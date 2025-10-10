@@ -18,19 +18,20 @@ auto calculate_output_size(int64_t input_size, int64_t kernel_size,
     return (input_size + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
 }
 
-// im2col transformation: unfold input tensor for convolution
+// im2col transformation: unfold input tensor for convolution (with separate padding for height/width)
 // Input: [batch, in_channels, height, width]
 // Output: [batch, in_channels * kernel_h * kernel_w, out_height * out_width]
 auto im2col(const Tensor& input, int64_t kernel_h, int64_t kernel_w,
-            int64_t stride, int64_t padding, int64_t dilation) -> Tensor {
+            int64_t stride_h, int64_t stride_w, int64_t padding_h, int64_t padding_w,
+            int64_t dilation) -> Tensor {
     auto shape = input.shape();
     int64_t batch = shape[0];
     int64_t channels = shape[1];
     int64_t height = shape[2];
     int64_t width = shape[3];
 
-    int64_t out_h = calculate_output_size(height, kernel_h, stride, padding, dilation);
-    int64_t out_w = calculate_output_size(width, kernel_w, stride, padding, dilation);
+    int64_t out_h = calculate_output_size(height, kernel_h, stride_h, padding_h, dilation);
+    int64_t out_w = calculate_output_size(width, kernel_w, stride_w, padding_w, dilation);
 
     // Create output tensor on same device as input
     auto col = zeros({batch, channels * kernel_h * kernel_w, out_h * out_w}, input.dtype(), input.device());
@@ -54,8 +55,8 @@ auto im2col(const Tensor& input, int64_t kernel_h, int64_t kernel_w,
                     for (int64_t oh = 0; oh < out_h; ++oh) {
                         for (int64_t ow = 0; ow < out_w; ++ow) {
                             // Calculate input position with padding and dilation
-                            int64_t ih = oh * stride - padding + kh * dilation;
-                            int64_t iw = ow * stride - padding + kw * dilation;
+                            int64_t ih = oh * stride_h - padding_h + kh * dilation;
+                            int64_t iw = ow * stride_w - padding_w + kw * dilation;
 
                             int64_t col_idx = b * (channels * kernel_h * kernel_w * out_h * out_w) +
                                             col_c * (out_h * out_w) +
@@ -81,16 +82,24 @@ auto im2col(const Tensor& input, int64_t kernel_h, int64_t kernel_w,
     return (input.device().type == Device::Type::CUDA) ? col_cpu.to(input.device()) : col_cpu;
 }
 
-// col2im transformation: reverse of im2col for gradient computation
+// im2col transformation: unfold input tensor for convolution (same padding for both dimensions)
+// Input: [batch, in_channels, height, width]
+// Output: [batch, in_channels * kernel_h * kernel_w, out_height * out_width]
+auto im2col(const Tensor& input, int64_t kernel_h, int64_t kernel_w,
+            int64_t stride, int64_t padding, int64_t dilation) -> Tensor {
+    return im2col(input, kernel_h, kernel_w, stride, stride, padding, padding, dilation);
+}
+
+// col2im transformation: reverse of im2col for gradient computation (with separate padding/stride for height/width)
 // Input: [batch, in_channels * kernel_h * kernel_w, out_height * out_width]
 // Output: [batch, in_channels, height, width]
 auto col2im(const Tensor& col, int64_t channels, int64_t height, int64_t width,
-            int64_t kernel_h, int64_t kernel_w, int64_t stride,
-            int64_t padding, int64_t dilation) -> Tensor {
+            int64_t kernel_h, int64_t kernel_w, int64_t stride_h, int64_t stride_w,
+            int64_t padding_h, int64_t padding_w, int64_t dilation) -> Tensor {
     auto col_shape = col.shape();
     int64_t batch = col_shape[0];
-    int64_t out_h = calculate_output_size(height, kernel_h, stride, padding, dilation);
-    int64_t out_w = calculate_output_size(width, kernel_w, stride, padding, dilation);
+    int64_t out_h = calculate_output_size(height, kernel_h, stride_h, padding_h, dilation);
+    int64_t out_w = calculate_output_size(width, kernel_w, stride_w, padding_w, dilation);
 
     // Create output tensor on same device as input
     auto output = zeros({batch, channels, height, width}, col.dtype(), col.device());
@@ -112,8 +121,8 @@ auto col2im(const Tensor& col, int64_t channels, int64_t height, int64_t width,
 
                     for (int64_t oh = 0; oh < out_h; ++oh) {
                         for (int64_t ow = 0; ow < out_w; ++ow) {
-                            int64_t ih = oh * stride - padding + kh * dilation;
-                            int64_t iw = ow * stride - padding + kw * dilation;
+                            int64_t ih = oh * stride_h - padding_h + kh * dilation;
+                            int64_t iw = ow * stride_w - padding_w + kw * dilation;
 
                             if (ih >= 0 && ih < height && iw >= 0 && iw < width) {
                                 int64_t col_idx = b * (channels * kernel_h * kernel_w * out_h * out_w) +
@@ -133,6 +142,16 @@ auto col2im(const Tensor& col, int64_t channels, int64_t height, int64_t width,
 
     // Transfer back to original device if needed
     return (col.device().type == Device::Type::CUDA) ? output_cpu.to(col.device()) : output_cpu;
+}
+
+// col2im transformation: reverse of im2col for gradient computation (same padding/stride for both dimensions)
+// Input: [batch, in_channels * kernel_h * kernel_w, out_height * out_width]
+// Output: [batch, in_channels, height, width]
+auto col2im(const Tensor& col, int64_t channels, int64_t height, int64_t width,
+            int64_t kernel_h, int64_t kernel_w, int64_t stride,
+            int64_t padding, int64_t dilation) -> Tensor {
+    return col2im(col, channels, height, width, kernel_h, kernel_w,
+                  stride, stride, padding, padding, dilation);
 }
 
 } // anonymous namespace
@@ -822,9 +841,10 @@ public:
                 std::copy_n(src, in_channels_per_group * kernel_size * length_out, dst);
             }
 
-            // Convert col back to 1D format
+            // Convert col back to 1D format (kernel_h=1, kernel_w=kernel_size for 1D convolution)
+            // Use stride_h=1, stride_w=stride_, padding_h=0, padding_w=padding_
             auto grad_input_slice = col2im(grad_col, in_channels_per_group, 1, length,
-                                          kernel_size, 1, stride_, padding_, dilation_);
+                                          1, kernel_size, 1, stride_, 0, padding_, dilation_);
 
             // Squeeze out the height dimension (which is 1)
             auto grad_input_slice_squeezed = grad_input_slice.reshape({batch, in_channels_per_group, length});
@@ -873,7 +893,8 @@ public:
 
             // Reshape to 4D for im2col: [batch, in_channels_per_group, 1, length]
             auto input_slice_4d = input_slice.reshape({batch, in_channels_per_group, 1, length});
-            auto input_col = im2col(input_slice_4d, kernel_size, 1, stride_, padding_, dilation_);
+            // Use kernel_h=1, kernel_w=kernel_size, stride_h=1, stride_w=stride_, padding_h=0, padding_w=padding_
+            auto input_col = im2col(input_slice_4d, 1, kernel_size, 1, stride_, 0, padding_, dilation_);
 
             // Extract grad_output slice
             auto grad_slice = zeros({batch, out_channels_per_group, length_out});
@@ -1006,8 +1027,8 @@ Conv1d::Conv1d(int64_t in_channels, int64_t out_channels, int64_t kernel_size,
     int64_t fan_in = (in_channels / groups) * kernel_size;
     float std_init = std::sqrt(2.0f / fan_in);
     auto weight_tensor = randn(weight_shape) * std_init;
-    weight_ = Variable(weight_tensor, true);
-    register_parameter("weight", weight_);
+    auto weight_var = Variable(weight_tensor, true);
+    register_parameter("weight", weight_var);
 
     // Initialize bias
     if (bias) {
@@ -1015,8 +1036,8 @@ Conv1d::Conv1d(int64_t in_channels, int64_t out_channels, int64_t kernel_size,
         // Uniform initialization: U(-sqrt(k), sqrt(k)) where k = 1/fan_in
         float bound = 1.0f / std::sqrt(static_cast<float>(fan_in));
         auto bias_tensor = (randn(bias_shape) * 2.0f * bound) - bound;
-        bias_ = Variable(bias_tensor, true);
-        register_parameter("bias", *bias_);
+        auto bias_var = Variable(bias_tensor, true);
+        register_parameter("bias", bias_var);
     }
 }
 
@@ -1052,9 +1073,10 @@ auto Conv1d::forward(const Variable& input) -> Variable {
     bool use_gpu = (original_device.type == Device::Type::CUDA);
 
     Tensor input_work = use_gpu ? input_4d.to(Device::cpu()) : input_4d;
-    Tensor weight_work = use_gpu ? weight_.tensor().to(Device::cpu()) : weight_.tensor();
+    Variable& weight = parameters_["weight"];
+    Tensor weight_work = use_gpu ? weight.tensor().to(Device::cpu()) : weight.tensor();
 
-    auto weight_shape = weight_.tensor().shape();
+    auto weight_shape = weight.tensor().shape();
     int64_t in_channels_per_group = weight_shape[1];
     int64_t out_channels_per_group = out_channels_ / groups_;
 
@@ -1083,8 +1105,9 @@ auto Conv1d::forward(const Variable& input) -> Variable {
             }
         }
 
-        // Apply im2col (kernel_h=kernel_size, kernel_w=1)
-        auto input_col = im2col(input_slice, kernel_size_, 1, stride_, padding_, dilation_);
+        // Apply im2col (kernel_h=1, kernel_w=kernel_size for 1D convolution)
+        // Use padding_h=0, padding_w=padding_ to only pad the width (length) dimension
+        auto input_col = im2col(input_slice, 1, kernel_size_, 1, stride_, 0, padding_, dilation_);
 
         // Extract weight slice [out_channels_per_group, in_channels_per_group, kernel_size]
         auto weight_slice = zeros({out_channels_per_group, in_channels_per_group, kernel_size_, 1});
@@ -1135,8 +1158,9 @@ auto Conv1d::forward(const Variable& input) -> Variable {
     }
 
     // Add bias if present
-    if (bias_) {
-        Tensor bias_work = use_gpu ? bias_->tensor().to(Device::cpu()) : bias_->tensor();
+    if (parameters_.find("bias") != parameters_.end()) {
+        Variable& bias = parameters_["bias"];
+        Tensor bias_work = use_gpu ? bias.tensor().to(Device::cpu()) : bias.tensor();
         float* out_data = output_work.data<float>();
         const float* bias_data = bias_work.data<float>();
 
@@ -1158,14 +1182,14 @@ auto Conv1d::forward(const Variable& input) -> Variable {
     }
 
     // Create output variable with autograd
-    auto result = Variable(output, input.requires_grad() || weight_.requires_grad());
+    auto result = Variable(output, input.requires_grad() || weight.requires_grad());
 
-    if (input.requires_grad() || weight_.requires_grad()) {
+    if (input.requires_grad() || weight.requires_grad()) {
         std::vector<Tensor> tensors_to_save;
-        if (bias_) {
-            tensors_to_save = {input.tensor(), weight_.tensor(), bias_->tensor()};
+        if (parameters_.find("bias") != parameters_.end()) {
+            tensors_to_save = {input.tensor(), weight.tensor(), parameters_["bias"].tensor()};
         } else {
-            tensors_to_save = {input.tensor(), weight_.tensor()};
+            tensors_to_save = {input.tensor(), weight.tensor()};
         }
 
         auto backward_fn = std::make_shared<Conv1dBackward>(
@@ -1178,11 +1202,11 @@ auto Conv1d::forward(const Variable& input) -> Variable {
         if (input.requires_grad()) {
             input_vars.push_back(const_cast<Variable*>(&input));
         }
-        if (weight_.requires_grad()) {
-            input_vars.push_back(&weight_);
+        if (weight.requires_grad()) {
+            input_vars.push_back(&weight);
         }
-        if (bias_ && bias_->requires_grad()) {
-            input_vars.push_back(&(*bias_));
+        if (parameters_.find("bias") != parameters_.end() && parameters_["bias"].requires_grad()) {
+            input_vars.push_back(&parameters_["bias"]);
         }
         backward_fn->set_input_variables(input_vars);
 
@@ -1203,15 +1227,13 @@ auto Conv1d::reset_parameters() -> void {
 
     std::vector<int64_t> weight_shape = {out_channels_, in_channels_ / groups_, kernel_size_};
     auto new_weight_tensor = randn(weight_shape) * std;
-    weight_ = Variable(new_weight_tensor, true);
-    parameters_["weight"] = weight_;
+    parameters_["weight"] = Variable(new_weight_tensor, true);
 
-    if (bias_) {
+    if (parameters_.find("bias") != parameters_.end()) {
         float bound = 1.0f / std::sqrt(static_cast<float>(fan_in));
         std::vector<int64_t> bias_shape = {out_channels_};
         auto new_bias_tensor = (randn(bias_shape) * 2.0f * bound) - bound;
-        *bias_ = Variable(new_bias_tensor, true);
-        parameters_["bias"] = *bias_;
+        parameters_["bias"] = Variable(new_bias_tensor, true);
     }
 }
 
@@ -1701,8 +1723,9 @@ auto ConvTranspose2d::forward(const Variable& input) -> Variable {
     }
 
     // Add bias if present
-    if (bias_) {
-        Tensor bias_work = use_gpu ? bias_->tensor().to(Device::cpu()) : bias_->tensor();
+    if (parameters_.find("bias") != parameters_.end()) {
+        Variable& bias = parameters_["bias"];
+        Tensor bias_work = use_gpu ? bias.tensor().to(Device::cpu()) : bias.tensor();
         float* out_data = output_work.data<float>();
         const float* bias_data = bias_work.data<float>();
 

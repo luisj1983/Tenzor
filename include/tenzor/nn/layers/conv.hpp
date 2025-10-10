@@ -55,9 +55,6 @@ private:
     int64_t dilation_;
     int64_t groups_;
 
-    Variable weight_;
-    std::optional<Variable> bias_;
-
     auto reset_parameters() -> void;
 };
 
