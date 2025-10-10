@@ -25,6 +25,7 @@
 #include "tenzor/nn/layers/linear.hpp"
 #include "tenzor/nn/layers/conv.hpp"
 #include "tenzor/nn/layers/batchnorm.hpp"
+#include "tenzor/nn/layers/normalization.hpp"
 #include "tenzor/nn/layers/dropout.hpp"
 #include "tenzor/nn/layers/pooling.hpp"
 #include "tenzor/nn/layers/flatten.hpp"

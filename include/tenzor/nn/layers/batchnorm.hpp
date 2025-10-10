@@ -59,25 +59,5 @@ private:
     auto reset_parameters() -> void;
 };
 
-// Layer Normalization
-class LayerNorm : public Module {
-public:
-    LayerNorm(std::vector<int64_t> normalized_shape,
-              double eps = 1e-5,
-              bool elementwise_affine = true);
-
-    auto forward(const Variable& input) -> Variable override;
-
-private:
-    std::vector<int64_t> normalized_shape_;
-    double eps_;
-    bool elementwise_affine_;
-
-    Variable weight_;
-    Variable bias_;
-
-    auto reset_parameters() -> void;
-};
-
 } // namespace nn
 } // namespace tenzor

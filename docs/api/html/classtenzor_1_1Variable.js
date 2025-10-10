@@ -1,0 +1,25 @@
+var classtenzor_1_1Variable =
+[
+    [ "Variable", "classtenzor_1_1Variable.html#a7b065622735a5528043e6477230259e5", null ],
+    [ "Variable", "classtenzor_1_1Variable.html#ada5687a3538d8b242feb52e8160d9bff", null ],
+    [ "backward", "classtenzor_1_1Variable.html#aeb5ad4007287588f5000c35a6a527bf8", null ],
+    [ "detach", "classtenzor_1_1Variable.html#a850823dc278cff64fa51859ced0f176e", null ],
+    [ "device", "classtenzor_1_1Variable.html#afe6e1016a7f2da6073901300ebe7accc", null ],
+    [ "dtype", "classtenzor_1_1Variable.html#aea3e0d3c09d368b3d6f9aec3e991404d", null ],
+    [ "grad", "classtenzor_1_1Variable.html#a5a2ef945b355d1495d173078732c88e0", null ],
+    [ "grad", "classtenzor_1_1Variable.html#a3c1c317a8266fbc139933308289b3378", null ],
+    [ "grad_fn", "classtenzor_1_1Variable.html#a31054bc788898d0d79e796806c23e1e7", null ],
+    [ "has_grad", "classtenzor_1_1Variable.html#ae9d7845afc46d83df8b89387aae6822f", null ],
+    [ "is_leaf", "classtenzor_1_1Variable.html#a9d948c8bfccbc88ad0ce261b6a10d5d5", null ],
+    [ "operator*", "classtenzor_1_1Variable.html#a62be5157afd9644017bad187dc1d52c7", null ],
+    [ "operator+", "classtenzor_1_1Variable.html#a18ed69fbc39b885a4054f6f7ce80100c", null ],
+    [ "operator-", "classtenzor_1_1Variable.html#a3c12f9f8d99f37e506a6a8eee54ca674", null ],
+    [ "operator/", "classtenzor_1_1Variable.html#a0bd680d2d27c00880ca9fc6880b35c01", null ],
+    [ "requires_grad", "classtenzor_1_1Variable.html#a6b37605397a8cf063c13c219fd289183", null ],
+    [ "set_grad_fn", "classtenzor_1_1Variable.html#a8dbb34d1105cc2680347cb4adda81c2d", null ],
+    [ "set_requires_grad", "classtenzor_1_1Variable.html#a19b1e79cfea0fdf67f43bc93858d309c", null ],
+    [ "shape", "classtenzor_1_1Variable.html#abd7936801200d5b9dbfccf007fbcdc22", null ],
+    [ "tensor", "classtenzor_1_1Variable.html#aa9a826423f8ca764e15494d78366490a", null ],
+    [ "tensor", "classtenzor_1_1Variable.html#a6af01fe0cde210657acde477d3fed019", null ],
+    [ "zero_grad", "classtenzor_1_1Variable.html#ae44d80001352d23adb3211042a93c9cc", null ]
+];

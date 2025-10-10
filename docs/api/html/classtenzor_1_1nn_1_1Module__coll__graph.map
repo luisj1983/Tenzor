@@ -1,0 +1,17 @@
+<map id="tenzor::nn::Module" name="tenzor::nn::Module">
+<area shape="rect" id="Node000001" title="Base class for all neural network modules." alt="" coords="723,63,865,91"/>
+<area shape="rect" id="Node000007" title=" " alt="" coords="939,5,1113,50"/>
+<area shape="poly" id="edge8_Node000007_Node000001" title=" " alt="" coords="877,57,938,44,939,49,878,62"/>
+<area shape="rect" id="Node000002" title=" " alt="" coords="433,46,585,108"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="601,74,722,74,722,80,601,80"/>
+<area shape="rect" id="Node000003" title=" " alt="" coords="212,124,298,152"/>
+<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="312,122,432,93,433,98,313,127"/>
+<area shape="rect" id="Node000006" title=" " alt="" coords="1230,60,1401,139"/>
+<area shape="poly" id="edge6_Node000006_Node000003" title=" " alt="" coords="313,144,405,153,508,158,1242,138,1265,142,1230,149,1030,161,1080,155,1133,148,1229,125,1230,130,1134,153,1081,161,1025,161,1229,143,1260,142,1242,144,508,164,404,159,313,149"/>
+<area shape="rect" id="Node000004" title=" " alt="" coords="5,116,144,161"/>
+<area shape="poly" id="edge3_Node000003_Node000004" title=" " alt="" coords="159,136,211,136,211,141,159,141"/>
+<area shape="rect" id="Node000005" href="$classtenzor_1_1Variable.html" title="Gradient&#45;enabled tensor wrapper for automatic differentiation." alt="" coords="193,47,316,75"/>
+<area shape="poly" id="edge4_Node000002_Node000005" title=" " alt="" coords="332,63,433,70,433,75,332,69"/>
+<area shape="poly" id="edge5_Node000001_Node000006" title=" " alt="" coords="1215,100,939,90,865,85,866,80,939,85,1215,95"/>
+<area shape="poly" id="edge7_Node000006_Node000007" title=" " alt="" coords="1129,50,1231,76,1229,81,1128,56"/>
+</map>

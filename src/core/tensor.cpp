@@ -146,6 +146,190 @@ template<> auto Tensor::data<bool>() const -> const bool* {
     return static_cast<const bool*>(impl_->storage->data());
 }
 
+// Template instantiations for item<T>() - extract scalar from single-element tensor
+template<> auto Tensor::item<float>() const -> float {
+    if (numel() != 1) {
+        throw std::runtime_error("item() only works for single-element tensors");
+    }
+    if (dtype() != DType::Float32) {
+        throw std::runtime_error("Type mismatch: tensor dtype is not Float32");
+    }
+    // For GPU tensors, copy to CPU first
+    if (device().type != Device::Type::CPU) {
+        auto cpu_tensor = cpu();
+        return *cpu_tensor.data<float>();
+    }
+    return *data<float>();
+}
+
+template<> auto Tensor::item<double>() const -> double {
+    if (numel() != 1) {
+        throw std::runtime_error("item() only works for single-element tensors");
+    }
+    if (dtype() != DType::Float64) {
+        throw std::runtime_error("Type mismatch: tensor dtype is not Float64");
+    }
+    if (device().type != Device::Type::CPU) {
+        auto cpu_tensor = cpu();
+        return *cpu_tensor.data<double>();
+    }
+    return *data<double>();
+}
+
+template<> auto Tensor::item<int32_t>() const -> int32_t {
+    if (numel() != 1) {
+        throw std::runtime_error("item() only works for single-element tensors");
+    }
+    if (dtype() != DType::Int32) {
+        throw std::runtime_error("Type mismatch: tensor dtype is not Int32");
+    }
+    if (device().type != Device::Type::CPU) {
+        auto cpu_tensor = cpu();
+        return *cpu_tensor.data<int32_t>();
+    }
+    return *data<int32_t>();
+}
+
+template<> auto Tensor::item<int64_t>() const -> int64_t {
+    if (numel() != 1) {
+        throw std::runtime_error("item() only works for single-element tensors");
+    }
+    if (dtype() != DType::Int64) {
+        throw std::runtime_error("Type mismatch: tensor dtype is not Int64");
+    }
+    if (device().type != Device::Type::CPU) {
+        auto cpu_tensor = cpu();
+        return *cpu_tensor.data<int64_t>();
+    }
+    return *data<int64_t>();
+}
+
+template<> auto Tensor::item<int16_t>() const -> int16_t {
+    if (numel() != 1) {
+        throw std::runtime_error("item() only works for single-element tensors");
+    }
+    if (dtype() != DType::Int16) {
+        throw std::runtime_error("Type mismatch: tensor dtype is not Int16");
+    }
+    if (device().type != Device::Type::CPU) {
+        auto cpu_tensor = cpu();
+        return *reinterpret_cast<const int16_t*>(cpu_tensor.impl_->storage->data());
+    }
+    return *reinterpret_cast<const int16_t*>(impl_->storage->data());
+}
+
+template<> auto Tensor::item<int8_t>() const -> int8_t {
+    if (numel() != 1) {
+        throw std::runtime_error("item() only works for single-element tensors");
+    }
+    if (dtype() != DType::Int8) {
+        throw std::runtime_error("Type mismatch: tensor dtype is not Int8");
+    }
+    if (device().type != Device::Type::CPU) {
+        auto cpu_tensor = cpu();
+        return *reinterpret_cast<const int8_t*>(cpu_tensor.impl_->storage->data());
+    }
+    return *reinterpret_cast<const int8_t*>(impl_->storage->data());
+}
+
+template<> auto Tensor::item<uint8_t>() const -> uint8_t {
+    if (numel() != 1) {
+        throw std::runtime_error("item() only works for single-element tensors");
+    }
+    if (dtype() != DType::UInt8) {
+        throw std::runtime_error("Type mismatch: tensor dtype is not UInt8");
+    }
+    if (device().type != Device::Type::CPU) {
+        auto cpu_tensor = cpu();
+        return *cpu_tensor.data<uint8_t>();
+    }
+    return *data<uint8_t>();
+}
+
+template<> auto Tensor::item<uint16_t>() const -> uint16_t {
+    if (numel() != 1) {
+        throw std::runtime_error("item() only works for single-element tensors");
+    }
+    if (dtype() != DType::UInt16) {
+        throw std::runtime_error("Type mismatch: tensor dtype is not UInt16");
+    }
+    if (device().type != Device::Type::CPU) {
+        auto cpu_tensor = cpu();
+        return *reinterpret_cast<const uint16_t*>(cpu_tensor.impl_->storage->data());
+    }
+    return *reinterpret_cast<const uint16_t*>(impl_->storage->data());
+}
+
+template<> auto Tensor::item<uint32_t>() const -> uint32_t {
+    if (numel() != 1) {
+        throw std::runtime_error("item() only works for single-element tensors");
+    }
+    if (dtype() != DType::UInt32) {
+        throw std::runtime_error("Type mismatch: tensor dtype is not UInt32");
+    }
+    if (device().type != Device::Type::CPU) {
+        auto cpu_tensor = cpu();
+        return *reinterpret_cast<const uint32_t*>(cpu_tensor.impl_->storage->data());
+    }
+    return *reinterpret_cast<const uint32_t*>(impl_->storage->data());
+}
+
+template<> auto Tensor::item<uint64_t>() const -> uint64_t {
+    if (numel() != 1) {
+        throw std::runtime_error("item() only works for single-element tensors");
+    }
+    if (dtype() != DType::UInt64) {
+        throw std::runtime_error("Type mismatch: tensor dtype is not UInt64");
+    }
+    if (device().type != Device::Type::CPU) {
+        auto cpu_tensor = cpu();
+        return *reinterpret_cast<const uint64_t*>(cpu_tensor.impl_->storage->data());
+    }
+    return *reinterpret_cast<const uint64_t*>(impl_->storage->data());
+}
+
+template<> auto Tensor::item<bool>() const -> bool {
+    if (numel() != 1) {
+        throw std::runtime_error("item() only works for single-element tensors");
+    }
+    if (dtype() != DType::Bool) {
+        throw std::runtime_error("Type mismatch: tensor dtype is not Bool");
+    }
+    if (device().type != Device::Type::CPU) {
+        auto cpu_tensor = cpu();
+        return *cpu_tensor.data<bool>();
+    }
+    return *data<bool>();
+}
+
+template<> auto Tensor::item<std::complex<float>>() const -> std::complex<float> {
+    if (numel() != 1) {
+        throw std::runtime_error("item() only works for single-element tensors");
+    }
+    if (dtype() != DType::Complex64) {
+        throw std::runtime_error("Type mismatch: tensor dtype is not Complex64");
+    }
+    if (device().type != Device::Type::CPU) {
+        auto cpu_tensor = cpu();
+        return *reinterpret_cast<const std::complex<float>*>(cpu_tensor.impl_->storage->data());
+    }
+    return *reinterpret_cast<const std::complex<float>*>(impl_->storage->data());
+}
+
+template<> auto Tensor::item<std::complex<double>>() const -> std::complex<double> {
+    if (numel() != 1) {
+        throw std::runtime_error("item() only works for single-element tensors");
+    }
+    if (dtype() != DType::Complex128) {
+        throw std::runtime_error("Type mismatch: tensor dtype is not Complex128");
+    }
+    if (device().type != Device::Type::CPU) {
+        auto cpu_tensor = cpu();
+        return *reinterpret_cast<const std::complex<double>*>(cpu_tensor.impl_->storage->data());
+    }
+    return *reinterpret_cast<const std::complex<double>*>(impl_->storage->data());
+}
+
 // Stub implementations for operations
 auto Tensor::to(Device device) const -> Tensor {
     if (!impl_) {

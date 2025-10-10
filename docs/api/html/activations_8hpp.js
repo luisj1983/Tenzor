@@ -1,0 +1,25 @@
+var activations_8hpp =
+[
+    [ "tenzor::nn::ReLU", "classtenzor_1_1nn_1_1ReLU.html", "classtenzor_1_1nn_1_1ReLU" ],
+    [ "tenzor::nn::LeakyReLU", "classtenzor_1_1nn_1_1LeakyReLU.html", "classtenzor_1_1nn_1_1LeakyReLU" ],
+    [ "tenzor::nn::Sigmoid", "classtenzor_1_1nn_1_1Sigmoid.html", "classtenzor_1_1nn_1_1Sigmoid" ],
+    [ "tenzor::nn::Tanh", "classtenzor_1_1nn_1_1Tanh.html", "classtenzor_1_1nn_1_1Tanh" ],
+    [ "tenzor::nn::GELU", "classtenzor_1_1nn_1_1GELU.html", "classtenzor_1_1nn_1_1GELU" ],
+    [ "tenzor::nn::Softmax", "classtenzor_1_1nn_1_1Softmax.html", "classtenzor_1_1nn_1_1Softmax" ],
+    [ "tenzor::nn::LogSoftmax", "classtenzor_1_1nn_1_1LogSoftmax.html", "classtenzor_1_1nn_1_1LogSoftmax" ],
+    [ "tenzor::nn::ELU", "classtenzor_1_1nn_1_1ELU.html", "classtenzor_1_1nn_1_1ELU" ],
+    [ "tenzor::nn::SELU", "classtenzor_1_1nn_1_1SELU.html", "classtenzor_1_1nn_1_1SELU" ],
+    [ "tenzor::nn::Swish", "classtenzor_1_1nn_1_1Swish.html", "classtenzor_1_1nn_1_1Swish" ],
+    [ "tenzor::nn::Mish", "classtenzor_1_1nn_1_1Mish.html", "classtenzor_1_1nn_1_1Mish" ],
+    [ "tenzor::nn::elu", "namespacetenzor_1_1nn.html#a7ff6135f0eb432cc7fe4860e464e9074", null ],
+    [ "tenzor::nn::gelu", "namespacetenzor_1_1nn.html#ac80b253bbbc565409805c52fb32c9138", null ],
+    [ "tenzor::nn::leaky_relu", "namespacetenzor_1_1nn.html#aa1c6557725ab884588b4641ad70f1ce4", null ],
+    [ "tenzor::nn::log_softmax", "namespacetenzor_1_1nn.html#ae392d181bdf193c32010e515c254b5bd", null ],
+    [ "tenzor::nn::mish", "namespacetenzor_1_1nn.html#af59362ed23ab6e23e7fef8cc5c1224a0", null ],
+    [ "tenzor::nn::relu", "namespacetenzor_1_1nn.html#af3c7a614ec2c4d2b546d874b5d5d45c2", null ],
+    [ "tenzor::nn::selu", "namespacetenzor_1_1nn.html#ac3e7403ba4db7c43889887f13e350780", null ],
+    [ "tenzor::nn::sigmoid", "namespacetenzor_1_1nn.html#a9870f0b1ca41f7a4175ff031c4bbb65d", null ],
+    [ "tenzor::nn::softmax", "namespacetenzor_1_1nn.html#a5ee6f1993d6b91a8c52fff4f4770ca5f", null ],
+    [ "tenzor::nn::swish", "namespacetenzor_1_1nn.html#ab90c24a38a49a61a6da7bfec1c1f7062", null ],
+    [ "tenzor::nn::tanh", "namespacetenzor_1_1nn.html#a047f215e7169a071545fb26749d47ce3", null ]
+];

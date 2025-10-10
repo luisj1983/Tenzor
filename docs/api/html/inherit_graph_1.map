@@ -1,0 +1,19 @@
+<map id="Graphical Class Hierarchy" name="Graphical Class Hierarchy">
+<area shape="rect" id="Node000000" title=" " alt="" coords="5,136,119,164"/>
+<area shape="rect" id="Node000001" title=" " alt="" coords="167,136,305,164"/>
+<area shape="poly" id="edge17_Node000000_Node000001" title=" " alt="" coords="134,147,166,147,166,152,134,152"/>
+<area shape="rect" id="Node000002" href="$classtenzor_1_1TenzorException.html" title=" " alt="" coords="353,136,529,164"/>
+<area shape="poly" id="edge18_Node000001_Node000002" title=" " alt="" coords="320,147,353,147,353,152,320,152"/>
+<area shape="rect" id="Node000003" href="$classtenzor_1_1AutogradException.html" title=" " alt="" coords="577,5,771,33"/>
+<area shape="poly" id="edge19_Node000002_Node000003" title=" " alt="" coords="466,123,515,83,576,43,607,31,609,36,579,48,518,87,470,127"/>
+<area shape="rect" id="Node000004" href="$classtenzor_1_1BackendException.html" title=" " alt="" coords="579,57,769,85"/>
+<area shape="poly" id="edge20_Node000002_Node000004" title=" " alt="" coords="490,127,576,95,617,83,618,88,578,100,492,132"/>
+<area shape="rect" id="Node000005" href="$classtenzor_1_1DTypeException.html" title=" " alt="" coords="587,109,761,137"/>
+<area shape="poly" id="edge21_Node000002_Node000005" title=" " alt="" coords="544,135,586,131,587,136,545,141"/>
+<area shape="rect" id="Node000006" href="$classtenzor_1_1DeviceException.html" title=" " alt="" coords="584,161,764,189"/>
+<area shape="poly" id="edge22_Node000002_Node000006" title=" " alt="" coords="545,158,584,163,584,168,544,164"/>
+<area shape="rect" id="Node000007" href="$classtenzor_1_1MemoryException.html" title=" " alt="" coords="580,213,768,241"/>
+<area shape="poly" id="edge23_Node000002_Node000007" title=" " alt="" coords="493,167,578,198,619,210,617,215,576,203,491,172"/>
+<area shape="rect" id="Node000008" href="$classtenzor_1_1ShapeException.html" title=" " alt="" coords="587,265,761,293"/>
+<area shape="poly" id="edge24_Node000002_Node000008" title=" " alt="" coords="470,172,518,212,579,250,609,262,607,267,576,255,515,217,467,176"/>
+</map>

@@ -1,0 +1,19 @@
+<map id="tenzor::nn::Softmax" name="tenzor::nn::Softmax">
+<area shape="rect" id="Node000001" title=" " alt="" coords="952,5,1100,33"/>
+<area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="723,69,865,97"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="848,61,888,49,957,31,958,36,890,54,850,66"/>
+<area shape="rect" id="Node000008" title=" " alt="" coords="939,57,1113,102"/>
+<area shape="poly" id="edge9_Node000008_Node000002" title=" " alt="" coords="880,79,938,78,939,83,880,84"/>
+<area shape="rect" id="Node000003" title=" " alt="" coords="433,58,585,119"/>
+<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="600,84,722,82,722,87,601,89"/>
+<area shape="rect" id="Node000004" title=" " alt="" coords="212,160,298,188"/>
+<area shape="poly" id="edge3_Node000003_Node000004" title=" " alt="" coords="312,152,432,111,434,116,313,157"/>
+<area shape="rect" id="Node000007" title=" " alt="" coords="1230,112,1401,190"/>
+<area shape="poly" id="edge7_Node000007_Node000004" title=" " alt="" coords="314,185,405,202,456,208,508,210,1242,190,1265,194,1230,200,1030,212,1080,207,1133,199,1229,176,1230,182,1134,204,1081,212,1025,213,1229,195,1260,194,1242,195,508,215,456,213,404,207,313,190"/>
+<area shape="rect" id="Node000005" title=" " alt="" coords="5,152,144,196"/>
+<area shape="poly" id="edge4_Node000004_Node000005" title=" " alt="" coords="159,171,211,171,211,176,159,176"/>
+<area shape="rect" id="Node000006" href="$classtenzor_1_1Variable.html" title="Gradient&#45;enabled tensor wrapper for automatic differentiation." alt="" coords="193,75,316,102"/>
+<area shape="poly" id="edge5_Node000003_Node000006" title=" " alt="" coords="332,86,433,86,433,91,332,91"/>
+<area shape="poly" id="edge6_Node000002_Node000007" title=" " alt="" coords="1214,160,1083,158,1010,153,938,141,875,123,822,100,825,95,877,117,940,136,1010,147,1083,153,1215,154"/>
+<area shape="poly" id="edge8_Node000007_Node000008" title=" " alt="" coords="1129,102,1231,127,1229,133,1128,107"/>
+</map>

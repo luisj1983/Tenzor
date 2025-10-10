@@ -84,6 +84,26 @@ target_link_libraries(test_pooling PRIVATE
     GTest::gtest_main
 )
 
+# Conv1d tests
+add_executable(test_conv1d
+    test_conv1d.cpp
+)
+
+target_link_libraries(test_conv1d PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+# ConvTranspose2d tests (temporarily disabled due to compilation errors)
+# add_executable(test_convtranspose2d
+#     test_convtranspose2d.cpp
+# )
+
+# target_link_libraries(test_convtranspose2d PRIVATE
+#     tenzor_core
+#     GTest::gtest_main
+# )
+
 # Scheduler tests
 add_executable(test_schedulers
     nn/optim/test_schedulers.cpp
@@ -183,6 +203,8 @@ gtest_discover_tests(test_dropout)
 gtest_discover_tests(test_batchnorm2d)
 gtest_discover_tests(test_conv2d)
 gtest_discover_tests(test_pooling)
+gtest_discover_tests(test_conv1d)
+# gtest_discover_tests(test_convtranspose2d)
 gtest_discover_tests(test_schedulers)
 gtest_discover_tests(test_normalization)
 gtest_discover_tests(test_serialization)

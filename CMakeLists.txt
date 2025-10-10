@@ -64,6 +64,7 @@ if(TENZOR_BUILD_PYTHON)
     if(pybind11_FOUND AND Python_FOUND)
         pybind11_add_module(tenzor_python
             python/bindings.cpp
+            python/numpy_interop.cpp
         )
 
         target_link_libraries(tenzor_python PRIVATE tenzor_core)
@@ -95,6 +96,19 @@ endif()
 # Examples
 if(TENZOR_BUILD_EXAMPLES)
     add_subdirectory(examples)
+endif()
+
+# Documentation
+find_package(Doxygen)
+if(DOXYGEN_FOUND)
+    add_custom_target(docs
+        COMMAND ${DOXYGEN_EXECUTABLE} ${CMAKE_SOURCE_DIR}/Doxyfile
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        COMMENT "Generating API documentation with Doxygen"
+        VERBATIM)
+    message(STATUS "  Doxygen:              Found (run 'make docs' to generate)")
+else()
+    message(STATUS "  Doxygen:              Not found (documentation will not be available)")
 endif()
 
 # Installation

@@ -1,0 +1,16 @@
+var searchData=
+[
+  ['backend_0',['Backend',['../classtenzor_1_1Backend.html',1,'tenzor']]],
+  ['backendexception_1',['BackendException',['../classtenzor_1_1BackendException.html',1,'tenzor']]],
+  ['backendloader_2',['BackendLoader',['../classtenzor_1_1BackendLoader.html',1,'tenzor']]],
+  ['backward_3',['backward',['../classtenzor_1_1Function.html#ab97b81bc5f300e68833d15beb486e299',1,'tenzor::Function::backward()'],['../classtenzor_1_1AddBackward.html#a174819b6a6f8bad86bbb375d1980d16c',1,'tenzor::AddBackward::backward()'],['../classtenzor_1_1SubBackward.html#a48147a220191900e783d0069ccaec7d6',1,'tenzor::SubBackward::backward()'],['../classtenzor_1_1MulBackward.html#a795d863451fcc18c1b3b01ae1afd1ea2',1,'tenzor::MulBackward::backward()'],['../classtenzor_1_1DivBackward.html#a542636e5921f0019a982b56cc99f6142',1,'tenzor::DivBackward::backward()'],['../classtenzor_1_1MatMulBackward.html#ac4c044d97f29a44c252d66e5e21c4b9d',1,'tenzor::MatMulBackward::backward()'],['../classtenzor_1_1ReLUBackward.html#a6699913ada62ea1a189e5acf9820edd4',1,'tenzor::ReLUBackward::backward()'],['../classtenzor_1_1SumBackward.html#a884ca01201092471009aa85637dd6f13',1,'tenzor::SumBackward::backward()'],['../classtenzor_1_1MeanBackward.html#acdedaa6128cb77dd718285a4a98f0a5b',1,'tenzor::MeanBackward::backward()'],['../classtenzor_1_1LogBackward.html#a15663a0c467ed58b3c8d527e7f8734d6',1,'tenzor::LogBackward::backward()'],['../classtenzor_1_1ExpBackward.html#af9064ca2975c7bdc9efdfd34b870d3dc',1,'tenzor::ExpBackward::backward()'],['../classtenzor_1_1NegBackward.html#ab92efccc8ec055a0fa31c6b2baf15b64',1,'tenzor::NegBackward::backward()'],['../classtenzor_1_1LogSoftmaxBackward.html#a68bef9e9e19e9b96eb182550ab7f9f25',1,'tenzor::LogSoftmaxBackward::backward()'],['../classtenzor_1_1AbsBackward.html#a8d1320c67325874c5438d926305c914d',1,'tenzor::AbsBackward::backward()'],['../classtenzor_1_1ClampBackward.html#a713c66b51c7499ca21a0c26cfa1dafc9',1,'tenzor::ClampBackward::backward()'],['../classtenzor_1_1MaxBackward.html#a5159990383a975b73910524600097737',1,'tenzor::MaxBackward::backward()'],['../classtenzor_1_1Variable.html#aeb5ad4007287588f5000c35a6a527bf8',1,'tenzor::Variable::backward()']]],
+  ['backwardengine_4',['BackwardEngine',['../classtenzor_1_1BackwardEngine.html',1,'tenzor']]],
+  ['batchnorm1d_5',['BatchNorm1d',['../classtenzor_1_1nn_1_1BatchNorm1d.html',1,'tenzor::nn']]],
+  ['batchnorm2d_6',['BatchNorm2d',['../classtenzor_1_1nn_1_1BatchNorm2d.html',1,'tenzor::nn']]],
+  ['bceloss_7',['BCELoss',['../classtenzor_1_1nn_1_1BCELoss.html',1,'tenzor::nn']]],
+  ['bcewithlogitsloss_8',['BCEWithLogitsLoss',['../classtenzor_1_1nn_1_1BCEWithLogitsLoss.html',1,'tenzor::nn']]],
+  ['bfloat16_9',['BFloat16',['../dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14feeacdb56b2d2f73c26480207524f2dbe0af',1,'tenzor']]],
+  ['bool_10',['Bool',['../dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14feeac26f15e86e3de4c398a8273272aba034',1,'tenzor']]],
+  ['buffers_11',['buffers',['../classtenzor_1_1nn_1_1Module.html#a1215241c57dd0f2b17b65d8d985a9279',1,'tenzor::nn::Module']]],
+  ['buffers_5f_12',['buffers_',['../classtenzor_1_1nn_1_1Module.html#aed969927473ba095ad312f9f0587258c',1,'tenzor::nn::Module']]]
+];

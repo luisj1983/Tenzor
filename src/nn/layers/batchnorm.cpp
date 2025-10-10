@@ -288,4 +288,314 @@ auto BatchNorm2d::reset_parameters() -> void {
     }
 }
 
+// ============================================================================
+// BatchNorm1d Implementation
+// ============================================================================
+
+// BatchNorm1d autograd function
+class BatchNorm1dBackward : public Function {
+public:
+    BatchNorm1dBackward(bool affine, double eps, std::vector<Tensor> tensors_to_save)
+        : affine_(affine), eps_(eps) {
+        saved_tensors_ = std::move(tensors_to_save);
+    }
+
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+        throw std::runtime_error("BatchNorm1dBackward::forward should not be called");
+    }
+
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
+        auto grad_output = grad_outputs[0].contiguous();
+        auto saved = saved_tensors();
+        auto input = saved[0].contiguous();
+        auto mean = saved[1].contiguous();
+        auto invstd = saved[2].contiguous();
+        auto weight = saved[3].contiguous();
+
+        auto shape = input.shape();
+        int64_t N = shape[0];
+        int64_t C = shape[1];
+        int64_t L = shape.size() == 3 ? shape[2] : 1;
+        int64_t batch_size = N * L;
+
+        // Compute normalized input
+        Tensor mean_broadcast, invstd_broadcast;
+        if (shape.size() == 3) {
+            mean_broadcast = mean.unsqueeze(0).unsqueeze(2).contiguous();
+            invstd_broadcast = invstd.unsqueeze(0).unsqueeze(2).contiguous();
+        } else {
+            mean_broadcast = mean.unsqueeze(0).contiguous();
+            invstd_broadcast = invstd.unsqueeze(0).contiguous();
+        }
+
+        auto normalized = ((input - mean_broadcast) * invstd_broadcast).contiguous();
+
+        // Gradient with respect to weight: sum(grad_output * normalized, dim=[0,2])
+        Tensor grad_weight;
+        if (shape.size() == 3) {
+            grad_weight = sum(sum((grad_output * normalized)
+                .reshape({N, C, L}).contiguous(), 0, false), 1, false);
+        } else {
+            grad_weight = sum((grad_output * normalized).contiguous(), 0, false);
+        }
+
+        // Gradient with respect to bias: sum(grad_output, dim=[0,2])
+        Tensor grad_bias;
+        if (shape.size() == 3) {
+            grad_bias = sum(sum(grad_output
+                .reshape({N, C, L}).contiguous(), 0, false), 1, false);
+        } else {
+            grad_bias = sum(grad_output.contiguous(), 0, false);
+        }
+
+        // Gradient with respect to normalized input
+        Tensor weight_broadcast;
+        if (shape.size() == 3) {
+            weight_broadcast = weight.unsqueeze(0).unsqueeze(2).contiguous();
+        } else {
+            weight_broadcast = weight.unsqueeze(0).contiguous();
+        }
+        auto grad_normalized = (grad_output * weight_broadcast).contiguous();
+
+        // Gradient with respect to input
+        Tensor grad_input_normalized;
+        Tensor normalized_reshaped;
+        if (shape.size() == 3) {
+            grad_input_normalized = grad_normalized.reshape({N, C, L}).contiguous();
+            normalized_reshaped = normalized.reshape({N, C, L}).contiguous();
+        } else {
+            grad_input_normalized = grad_normalized.contiguous();
+            normalized_reshaped = normalized.contiguous();
+        }
+
+        Tensor sum_grad, sum_grad_x_norm;
+        if (shape.size() == 3) {
+            sum_grad = sum(sum(grad_input_normalized, 0, true), 2, true).contiguous();
+            sum_grad_x_norm = sum(sum((grad_input_normalized * normalized_reshaped),
+                                0, true), 2, true).contiguous();
+        } else {
+            sum_grad = sum(grad_input_normalized, 0, true).contiguous();
+            sum_grad_x_norm = sum((grad_input_normalized * normalized_reshaped),
+                                0, true).contiguous();
+        }
+
+        Tensor invstd_expanded;
+        if (shape.size() == 3) {
+            invstd_expanded = invstd.unsqueeze(0).unsqueeze(-1).contiguous();
+        } else {
+            invstd_expanded = invstd.unsqueeze(0).contiguous();
+        }
+
+        auto term1 = (sum_grad / static_cast<float>(batch_size)).contiguous();
+        auto term2 = (normalized_reshaped * sum_grad_x_norm / static_cast<float>(batch_size)).contiguous();
+        auto grad_input = ((grad_input_normalized - term1 - term2) * invstd_expanded).contiguous();
+
+        if (shape.size() == 3) {
+            grad_input = grad_input.reshape({N, C, L}).contiguous();
+        }
+
+        return {grad_input, grad_weight, grad_bias};
+    }
+
+private:
+    bool affine_;
+    double eps_;
+};
+
+BatchNorm1d::BatchNorm1d(int64_t num_features, double eps, double momentum,
+                        bool affine, bool track_running_stats)
+    : num_features_(num_features), eps_(eps), momentum_(momentum),
+      affine_(affine), track_running_stats_(track_running_stats) {
+
+    if (affine) {
+        weight_ = Variable(ones({num_features}), true);
+        bias_ = Variable(zeros({num_features}), true);
+        register_parameter("weight", weight_);
+        register_parameter("bias", bias_);
+    } else {
+        weight_ = Variable(ones({num_features}), false);
+        bias_ = Variable(zeros({num_features}), false);
+    }
+
+    if (track_running_stats) {
+        running_mean_ = Variable(zeros({num_features}), false);
+        running_var_ = Variable(ones({num_features}), false);
+        register_buffer("running_mean", running_mean_);
+        register_buffer("running_var", running_var_);
+    }
+
+    reset_parameters();
+}
+
+auto BatchNorm1d::forward(const Variable& input) -> Variable {
+    // Input shape: [N, C] or [N, C, L]
+    auto shape = input.shape();
+    if (shape.size() != 2 && shape.size() != 3) {
+        throw std::runtime_error("BatchNorm1d expects 2D or 3D input (got " +
+                               std::to_string(shape.size()) + "D)");
+    }
+
+    int64_t N = shape[0];
+    int64_t C = shape[1];
+    int64_t L = shape.size() == 3 ? shape[2] : 1;
+
+    if (C != num_features_) {
+        throw std::runtime_error("Expected " + std::to_string(num_features_) +
+                               " features, got " + std::to_string(C));
+    }
+
+    int64_t batch_size = N * L;
+    if (training_ && batch_size == 0) {
+        throw std::runtime_error("BatchNorm1d: Cannot compute statistics for empty batch");
+    }
+
+    Device original_device = input.tensor().device();
+    Tensor input_work = input.tensor();
+
+    Tensor batch_mean, batch_var;
+
+    if (training_) {
+        // Compute mean and variance over N and L dimensions
+        // Reshape to [N*L, C] for easier computation
+        Tensor reshaped_input = shape.size() == 3 ?
+            input_work.reshape({N * L, C}).contiguous() : input_work.contiguous();
+
+        // Compute mean: average over batch dimension (N*L)
+        batch_mean = mean(reshaped_input, 0, false);
+
+        // Compute variance
+        auto mean_broadcast = batch_mean.unsqueeze(0).contiguous();
+        auto centered = (reshaped_input - mean_broadcast).contiguous();
+        batch_var = mean(centered * centered, 0, false);
+
+        // Update running statistics
+        if (track_running_stats_) {
+            auto unbiased_var = batch_var * (static_cast<float>(batch_size) /
+                                            static_cast<float>(batch_size - 1));
+
+            auto& rm_var = buffers_["running_mean"];
+            auto& rv_var = buffers_["running_var"];
+
+            // Exponential moving average update
+            auto rm_data = rm_var.tensor().data<float>();
+            auto rv_data = rv_var.tensor().data<float>();
+            auto mean_data = batch_mean.data<float>();
+            auto var_data = unbiased_var.data<float>();
+
+            for (int64_t i = 0; i < C; i++) {
+                rm_data[i] = (1 - momentum_) * rm_data[i] + momentum_ * mean_data[i];
+                rv_data[i] = (1 - momentum_) * rv_data[i] + momentum_ * var_data[i];
+            }
+
+            num_batches_tracked_++;
+        }
+    } else {
+        if (track_running_stats_) {
+            batch_mean = buffers_["running_mean"].tensor();
+            batch_var = buffers_["running_var"].tensor();
+        } else {
+            throw std::runtime_error("BatchNorm1d in eval mode requires track_running_stats=true");
+        }
+    }
+
+    // Normalize
+    Tensor output;
+    if (shape.size() == 3) {
+        auto mean_broadcast = batch_mean.unsqueeze(0).unsqueeze(2).contiguous();
+        auto var_broadcast = batch_var.unsqueeze(0).unsqueeze(2).contiguous();
+        auto invstd = pow(var_broadcast + static_cast<float>(eps_), -0.5f).contiguous();
+        auto normalized = ((input_work - mean_broadcast) * invstd).contiguous();
+
+        if (affine_) {
+            auto& weight = parameters_["weight"];
+            auto& bias = parameters_["bias"];
+            auto weight_broadcast = weight.tensor().unsqueeze(0).unsqueeze(2).contiguous();
+            auto bias_broadcast = bias.tensor().unsqueeze(0).unsqueeze(2).contiguous();
+            output = (normalized * weight_broadcast + bias_broadcast).contiguous();
+        } else {
+            output = normalized;
+        }
+    } else {
+        auto mean_broadcast = batch_mean.unsqueeze(0).contiguous();
+        auto var_broadcast = batch_var.unsqueeze(0).contiguous();
+        auto invstd = pow(var_broadcast + static_cast<float>(eps_), -0.5f).contiguous();
+        auto normalized = ((input_work - mean_broadcast) * invstd).contiguous();
+
+        if (affine_) {
+            auto& weight = parameters_["weight"];
+            auto& bias = parameters_["bias"];
+            auto weight_broadcast = weight.tensor().unsqueeze(0).contiguous();
+            auto bias_broadcast = bias.tensor().unsqueeze(0).contiguous();
+            output = (normalized * weight_broadcast + bias_broadcast).contiguous();
+        } else {
+            output = normalized;
+        }
+    }
+
+    // Set up autograd if needed
+    bool requires_grad = input.requires_grad();
+    if (affine_ && parameters_.find("weight") != parameters_.end()) {
+        requires_grad = requires_grad || parameters_["weight"].requires_grad();
+    }
+
+    if (requires_grad) {
+        auto result = Variable(output, true);
+
+        // Compute invstd for backward
+        auto invstd = pow(batch_var + static_cast<float>(eps_), -0.5f);
+
+        Tensor batch_mean_final = batch_mean.contiguous();
+        Tensor invstd_final = invstd.contiguous();
+
+        Tensor weight_tensor = affine_ ? parameters_["weight"].tensor() : ones({C}, DType::Float32, original_device);
+
+        std::vector<Tensor> tensors_to_save = {
+            input.tensor().contiguous(),
+            batch_mean_final,
+            invstd_final,
+            weight_tensor.contiguous()
+        };
+
+        auto grad_fn = std::make_shared<BatchNorm1dBackward>(
+            affine_, eps_, std::move(tensors_to_save)
+        );
+
+        result.set_grad_fn(grad_fn);
+
+        std::vector<Variable*> input_vars;
+        if (input.requires_grad()) {
+            input_vars.push_back(const_cast<Variable*>(&input));
+        }
+        if (affine_) {
+            auto weight_it = parameters_.find("weight");
+            auto bias_it = parameters_.find("bias");
+            if (weight_it != parameters_.end() && weight_it->second.requires_grad()) {
+                input_vars.push_back(&(weight_it->second));
+            }
+            if (bias_it != parameters_.end() && bias_it->second.requires_grad()) {
+                input_vars.push_back(&(bias_it->second));
+            }
+        }
+        grad_fn->set_input_variables(input_vars);
+
+        std::vector<std::shared_ptr<Function>> next_funcs;
+        if (input.grad_fn()) {
+            next_funcs.push_back(input.grad_fn());
+        }
+        grad_fn->set_next_functions(next_funcs);
+
+        return result;
+    } else {
+        return Variable(output, false);
+    }
+}
+
+auto BatchNorm1d::reset_parameters() -> void {
+    if (track_running_stats_) {
+        buffers_["running_mean"].tensor().zero_();
+        buffers_["running_var"].tensor().fill_(1.0f);
+        num_batches_tracked_ = 0;
+    }
+}
+
 } // namespace tenzor::nn

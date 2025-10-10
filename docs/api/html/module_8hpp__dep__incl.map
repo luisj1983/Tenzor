@@ -1,0 +1,32 @@
+<map id="include/tenzor/nn/module.hpp" name="include/tenzor/nn/module.hpp">
+<area shape="rect" id="Node000001" title="Neural network module base class." alt="" coords="775,5,989,33"/>
+<area shape="rect" id="Node000002" href="$activations_8hpp_source.html" title=" " alt="" coords="5,81,215,126"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="760,32,516,52,234,84,215,86,215,81,234,78,516,47,759,27"/>
+<area shape="rect" id="Node000003" href="$tenzor_8hpp_source.html" title=" " alt="" coords="789,174,975,201"/>
+<area shape="poly" id="edge19_Node000001_Node000003" title=" " alt="" coords="759,27,618,33,468,44,343,61,302,71,280,83,273,93,271,103,273,113,280,124,304,136,350,147,486,164,646,175,789,181,789,186,646,180,485,169,349,152,302,141,276,128,268,116,265,103,268,91,276,79,300,66,342,56,467,39,618,28,759,21"/>
+<area shape="rect" id="Node000004" href="$batchnorm_8hpp_source.html" title=" " alt="" coords="291,81,468,126"/>
+<area shape="poly" id="edge3_Node000001_Node000004" title=" " alt="" coords="769,38,480,84,469,86,468,80,479,78,769,33"/>
+<area shape="rect" id="Node000005" href="$conv_8hpp_source.html" title=" " alt="" coords="492,81,669,126"/>
+<area shape="poly" id="edge5_Node000001_Node000005" title=" " alt="" coords="820,40,661,83,660,78,819,35"/>
+<area shape="rect" id="Node000006" href="$dropout_8hpp_source.html" title=" " alt="" coords="693,81,871,126"/>
+<area shape="poly" id="edge7_Node000001_Node000006" title=" " alt="" coords="856,45,810,82,807,78,853,41"/>
+<area shape="rect" id="Node000007" href="$flatten_8hpp_source.html" title=" " alt="" coords="895,81,1072,126"/>
+<area shape="poly" id="edge9_Node000001_Node000007" title=" " alt="" coords="912,41,958,78,955,82,908,45"/>
+<area shape="rect" id="Node000008" href="$linear_8hpp_source.html" title=" " alt="" coords="1096,81,1273,126"/>
+<area shape="poly" id="edge11_Node000001_Node000008" title=" " alt="" coords="946,35,1105,78,1104,83,944,40"/>
+<area shape="rect" id="Node000009" href="$normalization_8hpp_source.html" title=" " alt="" coords="1297,81,1475,126"/>
+<area shape="poly" id="edge13_Node000001_Node000009" title=" " alt="" coords="996,33,1286,78,1298,80,1297,86,1286,84,995,38"/>
+<area shape="rect" id="Node000010" href="$pooling_8hpp_source.html" title=" " alt="" coords="1499,81,1676,126"/>
+<area shape="poly" id="edge15_Node000001_Node000010" title=" " alt="" coords="1005,26,1230,46,1488,78,1498,80,1498,85,1487,84,1229,51,1004,32"/>
+<area shape="rect" id="Node000011" href="$losses_8hpp_source.html" title=" " alt="" coords="1700,81,1864,126"/>
+<area shape="poly" id="edge17_Node000001_Node000011" title=" " alt="" coords="1005,21,1316,39,1503,55,1689,78,1700,80,1699,85,1688,84,1502,60,1316,44,1004,27"/>
+<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="230,122,234,123,538,156,789,177,789,182,538,162,234,128,230,128"/>
+<area shape="poly" id="edge4_Node000004_Node000003" title=" " alt="" coords="484,124,789,171,789,176,483,129"/>
+<area shape="poly" id="edge6_Node000005_Node000003" title=" " alt="" coords="676,128,834,171,833,176,674,133"/>
+<area shape="poly" id="edge8_Node000006_Node000003" title=" " alt="" coords="822,134,868,171,864,175,818,138"/>
+<area shape="poly" id="edge10_Node000007_Node000003" title=" " alt="" coords="947,138,900,175,897,171,943,134"/>
+<area shape="poly" id="edge12_Node000008_Node000003" title=" " alt="" coords="1090,133,931,176,930,171,1089,128"/>
+<area shape="poly" id="edge14_Node000009_Node000003" title=" " alt="" coords="1283,129,976,176,975,171,1282,124"/>
+<area shape="poly" id="edge16_Node000010_Node000003" title=" " alt="" coords="1483,129,1203,163,975,183,975,177,1202,158,1483,124"/>
+<area shape="poly" id="edge18_Node000011_Node000003" title=" " alt="" coords="1685,129,1484,153,1287,170,975,186,975,181,1286,165,1483,148,1684,123"/>
+</map>

@@ -290,4 +290,156 @@ auto Dropout2d::forward(const Variable& input) -> Variable {
     return output;
 }
 
+// AlphaDropout autograd function
+class AlphaDropoutBackward : public Function {
+public:
+    AlphaDropoutBackward(Tensor mask, double a, double b)
+        : mask_(std::move(mask)), a_(a), b_(b) {}
+
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+        if (inputs.size() != 1) {
+            throw std::invalid_argument("AlphaDropoutBackward expects 1 input");
+        }
+
+        // Apply affine transformation: output = a * input + b
+        auto shape_span = inputs[0].tensor().shape();
+        std::vector<int64_t> shape_vec(shape_span.begin(), shape_span.end());
+        auto a_tensor = full(shape_vec, static_cast<float>(a_),
+                            inputs[0].tensor().dtype(), inputs[0].tensor().device());
+        auto b_tensor = full(shape_vec, static_cast<float>(b_),
+                            inputs[0].tensor().dtype(), inputs[0].tensor().device());
+        auto output = add(mul(inputs[0].tensor(), a_tensor), b_tensor);
+
+        std::vector<Variable> result;
+        result.push_back(Variable(output, inputs[0].requires_grad()));
+        return result;
+    }
+
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
+        if (grad_outputs.size() != 1) {
+            throw std::invalid_argument("AlphaDropoutBackward expects 1 gradient output");
+        }
+
+        // Gradient: grad_input = grad_output * a * mask
+        // Only kept elements (mask=1) receive gradients, scaled by a
+        auto shape_span = grad_outputs[0].shape();
+        std::vector<int64_t> shape_vec(shape_span.begin(), shape_span.end());
+        auto a_tensor = full(shape_vec, static_cast<float>(a_),
+                            grad_outputs[0].dtype(), grad_outputs[0].device());
+        auto grad_input = mul(mul(grad_outputs[0], a_tensor), mask_);
+
+        std::vector<Tensor> result;
+        result.push_back(grad_input);
+        return result;
+    }
+
+private:
+    Tensor mask_;
+    double a_;
+    double b_;
+};
+
+// Alpha Dropout (for SELU networks)
+AlphaDropout::AlphaDropout(double p) : p_(p) {
+    if (p < 0.0 || p >= 1.0) {
+        throw std::invalid_argument("AlphaDropout probability must be in [0, 1)");
+    }
+}
+
+auto AlphaDropout::forward(const Variable& input) -> Variable {
+    // During inference, return input unchanged
+    if (!is_training()) {
+        return input;
+    }
+
+    if (p_ == 0.0) {
+        return input;  // No dropout
+    }
+
+    // SELU constants
+    const double alpha = 1.6732632423543772848170429916717;
+    const double scale = 1.0507009873554804934193349852946;
+    const double alpha_p = -alpha * scale;  // approximately -1.7581
+
+    // Affine transformation parameters to maintain mean=0, var=1
+    const double a = std::sqrt((1.0 - p_) * (1.0 + p_ * alpha_p * alpha_p));
+    const double b = -a * alpha_p * p_ / (1.0 - p_);
+
+    // Generate random mask
+    auto shape_span = input.tensor().shape();
+    std::vector<int64_t> shape_vec(shape_span.begin(), shape_span.end());
+
+    // Create random tensor on CPU
+    auto random_tensor = rand(shape_vec, input.tensor().dtype(), Device::cpu());
+
+    // Create binary mask: 1 for kept, 0 for dropped
+    auto mask_data_cpu = zeros(shape_vec, input.tensor().dtype(), Device::cpu());
+
+    size_t numel = random_tensor.numel();
+    void* random_ptr = random_tensor.impl()->storage->data();
+    void* mask_ptr = mask_data_cpu.impl()->storage->data();
+
+    if (random_tensor.dtype() == DType::Float32) {
+        float* rand_data = static_cast<float*>(random_ptr);
+        float* mask_out = static_cast<float*>(mask_ptr);
+        for (size_t i = 0; i < numel; ++i) {
+            mask_out[i] = rand_data[i] > static_cast<float>(p_) ? 1.0f : 0.0f;
+        }
+    } else if (random_tensor.dtype() == DType::Float64) {
+        double* rand_data = static_cast<double*>(random_ptr);
+        double* mask_out = static_cast<double*>(mask_ptr);
+        for (size_t i = 0; i < numel; ++i) {
+            mask_out[i] = rand_data[i] > p_ ? 1.0 : 0.0;
+        }
+    } else {
+        throw std::runtime_error("AlphaDropout only supports Float32 and Float64 dtypes");
+    }
+
+    // Transfer mask to target device if needed
+    auto mask_data = (input.tensor().device().type == Device::Type::CPU) ?
+                     mask_data_cpu : mask_data_cpu.to(input.tensor().device());
+
+    // Create masked input: set dropped elements to alpha_p
+    // masked_input = input * mask + alpha_p * (1 - mask)
+    auto ones_tensor = ones(shape_vec, input.tensor().dtype(), input.tensor().device());
+    auto inverted_mask = sub(ones_tensor, mask_data);
+    auto alpha_p_tensor = full(shape_vec, static_cast<float>(alpha_p),
+                               input.tensor().dtype(), input.tensor().device());
+
+    auto kept_part = mul(input.tensor(), mask_data);
+    auto dropped_part = mul(alpha_p_tensor, inverted_mask);
+    auto masked_input = add(kept_part, dropped_part);
+
+    // Apply affine transformation: output = a * masked_input + b
+    auto a_tensor = full(shape_vec, static_cast<float>(a),
+                        input.tensor().dtype(), input.tensor().device());
+    auto b_tensor = full(shape_vec, static_cast<float>(b),
+                        input.tensor().dtype(), input.tensor().device());
+    auto output_tensor = add(mul(masked_input, a_tensor), b_tensor);
+
+    // Create output variable
+    Variable output(output_tensor, input.requires_grad());
+
+    // Set up autograd if input requires grad
+    if (input.requires_grad()) {
+        // Create autograd function with mask and affine parameters
+        auto alpha_dropout_fn = std::make_shared<AlphaDropoutBackward>(mask_data, a, b);
+
+        // Track input variable for gradient accumulation
+        alpha_dropout_fn->set_input_variables({const_cast<Variable*>(&input)});
+
+        // Set up backward graph - link to input's grad_fn if it exists
+        std::vector<std::shared_ptr<Function>> next_funcs;
+        if (input.grad_fn()) {
+            next_funcs.push_back(input.grad_fn());
+        }
+        alpha_dropout_fn->set_next_functions(next_funcs);
+
+        // Set gradient function on output
+        output.set_grad_fn(alpha_dropout_fn);
+    }
+
+    return output;
+}
+
 } // namespace tenzor::nn

@@ -1,3 +1,11 @@
+/**
+ * @file dtype.hpp
+ * @brief Data type system for Tenzor tensors
+ *
+ * Provides type definitions, traits, and utilities for tensor data types.
+ * Supports various numeric types including floating-point, integers, and complex numbers.
+ */
+
 #pragma once
 
 #include <cstdint>
@@ -7,54 +15,113 @@
 
 namespace tenzor {
 
-// Data type enumeration
+/**
+ * @brief Enumeration of supported tensor data types.
+ *
+ * Defines all numeric types that can be stored in tensors, including
+ * floating-point, integer, boolean, and complex number types.
+ */
 enum class DType : uint8_t {
-    Float32,
-    Float64,
-    Float16,
-    BFloat16,
-    Int8,
-    Int16,
-    Int32,
-    Int64,
-    UInt8,
-    UInt16,
-    UInt32,
-    UInt64,
-    Bool,
-    Complex64,
-    Complex128
+    Float32,    ///< 32-bit floating point (float)
+    Float64,    ///< 64-bit floating point (double)
+    Float16,    ///< 16-bit floating point (half precision)
+    BFloat16,   ///< Brain floating point (16-bit, Google format)
+    Int8,       ///< 8-bit signed integer
+    Int16,      ///< 16-bit signed integer
+    Int32,      ///< 32-bit signed integer
+    Int64,      ///< 64-bit signed integer
+    UInt8,      ///< 8-bit unsigned integer
+    UInt16,     ///< 16-bit unsigned integer
+    UInt32,     ///< 32-bit unsigned integer
+    UInt64,     ///< 64-bit unsigned integer
+    Bool,       ///< Boolean type
+    Complex64,  ///< 64-bit complex (two float32)
+    Complex128  ///< 128-bit complex (two float64)
 };
 
-// Type traits
+/**
+ * @brief Concept for valid scalar types.
+ *
+ * Requires type to be arithmetic (integers, floats) or complex numbers.
+ * Used to constrain template parameters to valid tensor element types.
+ *
+ * @tparam T Type to check
+ */
 template<typename T>
 concept ScalarType = std::is_arithmetic_v<T> ||
                      std::is_same_v<T, std::complex<float>> ||
                      std::is_same_v<T, std::complex<double>>;
 
+/**
+ * @brief Concept for integral types.
+ *
+ * Requires type to be an integer (signed or unsigned).
+ *
+ * @tparam T Type to check
+ */
 template<typename T>
 concept IntegralType = std::is_integral_v<T>;
 
+/**
+ * @brief Concept for floating-point types.
+ *
+ * Requires type to be float or double.
+ *
+ * @tparam T Type to check
+ */
 template<typename T>
 concept FloatingType = std::is_floating_point_v<T>;
 
-// DType traits
+/**
+ * @brief Type traits for DType enumeration.
+ *
+ * Maps DType enumeration values to their corresponding C++ types.
+ * Specialized for each supported data type.
+ *
+ * @tparam dt DType enumeration value
+ */
 template<DType dt>
 struct dtype_traits;
 
+/// @brief Specialization for Float32
 template<> struct dtype_traits<DType::Float32> { using type = float; };
+/// @brief Specialization for Float64
 template<> struct dtype_traits<DType::Float64> { using type = double; };
+/// @brief Specialization for Int32
 template<> struct dtype_traits<DType::Int32> { using type = int32_t; };
+/// @brief Specialization for Int64
 template<> struct dtype_traits<DType::Int64> { using type = int64_t; };
+/// @brief Specialization for UInt8
 template<> struct dtype_traits<DType::UInt8> { using type = uint8_t; };
+/// @brief Specialization for Bool
 template<> struct dtype_traits<DType::Bool> { using type = bool; };
+/// @brief Specialization for Complex64
 template<> struct dtype_traits<DType::Complex64> { using type = std::complex<float>; };
+/// @brief Specialization for Complex128
 template<> struct dtype_traits<DType::Complex128> { using type = std::complex<double>; };
 
+/**
+ * @brief Type alias for extracting C++ type from DType.
+ *
+ * @tparam dt DType enumeration value
+ *
+ * @code
+ * using T = dtype_t<DType::Float32>;  // T is float
+ * @endcode
+ */
 template<DType dt>
 using dtype_t = typename dtype_traits<dt>::type;
 
-// Helper functions
+/**
+ * @brief Get the size in bytes of a data type.
+ *
+ * @param dtype Data type enumeration
+ * @return Size in bytes (1, 2, 4, 8, or 16)
+ *
+ * @code
+ * size_t size = dtype_size(DType::Float32);  // Returns 4
+ * @endcode
+ */
 constexpr auto dtype_size(DType dtype) -> size_t {
     switch (dtype) {
         case DType::Float32: return 4;
@@ -76,6 +143,16 @@ constexpr auto dtype_size(DType dtype) -> size_t {
     return 0;
 }
 
+/**
+ * @brief Get the string name of a data type.
+ *
+ * @param dtype Data type enumeration
+ * @return String representation of the type (e.g., "float32", "int64")
+ *
+ * @code
+ * auto name = dtype_name(DType::Float32);  // Returns "float32"
+ * @endcode
+ */
 constexpr auto dtype_name(DType dtype) -> std::string_view {
     switch (dtype) {
         case DType::Float32: return "float32";

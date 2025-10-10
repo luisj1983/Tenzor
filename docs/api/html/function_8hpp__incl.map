@@ -1,0 +1,44 @@
+<map id="include/tenzor/autograd/function.hpp" name="include/tenzor/autograd/function.hpp">
+<area shape="rect" id="Node000001" title="Autograd function interface and built&#45;in operations." alt="" coords="224,5,399,50"/>
+<area shape="rect" id="Node000002" title=" " alt="" coords="5,325,82,353"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="273,53,222,85,163,130,106,185,81,217,61,250,50,280,46,310,41,309,45,279,56,248,77,214,102,182,160,126,219,81,270,48"/>
+<area shape="rect" id="Node000003" title=" " alt="" coords="432,249,495,277"/>
+<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="361,48,393,69,420,96,440,131,453,168,464,234,459,235,447,169,435,133,416,100,389,73,358,53"/>
+<area shape="rect" id="Node000004" href="$tensor_8hpp.html" title="Core tensor class for multi&#45;dimensional array operations." alt="" coords="278,174,412,201"/>
+<area shape="poly" id="edge3_Node000001_Node000004" title=" " alt="" coords="303,51,293,87,292,106,295,125,306,144,320,161,316,165,302,147,290,127,286,106,288,86,298,50"/>
+<area shape="rect" id="Node000017" href="$variable_8hpp.html" title="Automatic differentiation wrapper for tensors." alt="" coords="304,98,407,126"/>
+<area shape="poly" id="edge22_Node000001_Node000017" title=" " alt="" coords="325,49,343,83,339,85,321,52"/>
+<area shape="poly" id="edge4_Node000004_Node000002" title=" " alt="" coords="278,199,200,217,159,232,121,252,87,281,61,314,57,310,83,277,118,247,157,227,198,212,277,194"/>
+<area shape="poly" id="edge5_Node000004_Node000003" title=" " alt="" coords="367,200,431,239,428,243,365,204"/>
+<area shape="rect" id="Node000005" title=" " alt="" coords="255,249,307,277"/>
+<area shape="poly" id="edge6_Node000004_Node000005" title=" " alt="" coords="335,204,304,239,300,236,331,200"/>
+<area shape="rect" id="Node000006" title=" " alt="" coords="518,249,593,277"/>
+<area shape="poly" id="edge7_Node000004_Node000006" title=" " alt="" coords="383,199,504,241,503,246,382,204"/>
+<area shape="rect" id="Node000007" href="$dtype_8hpp.html" title="Data type system for Tenzor tensors." alt="" coords="407,325,493,353"/>
+<area shape="poly" id="edge8_Node000004_Node000007" title=" " alt="" coords="356,200,434,311,430,314,352,203"/>
+<area shape="rect" id="Node000012" href="$device_8hpp.html" title="Device specification and management for tensors." alt="" coords="291,325,383,353"/>
+<area shape="poly" id="edge13_Node000004_Node000012" title=" " alt="" coords="347,202,341,310,336,309,341,201"/>
+<area shape="rect" id="Node000014" href="$storage_8hpp_source.html" title=" " alt="" coords="132,249,230,277"/>
+<area shape="poly" id="edge17_Node000004_Node000014" title=" " alt="" coords="317,204,225,245,223,240,314,199"/>
+<area shape="rect" id="Node000008" title=" " alt="" coords="304,401,370,428"/>
+<area shape="poly" id="edge9_Node000007_Node000008" title=" " alt="" coords="431,355,371,394,368,390,428,351"/>
+<area shape="rect" id="Node000009" title=" " alt="" coords="394,401,490,428"/>
+<area shape="poly" id="edge10_Node000007_Node000009" title=" " alt="" coords="451,354,448,385,443,385,446,353"/>
+<area shape="rect" id="Node000010" title=" " alt="" coords="514,401,605,428"/>
+<area shape="poly" id="edge11_Node000007_Node000010" title=" " alt="" coords="471,351,529,390,526,394,468,355"/>
+<area shape="rect" id="Node000011" title=" " alt="" coords="629,401,706,428"/>
+<area shape="poly" id="edge12_Node000007_Node000011" title=" " alt="" coords="490,351,615,393,614,398,488,356"/>
+<area shape="poly" id="edge14_Node000012_Node000008" title=" " alt="" coords="340,353,340,385,334,385,334,353"/>
+<area shape="poly" id="edge16_Node000012_Node000009" title=" " alt="" coords="357,351,413,390,410,394,354,355"/>
+<area shape="rect" id="Node000013" title=" " alt="" coords="222,401,281,428"/>
+<area shape="poly" id="edge15_Node000012_Node000013" title=" " alt="" coords="323,355,280,392,277,388,320,351"/>
+<area shape="poly" id="edge18_Node000014_Node000002" title=" " alt="" coords="158,280,82,320,80,315,155,275"/>
+<area shape="poly" id="edge21_Node000014_Node000012" title=" " alt="" coords="210,275,296,316,294,320,208,280"/>
+<area shape="rect" id="Node000015" title=" " alt="" coords="106,325,176,353"/>
+<area shape="poly" id="edge19_Node000014_Node000015" title=" " alt="" coords="176,279,158,313,153,310,171,276"/>
+<area shape="rect" id="Node000016" title=" " alt="" coords="200,325,266,353"/>
+<area shape="poly" id="edge20_Node000014_Node000016" title=" " alt="" coords="192,276,217,311,213,314,188,279"/>
+<area shape="poly" id="edge23_Node000017_Node000002" title=" " alt="" coords="308,129,256,146,197,172,137,207,84,251,65,280,53,311,48,309,60,278,80,248,134,203,194,167,254,141,306,124"/>
+<area shape="poly" id="edge25_Node000017_Node000004" title=" " alt="" coords="356,127,352,159,346,158,351,126"/>
+<area shape="poly" id="edge24_Node000017_Node000006" title=" " alt="" coords="374,124,528,238,524,242,371,128"/>
+</map>
