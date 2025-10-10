@@ -55,4 +55,55 @@ auto SGD::initialize_buffers() -> void {
     }
 }
 
+auto SGD::state_dict() const -> std::unordered_map<std::string, Tensor> {
+    std::unordered_map<std::string, Tensor> state;
+
+    // Save optimizer configuration as tensors
+    state["lr"] = Tensor({1}, DType::Float64, Device::cpu());
+    state["lr"].data<double>()[0] = lr_;
+
+    state["momentum"] = Tensor({1}, DType::Float64, Device::cpu());
+    state["momentum"].data<double>()[0] = momentum_;
+
+    state["dampening"] = Tensor({1}, DType::Float64, Device::cpu());
+    state["dampening"].data<double>()[0] = dampening_;
+
+    state["weight_decay"] = Tensor({1}, DType::Float64, Device::cpu());
+    state["weight_decay"].data<double>()[0] = weight_decay_;
+
+    // Save velocity buffers
+    for (size_t i = 0; i < velocity_buffers_.size(); ++i) {
+        state["velocity_" + std::to_string(i)] = velocity_buffers_[i].clone();
+    }
+
+    return state;
+}
+
+auto SGD::load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void {
+    // Load optimizer configuration
+    if (state.count("lr")) {
+        lr_ = state.at("lr").data<double>()[0];
+    }
+
+    if (state.count("momentum")) {
+        momentum_ = state.at("momentum").data<double>()[0];
+    }
+
+    if (state.count("dampening")) {
+        dampening_ = state.at("dampening").data<double>()[0];
+    }
+
+    if (state.count("weight_decay")) {
+        weight_decay_ = state.at("weight_decay").data<double>()[0];
+    }
+
+    // Load velocity buffers
+    for (size_t i = 0; i < velocity_buffers_.size(); ++i) {
+        std::string velocity_key = "velocity_" + std::to_string(i);
+        if (state.count(velocity_key)) {
+            velocity_buffers_[i] = state.at(velocity_key).clone();
+        }
+    }
+}
+
 } // namespace tenzor::optim

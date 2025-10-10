@@ -22,6 +22,10 @@ public:
     auto set_lr(double lr) -> void;
     auto get_lr() const -> double;
 
+    // Serialization
+    auto state_dict() const -> std::unordered_map<std::string, Tensor> override;
+    auto load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void override;
+
 private:
     double lr_;
     double beta1_;
@@ -53,6 +57,10 @@ public:
 
     auto set_lr(double lr) -> void;
     auto get_lr() const -> double;
+
+    // Serialization
+    auto state_dict() const -> std::unordered_map<std::string, Tensor> override;
+    auto load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void override;
 
 private:
     double lr_;

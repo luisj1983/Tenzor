@@ -16,7 +16,10 @@ message(STATUS "CUDA Backend: Found CUDA ${CUDAToolkit_VERSION}")
 set(CUDA_BACKEND_SOURCES
     cuda_backend.cpp
     kernels/math.cu
+    kernels/matmul.cu
     kernels/reduction.cu
+    kernels/activations.cu
+    kernels/transform.cu
 )
 
 # Create CUDA backend shared library
@@ -29,7 +32,7 @@ set_target_properties(tenzor_backend_cuda PROPERTIES
     OUTPUT_NAME "tenzor_backend_cuda"
     PREFIX ""  # Remove 'lib' prefix on Unix
     CUDA_SEPARABLE_COMPILATION ON
-    CUDA_STANDARD 17
+    CUDA_STANDARD 20
     CUDA_STANDARD_REQUIRED ON
 )
 

@@ -6,6 +6,7 @@ set(CPU_BACKEND_SOURCES
     kernels/math.cpp
     kernels/reduction.cpp
     kernels/transform.cpp
+    kernels/activations.cpp
 )
 
 # Create CPU backend shared library
@@ -45,17 +46,9 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     )
 
     # Check for specific SIMD support
-    include(CheckCXXCompilerFlag)
-    check_cxx_compiler_flag("-mavx2" COMPILER_SUPPORTS_AVX2)
-    check_cxx_compiler_flag("-mavx512f" COMPILER_SUPPORTS_AVX512)
-
-    if(COMPILER_SUPPORTS_AVX512)
-        message(STATUS "CPU Backend: AVX-512 support detected")
-        target_compile_definitions(tenzor_backend_cpu PRIVATE TENZOR_HAS_AVX512)
-    elseif(COMPILER_SUPPORTS_AVX2)
-        message(STATUS "CPU Backend: AVX2 support detected")
-        target_compile_definitions(tenzor_backend_cpu PRIVATE TENZOR_HAS_AVX2)
-    endif()
+    # With -march=native, the compiler will emit the correct instructions
+    # We detect CPU capabilities at compile time via compiler predefined macros
+    message(STATUS "CPU Backend: Using -march=native for automatic SIMD detection")
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
     target_compile_options(tenzor_backend_cpu PRIVATE
         /arch:AVX2

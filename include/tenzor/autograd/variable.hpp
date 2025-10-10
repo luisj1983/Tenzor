@@ -33,6 +33,7 @@ public:
     auto detach() -> Variable;
     auto requires_grad() const -> bool;
     auto set_requires_grad(bool requires_grad) -> void;
+    auto is_leaf() const -> bool;
 
     // Autograd context
     auto set_grad_fn(std::shared_ptr<Function> fn) -> void;

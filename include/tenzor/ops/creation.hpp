@@ -2,6 +2,8 @@
 
 #include <vector>
 #include <optional>
+#include <cstring>
+#include <type_traits>
 #include "../core/tensor.hpp"
 #include "../core/dtype.hpp"
 #include "../core/device.hpp"
@@ -59,7 +61,36 @@ auto eye(int64_t n, std::optional<int64_t> m = std::nullopt,
 // Create tensor from data
 template<typename T>
 auto from_data(const T* data, std::vector<int64_t> shape,
-              Device device = Device::cpu()) -> Tensor;
+              Device device = Device::cpu()) -> Tensor {
+    // Determine dtype from T
+    DType dtype;
+    if constexpr (std::is_same_v<T, float>) {
+        dtype = DType::Float32;
+    } else if constexpr (std::is_same_v<T, double>) {
+        dtype = DType::Float64;
+    } else if constexpr (std::is_same_v<T, int32_t>) {
+        dtype = DType::Int32;
+    } else if constexpr (std::is_same_v<T, int64_t>) {
+        dtype = DType::Int64;
+    } else if constexpr (std::is_same_v<T, uint8_t>) {
+        dtype = DType::UInt8;
+    } else if constexpr (std::is_same_v<T, bool>) {
+        dtype = DType::Bool;
+    } else {
+        static_assert(std::is_same_v<T, float>, "Unsupported type for from_data");
+    }
+
+    // Create empty tensor
+    auto tensor = empty(shape, dtype, device);
+
+    // Copy data
+    if (tensor.impl() && tensor.impl()->storage) {
+        size_t bytes = tensor.numel() * sizeof(T);
+        std::memcpy(tensor.impl()->storage->data(), data, bytes);
+    }
+
+    return tensor;
+}
 
 // Create tensor like another tensor
 auto zeros_like(const Tensor& tensor) -> Tensor;

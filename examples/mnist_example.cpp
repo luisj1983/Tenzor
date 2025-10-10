@@ -4,7 +4,10 @@
 int main() {
     using namespace tenzor;
 
-    std::cout << "Tenzor MNIST Example\n";
+    // Initialize Tenzor library
+    initialize();
+
+    std::cout << "\nTenzor MNIST Example\n";
     std::cout << "====================\n\n";
 
     // Create model

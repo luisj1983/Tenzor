@@ -1,6 +1,9 @@
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/autograd/engine.hpp"
+#include "tenzor/autograd/function.hpp"
+#include "tenzor/ops/creation.hpp"
 #include <atomic>
+#include <iostream>
 
 namespace tenzor {
 
@@ -35,7 +38,9 @@ auto Variable::backward(std::optional<Tensor> gradient) -> void {
 }
 
 auto Variable::zero_grad() -> void {
-    grad_ = std::nullopt;
+    if (grad_.has_value()) {
+        grad_ = zeros_like(grad_.value());
+    }
 }
 
 auto Variable::detach() -> Variable {
@@ -48,6 +53,10 @@ auto Variable::requires_grad() const -> bool {
 
 auto Variable::set_requires_grad(bool requires_grad) -> void {
     requires_grad_ = requires_grad;
+}
+
+auto Variable::is_leaf() const -> bool {
+    return !grad_fn_;
 }
 
 auto Variable::set_grad_fn(std::shared_ptr<Function> fn) -> void {
@@ -90,23 +99,101 @@ auto set_grad_enabled(bool enabled) -> void {
 
 // Arithmetic operators
 auto Variable::operator+(const Variable& other) const -> Variable {
+    auto grad_fn = std::make_shared<AddBackward>();
+
+    // Set up backward graph
+    std::vector<std::shared_ptr<Function>> next_funcs;
+    if (grad_fn_) next_funcs.push_back(grad_fn_);
+    if (other.grad_fn_) next_funcs.push_back(other.grad_fn_);
+    grad_fn->set_next_functions(next_funcs);
+
+    // Track input variables for gradient accumulation
+    grad_fn->set_input_variables({const_cast<Variable*>(this), const_cast<Variable*>(&other)});
+
+    // Compute result
     auto result = data_ + other.data_;
-    return Variable(result, requires_grad_ || other.requires_grad_);
+    Variable output(result, requires_grad_ || other.requires_grad_);
+
+    if (is_grad_enabled() && (requires_grad_ || other.requires_grad_)) {
+        output.set_grad_fn(grad_fn);
+    }
+
+    return output;
 }
 
 auto Variable::operator-(const Variable& other) const -> Variable {
+    auto grad_fn = std::make_shared<SubBackward>();
+
+    // Set up backward graph
+    std::vector<std::shared_ptr<Function>> next_funcs;
+    if (grad_fn_) next_funcs.push_back(grad_fn_);
+    if (other.grad_fn_) next_funcs.push_back(other.grad_fn_);
+    grad_fn->set_next_functions(next_funcs);
+
+    // Track input variables for gradient accumulation
+    grad_fn->set_input_variables({const_cast<Variable*>(this), const_cast<Variable*>(&other)});
+
+    // Compute result
     auto result = data_ - other.data_;
-    return Variable(result, requires_grad_ || other.requires_grad_);
+    Variable output(result, requires_grad_ || other.requires_grad_);
+
+    if (is_grad_enabled() && (requires_grad_ || other.requires_grad_)) {
+        output.set_grad_fn(grad_fn);
+    }
+
+    return output;
 }
 
 auto Variable::operator*(const Variable& other) const -> Variable {
+    auto grad_fn = std::make_shared<MulBackward>();
+
+    // Set up backward graph
+    std::vector<std::shared_ptr<Function>> next_funcs;
+    if (grad_fn_) next_funcs.push_back(grad_fn_);
+    if (other.grad_fn_) next_funcs.push_back(other.grad_fn_);
+    grad_fn->set_next_functions(next_funcs);
+
+    // Track input variables for gradient accumulation
+    grad_fn->set_input_variables({const_cast<Variable*>(this), const_cast<Variable*>(&other)});
+
+    // Save tensors for backward - clone to preserve values
+    grad_fn->saved_tensors_ = {data_.clone(), other.data_.clone()};
+
+    // Compute result
     auto result = data_ * other.data_;
-    return Variable(result, requires_grad_ || other.requires_grad_);
+    Variable output(result, requires_grad_ || other.requires_grad_);
+
+    if (is_grad_enabled() && (requires_grad_ || other.requires_grad_)) {
+        output.set_grad_fn(grad_fn);
+    }
+
+    return output;
 }
 
 auto Variable::operator/(const Variable& other) const -> Variable {
+    auto grad_fn = std::make_shared<DivBackward>();
+
+    // Set up backward graph
+    std::vector<std::shared_ptr<Function>> next_funcs;
+    if (grad_fn_) next_funcs.push_back(grad_fn_);
+    if (other.grad_fn_) next_funcs.push_back(other.grad_fn_);
+    grad_fn->set_next_functions(next_funcs);
+
+    // Track input variables for gradient accumulation
+    grad_fn->set_input_variables({const_cast<Variable*>(this), const_cast<Variable*>(&other)});
+
+    // Save tensors for backward - clone to preserve values
+    grad_fn->saved_tensors_ = {data_.clone(), other.data_.clone()};
+
+    // Compute result
     auto result = data_ / other.data_;
-    return Variable(result, requires_grad_ || other.requires_grad_);
+    Variable output(result, requires_grad_ || other.requires_grad_);
+
+    if (is_grad_enabled() && (requires_grad_ || other.requires_grad_)) {
+        output.set_grad_fn(grad_fn);
+    }
+
+    return output;
 }
 
 } // namespace tenzor

@@ -8,10 +8,15 @@
 namespace tenzor {
 
 BackendLoader::~BackendLoader() {
-    // Unload all libraries
+    // First, destroy all backend objects (while libraries are still loaded)
+    backends_.clear();
+    device_to_backend_.clear();
+
+    // Then unload libraries
     for (auto handle : loaded_libraries_) {
         unload_library(handle);
     }
+    loaded_libraries_.clear();
 }
 
 auto BackendLoader::load_backend(const std::filesystem::path& library_path)
@@ -47,7 +52,26 @@ auto BackendLoader::load_backend(const std::filesystem::path& library_path)
 
 auto BackendLoader::register_backend(std::string_view name,
                                      std::unique_ptr<Backend> backend) -> void {
-    backends_[std::string(name)] = std::move(backend);
+    auto backend_name = std::string(name);
+
+    // Determine device type from backend name
+    Device::Type device_type;
+    if (backend_name == "cpu") {
+        device_type = Device::Type::CPU;
+    } else if (backend_name == "cuda") {
+        device_type = Device::Type::CUDA;
+    } else {
+        device_type = Device::Type::CPU; // Default fallback
+    }
+
+    // Store backend pointer before moving
+    auto* backend_ptr = backend.get();
+
+    // Register by name
+    backends_[backend_name] = std::move(backend);
+
+    // Register by device type
+    device_to_backend_[device_type] = backend_ptr;
 }
 
 auto BackendLoader::get_backend(std::string_view name) -> Backend* {

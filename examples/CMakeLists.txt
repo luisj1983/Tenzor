@@ -11,3 +11,7 @@ target_link_libraries(mnist_example PRIVATE tenzor_core)
 # Custom operation example
 add_executable(custom_op_example custom_op_example.cpp)
 target_link_libraries(custom_op_example PRIVATE tenzor_core)
+
+# Backend selection example
+add_executable(backend_example backend_example.cpp)
+target_link_libraries(backend_example PRIVATE tenzor_core)

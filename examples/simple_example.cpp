@@ -4,7 +4,10 @@
 int main() {
     using namespace tenzor;
 
-    std::cout << "Tenzor Simple Example\n";
+    // Initialize Tenzor library
+    initialize();
+
+    std::cout << "\nTenzor Simple Example\n";
     std::cout << "=====================\n\n";
 
     // Create tensors

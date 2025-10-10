@@ -45,9 +45,9 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def_property_readonly("device", &tenzor::Tensor::device)
         .def("to", py::overload_cast<tenzor::Device>(&tenzor::Tensor::to, py::const_))
         .def("reshape", &tenzor::Tensor::reshape)
-        .def("__add__", &tenzor::Tensor::operator+)
-        .def("__sub__", &tenzor::Tensor::operator-)
-        .def("__mul__", &tenzor::Tensor::operator*)
+        .def("__add__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return a + b; })
+        .def("__sub__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return a - b; })
+        .def("__mul__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return a * b; })
         .def("__repr__", [](const tenzor::Tensor& t) {
             return "Tensor(shape=[...])";
         });

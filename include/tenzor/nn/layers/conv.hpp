@@ -29,9 +29,6 @@ private:
     int64_t dilation_;
     int64_t groups_;
 
-    Variable weight_;  // [out_channels, in_channels/groups, kernel_size, kernel_size]
-    std::optional<Variable> bias_;  // [out_channels]
-
     auto reset_parameters() -> void;
 };
 

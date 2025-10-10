@@ -124,5 +124,8 @@ auto bce_loss(const Variable& input, const Variable& target,
 auto nll_loss(const Variable& input, const Tensor& target,
              Reduction reduction = Reduction::Mean) -> Variable;
 
+auto l1_loss(const Variable& input, const Variable& target,
+            Reduction reduction = Reduction::Mean) -> Variable;
+
 } // namespace nn
 } // namespace tenzor

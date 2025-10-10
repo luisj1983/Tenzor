@@ -5,6 +5,7 @@ set(TENZOR_CORE_SOURCES
     core/device.cpp
     core/dtype.cpp
     core/shape.cpp
+    core/init.cpp
     backend/backend.cpp
     backend/loader.cpp
     backend/registry.cpp
@@ -18,16 +19,22 @@ set(TENZOR_CORE_SOURCES
     autograd/graph.cpp
     autograd/function.cpp
     autograd/engine.cpp
+    autograd/ops.cpp
     nn/module.cpp
+    nn/serialize.cpp
     nn/layers/linear.cpp
     nn/layers/conv.cpp
     nn/layers/batchnorm.cpp
     nn/layers/dropout.cpp
+    nn/layers/pooling.cpp
+    nn/layers/normalization.cpp
+    nn/layers/flatten.cpp
     nn/activations/activations.cpp
     nn/loss/losses.cpp
     nn/optim/optimizer.cpp
     nn/optim/sgd.cpp
     nn/optim/adam.cpp
+    nn/optim/scheduler.cpp
     parallel/threadpool.cpp
     utils/logging.cpp
     utils/error.cpp

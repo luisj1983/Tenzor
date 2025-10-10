@@ -24,8 +24,8 @@ public:
     }
 
     // Parameter management
-    auto parameters() -> std::vector<Variable*>;
-    auto named_parameters() -> std::vector<std::pair<std::string, Variable*>>;
+    virtual auto parameters() -> std::vector<Variable*>;
+    virtual auto named_parameters() -> std::vector<std::pair<std::string, Variable*>>;
     auto buffers() -> std::vector<Variable*>;
     auto named_buffers() -> std::vector<std::pair<std::string, Variable*>>;
 
@@ -43,8 +43,12 @@ public:
     auto zero_grad() -> void;
 
     // State management
-    auto state_dict() const -> std::unordered_map<std::string, Tensor>;
-    auto load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void;
+    virtual auto state_dict() const -> std::unordered_map<std::string, Tensor>;
+    virtual auto load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void;
+
+    // Serialization
+    auto save(const std::string& path) const -> void;
+    auto load(const std::string& path) -> void;
 
 protected:
     // Register parameters
@@ -74,6 +78,12 @@ public:
 
     // Forward pass through all modules
     auto forward(const Variable& input) -> Variable override;
+
+    // Override to preserve module order
+    auto parameters() -> std::vector<Variable*> override;
+    auto named_parameters() -> std::vector<std::pair<std::string, Variable*>> override;
+    auto state_dict() const -> std::unordered_map<std::string, Tensor> override;
+    auto load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void override;
 
 private:
     std::vector<std::shared_ptr<Module>> modules_;
