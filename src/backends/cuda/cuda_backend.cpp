@@ -50,6 +50,12 @@ namespace cuda {
 
     // Transform operations
     auto contiguous_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
+    auto clone_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
+    auto reshape_kernel(const Tensor& input, const std::vector<int64_t>& new_shape, cudaStream_t stream) -> Tensor;
+    auto transpose_kernel(const Tensor& input, int64_t dim0, int64_t dim1, cudaStream_t stream) -> Tensor;
+    auto permute_kernel(const Tensor& input, const std::vector<int64_t>& dims, cudaStream_t stream) -> Tensor;
+    auto squeeze_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Tensor;
+    auto unsqueeze_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Tensor;
     auto expand_kernel(const Tensor& input, const std::vector<int64_t>& shape, void* stream) -> Tensor;
 
     // Fill operations
@@ -61,6 +67,13 @@ namespace cuda {
     // Random operations
     auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, cudaStream_t stream) -> Tensor;
     auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, cudaStream_t stream) -> Tensor;
+
+    // BatchNorm2d operations
+    auto batchnorm2d_mean_var(const Tensor& input, Tensor& mean, Tensor& variance, cudaStream_t stream) -> void;
+    auto batchnorm2d_forward(const Tensor& input, const Tensor& mean, const Tensor& variance, float epsilon, cudaStream_t stream) -> Tensor;
+    auto batchnorm2d_forward_affine(const Tensor& input, const Tensor& mean, const Tensor& variance, const Tensor& gamma, const Tensor& beta, float epsilon, cudaStream_t stream) -> Tensor;
+    auto batchnorm2d_update_running_stats(Tensor& running_mean, Tensor& running_var, const Tensor& batch_mean, const Tensor& batch_var, float momentum, cudaStream_t stream) -> void;
+    auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const Tensor& mean, const Tensor& variance, const Tensor& gamma, float epsilon, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
 } // namespace cuda
 
 class CUDABackend : public Backend {
@@ -607,6 +620,148 @@ public:
                     throw std::invalid_argument("contiguous operation requires exactly 1 input");
                 }
                 return {cuda::contiguous_kernel(inputs[0], stream)};
+            }
+            else if (op_name == "clone") {
+                if (inputs.size() != 1) {
+                    throw std::invalid_argument("clone operation requires exactly 1 input");
+                }
+                return {cuda::clone_kernel(inputs[0], stream)};
+            }
+            else if (op_name == "reshape") {
+                if (inputs.size() != 1) {
+                    throw std::invalid_argument("reshape operation requires exactly 1 input");
+                }
+                // Parse shape from comma-separated string
+                std::vector<int64_t> shape;
+                if (attrs.contains("shape")) {
+                    std::string shape_str = attrs.at("shape");
+                    size_t pos = 0;
+                    while (pos < shape_str.size()) {
+                        size_t comma = shape_str.find(',', pos);
+                        if (comma == std::string::npos) {
+                            shape.push_back(std::stoll(shape_str.substr(pos)));
+                            break;
+                        }
+                        shape.push_back(std::stoll(shape_str.substr(pos, comma - pos)));
+                        pos = comma + 1;
+                    }
+                }
+                return {cuda::reshape_kernel(inputs[0], shape, stream)};
+            }
+            else if (op_name == "transpose") {
+                if (inputs.size() != 1) {
+                    throw std::invalid_argument("transpose operation requires exactly 1 input");
+                }
+                int64_t dim0 = 0;
+                int64_t dim1 = 1;
+                if (attrs.contains("dim0")) {
+                    dim0 = std::stoll(attrs.at("dim0"));
+                }
+                if (attrs.contains("dim1")) {
+                    dim1 = std::stoll(attrs.at("dim1"));
+                }
+                return {cuda::transpose_kernel(inputs[0], dim0, dim1, stream)};
+            }
+            else if (op_name == "permute") {
+                if (inputs.size() != 1) {
+                    throw std::invalid_argument("permute operation requires exactly 1 input");
+                }
+                // Parse dims from comma-separated string
+                std::vector<int64_t> dims;
+                if (attrs.contains("dims")) {
+                    std::string dims_str = attrs.at("dims");
+                    size_t pos = 0;
+                    while (pos < dims_str.size()) {
+                        size_t comma = dims_str.find(',', pos);
+                        if (comma == std::string::npos) {
+                            dims.push_back(std::stoll(dims_str.substr(pos)));
+                            break;
+                        }
+                        dims.push_back(std::stoll(dims_str.substr(pos, comma - pos)));
+                        pos = comma + 1;
+                    }
+                }
+                return {cuda::permute_kernel(inputs[0], dims, stream)};
+            }
+            else if (op_name == "squeeze") {
+                if (inputs.size() != 1) {
+                    throw std::invalid_argument("squeeze operation requires exactly 1 input");
+                }
+                int64_t dim = -1;
+                if (attrs.contains("dim")) {
+                    dim = std::stoll(attrs.at("dim"));
+                }
+                return {cuda::squeeze_kernel(inputs[0], dim, stream)};
+            }
+            else if (op_name == "unsqueeze") {
+                if (inputs.size() != 1) {
+                    throw std::invalid_argument("unsqueeze operation requires exactly 1 input");
+                }
+                int64_t dim = 0;
+                if (attrs.contains("dim")) {
+                    dim = std::stoll(attrs.at("dim"));
+                }
+                return {cuda::unsqueeze_kernel(inputs[0], dim, stream)};
+            }
+            else if (op_name == "batchnorm2d_mean_var") {
+                if (inputs.size() != 1) {
+                    throw std::invalid_argument("batchnorm2d_mean_var operation requires exactly 1 input");
+                }
+                // mean and variance tensors are passed in attrs as references
+                // For now, we'll return them as outputs
+                auto shape = inputs[0].shape();
+                int64_t C = shape[1];
+                Tensor mean({C}, inputs[0].dtype(), inputs[0].device());
+                Tensor variance({C}, inputs[0].dtype(), inputs[0].device());
+                cuda::batchnorm2d_mean_var(inputs[0], mean, variance, stream);
+                return {mean, variance};
+            }
+            else if (op_name == "batchnorm2d_forward") {
+                if (inputs.size() != 3) {
+                    throw std::invalid_argument("batchnorm2d_forward operation requires exactly 3 inputs (input, mean, variance)");
+                }
+                float epsilon = 1e-5f;
+                if (attrs.contains("epsilon")) {
+                    epsilon = std::stof(attrs.at("epsilon"));
+                }
+                return {cuda::batchnorm2d_forward(inputs[0], inputs[1], inputs[2], epsilon, stream)};
+            }
+            else if (op_name == "batchnorm2d_forward_affine") {
+                if (inputs.size() != 5) {
+                    throw std::invalid_argument("batchnorm2d_forward_affine operation requires exactly 5 inputs (input, mean, variance, gamma, beta)");
+                }
+                float epsilon = 1e-5f;
+                if (attrs.contains("epsilon")) {
+                    epsilon = std::stof(attrs.at("epsilon"));
+                }
+                return {cuda::batchnorm2d_forward_affine(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], epsilon, stream)};
+            }
+            else if (op_name == "batchnorm2d_update_running_stats") {
+                if (inputs.size() != 4) {
+                    throw std::invalid_argument("batchnorm2d_update_running_stats operation requires exactly 4 inputs (running_mean, running_var, batch_mean, batch_var)");
+                }
+                float momentum = 0.1f;
+                if (attrs.contains("momentum")) {
+                    momentum = std::stof(attrs.at("momentum"));
+                }
+                // Note: running_mean and running_var are modified in-place
+                // This is a special case - we need to get mutable references
+                // For now, we'll copy back the results
+                Tensor running_mean = inputs[0];
+                Tensor running_var = inputs[1];
+                cuda::batchnorm2d_update_running_stats(running_mean, running_var, inputs[2], inputs[3], momentum, stream);
+                return {running_mean, running_var};
+            }
+            else if (op_name == "batchnorm2d_backward") {
+                if (inputs.size() != 5) {
+                    throw std::invalid_argument("batchnorm2d_backward operation requires exactly 5 inputs (grad_output, input, mean, variance, gamma)");
+                }
+                float epsilon = 1e-5f;
+                if (attrs.contains("epsilon")) {
+                    epsilon = std::stof(attrs.at("epsilon"));
+                }
+                auto [grad_input, grad_gamma, grad_beta] = cuda::batchnorm2d_backward(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], epsilon, stream);
+                return {grad_input, grad_gamma, grad_beta};
             }
             else {
                 throw std::runtime_error("CUDABackend: Unknown operation '" + op_name + "'");

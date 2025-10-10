@@ -167,4 +167,81 @@ auto log_softmax(const Variable& input, int64_t dim) -> Variable {
     return output;
 }
 
+auto abs(const Variable& input) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::abs(input.tensor()), false);
+    }
+
+    auto grad_fn = std::make_shared<AbsBackward>();
+
+    // Save input tensor for backward pass
+    grad_fn->save_for_backward({input.tensor()});
+
+    std::vector<std::shared_ptr<Function>> next_funcs;
+    if (input.grad_fn()) {
+        next_funcs.push_back(input.grad_fn());
+    }
+    grad_fn->set_next_functions(next_funcs);
+
+    grad_fn->set_input_variables({const_cast<Variable*>(&input)});
+
+    auto result_tensor = tenzor::abs(input.tensor());
+    Variable output(result_tensor, true);
+    output.set_grad_fn(grad_fn);
+
+    return output;
+}
+
+auto clamp(const Variable& input, float min, float max) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::clamp(input.tensor(), min, max), false);
+    }
+
+    auto grad_fn = std::make_shared<ClampBackward>(min, max);
+
+    // Save input tensor for backward pass
+    grad_fn->save_for_backward({input.tensor()});
+
+    std::vector<std::shared_ptr<Function>> next_funcs;
+    if (input.grad_fn()) {
+        next_funcs.push_back(input.grad_fn());
+    }
+    grad_fn->set_next_functions(next_funcs);
+
+    grad_fn->set_input_variables({const_cast<Variable*>(&input)});
+
+    auto result_tensor = tenzor::clamp(input.tensor(), min, max);
+    Variable output(result_tensor, true);
+    output.set_grad_fn(grad_fn);
+
+    return output;
+}
+
+auto max(const Variable& input, std::optional<int64_t> dim, bool keepdim) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::max(input.tensor(), dim, keepdim), false);
+    }
+
+    auto grad_fn = std::make_shared<MaxBackward>(dim, keepdim);
+
+    // Compute result first so we can save it
+    auto result_tensor = tenzor::max(input.tensor(), dim, keepdim);
+
+    // Save input and output for backward pass
+    grad_fn->save_for_backward({input.tensor(), result_tensor});
+
+    std::vector<std::shared_ptr<Function>> next_funcs;
+    if (input.grad_fn()) {
+        next_funcs.push_back(input.grad_fn());
+    }
+    grad_fn->set_next_functions(next_funcs);
+
+    grad_fn->set_input_variables({const_cast<Variable*>(&input)});
+
+    Variable output(result_tensor, true);
+    output.set_grad_fn(grad_fn);
+
+    return output;
+}
+
 } // namespace tenzor

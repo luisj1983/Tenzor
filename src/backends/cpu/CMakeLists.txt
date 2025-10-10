@@ -7,6 +7,7 @@ set(CPU_BACKEND_SOURCES
     kernels/reduction.cpp
     kernels/transform.cpp
     kernels/activations.cpp
+    kernels/batchnorm.cpp
 )
 
 # Create CPU backend shared library

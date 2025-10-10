@@ -293,42 +293,9 @@ auto Tensor::clone() const -> Tensor {
         return *this;
     }
 
-    // Make tensor contiguous if needed
-    Tensor cont;
-    if (is_contiguous()) {
-        cont = *this;
-    } else if (impl_->device.type == Device::Type::CPU) {
-        cont = contiguous();
-    } else {
-        // For non-contiguous GPU tensors, use .to() which handles stride conversion
-        cont = to(impl_->device);
-    }
-
-    // Create new tensor with same shape, dtype, device
-    Tensor result(cont.impl_->shape, cont.impl_->dtype, cont.impl_->device);
-    result.impl_->requires_grad = cont.impl_->requires_grad;
-
-    // Deep copy the data using backend
-    const size_t size_bytes = cont.numel() * dtype_size(cont.dtype());
-
-    if (cont.impl_->device.type == Device::Type::CPU) {
-        // CPU: direct memcpy
-        std::memcpy(result.impl_->storage->data(),
-                    cont.impl_->storage->data(),
-                    size_bytes);
-    } else {
-        // GPU: use backend copy
-        auto* backend = backend_registry().get_backend(cont.impl_->device.type);
-        if (!backend) {
-            throw std::runtime_error("Backend not available for clone");
-        }
-        backend->copy(result.impl_->storage->data(),
-                     cont.impl_->storage->data(),
-                     size_bytes,
-                     CopyKind::DeviceToDevice);
-    }
-
-    return result;
+    // Dispatch to backend for clone operation
+    std::vector<Tensor> inputs = {*this};
+    return Dispatcher::dispatch("clone", inputs)[0];
 }
 
 auto Tensor::detach() const -> Tensor {
@@ -369,22 +336,11 @@ auto Tensor::operator/(const Tensor& other) const -> Tensor {
     return tenzor::div(*this, other);
 }
 
-// Scalar operations - use backend dispatch for device-agnostic execution
+// Scalar operations - use tensor path for device-agnostic execution
 auto Tensor::operator+(float scalar) const -> Tensor {
     if (!impl_) return *this;
 
-    // For CPU tensors, use fast direct access
-    if (impl_->device.type == Device::Type::CPU) {
-        auto result = clone();
-        auto* data_ptr = result.data<float>();
-        const int64_t n = numel();
-        for (int64_t i = 0; i < n; ++i) {
-            data_ptr[i] += scalar;
-        }
-        return result;
-    }
-
-    // For GPU tensors, create scalar tensor and use element-wise add
+    // Create scalar tensor and use element-wise add
     auto scalar_tensor = full(std::vector<int64_t>(impl_->shape.begin(), impl_->shape.end()),
                              scalar, impl_->dtype, impl_->device);
     return *this + scalar_tensor;
@@ -393,18 +349,7 @@ auto Tensor::operator+(float scalar) const -> Tensor {
 auto Tensor::operator-(float scalar) const -> Tensor {
     if (!impl_) return *this;
 
-    // For CPU tensors, use fast direct access
-    if (impl_->device.type == Device::Type::CPU) {
-        auto result = clone();
-        auto* data_ptr = result.data<float>();
-        const int64_t n = numel();
-        for (int64_t i = 0; i < n; ++i) {
-            data_ptr[i] -= scalar;
-        }
-        return result;
-    }
-
-    // For GPU tensors, create scalar tensor and use element-wise sub
+    // Create scalar tensor and use element-wise sub
     auto scalar_tensor = full(std::vector<int64_t>(impl_->shape.begin(), impl_->shape.end()),
                              scalar, impl_->dtype, impl_->device);
     return *this - scalar_tensor;
@@ -413,18 +358,7 @@ auto Tensor::operator-(float scalar) const -> Tensor {
 auto Tensor::operator*(float scalar) const -> Tensor {
     if (!impl_) return *this;
 
-    // For CPU tensors, use fast direct access
-    if (impl_->device.type == Device::Type::CPU) {
-        auto result = clone();
-        auto* data_ptr = result.data<float>();
-        const int64_t n = numel();
-        for (int64_t i = 0; i < n; ++i) {
-            data_ptr[i] *= scalar;
-        }
-        return result;
-    }
-
-    // For GPU tensors, create scalar tensor and use element-wise mul
+    // Create scalar tensor and use element-wise mul
     auto scalar_tensor = full(std::vector<int64_t>(impl_->shape.begin(), impl_->shape.end()),
                              scalar, impl_->dtype, impl_->device);
     return *this * scalar_tensor;
@@ -433,18 +367,7 @@ auto Tensor::operator*(float scalar) const -> Tensor {
 auto Tensor::operator/(float scalar) const -> Tensor {
     if (!impl_) return *this;
 
-    // For CPU tensors, use fast direct access
-    if (impl_->device.type == Device::Type::CPU) {
-        auto result = clone();
-        auto* data_ptr = result.data<float>();
-        const int64_t n = numel();
-        for (int64_t i = 0; i < n; ++i) {
-            data_ptr[i] /= scalar;
-        }
-        return result;
-    }
-
-    // For GPU tensors, create scalar tensor and use element-wise div
+    // Create scalar tensor and use element-wise div
     auto scalar_tensor = full(std::vector<int64_t>(impl_->shape.begin(), impl_->shape.end()),
                              scalar, impl_->dtype, impl_->device);
     return *this / scalar_tensor;
@@ -475,11 +398,15 @@ auto Tensor::fill_(float value) -> Tensor& {
     if (!impl_) {
         return *this;
     }
-    auto* data_ptr = data<float>();
-    const int64_t n = numel();
-    for (int64_t i = 0; i < n; ++i) {
-        data_ptr[i] = value;
-    }
+
+    // Build attributes with fill value
+    OpAttributes attrs;
+    attrs["value"] = std::to_string(value);
+
+    // Dispatch to backend for fill operation
+    std::vector<Tensor> inputs = {*this};
+    *this = Dispatcher::dispatch("fill", inputs, attrs)[0];
+
     return *this;
 }
 
@@ -522,13 +449,18 @@ auto Tensor::reshape(std::vector<int64_t> new_shape) const -> Tensor {
         throw std::invalid_argument("Shape incompatible with number of elements");
     }
 
-    // Try view first (zero-copy if contiguous)
-    if (is_contiguous()) {
-        return view(std::move(new_shape));
+    // Build attributes with new shape
+    OpAttributes attrs;
+    std::string shape_str;
+    for (size_t i = 0; i < new_shape.size(); ++i) {
+        if (i > 0) shape_str += ",";
+        shape_str += std::to_string(new_shape[i]);
     }
+    attrs["shape"] = shape_str;
 
-    // Otherwise need to make contiguous first
-    return contiguous().view(std::move(new_shape));
+    // Dispatch to backend for reshape operation
+    std::vector<Tensor> inputs = {*this};
+    return Dispatcher::dispatch("reshape", inputs, attrs)[0];
 }
 
 auto Tensor::view(std::vector<int64_t> new_shape) const -> Tensor {
@@ -549,13 +481,18 @@ auto Tensor::view(std::vector<int64_t> new_shape) const -> Tensor {
         throw std::invalid_argument("View shape incompatible with number of elements");
     }
 
-    // Create new tensor sharing storage
-    Tensor result;
-    result.impl_ = std::make_shared<TensorImpl>(*impl_);
-    result.impl_->shape = std::move(new_shape);
-    result.impl_->strides = compute_strides(result.impl_->shape);
+    // Build attributes with new shape
+    OpAttributes attrs;
+    std::string shape_str;
+    for (size_t i = 0; i < new_shape.size(); ++i) {
+        if (i > 0) shape_str += ",";
+        shape_str += std::to_string(new_shape[i]);
+    }
+    attrs["shape"] = shape_str;
 
-    return result;
+    // Dispatch to backend (uses reshape since view is just reshape on contiguous tensor)
+    std::vector<Tensor> inputs = {*this};
+    return Dispatcher::dispatch("reshape", inputs, attrs)[0];
 }
 
 auto Tensor::transpose(int64_t dim0, int64_t dim1) const -> Tensor {

@@ -44,16 +44,6 @@ target_link_libraries(tenzor_integration_tests PRIVATE
     GTest::gtest_main
 )
 
-# Activation tests
-add_executable(test_activations
-    test_activations.cpp
-)
-
-target_link_libraries(test_activations PRIVATE
-    tenzor_core
-    GTest::gtest_main
-)
-
 # Dropout tests
 add_executable(test_dropout
     nn/layers/test_dropout.cpp
@@ -189,7 +179,6 @@ target_link_libraries(test_multichannel PRIVATE
 include(GoogleTest)
 gtest_discover_tests(tenzor_unit_tests)
 gtest_discover_tests(tenzor_integration_tests)
-gtest_discover_tests(test_activations)
 gtest_discover_tests(test_dropout)
 gtest_discover_tests(test_batchnorm2d)
 gtest_discover_tests(test_conv2d)

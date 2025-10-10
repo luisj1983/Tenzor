@@ -130,4 +130,30 @@ private:
     int64_t dim_;
 };
 
+class AbsBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+};
+
+class ClampBackward : public Function {
+public:
+    ClampBackward(float min, float max) : min_(min), max_(max) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+private:
+    float min_;
+    float max_;
+};
+
+class MaxBackward : public Function {
+public:
+    MaxBackward(std::optional<int64_t> dim, bool keepdim) : dim_(dim), keepdim_(keepdim) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+private:
+    std::optional<int64_t> dim_;
+    bool keepdim_;
+};
+
 } // namespace tenzor

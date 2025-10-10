@@ -15,21 +15,6 @@ namespace {
         auto scalar_tensor = full(shape_vec, scalar, var.dtype(), var.device());
         return Variable(scalar_tensor, false) - var;
     }
-
-    auto variable_abs(const Variable& var) -> Variable {
-        // TODO: Implement AbsBackward for proper autograd
-        return Variable(tenzor::abs(var.tensor()), var.requires_grad());
-    }
-
-    auto variable_clamp(const Variable& var, float min, float max) -> Variable {
-        // TODO: Implement ClampBackward for proper autograd
-        return Variable(tenzor::clamp(var.tensor(), min, max), var.requires_grad());
-    }
-
-    auto variable_max(const Variable& var, int64_t dim, bool keepdim) -> Variable {
-        // TODO: Implement MaxBackward for proper autograd
-        return Variable(tenzor::max(var.tensor(), dim, keepdim), var.requires_grad());
-    }
 }
 
 // MSELoss implementation
@@ -55,7 +40,7 @@ BCELoss::BCELoss(Reduction reduction) : reduction_(reduction) {}
 
 auto BCELoss::forward(const Variable& input, const Variable& target) -> Variable {
     // Clamp predictions to avoid log(0)
-    auto predictions_clamped = variable_clamp(input, 1e-7f, 1.0f - 1e-7f);
+    auto predictions_clamped = clamp(input, 1e-7f, 1.0f - 1e-7f);
 
     // loss = -[target * log(pred) + (1 - target) * log(1 - pred)]
     auto term1 = target * log(predictions_clamped);
@@ -81,17 +66,21 @@ auto BCEWithLogitsLoss::forward(const Variable& input, const Variable& target) -
     // Use log-sum-exp trick for numerical stability
     // BCE = max(x, 0) - x * z + log(1 + exp(-abs(x)))
     // where x = input, z = target
+    // Simplify using: max(x, 0) = (x + abs(x)) / 2
 
-    auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
-    auto zeros_tensor = zeros(shape_vec, input.dtype(), input.device());
-    auto zeros_var = Variable(zeros_tensor, false);
-
-    auto abs_input = variable_abs(input);
+    auto abs_input = abs(input);
     auto neg_abs = neg(abs_input);
 
-    auto max_val = variable_max(input, 0, false);  // max(x, 0)
+    // Element-wise max(x, 0) = (x + abs(x)) / 2
+    auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    auto two_tensor = full(shape_vec, 2.0f, input.dtype(), input.device());
+    auto two_var = Variable(two_tensor, false);
+    auto max_val = (input + abs_input) / two_var;
+
     auto xz = input * target;  // x * z
-    auto log_term = log(scalar_sub(1.0f, zeros_var) + exp(neg_abs));
+    auto ones_tensor = ones(shape_vec, input.dtype(), input.device());
+    auto ones_var = Variable(ones_tensor, false);
+    auto log_term = log(ones_var + exp(neg_abs));
 
     auto loss_unreduced = max_val - xz + log_term;
 
@@ -160,7 +149,7 @@ L1Loss::L1Loss(Reduction reduction) : reduction_(reduction) {}
 
 auto L1Loss::forward(const Variable& input, const Variable& target) -> Variable {
     auto diff = input - target;
-    auto abs_diff = variable_abs(diff);
+    auto abs_diff = abs(diff);
 
     switch (reduction_) {
         case Reduction::None:
@@ -179,7 +168,7 @@ SmoothL1Loss::SmoothL1Loss(Reduction reduction, double beta)
 
 auto SmoothL1Loss::forward(const Variable& input, const Variable& target) -> Variable {
     auto diff = input - target;
-    auto abs_diff = variable_abs(diff);
+    auto abs_diff = abs(diff);
 
     // For now, implement a simple version
     // TODO: Properly implement smooth L1 with beta parameter

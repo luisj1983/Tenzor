@@ -271,4 +271,123 @@ auto LogSoftmaxBackward::backward(std::vector<Tensor> grad_outputs) -> std::vect
     return {grad_input};
 }
 
+// AbsBackward implementation
+auto AbsBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
+    saved_tensors_ = {inputs[0].tensor()};
+    auto result = abs(inputs[0].tensor());
+    return {Variable(result, true)};
+}
+
+auto AbsBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    // d(abs(x))/dx = sign(x)
+    const auto& input = saved_tensors_[0];
+    auto grad_input = mul(grad_outputs[0], sign(input));
+    return {grad_input};
+}
+
+// ClampBackward implementation
+auto ClampBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
+    saved_tensors_ = {inputs[0].tensor()};
+    auto result = clamp(inputs[0].tensor(), min_, max_);
+    return {Variable(result, true)};
+}
+
+auto ClampBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    // d(clamp(x, min, max))/dx = 1 if min <= x <= max else 0
+    const auto& input = saved_tensors_[0];
+    const auto& grad_output = grad_outputs[0];
+
+    // Create mask: 1 where min <= x <= max, 0 otherwise
+    auto input_shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    auto ones_tensor = ones(input_shape_vec, input.dtype(), input.device());
+    auto zeros_tensor = zeros(input_shape_vec, input.dtype(), input.device());
+
+    // Check if input >= min
+    auto min_tensor = full(input_shape_vec, min_, input.dtype(), input.device());
+    auto max_tensor = full(input_shape_vec, max_, input.dtype(), input.device());
+
+    // Mask = (input >= min) & (input <= max)
+    // For now, use clamp and compare approach
+    auto clamped = clamp(input, min_, max_);
+
+    // grad = grad_output where input == clamped else 0
+    // This is approximately: mask = 1 - abs(sign(input - clamped))
+    auto diff = sub(input, clamped);
+    auto diff_sign = abs(sign(diff));
+    auto mask = sub(ones_tensor, diff_sign);
+
+    return {mul(grad_output, mask)};
+}
+
+// MaxBackward implementation
+auto MaxBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
+    auto result = max(inputs[0].tensor(), dim_, keepdim_);
+    // Save both input and output for backward
+    saved_tensors_ = {inputs[0].tensor(), result};
+    return {Variable(result, true)};
+}
+
+auto MaxBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    const auto& input = saved_tensors_[0];
+    const auto& output = saved_tensors_[1];
+    const auto& grad_output = grad_outputs[0];
+
+    auto input_shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+
+    if (!dim_.has_value()) {
+        // Global max: gradient flows only to the maximum element
+        // Create mask where input == output (broadcasted)
+        auto output_expanded = expand(output, input_shape_vec);
+
+        // mask = (input == output) ? 1 : 0
+        auto diff = sub(input, output_expanded);
+        auto abs_diff = abs(diff);
+
+        // Small epsilon for floating point comparison
+        auto epsilon = full(input_shape_vec, 1e-7f, input.dtype(), input.device());
+        auto ones_tensor = ones(input_shape_vec, input.dtype(), input.device());
+        auto zeros_tensor = zeros(input_shape_vec, input.dtype(), input.device());
+
+        // mask = abs_diff < epsilon ? 1 : 0
+        // Approximate using: 1 - clamp(abs_diff / epsilon, 0, 1)
+        auto scaled_diff = div(abs_diff, epsilon);
+        auto clamped = clamp(scaled_diff, 0.0f, 1.0f);
+        auto mask = sub(ones_tensor, clamped);
+
+        // Broadcast grad_output to input shape
+        auto grad_broadcasted = expand(grad_output, input_shape_vec);
+
+        return {mul(grad_broadcasted, mask)};
+    } else {
+        // Dimension-specific max
+        int64_t dim = dim_.value();
+        if (dim < 0) dim += input.shape().size();
+
+        auto grad = grad_output;
+        auto out = output;
+
+        // Unsqueeze if needed
+        if (!keepdim_) {
+            grad = unsqueeze(grad, dim);
+            out = unsqueeze(out, dim);
+        }
+
+        // Expand to input shape
+        auto out_expanded = expand(out, input_shape_vec);
+        auto grad_expanded = expand(grad, input_shape_vec);
+
+        // Create mask where input == max_value
+        auto diff = sub(input, out_expanded);
+        auto abs_diff = abs(diff);
+
+        auto epsilon = full(input_shape_vec, 1e-7f, input.dtype(), input.device());
+        auto ones_tensor = ones(input_shape_vec, input.dtype(), input.device());
+        auto scaled_diff = div(abs_diff, epsilon);
+        auto clamped = clamp(scaled_diff, 0.0f, 1.0f);
+        auto mask = sub(ones_tensor, clamped);
+
+        return {mul(grad_expanded, mask)};
+    }
+}
+
 } // namespace tenzor

@@ -39,6 +39,20 @@ namespace cpu {
 
     // Transform kernels
     auto contiguous_kernel(const Tensor& input) -> Tensor;
+    auto fill_kernel(const Tensor& input, float value) -> Tensor;
+    auto clone_kernel(const Tensor& input) -> Tensor;
+    auto reshape_kernel(const Tensor& input, const std::vector<int64_t>& new_shape) -> Tensor;
+    auto transpose_kernel(const Tensor& input, int64_t dim0, int64_t dim1) -> Tensor;
+    auto permute_kernel(const Tensor& input, const std::vector<int64_t>& dims) -> Tensor;
+    auto squeeze_kernel(const Tensor& input, int64_t dim) -> Tensor;
+    auto unsqueeze_kernel(const Tensor& input, int64_t dim) -> Tensor;
+
+    // BatchNorm kernels
+    auto batchnorm2d_mean_var_kernel(const Tensor& input) -> std::vector<Tensor>;
+    auto batchnorm2d_forward_kernel(const Tensor& input, const Tensor& mean, const Tensor& variance, float epsilon) -> Tensor;
+    auto batchnorm2d_forward_affine_kernel(const Tensor& input, const Tensor& mean, const Tensor& variance, const Tensor& gamma, const Tensor& beta, float epsilon) -> Tensor;
+    auto batchnorm2d_update_running_stats_kernel(Tensor& running_mean, Tensor& running_var, const Tensor& batch_mean, const Tensor& batch_var, float momentum) -> void;
+    auto batchnorm2d_backward_kernel(const Tensor& grad_output, const Tensor& input, const Tensor& mean, const Tensor& variance, const Tensor& gamma, float epsilon) -> std::vector<Tensor>;
 } // namespace cpu
 
 class CPUBackend : public Backend {
@@ -356,6 +370,148 @@ public:
                 throw std::invalid_argument("contiguous operation requires exactly 1 input");
             }
             return {cpu::contiguous_kernel(inputs[0])};
+        }
+        else if (op_name == "fill") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("fill operation requires exactly 1 input");
+            }
+            float value = 0.0f;
+            if (attrs.contains("value")) {
+                value = std::stof(attrs.at("value"));
+            }
+            return {cpu::fill_kernel(inputs[0], value)};
+        }
+        else if (op_name == "clone") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("clone operation requires exactly 1 input");
+            }
+            return {cpu::clone_kernel(inputs[0])};
+        }
+        else if (op_name == "reshape") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("reshape operation requires exactly 1 input");
+            }
+            // Parse shape from comma-separated string
+            std::vector<int64_t> shape;
+            if (attrs.contains("shape")) {
+                std::string shape_str = attrs.at("shape");
+                size_t pos = 0;
+                while (pos < shape_str.size()) {
+                    size_t comma = shape_str.find(',', pos);
+                    if (comma == std::string::npos) {
+                        shape.push_back(std::stoll(shape_str.substr(pos)));
+                        break;
+                    }
+                    shape.push_back(std::stoll(shape_str.substr(pos, comma - pos)));
+                    pos = comma + 1;
+                }
+            }
+            return {cpu::reshape_kernel(inputs[0], shape)};
+        }
+        else if (op_name == "transpose") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("transpose operation requires exactly 1 input");
+            }
+            int64_t dim0 = 0;
+            int64_t dim1 = 1;
+            if (attrs.contains("dim0")) {
+                dim0 = std::stoll(attrs.at("dim0"));
+            }
+            if (attrs.contains("dim1")) {
+                dim1 = std::stoll(attrs.at("dim1"));
+            }
+            return {cpu::transpose_kernel(inputs[0], dim0, dim1)};
+        }
+        else if (op_name == "permute") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("permute operation requires exactly 1 input");
+            }
+            // Parse dims from comma-separated string
+            std::vector<int64_t> dims;
+            if (attrs.contains("dims")) {
+                std::string dims_str = attrs.at("dims");
+                size_t pos = 0;
+                while (pos < dims_str.size()) {
+                    size_t comma = dims_str.find(',', pos);
+                    if (comma == std::string::npos) {
+                        dims.push_back(std::stoll(dims_str.substr(pos)));
+                        break;
+                    }
+                    dims.push_back(std::stoll(dims_str.substr(pos, comma - pos)));
+                    pos = comma + 1;
+                }
+            }
+            return {cpu::permute_kernel(inputs[0], dims)};
+        }
+        else if (op_name == "squeeze") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("squeeze operation requires exactly 1 input");
+            }
+            int64_t dim = -1;
+            if (attrs.contains("dim")) {
+                dim = std::stoll(attrs.at("dim"));
+            }
+            return {cpu::squeeze_kernel(inputs[0], dim)};
+        }
+        else if (op_name == "unsqueeze") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("unsqueeze operation requires exactly 1 input");
+            }
+            int64_t dim = 0;
+            if (attrs.contains("dim")) {
+                dim = std::stoll(attrs.at("dim"));
+            }
+            return {cpu::unsqueeze_kernel(inputs[0], dim)};
+        }
+        else if (op_name == "batchnorm2d_mean_var") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("batchnorm2d_mean_var operation requires exactly 1 input");
+            }
+            return cpu::batchnorm2d_mean_var_kernel(inputs[0]);
+        }
+        else if (op_name == "batchnorm2d_forward") {
+            if (inputs.size() != 3) {
+                throw std::invalid_argument("batchnorm2d_forward operation requires exactly 3 inputs");
+            }
+            float epsilon = 1e-5f;
+            if (attrs.contains("epsilon")) {
+                epsilon = std::stof(attrs.at("epsilon"));
+            }
+            return {cpu::batchnorm2d_forward_kernel(inputs[0], inputs[1], inputs[2], epsilon)};
+        }
+        else if (op_name == "batchnorm2d_forward_affine") {
+            if (inputs.size() != 5) {
+                throw std::invalid_argument("batchnorm2d_forward_affine operation requires exactly 5 inputs");
+            }
+            float epsilon = 1e-5f;
+            if (attrs.contains("epsilon")) {
+                epsilon = std::stof(attrs.at("epsilon"));
+            }
+            return {cpu::batchnorm2d_forward_affine_kernel(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], epsilon)};
+        }
+        else if (op_name == "batchnorm2d_update_running_stats") {
+            if (inputs.size() != 4) {
+                throw std::invalid_argument("batchnorm2d_update_running_stats operation requires exactly 4 inputs");
+            }
+            float momentum = 0.1f;
+            if (attrs.contains("momentum")) {
+                momentum = std::stof(attrs.at("momentum"));
+            }
+            // Create copies that will be modified by the kernel
+            Tensor updated_mean = inputs[0].clone();
+            Tensor updated_var = inputs[1].clone();
+            cpu::batchnorm2d_update_running_stats_kernel(updated_mean, updated_var, inputs[2], inputs[3], momentum);
+            return {updated_mean, updated_var};
+        }
+        else if (op_name == "batchnorm2d_backward") {
+            if (inputs.size() != 5) {
+                throw std::invalid_argument("batchnorm2d_backward operation requires exactly 5 inputs");
+            }
+            float epsilon = 1e-5f;
+            if (attrs.contains("epsilon")) {
+                epsilon = std::stof(attrs.at("epsilon"));
+            }
+            return cpu::batchnorm2d_backward_kernel(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], epsilon);
         }
         else {
             throw std::runtime_error("CPUBackend: Unknown operation '" + op_name + "'");

@@ -208,6 +208,67 @@ auto initialize() -> void {
             return cpu_backend->dispatch("contiguous", inputs, attrs);
         });
 
+    registry.register_kernel("fill", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("fill", inputs, attrs);
+        });
+
+    registry.register_kernel("clone", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("clone", inputs, attrs);
+        });
+
+    registry.register_kernel("reshape", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("reshape", inputs, attrs);
+        });
+
+    registry.register_kernel("transpose", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("transpose", inputs, attrs);
+        });
+
+    registry.register_kernel("permute", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("permute", inputs, attrs);
+        });
+
+    registry.register_kernel("squeeze", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("squeeze", inputs, attrs);
+        });
+
+    registry.register_kernel("unsqueeze", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("unsqueeze", inputs, attrs);
+        });
+
+    // BatchNorm2d operations
+    registry.register_kernel("batchnorm2d_mean_var", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("batchnorm2d_mean_var", inputs, attrs);
+        });
+
+    registry.register_kernel("batchnorm2d_forward", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("batchnorm2d_forward", inputs, attrs);
+        });
+
+    registry.register_kernel("batchnorm2d_forward_affine", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("batchnorm2d_forward_affine", inputs, attrs);
+        });
+
+    registry.register_kernel("batchnorm2d_update_running_stats", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("batchnorm2d_update_running_stats", inputs, attrs);
+        });
+
+    registry.register_kernel("batchnorm2d_backward", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("batchnorm2d_backward", inputs, attrs);
+        });
+
     // Try to load CUDA backend if available
     std::filesystem::path cuda_backend_path = bin_path / "tenzor_backend_cuda.so";
 
@@ -383,6 +444,93 @@ auto initialize() -> void {
                         return cuda_backend->dispatch("contiguous", inputs, attrs);
                     });
 
+                registry.register_kernel("fill", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("fill", inputs, attrs);
+                    });
+
+                registry.register_kernel("clone", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("clone", inputs, attrs);
+                    });
+
+                registry.register_kernel("reshape", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("reshape", inputs, attrs);
+                    });
+
+                registry.register_kernel("transpose", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("transpose", inputs, attrs);
+                    });
+
+                registry.register_kernel("permute", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("permute", inputs, attrs);
+                    });
+
+                registry.register_kernel("squeeze", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("squeeze", inputs, attrs);
+                    });
+
+                registry.register_kernel("unsqueeze", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("unsqueeze", inputs, attrs);
+                    });
+
+                // BatchNorm2d operations
+                registry.register_kernel("batchnorm2d_mean_var", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("batchnorm2d_mean_var", inputs, attrs);
+                    });
+
+                registry.register_kernel("batchnorm2d_forward", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("batchnorm2d_forward", inputs, attrs);
+                    });
+
+                registry.register_kernel("batchnorm2d_forward_affine", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("batchnorm2d_forward_affine", inputs, attrs);
+                    });
+
+                registry.register_kernel("batchnorm2d_update_running_stats", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("batchnorm2d_update_running_stats", inputs, attrs);
+                    });
+
+                registry.register_kernel("batchnorm2d_backward", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("batchnorm2d_backward", inputs, attrs);
+                    });
+
+                // Conv2d operations
+                registry.register_kernel("im2col", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("im2col", inputs, attrs);
+                    });
+
+                registry.register_kernel("col2im", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("col2im", inputs, attrs);
+                    });
+
+                registry.register_kernel("conv2d_forward", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("conv2d_forward", inputs, attrs);
+                    });
+
+                registry.register_kernel("conv2d_backward_input", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("conv2d_backward_input", inputs, attrs);
+                    });
+
+                registry.register_kernel("conv2d_backward_weight", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("conv2d_backward_weight", inputs, attrs);
+                    });
+
                 std::cout << "CUDA operations registered successfully" << std::endl;
             } else {
                 std::cout << "CUDA backend loaded but no CUDA devices available" << std::endl;
@@ -394,7 +542,7 @@ auto initialize() -> void {
         std::cout << "CUDA backend not found at: " << cuda_backend_path << std::endl;
     }
 
-    std::cout << "Tenzor initialization complete - 29 CPU operations registered" << std::endl;
+    std::cout << "Tenzor initialization complete - 36 CPU operations registered" << std::endl;
 
     g_initialized = true;
 }

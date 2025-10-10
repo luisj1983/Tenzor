@@ -1,0 +1,458 @@
+#include "tenzor/core/tensor.hpp"
+#include "tenzor/core/dtype.hpp"
+#include <cmath>
+#include <vector>
+#include <stdexcept>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
+namespace tenzor {
+namespace cpu {
+
+// ============================================================================
+// BatchNorm2d Mean/Variance Computation
+// ============================================================================
+
+// Compute per-channel mean and variance
+// Input: [N, C, H, W] - NCHW format
+// Output: mean[C], variance[C]
+template<typename T>
+void batchnorm_mean_var_impl(const T* input,
+                             T* mean,
+                             T* variance,
+                             int64_t N,
+                             int64_t C,
+                             int64_t H,
+                             int64_t W) {
+    int64_t spatial_size = H * W;
+    int64_t total_elements = N * spatial_size;
+
+    // Compute mean and variance for each channel
+    #pragma omp parallel for if(C > 1)
+    for (int64_t c = 0; c < C; c++) {
+        // Compute mean using Kahan summation for numerical stability
+        T sum = T(0);
+        T compensation = T(0);
+
+        for (int64_t n = 0; n < N; n++) {
+            for (int64_t h = 0; h < H; h++) {
+                for (int64_t w = 0; w < W; w++) {
+                    int64_t idx = ((n * C + c) * H + h) * W + w;
+                    T value = input[idx];
+                    T y = value - compensation;
+                    T t = sum + y;
+                    compensation = (t - sum) - y;
+                    sum = t;
+                }
+            }
+        }
+        mean[c] = sum / T(total_elements);
+
+        // Compute variance using Kahan summation
+        T sum_sq_diff = T(0);
+        T var_compensation = T(0);
+        T channel_mean = mean[c];
+
+        for (int64_t n = 0; n < N; n++) {
+            for (int64_t h = 0; h < H; h++) {
+                for (int64_t w = 0; w < W; w++) {
+                    int64_t idx = ((n * C + c) * H + h) * W + w;
+                    T diff = input[idx] - channel_mean;
+                    T sq_diff = diff * diff;
+                    T y = sq_diff - var_compensation;
+                    T t = sum_sq_diff + y;
+                    var_compensation = (t - sum_sq_diff) - y;
+                    sum_sq_diff = t;
+                }
+            }
+        }
+        variance[c] = sum_sq_diff / T(total_elements);
+    }
+}
+
+auto batchnorm2d_mean_var_kernel(const Tensor& input) -> std::vector<Tensor> {
+    auto shape = input.shape();
+    if (shape.size() != 4) {
+        throw std::invalid_argument("batchnorm2d_mean_var expects 4D input (NCHW)");
+    }
+
+    int64_t N = shape[0];
+    int64_t C = shape[1];
+    int64_t H = shape[2];
+    int64_t W = shape[3];
+
+    // Allocate output tensors
+    Tensor mean({C}, input.dtype(), input.device());
+    Tensor variance({C}, input.dtype(), input.device());
+
+    if (input.dtype() == DType::Float32) {
+        batchnorm_mean_var_impl<float>(
+            input.data<float>(),
+            mean.data<float>(),
+            variance.data<float>(),
+            N, C, H, W
+        );
+    } else if (input.dtype() == DType::Float64) {
+        batchnorm_mean_var_impl<double>(
+            input.data<double>(),
+            mean.data<double>(),
+            variance.data<double>(),
+            N, C, H, W
+        );
+    } else {
+        throw std::runtime_error("BatchNorm2d only supports Float32 and Float64 dtypes");
+    }
+
+    return {mean, variance};
+}
+
+// ============================================================================
+// BatchNorm2d Normalization Kernel
+// ============================================================================
+
+// Normalize: (x - mean) / sqrt(variance + epsilon)
+template<typename T>
+void batchnorm_forward_impl(const T* input,
+                            T* output,
+                            const T* mean,
+                            const T* variance,
+                            T epsilon,
+                            int64_t N,
+                            int64_t C,
+                            int64_t H,
+                            int64_t W) {
+    int64_t spatial_size = H * W;
+    int64_t total_size = N * C * spatial_size;
+
+    #pragma omp parallel for if(total_size > 10000)
+    for (int64_t idx = 0; idx < total_size; idx++) {
+        // Decode NCHW index
+        int64_t w = idx % W;
+        int64_t h = (idx / W) % H;
+        int64_t c = (idx / (W * H)) % C;
+
+        T channel_mean = mean[c];
+        T channel_var = variance[c];
+        T invstd = T(1) / std::sqrt(channel_var + epsilon);
+
+        output[idx] = (input[idx] - channel_mean) * invstd;
+    }
+}
+
+auto batchnorm2d_forward_kernel(const Tensor& input,
+                               const Tensor& mean,
+                               const Tensor& variance,
+                               float epsilon) -> Tensor {
+    auto shape = input.shape();
+    std::vector<int64_t> shape_vec(shape.begin(), shape.end());
+    Tensor output(shape_vec, input.dtype(), input.device());
+
+    int64_t N = shape[0];
+    int64_t C = shape[1];
+    int64_t H = shape[2];
+    int64_t W = shape[3];
+
+    if (input.dtype() == DType::Float32) {
+        batchnorm_forward_impl<float>(
+            input.data<float>(),
+            output.data<float>(),
+            mean.data<float>(),
+            variance.data<float>(),
+            epsilon,
+            N, C, H, W
+        );
+    } else if (input.dtype() == DType::Float64) {
+        batchnorm_forward_impl<double>(
+            input.data<double>(),
+            output.data<double>(),
+            mean.data<double>(),
+            variance.data<double>(),
+            static_cast<double>(epsilon),
+            N, C, H, W
+        );
+    } else {
+        throw std::runtime_error("BatchNorm2d only supports Float32 and Float64 dtypes");
+    }
+
+    return output;
+}
+
+// ============================================================================
+// BatchNorm2d Affine Transform Kernel
+// ============================================================================
+
+// Combined normalization + affine: y = gamma * normalized + beta
+template<typename T>
+void batchnorm_forward_affine_impl(const T* input,
+                                   T* output,
+                                   const T* mean,
+                                   const T* variance,
+                                   const T* gamma,
+                                   const T* beta,
+                                   T epsilon,
+                                   int64_t N,
+                                   int64_t C,
+                                   int64_t H,
+                                   int64_t W) {
+    int64_t spatial_size = H * W;
+    int64_t total_size = N * C * spatial_size;
+
+    #pragma omp parallel for if(total_size > 10000)
+    for (int64_t idx = 0; idx < total_size; idx++) {
+        // Decode NCHW index
+        int64_t c = (idx / (H * W)) % C;
+
+        T channel_mean = mean[c];
+        T channel_var = variance[c];
+        T invstd = T(1) / std::sqrt(channel_var + epsilon);
+
+        T normalized = (input[idx] - channel_mean) * invstd;
+        output[idx] = gamma[c] * normalized + beta[c];
+    }
+}
+
+auto batchnorm2d_forward_affine_kernel(const Tensor& input,
+                                       const Tensor& mean,
+                                       const Tensor& variance,
+                                       const Tensor& gamma,
+                                       const Tensor& beta,
+                                       float epsilon) -> Tensor {
+    auto shape = input.shape();
+    std::vector<int64_t> shape_vec(shape.begin(), shape.end());
+    Tensor output(shape_vec, input.dtype(), input.device());
+
+    int64_t N = shape[0];
+    int64_t C = shape[1];
+    int64_t H = shape[2];
+    int64_t W = shape[3];
+
+    if (input.dtype() == DType::Float32) {
+        batchnorm_forward_affine_impl<float>(
+            input.data<float>(),
+            output.data<float>(),
+            mean.data<float>(),
+            variance.data<float>(),
+            gamma.data<float>(),
+            beta.data<float>(),
+            epsilon,
+            N, C, H, W
+        );
+    } else if (input.dtype() == DType::Float64) {
+        batchnorm_forward_affine_impl<double>(
+            input.data<double>(),
+            output.data<double>(),
+            mean.data<double>(),
+            variance.data<double>(),
+            gamma.data<double>(),
+            beta.data<double>(),
+            static_cast<double>(epsilon),
+            N, C, H, W
+        );
+    } else {
+        throw std::runtime_error("BatchNorm2d only supports Float32 and Float64 dtypes");
+    }
+
+    return output;
+}
+
+// ============================================================================
+// BatchNorm2d Running Statistics Update Kernel
+// ============================================================================
+
+// Update running statistics: running = (1 - momentum) * running + momentum * batch
+template<typename T>
+void batchnorm_update_running_stats_impl(T* running_mean,
+                                         T* running_var,
+                                         const T* batch_mean,
+                                         const T* batch_var,
+                                         T momentum,
+                                         int64_t C) {
+    #pragma omp parallel for if(C > 100)
+    for (int64_t c = 0; c < C; c++) {
+        running_mean[c] = (T(1) - momentum) * running_mean[c] + momentum * batch_mean[c];
+        running_var[c] = (T(1) - momentum) * running_var[c] + momentum * batch_var[c];
+    }
+}
+
+auto batchnorm2d_update_running_stats_kernel(Tensor& running_mean,
+                                             Tensor& running_var,
+                                             const Tensor& batch_mean,
+                                             const Tensor& batch_var,
+                                             float momentum) -> void {
+    int64_t C = batch_mean.shape()[0];
+
+    if (running_mean.dtype() == DType::Float32) {
+        batchnorm_update_running_stats_impl<float>(
+            running_mean.data<float>(),
+            running_var.data<float>(),
+            batch_mean.data<float>(),
+            batch_var.data<float>(),
+            momentum,
+            C
+        );
+    } else if (running_mean.dtype() == DType::Float64) {
+        batchnorm_update_running_stats_impl<double>(
+            running_mean.data<double>(),
+            running_var.data<double>(),
+            batch_mean.data<double>(),
+            batch_var.data<double>(),
+            static_cast<double>(momentum),
+            C
+        );
+    } else {
+        throw std::runtime_error("BatchNorm2d only supports Float32 and Float64 dtypes");
+    }
+}
+
+// ============================================================================
+// BatchNorm2d Backward Kernels
+// ============================================================================
+
+// Compute gradients w.r.t input, gamma, and beta
+template<typename T>
+void batchnorm_backward_impl(const T* grad_output,
+                            const T* input,
+                            T* grad_input,
+                            T* grad_gamma,
+                            T* grad_beta,
+                            const T* mean,
+                            const T* variance,
+                            const T* gamma,
+                            T epsilon,
+                            int64_t N,
+                            int64_t C,
+                            int64_t H,
+                            int64_t W) {
+    int64_t spatial_size = H * W;
+    int64_t total_elements = N * spatial_size;
+
+    // Compute grad_gamma and grad_beta for each channel
+    #pragma omp parallel for if(C > 1)
+    for (int64_t c = 0; c < C; c++) {
+        T channel_mean = mean[c];
+        T channel_var = variance[c];
+        T invstd = T(1) / std::sqrt(channel_var + epsilon);
+
+        // Compute grad_gamma = sum(grad_output * normalized)
+        // Compute grad_beta = sum(grad_output)
+        T sum_grad_gamma = T(0);
+        T sum_grad_beta = T(0);
+
+        for (int64_t n = 0; n < N; n++) {
+            for (int64_t h = 0; h < H; h++) {
+                for (int64_t w = 0; w < W; w++) {
+                    int64_t idx = ((n * C + c) * H + h) * W + w;
+                    T grad_out = grad_output[idx];
+                    T normalized = (input[idx] - channel_mean) * invstd;
+
+                    sum_grad_gamma += grad_out * normalized;
+                    sum_grad_beta += grad_out;
+                }
+            }
+        }
+
+        grad_gamma[c] = sum_grad_gamma;
+        grad_beta[c] = sum_grad_beta;
+    }
+
+    // Compute grad_input
+    // Efficient formulation: grad_input = gamma * invstd * (grad_output - mean(grad_output) - normalized * mean(grad_output * normalized))
+    #pragma omp parallel for if(C > 1)
+    for (int64_t c = 0; c < C; c++) {
+        T channel_mean = mean[c];
+        T channel_var = variance[c];
+        T invstd = T(1) / std::sqrt(channel_var + epsilon);
+        T channel_gamma = gamma[c];
+
+        // Compute auxiliary statistics
+        T sum_grad = T(0);
+        T sum_grad_norm = T(0);
+
+        for (int64_t n = 0; n < N; n++) {
+            for (int64_t h = 0; h < H; h++) {
+                for (int64_t w = 0; w < W; w++) {
+                    int64_t idx = ((n * C + c) * H + h) * W + w;
+                    T grad_out = grad_output[idx];
+                    T normalized = (input[idx] - channel_mean) * invstd;
+
+                    sum_grad += grad_out;
+                    sum_grad_norm += grad_out * normalized;
+                }
+            }
+        }
+
+        T mean_grad = sum_grad / T(total_elements);
+        T mean_grad_norm = sum_grad_norm / T(total_elements);
+
+        // Compute gradient w.r.t input
+        for (int64_t n = 0; n < N; n++) {
+            for (int64_t h = 0; h < H; h++) {
+                for (int64_t w = 0; w < W; w++) {
+                    int64_t idx = ((n * C + c) * H + h) * W + w;
+                    T grad_out = grad_output[idx];
+                    T normalized = (input[idx] - channel_mean) * invstd;
+
+                    // Efficient backward formulation
+                    T grad_normalized = grad_out - mean_grad - normalized * mean_grad_norm;
+                    grad_input[idx] = channel_gamma * invstd * grad_normalized;
+                }
+            }
+        }
+    }
+}
+
+auto batchnorm2d_backward_kernel(const Tensor& grad_output,
+                                 const Tensor& input,
+                                 const Tensor& mean,
+                                 const Tensor& variance,
+                                 const Tensor& gamma,
+                                 float epsilon) -> std::vector<Tensor> {
+    auto shape = input.shape();
+    int64_t N = shape[0];
+    int64_t C = shape[1];
+    int64_t H = shape[2];
+    int64_t W = shape[3];
+
+    // Allocate output gradients
+    std::vector<int64_t> shape_vec(shape.begin(), shape.end());
+    Tensor grad_input(shape_vec, input.dtype(), input.device());
+    Tensor grad_gamma({C}, input.dtype(), input.device());
+    Tensor grad_beta({C}, input.dtype(), input.device());
+
+    if (input.dtype() == DType::Float32) {
+        batchnorm_backward_impl<float>(
+            grad_output.data<float>(),
+            input.data<float>(),
+            grad_input.data<float>(),
+            grad_gamma.data<float>(),
+            grad_beta.data<float>(),
+            mean.data<float>(),
+            variance.data<float>(),
+            gamma.data<float>(),
+            epsilon,
+            N, C, H, W
+        );
+    } else if (input.dtype() == DType::Float64) {
+        batchnorm_backward_impl<double>(
+            grad_output.data<double>(),
+            input.data<double>(),
+            grad_input.data<double>(),
+            grad_gamma.data<double>(),
+            grad_beta.data<double>(),
+            mean.data<double>(),
+            variance.data<double>(),
+            gamma.data<double>(),
+            static_cast<double>(epsilon),
+            N, C, H, W
+        );
+    } else {
+        throw std::runtime_error("BatchNorm2d only supports Float32 and Float64 dtypes");
+    }
+
+    return {grad_input, grad_gamma, grad_beta};
+}
+
+} // namespace cpu
+} // namespace tenzor

@@ -20,6 +20,8 @@ set(CUDA_BACKEND_SOURCES
     kernels/reduction.cu
     kernels/activations.cu
     kernels/transform.cu
+    kernels/batchnorm.cu
+    kernels/conv2d.cu
 )
 
 # Create CUDA backend shared library

@@ -3,7 +3,11 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/autograd/function.hpp"
+#include "tenzor/backend/dispatch.hpp"
+#include "tenzor/backend/registry.hpp"
 #include <cmath>
+#include <sstream>
+#include <iomanip>
 
 namespace tenzor::nn {
 
@@ -134,120 +138,73 @@ auto BatchNorm2d::forward(const Variable& input) -> Variable {
     Device original_device = input.tensor().device();
     bool use_gpu = (original_device.type == Device::Type::CUDA);
 
-    // Work on CPU for now (TODO: implement GPU batch norm kernels)
-    Tensor input_work = use_gpu ? input.tensor().to(Device::cpu()) : input.tensor();
+    // Keep data on original device throughout (no CPU fallbacks)
+    Tensor input_work = input.tensor();
 
     Tensor batch_mean, batch_var;
 
     if (training_) {
-        // Training mode: compute batch statistics
-        // We need to compute mean and variance over dimensions [0, 2, 3], keeping dimension 1 (channels)
+        // Training mode: compute batch statistics using backend dispatch
+        OpAttributes mean_var_attrs;
+        std::vector<Tensor> mean_var_inputs = {input_work};
+        std::vector<Tensor> mean_var_results = Dispatcher::dispatch("batchnorm2d_mean_var", mean_var_inputs, mean_var_attrs);
+        batch_mean = mean_var_results[0];
+        batch_var = mean_var_results[1];
 
-        // Manual computation to correctly handle NCHW layout
-        // Allocate tensors for mean and variance (per channel) on CPU
-        batch_mean = zeros({C});
-        batch_var = zeros({C});
-
-        auto* input_data = input_work.data<float>();
-        auto* mean_data = batch_mean.data<float>();
-        auto* var_data = batch_var.data<float>();
-
-        int64_t batch_size = N * spatial_size;
-
-        // Compute mean for each channel
-        for (int64_t c = 0; c < C; c++) {
-            double sum = 0.0;
-            for (int64_t n = 0; n < N; n++) {
-                for (int64_t h = 0; h < H; h++) {
-                    for (int64_t w = 0; w < W; w++) {
-                        int64_t idx = ((n * C + c) * H + h) * W + w;
-                        sum += input_data[idx];
-                    }
-                }
-            }
-            mean_data[c] = static_cast<float>(sum / batch_size);
-        }
-
-        // Compute variance for each channel
-        for (int64_t c = 0; c < C; c++) {
-            double sum_sq = 0.0;
-            float mu = mean_data[c];
-            for (int64_t n = 0; n < N; n++) {
-                for (int64_t h = 0; h < H; h++) {
-                    for (int64_t w = 0; w < W; w++) {
-                        int64_t idx = ((n * C + c) * H + h) * W + w;
-                        float diff = input_data[idx] - mu;
-                        sum_sq += diff * diff;
-                    }
-                }
-            }
-            var_data[c] = static_cast<float>(sum_sq / batch_size);
-        }
-
-        // Update running statistics (on CPU, then transfer back if needed)
+        // Update running statistics using CUDA kernel (no CPU fallback)
         if (track_running_stats_) {
             // Use unbiased variance estimate for running statistics
             int64_t batch_size = N * spatial_size;
             auto unbiased_var = batch_var * (static_cast<float>(batch_size) /
                                             static_cast<float>(batch_size - 1));
 
-            // Get running stats on CPU for computation
+            // Get running stats (stay on original device)
             auto& rm_var = buffers_["running_mean"];
             auto& rv_var = buffers_["running_var"];
-            Tensor rm_cpu = use_gpu ? rm_var.tensor().to(Device::cpu()) : rm_var.tensor();
-            Tensor rv_cpu = use_gpu ? rv_var.tensor().to(Device::cpu()) : rv_var.tensor();
 
-            rm_cpu = rm_cpu * (1.0f - static_cast<float>(momentum_)) +
-                     batch_mean * static_cast<float>(momentum_);
-            rv_cpu = rv_cpu * (1.0f - static_cast<float>(momentum_)) +
-                     unbiased_var * static_cast<float>(momentum_);
+            // Use CUDA kernel for running stats update
+            OpAttributes update_attrs;
+            std::ostringstream momentum_ss;
+            momentum_ss << std::scientific << std::setprecision(9) << static_cast<float>(momentum_);
+            update_attrs["momentum"] = momentum_ss.str();
+            std::vector<Tensor> update_inputs = {rm_var.tensor(), rv_var.tensor(), batch_mean, unbiased_var};
+            std::vector<Tensor> updated_stats = Dispatcher::dispatch("batchnorm2d_update_running_stats", update_inputs, update_attrs);
 
-            // Transfer back to original device if needed
-            rm_var.tensor() = use_gpu ? rm_cpu.to(original_device) : rm_cpu;
-            rv_var.tensor() = use_gpu ? rv_cpu.to(original_device) : rv_cpu;
+            rm_var.tensor() = updated_stats[0];
+            rv_var.tensor() = updated_stats[1];
 
             num_batches_tracked_++;
         }
     } else {
-        // Inference mode: use running statistics (transfer to CPU if needed)
+        // Inference mode: use running statistics (stay on original device)
         if (track_running_stats_) {
-            Tensor rm_tensor = buffers_["running_mean"].tensor();
-            Tensor rv_tensor = buffers_["running_var"].tensor();
-            batch_mean = use_gpu ? rm_tensor.to(Device::cpu()) : rm_tensor;
-            batch_var = use_gpu ? rv_tensor.to(Device::cpu()) : rv_tensor;
+            batch_mean = buffers_["running_mean"].tensor();
+            batch_var = buffers_["running_var"].tensor();
         } else {
             throw std::runtime_error("BatchNorm2d in eval mode requires track_running_stats=true");
         }
     }
 
-    // Normalize: (x - mean) / sqrt(var + eps) (all on CPU)
-    // Reshape statistics to [1, C, 1, 1] for broadcasting
-    auto mean_broadcast = batch_mean.unsqueeze(0).unsqueeze(2).unsqueeze(3).contiguous();
-    auto var_broadcast = batch_var.unsqueeze(0).unsqueeze(2).unsqueeze(3).contiguous();
-
-    auto invstd = pow(var_broadcast + static_cast<float>(eps_), -0.5f);
-    auto normalized = (input_work - mean_broadcast) * invstd;
-
-    // Determine output tensor (all operations on CPU)
+    // Normalize using CUDA kernel (no CPU operations)
     Tensor output;
+    OpAttributes forward_attrs;
+    std::ostringstream epsilon_ss;
+    epsilon_ss << std::scientific << std::setprecision(9) << static_cast<float>(eps_);
+    forward_attrs["epsilon"] = epsilon_ss.str();
+
     if (affine_) {
-        // Get weight and bias on CPU
+        // Use affine forward kernel: output = gamma * (x - mean) / sqrt(var + eps) + beta
         auto& weight = parameters_["weight"];
         auto& bias = parameters_["bias"];
-        Tensor weight_work = use_gpu ? weight.tensor().to(Device::cpu()) : weight.tensor();
-        Tensor bias_work = use_gpu ? bias.tensor().to(Device::cpu()) : bias.tensor();
 
-        // Apply affine transformation: output = weight * normalized + bias
-        auto weight_broadcast = weight_work.unsqueeze(0).unsqueeze(2).unsqueeze(3).contiguous();
-        auto bias_broadcast = bias_work.unsqueeze(0).unsqueeze(2).unsqueeze(3).contiguous();
-        output = normalized * weight_broadcast + bias_broadcast;
+        std::vector<Tensor> forward_inputs = {input_work, batch_mean, batch_var, weight.tensor(), bias.tensor()};
+        std::vector<Tensor> forward_results = Dispatcher::dispatch("batchnorm2d_forward_affine", forward_inputs, forward_attrs);
+        output = forward_results[0];
     } else {
-        output = normalized;
-    }
-
-    // Transfer back to original device if needed
-    if (use_gpu) {
-        output = output.to(original_device);
+        // Use non-affine forward kernel: output = (x - mean) / sqrt(var + eps)
+        std::vector<Tensor> forward_inputs = {input_work, batch_mean, batch_var};
+        std::vector<Tensor> forward_results = Dispatcher::dispatch("batchnorm2d_forward", forward_inputs, forward_attrs);
+        output = forward_results[0];
     }
 
     // Set up autograd if needed
@@ -259,14 +216,13 @@ auto BatchNorm2d::forward(const Variable& input) -> Variable {
         // Create result variable from output
         auto result = Variable(output, true);
 
-        // Prepare tensors to save for backward
-        auto invstd_squeezed = invstd.reshape({C});
+        // Prepare tensors to save for backward (already on correct device, no transfers needed)
+        // Compute invstd from variance for backward pass
+        auto invstd = pow(batch_var + static_cast<float>(eps_), -0.5f);
 
-        // Transfer statistics to original device if needed for backward
-        // Make sure they're contiguous first, then transfer
-        // CRITICAL: Always make contiguous, even for CPU-only execution
-        Tensor batch_mean_final = use_gpu ? batch_mean.contiguous().to(original_device) : batch_mean.contiguous();
-        Tensor invstd_final = use_gpu ? invstd_squeezed.contiguous().to(original_device) : invstd_squeezed.contiguous();
+        // Ensure contiguous for backward
+        Tensor batch_mean_final = batch_mean.contiguous();
+        Tensor invstd_final = invstd.contiguous();
 
         // CRITICAL: Access weight from parameters_ map
         Tensor weight_tensor = affine_ ? parameters_["weight"].tensor() : ones({C}, DType::Float32, original_device);

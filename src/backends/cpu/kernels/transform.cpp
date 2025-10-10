@@ -1,15 +1,152 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "tenzor/core/shape.hpp"
 #include <cstring>
 
 namespace tenzor {
 namespace cpu {
 
+// Forward declarations
+auto contiguous_kernel(const Tensor& input) -> Tensor;
+
 // CPU transform kernels
 
+auto fill_kernel(const Tensor& input, float value) -> Tensor {
+    // Create result tensor (clone)
+    Tensor result(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                  input.dtype(), input.device());
+
+    const int64_t total_elements = result.numel();
+
+    // Fill based on dtype
+    if (input.dtype() == DType::Float32) {
+        auto* data = result.data<float>();
+        for (int64_t i = 0; i < total_elements; ++i) {
+            data[i] = value;
+        }
+    } else if (input.dtype() == DType::Float64) {
+        auto* data = result.data<double>();
+        for (int64_t i = 0; i < total_elements; ++i) {
+            data[i] = static_cast<double>(value);
+        }
+    } else if (input.dtype() == DType::Int32) {
+        auto* data = result.data<int32_t>();
+        for (int64_t i = 0; i < total_elements; ++i) {
+            data[i] = static_cast<int32_t>(value);
+        }
+    } else if (input.dtype() == DType::Int64) {
+        auto* data = result.data<int64_t>();
+        for (int64_t i = 0; i < total_elements; ++i) {
+            data[i] = static_cast<int64_t>(value);
+        }
+    }
+
+    return result;
+}
+
+auto clone_kernel(const Tensor& input) -> Tensor {
+    // Make contiguous first if needed
+    Tensor cont = input.is_contiguous() ? input : contiguous_kernel(input);
+
+    // Create new tensor
+    Tensor result(std::vector<int64_t>(cont.shape().begin(), cont.shape().end()),
+                  cont.dtype(), cont.device());
+
+    // Copy data
+    const size_t size_bytes = cont.numel() * dtype_size(cont.dtype());
+    std::memcpy(result.data<uint8_t>(), cont.data<uint8_t>(), size_bytes);
+
+    return result;
+}
+
+auto reshape_kernel(const Tensor& input, const std::vector<int64_t>& new_shape) -> Tensor {
+    // Reshape just manipulates metadata - create view
+    // If not contiguous, need to make contiguous first
+    if (!input.is_contiguous()) {
+        return reshape_kernel(contiguous_kernel(input), new_shape);
+    }
+
+    // Create new tensor sharing storage (view)
+    Tensor result;
+    result.impl_ = std::make_shared<TensorImpl>(*input.impl_);
+    result.impl_->shape = new_shape;
+    result.impl_->strides = compute_strides(new_shape);
+
+    return result;
+}
+
 auto transpose_kernel(const Tensor& input, int64_t dim0, int64_t dim1) -> Tensor {
-    // TODO: Implement cache-optimized transpose
-    return input;
+    // Transpose just swaps dimensions in metadata
+    Tensor result;
+    result.impl_ = std::make_shared<TensorImpl>(*input.impl_);
+    std::swap(result.impl_->shape[dim0], result.impl_->shape[dim1]);
+    std::swap(result.impl_->strides[dim0], result.impl_->strides[dim1]);
+    return result;
+}
+
+auto permute_kernel(const Tensor& input, const std::vector<int64_t>& dims) -> Tensor {
+    const int64_t ndim = input.ndim();
+
+    Tensor result;
+    result.impl_ = std::make_shared<TensorImpl>(*input.impl_);
+
+    std::vector<int64_t> new_shape(ndim);
+    std::vector<int64_t> new_strides(ndim);
+
+    for (int64_t i = 0; i < ndim; ++i) {
+        new_shape[i] = input.impl_->shape[dims[i]];
+        new_strides[i] = input.impl_->strides[dims[i]];
+    }
+
+    result.impl_->shape = std::move(new_shape);
+    result.impl_->strides = std::move(new_strides);
+
+    return result;
+}
+
+auto squeeze_kernel(const Tensor& input, int64_t dim) -> Tensor {
+    Tensor result;
+    result.impl_ = std::make_shared<TensorImpl>(*input.impl_);
+
+    if (dim >= 0) {
+        // Squeeze specific dimension
+        result.impl_->shape.erase(result.impl_->shape.begin() + dim);
+        result.impl_->strides.erase(result.impl_->strides.begin() + dim);
+    } else {
+        // Squeeze all dimensions with size 1
+        std::vector<int64_t> new_shape;
+        std::vector<int64_t> new_strides;
+
+        for (int64_t i = 0; i < input.ndim(); ++i) {
+            if (input.impl_->shape[i] != 1) {
+                new_shape.push_back(input.impl_->shape[i]);
+                new_strides.push_back(input.impl_->strides[i]);
+            }
+        }
+
+        if (new_shape.empty()) {
+            new_shape.push_back(1);
+            new_strides.push_back(1);
+        }
+
+        result.impl_->shape = std::move(new_shape);
+        result.impl_->strides = std::move(new_strides);
+    }
+
+    return result;
+}
+
+auto unsqueeze_kernel(const Tensor& input, int64_t dim) -> Tensor {
+    Tensor result;
+    result.impl_ = std::make_shared<TensorImpl>(*input.impl_);
+
+    result.impl_->shape.insert(result.impl_->shape.begin() + dim, 1);
+
+    // Compute stride for new dimension
+    int64_t new_stride = (dim < input.ndim()) ? input.impl_->strides[dim] : 1;
+    result.impl_->strides.insert(result.impl_->strides.begin() + dim, new_stride);
+
+    return result;
 }
 
 auto contiguous_kernel(const Tensor& input) -> Tensor {

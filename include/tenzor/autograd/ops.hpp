@@ -24,4 +24,12 @@ auto neg(const Variable& input) -> Variable;
 
 auto log_softmax(const Variable& input, int64_t dim) -> Variable;
 
+auto abs(const Variable& input) -> Variable;
+
+auto clamp(const Variable& input, float min, float max) -> Variable;
+
+auto max(const Variable& input,
+         std::optional<int64_t> dim = std::nullopt,
+         bool keepdim = false) -> Variable;
+
 } // namespace tenzor

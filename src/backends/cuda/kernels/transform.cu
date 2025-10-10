@@ -1,11 +1,23 @@
 #include <cuda_runtime.h>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "tenzor/core/shape.hpp"
 #include <stdexcept>
 #include <vector>
 
 namespace tenzor {
 namespace cuda {
+
+// Helper class to access Tensor private members from CUDA kernels
+class CUDAKernelAccess {
+public:
+    static auto get_impl(const Tensor& t) -> const std::shared_ptr<TensorImpl>& {
+        return t.impl_;
+    }
+    static auto get_impl_mutable(Tensor& t) -> std::shared_ptr<TensorImpl>& {
+        return t.impl_;
+    }
+};
 
 // CUDA Helper macros
 #define CUDA_CHECK(call) \
@@ -112,6 +124,118 @@ auto contiguous_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     // Free device memory
     cudaFree(d_strides);
     cudaFree(d_shape);
+
+    return result;
+}
+
+// Clone kernel - device-to-device copy
+auto clone_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+    // Make contiguous first if needed
+    Tensor cont = input.is_contiguous() ? input : contiguous_kernel(input, stream);
+
+    // Create new tensor
+    std::vector<int64_t> shape(cont.shape().begin(), cont.shape().end());
+    Tensor result(shape, cont.dtype(), cont.device());
+
+    // Copy data using cudaMemcpy
+    const size_t size_bytes = cont.numel() * dtype_size(cont.dtype());
+    CUDA_CHECK(cudaMemcpyAsync(result.data<uint8_t>(), cont.data<uint8_t>(),
+                                size_bytes, cudaMemcpyDeviceToDevice, stream));
+
+    return result;
+}
+
+// Reshape kernel - metadata manipulation (create view with new shape)
+auto reshape_kernel(const Tensor& input, const std::vector<int64_t>& new_shape, cudaStream_t stream) -> Tensor {
+    // Reshape just manipulates metadata - create view
+    // If not contiguous, need to make contiguous first
+    if (!input.is_contiguous()) {
+        return reshape_kernel(contiguous_kernel(input, stream), new_shape, stream);
+    }
+
+    // Create new tensor sharing storage (view)
+    Tensor result;
+    CUDAKernelAccess::get_impl_mutable(result) = std::make_shared<TensorImpl>(*CUDAKernelAccess::get_impl(input));
+    CUDAKernelAccess::get_impl_mutable(result)->shape = new_shape;
+    CUDAKernelAccess::get_impl_mutable(result)->strides = compute_strides(new_shape);
+
+    return result;
+}
+
+// Transpose kernel - metadata manipulation (swap dimensions)
+auto transpose_kernel(const Tensor& input, int64_t dim0, int64_t dim1, cudaStream_t stream) -> Tensor {
+    // Transpose just swaps dimensions in metadata
+    Tensor result;
+    CUDAKernelAccess::get_impl_mutable(result) = std::make_shared<TensorImpl>(*CUDAKernelAccess::get_impl(input));
+    std::swap(CUDAKernelAccess::get_impl_mutable(result)->shape[dim0], CUDAKernelAccess::get_impl_mutable(result)->shape[dim1]);
+    std::swap(CUDAKernelAccess::get_impl_mutable(result)->strides[dim0], CUDAKernelAccess::get_impl_mutable(result)->strides[dim1]);
+    return result;
+}
+
+// Permute kernel - metadata manipulation (permute dimensions)
+auto permute_kernel(const Tensor& input, const std::vector<int64_t>& dims, cudaStream_t stream) -> Tensor {
+    const int64_t ndim = input.ndim();
+
+    Tensor result;
+    CUDAKernelAccess::get_impl_mutable(result) = std::make_shared<TensorImpl>(*CUDAKernelAccess::get_impl(input));
+
+    std::vector<int64_t> new_shape(ndim);
+    std::vector<int64_t> new_strides(ndim);
+
+    for (int64_t i = 0; i < ndim; ++i) {
+        new_shape[i] = CUDAKernelAccess::get_impl(input)->shape[dims[i]];
+        new_strides[i] = CUDAKernelAccess::get_impl(input)->strides[dims[i]];
+    }
+
+    CUDAKernelAccess::get_impl_mutable(result)->shape = std::move(new_shape);
+    CUDAKernelAccess::get_impl_mutable(result)->strides = std::move(new_strides);
+
+    return result;
+}
+
+// Squeeze kernel - metadata manipulation (remove dimension)
+auto squeeze_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Tensor {
+    Tensor result;
+    CUDAKernelAccess::get_impl_mutable(result) = std::make_shared<TensorImpl>(*CUDAKernelAccess::get_impl(input));
+
+    if (dim >= 0) {
+        // Squeeze specific dimension
+        CUDAKernelAccess::get_impl_mutable(result)->shape.erase(CUDAKernelAccess::get_impl_mutable(result)->shape.begin() + dim);
+        CUDAKernelAccess::get_impl_mutable(result)->strides.erase(CUDAKernelAccess::get_impl_mutable(result)->strides.begin() + dim);
+    } else {
+        // Squeeze all dimensions with size 1
+        std::vector<int64_t> new_shape;
+        std::vector<int64_t> new_strides;
+
+        for (int64_t i = 0; i < input.ndim(); ++i) {
+            if (CUDAKernelAccess::get_impl(input)->shape[i] != 1) {
+                new_shape.push_back(CUDAKernelAccess::get_impl(input)->shape[i]);
+                new_strides.push_back(CUDAKernelAccess::get_impl(input)->strides[i]);
+            }
+        }
+
+        if (new_shape.empty()) {
+            new_shape.push_back(1);
+            new_strides.push_back(1);
+        }
+
+        CUDAKernelAccess::get_impl_mutable(result)->shape = std::move(new_shape);
+        CUDAKernelAccess::get_impl_mutable(result)->strides = std::move(new_strides);
+    }
+
+    return result;
+}
+
+// Unsqueeze kernel - metadata manipulation (add dimension)
+auto unsqueeze_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Tensor {
+    Tensor result;
+    CUDAKernelAccess::get_impl_mutable(result) = std::make_shared<TensorImpl>(*CUDAKernelAccess::get_impl(input));
+
+    CUDAKernelAccess::get_impl_mutable(result)->shape.insert(CUDAKernelAccess::get_impl_mutable(result)->shape.begin() + dim, 1);
+
+    // Compute stride for new dimension
+    int64_t new_stride = (dim < input.ndim()) ? CUDAKernelAccess::get_impl(input)->strides[dim] : 1;
+    CUDAKernelAccess::get_impl_mutable(result)->strides.insert(CUDAKernelAccess::get_impl_mutable(result)->strides.begin() + dim, new_stride);
 
     return result;
 }
