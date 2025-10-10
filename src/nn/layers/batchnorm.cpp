@@ -134,6 +134,12 @@ auto BatchNorm2d::forward(const Variable& input) -> Variable {
                                " channels, got " + std::to_string(C));
     }
 
+    // Validate to prevent division by zero
+    int64_t batch_size = N * spatial_size;
+    if (training_ && batch_size == 0) {
+        throw std::runtime_error("BatchNorm2d: Cannot compute statistics for empty batch (N * H * W = 0)");
+    }
+
     // Track original device for final output
     Device original_device = input.tensor().device();
     bool use_gpu = (original_device.type == Device::Type::CUDA);

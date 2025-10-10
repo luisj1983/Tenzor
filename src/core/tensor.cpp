@@ -437,6 +437,9 @@ auto Tensor::reshape(std::vector<int64_t> new_shape) const -> Tensor {
     }
 
     if (infer_dim != -1) {
+        if (total == 0) {
+            throw std::invalid_argument("Cannot infer dimension: product of known dimensions is zero");
+        }
         if (numel() % total != 0) {
             throw std::invalid_argument("Cannot infer dimension");
         }

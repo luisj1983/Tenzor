@@ -29,6 +29,11 @@ void batchnorm_mean_var_impl(const T* input,
     int64_t spatial_size = H * W;
     int64_t total_elements = N * spatial_size;
 
+    // Check for division by zero
+    if (total_elements == 0) {
+        throw std::runtime_error("BatchNorm2d: Cannot compute mean/variance for empty tensor (total_elements = 0)");
+    }
+
     // Compute mean and variance for each channel
     #pragma omp parallel for if(C > 1)
     for (int64_t c = 0; c < C; c++) {
@@ -327,6 +332,11 @@ void batchnorm_backward_impl(const T* grad_output,
                             int64_t W) {
     int64_t spatial_size = H * W;
     int64_t total_elements = N * spatial_size;
+
+    // Check for division by zero
+    if (total_elements == 0) {
+        throw std::runtime_error("BatchNorm2d backward: Cannot compute gradients for empty tensor (total_elements = 0)");
+    }
 
     // Compute grad_gamma and grad_beta for each channel
     #pragma omp parallel for if(C > 1)

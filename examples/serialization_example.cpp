@@ -34,6 +34,9 @@ private:
 };
 
 int main() {
+    // Initialize Tenzor library
+    initialize();
+
     std::cout << "Tenzor Serialization Example\n";
     std::cout << "============================\n\n";
 

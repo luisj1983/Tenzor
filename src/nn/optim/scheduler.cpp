@@ -41,6 +41,9 @@ auto StepLR::step() -> void {
 
 auto StepLR::update_lr() -> void {
     // lr = base_lr * gamma^(epoch / step_size)
+    if (step_size_ == 0) {
+        throw std::runtime_error("StepLR: step_size cannot be zero");
+    }
     int num_decays = epoch_ / step_size_;
     double new_lr = base_lr_ * std::pow(gamma_, num_decays);
     last_lr_ = new_lr;
@@ -174,6 +177,9 @@ auto CosineAnnealingLR::step() -> void {
 
 auto CosineAnnealingLR::update_lr() -> void {
     // lr = eta_min + (base_lr - eta_min) * (1 + cos(pi * epoch / T_max)) / 2
+    if (T_max_ == 0) {
+        throw std::runtime_error("CosineAnnealingLR: T_max cannot be zero");
+    }
     double cosine_term = std::cos(std::numbers::pi * epoch_ / T_max_);
     double new_lr = eta_min_ + (base_lr_ - eta_min_) * (1.0 + cosine_term) / 2.0;
     last_lr_ = new_lr;

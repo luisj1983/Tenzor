@@ -53,6 +53,18 @@ namespace cpu {
     auto batchnorm2d_forward_affine_kernel(const Tensor& input, const Tensor& mean, const Tensor& variance, const Tensor& gamma, const Tensor& beta, float epsilon) -> Tensor;
     auto batchnorm2d_update_running_stats_kernel(Tensor& running_mean, Tensor& running_var, const Tensor& batch_mean, const Tensor& batch_var, float momentum) -> void;
     auto batchnorm2d_backward_kernel(const Tensor& grad_output, const Tensor& input, const Tensor& mean, const Tensor& variance, const Tensor& gamma, float epsilon) -> std::vector<Tensor>;
+
+    // Creation kernels
+    auto zeros_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& device) -> Tensor;
+    auto ones_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& device) -> Tensor;
+    auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& device) -> Tensor;
+    auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, const Device& device) -> Tensor;
+
+    // Conv2d kernels
+    auto conv2d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t dilation, int64_t groups) -> Tensor;
+    auto conv2d_backward_input_kernel(const Tensor& grad_output, const Tensor& weight, const std::vector<int64_t>& input_shape, int64_t stride, int64_t padding, int64_t dilation, int64_t groups) -> Tensor;
+    auto conv2d_backward_weight_kernel(const Tensor& grad_output, const Tensor& input, const std::vector<int64_t>& weight_shape, int64_t stride, int64_t padding, int64_t dilation, int64_t groups) -> Tensor;
+    auto conv2d_backward_bias_kernel(const Tensor& grad_output) -> Tensor;
 } // namespace cpu
 
 class CPUBackend : public Backend {
@@ -512,6 +524,214 @@ public:
                 epsilon = std::stof(attrs.at("epsilon"));
             }
             return cpu::batchnorm2d_backward_kernel(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], epsilon);
+        }
+        else if (op_name == "zeros") {
+            // Parse shape from comma-separated string
+            std::vector<int64_t> shape;
+            if (attrs.contains("shape")) {
+                std::string shape_str = attrs.at("shape");
+                size_t pos = 0;
+                while (pos < shape_str.size()) {
+                    size_t comma = shape_str.find(',', pos);
+                    if (comma == std::string::npos) {
+                        shape.push_back(std::stoll(shape_str.substr(pos)));
+                        break;
+                    }
+                    shape.push_back(std::stoll(shape_str.substr(pos, comma - pos)));
+                    pos = comma + 1;
+                }
+            }
+            DType dtype = inputs.empty() ? DType::Float32 : inputs[0].dtype();
+            Device device = inputs.empty() ? Device{Device::Type::CPU, 0} : inputs[0].device();
+            if (attrs.contains("dtype")) {
+                // Parse dtype if provided
+                std::string dtype_str = attrs.at("dtype");
+                if (dtype_str == "float32") dtype = DType::Float32;
+                else if (dtype_str == "float64") dtype = DType::Float64;
+                else if (dtype_str == "int32") dtype = DType::Int32;
+                else if (dtype_str == "int64") dtype = DType::Int64;
+            }
+            return {cpu::zeros_kernel(shape, dtype, device)};
+        }
+        else if (op_name == "ones") {
+            // Parse shape from comma-separated string
+            std::vector<int64_t> shape;
+            if (attrs.contains("shape")) {
+                std::string shape_str = attrs.at("shape");
+                size_t pos = 0;
+                while (pos < shape_str.size()) {
+                    size_t comma = shape_str.find(',', pos);
+                    if (comma == std::string::npos) {
+                        shape.push_back(std::stoll(shape_str.substr(pos)));
+                        break;
+                    }
+                    shape.push_back(std::stoll(shape_str.substr(pos, comma - pos)));
+                    pos = comma + 1;
+                }
+            }
+            DType dtype = inputs.empty() ? DType::Float32 : inputs[0].dtype();
+            Device device = inputs.empty() ? Device{Device::Type::CPU, 0} : inputs[0].device();
+            if (attrs.contains("dtype")) {
+                std::string dtype_str = attrs.at("dtype");
+                if (dtype_str == "float32") dtype = DType::Float32;
+                else if (dtype_str == "float64") dtype = DType::Float64;
+                else if (dtype_str == "int32") dtype = DType::Int32;
+                else if (dtype_str == "int64") dtype = DType::Int64;
+            }
+            return {cpu::ones_kernel(shape, dtype, device)};
+        }
+        else if (op_name == "rand") {
+            // Parse shape from comma-separated string
+            std::vector<int64_t> shape;
+            if (attrs.contains("shape")) {
+                std::string shape_str = attrs.at("shape");
+                size_t pos = 0;
+                while (pos < shape_str.size()) {
+                    size_t comma = shape_str.find(',', pos);
+                    if (comma == std::string::npos) {
+                        shape.push_back(std::stoll(shape_str.substr(pos)));
+                        break;
+                    }
+                    shape.push_back(std::stoll(shape_str.substr(pos, comma - pos)));
+                    pos = comma + 1;
+                }
+            }
+            DType dtype = inputs.empty() ? DType::Float32 : inputs[0].dtype();
+            Device device = inputs.empty() ? Device{Device::Type::CPU, 0} : inputs[0].device();
+            if (attrs.contains("dtype")) {
+                std::string dtype_str = attrs.at("dtype");
+                if (dtype_str == "float32") dtype = DType::Float32;
+                else if (dtype_str == "float64") dtype = DType::Float64;
+            }
+            return {cpu::rand_kernel(shape, dtype, device)};
+        }
+        else if (op_name == "randn") {
+            // Parse shape from comma-separated string
+            std::vector<int64_t> shape;
+            if (attrs.contains("shape")) {
+                std::string shape_str = attrs.at("shape");
+                size_t pos = 0;
+                while (pos < shape_str.size()) {
+                    size_t comma = shape_str.find(',', pos);
+                    if (comma == std::string::npos) {
+                        shape.push_back(std::stoll(shape_str.substr(pos)));
+                        break;
+                    }
+                    shape.push_back(std::stoll(shape_str.substr(pos, comma - pos)));
+                    pos = comma + 1;
+                }
+            }
+            DType dtype = inputs.empty() ? DType::Float32 : inputs[0].dtype();
+            Device device = inputs.empty() ? Device{Device::Type::CPU, 0} : inputs[0].device();
+            if (attrs.contains("dtype")) {
+                std::string dtype_str = attrs.at("dtype");
+                if (dtype_str == "float32") dtype = DType::Float32;
+                else if (dtype_str == "float64") dtype = DType::Float64;
+            }
+            return {cpu::randn_kernel(shape, dtype, device)};
+        }
+        else if (op_name == "conv2d_forward") {
+            if (inputs.size() < 2) {
+                throw std::invalid_argument("conv2d_forward operation requires at least 2 inputs (input, weight)");
+            }
+            const Tensor* bias = (inputs.size() >= 3) ? &inputs[2] : nullptr;
+            int64_t stride = 1;
+            int64_t padding = 0;
+            int64_t dilation = 1;
+            int64_t groups = 1;
+            if (attrs.contains("stride")) {
+                stride = std::stoll(attrs.at("stride"));
+            }
+            if (attrs.contains("padding")) {
+                padding = std::stoll(attrs.at("padding"));
+            }
+            if (attrs.contains("dilation")) {
+                dilation = std::stoll(attrs.at("dilation"));
+            }
+            if (attrs.contains("groups")) {
+                groups = std::stoll(attrs.at("groups"));
+            }
+            return {cpu::conv2d_forward_kernel(inputs[0], inputs[1], bias, stride, padding, dilation, groups)};
+        }
+        else if (op_name == "conv2d_backward_input") {
+            if (inputs.size() != 2) {
+                throw std::invalid_argument("conv2d_backward_input operation requires exactly 2 inputs (grad_output, weight)");
+            }
+            // Parse input_shape from comma-separated string
+            std::vector<int64_t> input_shape;
+            if (attrs.contains("input_shape")) {
+                std::string shape_str = attrs.at("input_shape");
+                size_t pos = 0;
+                while (pos < shape_str.size()) {
+                    size_t comma = shape_str.find(',', pos);
+                    if (comma == std::string::npos) {
+                        input_shape.push_back(std::stoll(shape_str.substr(pos)));
+                        break;
+                    }
+                    input_shape.push_back(std::stoll(shape_str.substr(pos, comma - pos)));
+                    pos = comma + 1;
+                }
+            }
+            int64_t stride = 1;
+            int64_t padding = 0;
+            int64_t dilation = 1;
+            int64_t groups = 1;
+            if (attrs.contains("stride")) {
+                stride = std::stoll(attrs.at("stride"));
+            }
+            if (attrs.contains("padding")) {
+                padding = std::stoll(attrs.at("padding"));
+            }
+            if (attrs.contains("dilation")) {
+                dilation = std::stoll(attrs.at("dilation"));
+            }
+            if (attrs.contains("groups")) {
+                groups = std::stoll(attrs.at("groups"));
+            }
+            return {cpu::conv2d_backward_input_kernel(inputs[0], inputs[1], input_shape, stride, padding, dilation, groups)};
+        }
+        else if (op_name == "conv2d_backward_weight") {
+            if (inputs.size() != 2) {
+                throw std::invalid_argument("conv2d_backward_weight operation requires exactly 2 inputs (grad_output, input)");
+            }
+            // Parse weight_shape from comma-separated string
+            std::vector<int64_t> weight_shape;
+            if (attrs.contains("weight_shape")) {
+                std::string shape_str = attrs.at("weight_shape");
+                size_t pos = 0;
+                while (pos < shape_str.size()) {
+                    size_t comma = shape_str.find(',', pos);
+                    if (comma == std::string::npos) {
+                        weight_shape.push_back(std::stoll(shape_str.substr(pos)));
+                        break;
+                    }
+                    weight_shape.push_back(std::stoll(shape_str.substr(pos, comma - pos)));
+                    pos = comma + 1;
+                }
+            }
+            int64_t stride = 1;
+            int64_t padding = 0;
+            int64_t dilation = 1;
+            int64_t groups = 1;
+            if (attrs.contains("stride")) {
+                stride = std::stoll(attrs.at("stride"));
+            }
+            if (attrs.contains("padding")) {
+                padding = std::stoll(attrs.at("padding"));
+            }
+            if (attrs.contains("dilation")) {
+                dilation = std::stoll(attrs.at("dilation"));
+            }
+            if (attrs.contains("groups")) {
+                groups = std::stoll(attrs.at("groups"));
+            }
+            return {cpu::conv2d_backward_weight_kernel(inputs[0], inputs[1], weight_shape, stride, padding, dilation, groups)};
+        }
+        else if (op_name == "conv2d_backward_bias") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("conv2d_backward_bias operation requires exactly 1 input (grad_output)");
+            }
+            return {cpu::conv2d_backward_bias_kernel(inputs[0])};
         }
         else {
             throw std::runtime_error("CPUBackend: Unknown operation '" + op_name + "'");

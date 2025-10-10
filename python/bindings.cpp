@@ -8,6 +8,10 @@ namespace py = pybind11;
 PYBIND11_MODULE(tenzor_core, m) {
     m.doc() = "Tenzor: High-performance tensor library";
 
+    // Library initialization
+    m.def("initialize", &tenzor::initialize,
+          "Initialize the Tenzor library (registers backends and operations)");
+
     // Device
     py::class_<tenzor::Device>(m, "Device")
         .def(py::init<tenzor::Device::Type, int32_t>())

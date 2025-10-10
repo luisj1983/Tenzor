@@ -15,6 +15,9 @@ namespace {
 // Calculate output size for pooling
 auto calculate_pool_output_size(int64_t input_size, int64_t kernel_size,
                                 int64_t stride, int64_t padding) -> int64_t {
+    if (stride == 0) {
+        throw std::invalid_argument("Pooling: stride cannot be zero");
+    }
     return (input_size + 2 * padding - kernel_size) / stride + 1;
 }
 

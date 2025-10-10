@@ -8,6 +8,8 @@ set(CPU_BACKEND_SOURCES
     kernels/transform.cpp
     kernels/activations.cpp
     kernels/batchnorm.cpp
+    kernels/creation.cpp
+    kernels/conv2d.cpp
 )
 
 # Create CPU backend shared library

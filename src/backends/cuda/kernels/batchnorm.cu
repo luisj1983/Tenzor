@@ -471,6 +471,12 @@ auto batchnorm2d_mean_var(const Tensor& input,
     int64_t H = shape[2];
     int64_t W = shape[3];
 
+    // Check for division by zero
+    int64_t total_elements = N * H * W;
+    if (total_elements == 0) {
+        throw std::runtime_error("BatchNorm2d CUDA: Cannot compute mean/variance for empty tensor (N*H*W = 0)");
+    }
+
     if (input.dtype() == DType::Float32) {
         int shared_mem_size = (BATCHNORM_BLOCK_SIZE / 32) * sizeof(float);
         batchnorm_mean_kernel<float><<<C, BATCHNORM_BLOCK_SIZE, shared_mem_size, stream>>>(
@@ -613,6 +619,12 @@ auto batchnorm2d_backward(const Tensor& grad_output,
     int64_t C = shape[1];
     int64_t H = shape[2];
     int64_t W = shape[3];
+
+    // Check for division by zero
+    int64_t total_elements = N * H * W;
+    if (total_elements == 0) {
+        throw std::runtime_error("BatchNorm2d CUDA backward: Cannot compute gradients for empty tensor (N*H*W = 0)");
+    }
 
     // Allocate output gradients
     std::vector<int64_t> shape_vec(shape.begin(), shape.end());
