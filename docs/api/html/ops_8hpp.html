@@ -5,7 +5,7 @@
 <meta http-equiv="X-UA-Compatible" content="IE=11"/>
 <meta name="generator" content="Doxygen 1.14.0"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Tenzor: tenzor/autograd/ops.hpp File Reference</title>
+<title>Tenzor: include/tenzor/autograd/ops.hpp File Reference</title>
 <link href="tabs.css" rel="stylesheet" type="text/css"/>
 <script type="text/javascript" src="jquery.js"></script>
 <script type="text/javascript" src="dynsections.js"></script>
@@ -28,7 +28,7 @@
   <td id="projectalign">
    <div id="projectname">Tenzor<span id="projectnumber">&#160;1.0.0</span>
    </div>
-   <div id="projectbrief">Modern C++20 tensor library with automatic differentiation</div>
+   <div id="projectbrief">High-performance tensor library with automatic differentiation</div>
   </td>
  </tr>
  </tbody>
@@ -92,29 +92,110 @@ $(function(){initNavTree('ops_8hpp.html','',''); });
   <div class="headertitle"><div class="title">ops.hpp File Reference</div></div>
 </div><!--header-->
 <div class="contents">
+
+<p>Gradient-aware tensor operations for automatic differentiation.  
+<a href="#details">More...</a></p>
 <div class="textblock"><code>#include &quot;<a class="el" href="variable_8hpp_source.html">variable.hpp</a>&quot;</code><br />
 <code>#include &quot;<a class="el" href="function_8hpp_source.html">function.hpp</a>&quot;</code><br />
 <code>#include &lt;optional&gt;</code><br />
+</div><div class="textblock"><div class="dynheader">
+Include dependency graph for ops.hpp:</div>
+<div class="dyncontent">
+<div class="center"><img src="ops_8hpp__incl.png" border="0" usemap="#ainclude_2tenzor_2autograd_2ops_8hpp" loading="lazy" alt=""/></div>
+<map name="ainclude_2tenzor_2autograd_2ops_8hpp" id="ainclude_2tenzor_2autograd_2ops_8hpp">
+<area shape="rect" title="Gradient&#45;aware tensor operations for automatic differentiation." alt="" coords="129,5,304,50"/>
+<area shape="rect" href="variable_8hpp.html" title="Automatic differentiation wrapper for tensors." alt="" coords="166,174,268,201"/>
+<area shape="poly" title=" " alt="" coords="220,50,220,158,214,158,214,50"/>
+<area shape="rect" title=" " alt="" coords="472,325,546,353"/>
+<area shape="poly" title=" " alt="" coords="239,48,489,312,485,316,235,52"/>
+<area shape="rect" href="function_8hpp.html" title="Autograd function interface and built&#45;in operations." alt="" coords="78,98,180,126"/>
+<area shape="poly" title=" " alt="" coords="196,52,156,89,152,85,192,48"/>
+<area shape="rect" title=" " alt="" coords="5,401,82,428"/>
+<area shape="poly" title=" " alt="" coords="182,204,142,222,98,249,56,283,39,304,25,326,20,341,21,356,31,387,26,388,15,357,15,340,20,324,35,301,53,280,95,244,140,218,180,199"/>
+<area shape="poly" title=" " alt="" coords="243,199,471,315,469,320,241,204"/>
+<area shape="rect" href="tensor_8hpp.html" title="Core tensor class for multi&#45;dimensional array operations." alt="" coords="150,249,284,277"/>
+<area shape="poly" title=" " alt="" coords="220,202,220,234,214,234,214,202"/>
+<area shape="poly" title=" " alt="" coords="204,279,72,392,68,388,200,275"/>
+<area shape="poly" title=" " alt="" coords="270,275,457,322,456,327,269,280"/>
+<area shape="rect" title=" " alt="" coords="34,325,96,353"/>
+<area shape="poly" title=" " alt="" coords="191,280,106,320,104,316,189,275"/>
+<area shape="rect" title=" " alt="" coords="171,325,223,353"/>
+<area shape="poly" title=" " alt="" coords="216,278,207,311,202,309,211,277"/>
+<area shape="rect" href="dtype_8hpp.html" title="Data type system for Tenzor tensors." alt="" coords="454,401,540,428"/>
+<area shape="poly" title=" " alt="" coords="267,275,325,295,386,323,435,355,474,388,471,392,431,359,384,327,323,300,265,280"/>
+<area shape="rect" href="device_8hpp.html" title="Device specification and management for tensors." alt="" coords="337,401,430,428"/>
+<area shape="poly" title=" " alt="" coords="278,275,322,293,342,307,360,323,377,353,384,385,379,386,372,355,356,327,339,311,319,298,276,280"/>
+<area shape="rect" href="storage_8hpp.html" title="Memory storage abstraction for tensor data." alt="" coords="248,325,346,353"/>
+<area shape="poly" title=" " alt="" coords="233,276,273,312,270,316,229,280"/>
+<area shape="rect" title=" " alt="" coords="456,476,522,504"/>
+<area shape="poly" title=" " alt="" coords="498,429,495,461,489,460,493,429"/>
+<area shape="rect" title=" " alt="" coords="335,476,432,504"/>
+<area shape="poly" title=" " alt="" coords="478,431,418,470,415,466,475,427"/>
+<area shape="rect" title=" " alt="" coords="546,476,637,504"/>
+<area shape="poly" title=" " alt="" coords="515,427,564,465,561,469,512,431"/>
+<area shape="rect" title=" " alt="" coords="661,476,738,504"/>
+<area shape="poly" title=" " alt="" coords="534,426,650,468,648,473,532,431"/>
+<area shape="poly" title=" " alt="" coords="404,427,459,465,456,470,401,431"/>
+<area shape="poly" title=" " alt="" coords="386,429,386,461,381,461,381,429"/>
+<area shape="rect" title=" " alt="" coords="253,476,311,504"/>
+<area shape="poly" title=" " alt="" coords="367,431,314,469,311,465,364,427"/>
+<area shape="poly" title=" " alt="" coords="252,356,98,400,96,395,251,351"/>
+<area shape="poly" title=" " alt="" coords="314,351,358,389,355,393,311,355"/>
+<area shape="rect" title=" " alt="" coords="244,401,313,428"/>
+<area shape="poly" title=" " alt="" coords="296,354,288,386,283,385,291,353"/>
+<area shape="rect" title=" " alt="" coords="153,401,219,428"/>
+<area shape="poly" title=" " alt="" coords="279,355,220,394,217,390,276,351"/>
+<area shape="poly" title=" " alt="" coords="146,124,191,162,188,166,143,128"/>
+<area shape="poly" title=" " alt="" coords="121,128,66,208,36,265,14,326,13,341,15,357,28,386,23,388,10,358,7,341,9,324,31,262,62,205,116,125"/>
+<area shape="poly" title=" " alt="" coords="133,125,140,160,156,200,172,220,189,237,185,241,167,223,152,203,135,162,128,127"/>
+<area shape="poly" title=" " alt="" coords="128,127,75,311,70,309,123,125"/>
+</map>
+</div>
+</div><div class="textblock"><div class="dynheader">
+This graph shows which files directly or indirectly include this file:</div>
+<div class="dyncontent">
+<div class="center"><img src="ops_8hpp__dep__incl.png" border="0" usemap="#ainclude_2tenzor_2autograd_2ops_8hppdep" loading="lazy" alt=""/></div>
+<map name="ainclude_2tenzor_2autograd_2ops_8hppdep" id="ainclude_2tenzor_2autograd_2ops_8hppdep">
+<area shape="rect" title="Gradient&#45;aware tensor operations for automatic differentiation." alt="" coords="10,5,186,50"/>
+<area shape="rect" href="tenzor_8hpp.html" title="Main header &#45; includes all public Tenzor APIs." alt="" coords="5,98,191,126"/>
+<area shape="poly" title=" " alt="" coords="101,66,101,97,95,97,95,66"/>
+</map>
+</div>
 </div>
 <p><a href="ops_8hpp_source.html">Go to the source code of this file.</a></p>
 <table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-namespaces" class="groupheader"><a id="namespaces" name="namespaces"></a>
 Namespaces</h2></td></tr>
 <tr class="memitem:tenzor" id="r_tenzor"><td class="memItemLeft" align="right" valign="top">namespace &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html">tenzor</a></td></tr>
+<tr class="memdesc:namespacetenzor"><td class="mdescLeft">&#160;</td><td class="mdescRight">Main Tenzor namespace. <br /></td></tr>
 </table><table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-func-members" class="groupheader"><a id="func-members" name="func-members"></a>
 Functions</h2></td></tr>
 <tr class="memitem:a0be2a29e47400321d89a2430100e5b40" id="r_a0be2a29e47400321d89a2430100e5b40"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#a0be2a29e47400321d89a2430100e5b40">tenzor::sum</a> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input, std::optional&lt; int64_t &gt; dim=std::nullopt, bool keepdim=false) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
+<tr class="memdesc:a0be2a29e47400321d89a2430100e5b40"><td class="mdescLeft">&#160;</td><td class="mdescRight">Sum reduction with gradient tracking.  <br /></td></tr>
 <tr class="memitem:ade6a75a53fb370fbce043bd1d526fa3b" id="r_ade6a75a53fb370fbce043bd1d526fa3b"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#ade6a75a53fb370fbce043bd1d526fa3b">tenzor::mean</a> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input, std::optional&lt; int64_t &gt; dim=std::nullopt, bool keepdim=false) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
-<tr class="memitem:ae18a38f103555251235222cbf26b023c" id="r_ae18a38f103555251235222cbf26b023c"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#ae18a38f103555251235222cbf26b023c">tenzor::log</a> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
-<tr class="memitem:a06a3c8889b869c7c972933f4a94a45c5" id="r_a06a3c8889b869c7c972933f4a94a45c5"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#a06a3c8889b869c7c972933f4a94a45c5">tenzor::exp</a> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
-<tr class="memitem:a5383a54a7e2308e24bf8ece5adc3bfc3" id="r_a5383a54a7e2308e24bf8ece5adc3bfc3"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#a5383a54a7e2308e24bf8ece5adc3bfc3">tenzor::neg</a> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
-<tr class="memitem:a09db3c5bddffb9bf011bdc3633b179d0" id="r_a09db3c5bddffb9bf011bdc3633b179d0"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#a09db3c5bddffb9bf011bdc3633b179d0">tenzor::log_softmax</a> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input, int64_t dim) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
-<tr class="memitem:a950707f47379f3c50a775345930e45c3" id="r_a950707f47379f3c50a775345930e45c3"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#a950707f47379f3c50a775345930e45c3">tenzor::abs</a> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
-<tr class="memitem:a0cdbffe8c9536c8d9669033b36108eff" id="r_a0cdbffe8c9536c8d9669033b36108eff"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#a0cdbffe8c9536c8d9669033b36108eff">tenzor::clamp</a> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input, float <a class="el" href="namespacetenzor.html#a2b4afb17e2e6cfb7b5dadb0198259061">min</a>, float <a class="el" href="namespacetenzor.html#a18f60780d055204ab7cd526c5116c864">max</a>) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
+<tr class="memdesc:ade6a75a53fb370fbce043bd1d526fa3b"><td class="mdescLeft">&#160;</td><td class="mdescRight">Mean reduction with gradient tracking.  <br /></td></tr>
 <tr class="memitem:a18f60780d055204ab7cd526c5116c864" id="r_a18f60780d055204ab7cd526c5116c864"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#a18f60780d055204ab7cd526c5116c864">tenzor::max</a> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input, std::optional&lt; int64_t &gt; dim=std::nullopt, bool keepdim=false) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
+<tr class="memdesc:a18f60780d055204ab7cd526c5116c864"><td class="mdescLeft">&#160;</td><td class="mdescRight">Max reduction with gradient tracking.  <br /></td></tr>
+<tr class="memitem:ae18a38f103555251235222cbf26b023c" id="r_ae18a38f103555251235222cbf26b023c"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#ae18a38f103555251235222cbf26b023c">tenzor::log</a> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
+<tr class="memdesc:ae18a38f103555251235222cbf26b023c"><td class="mdescLeft">&#160;</td><td class="mdescRight">Natural logarithm with gradient tracking.  <br /></td></tr>
+<tr class="memitem:a06a3c8889b869c7c972933f4a94a45c5" id="r_a06a3c8889b869c7c972933f4a94a45c5"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#a06a3c8889b869c7c972933f4a94a45c5">tenzor::exp</a> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
+<tr class="memdesc:a06a3c8889b869c7c972933f4a94a45c5"><td class="mdescLeft">&#160;</td><td class="mdescRight">Exponential function with gradient tracking.  <br /></td></tr>
+<tr class="memitem:a5383a54a7e2308e24bf8ece5adc3bfc3" id="r_a5383a54a7e2308e24bf8ece5adc3bfc3"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#a5383a54a7e2308e24bf8ece5adc3bfc3">tenzor::neg</a> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
+<tr class="memdesc:a5383a54a7e2308e24bf8ece5adc3bfc3"><td class="mdescLeft">&#160;</td><td class="mdescRight">Negation with gradient tracking.  <br /></td></tr>
+<tr class="memitem:a950707f47379f3c50a775345930e45c3" id="r_a950707f47379f3c50a775345930e45c3"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#a950707f47379f3c50a775345930e45c3">tenzor::abs</a> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
+<tr class="memdesc:a950707f47379f3c50a775345930e45c3"><td class="mdescLeft">&#160;</td><td class="mdescRight">Absolute value with gradient tracking.  <br /></td></tr>
+<tr class="memitem:a0cdbffe8c9536c8d9669033b36108eff" id="r_a0cdbffe8c9536c8d9669033b36108eff"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#a0cdbffe8c9536c8d9669033b36108eff">tenzor::clamp</a> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input, float <a class="el" href="group__tensor__reduction.html#ga2b4afb17e2e6cfb7b5dadb0198259061">min</a>, float <a class="el" href="namespacetenzor.html#a18f60780d055204ab7cd526c5116c864">max</a>) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
+<tr class="memdesc:a0cdbffe8c9536c8d9669033b36108eff"><td class="mdescLeft">&#160;</td><td class="mdescRight">Clamp values with gradient tracking.  <br /></td></tr>
+<tr class="memitem:a09db3c5bddffb9bf011bdc3633b179d0" id="r_a09db3c5bddffb9bf011bdc3633b179d0"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#a09db3c5bddffb9bf011bdc3633b179d0">tenzor::log_softmax</a> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input, int64_t dim) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
+<tr class="memdesc:a09db3c5bddffb9bf011bdc3633b179d0"><td class="mdescLeft">&#160;</td><td class="mdescRight">Log-softmax activation with gradient tracking.  <br /></td></tr>
 </table>
-</div><!-- contents -->
+<a name="details" id="details"></a><h2 id="header-details" class="groupheader">Detailed Description</h2>
+<div class="textblock"><p>Gradient-aware tensor operations for automatic differentiation. </p>
+<p>Provides operation functions that work with Variables to preserve the autograd computation graph. All operations automatically track gradients when applied to Variables with requires_grad=true. </p>
+
+<p class="definition">Definition in file <a class="el" href="ops_8hpp_source.html">ops.hpp</a>.</p>
+</div></div><!-- contents -->
 </div><!-- doc-content -->
 <div id="page-nav" class="page-nav-panel">
 <div id="page-nav-resize-handle"></div>
@@ -127,8 +208,8 @@ Functions</h2></td></tr>
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><a href="dir_4f7edb362912b75e95599213beee2a17.html">tenzor</a></li><li class="navelem"><a href="dir_a8af10209a5d43e76b135a85ab04875a.html">autograd</a></li><li class="navelem"><a href="ops_8hpp.html">ops.hpp</a></li>
-    <li class="footer">Generated by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
+    <li class="navelem"><a href="dir_d44c64559bbebec7f509842c48db8b23.html">include</a></li><li class="navelem"><a href="dir_14ba40437910c5dd1b08964ca20ae5af.html">tenzor</a></li><li class="navelem"><a href="dir_1204adbf8d2f8e90c5fef395b6535c41.html">autograd</a></li><li class="navelem"><a href="ops_8hpp.html">ops.hpp</a></li>
+    <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>
 </body>

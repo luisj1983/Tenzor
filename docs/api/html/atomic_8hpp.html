@@ -5,7 +5,7 @@
 <meta http-equiv="X-UA-Compatible" content="IE=11"/>
 <meta name="generator" content="Doxygen 1.14.0"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Tenzor: tenzor/parallel/atomic.hpp File Reference</title>
+<title>Tenzor: include/tenzor/parallel/atomic.hpp File Reference</title>
 <link href="tabs.css" rel="stylesheet" type="text/css"/>
 <script type="text/javascript" src="jquery.js"></script>
 <script type="text/javascript" src="dynsections.js"></script>
@@ -28,7 +28,7 @@
   <td id="projectalign">
    <div id="projectname">Tenzor<span id="projectnumber">&#160;1.0.0</span>
    </div>
-   <div id="projectbrief">Modern C++20 tensor library with automatic differentiation</div>
+   <div id="projectbrief">High-performance tensor library with automatic differentiation</div>
   </td>
  </tr>
  </tbody>
@@ -92,27 +92,51 @@ $(function(){initNavTree('atomic_8hpp.html','',''); });
   <div class="headertitle"><div class="title">atomic.hpp File Reference</div></div>
 </div><!--header-->
 <div class="contents">
+
+<p>Lock-free atomic operations for thread-safe tensor operations.  
+<a href="#details">More...</a></p>
 <div class="textblock"><code>#include &lt;atomic&gt;</code><br />
 <code>#include &lt;memory&gt;</code><br />
+</div><div class="textblock"><div class="dynheader">
+Include dependency graph for atomic.hpp:</div>
+<div class="dyncontent">
+<div class="center"><img src="atomic_8hpp__incl.png" border="0" usemap="#ainclude_2tenzor_2parallel_2atomic_8hpp" loading="lazy" alt=""/></div>
+<map name="ainclude_2tenzor_2parallel_2atomic_8hpp" id="ainclude_2tenzor_2parallel_2atomic_8hpp">
+<area shape="rect" title="Lock&#45;free atomic operations for thread&#45;safe tensor operations." alt="" coords="5,5,172,50"/>
+<area shape="rect" title=" " alt="" coords="7,98,74,126"/>
+<area shape="poly" title=" " alt="" coords="78,52,58,86,54,83,74,49"/>
+<area shape="rect" title=" " alt="" coords="98,98,175,126"/>
+<area shape="poly" title=" " alt="" coords="103,49,123,83,119,86,99,52"/>
+</map>
+</div>
 </div>
 <p><a href="atomic_8hpp_source.html">Go to the source code of this file.</a></p>
 <table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-nested-classes" class="groupheader"><a id="nested-classes" name="nested-classes"></a>
 Classes</h2></td></tr>
 <tr class="memitem:tenzor_3A_3ASpinLock" id="r_tenzor_3A_3ASpinLock"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1SpinLock.html">tenzor::SpinLock</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Lightweight spin lock for short critical sections.  <a href="classtenzor_1_1SpinLock.html#details">More...</a><br /></td></tr>
 </table><table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-namespaces" class="groupheader"><a id="namespaces" name="namespaces"></a>
 Namespaces</h2></td></tr>
 <tr class="memitem:tenzor" id="r_tenzor"><td class="memItemLeft" align="right" valign="top">namespace &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html">tenzor</a></td></tr>
+<tr class="memdesc:namespacetenzor"><td class="mdescLeft">&#160;</td><td class="mdescRight">Main Tenzor namespace. <br /></td></tr>
 </table><table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-func-members" class="groupheader"><a id="func-members" name="func-members"></a>
 Functions</h2></td></tr>
 <tr class="memitem:a323bc892d354d4cd45f1b893b00f0b9b" id="r_a323bc892d354d4cd45f1b893b00f0b9b"><td class="memTemplParams" colspan="2">template&lt;typename T&gt; </td></tr>
 <tr class="memitem:a323bc892d354d4cd45f1b893b00f0b9b template"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#a323bc892d354d4cd45f1b893b00f0b9b">tenzor::atomic_add</a> (std::atomic&lt; T &gt; &amp;target, T value) -&gt; T</td></tr>
+<tr class="memdesc:a323bc892d354d4cd45f1b893b00f0b9b"><td class="mdescLeft">&#160;</td><td class="mdescRight">Atomic add operation with relaxed memory ordering.  <br /></td></tr>
 <tr class="memitem:ac103011b8481a9cd9d26247aaff2695e" id="r_ac103011b8481a9cd9d26247aaff2695e"><td class="memTemplParams" colspan="2">template&lt;typename T&gt; </td></tr>
 <tr class="memitem:ac103011b8481a9cd9d26247aaff2695e template"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#ac103011b8481a9cd9d26247aaff2695e">tenzor::atomic_cas</a> (std::atomic&lt; T &gt; &amp;target, T expected, T desired) -&gt; bool</td></tr>
+<tr class="memdesc:ac103011b8481a9cd9d26247aaff2695e"><td class="mdescLeft">&#160;</td><td class="mdescRight">Atomic compare-and-swap operation.  <br /></td></tr>
 </table>
-</div><!-- contents -->
+<a name="details" id="details"></a><h2 id="header-details" class="groupheader">Detailed Description</h2>
+<div class="textblock"><p>Lock-free atomic operations for thread-safe tensor operations. </p>
+<p>Provides atomic primitives and synchronization mechanisms for concurrent tensor operations on CPU. </p>
+
+<p class="definition">Definition in file <a class="el" href="atomic_8hpp_source.html">atomic.hpp</a>.</p>
+</div></div><!-- contents -->
 </div><!-- doc-content -->
 <div id="page-nav" class="page-nav-panel">
 <div id="page-nav-resize-handle"></div>
@@ -125,8 +149,8 @@ Functions</h2></td></tr>
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><a href="dir_4f7edb362912b75e95599213beee2a17.html">tenzor</a></li><li class="navelem"><a href="dir_4a1f4f826d5b933793bf79312cc017c9.html">parallel</a></li><li class="navelem"><a href="atomic_8hpp.html">atomic.hpp</a></li>
-    <li class="footer">Generated by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
+    <li class="navelem"><a href="dir_d44c64559bbebec7f509842c48db8b23.html">include</a></li><li class="navelem"><a href="dir_14ba40437910c5dd1b08964ca20ae5af.html">tenzor</a></li><li class="navelem"><a href="dir_731150426551138f38ed7fbcbd46a602.html">parallel</a></li><li class="navelem"><a href="atomic_8hpp.html">atomic.hpp</a></li>
+    <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>
 </body>

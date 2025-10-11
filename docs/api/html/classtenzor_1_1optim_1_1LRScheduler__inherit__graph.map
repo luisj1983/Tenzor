@@ -1,9 +1,9 @@
 <map id="tenzor::optim::LRScheduler" name="tenzor::optim::LRScheduler">
-<area shape="rect" id="Node000001" title=" " alt="" coords="5,57,202,85"/>
-<area shape="rect" id="Node000002" href="$classtenzor_1_1optim_1_1CosineAnnealingLR.html" title=" " alt="" coords="250,5,491,33"/>
+<area shape="rect" id="Node000001" title="Base class for learning rate schedulers." alt="" coords="5,57,202,85"/>
+<area shape="rect" id="Node000002" href="$classtenzor_1_1optim_1_1CosineAnnealingLR.html" title="Cosine annealing learning rate scheduler." alt="" coords="250,5,491,33"/>
 <area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="193,51,295,31,296,36,194,56"/>
-<area shape="rect" id="Node000003" href="$classtenzor_1_1optim_1_1ExponentialLR.html" title=" " alt="" coords="266,57,475,85"/>
+<area shape="rect" id="Node000003" href="$classtenzor_1_1optim_1_1ExponentialLR.html" title="Exponential learning rate scheduler." alt="" coords="266,57,475,85"/>
 <area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="217,68,265,68,265,74,217,74"/>
-<area shape="rect" id="Node000004" href="$classtenzor_1_1optim_1_1StepLR.html" title=" " alt="" coords="290,109,451,137"/>
+<area shape="rect" id="Node000004" href="$classtenzor_1_1optim_1_1StepLR.html" title="Step learning rate scheduler." alt="" coords="290,109,451,137"/>
 <area shape="poly" id="edge3_Node000001_Node000004" title=" " alt="" coords="194,86,296,106,295,111,193,91"/>
 </map>

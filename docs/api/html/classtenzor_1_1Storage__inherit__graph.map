@@ -1,7 +1,7 @@
 <map id="tenzor::Storage" name="tenzor::Storage">
-<area shape="rect" id="Node000001" title=" " alt="" coords="108,5,228,33"/>
-<area shape="rect" id="Node000002" href="$classtenzor_1_1CPUStorage.html" title=" " alt="" coords="5,81,153,109"/>
+<area shape="rect" id="Node000001" title="Abstract base class for tensor memory storage." alt="" coords="108,5,228,33"/>
+<area shape="rect" id="Node000002" href="$classtenzor_1_1CPUStorage.html" title="CPU memory storage with aligned allocation." alt="" coords="5,81,153,109"/>
 <area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="142,45,97,83,93,78,139,41"/>
-<area shape="rect" id="Node000003" href="$classtenzor_1_1DeviceStorage.html" title=" " alt="" coords="176,81,342,109"/>
+<area shape="rect" id="Node000003" href="$classtenzor_1_1DeviceStorage.html" title="Device (GPU) memory storage managed by backend." alt="" coords="176,81,342,109"/>
 <area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="198,41,245,78,241,83,195,45"/>
 </map>

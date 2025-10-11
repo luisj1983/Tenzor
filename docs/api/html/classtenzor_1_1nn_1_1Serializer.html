@@ -92,20 +92,171 @@ $(function(){initNavTree('classtenzor_1_1nn_1_1Serializer.html','','classtenzor_
   <div class="headertitle"><div class="title">tenzor::nn::Serializer Class Reference</div></div>
 </div><!--header-->
 <div class="contents">
+
+<p>Serialization utilities for model state persistence.  
+ <a href="#details">More...</a></p>
+
+<p><code>#include &lt;<a class="el" href="serialize_8hpp_source.html">serialize.hpp</a>&gt;</code></p>
 <table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-pub-static-methods" class="groupheader"><a id="pub-static-methods" name="pub-static-methods"></a>
 Static Public Member Functions</h2></td></tr>
-<tr class="memitem:aa0e7a2a6d171829ae80a50d716aa41c8" id="r_aa0e7a2a6d171829ae80a50d716aa41c8"><td class="memItemLeft" align="right" valign="top"><a id="aa0e7a2a6d171829ae80a50d716aa41c8" name="aa0e7a2a6d171829ae80a50d716aa41c8"></a>
-static void&#160;</td><td class="memItemRight" valign="bottom"><b>save</b> (const std::unordered_map&lt; std::string, <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &gt; &amp;state_dict, const std::string &amp;path)</td></tr>
-<tr class="memitem:a5edd9d415a51407b66386817256131f0" id="r_a5edd9d415a51407b66386817256131f0"><td class="memItemLeft" align="right" valign="top"><a id="a5edd9d415a51407b66386817256131f0" name="a5edd9d415a51407b66386817256131f0"></a>
-static auto&#160;</td><td class="memItemRight" valign="bottom"><b>load</b> (const std::string &amp;path) -&gt; std::unordered_map&lt; std::string, <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &gt;</td></tr>
-<tr class="memitem:a04db23cbbca89eddeea998fa6cdcfe63" id="r_a04db23cbbca89eddeea998fa6cdcfe63"><td class="memItemLeft" align="right" valign="top"><a id="a04db23cbbca89eddeea998fa6cdcfe63" name="a04db23cbbca89eddeea998fa6cdcfe63"></a>
-static auto&#160;</td><td class="memItemRight" valign="bottom"><b>is_valid_file</b> (const std::string &amp;path) -&gt; bool</td></tr>
+<tr class="memitem:aa0e7a2a6d171829ae80a50d716aa41c8" id="r_aa0e7a2a6d171829ae80a50d716aa41c8"><td class="memItemLeft" align="right" valign="top">static void&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#aa0e7a2a6d171829ae80a50d716aa41c8">save</a> (const std::unordered_map&lt; std::string, <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &gt; &amp;state_dict, const std::string &amp;path)</td></tr>
+<tr class="memdesc:aa0e7a2a6d171829ae80a50d716aa41c8"><td class="mdescLeft">&#160;</td><td class="mdescRight">Save state dictionary to file.  <br /></td></tr>
+<tr class="memitem:a5edd9d415a51407b66386817256131f0" id="r_a5edd9d415a51407b66386817256131f0"><td class="memItemLeft" align="right" valign="top">static auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a5edd9d415a51407b66386817256131f0">load</a> (const std::string &amp;path) -&gt; std::unordered_map&lt; std::string, <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &gt;</td></tr>
+<tr class="memdesc:a5edd9d415a51407b66386817256131f0"><td class="mdescLeft">&#160;</td><td class="mdescRight">Load state dictionary from file.  <br /></td></tr>
+<tr class="memitem:a04db23cbbca89eddeea998fa6cdcfe63" id="r_a04db23cbbca89eddeea998fa6cdcfe63"><td class="memItemLeft" align="right" valign="top">static auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a04db23cbbca89eddeea998fa6cdcfe63">is_valid_file</a> (const std::string &amp;path) -&gt; bool</td></tr>
+<tr class="memdesc:a04db23cbbca89eddeea998fa6cdcfe63"><td class="mdescLeft">&#160;</td><td class="mdescRight">Check if file exists and has valid Tenzor format.  <br /></td></tr>
 </table>
 <a name="details" id="details"></a><h2 id="header-details" class="groupheader">Detailed Description</h2>
-<div class="textblock">
-<p class="definition">Definition at line <a class="el" href="serialize_8hpp_source.html#l00018">18</a> of file <a class="el" href="serialize_8hpp_source.html">serialize.hpp</a>.</p>
-</div><hr/>The documentation for this class was generated from the following file:<ul>
+<div class="textblock"><p>Serialization utilities for model state persistence. </p>
+<p>Provides static methods for saving and loading model state dictionaries. State dictionaries contain model parameters (weights, biases) and optimizer state.</p>
+<p><b>File Format:</b></p><ul>
+<li>Header: Magic number + version</li>
+<li>Data: <a class="el" href="classtenzor_1_1Tensor.html" title="Multi-dimensional array with automatic differentiation support.">Tensor</a> name-value pairs with metadata</li>
+<li>Endianness: Platform-independent (little-endian)</li>
+</ul>
+<p><b>Use Cases:</b></p><ul>
+<li>Checkpointing during training</li>
+<li>Saving best model based on validation loss</li>
+<li>Model sharing and deployment</li>
+<li>Transfer learning (loading pretrained weights)</li>
+</ul>
+<dl class="section user"><dt>Thread Safety</dt><dd>Static methods are not thread-safe for concurrent access to same file</dd></dl>
+<div class="fragment"><div class="line"><span class="comment">// Save model</span></div>
+<div class="line"><span class="keyword">auto</span> state = model.state_dict();</div>
+<div class="line"><a class="code hl_function" href="#aa0e7a2a6d171829ae80a50d716aa41c8">Serializer::save</a>(state, <span class="stringliteral">&quot;model.pth&quot;</span>);</div>
+<div class="line"> </div>
+<div class="line"><span class="comment">// Load model</span></div>
+<div class="line"><span class="keyword">auto</span> loaded_state = <a class="code hl_function" href="#a5edd9d415a51407b66386817256131f0">Serializer::load</a>(<span class="stringliteral">&quot;model.pth&quot;</span>);</div>
+<div class="line">model.load_state_dict(loaded_state);</div>
+<div class="ttc" id="aclasstenzor_1_1nn_1_1Serializer_html_a5edd9d415a51407b66386817256131f0"><div class="ttname"><a href="#a5edd9d415a51407b66386817256131f0">tenzor::nn::Serializer::load</a></div><div class="ttdeci">static auto load(const std::string &amp;path) -&gt; std::unordered_map&lt; std::string, Tensor &gt;</div><div class="ttdoc">Load state dictionary from file.</div></div>
+<div class="ttc" id="aclasstenzor_1_1nn_1_1Serializer_html_aa0e7a2a6d171829ae80a50d716aa41c8"><div class="ttname"><a href="#aa0e7a2a6d171829ae80a50d716aa41c8">tenzor::nn::Serializer::save</a></div><div class="ttdeci">static void save(const std::unordered_map&lt; std::string, Tensor &gt; &amp;state_dict, const std::string &amp;path)</div><div class="ttdoc">Save state dictionary to file.</div></div>
+</div><!-- fragment --><dl class="section see"><dt>See also</dt><dd><a class="el" href="classtenzor_1_1nn_1_1Module.html#a0cdec1c8afdd46a9bd6a517d03a2280d" title="Get module state as dictionary.">Module::state_dict()</a>, Optimizer::state_dict() </dd></dl>
+
+<p class="definition">Definition at line <a class="el" href="serialize_8hpp_source.html#l00057">57</a> of file <a class="el" href="serialize_8hpp_source.html">serialize.hpp</a>.</p>
+</div><a name="doc-func-members" id="doc-func-members"></a><h2 id="header-doc-func-members" class="groupheader">Member Function Documentation</h2>
+<a id="a04db23cbbca89eddeea998fa6cdcfe63" name="a04db23cbbca89eddeea998fa6cdcfe63"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a04db23cbbca89eddeea998fa6cdcfe63">&#9670;&#160;</a></span>is_valid_file()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname">auto tenzor::nn::Serializer::is_valid_file </td>
+          <td>(</td>
+          <td class="paramtype">const std::string &amp;</td>          <td class="paramname"><span class="paramname"><em>path</em></span></td><td>)</td>
+          <td> -&gt;  bool</td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel static">static</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+
+<p>Check if file exists and has valid Tenzor format. </p>
+<p>Verifies magic number and version without loading full data.</p>
+<dl class="params"><dt>Parameters</dt><dd>
+  <table class="params">
+    <tr><td class="paramname">path</td><td>File path to validate </td></tr>
+  </table>
+  </dd>
+</dl>
+<dl class="section return"><dt>Returns</dt><dd>true if file is valid Tenzor checkpoint, false otherwise </dd></dl>
+
+</div>
+</div>
+<a id="a5edd9d415a51407b66386817256131f0" name="a5edd9d415a51407b66386817256131f0"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a5edd9d415a51407b66386817256131f0">&#9670;&#160;</a></span>load()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname">auto tenzor::nn::Serializer::load </td>
+          <td>(</td>
+          <td class="paramtype">const std::string &amp;</td>          <td class="paramname"><span class="paramname"><em>path</em></span></td><td>)</td>
+          <td> -&gt;  std::unordered_map&lt; std::string, <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &gt;</td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel static">static</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+
+<p>Load state dictionary from file. </p>
+<p>Reads tensors from binary file, validating format and version.</p>
+<dl class="params"><dt>Parameters</dt><dd>
+  <table class="params">
+    <tr><td class="paramname">path</td><td>Input file path </td></tr>
+  </table>
+  </dd>
+</dl>
+<dl class="section return"><dt>Returns</dt><dd>Map of parameter names to tensors </dd></dl>
+<dl class="exception"><dt>Exceptions</dt><dd>
+  <table class="exception">
+    <tr><td class="paramname">std::runtime_error</td><td>if file is invalid or incompatible </td></tr>
+  </table>
+  </dd>
+</dl>
+
+</div>
+</div>
+<a id="aa0e7a2a6d171829ae80a50d716aa41c8" name="aa0e7a2a6d171829ae80a50d716aa41c8"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#aa0e7a2a6d171829ae80a50d716aa41c8">&#9670;&#160;</a></span>save()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname">void tenzor::nn::Serializer::save </td>
+          <td>(</td>
+          <td class="paramtype">const std::unordered_map&lt; std::string, <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &gt; &amp;</td>          <td class="paramname"><span class="paramname"><em>state_dict</em></span>, </td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype">const std::string &amp;</td>          <td class="paramname"><span class="paramname"><em>path</em></span>&#160;)</td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel static">static</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+
+<p>Save state dictionary to file. </p>
+<p>Writes all tensors in state_dict to binary file with metadata. File format includes magic number, version, and tensor data.</p>
+<dl class="params"><dt>Parameters</dt><dd>
+  <table class="params">
+    <tr><td class="paramname">state_dict</td><td>Map of parameter names to tensors </td></tr>
+    <tr><td class="paramname">path</td><td>Output file path </td></tr>
+  </table>
+  </dd>
+</dl>
+<dl class="exception"><dt>Exceptions</dt><dd>
+  <table class="exception">
+    <tr><td class="paramname">std::runtime_error</td><td>if file cannot be opened or written </td></tr>
+  </table>
+  </dd>
+</dl>
+
+</div>
+</div>
+<hr/>The documentation for this class was generated from the following file:<ul>
 <li>include/tenzor/nn/<a class="el" href="serialize_8hpp_source.html">serialize.hpp</a></li>
 </ul>
 </div><!-- contents -->
@@ -121,7 +272,7 @@ static auto&#160;</td><td class="memItemRight" valign="bottom"><b>is_valid_file<
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><b>tenzor</b></li><li class="navelem"><b>nn</b></li><li class="navelem"><a href="classtenzor_1_1nn_1_1Serializer.html">Serializer</a></li>
+    <li class="navelem"><a href="namespacetenzor.html">tenzor</a></li><li class="navelem"><b>nn</b></li><li class="navelem"><a href="classtenzor_1_1nn_1_1Serializer.html">Serializer</a></li>
     <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>

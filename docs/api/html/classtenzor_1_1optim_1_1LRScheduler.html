@@ -92,33 +92,89 @@ $(function(){initNavTree('classtenzor_1_1optim_1_1LRScheduler.html','','classten
   <div class="headertitle"><div class="title">tenzor::optim::LRScheduler Class Reference<span class="mlabels"><span class="mlabel abstract">abstract</span></span></div></div>
 </div><!--header-->
 <div class="contents">
+
+<p>Base class for learning rate schedulers.  
+ <a href="#details">More...</a></p>
+
+<p><code>#include &lt;<a class="el" href="scheduler_8hpp_source.html">scheduler.hpp</a>&gt;</code></p>
 <div class="dynheader">
 Inheritance diagram for tenzor::optim::LRScheduler:</div>
 <div class="dyncontent">
 <div class="center"><img src="classtenzor_1_1optim_1_1LRScheduler__inherit__graph.png" border="0" usemap="#atenzor_1_1optim_1_1LRScheduler_inherit__map" loading="lazy" alt="Inheritance graph"/></div>
 <map name="atenzor_1_1optim_1_1LRScheduler_inherit__map" id="atenzor_1_1optim_1_1LRScheduler_inherit__map">
-<area shape="rect" title=" " alt="" coords="5,57,202,85"/>
-<area shape="rect" href="classtenzor_1_1optim_1_1CosineAnnealingLR.html" title=" " alt="" coords="250,5,491,33"/>
+<area shape="rect" title="Base class for learning rate schedulers." alt="" coords="5,57,202,85"/>
+<area shape="rect" href="classtenzor_1_1optim_1_1CosineAnnealingLR.html" title="Cosine annealing learning rate scheduler." alt="" coords="250,5,491,33"/>
 <area shape="poly" title=" " alt="" coords="193,51,295,31,296,36,194,56"/>
-<area shape="rect" href="classtenzor_1_1optim_1_1ExponentialLR.html" title=" " alt="" coords="266,57,475,85"/>
+<area shape="rect" href="classtenzor_1_1optim_1_1ExponentialLR.html" title="Exponential learning rate scheduler." alt="" coords="266,57,475,85"/>
 <area shape="poly" title=" " alt="" coords="217,68,265,68,265,74,217,74"/>
-<area shape="rect" href="classtenzor_1_1optim_1_1StepLR.html" title=" " alt="" coords="290,109,451,137"/>
+<area shape="rect" href="classtenzor_1_1optim_1_1StepLR.html" title="Step learning rate scheduler." alt="" coords="290,109,451,137"/>
 <area shape="poly" title=" " alt="" coords="194,86,296,106,295,111,193,91"/>
 </map>
 <center><span class="legend">[<a target="top" href="graph_legend.html">legend</a>]</span></center></div>
 <table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-pub-methods" class="groupheader"><a id="pub-methods" name="pub-methods"></a>
 Public Member Functions</h2></td></tr>
-<tr class="memitem:a2d090466f1aba10effd366b22df409e2" id="r_a2d090466f1aba10effd366b22df409e2"><td class="memItemLeft" align="right" valign="top"><a id="a2d090466f1aba10effd366b22df409e2" name="a2d090466f1aba10effd366b22df409e2"></a>
-virtual auto&#160;</td><td class="memItemRight" valign="bottom"><b>step</b> () -&gt; void=0</td></tr>
-<tr class="memitem:a37d4518a9d9dc0b542c77ebbbee9badc" id="r_a37d4518a9d9dc0b542c77ebbbee9badc"><td class="memItemLeft" align="right" valign="top"><a id="a37d4518a9d9dc0b542c77ebbbee9badc" name="a37d4518a9d9dc0b542c77ebbbee9badc"></a>
-virtual auto&#160;</td><td class="memItemRight" valign="bottom"><b>get_last_lr</b> () const -&gt; double=0</td></tr>
+<tr class="memitem:a2d090466f1aba10effd366b22df409e2" id="r_a2d090466f1aba10effd366b22df409e2"><td class="memItemLeft" align="right" valign="top">virtual auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a2d090466f1aba10effd366b22df409e2">step</a> () -&gt; void=0</td></tr>
+<tr class="memdesc:a2d090466f1aba10effd366b22df409e2"><td class="mdescLeft">&#160;</td><td class="mdescRight">Update learning rate according to schedule.  <br /></td></tr>
+<tr class="memitem:a37d4518a9d9dc0b542c77ebbbee9badc" id="r_a37d4518a9d9dc0b542c77ebbbee9badc"><td class="memItemLeft" align="right" valign="top">virtual auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a37d4518a9d9dc0b542c77ebbbee9badc">get_last_lr</a> () const -&gt; double=0</td></tr>
+<tr class="memdesc:a37d4518a9d9dc0b542c77ebbbee9badc"><td class="mdescLeft">&#160;</td><td class="mdescRight">Get the last computed learning rate.  <br /></td></tr>
 <tr class="memitem:aee2145a3df3be042426254e4c76594eb" id="r_aee2145a3df3be042426254e4c76594eb"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#aee2145a3df3be042426254e4c76594eb">get_lr</a> () const -&gt; double</td></tr>
+<tr class="memdesc:aee2145a3df3be042426254e4c76594eb"><td class="mdescLeft">&#160;</td><td class="mdescRight">Get the current learning rate (alias for get_last_lr)  <br /></td></tr>
 </table>
 <a name="details" id="details"></a><h2 id="header-details" class="groupheader">Detailed Description</h2>
-<div class="textblock">
-<p class="definition">Definition at line <a class="el" href="scheduler_8hpp_source.html#l00017">17</a> of file <a class="el" href="scheduler_8hpp_source.html">scheduler.hpp</a>.</p>
+<div class="textblock"><p>Base class for learning rate schedulers. </p>
+<p>Learning rate schedules adjust the learning rate during training:</p><ul>
+<li>Start with higher learning rate for fast initial progress</li>
+<li>Reduce learning rate to fine-tune and converge to optimum</li>
+</ul>
+<p><b>Common Patterns:</b></p><ul>
+<li>Step decay: Reduce LR by factor every N epochs</li>
+<li>Exponential decay: Smooth continuous reduction</li>
+<li>Cosine annealing: Gradual cosine-shaped reduction</li>
+</ul>
+<dl class="section user"><dt>Usage</dt><dd>Call scheduler.step() once per epoch (after optimizer.step())</dd></dl>
+<div class="fragment"><div class="line"><span class="keyword">auto</span> scheduler = <a class="code hl_class" href="classtenzor_1_1optim_1_1StepLR.html">StepLR</a>(optimizer, 30, 0.1);</div>
+<div class="line"><span class="keywordflow">for</span> (<span class="keywordtype">int</span> epoch = 0; epoch &lt; 100; ++epoch) {</div>
+<div class="line">    train_one_epoch();</div>
+<div class="line">    scheduler.step();  <span class="comment">// Reduce LR every 30 epochs</span></div>
+<div class="line">}</div>
+<div class="ttc" id="aclasstenzor_1_1optim_1_1StepLR_html"><div class="ttname"><a href="classtenzor_1_1optim_1_1StepLR.html">tenzor::optim::StepLR</a></div><div class="ttdoc">Step learning rate scheduler.</div><div class="ttdef"><b>Definition</b> <a href="scheduler_8hpp_source.html#l00114">scheduler.hpp:114</a></div></div>
+</div><!-- fragment --><dl class="section see"><dt>See also</dt><dd><a class="el" href="classtenzor_1_1optim_1_1StepLR.html" title="Step learning rate scheduler.">StepLR</a>, <a class="el" href="classtenzor_1_1optim_1_1ExponentialLR.html" title="Exponential learning rate scheduler.">ExponentialLR</a>, <a class="el" href="classtenzor_1_1optim_1_1CosineAnnealingLR.html" title="Cosine annealing learning rate scheduler.">CosineAnnealingLR</a> </dd></dl>
+
+<p class="definition">Definition at line <a class="el" href="scheduler_8hpp_source.html#l00049">49</a> of file <a class="el" href="scheduler_8hpp_source.html">scheduler.hpp</a>.</p>
 </div><a name="doc-func-members" id="doc-func-members"></a><h2 id="header-doc-func-members" class="groupheader">Member Function Documentation</h2>
+<a id="a37d4518a9d9dc0b542c77ebbbee9badc" name="a37d4518a9d9dc0b542c77ebbbee9badc"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a37d4518a9d9dc0b542c77ebbbee9badc">&#9670;&#160;</a></span>get_last_lr()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname">virtual auto tenzor::optim::LRScheduler::get_last_lr </td>
+          <td>(</td>
+          <td class="paramname"><span class="paramname"><em></em></span></td><td>)</td>
+          <td> const -&gt;  double</td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel pure-virtual">pure virtual</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+
+<p>Get the last computed learning rate. </p>
+<dl class="section return"><dt>Returns</dt><dd>Current learning rate value </dd></dl>
+
+<p>Implemented in <a class="el" href="classtenzor_1_1optim_1_1CosineAnnealingLR.html#a4c2ac8b75254752647e2979bb72ffa39">tenzor::optim::CosineAnnealingLR</a>, <a class="el" href="classtenzor_1_1optim_1_1ExponentialLR.html#ac11c879619240ca07fbfc1536f45a1dd">tenzor::optim::ExponentialLR</a>, and <a class="el" href="classtenzor_1_1optim_1_1StepLR.html#a77572ad8ccf31140631542ebdfad98c1">tenzor::optim::StepLR</a>.</p>
+
+<p class="reference">Referenced by <a class="el" href="scheduler_8hpp_source.html#l00071">get_lr()</a>.</p>
+
+</div>
+</div>
 <a id="aee2145a3df3be042426254e4c76594eb" name="aee2145a3df3be042426254e4c76594eb"></a>
 <h2 class="memtitle"><span class="permalink"><a href="#aee2145a3df3be042426254e4c76594eb">&#9670;&#160;</a></span>get_lr()</h2>
 
@@ -142,7 +198,44 @@ virtual auto&#160;</td><td class="memItemRight" valign="bottom"><b>get_last_lr</
 </table>
 </div><div class="memdoc">
 
-<p class="definition">Definition at line <a class="el" href="scheduler_8hpp_source.html#l00028">28</a> of file <a class="el" href="scheduler_8hpp_source.html">scheduler.hpp</a>.</p>
+<p>Get the current learning rate (alias for get_last_lr) </p>
+<dl class="section return"><dt>Returns</dt><dd>Current learning rate value </dd></dl>
+
+<p class="definition">Definition at line <a class="el" href="scheduler_8hpp_source.html#l00071">71</a> of file <a class="el" href="scheduler_8hpp_source.html">scheduler.hpp</a>.</p>
+
+<p class="reference">References <a class="el" href="#a37d4518a9d9dc0b542c77ebbbee9badc">get_last_lr()</a>, and <a class="el" href="scheduler_8hpp_source.html#l00071">get_lr()</a>.</p>
+
+<p class="reference">Referenced by <a class="el" href="scheduler_8hpp_source.html#l00071">get_lr()</a>.</p>
+
+</div>
+</div>
+<a id="a2d090466f1aba10effd366b22df409e2" name="a2d090466f1aba10effd366b22df409e2"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a2d090466f1aba10effd366b22df409e2">&#9670;&#160;</a></span>step()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname">virtual auto tenzor::optim::LRScheduler::step </td>
+          <td>(</td>
+          <td class="paramname"><span class="paramname"><em></em></span></td><td>)</td>
+          <td> -&gt;  void</td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel pure-virtual">pure virtual</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+
+<p>Update learning rate according to schedule. </p>
+<p>Typically called once per epoch after training. Updates the optimizer's learning rate based on the scheduling strategy. </p>
+
+<p>Implemented in <a class="el" href="classtenzor_1_1optim_1_1CosineAnnealingLR.html#a67afa13cbe35529dc817fd1a98215cde">tenzor::optim::CosineAnnealingLR</a>, <a class="el" href="classtenzor_1_1optim_1_1ExponentialLR.html#a3b0b2eaf33c12600e3e1cae47a6126a3">tenzor::optim::ExponentialLR</a>, and <a class="el" href="classtenzor_1_1optim_1_1StepLR.html#a8af6acebefbf262e694f64ad1bc6648e">tenzor::optim::StepLR</a>.</p>
 
 </div>
 </div>
@@ -162,7 +255,7 @@ virtual auto&#160;</td><td class="memItemRight" valign="bottom"><b>get_last_lr</
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><b>tenzor</b></li><li class="navelem"><b>optim</b></li><li class="navelem"><a href="classtenzor_1_1optim_1_1LRScheduler.html">LRScheduler</a></li>
+    <li class="navelem"><a href="namespacetenzor.html">tenzor</a></li><li class="navelem"><b>optim</b></li><li class="navelem"><a href="classtenzor_1_1optim_1_1LRScheduler.html">LRScheduler</a></li>
     <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>

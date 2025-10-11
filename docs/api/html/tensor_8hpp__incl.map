@@ -12,7 +12,7 @@
 <area shape="poly" id="edge5_Node000001_Node000006" title=" " alt="" coords="372,53,195,167,192,163,369,48"/>
 <area shape="rect" id="Node000011" href="$device_8hpp.html" title="Device specification and management for tensors." alt="" coords="328,174,421,201"/>
 <area shape="poly" id="edge10_Node000001_Node000011" title=" " alt="" coords="379,52,360,73,345,99,342,114,345,130,358,160,353,162,339,132,337,114,340,97,356,70,376,48"/>
-<area shape="rect" id="Node000013" href="$storage_8hpp_source.html" title=" " alt="" coords="355,98,453,126"/>
+<area shape="rect" id="Node000013" href="$storage_8hpp.html" title="Memory storage abstraction for tensor data." alt="" coords="355,98,453,126"/>
 <area shape="poly" id="edge14_Node000001_Node000013" title=" " alt="" coords="407,50,407,82,401,82,401,50"/>
 <area shape="rect" id="Node000007" title=" " alt="" coords="342,249,407,277"/>
 <area shape="poly" id="edge6_Node000006_Node000007" title=" " alt="" coords="200,199,328,243,326,248,199,204"/>

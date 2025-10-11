@@ -1,3 +1,10 @@
+/**
+ * @file config.hpp
+ * @brief Runtime configuration management
+ *
+ * Provides global configuration system for library behavior customization.
+ */
+
 #pragma once
 
 #include <string>
@@ -6,7 +13,27 @@
 
 namespace tenzor {
 
-// Runtime configuration
+/**
+ * @brief Singleton configuration manager
+ *
+ * Manages runtime configuration settings for the library.
+ * Settings can be loaded from files or set programmatically.
+ *
+ * **Common Settings:**
+ * - "num_threads": Number of CPU threads
+ * - "device": Default device ("cpu", "cuda")
+ * - "cudnn_benchmark": Enable cuDNN benchmarking
+ * - "deterministic": Enable deterministic operations
+ *
+ * @par Thread Safety
+ * Not thread-safe. Configure before parallel operations begin.
+ *
+ * @code
+ * auto& config = Config::instance();
+ * config.set_int("num_threads", 4);
+ * config.set_bool("deterministic", true);
+ * @endcode
+ */
 class Config {
 public:
     static auto instance() -> Config&;

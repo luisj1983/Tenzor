@@ -5,7 +5,7 @@
 <meta http-equiv="X-UA-Compatible" content="IE=11"/>
 <meta name="generator" content="Doxygen 1.14.0"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Tenzor: tenzor/utils/logging.hpp File Reference</title>
+<title>Tenzor: include/tenzor/utils/logging.hpp File Reference</title>
 <link href="tabs.css" rel="stylesheet" type="text/css"/>
 <script type="text/javascript" src="jquery.js"></script>
 <script type="text/javascript" src="dynsections.js"></script>
@@ -28,7 +28,7 @@
   <td id="projectalign">
    <div id="projectname">Tenzor<span id="projectnumber">&#160;1.0.0</span>
    </div>
-   <div id="projectbrief">Modern C++20 tensor library with automatic differentiation</div>
+   <div id="projectbrief">High-performance tensor library with automatic differentiation</div>
   </td>
  </tr>
  </tbody>
@@ -92,20 +92,41 @@ $(function(){initNavTree('logging_8hpp.html','',''); });
   <div class="headertitle"><div class="title">logging.hpp File Reference</div></div>
 </div><!--header-->
 <div class="contents">
+
+<p>Logging system for debugging and diagnostics.  
+<a href="#details">More...</a></p>
 <div class="textblock"><code>#include &lt;string&gt;</code><br />
 <code>#include &lt;string_view&gt;</code><br />
 <code>#include &lt;source_location&gt;</code><br />
 <code>#include &lt;format&gt;</code><br />
+</div><div class="textblock"><div class="dynheader">
+Include dependency graph for logging.hpp:</div>
+<div class="dyncontent">
+<div class="center"><img src="logging_8hpp__incl.png" border="0" usemap="#ainclude_2tenzor_2utils_2logging_8hpp" loading="lazy" alt=""/></div>
+<map name="ainclude_2tenzor_2utils_2logging_8hpp" id="ainclude_2tenzor_2utils_2logging_8hpp">
+<area shape="rect" title="Logging system for debugging and diagnostics." alt="" coords="130,5,275,50"/>
+<area shape="rect" title=" " alt="" coords="5,98,64,126"/>
+<area shape="poly" title=" " alt="" coords="159,53,76,93,74,88,157,48"/>
+<area shape="rect" title=" " alt="" coords="88,98,184,126"/>
+<area shape="poly" title=" " alt="" coords="187,52,158,87,154,84,183,49"/>
+<area shape="rect" title=" " alt="" coords="208,98,331,126"/>
+<area shape="poly" title=" " alt="" coords="222,49,251,84,247,87,218,52"/>
+<area shape="rect" title=" " alt="" coords="355,98,420,126"/>
+<area shape="poly" title=" " alt="" coords="253,48,346,89,343,94,251,53"/>
+</map>
+</div>
 </div>
 <p><a href="logging_8hpp_source.html">Go to the source code of this file.</a></p>
 <table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-nested-classes" class="groupheader"><a id="nested-classes" name="nested-classes"></a>
 Classes</h2></td></tr>
 <tr class="memitem:tenzor_3A_3ALogger" id="r_tenzor_3A_3ALogger"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1Logger.html">tenzor::Logger</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Singleton logger for library diagnostics.  <a href="classtenzor_1_1Logger.html#details">More...</a><br /></td></tr>
 </table><table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-namespaces" class="groupheader"><a id="namespaces" name="namespaces"></a>
 Namespaces</h2></td></tr>
 <tr class="memitem:tenzor" id="r_tenzor"><td class="memItemLeft" align="right" valign="top">namespace &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html">tenzor</a></td></tr>
+<tr class="memdesc:namespacetenzor"><td class="mdescLeft">&#160;</td><td class="mdescRight">Main Tenzor namespace. <br /></td></tr>
 </table><table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-define-members" class="groupheader"><a id="define-members" name="define-members"></a>
 Macros</h2></td></tr>
@@ -126,8 +147,14 @@ Enumerations</h2></td></tr>
 &#160;&#160;<a class="el" href="namespacetenzor.html#a73a4f7deebe32a56e7bf28bd1723a4bea882384ec38ce8d9582b57e70861730e4">tenzor::Fatal</a>
 <br />
  }</td></tr>
+<tr class="memdesc:a73a4f7deebe32a56e7bf28bd1723a4be"><td class="mdescLeft">&#160;</td><td class="mdescRight">Logging severity levels.  <a href="namespacetenzor.html#a73a4f7deebe32a56e7bf28bd1723a4be">More...</a><br /></td></tr>
 </table>
-<a name="doc-define-members" id="doc-define-members"></a><h2 id="header-doc-define-members" class="groupheader">Macro Definition Documentation</h2>
+<a name="details" id="details"></a><h2 id="header-details" class="groupheader">Detailed Description</h2>
+<div class="textblock"><p>Logging system for debugging and diagnostics. </p>
+<p>Provides structured logging with multiple severity levels, automatic source location tracking, and configurable outputs. </p>
+
+<p class="definition">Definition in file <a class="el" href="logging_8hpp_source.html">logging.hpp</a>.</p>
+</div><a name="doc-define-members" id="doc-define-members"></a><h2 id="header-doc-define-members" class="groupheader">Macro Definition Documentation</h2>
 <a id="a9e5932922f61f21c5b3383cb99738b9c" name="a9e5932922f61f21c5b3383cb99738b9c"></a>
 <h2 class="memtitle"><span class="permalink"><a href="#a9e5932922f61f21c5b3383cb99738b9c">&#9670;&#160;</a></span>TENZOR_LOG_DEBUG</h2>
 
@@ -142,9 +169,10 @@ Enumerations</h2></td></tr>
         </tr>
       </table>
 </div><div class="memdoc">
-<b>Value:</b><div class="fragment"><div class="line"><a class="code hl_function" href="classtenzor_1_1Logger.html#a7959106dc259bdd48a32959164f40830">::tenzor::Logger::instance</a>().debug(msg)</div>
-<div class="ttc" id="aclasstenzor_1_1Logger_html_a7959106dc259bdd48a32959164f40830"><div class="ttname"><a href="classtenzor_1_1Logger.html#a7959106dc259bdd48a32959164f40830">tenzor::Logger::instance</a></div><div class="ttdeci">static auto instance() -&gt; Logger &amp;</div></div>
+<b>Value:</b><div class="fragment"><div class="line">::tenzor::Logger::instance().debug(msg)</div>
 </div><!-- fragment -->
+<p class="definition">Definition at line <a class="el" href="logging_8hpp_source.html#l00098">98</a> of file <a class="el" href="logging_8hpp_source.html">logging.hpp</a>.</p>
+
 </div>
 </div>
 <a id="a4a0fa30f6d15941f982cca7448b376fc" name="a4a0fa30f6d15941f982cca7448b376fc"></a>
@@ -161,8 +189,10 @@ Enumerations</h2></td></tr>
         </tr>
       </table>
 </div><div class="memdoc">
-<b>Value:</b><div class="fragment"><div class="line"><a class="code hl_function" href="classtenzor_1_1Logger.html#a7959106dc259bdd48a32959164f40830">::tenzor::Logger::instance</a>().error(msg)</div>
+<b>Value:</b><div class="fragment"><div class="line">::tenzor::Logger::instance().error(msg)</div>
 </div><!-- fragment -->
+<p class="definition">Definition at line <a class="el" href="logging_8hpp_source.html#l00101">101</a> of file <a class="el" href="logging_8hpp_source.html">logging.hpp</a>.</p>
+
 </div>
 </div>
 <a id="ad2dae854875cb5691679538bb817ec57" name="ad2dae854875cb5691679538bb817ec57"></a>
@@ -179,8 +209,10 @@ Enumerations</h2></td></tr>
         </tr>
       </table>
 </div><div class="memdoc">
-<b>Value:</b><div class="fragment"><div class="line"><a class="code hl_function" href="classtenzor_1_1Logger.html#a7959106dc259bdd48a32959164f40830">::tenzor::Logger::instance</a>().fatal(msg)</div>
+<b>Value:</b><div class="fragment"><div class="line">::tenzor::Logger::instance().fatal(msg)</div>
 </div><!-- fragment -->
+<p class="definition">Definition at line <a class="el" href="logging_8hpp_source.html#l00102">102</a> of file <a class="el" href="logging_8hpp_source.html">logging.hpp</a>.</p>
+
 </div>
 </div>
 <a id="ad0763e1bc5f68bd1638ad5d4cfeb2e4b" name="ad0763e1bc5f68bd1638ad5d4cfeb2e4b"></a>
@@ -197,8 +229,10 @@ Enumerations</h2></td></tr>
         </tr>
       </table>
 </div><div class="memdoc">
-<b>Value:</b><div class="fragment"><div class="line"><a class="code hl_function" href="classtenzor_1_1Logger.html#a7959106dc259bdd48a32959164f40830">::tenzor::Logger::instance</a>().info(msg)</div>
+<b>Value:</b><div class="fragment"><div class="line">::tenzor::Logger::instance().info(msg)</div>
 </div><!-- fragment -->
+<p class="definition">Definition at line <a class="el" href="logging_8hpp_source.html#l00099">99</a> of file <a class="el" href="logging_8hpp_source.html">logging.hpp</a>.</p>
+
 </div>
 </div>
 <a id="ad08eaa5dbeb2e8cc4059138af83b545c" name="ad08eaa5dbeb2e8cc4059138af83b545c"></a>
@@ -215,8 +249,10 @@ Enumerations</h2></td></tr>
         </tr>
       </table>
 </div><div class="memdoc">
-<b>Value:</b><div class="fragment"><div class="line"><a class="code hl_function" href="classtenzor_1_1Logger.html#a7959106dc259bdd48a32959164f40830">::tenzor::Logger::instance</a>().warning(msg)</div>
+<b>Value:</b><div class="fragment"><div class="line">::tenzor::Logger::instance().warning(msg)</div>
 </div><!-- fragment -->
+<p class="definition">Definition at line <a class="el" href="logging_8hpp_source.html#l00100">100</a> of file <a class="el" href="logging_8hpp_source.html">logging.hpp</a>.</p>
+
 </div>
 </div>
 </div><!-- contents -->
@@ -232,8 +268,8 @@ Enumerations</h2></td></tr>
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><a href="dir_4f7edb362912b75e95599213beee2a17.html">tenzor</a></li><li class="navelem"><a href="dir_b4f8a9091db2466660d9700afb3e35b8.html">utils</a></li><li class="navelem"><a href="logging_8hpp.html">logging.hpp</a></li>
-    <li class="footer">Generated by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
+    <li class="navelem"><a href="dir_d44c64559bbebec7f509842c48db8b23.html">include</a></li><li class="navelem"><a href="dir_14ba40437910c5dd1b08964ca20ae5af.html">tenzor</a></li><li class="navelem"><a href="dir_16b01d04ecc528db8b9be846cd642082.html">utils</a></li><li class="navelem"><a href="logging_8hpp.html">logging.hpp</a></li>
+    <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>
 </body>

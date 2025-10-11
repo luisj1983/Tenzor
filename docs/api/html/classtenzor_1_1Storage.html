@@ -92,36 +92,209 @@ $(function(){initNavTree('classtenzor_1_1Storage.html','','classtenzor_1_1Storag
   <div class="headertitle"><div class="title">tenzor::Storage Class Reference<span class="mlabels"><span class="mlabel abstract">abstract</span></span></div></div>
 </div><!--header-->
 <div class="contents">
+
+<p>Abstract base class for tensor memory storage.  
+ <a href="#details">More...</a></p>
+
+<p><code>#include &lt;<a class="el" href="storage_8hpp_source.html">storage.hpp</a>&gt;</code></p>
 <div class="dynheader">
 Inheritance diagram for tenzor::Storage:</div>
 <div class="dyncontent">
 <div class="center"><img src="classtenzor_1_1Storage__inherit__graph.png" border="0" usemap="#atenzor_1_1Storage_inherit__map" loading="lazy" alt="Inheritance graph"/></div>
 <map name="atenzor_1_1Storage_inherit__map" id="atenzor_1_1Storage_inherit__map">
-<area shape="rect" title=" " alt="" coords="108,5,228,33"/>
-<area shape="rect" href="classtenzor_1_1CPUStorage.html" title=" " alt="" coords="5,81,153,109"/>
+<area shape="rect" title="Abstract base class for tensor memory storage." alt="" coords="108,5,228,33"/>
+<area shape="rect" href="classtenzor_1_1CPUStorage.html" title="CPU memory storage with aligned allocation." alt="" coords="5,81,153,109"/>
 <area shape="poly" title=" " alt="" coords="142,45,97,83,93,78,139,41"/>
-<area shape="rect" href="classtenzor_1_1DeviceStorage.html" title=" " alt="" coords="176,81,342,109"/>
+<area shape="rect" href="classtenzor_1_1DeviceStorage.html" title="Device (GPU) memory storage managed by backend." alt="" coords="176,81,342,109"/>
 <area shape="poly" title=" " alt="" coords="198,41,245,78,241,83,195,45"/>
 </map>
 <center><span class="legend">[<a target="top" href="graph_legend.html">legend</a>]</span></center></div>
 <table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-pub-methods" class="groupheader"><a id="pub-methods" name="pub-methods"></a>
 Public Member Functions</h2></td></tr>
-<tr class="memitem:ac55a217c856248885fc9e6422893835e" id="r_ac55a217c856248885fc9e6422893835e"><td class="memItemLeft" align="right" valign="top"><a id="ac55a217c856248885fc9e6422893835e" name="ac55a217c856248885fc9e6422893835e"></a>
-virtual auto&#160;</td><td class="memItemRight" valign="bottom"><b>data</b> () -&gt; void *=0</td></tr>
-<tr class="memitem:a16ab12d0419bfb14c8aa8c5dc71868a9" id="r_a16ab12d0419bfb14c8aa8c5dc71868a9"><td class="memItemLeft" align="right" valign="top"><a id="a16ab12d0419bfb14c8aa8c5dc71868a9" name="a16ab12d0419bfb14c8aa8c5dc71868a9"></a>
-virtual auto&#160;</td><td class="memItemRight" valign="bottom"><b>data</b> () const -&gt; const void *=0</td></tr>
-<tr class="memitem:aab616941cd3d0627a71bc2b4ce633186" id="r_aab616941cd3d0627a71bc2b4ce633186"><td class="memItemLeft" align="right" valign="top"><a id="aab616941cd3d0627a71bc2b4ce633186" name="aab616941cd3d0627a71bc2b4ce633186"></a>
-virtual auto&#160;</td><td class="memItemRight" valign="bottom"><b>size_bytes</b> () const -&gt; size_t=0</td></tr>
-<tr class="memitem:a661378bfb0a42b354a9b018f668ca89d" id="r_a661378bfb0a42b354a9b018f668ca89d"><td class="memItemLeft" align="right" valign="top"><a id="a661378bfb0a42b354a9b018f668ca89d" name="a661378bfb0a42b354a9b018f668ca89d"></a>
-virtual auto&#160;</td><td class="memItemRight" valign="bottom"><b>device</b> () const -&gt; <a class="el" href="structtenzor_1_1Device.html">Device</a>=0</td></tr>
-<tr class="memitem:a8889814f3a8e285c0edb66d46a764aa0" id="r_a8889814f3a8e285c0edb66d46a764aa0"><td class="memItemLeft" align="right" valign="top"><a id="a8889814f3a8e285c0edb66d46a764aa0" name="a8889814f3a8e285c0edb66d46a764aa0"></a>
-virtual auto&#160;</td><td class="memItemRight" valign="bottom"><b>ref_count</b> () const -&gt; int64_t=0</td></tr>
+<tr class="memitem:ac55a217c856248885fc9e6422893835e" id="r_ac55a217c856248885fc9e6422893835e"><td class="memItemLeft" align="right" valign="top">virtual auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#ac55a217c856248885fc9e6422893835e">data</a> () -&gt; void *=0</td></tr>
+<tr class="memdesc:ac55a217c856248885fc9e6422893835e"><td class="mdescLeft">&#160;</td><td class="mdescRight">Get mutable pointer to storage data.  <br /></td></tr>
+<tr class="memitem:a16ab12d0419bfb14c8aa8c5dc71868a9" id="r_a16ab12d0419bfb14c8aa8c5dc71868a9"><td class="memItemLeft" align="right" valign="top">virtual auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a16ab12d0419bfb14c8aa8c5dc71868a9">data</a> () const -&gt; const void *=0</td></tr>
+<tr class="memdesc:a16ab12d0419bfb14c8aa8c5dc71868a9"><td class="mdescLeft">&#160;</td><td class="mdescRight">Get const pointer to storage data.  <br /></td></tr>
+<tr class="memitem:aab616941cd3d0627a71bc2b4ce633186" id="r_aab616941cd3d0627a71bc2b4ce633186"><td class="memItemLeft" align="right" valign="top">virtual auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#aab616941cd3d0627a71bc2b4ce633186">size_bytes</a> () const -&gt; size_t=0</td></tr>
+<tr class="memdesc:aab616941cd3d0627a71bc2b4ce633186"><td class="mdescLeft">&#160;</td><td class="mdescRight">Get total size of storage in bytes.  <br /></td></tr>
+<tr class="memitem:a661378bfb0a42b354a9b018f668ca89d" id="r_a661378bfb0a42b354a9b018f668ca89d"><td class="memItemLeft" align="right" valign="top">virtual auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a661378bfb0a42b354a9b018f668ca89d">device</a> () const -&gt; <a class="el" href="structtenzor_1_1Device.html">Device</a>=0</td></tr>
+<tr class="memdesc:a661378bfb0a42b354a9b018f668ca89d"><td class="mdescLeft">&#160;</td><td class="mdescRight">Get device where storage resides.  <br /></td></tr>
+<tr class="memitem:a8889814f3a8e285c0edb66d46a764aa0" id="r_a8889814f3a8e285c0edb66d46a764aa0"><td class="memItemLeft" align="right" valign="top">virtual auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a8889814f3a8e285c0edb66d46a764aa0">ref_count</a> () const -&gt; int64_t=0</td></tr>
+<tr class="memdesc:a8889814f3a8e285c0edb66d46a764aa0"><td class="mdescLeft">&#160;</td><td class="mdescRight">Get current reference count.  <br /></td></tr>
 </table>
 <a name="details" id="details"></a><h2 id="header-details" class="groupheader">Detailed Description</h2>
-<div class="textblock">
-<p class="definition">Definition at line <a class="el" href="storage_8hpp_source.html#l00011">11</a> of file <a class="el" href="storage_8hpp_source.html">storage.hpp</a>.</p>
-</div><hr/>The documentation for this class was generated from the following file:<ul>
+<div class="textblock"><p>Abstract base class for tensor memory storage. </p>
+<p>Defines the interface for managing raw memory buffers that back tensor data. Concrete implementations handle CPU and device-specific memory allocation, deallocation, and lifetime management.</p>
+<p><a class="el" href="classtenzor_1_1Storage.html" title="Abstract base class for tensor memory storage.">Storage</a> objects use reference counting to enable safe sharing of underlying memory between multiple tensor views.</p>
+<dl class="section note"><dt>Note</dt><dd>This class is not thread-safe for mutation operations. </dd></dl>
+
+<p class="definition">Definition at line <a class="el" href="storage_8hpp_source.html#l00030">30</a> of file <a class="el" href="storage_8hpp_source.html">storage.hpp</a>.</p>
+</div><a name="doc-func-members" id="doc-func-members"></a><h2 id="header-doc-func-members" class="groupheader">Member Function Documentation</h2>
+<a id="ac55a217c856248885fc9e6422893835e" name="ac55a217c856248885fc9e6422893835e"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#ac55a217c856248885fc9e6422893835e">&#9670;&#160;</a></span>data() <span class="overload">[1/2]</span></h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname">virtual auto tenzor::Storage::data </td>
+          <td>(</td>
+          <td class="paramname"><span class="paramname"><em></em></span></td><td>)</td>
+          <td> -&gt;  void *</td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel pure-virtual">pure virtual</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+
+<p>Get mutable pointer to storage data. </p>
+<dl class="section return"><dt>Returns</dt><dd>Pointer to raw memory buffer </dd></dl>
+
+<p>Implemented in <a class="el" href="classtenzor_1_1CPUStorage.html#a73370c8024890a096236f7e40e8f85b5">tenzor::CPUStorage</a>, and <a class="el" href="classtenzor_1_1DeviceStorage.html#a98de955ace838697ab8d6ad411f65eca">tenzor::DeviceStorage</a>.</p>
+
+</div>
+</div>
+<a id="a16ab12d0419bfb14c8aa8c5dc71868a9" name="a16ab12d0419bfb14c8aa8c5dc71868a9"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a16ab12d0419bfb14c8aa8c5dc71868a9">&#9670;&#160;</a></span>data() <span class="overload">[2/2]</span></h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname">virtual auto tenzor::Storage::data </td>
+          <td>(</td>
+          <td class="paramname"><span class="paramname"><em></em></span></td><td>)</td>
+          <td> const -&gt;  const void *</td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel pure-virtual">pure virtual</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+
+<p>Get const pointer to storage data. </p>
+<dl class="section return"><dt>Returns</dt><dd>Const pointer to raw memory buffer </dd></dl>
+
+<p>Implemented in <a class="el" href="classtenzor_1_1CPUStorage.html#ab5a9fdf0d0de39249d37f9fc8dbdf025">tenzor::CPUStorage</a>, and <a class="el" href="classtenzor_1_1DeviceStorage.html#a37dcafb452660ac45b0d7d29e1169def">tenzor::DeviceStorage</a>.</p>
+
+</div>
+</div>
+<a id="a661378bfb0a42b354a9b018f668ca89d" name="a661378bfb0a42b354a9b018f668ca89d"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a661378bfb0a42b354a9b018f668ca89d">&#9670;&#160;</a></span>device()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname">virtual auto tenzor::Storage::device </td>
+          <td>(</td>
+          <td class="paramname"><span class="paramname"><em></em></span></td><td>)</td>
+          <td> const -&gt;  <a class="el" href="structtenzor_1_1Device.html">Device</a></td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel pure-virtual">pure virtual</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+
+<p>Get device where storage resides. </p>
+<dl class="section return"><dt>Returns</dt><dd><a class="el" href="structtenzor_1_1Device.html" title="Device specification for tensor placement.">Device</a> specification (CPU, CUDA, etc.) </dd></dl>
+
+<p>Implemented in <a class="el" href="classtenzor_1_1CPUStorage.html#a097aa5aef8c1722e8df8c1556bb8d9f8">tenzor::CPUStorage</a>, and <a class="el" href="classtenzor_1_1DeviceStorage.html#a5be2369c4b8f815623fee9fea09803f1">tenzor::DeviceStorage</a>.</p>
+
+<p class="reference">References <a class="el" href="#a661378bfb0a42b354a9b018f668ca89d">device()</a>.</p>
+
+<p class="reference">Referenced by <a class="el" href="#a661378bfb0a42b354a9b018f668ca89d">device()</a>.</p>
+
+</div>
+</div>
+<a id="a8889814f3a8e285c0edb66d46a764aa0" name="a8889814f3a8e285c0edb66d46a764aa0"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a8889814f3a8e285c0edb66d46a764aa0">&#9670;&#160;</a></span>ref_count()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname">virtual auto tenzor::Storage::ref_count </td>
+          <td>(</td>
+          <td class="paramname"><span class="paramname"><em></em></span></td><td>)</td>
+          <td> const -&gt;  int64_t</td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel pure-virtual">pure virtual</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+
+<p>Get current reference count. </p>
+<dl class="section return"><dt>Returns</dt><dd>Number of references to this storage</dd></dl>
+<dl class="section note"><dt>Note</dt><dd>Reference count is managed atomically for thread-safety. </dd></dl>
+
+<p>Implemented in <a class="el" href="classtenzor_1_1CPUStorage.html#a838779a2cd0d2918633baf1e64cf40d4">tenzor::CPUStorage</a>, and <a class="el" href="classtenzor_1_1DeviceStorage.html#a3688c808ac537dc02f99bba76660f222">tenzor::DeviceStorage</a>.</p>
+
+<p class="reference">References <a class="el" href="#a8889814f3a8e285c0edb66d46a764aa0">ref_count()</a>.</p>
+
+<p class="reference">Referenced by <a class="el" href="#a8889814f3a8e285c0edb66d46a764aa0">ref_count()</a>.</p>
+
+</div>
+</div>
+<a id="aab616941cd3d0627a71bc2b4ce633186" name="aab616941cd3d0627a71bc2b4ce633186"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#aab616941cd3d0627a71bc2b4ce633186">&#9670;&#160;</a></span>size_bytes()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname">virtual auto tenzor::Storage::size_bytes </td>
+          <td>(</td>
+          <td class="paramname"><span class="paramname"><em></em></span></td><td>)</td>
+          <td> const -&gt;  size_t</td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel pure-virtual">pure virtual</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+
+<p>Get total size of storage in bytes. </p>
+<dl class="section return"><dt>Returns</dt><dd>Size of allocated memory in bytes </dd></dl>
+
+<p>Implemented in <a class="el" href="classtenzor_1_1CPUStorage.html#a2d84be19c17349b9fb22fdadb52dec3e">tenzor::CPUStorage</a>, and <a class="el" href="classtenzor_1_1DeviceStorage.html#a4ea1a54292dcf5dd519932bda266ed35">tenzor::DeviceStorage</a>.</p>
+
+<p class="reference">References <a class="el" href="#aab616941cd3d0627a71bc2b4ce633186">size_bytes()</a>.</p>
+
+<p class="reference">Referenced by <a class="el" href="#aab616941cd3d0627a71bc2b4ce633186">size_bytes()</a>.</p>
+
+</div>
+</div>
+<hr/>The documentation for this class was generated from the following file:<ul>
 <li>include/tenzor/core/<a class="el" href="storage_8hpp_source.html">storage.hpp</a></li>
 </ul>
 </div><!-- contents -->
@@ -137,7 +310,7 @@ virtual auto&#160;</td><td class="memItemRight" valign="bottom"><b>ref_count</b>
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><b>tenzor</b></li><li class="navelem"><a href="classtenzor_1_1Storage.html">Storage</a></li>
+    <li class="navelem"><a href="namespacetenzor.html">tenzor</a></li><li class="navelem"><a href="classtenzor_1_1Storage.html">Storage</a></li>
     <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>

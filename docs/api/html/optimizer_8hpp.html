@@ -5,7 +5,7 @@
 <meta http-equiv="X-UA-Compatible" content="IE=11"/>
 <meta name="generator" content="Doxygen 1.14.0"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Tenzor: tenzor/nn/optim/optimizer.hpp File Reference</title>
+<title>Tenzor: include/tenzor/nn/optim/optimizer.hpp File Reference</title>
 <link href="tabs.css" rel="stylesheet" type="text/css"/>
 <script type="text/javascript" src="jquery.js"></script>
 <script type="text/javascript" src="dynsections.js"></script>
@@ -28,7 +28,7 @@
   <td id="projectalign">
    <div id="projectname">Tenzor<span id="projectnumber">&#160;1.0.0</span>
    </div>
-   <div id="projectbrief">Modern C++20 tensor library with automatic differentiation</div>
+   <div id="projectbrief">High-performance tensor library with automatic differentiation</div>
   </td>
  </tr>
  </tbody>
@@ -92,25 +92,103 @@ $(function(){initNavTree('optimizer_8hpp.html','',''); });
   <div class="headertitle"><div class="title">optimizer.hpp File Reference</div></div>
 </div><!--header-->
 <div class="contents">
+
+<p>Base class for all optimizers.  
+<a href="#details">More...</a></p>
 <div class="textblock"><code>#include &lt;vector&gt;</code><br />
 <code>#include &lt;memory&gt;</code><br />
 <code>#include &lt;unordered_map&gt;</code><br />
 <code>#include &lt;string&gt;</code><br />
 <code>#include &quot;<a class="el" href="variable_8hpp_source.html">../../autograd/variable.hpp</a>&quot;</code><br />
+</div><div class="textblock"><div class="dynheader">
+Include dependency graph for optimizer.hpp:</div>
+<div class="dyncontent">
+<div class="center"><img src="optimizer_8hpp__incl.png" border="0" usemap="#ainclude_2tenzor_2nn_2optim_2optimizer_8hpp" loading="lazy" alt=""/></div>
+<map name="ainclude_2tenzor_2nn_2optim_2optimizer_8hpp" id="ainclude_2tenzor_2nn_2optim_2optimizer_8hpp">
+<area shape="rect" title="Base class for all optimizers." alt="" coords="212,5,387,50"/>
+<area shape="rect" title=" " alt="" coords="22,249,84,277"/>
+<area shape="poly" title=" " alt="" coords="262,53,228,74,195,100,158,135,125,172,73,238,69,235,121,169,155,131,191,96,225,70,259,48"/>
+<area shape="rect" title=" " alt="" coords="175,325,251,353"/>
+<area shape="poly" title=" " alt="" coords="248,53,188,83,121,126,89,153,59,182,33,215,13,250,8,264,12,275,66,294,160,321,159,326,64,299,8,279,3,264,8,248,29,212,55,179,86,149,118,122,185,79,245,48"/>
+<area shape="rect" title=" " alt="" coords="659,98,783,126"/>
+<area shape="poly" title=" " alt="" coords="388,43,644,93,643,98,387,49"/>
+<area shape="rect" title=" " alt="" coords="576,401,634,428"/>
+<area shape="poly" title=" " alt="" coords="388,32,465,46,505,58,542,73,575,93,601,118,619,149,625,187,314,326,237,363,213,377,236,373,313,353,624,262,621,330,613,386,608,385,616,329,621,267,314,358,237,378,208,378,235,358,312,321,620,185,614,151,597,122,572,97,540,78,503,63,464,51,387,37"/>
+<area shape="rect" href="variable_8hpp.html" title="Automatic differentiation wrapper for tensors." alt="" coords="205,98,394,126"/>
+<area shape="poly" title=" " alt="" coords="302,50,302,82,297,82,297,50"/>
+<area shape="poly" title=" " alt="" coords="277,129,249,148,223,175,207,201,199,223,197,247,200,277,207,310,202,311,194,277,192,247,194,222,203,198,219,172,245,144,274,124"/>
+<area shape="rect" title=" " alt="" coords="510,249,585,277"/>
+<area shape="poly" title=" " alt="" coords="323,124,515,239,512,243,320,128"/>
+<area shape="rect" href="tensor_8hpp.html" title="Core tensor class for multi&#45;dimensional array operations." alt="" coords="233,174,366,201"/>
+<area shape="poly" title=" " alt="" coords="302,126,302,158,297,158,297,126"/>
+<area shape="poly" title=" " alt="" coords="256,204,100,251,98,246,255,199"/>
+<area shape="poly" title=" " alt="" coords="301,202,293,238,277,278,261,299,244,317,240,313,257,295,272,276,288,236,295,201"/>
+<area shape="poly" title=" " alt="" coords="345,199,496,244,495,249,343,204"/>
+<area shape="rect" title=" " alt="" coords="209,249,262,277"/>
+<area shape="poly" title=" " alt="" coords="290,204,259,239,255,236,286,200"/>
+<area shape="rect" href="dtype_8hpp.html" title="Data type system for Tenzor tensors." alt="" coords="64,325,151,353"/>
+<area shape="poly" title=" " alt="" coords="275,204,238,225,199,251,162,284,131,315,127,312,158,280,195,247,235,221,272,200"/>
+<area shape="rect" href="device_8hpp.html" title="Device specification and management for tensors." alt="" coords="460,325,552,353"/>
+<area shape="poly" title=" " alt="" coords="353,199,402,218,449,247,477,278,496,310,492,312,473,281,446,251,400,223,351,204"/>
+<area shape="rect" href="storage_8hpp.html" title="Memory storage abstraction for tensor data." alt="" coords="337,249,435,277"/>
+<area shape="poly" title=" " alt="" coords="317,200,361,237,358,241,313,204"/>
+<area shape="rect" title=" " alt="" coords="454,401,519,428"/>
+<area shape="poly" title=" " alt="" coords="152,348,163,350,423,398,439,401,438,406,422,403,162,355,151,353"/>
+<area shape="rect" title=" " alt="" coords="314,401,410,428"/>
+<area shape="poly" title=" " alt="" coords="152,350,303,393,301,398,151,355"/>
+<area shape="rect" title=" " alt="" coords="162,401,253,428"/>
+<area shape="poly" title=" " alt="" coords="127,351,179,389,176,394,124,355"/>
+<area shape="rect" title=" " alt="" coords="61,401,138,428"/>
+<area shape="poly" title=" " alt="" coords="109,354,105,385,100,385,104,353"/>
+<area shape="poly" title=" " alt="" coords="526,351,577,389,574,394,522,355"/>
+<area shape="poly" title=" " alt="" coords="505,354,496,386,491,385,500,353"/>
+<area shape="poly" title=" " alt="" coords="482,356,403,396,400,391,479,351"/>
+<area shape="poly" title=" " alt="" coords="356,280,259,321,256,316,354,275"/>
+<area shape="poly" title=" " alt="" coords="409,275,474,315,471,319,406,280"/>
+<area shape="rect" title=" " alt="" coords="276,325,345,353"/>
+<area shape="poly" title=" " alt="" coords="375,279,336,316,333,312,371,276"/>
+<area shape="rect" title=" " alt="" coords="369,325,435,353"/>
+<area shape="poly" title=" " alt="" coords="392,277,399,309,394,310,387,278"/>
+</map>
+</div>
+</div><div class="textblock"><div class="dynheader">
+This graph shows which files directly or indirectly include this file:</div>
+<div class="dyncontent">
+<div class="center"><img src="optimizer_8hpp__dep__incl.png" border="0" usemap="#ainclude_2tenzor_2nn_2optim_2optimizer_8hppdep" loading="lazy" alt=""/></div>
+<map name="ainclude_2tenzor_2nn_2optim_2optimizer_8hppdep" id="ainclude_2tenzor_2nn_2optim_2optimizer_8hppdep">
+<area shape="rect" title="Base class for all optimizers." alt="" coords="205,5,381,50"/>
+<area shape="rect" href="adam_8hpp.html" title="Adam and AdamW optimizers." alt="" coords="5,98,181,143"/>
+<area shape="poly" title=" " alt="" coords="232,59,142,100,140,95,230,54"/>
+<area shape="rect" href="scheduler_8hpp.html" title="Learning rate scheduling strategies." alt="" coords="205,98,381,143"/>
+<area shape="poly" title=" " alt="" coords="296,66,296,98,290,98,290,66"/>
+<area shape="rect" href="sgd_8hpp.html" title="Stochastic Gradient Descent optimizer." alt="" coords="405,98,581,143"/>
+<area shape="poly" title=" " alt="" coords="356,54,446,95,444,100,354,59"/>
+<area shape="rect" href="tenzor_8hpp.html" title="Main header &#45; includes all public Tenzor APIs." alt="" coords="200,191,386,218"/>
+<area shape="poly" title=" " alt="" coords="161,147,262,188,260,193,159,152"/>
+<area shape="poly" title=" " alt="" coords="427,152,326,193,324,188,425,147"/>
+</map>
+</div>
 </div>
 <p><a href="optimizer_8hpp_source.html">Go to the source code of this file.</a></p>
 <table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-nested-classes" class="groupheader"><a id="nested-classes" name="nested-classes"></a>
 Classes</h2></td></tr>
 <tr class="memitem:tenzor_3A_3Aoptim_3A_3AOptimizer" id="r_tenzor_3A_3Aoptim_3A_3AOptimizer"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1optim_1_1Optimizer.html">tenzor::optim::Optimizer</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Abstract base class for all optimizers.  <a href="classtenzor_1_1optim_1_1Optimizer.html#details">More...</a><br /></td></tr>
 <tr class="memitem:tenzor_3A_3Aoptim_3A_3AParamGroup" id="r_tenzor_3A_3Aoptim_3A_3AParamGroup"><td class="memItemLeft" align="right" valign="top">struct &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="structtenzor_1_1optim_1_1ParamGroup.html">tenzor::optim::ParamGroup</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Parameter group with individual learning rate.  <a href="structtenzor_1_1optim_1_1ParamGroup.html#details">More...</a><br /></td></tr>
 </table><table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-namespaces" class="groupheader"><a id="namespaces" name="namespaces"></a>
 Namespaces</h2></td></tr>
 <tr class="memitem:tenzor" id="r_tenzor"><td class="memItemLeft" align="right" valign="top">namespace &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html">tenzor</a></td></tr>
-<tr class="memitem:tenzor_3A_3Aoptim" id="r_tenzor_3A_3Aoptim"><td class="memItemLeft" align="right" valign="top">namespace &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor_1_1optim.html">tenzor::optim</a></td></tr>
+<tr class="memdesc:namespacetenzor"><td class="mdescLeft">&#160;</td><td class="mdescRight">Main Tenzor namespace. <br /></td></tr>
 </table>
-</div><!-- contents -->
+<a name="details" id="details"></a><h2 id="header-details" class="groupheader">Detailed Description</h2>
+<div class="textblock"><p>Base class for all optimizers. </p>
+<p>Provides the foundation for gradient-based optimization algorithms. Optimizers update model parameters based on computed gradients to minimize loss. </p>
+
+<p class="definition">Definition in file <a class="el" href="optimizer_8hpp_source.html">optimizer.hpp</a>.</p>
+</div></div><!-- contents -->
 </div><!-- doc-content -->
 <div id="page-nav" class="page-nav-panel">
 <div id="page-nav-resize-handle"></div>
@@ -123,8 +201,8 @@ Namespaces</h2></td></tr>
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><a href="dir_4f7edb362912b75e95599213beee2a17.html">tenzor</a></li><li class="navelem"><a href="dir_7d5460f3c919ba4808998a3c805d565d.html">nn</a></li><li class="navelem"><a href="dir_4923d234618ef098133bb18371954b49.html">optim</a></li><li class="navelem"><a href="optimizer_8hpp.html">optimizer.hpp</a></li>
-    <li class="footer">Generated by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
+    <li class="navelem"><a href="dir_d44c64559bbebec7f509842c48db8b23.html">include</a></li><li class="navelem"><a href="dir_14ba40437910c5dd1b08964ca20ae5af.html">tenzor</a></li><li class="navelem"><a href="dir_2996a04abcb928fe38186b609b0d69a7.html">nn</a></li><li class="navelem"><a href="dir_773af256a187f753cf450a2e67d6bc80.html">optim</a></li><li class="navelem"><a href="optimizer_8hpp.html">optimizer.hpp</a></li>
+    <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>
 </body>

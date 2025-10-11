@@ -1,4 +1,4 @@
 var searchData=
 [
-  ['requires_5fgrad_0',['requires_grad',['../classtenzor_1_1TensorImpl.html#af389dddf8256d92c80bd99737dc1879c',1,'tenzor::TensorImpl']]]
+  ['offset_0',['offset',['../classtenzor_1_1TensorImpl.html#a85f01db9a220494ac9ee9ec128c7d903',1,'tenzor::TensorImpl']]]
 ];

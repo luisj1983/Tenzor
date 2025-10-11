@@ -92,26 +92,228 @@ $(function(){initNavTree('classtenzor_1_1ComputationGraph.html','','classtenzor_
   <div class="headertitle"><div class="title">tenzor::ComputationGraph Class Reference</div></div>
 </div><!--header-->
 <div class="contents">
+
+<p>Computation graph for automatic differentiation.  
+ <a href="#details">More...</a></p>
+
+<p><code>#include &lt;<a class="el" href="graph_8hpp_source.html">graph.hpp</a>&gt;</code></p>
 <table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-pub-methods" class="groupheader"><a id="pub-methods" name="pub-methods"></a>
 Public Member Functions</h2></td></tr>
-<tr class="memitem:a3e35a409f4dd7603f682e2fb92b8d13b" id="r_a3e35a409f4dd7603f682e2fb92b8d13b"><td class="memItemLeft" align="right" valign="top"><a id="a3e35a409f4dd7603f682e2fb92b8d13b" name="a3e35a409f4dd7603f682e2fb92b8d13b"></a>
-auto&#160;</td><td class="memItemRight" valign="bottom"><b>add_node</b> (std::shared_ptr&lt; <a class="el" href="classtenzor_1_1Function.html">Function</a> &gt; func) -&gt; std::shared_ptr&lt; <a class="el" href="structtenzor_1_1GraphNode.html">GraphNode</a> &gt;</td></tr>
-<tr class="memitem:a70661dd12a89c7a011f6da4bf9e17fb7" id="r_a70661dd12a89c7a011f6da4bf9e17fb7"><td class="memItemLeft" align="right" valign="top"><a id="a70661dd12a89c7a011f6da4bf9e17fb7" name="a70661dd12a89c7a011f6da4bf9e17fb7"></a>
-auto&#160;</td><td class="memItemRight" valign="bottom"><b>connect</b> (std::shared_ptr&lt; <a class="el" href="structtenzor_1_1GraphNode.html">GraphNode</a> &gt; from, std::shared_ptr&lt; <a class="el" href="structtenzor_1_1GraphNode.html">GraphNode</a> &gt; to) -&gt; void</td></tr>
-<tr class="memitem:a020363e53c206f55fd974b4a10180a08" id="r_a020363e53c206f55fd974b4a10180a08"><td class="memItemLeft" align="right" valign="top"><a id="a020363e53c206f55fd974b4a10180a08" name="a020363e53c206f55fd974b4a10180a08"></a>
-auto&#160;</td><td class="memItemRight" valign="bottom"><b>topological_sort</b> (std::shared_ptr&lt; <a class="el" href="structtenzor_1_1GraphNode.html">GraphNode</a> &gt; root) -&gt; std::vector&lt; std::shared_ptr&lt; <a class="el" href="structtenzor_1_1GraphNode.html">GraphNode</a> &gt; &gt;</td></tr>
-<tr class="memitem:a12dd4f19a398ea56a0fdf4ef56c93da8" id="r_a12dd4f19a398ea56a0fdf4ef56c93da8"><td class="memItemLeft" align="right" valign="top"><a id="a12dd4f19a398ea56a0fdf4ef56c93da8" name="a12dd4f19a398ea56a0fdf4ef56c93da8"></a>
-auto&#160;</td><td class="memItemRight" valign="bottom"><b>clear</b> () -&gt; void</td></tr>
-<tr class="memitem:a8658568059d833801abd766203f99cac" id="r_a8658568059d833801abd766203f99cac"><td class="memItemLeft" align="right" valign="top"><a id="a8658568059d833801abd766203f99cac" name="a8658568059d833801abd766203f99cac"></a>
-auto&#160;</td><td class="memItemRight" valign="bottom"><b>node_count</b> () const -&gt; size_t</td></tr>
-<tr class="memitem:a8eff18e9ea24e00655737bb6980fd513" id="r_a8eff18e9ea24e00655737bb6980fd513"><td class="memItemLeft" align="right" valign="top"><a id="a8eff18e9ea24e00655737bb6980fd513" name="a8eff18e9ea24e00655737bb6980fd513"></a>
-auto&#160;</td><td class="memItemRight" valign="bottom"><b>edge_count</b> () const -&gt; size_t</td></tr>
+<tr class="memitem:a87d52cd345e4bba687ad70017a156c55" id="r_a87d52cd345e4bba687ad70017a156c55"><td class="memItemLeft" align="right" valign="top"><a id="a87d52cd345e4bba687ad70017a156c55" name="a87d52cd345e4bba687ad70017a156c55"></a>
+&#160;</td><td class="memItemRight" valign="bottom"><b>ComputationGraph</b> ()=default</td></tr>
+<tr class="memdesc:a87d52cd345e4bba687ad70017a156c55"><td class="mdescLeft">&#160;</td><td class="mdescRight">Default constructor. <br /></td></tr>
+<tr class="memitem:a3e35a409f4dd7603f682e2fb92b8d13b" id="r_a3e35a409f4dd7603f682e2fb92b8d13b"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a3e35a409f4dd7603f682e2fb92b8d13b">add_node</a> (std::shared_ptr&lt; <a class="el" href="classtenzor_1_1Function.html">Function</a> &gt; func) -&gt; std::shared_ptr&lt; <a class="el" href="structtenzor_1_1GraphNode.html">GraphNode</a> &gt;</td></tr>
+<tr class="memdesc:a3e35a409f4dd7603f682e2fb92b8d13b"><td class="mdescLeft">&#160;</td><td class="mdescRight">Add a function node to the graph.  <br /></td></tr>
+<tr class="memitem:a70661dd12a89c7a011f6da4bf9e17fb7" id="r_a70661dd12a89c7a011f6da4bf9e17fb7"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a70661dd12a89c7a011f6da4bf9e17fb7">connect</a> (std::shared_ptr&lt; <a class="el" href="structtenzor_1_1GraphNode.html">GraphNode</a> &gt; from, std::shared_ptr&lt; <a class="el" href="structtenzor_1_1GraphNode.html">GraphNode</a> &gt; to) -&gt; void</td></tr>
+<tr class="memdesc:a70661dd12a89c7a011f6da4bf9e17fb7"><td class="mdescLeft">&#160;</td><td class="mdescRight">Connect two nodes in the graph.  <br /></td></tr>
+<tr class="memitem:a020363e53c206f55fd974b4a10180a08" id="r_a020363e53c206f55fd974b4a10180a08"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a020363e53c206f55fd974b4a10180a08">topological_sort</a> (std::shared_ptr&lt; <a class="el" href="structtenzor_1_1GraphNode.html">GraphNode</a> &gt; root) -&gt; std::vector&lt; std::shared_ptr&lt; <a class="el" href="structtenzor_1_1GraphNode.html">GraphNode</a> &gt; &gt;</td></tr>
+<tr class="memdesc:a020363e53c206f55fd974b4a10180a08"><td class="mdescLeft">&#160;</td><td class="mdescRight">Perform topological sort from root node.  <br /></td></tr>
+<tr class="memitem:a12dd4f19a398ea56a0fdf4ef56c93da8" id="r_a12dd4f19a398ea56a0fdf4ef56c93da8"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a12dd4f19a398ea56a0fdf4ef56c93da8">clear</a> () -&gt; void</td></tr>
+<tr class="memdesc:a12dd4f19a398ea56a0fdf4ef56c93da8"><td class="mdescLeft">&#160;</td><td class="mdescRight">Clear all nodes and edges from graph.  <br /></td></tr>
+<tr class="memitem:a8658568059d833801abd766203f99cac" id="r_a8658568059d833801abd766203f99cac"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a8658568059d833801abd766203f99cac">node_count</a> () const -&gt; size_t</td></tr>
+<tr class="memdesc:a8658568059d833801abd766203f99cac"><td class="mdescLeft">&#160;</td><td class="mdescRight">Get number of nodes in graph.  <br /></td></tr>
+<tr class="memitem:a8eff18e9ea24e00655737bb6980fd513" id="r_a8eff18e9ea24e00655737bb6980fd513"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a8eff18e9ea24e00655737bb6980fd513">edge_count</a> () const -&gt; size_t</td></tr>
+<tr class="memdesc:a8eff18e9ea24e00655737bb6980fd513"><td class="mdescLeft">&#160;</td><td class="mdescRight">Get number of edges in graph.  <br /></td></tr>
 </table>
 <a name="details" id="details"></a><h2 id="header-details" class="groupheader">Detailed Description</h2>
-<div class="textblock">
-<p class="definition">Definition at line <a class="el" href="graph_8hpp_source.html#l00019">19</a> of file <a class="el" href="graph_8hpp_source.html">graph.hpp</a>.</p>
-</div><hr/>The documentation for this class was generated from the following file:<ul>
+<div class="textblock"><p>Computation graph for automatic differentiation. </p>
+<p>Manages the directed acyclic graph (DAG) of operations performed during the forward pass. This graph is used during backpropagation to compute gradients in the correct order.</p>
+<p>Key features:</p><ul>
+<li>Dynamic graph construction during forward pass</li>
+<li>Topological sorting for backward pass</li>
+<li>Efficient memory management with reference counting</li>
+<li>Graph statistics and analysis</li>
+</ul>
+<p>The graph is typically managed automatically by <a class="el" href="classtenzor_1_1Variable.html" title="Gradient-enabled tensor wrapper for automatic differentiation.">Variable</a> and <a class="el" href="classtenzor_1_1BackwardEngine.html" title="Execution engine for backward pass gradient computation.">BackwardEngine</a> rather than being used directly.</p>
+<div class="fragment"><div class="line"><a class="code hl_function" href="#a87d52cd345e4bba687ad70017a156c55">ComputationGraph</a> graph;</div>
+<div class="line"> </div>
+<div class="line"><span class="comment">// Add operations to graph</span></div>
+<div class="line"><span class="keyword">auto</span> node1 = graph.<a class="code hl_function" href="#a3e35a409f4dd7603f682e2fb92b8d13b">add_node</a>(add_func);</div>
+<div class="line"><span class="keyword">auto</span> node2 = graph.<a class="code hl_function" href="#a3e35a409f4dd7603f682e2fb92b8d13b">add_node</a>(mul_func);</div>
+<div class="line"> </div>
+<div class="line"><span class="comment">// Connect operations</span></div>
+<div class="line">graph.<a class="code hl_function" href="#a70661dd12a89c7a011f6da4bf9e17fb7">connect</a>(node1, node2);</div>
+<div class="line"> </div>
+<div class="line"><span class="comment">// Get execution order for backward pass</span></div>
+<div class="line"><span class="keyword">auto</span> sorted = graph.<a class="code hl_function" href="#a020363e53c206f55fd974b4a10180a08">topological_sort</a>(node2);</div>
+<div class="line"> </div>
+<div class="line"><span class="comment">// Clean up</span></div>
+<div class="line">graph.<a class="code hl_function" href="#a12dd4f19a398ea56a0fdf4ef56c93da8">clear</a>();</div>
+<div class="ttc" id="aclasstenzor_1_1ComputationGraph_html_a020363e53c206f55fd974b4a10180a08"><div class="ttname"><a href="#a020363e53c206f55fd974b4a10180a08">tenzor::ComputationGraph::topological_sort</a></div><div class="ttdeci">auto topological_sort(std::shared_ptr&lt; GraphNode &gt; root) -&gt; std::vector&lt; std::shared_ptr&lt; GraphNode &gt; &gt;</div><div class="ttdoc">Perform topological sort from root node.</div></div>
+<div class="ttc" id="aclasstenzor_1_1ComputationGraph_html_a12dd4f19a398ea56a0fdf4ef56c93da8"><div class="ttname"><a href="#a12dd4f19a398ea56a0fdf4ef56c93da8">tenzor::ComputationGraph::clear</a></div><div class="ttdeci">auto clear() -&gt; void</div><div class="ttdoc">Clear all nodes and edges from graph.</div></div>
+<div class="ttc" id="aclasstenzor_1_1ComputationGraph_html_a3e35a409f4dd7603f682e2fb92b8d13b"><div class="ttname"><a href="#a3e35a409f4dd7603f682e2fb92b8d13b">tenzor::ComputationGraph::add_node</a></div><div class="ttdeci">auto add_node(std::shared_ptr&lt; Function &gt; func) -&gt; std::shared_ptr&lt; GraphNode &gt;</div><div class="ttdoc">Add a function node to the graph.</div></div>
+<div class="ttc" id="aclasstenzor_1_1ComputationGraph_html_a70661dd12a89c7a011f6da4bf9e17fb7"><div class="ttname"><a href="#a70661dd12a89c7a011f6da4bf9e17fb7">tenzor::ComputationGraph::connect</a></div><div class="ttdeci">auto connect(std::shared_ptr&lt; GraphNode &gt; from, std::shared_ptr&lt; GraphNode &gt; to) -&gt; void</div><div class="ttdoc">Connect two nodes in the graph.</div></div>
+<div class="ttc" id="aclasstenzor_1_1ComputationGraph_html_a87d52cd345e4bba687ad70017a156c55"><div class="ttname"><a href="#a87d52cd345e4bba687ad70017a156c55">tenzor::ComputationGraph::ComputationGraph</a></div><div class="ttdeci">ComputationGraph()=default</div><div class="ttdoc">Default constructor.</div></div>
+</div><!-- fragment --><dl class="section see"><dt>See also</dt><dd><a class="el" href="classtenzor_1_1BackwardEngine.html" title="Execution engine for backward pass gradient computation.">BackwardEngine</a> for gradient execution </dd>
+<dd>
+<a class="el" href="classtenzor_1_1Function.html" title="Base class for autograd differentiable functions.">Function</a> for graph node operations </dd></dl>
+
+<p class="definition">Definition at line <a class="el" href="graph_8hpp_source.html#l00071">71</a> of file <a class="el" href="graph_8hpp_source.html">graph.hpp</a>.</p>
+</div><a name="doc-func-members" id="doc-func-members"></a><h2 id="header-doc-func-members" class="groupheader">Member Function Documentation</h2>
+<a id="a3e35a409f4dd7603f682e2fb92b8d13b" name="a3e35a409f4dd7603f682e2fb92b8d13b"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a3e35a409f4dd7603f682e2fb92b8d13b">&#9670;&#160;</a></span>add_node()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname">auto tenzor::ComputationGraph::add_node </td>
+          <td>(</td>
+          <td class="paramtype">std::shared_ptr&lt; <a class="el" href="classtenzor_1_1Function.html">Function</a> &gt;</td>          <td class="paramname"><span class="paramname"><em>func</em></span></td><td>)</td>
+          <td> -&gt;  std::shared_ptr&lt; <a class="el" href="structtenzor_1_1GraphNode.html">GraphNode</a> &gt;</td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>Add a function node to the graph. </p>
+<p>Creates a new graph node for the given function. If a node already exists for this function, returns the existing node.</p>
+<dl class="params"><dt>Parameters</dt><dd>
+  <table class="params">
+    <tr><td class="paramname">func</td><td>Gradient function to add </td></tr>
+  </table>
+  </dd>
+</dl>
+<dl class="section return"><dt>Returns</dt><dd>Shared pointer to graph node</dd></dl>
+<div class="fragment"><div class="line"><span class="keyword">auto</span> add_func = std::make_shared&lt;AddBackward&gt;();</div>
+<div class="line"><span class="keyword">auto</span> node = graph.add_node(add_func);</div>
+</div><!-- fragment --> 
+</div>
+</div>
+<a id="a12dd4f19a398ea56a0fdf4ef56c93da8" name="a12dd4f19a398ea56a0fdf4ef56c93da8"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a12dd4f19a398ea56a0fdf4ef56c93da8">&#9670;&#160;</a></span>clear()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname">auto tenzor::ComputationGraph::clear </td>
+          <td>(</td>
+          <td class="paramname"><span class="paramname"><em></em></span></td><td>)</td>
+          <td> -&gt;  void</td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>Clear all nodes and edges from graph. </p>
+<p>Removes all nodes and resets edge count. Call this to free memory after a backward pass is complete. </p>
+
+</div>
+</div>
+<a id="a70661dd12a89c7a011f6da4bf9e17fb7" name="a70661dd12a89c7a011f6da4bf9e17fb7"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a70661dd12a89c7a011f6da4bf9e17fb7">&#9670;&#160;</a></span>connect()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname">auto tenzor::ComputationGraph::connect </td>
+          <td>(</td>
+          <td class="paramtype">std::shared_ptr&lt; <a class="el" href="structtenzor_1_1GraphNode.html">GraphNode</a> &gt;</td>          <td class="paramname"><span class="paramname"><em>from</em></span>, </td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype">std::shared_ptr&lt; <a class="el" href="structtenzor_1_1GraphNode.html">GraphNode</a> &gt;</td>          <td class="paramname"><span class="paramname"><em>to</em></span>&#160;) -&gt;  void</td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>Connect two nodes in the graph. </p>
+<p>Creates a directed edge from one node to another, representing the flow of gradients during backpropagation. The 'from' node depends on the output of the 'to' node.</p>
+<dl class="params"><dt>Parameters</dt><dd>
+  <table class="params">
+    <tr><td class="paramname">from</td><td>Source node (earlier in forward pass) </td></tr>
+    <tr><td class="paramname">to</td><td>Destination node (later in forward pass)</td></tr>
+  </table>
+  </dd>
+</dl>
+<div class="fragment"><div class="line">graph.connect(input_node, output_node);</div>
+<div class="line"><span class="comment">// Gradients flow from output_node back to input_node</span></div>
+</div><!-- fragment --> 
+</div>
+</div>
+<a id="a8eff18e9ea24e00655737bb6980fd513" name="a8eff18e9ea24e00655737bb6980fd513"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a8eff18e9ea24e00655737bb6980fd513">&#9670;&#160;</a></span>edge_count()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname">auto tenzor::ComputationGraph::edge_count </td>
+          <td>(</td>
+          <td class="paramname"><span class="paramname"><em></em></span></td><td>)</td>
+          <td> const -&gt;  size_t</td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>Get number of edges in graph. </p>
+<dl class="section return"><dt>Returns</dt><dd>Count of connections between nodes </dd></dl>
+
+<p class="reference">References <a class="el" href="#a8eff18e9ea24e00655737bb6980fd513">edge_count()</a>, and <a class="el" href="group__tensor__reduction.html#ga57c6304de0ccf7b02d2cf42923b2e3d9">tenzor::std()</a>.</p>
+
+<p class="reference">Referenced by <a class="el" href="#a8eff18e9ea24e00655737bb6980fd513">edge_count()</a>.</p>
+
+</div>
+</div>
+<a id="a8658568059d833801abd766203f99cac" name="a8658568059d833801abd766203f99cac"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a8658568059d833801abd766203f99cac">&#9670;&#160;</a></span>node_count()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname">auto tenzor::ComputationGraph::node_count </td>
+          <td>(</td>
+          <td class="paramname"><span class="paramname"><em></em></span></td><td>)</td>
+          <td> const -&gt;  size_t</td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>Get number of nodes in graph. </p>
+<dl class="section return"><dt>Returns</dt><dd>Count of function nodes in the graph </dd></dl>
+
+</div>
+</div>
+<a id="a020363e53c206f55fd974b4a10180a08" name="a020363e53c206f55fd974b4a10180a08"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a020363e53c206f55fd974b4a10180a08">&#9670;&#160;</a></span>topological_sort()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname">auto tenzor::ComputationGraph::topological_sort </td>
+          <td>(</td>
+          <td class="paramtype">std::shared_ptr&lt; <a class="el" href="structtenzor_1_1GraphNode.html">GraphNode</a> &gt;</td>          <td class="paramname"><span class="paramname"><em>root</em></span></td><td>)</td>
+          <td> -&gt;  std::vector&lt; std::shared_ptr&lt; <a class="el" href="structtenzor_1_1GraphNode.html">GraphNode</a> &gt; &gt;</td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>Perform topological sort from root node. </p>
+<p>Computes a topologically sorted order of nodes from the root backward to all dependencies. This order ensures that gradients are computed correctly during backpropagation.</p>
+<p>Uses depth-first search with cycle detection to traverse the graph.</p>
+<dl class="params"><dt>Parameters</dt><dd>
+  <table class="params">
+    <tr><td class="paramname">root</td><td>Root node to start sorting from </td></tr>
+  </table>
+  </dd>
+</dl>
+<dl class="section return"><dt>Returns</dt><dd>Vector of nodes in reverse topological order</dd></dl>
+<dl class="exception"><dt>Exceptions</dt><dd>
+  <table class="exception">
+    <tr><td class="paramname">std::runtime_error</td><td>if graph contains cycles</td></tr>
+  </table>
+  </dd>
+</dl>
+<div class="fragment"><div class="line"><span class="keyword">auto</span> sorted_nodes = graph.topological_sort(output_node);</div>
+<div class="line"><span class="comment">// Nodes are now in order for backward pass execution</span></div>
+</div><!-- fragment --> 
+</div>
+</div>
+<hr/>The documentation for this class was generated from the following file:<ul>
 <li>include/tenzor/autograd/<a class="el" href="graph_8hpp_source.html">graph.hpp</a></li>
 </ul>
 </div><!-- contents -->
@@ -127,7 +329,7 @@ auto&#160;</td><td class="memItemRight" valign="bottom"><b>edge_count</b> () con
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><b>tenzor</b></li><li class="navelem"><a href="classtenzor_1_1ComputationGraph.html">ComputationGraph</a></li>
+    <li class="navelem"><a href="namespacetenzor.html">tenzor</a></li><li class="navelem"><a href="classtenzor_1_1ComputationGraph.html">ComputationGraph</a></li>
     <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>

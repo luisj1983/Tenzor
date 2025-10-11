@@ -2,7 +2,7 @@
 <area shape="rect" id="Node000001" title="Internal tensor implementation (PImpl pattern)." alt="" coords="215,246,356,274"/>
 <area shape="rect" id="Node000002" title=" " alt="" coords="5,106,180,151"/>
 <area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="135,158,225,220,264,243,261,248,222,224,132,162"/>
-<area shape="rect" id="Node000003" href="$classtenzor_1_1Storage.html" title=" " alt="" coords="32,5,153,33"/>
+<area shape="rect" id="Node000003" href="$classtenzor_1_1Storage.html" title="Abstract base class for tensor memory storage." alt="" coords="32,5,153,33"/>
 <area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="95,49,95,105,90,105,90,49"/>
 <area shape="rect" id="Node000004" title=" " alt="" coords="203,114,368,142"/>
 <area shape="poly" id="edge3_Node000001_Node000004" title=" " alt="" coords="288,158,288,245,283,245,283,158"/>

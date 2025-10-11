@@ -92,16 +92,43 @@ $(function(){initNavTree('classtenzor_1_1SpinLock.html','','classtenzor_1_1SpinL
   <div class="headertitle"><div class="title">tenzor::SpinLock Class Reference</div></div>
 </div><!--header-->
 <div class="contents">
+
+<p>Lightweight spin lock for short critical sections.  
+ <a href="#details">More...</a></p>
+
+<p><code>#include &lt;<a class="el" href="atomic_8hpp_source.html">atomic.hpp</a>&gt;</code></p>
 <table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-pub-methods" class="groupheader"><a id="pub-methods" name="pub-methods"></a>
 Public Member Functions</h2></td></tr>
 <tr class="memitem:a3e9f5be73916651bf669fc369782b1e5" id="r_a3e9f5be73916651bf669fc369782b1e5"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a3e9f5be73916651bf669fc369782b1e5">lock</a> () -&gt; void</td></tr>
+<tr class="memdesc:a3e9f5be73916651bf669fc369782b1e5"><td class="mdescLeft">&#160;</td><td class="mdescRight">Acquire the lock (blocks until available)  <br /></td></tr>
 <tr class="memitem:a9b95afa5f9ab91cf29f6d8aadd096346" id="r_a9b95afa5f9ab91cf29f6d8aadd096346"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a9b95afa5f9ab91cf29f6d8aadd096346">unlock</a> () -&gt; void</td></tr>
+<tr class="memdesc:a9b95afa5f9ab91cf29f6d8aadd096346"><td class="mdescLeft">&#160;</td><td class="mdescRight">Release the lock.  <br /></td></tr>
 <tr class="memitem:a06a65b20b88a9a8d8d15d52b58f93847" id="r_a06a65b20b88a9a8d8d15d52b58f93847"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a06a65b20b88a9a8d8d15d52b58f93847">try_lock</a> () -&gt; bool</td></tr>
+<tr class="memdesc:a06a65b20b88a9a8d8d15d52b58f93847"><td class="mdescLeft">&#160;</td><td class="mdescRight">Try to acquire lock without blocking.  <br /></td></tr>
 </table>
 <a name="details" id="details"></a><h2 id="header-details" class="groupheader">Detailed Description</h2>
-<div class="textblock">
-<p class="definition">Definition at line <a class="el" href="atomic_8hpp_source.html#l00025">25</a> of file <a class="el" href="atomic_8hpp_source.html">atomic.hpp</a>.</p>
+<div class="textblock"><p>Lightweight spin lock for short critical sections. </p>
+<p>Spin lock that actively spins (busy-waits) until lock is acquired. Suitable for protecting very short critical sections where blocking would be more expensive than spinning.</p>
+<p><b>When to Use:</b></p><ul>
+<li>Critical sections &lt; 100 CPU cycles</li>
+<li>Low contention scenarios</li>
+<li>Real-time requirements</li>
+</ul>
+<p><b>When NOT to Use:</b></p><ul>
+<li>Long critical sections (use std::mutex)</li>
+<li>High contention (causes CPU waste)</li>
+<li>I/O operations in critical section</li>
+</ul>
+<dl class="section user"><dt>Thread Safety</dt><dd>Thread-safe</dd></dl>
+<div class="fragment"><div class="line">SpinLock <a class="code hl_function" href="#a3e9f5be73916651bf669fc369782b1e5">lock</a>;</div>
+<div class="line"><span class="comment">// ... in thread:</span></div>
+<div class="line"><a class="code hl_function" href="#a3e9f5be73916651bf669fc369782b1e5">lock</a>.lock();</div>
+<div class="line"><span class="comment">// Critical section</span></div>
+<div class="line"><a class="code hl_function" href="#a3e9f5be73916651bf669fc369782b1e5">lock</a>.unlock();</div>
+<div class="ttc" id="aclasstenzor_1_1SpinLock_html_a3e9f5be73916651bf669fc369782b1e5"><div class="ttname"><a href="#a3e9f5be73916651bf669fc369782b1e5">tenzor::SpinLock::lock</a></div><div class="ttdeci">auto lock() -&gt; void</div><div class="ttdoc">Acquire the lock (blocks until available)</div><div class="ttdef"><b>Definition</b> <a href="atomic_8hpp_source.html#l00100">atomic.hpp:100</a></div></div>
+</div><!-- fragment --> 
+<p class="definition">Definition at line <a class="el" href="atomic_8hpp_source.html#l00090">90</a> of file <a class="el" href="atomic_8hpp_source.html">atomic.hpp</a>.</p>
 </div><a name="doc-func-members" id="doc-func-members"></a><h2 id="header-doc-func-members" class="groupheader">Member Function Documentation</h2>
 <a id="a3e9f5be73916651bf669fc369782b1e5" name="a3e9f5be73916651bf669fc369782b1e5"></a>
 <h2 class="memtitle"><span class="permalink"><a href="#a3e9f5be73916651bf669fc369782b1e5">&#9670;&#160;</a></span>lock()</h2>
@@ -126,7 +153,10 @@ Public Member Functions</h2></td></tr>
 </table>
 </div><div class="memdoc">
 
-<p class="definition">Definition at line <a class="el" href="atomic_8hpp_source.html#l00029">29</a> of file <a class="el" href="atomic_8hpp_source.html">atomic.hpp</a>.</p>
+<p>Acquire the lock (blocks until available) </p>
+<p>Spins until lock is acquired. Uses CPU pause instructions on x86/ARM to reduce power consumption and improve performance. </p>
+
+<p class="definition">Definition at line <a class="el" href="atomic_8hpp_source.html#l00100">100</a> of file <a class="el" href="atomic_8hpp_source.html">atomic.hpp</a>.</p>
 
 </div>
 </div>
@@ -153,7 +183,10 @@ Public Member Functions</h2></td></tr>
 </table>
 </div><div class="memdoc">
 
-<p class="definition">Definition at line <a class="el" href="atomic_8hpp_source.html#l00044">44</a> of file <a class="el" href="atomic_8hpp_source.html">atomic.hpp</a>.</p>
+<p>Try to acquire lock without blocking. </p>
+<dl class="section return"><dt>Returns</dt><dd>true if lock acquired, false if already locked </dd></dl>
+
+<p class="definition">Definition at line <a class="el" href="atomic_8hpp_source.html#l00122">122</a> of file <a class="el" href="atomic_8hpp_source.html">atomic.hpp</a>.</p>
 
 </div>
 </div>
@@ -180,7 +213,9 @@ Public Member Functions</h2></td></tr>
 </table>
 </div><div class="memdoc">
 
-<p class="definition">Definition at line <a class="el" href="atomic_8hpp_source.html#l00040">40</a> of file <a class="el" href="atomic_8hpp_source.html">atomic.hpp</a>.</p>
+<p>Release the lock. </p>
+
+<p class="definition">Definition at line <a class="el" href="atomic_8hpp_source.html#l00114">114</a> of file <a class="el" href="atomic_8hpp_source.html">atomic.hpp</a>.</p>
 
 </div>
 </div>
@@ -200,7 +235,7 @@ Public Member Functions</h2></td></tr>
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><b>tenzor</b></li><li class="navelem"><a href="classtenzor_1_1SpinLock.html">SpinLock</a></li>
+    <li class="navelem"><a href="namespacetenzor.html">tenzor</a></li><li class="navelem"><a href="classtenzor_1_1SpinLock.html">SpinLock</a></li>
     <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>

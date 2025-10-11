@@ -5,7 +5,7 @@
 <meta http-equiv="X-UA-Compatible" content="IE=11"/>
 <meta name="generator" content="Doxygen 1.14.0"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Tenzor: tenzor/backend/dispatch.hpp File Reference</title>
+<title>Tenzor: include/tenzor/backend/dispatch.hpp File Reference</title>
 <link href="tabs.css" rel="stylesheet" type="text/css"/>
 <script type="text/javascript" src="jquery.js"></script>
 <script type="text/javascript" src="dynsections.js"></script>
@@ -28,7 +28,7 @@
   <td id="projectalign">
    <div id="projectname">Tenzor<span id="projectnumber">&#160;1.0.0</span>
    </div>
-   <div id="projectbrief">Modern C++20 tensor library with automatic differentiation</div>
+   <div id="projectbrief">High-performance tensor library with automatic differentiation</div>
   </td>
  </tr>
  </tbody>
@@ -92,22 +92,89 @@ $(function(){initNavTree('dispatch_8hpp.html','',''); });
   <div class="headertitle"><div class="title">dispatch.hpp File Reference</div></div>
 </div><!--header-->
 <div class="contents">
+
+<p>Central dispatcher for routing operations to appropriate backends.  
+<a href="#details">More...</a></p>
 <div class="textblock"><code>#include &lt;span&gt;</code><br />
 <code>#include &lt;vector&gt;</code><br />
 <code>#include &quot;<a class="el" href="tensor_8hpp_source.html">../core/tensor.hpp</a>&quot;</code><br />
 <code>#include &quot;<a class="el" href="backend_8hpp_source.html">backend.hpp</a>&quot;</code><br />
+</div><div class="textblock"><div class="dynheader">
+Include dependency graph for dispatch.hpp:</div>
+<div class="dyncontent">
+<div class="center"><img src="dispatch_8hpp__incl.png" border="0" usemap="#ainclude_2tenzor_2backend_2dispatch_8hpp" loading="lazy" alt=""/></div>
+<map name="ainclude_2tenzor_2backend_2dispatch_8hpp" id="ainclude_2tenzor_2backend_2dispatch_8hpp">
+<area shape="rect" title="Central dispatcher for routing operations to appropriate backends." alt="" coords="318,5,490,50"/>
+<area shape="rect" title=" " alt="" coords="472,249,525,277"/>
+<area shape="poly" title=" " alt="" coords="415,49,490,234,485,236,410,51"/>
+<area shape="rect" title=" " alt="" coords="13,249,75,277"/>
+<area shape="poly" title=" " alt="" coords="369,53,169,176,75,242,72,238,167,171,366,48"/>
+<area shape="rect" href="tensor_8hpp.html" title="Core tensor class for multi&#45;dimensional array operations." alt="" coords="260,174,393,201"/>
+<area shape="poly" title=" " alt="" coords="396,51,342,161,337,159,391,49"/>
+<area shape="rect" href="backend_8hpp.html" title="Abstract backend interface for device&#45;specific implementations." alt="" coords="520,98,624,126"/>
+<area shape="poly" title=" " alt="" coords="450,48,532,88,530,93,447,53"/>
+<area shape="poly" title=" " alt="" coords="358,199,459,242,457,247,356,204"/>
+<area shape="poly" title=" " alt="" coords="277,204,91,252,90,247,275,199"/>
+<area shape="rect" title=" " alt="" coords="348,325,425,353"/>
+<area shape="poly" title=" " alt="" coords="337,201,361,248,382,309,377,311,356,250,332,203"/>
+<area shape="rect" title=" " alt="" coords="272,249,346,277"/>
+<area shape="poly" title=" " alt="" coords="326,203,319,235,313,233,321,201"/>
+<area shape="rect" href="dtype_8hpp.html" title="Data type system for Tenzor tensors." alt="" coords="54,325,140,353"/>
+<area shape="poly" title=" " alt="" coords="260,199,197,217,166,232,139,251,118,280,106,311,101,309,113,277,135,247,164,227,195,212,259,194"/>
+<area shape="rect" href="device_8hpp.html" title="Device specification and management for tensors." alt="" coords="448,325,541,353"/>
+<area shape="poly" title=" " alt="" coords="343,200,470,312,467,316,339,204"/>
+<area shape="rect" href="storage_8hpp.html" title="Memory storage abstraction for tensor data." alt="" coords="150,249,248,277"/>
+<area shape="poly" title=" " alt="" coords="305,204,236,244,233,239,302,200"/>
+<area shape="rect" title=" " alt="" coords="290,401,355,428"/>
+<area shape="poly" title=" " alt="" coords="138,351,276,395,275,400,137,356"/>
+<area shape="rect" title=" " alt="" coords="446,401,543,428"/>
+<area shape="poly" title=" " alt="" coords="141,348,153,350,432,400,431,406,151,355,140,353"/>
+<area shape="rect" title=" " alt="" coords="106,401,198,428"/>
+<area shape="poly" title=" " alt="" coords="109,352,135,386,131,390,105,355"/>
+<area shape="rect" title=" " alt="" coords="5,401,83,428"/>
+<area shape="poly" title=" " alt="" coords="90,355,65,390,60,386,86,352"/>
+<area shape="poly" title=" " alt="" coords="465,356,368,397,366,392,463,351"/>
+<area shape="poly" title=" " alt="" coords="497,353,497,385,492,385,492,353"/>
+<area shape="rect" title=" " alt="" coords="731,401,789,428"/>
+<area shape="poly" title=" " alt="" coords="542,350,717,398,715,404,541,356"/>
+<area shape="poly" title=" " alt="" coords="233,275,340,317,338,322,231,280"/>
+<area shape="poly" title=" " alt="" coords="249,274,434,320,432,325,248,279"/>
+<area shape="rect" title=" " alt="" coords="164,325,233,353"/>
+<area shape="poly" title=" " alt="" coords="201,278,201,309,196,309,196,278"/>
+<area shape="rect" title=" " alt="" coords="258,325,324,353"/>
+<area shape="poly" title=" " alt="" coords="217,275,264,313,261,317,213,280"/>
+<area shape="poly" title=" " alt="" coords="557,128,535,149,516,175,506,205,502,234,496,233,501,203,511,172,531,145,553,124"/>
+<area shape="poly" title=" " alt="" coords="520,122,395,141,322,157,249,176,159,210,84,244,82,240,157,205,247,171,320,152,394,136,520,117"/>
+<area shape="poly" title=" " alt="" coords="529,129,386,171,384,166,527,124"/>
+<area shape="poly" title=" " alt="" coords="571,127,560,174,557,204,557,229,554,253,539,279,523,291,499,303,441,325,439,320,497,298,521,287,535,275,549,251,552,229,552,204,555,173,566,125"/>
+<area shape="poly" title=" " alt="" coords="624,115,684,122,748,133,804,150,825,160,840,172,845,187,840,202,818,244,789,280,754,311,715,337,674,359,633,377,559,401,557,396,631,372,671,354,712,332,750,307,785,276,814,241,835,200,839,187,835,175,822,164,802,155,746,139,683,127,624,120"/>
+<area shape="poly" title=" " alt="" coords="624,111,696,116,769,130,798,141,819,157,826,177,817,203,792,233,762,259,729,280,693,297,621,321,557,334,556,329,620,316,691,292,726,275,759,255,788,230,812,200,821,177,814,160,796,146,768,135,696,121,624,116"/>
+<area shape="poly" title=" " alt="" coords="624,114,688,120,759,131,821,148,845,159,861,172,876,200,879,230,874,260,861,291,825,348,786,391,782,388,820,344,856,289,868,259,874,229,871,201,857,175,842,163,819,153,758,137,688,126,624,119"/>
+<area shape="rect" title=" " alt="" coords="569,174,655,201"/>
+<area shape="poly" title=" " alt="" coords="581,125,600,159,595,161,577,127"/>
+<area shape="rect" title=" " alt="" coords="680,174,803,201"/>
+<area shape="poly" title=" " alt="" coords="603,124,699,165,696,170,601,129"/>
+</map>
+</div>
 </div>
 <p><a href="dispatch_8hpp_source.html">Go to the source code of this file.</a></p>
 <table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-nested-classes" class="groupheader"><a id="nested-classes" name="nested-classes"></a>
 Classes</h2></td></tr>
 <tr class="memitem:tenzor_3A_3ADispatcher" id="r_tenzor_3A_3ADispatcher"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1Dispatcher.html">tenzor::Dispatcher</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Central operation dispatcher for backend routing.  <a href="classtenzor_1_1Dispatcher.html#details">More...</a><br /></td></tr>
 </table><table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-namespaces" class="groupheader"><a id="namespaces" name="namespaces"></a>
 Namespaces</h2></td></tr>
 <tr class="memitem:tenzor" id="r_tenzor"><td class="memItemLeft" align="right" valign="top">namespace &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html">tenzor</a></td></tr>
+<tr class="memdesc:namespacetenzor"><td class="mdescLeft">&#160;</td><td class="mdescRight">Main Tenzor namespace. <br /></td></tr>
 </table>
-</div><!-- contents -->
+<a name="details" id="details"></a><h2 id="header-details" class="groupheader">Detailed Description</h2>
+<div class="textblock"><p>Central dispatcher for routing operations to appropriate backends. </p>
+<p>Provides automatic backend selection and device compatibility checking for tensor operations. Routes operations to CPU, CUDA, ROCm, or OneAPI backends based on tensor device placement. </p>
+
+<p class="definition">Definition in file <a class="el" href="dispatch_8hpp_source.html">dispatch.hpp</a>.</p>
+</div></div><!-- contents -->
 </div><!-- doc-content -->
 <div id="page-nav" class="page-nav-panel">
 <div id="page-nav-resize-handle"></div>
@@ -120,8 +187,8 @@ Namespaces</h2></td></tr>
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><a href="dir_4f7edb362912b75e95599213beee2a17.html">tenzor</a></li><li class="navelem"><a href="dir_a17c2c11515cf3639c59a5ed15c726ad.html">backend</a></li><li class="navelem"><a href="dispatch_8hpp.html">dispatch.hpp</a></li>
-    <li class="footer">Generated by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
+    <li class="navelem"><a href="dir_d44c64559bbebec7f509842c48db8b23.html">include</a></li><li class="navelem"><a href="dir_14ba40437910c5dd1b08964ca20ae5af.html">tenzor</a></li><li class="navelem"><a href="dir_2992e1c9f681c22b056da3b57fbd5125.html">backend</a></li><li class="navelem"><a href="dispatch_8hpp.html">dispatch.hpp</a></li>
+    <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>
 </body>

@@ -92,12 +92,17 @@ $(function(){initNavTree('structtenzor_1_1optim_1_1ParamGroup.html','','structte
   <div class="headertitle"><div class="title">tenzor::optim::ParamGroup Struct Reference</div></div>
 </div><!--header-->
 <div class="contents">
+
+<p>Parameter group with individual learning rate.  
+ <a href="#details">More...</a></p>
+
+<p><code>#include &lt;<a class="el" href="optimizer_8hpp_source.html">optimizer.hpp</a>&gt;</code></p>
 <div class="dynheader">
 Collaboration diagram for tenzor::optim::ParamGroup:</div>
 <div class="dyncontent">
 <div class="center"><img src="structtenzor_1_1optim_1_1ParamGroup__coll__graph.png" border="0" usemap="#atenzor_1_1optim_1_1ParamGroup_coll__map" loading="lazy" alt="Collaboration graph"/></div>
 <map name="atenzor_1_1optim_1_1ParamGroup_coll__map" id="atenzor_1_1optim_1_1ParamGroup_coll__map">
-<area shape="rect" title=" " alt="" coords="5,224,202,251"/>
+<area shape="rect" title="Parameter group with individual learning rate." alt="" coords="5,224,202,251"/>
 <area shape="rect" title=" " alt="" coords="30,106,177,151"/>
 <area shape="poly" title=" " alt="" coords="106,166,106,223,101,223,101,166"/>
 <area shape="rect" href="classtenzor_1_1Variable.html" title="Gradient&#45;enabled tensor wrapper for automatic differentiation." alt="" coords="42,5,165,33"/>
@@ -108,12 +113,21 @@ Collaboration diagram for tenzor::optim::ParamGroup:</div>
 <tr class="heading"><td colspan="2"><h2 id="header-pub-attribs" class="groupheader"><a id="pub-attribs" name="pub-attribs"></a>
 Public Attributes</h2></td></tr>
 <tr class="memitem:ac6e175935c59586284c1605761ae8de6" id="r_ac6e175935c59586284c1605761ae8de6"><td class="memItemLeft" align="right" valign="top">std::vector&lt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a> * &gt;&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#ac6e175935c59586284c1605761ae8de6">params</a></td></tr>
+<tr class="memdesc:ac6e175935c59586284c1605761ae8de6"><td class="mdescLeft">&#160;</td><td class="mdescRight">Parameters in this group.  <br /></td></tr>
 <tr class="memitem:a1f79cbfd3592900332741e8f66a4b438" id="r_a1f79cbfd3592900332741e8f66a4b438"><td class="memItemLeft" align="right" valign="top">double&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a1f79cbfd3592900332741e8f66a4b438">lr</a></td></tr>
+<tr class="memdesc:a1f79cbfd3592900332741e8f66a4b438"><td class="mdescLeft">&#160;</td><td class="mdescRight">Learning rate for this group.  <br /></td></tr>
 <tr class="memitem:a1eb2200564dd7e214d02f800197c7772" id="r_a1eb2200564dd7e214d02f800197c7772"><td class="memItemLeft" align="right" valign="top">double&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a1eb2200564dd7e214d02f800197c7772">weight_decay</a> {0.0}</td></tr>
+<tr class="memdesc:a1eb2200564dd7e214d02f800197c7772"><td class="mdescLeft">&#160;</td><td class="mdescRight">Weight decay (L2 regularization) for this group.  <br /></td></tr>
 </table>
 <a name="details" id="details"></a><h2 id="header-details" class="groupheader">Detailed Description</h2>
-<div class="textblock">
-<p class="definition">Definition at line <a class="el" href="optimizer_8hpp_source.html#l00041">41</a> of file <a class="el" href="optimizer_8hpp_source.html">optimizer.hpp</a>.</p>
+<div class="textblock"><p>Parameter group with individual learning rate. </p>
+<p>Allows different learning rates and weight decay for different parameter groups. Useful for transfer learning or fine-tuning specific layers.</p>
+<div class="fragment"><div class="line"><span class="comment">// Different learning rates for different layers</span></div>
+<div class="line"><a class="code hl_struct" href="structtenzor_1_1optim_1_1ParamGroup.html">ParamGroup</a> group1{backbone_params, 0.001, 0.0001};</div>
+<div class="line"><a class="code hl_struct" href="structtenzor_1_1optim_1_1ParamGroup.html">ParamGroup</a> group2{head_params, 0.01, 0.0001};</div>
+<div class="ttc" id="astructtenzor_1_1optim_1_1ParamGroup_html"><div class="ttname"><a href="structtenzor_1_1optim_1_1ParamGroup.html">tenzor::optim::ParamGroup</a></div><div class="ttdoc">Parameter group with individual learning rate.</div><div class="ttdef"><b>Definition</b> <a href="optimizer_8hpp_source.html#l00152">optimizer.hpp:152</a></div></div>
+</div><!-- fragment --> 
+<p class="definition">Definition at line <a class="el" href="optimizer_8hpp_source.html#l00152">152</a> of file <a class="el" href="optimizer_8hpp_source.html">optimizer.hpp</a>.</p>
 </div><a name="doc-variable-members" id="doc-variable-members"></a><h2 id="header-doc-variable-members" class="groupheader">Member Data Documentation</h2>
 <a id="a1f79cbfd3592900332741e8f66a4b438" name="a1f79cbfd3592900332741e8f66a4b438"></a>
 <h2 class="memtitle"><span class="permalink"><a href="#a1f79cbfd3592900332741e8f66a4b438">&#9670;&#160;</a></span>lr</h2>
@@ -127,7 +141,9 @@ Public Attributes</h2></td></tr>
       </table>
 </div><div class="memdoc">
 
-<p class="definition">Definition at line <a class="el" href="optimizer_8hpp_source.html#l00043">43</a> of file <a class="el" href="optimizer_8hpp_source.html">optimizer.hpp</a>.</p>
+<p>Learning rate for this group. </p>
+
+<p class="definition">Definition at line <a class="el" href="optimizer_8hpp_source.html#l00154">154</a> of file <a class="el" href="optimizer_8hpp_source.html">optimizer.hpp</a>.</p>
 
 </div>
 </div>
@@ -143,7 +159,9 @@ Public Attributes</h2></td></tr>
       </table>
 </div><div class="memdoc">
 
-<p class="definition">Definition at line <a class="el" href="optimizer_8hpp_source.html#l00042">42</a> of file <a class="el" href="optimizer_8hpp_source.html">optimizer.hpp</a>.</p>
+<p>Parameters in this group. </p>
+
+<p class="definition">Definition at line <a class="el" href="optimizer_8hpp_source.html#l00153">153</a> of file <a class="el" href="optimizer_8hpp_source.html">optimizer.hpp</a>.</p>
 
 </div>
 </div>
@@ -159,7 +177,9 @@ Public Attributes</h2></td></tr>
       </table>
 </div><div class="memdoc">
 
-<p class="definition">Definition at line <a class="el" href="optimizer_8hpp_source.html#l00044">44</a> of file <a class="el" href="optimizer_8hpp_source.html">optimizer.hpp</a>.</p>
+<p>Weight decay (L2 regularization) for this group. </p>
+
+<p class="definition">Definition at line <a class="el" href="optimizer_8hpp_source.html#l00155">155</a> of file <a class="el" href="optimizer_8hpp_source.html">optimizer.hpp</a>.</p>
 
 </div>
 </div>
@@ -179,7 +199,7 @@ Public Attributes</h2></td></tr>
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><b>tenzor</b></li><li class="navelem"><b>optim</b></li><li class="navelem"><a href="structtenzor_1_1optim_1_1ParamGroup.html">ParamGroup</a></li>
+    <li class="navelem"><a href="namespacetenzor.html">tenzor</a></li><li class="navelem"><b>optim</b></li><li class="navelem"><a href="structtenzor_1_1optim_1_1ParamGroup.html">ParamGroup</a></li>
     <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>

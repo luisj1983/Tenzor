@@ -5,7 +5,7 @@
 <meta http-equiv="X-UA-Compatible" content="IE=11"/>
 <meta name="generator" content="Doxygen 1.14.0"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Tenzor: tenzor/parallel/parallel_for.hpp File Reference</title>
+<title>Tenzor: include/tenzor/parallel/parallel_for.hpp File Reference</title>
 <link href="tabs.css" rel="stylesheet" type="text/css"/>
 <script type="text/javascript" src="jquery.js"></script>
 <script type="text/javascript" src="dynsections.js"></script>
@@ -28,7 +28,7 @@
   <td id="projectalign">
    <div id="projectname">Tenzor<span id="projectnumber">&#160;1.0.0</span>
    </div>
-   <div id="projectbrief">Modern C++20 tensor library with automatic differentiation</div>
+   <div id="projectbrief">High-performance tensor library with automatic differentiation</div>
   </td>
  </tr>
  </tbody>
@@ -92,25 +92,49 @@ $(function(){initNavTree('parallel__for_8hpp.html','',''); });
   <div class="headertitle"><div class="title">parallel_for.hpp File Reference</div></div>
 </div><!--header-->
 <div class="contents">
+
+<p>Parallel loop execution primitives.  
+<a href="#details">More...</a></p>
 <div class="textblock"><code>#include &lt;functional&gt;</code><br />
 <code>#include &lt;cstdint&gt;</code><br />
+</div><div class="textblock"><div class="dynheader">
+Include dependency graph for parallel_for.hpp:</div>
+<div class="dyncontent">
+<div class="center"><img src="parallel__for_8hpp__incl.png" border="0" usemap="#ainclude_2tenzor_2parallel_2parallel__for_8hpp" loading="lazy" alt=""/></div>
+<map name="ainclude_2tenzor_2parallel_2parallel__for_8hpp" id="ainclude_2tenzor_2parallel_2parallel__for_8hpp">
+<area shape="rect" title="Parallel loop execution primitives." alt="" coords="15,5,181,50"/>
+<area shape="rect" title=" " alt="" coords="5,98,92,126"/>
+<area shape="poly" title=" " alt="" coords="87,52,66,86,62,83,83,49"/>
+<area shape="rect" title=" " alt="" coords="116,98,181,126"/>
+<area shape="poly" title=" " alt="" coords="113,49,135,83,130,86,109,52"/>
+</map>
+</div>
 </div>
 <p><a href="parallel__for_8hpp_source.html">Go to the source code of this file.</a></p>
 <table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-namespaces" class="groupheader"><a id="namespaces" name="namespaces"></a>
 Namespaces</h2></td></tr>
 <tr class="memitem:tenzor" id="r_tenzor"><td class="memItemLeft" align="right" valign="top">namespace &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html">tenzor</a></td></tr>
+<tr class="memdesc:namespacetenzor"><td class="mdescLeft">&#160;</td><td class="mdescRight">Main Tenzor namespace. <br /></td></tr>
 </table><table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-func-members" class="groupheader"><a id="func-members" name="func-members"></a>
 Functions</h2></td></tr>
 <tr class="memitem:a6e3b587d58c4ad5bbd0cbe5e308e955a" id="r_a6e3b587d58c4ad5bbd0cbe5e308e955a"><td class="memTemplParams" colspan="2">template&lt;typename F&gt; </td></tr>
 <tr class="memitem:a6e3b587d58c4ad5bbd0cbe5e308e955a template"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#a6e3b587d58c4ad5bbd0cbe5e308e955a">tenzor::parallel_for</a> (int64_t begin, int64_t end, F &amp;&amp;func) -&gt; void</td></tr>
+<tr class="memdesc:a6e3b587d58c4ad5bbd0cbe5e308e955a"><td class="mdescLeft">&#160;</td><td class="mdescRight">Execute loop iterations in parallel.  <br /></td></tr>
 <tr class="memitem:a5a3216c62058c3f26b34c26130f2d7a9" id="r_a5a3216c62058c3f26b34c26130f2d7a9"><td class="memTemplParams" colspan="2">template&lt;typename F&gt; </td></tr>
 <tr class="memitem:a5a3216c62058c3f26b34c26130f2d7a9 template"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#a5a3216c62058c3f26b34c26130f2d7a9">tenzor::parallel_for</a> (int64_t begin, int64_t end, int64_t grain_size, F &amp;&amp;func) -&gt; void</td></tr>
+<tr class="memdesc:a5a3216c62058c3f26b34c26130f2d7a9"><td class="mdescLeft">&#160;</td><td class="mdescRight">Execute loop with custom grain size.  <br /></td></tr>
 <tr class="memitem:a9f7dc5155c5651afeb01a40c3cc5eb04" id="r_a9f7dc5155c5651afeb01a40c3cc5eb04"><td class="memTemplParams" colspan="2">template&lt;typename T, typename F, typename R&gt; </td></tr>
 <tr class="memitem:a9f7dc5155c5651afeb01a40c3cc5eb04 template"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#a9f7dc5155c5651afeb01a40c3cc5eb04">tenzor::parallel_reduce</a> (int64_t begin, int64_t end, T init, F &amp;&amp;map_func, R &amp;&amp;reduce_func) -&gt; T</td></tr>
+<tr class="memdesc:a9f7dc5155c5651afeb01a40c3cc5eb04"><td class="mdescLeft">&#160;</td><td class="mdescRight">Parallel map-reduce operation.  <br /></td></tr>
 </table>
-</div><!-- contents -->
+<a name="details" id="details"></a><h2 id="header-details" class="groupheader">Detailed Description</h2>
+<div class="textblock"><p>Parallel loop execution primitives. </p>
+<p>Provides high-level parallel programming constructs for data-parallel operations. </p>
+
+<p class="definition">Definition in file <a class="el" href="parallel__for_8hpp_source.html">parallel_for.hpp</a>.</p>
+</div></div><!-- contents -->
 </div><!-- doc-content -->
 <div id="page-nav" class="page-nav-panel">
 <div id="page-nav-resize-handle"></div>
@@ -123,8 +147,8 @@ Functions</h2></td></tr>
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><a href="dir_4f7edb362912b75e95599213beee2a17.html">tenzor</a></li><li class="navelem"><a href="dir_4a1f4f826d5b933793bf79312cc017c9.html">parallel</a></li><li class="navelem"><a href="parallel__for_8hpp.html">parallel_for.hpp</a></li>
-    <li class="footer">Generated by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
+    <li class="navelem"><a href="dir_d44c64559bbebec7f509842c48db8b23.html">include</a></li><li class="navelem"><a href="dir_14ba40437910c5dd1b08964ca20ae5af.html">tenzor</a></li><li class="navelem"><a href="dir_731150426551138f38ed7fbcbd46a602.html">parallel</a></li><li class="navelem"><a href="parallel__for_8hpp.html">parallel_for.hpp</a></li>
+    <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>
 </body>

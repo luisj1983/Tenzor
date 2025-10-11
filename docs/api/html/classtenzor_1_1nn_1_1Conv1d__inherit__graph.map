@@ -1,5 +1,5 @@
 <map id="tenzor::nn::Conv1d" name="tenzor::nn::Conv1d">
-<area shape="rect" id="Node000001" title=" " alt="" coords="5,81,149,109"/>
+<area shape="rect" id="Node000001" title="1D convolutional layer." alt="" coords="5,81,149,109"/>
 <area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="6,5,148,33"/>
 <area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="80,49,80,81,74,81,74,49"/>
 </map>

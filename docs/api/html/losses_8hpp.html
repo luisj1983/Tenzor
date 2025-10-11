@@ -5,7 +5,7 @@
 <meta http-equiv="X-UA-Compatible" content="IE=11"/>
 <meta name="generator" content="Doxygen 1.14.0"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Tenzor: tenzor/nn/loss/losses.hpp File Reference</title>
+<title>Tenzor: include/tenzor/nn/loss/losses.hpp File Reference</title>
 <link href="tabs.css" rel="stylesheet" type="text/css"/>
 <script type="text/javascript" src="jquery.js"></script>
 <script type="text/javascript" src="dynsections.js"></script>
@@ -28,7 +28,7 @@
   <td id="projectalign">
    <div id="projectname">Tenzor<span id="projectnumber">&#160;1.0.0</span>
    </div>
-   <div id="projectbrief">Modern C++20 tensor library with automatic differentiation</div>
+   <div id="projectbrief">High-performance tensor library with automatic differentiation</div>
   </td>
  </tr>
  </tbody>
@@ -92,40 +92,176 @@ $(function(){initNavTree('losses_8hpp.html','',''); });
   <div class="headertitle"><div class="title">losses.hpp File Reference</div></div>
 </div><!--header-->
 <div class="contents">
+
+<p>Loss functions for neural network training.  
+<a href="#details">More...</a></p>
 <div class="textblock"><code>#include &quot;<a class="el" href="module_8hpp_source.html">../module.hpp</a>&quot;</code><br />
+</div><div class="textblock"><div class="dynheader">
+Include dependency graph for losses.hpp:</div>
+<div class="dyncontent">
+<div class="center"><img src="losses_8hpp__incl.png" border="0" usemap="#ainclude_2tenzor_2nn_2loss_2losses_8hpp" loading="lazy" alt=""/></div>
+<map name="ainclude_2tenzor_2nn_2loss_2losses_8hpp" id="ainclude_2tenzor_2nn_2loss_2losses_8hpp">
+<area shape="rect" title="Loss functions for neural network training." alt="" coords="482,5,645,50"/>
+<area shape="rect" href="module_8hpp.html" title="Neural network module base class." alt="" coords="508,98,619,126"/>
+<area shape="poly" title=" " alt="" coords="566,50,566,82,561,82,561,50"/>
+<area shape="rect" title=" " alt="" coords="24,401,100,428"/>
+<area shape="poly" title=" " alt="" coords="508,115,398,116,264,123,199,131,140,142,93,157,60,176,26,215,16,234,10,255,11,299,23,352,43,387,38,390,18,354,5,300,5,254,11,233,21,212,56,172,90,152,139,137,198,126,264,118,397,111,508,109"/>
+<area shape="rect" title=" " alt="" coords="442,476,501,504"/>
+<area shape="poly" title=" " alt="" coords="578,125,597,148,619,181,636,220,643,263,309,402,226,439,199,452,224,449,307,429,643,338,640,365,631,387,616,408,598,425,557,455,516,475,514,470,554,450,595,421,612,404,626,385,635,363,639,342,309,434,225,454,194,454,223,434,307,397,639,261,631,221,614,184,593,152,574,128"/>
+<area shape="rect" title=" " alt="" coords="491,325,553,353"/>
+<area shape="poly" title=" " alt="" coords="564,126,530,310,525,309,559,125"/>
+<area shape="rect" title=" " alt="" coords="678,174,801,201"/>
+<area shape="poly" title=" " alt="" coords="596,124,695,165,693,170,594,129"/>
+<area shape="rect" href="variable_8hpp.html" title="Automatic differentiation wrapper for tensors." alt="" coords="70,174,246,201"/>
+<area shape="poly" title=" " alt="" coords="508,126,247,173,246,168,508,121"/>
+<area shape="rect" href="device_8hpp.html" title="Device specification and management for tensors." alt="" coords="468,401,560,428"/>
+<area shape="poly" title=" " alt="" coords="569,126,577,165,583,223,582,288,577,322,567,354,557,374,543,391,539,388,552,371,562,352,572,321,577,288,578,223,572,166,564,127"/>
+<area shape="poly" title=" " alt="" coords="140,204,113,224,83,252,53,287,31,326,28,341,31,357,45,387,40,390,26,359,23,341,26,324,49,284,79,249,110,220,137,200"/>
+<area shape="rect" title=" " alt="" coords="41,325,115,353"/>
+<area shape="poly" title=" " alt="" coords="154,203,95,313,90,310,149,200"/>
+<area shape="rect" href="tensor_8hpp.html" title="Core tensor class for multi&#45;dimensional array operations." alt="" coords="222,249,356,277"/>
+<area shape="poly" title=" " alt="" coords="183,200,254,239,251,244,180,204"/>
+<area shape="poly" title=" " alt="" coords="264,280,180,327,91,393,88,389,177,323,261,275"/>
+<area shape="poly" title=" " alt="" coords="331,275,477,320,475,326,330,280"/>
+<area shape="poly" title=" " alt="" coords="252,280,131,322,129,317,250,275"/>
+<area shape="rect" title=" " alt="" coords="313,325,366,353"/>
+<area shape="poly" title=" " alt="" coords="300,276,324,310,320,314,296,279"/>
+<area shape="rect" href="dtype_8hpp.html" title="Data type system for Tenzor tensors." alt="" coords="678,401,764,428"/>
+<area shape="poly" title=" " alt="" coords="319,275,422,323,451,337,480,350,576,379,663,399,662,405,575,384,479,355,449,342,420,327,317,280"/>
+<area shape="poly" title=" " alt="" coords="310,275,484,390,481,394,307,280"/>
+<area shape="rect" href="storage_8hpp.html" title="Memory storage abstraction for tensor data." alt="" coords="190,325,289,353"/>
+<area shape="poly" title=" " alt="" coords="282,279,259,313,255,310,278,276"/>
+<area shape="rect" title=" " alt="" coords="524,476,590,504"/>
+<area shape="poly" title=" " alt="" coords="693,431,601,472,599,467,690,426"/>
+<area shape="rect" title=" " alt="" coords="614,476,710,504"/>
+<area shape="poly" title=" " alt="" coords="712,431,684,466,680,462,708,427"/>
+<area shape="rect" title=" " alt="" coords="734,476,825,504"/>
+<area shape="poly" title=" " alt="" coords="733,427,762,462,758,466,729,431"/>
+<area shape="rect" title=" " alt="" coords="849,476,926,504"/>
+<area shape="poly" title=" " alt="" coords="752,426,845,467,843,472,750,431"/>
+<area shape="poly" title=" " alt="" coords="509,430,489,464,484,462,504,428"/>
+<area shape="poly" title=" " alt="" coords="524,428,544,462,539,464,520,430"/>
+<area shape="poly" title=" " alt="" coords="542,426,624,467,621,472,539,431"/>
+<area shape="poly" title=" " alt="" coords="209,356,109,397,107,392,207,351"/>
+<area shape="poly" title=" " alt="" coords="289,351,454,394,452,400,288,356"/>
+<area shape="rect" title=" " alt="" coords="148,401,217,428"/>
+<area shape="poly" title=" " alt="" coords="231,355,204,390,200,387,227,352"/>
+<area shape="rect" title=" " alt="" coords="241,401,307,428"/>
+<area shape="poly" title=" " alt="" coords="248,352,264,385,259,388,243,354"/>
+</map>
+</div>
+</div><div class="textblock"><div class="dynheader">
+This graph shows which files directly or indirectly include this file:</div>
+<div class="dyncontent">
+<div class="center"><img src="losses_8hpp__dep__incl.png" border="0" usemap="#ainclude_2tenzor_2nn_2loss_2losses_8hppdep" loading="lazy" alt=""/></div>
+<map name="ainclude_2tenzor_2nn_2loss_2losses_8hppdep" id="ainclude_2tenzor_2nn_2loss_2losses_8hppdep">
+<area shape="rect" title="Loss functions for neural network training." alt="" coords="16,5,180,50"/>
+<area shape="rect" href="tenzor_8hpp.html" title="Main header &#45; includes all public Tenzor APIs." alt="" coords="5,98,191,126"/>
+<area shape="poly" title=" " alt="" coords="101,66,101,97,95,97,95,66"/>
+</map>
+</div>
 </div>
 <p><a href="losses_8hpp_source.html">Go to the source code of this file.</a></p>
 <table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-nested-classes" class="groupheader"><a id="nested-classes" name="nested-classes"></a>
 Classes</h2></td></tr>
 <tr class="memitem:tenzor_3A_3Ann_3A_3AMSELoss" id="r_tenzor_3A_3Ann_3A_3AMSELoss"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1nn_1_1MSELoss.html">tenzor::nn::MSELoss</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Mean Squared Error (MSE) Loss.  <a href="classtenzor_1_1nn_1_1MSELoss.html#details">More...</a><br /></td></tr>
 <tr class="memitem:tenzor_3A_3Ann_3A_3ACrossEntropyLoss" id="r_tenzor_3A_3Ann_3A_3ACrossEntropyLoss"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1nn_1_1CrossEntropyLoss.html">tenzor::nn::CrossEntropyLoss</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Cross Entropy Loss.  <a href="classtenzor_1_1nn_1_1CrossEntropyLoss.html#details">More...</a><br /></td></tr>
 <tr class="memitem:tenzor_3A_3Ann_3A_3ABCELoss" id="r_tenzor_3A_3Ann_3A_3ABCELoss"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1nn_1_1BCELoss.html">tenzor::nn::BCELoss</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Binary Cross Entropy (BCE) Loss.  <a href="classtenzor_1_1nn_1_1BCELoss.html#details">More...</a><br /></td></tr>
 <tr class="memitem:tenzor_3A_3Ann_3A_3ABCEWithLogitsLoss" id="r_tenzor_3A_3Ann_3A_3ABCEWithLogitsLoss"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1nn_1_1BCEWithLogitsLoss.html">tenzor::nn::BCEWithLogitsLoss</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Binary Cross Entropy with Logits Loss.  <a href="classtenzor_1_1nn_1_1BCEWithLogitsLoss.html#details">More...</a><br /></td></tr>
 <tr class="memitem:tenzor_3A_3Ann_3A_3ANLLLoss" id="r_tenzor_3A_3Ann_3A_3ANLLLoss"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1nn_1_1NLLLoss.html">tenzor::nn::NLLLoss</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Negative Log Likelihood (NLL) Loss.  <a href="classtenzor_1_1nn_1_1NLLLoss.html#details">More...</a><br /></td></tr>
 <tr class="memitem:tenzor_3A_3Ann_3A_3AL1Loss" id="r_tenzor_3A_3Ann_3A_3AL1Loss"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1nn_1_1L1Loss.html">tenzor::nn::L1Loss</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">L1 Loss (Mean Absolute Error)  <a href="classtenzor_1_1nn_1_1L1Loss.html#details">More...</a><br /></td></tr>
 <tr class="memitem:tenzor_3A_3Ann_3A_3ASmoothL1Loss" id="r_tenzor_3A_3Ann_3A_3ASmoothL1Loss"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1nn_1_1SmoothL1Loss.html">tenzor::nn::SmoothL1Loss</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Smooth L1 Loss (Huber Loss)  <a href="classtenzor_1_1nn_1_1SmoothL1Loss.html#details">More...</a><br /></td></tr>
 </table><table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-namespaces" class="groupheader"><a id="namespaces" name="namespaces"></a>
 Namespaces</h2></td></tr>
 <tr class="memitem:tenzor" id="r_tenzor"><td class="memItemLeft" align="right" valign="top">namespace &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html">tenzor</a></td></tr>
-<tr class="memitem:tenzor_3A_3Ann" id="r_tenzor_3A_3Ann"><td class="memItemLeft" align="right" valign="top">namespace &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor_1_1nn.html">tenzor::nn</a></td></tr>
+<tr class="memdesc:namespacetenzor"><td class="mdescLeft">&#160;</td><td class="mdescRight">Main Tenzor namespace. <br /></td></tr>
 </table><table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-enum-members" class="groupheader"><a id="enum-members" name="enum-members"></a>
 Enumerations</h2></td></tr>
-<tr class="memitem:aeb11febbc1aca7cd4e2eccca3fdb1158" id="r_aeb11febbc1aca7cd4e2eccca3fdb1158"><td class="memItemLeft" align="right" valign="top">enum class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor_1_1nn.html#aeb11febbc1aca7cd4e2eccca3fdb1158">tenzor::nn::Reduction</a> { <a class="el" href="namespacetenzor_1_1nn.html#aeb11febbc1aca7cd4e2eccca3fdb1158a6adf97f83acf6453d4a6a4b1070f3754">tenzor::nn::None</a>
-, <a class="el" href="namespacetenzor_1_1nn.html#aeb11febbc1aca7cd4e2eccca3fdb1158a3d6c9ac08ada31c184094bbc67afe00d">tenzor::nn::Mean</a>
-, <a class="el" href="namespacetenzor_1_1nn.html#aeb11febbc1aca7cd4e2eccca3fdb1158aa0ec87054b5e5b7847d0d8780a01a3d5">tenzor::nn::Sum</a>
+<tr class="memitem:aeb11febbc1aca7cd4e2eccca3fdb1158" id="r_aeb11febbc1aca7cd4e2eccca3fdb1158"><td class="memItemLeft" align="right" valign="top">enum class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#aeb11febbc1aca7cd4e2eccca3fdb1158">tenzor::nn::Reduction</a> { <a class="el" href="#aeb11febbc1aca7cd4e2eccca3fdb1158a6adf97f83acf6453d4a6a4b1070f3754">None</a>
+, <a class="el" href="#aeb11febbc1aca7cd4e2eccca3fdb1158a3d6c9ac08ada31c184094bbc67afe00d">Mean</a>
+, <a class="el" href="#aeb11febbc1aca7cd4e2eccca3fdb1158aa0ec87054b5e5b7847d0d8780a01a3d5">Sum</a>
  }</td></tr>
+<tr class="memdesc:aeb11febbc1aca7cd4e2eccca3fdb1158"><td class="mdescLeft">&#160;</td><td class="mdescRight">Reduction mode for loss functions.  <a href="#aeb11febbc1aca7cd4e2eccca3fdb1158">More...</a><br /></td></tr>
 </table><table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-func-members" class="groupheader"><a id="func-members" name="func-members"></a>
 Functions</h2></td></tr>
-<tr class="memitem:a0d7747728d8540f5f7f4b5a88e261be2" id="r_a0d7747728d8540f5f7f4b5a88e261be2"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor_1_1nn.html#a0d7747728d8540f5f7f4b5a88e261be2">tenzor::nn::mse_loss</a> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input, const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;target, <a class="el" href="namespacetenzor_1_1nn.html#aeb11febbc1aca7cd4e2eccca3fdb1158">Reduction</a> reduction=<a class="el" href="namespacetenzor_1_1nn.html#aeb11febbc1aca7cd4e2eccca3fdb1158a3d6c9ac08ada31c184094bbc67afe00d">Reduction::Mean</a>) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
-<tr class="memitem:a44b00495fd680e6a44cf4b9e1e098888" id="r_a44b00495fd680e6a44cf4b9e1e098888"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor_1_1nn.html#a44b00495fd680e6a44cf4b9e1e098888">tenzor::nn::cross_entropy</a> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input, const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &amp;target, <a class="el" href="namespacetenzor_1_1nn.html#aeb11febbc1aca7cd4e2eccca3fdb1158">Reduction</a> reduction=<a class="el" href="namespacetenzor_1_1nn.html#aeb11febbc1aca7cd4e2eccca3fdb1158a3d6c9ac08ada31c184094bbc67afe00d">Reduction::Mean</a>) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
-<tr class="memitem:a9bf7eb16ed70016651550bbbea4155ba" id="r_a9bf7eb16ed70016651550bbbea4155ba"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor_1_1nn.html#a9bf7eb16ed70016651550bbbea4155ba">tenzor::nn::bce_loss</a> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input, const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;target, <a class="el" href="namespacetenzor_1_1nn.html#aeb11febbc1aca7cd4e2eccca3fdb1158">Reduction</a> reduction=<a class="el" href="namespacetenzor_1_1nn.html#aeb11febbc1aca7cd4e2eccca3fdb1158a3d6c9ac08ada31c184094bbc67afe00d">Reduction::Mean</a>) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
-<tr class="memitem:aee3edab624421673532fe5485e348703" id="r_aee3edab624421673532fe5485e348703"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor_1_1nn.html#aee3edab624421673532fe5485e348703">tenzor::nn::nll_loss</a> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input, const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &amp;target, <a class="el" href="namespacetenzor_1_1nn.html#aeb11febbc1aca7cd4e2eccca3fdb1158">Reduction</a> reduction=<a class="el" href="namespacetenzor_1_1nn.html#aeb11febbc1aca7cd4e2eccca3fdb1158a3d6c9ac08ada31c184094bbc67afe00d">Reduction::Mean</a>) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
-<tr class="memitem:a3647c39e6d882c8295e79aedb3b38c36" id="r_a3647c39e6d882c8295e79aedb3b38c36"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor_1_1nn.html#a3647c39e6d882c8295e79aedb3b38c36">tenzor::nn::l1_loss</a> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input, const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;target, <a class="el" href="namespacetenzor_1_1nn.html#aeb11febbc1aca7cd4e2eccca3fdb1158">Reduction</a> reduction=<a class="el" href="namespacetenzor_1_1nn.html#aeb11febbc1aca7cd4e2eccca3fdb1158a3d6c9ac08ada31c184094bbc67afe00d">Reduction::Mean</a>) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
+<tr class="memitem:ga0d7747728d8540f5f7f4b5a88e261be2" id="r_ga0d7747728d8540f5f7f4b5a88e261be2"><td class="memItemLeft" align="right" valign="top">
+auto&#160;</td><td class="memItemRight" valign="bottom"><b>tenzor::nn::mse_loss</b> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input, const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;target, <a class="el" href="#aeb11febbc1aca7cd4e2eccca3fdb1158">Reduction</a> reduction=<a class="el" href="#aeb11febbc1aca7cd4e2eccca3fdb1158a3d6c9ac08ada31c184094bbc67afe00d">Reduction::Mean</a>) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
+<tr class="memdesc:ga0d7747728d8540f5f7f4b5a88e261be2"><td class="mdescLeft">&#160;</td><td class="mdescRight">Functional MSE loss computation. <br /></td></tr>
+<tr class="memitem:ga44b00495fd680e6a44cf4b9e1e098888" id="r_ga44b00495fd680e6a44cf4b9e1e098888"><td class="memItemLeft" align="right" valign="top">
+auto&#160;</td><td class="memItemRight" valign="bottom"><b>tenzor::nn::cross_entropy</b> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input, const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &amp;target, <a class="el" href="#aeb11febbc1aca7cd4e2eccca3fdb1158">Reduction</a> reduction=<a class="el" href="#aeb11febbc1aca7cd4e2eccca3fdb1158a3d6c9ac08ada31c184094bbc67afe00d">Reduction::Mean</a>) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
+<tr class="memdesc:ga44b00495fd680e6a44cf4b9e1e098888"><td class="mdescLeft">&#160;</td><td class="mdescRight">Functional cross entropy loss computation. <br /></td></tr>
+<tr class="memitem:ga9bf7eb16ed70016651550bbbea4155ba" id="r_ga9bf7eb16ed70016651550bbbea4155ba"><td class="memItemLeft" align="right" valign="top">
+auto&#160;</td><td class="memItemRight" valign="bottom"><b>tenzor::nn::bce_loss</b> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input, const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;target, <a class="el" href="#aeb11febbc1aca7cd4e2eccca3fdb1158">Reduction</a> reduction=<a class="el" href="#aeb11febbc1aca7cd4e2eccca3fdb1158a3d6c9ac08ada31c184094bbc67afe00d">Reduction::Mean</a>) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
+<tr class="memdesc:ga9bf7eb16ed70016651550bbbea4155ba"><td class="mdescLeft">&#160;</td><td class="mdescRight">Functional BCE loss computation. <br /></td></tr>
+<tr class="memitem:gaee3edab624421673532fe5485e348703" id="r_gaee3edab624421673532fe5485e348703"><td class="memItemLeft" align="right" valign="top">
+auto&#160;</td><td class="memItemRight" valign="bottom"><b>tenzor::nn::nll_loss</b> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input, const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &amp;target, <a class="el" href="#aeb11febbc1aca7cd4e2eccca3fdb1158">Reduction</a> reduction=<a class="el" href="#aeb11febbc1aca7cd4e2eccca3fdb1158a3d6c9ac08ada31c184094bbc67afe00d">Reduction::Mean</a>) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
+<tr class="memdesc:gaee3edab624421673532fe5485e348703"><td class="mdescLeft">&#160;</td><td class="mdescRight">Functional NLL loss computation. <br /></td></tr>
+<tr class="memitem:ga3647c39e6d882c8295e79aedb3b38c36" id="r_ga3647c39e6d882c8295e79aedb3b38c36"><td class="memItemLeft" align="right" valign="top">
+auto&#160;</td><td class="memItemRight" valign="bottom"><b>tenzor::nn::l1_loss</b> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input, const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;target, <a class="el" href="#aeb11febbc1aca7cd4e2eccca3fdb1158">Reduction</a> reduction=<a class="el" href="#aeb11febbc1aca7cd4e2eccca3fdb1158a3d6c9ac08ada31c184094bbc67afe00d">Reduction::Mean</a>) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
+<tr class="memdesc:ga3647c39e6d882c8295e79aedb3b38c36"><td class="mdescLeft">&#160;</td><td class="mdescRight">Functional L1 loss computation. <br /></td></tr>
 </table>
+<a name="details" id="details"></a><h2 id="header-details" class="groupheader">Detailed Description</h2>
+<div class="textblock"><p>Loss functions for neural network training. </p>
+<p>This file provides common loss (cost/objective) functions used in supervised learning. Loss functions measure the difference between predictions and targets, providing the signal for backpropagation and optimization. </p>
+
+<p class="definition">Definition in file <a class="el" href="losses_8hpp_source.html">losses.hpp</a>.</p>
+</div><a name="doc-enum-members" id="doc-enum-members"></a><h2 id="header-doc-enum-members" class="groupheader">Enumeration Type Documentation</h2>
+<a id="aeb11febbc1aca7cd4e2eccca3fdb1158" name="aeb11febbc1aca7cd4e2eccca3fdb1158"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#aeb11febbc1aca7cd4e2eccca3fdb1158">&#9670;&#160;</a></span>Reduction</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname">enum class <a class="el" href="#aeb11febbc1aca7cd4e2eccca3fdb1158">tenzor::nn::Reduction</a></td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel strong">strong</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+
+<p>Reduction mode for loss functions. </p>
+<p>Specifies how to aggregate individual element losses into a single scalar value.</p>
+<ul>
+<li><b>None</b>: Return loss for each element (no reduction)</li>
+<li><b>Mean</b>: Average loss across all elements (default for most losses)</li>
+<li><b>Sum</b>: Sum all individual losses</li>
+</ul>
+<p><b>Choosing Reduction:</b></p><ul>
+<li>Mean: Use when batch size varies (normalizes by count)</li>
+<li>Sum: Use when you want gradient scale independent of batch size</li>
+<li>None: Use for custom per-element processing </li>
+</ul>
+<table class="fieldtable">
+<tr><th colspan="2">Enumerator</th></tr><tr><td class="fieldname"><a id="aeb11febbc1aca7cd4e2eccca3fdb1158a6adf97f83acf6453d4a6a4b1070f3754" name="aeb11febbc1aca7cd4e2eccca3fdb1158a6adf97f83acf6453d4a6a4b1070f3754"></a>None&#160;</td><td class="fielddoc"><p>No reduction, return per-element loss. </p>
+</td></tr>
+<tr><td class="fieldname"><a id="aeb11febbc1aca7cd4e2eccca3fdb1158a3d6c9ac08ada31c184094bbc67afe00d" name="aeb11febbc1aca7cd4e2eccca3fdb1158a3d6c9ac08ada31c184094bbc67afe00d"></a>Mean&#160;</td><td class="fielddoc"><p>Average reduction (divide by number of elements) </p>
+</td></tr>
+<tr><td class="fieldname"><a id="aeb11febbc1aca7cd4e2eccca3fdb1158aa0ec87054b5e5b7847d0d8780a01a3d5" name="aeb11febbc1aca7cd4e2eccca3fdb1158aa0ec87054b5e5b7847d0d8780a01a3d5"></a>Sum&#160;</td><td class="fielddoc"><p>Sum reduction (sum all losses) </p>
+</td></tr>
+</table>
+
+<p class="definition">Definition at line <a class="el" href="losses_8hpp_source.html#l00031">31</a> of file <a class="el" href="losses_8hpp_source.html">losses.hpp</a>.</p>
+
+</div>
+</div>
 </div><!-- contents -->
 </div><!-- doc-content -->
 <div id="page-nav" class="page-nav-panel">
@@ -139,8 +275,8 @@ Functions</h2></td></tr>
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><a href="dir_4f7edb362912b75e95599213beee2a17.html">tenzor</a></li><li class="navelem"><a href="dir_7d5460f3c919ba4808998a3c805d565d.html">nn</a></li><li class="navelem"><a href="dir_c01d9560896a86b7c07aff3d533fb6f3.html">loss</a></li><li class="navelem"><a href="losses_8hpp.html">losses.hpp</a></li>
-    <li class="footer">Generated by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
+    <li class="navelem"><a href="dir_d44c64559bbebec7f509842c48db8b23.html">include</a></li><li class="navelem"><a href="dir_14ba40437910c5dd1b08964ca20ae5af.html">tenzor</a></li><li class="navelem"><a href="dir_2996a04abcb928fe38186b609b0d69a7.html">nn</a></li><li class="navelem"><a href="dir_383df7e77f472265e68a964705df9dac.html">loss</a></li><li class="navelem"><a href="losses_8hpp.html">losses.hpp</a></li>
+    <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>
 </body>

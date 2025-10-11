@@ -1,5 +1,5 @@
 <map id="tenzor::nn::AdaptiveAvgPool2d" name="tenzor::nn::AdaptiveAvgPool2d">
-<area shape="rect" id="Node000001" title=" " alt="" coords="939,5,1159,33"/>
+<area shape="rect" id="Node000001" title="2D adaptive average pooling layer." alt="" coords="939,5,1159,33"/>
 <area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="723,69,865,97"/>
 <area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="847,61,888,49,965,31,966,36,890,54,849,66"/>
 <area shape="rect" id="Node000008" title=" " alt="" coords="962,57,1136,102"/>

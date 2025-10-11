@@ -5,7 +5,7 @@
 <meta http-equiv="X-UA-Compatible" content="IE=11"/>
 <meta name="generator" content="Doxygen 1.14.0"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Tenzor: tenzor/backend/registry.hpp File Reference</title>
+<title>Tenzor: include/tenzor/backend/registry.hpp File Reference</title>
 <link href="tabs.css" rel="stylesheet" type="text/css"/>
 <script type="text/javascript" src="jquery.js"></script>
 <script type="text/javascript" src="dynsections.js"></script>
@@ -28,7 +28,7 @@
   <td id="projectalign">
    <div id="projectname">Tenzor<span id="projectnumber">&#160;1.0.0</span>
    </div>
-   <div id="projectbrief">Modern C++20 tensor library with automatic differentiation</div>
+   <div id="projectbrief">High-performance tensor library with automatic differentiation</div>
   </td>
  </tr>
  </tbody>
@@ -92,6 +92,9 @@ $(function(){initNavTree('registry_8hpp.html','',''); });
   <div class="headertitle"><div class="title">registry.hpp File Reference</div></div>
 </div><!--header-->
 <div class="contents">
+
+<p>Operation kernel registration and dispatch system.  
+<a href="#details">More...</a></p>
 <div class="textblock"><code>#include &lt;functional&gt;</code><br />
 <code>#include &lt;string&gt;</code><br />
 <code>#include &lt;unordered_map&gt;</code><br />
@@ -100,26 +103,97 @@ $(function(){initNavTree('registry_8hpp.html','',''); });
 <code>#include &quot;<a class="el" href="tensor_8hpp_source.html">../core/tensor.hpp</a>&quot;</code><br />
 <code>#include &quot;<a class="el" href="device_8hpp_source.html">../core/device.hpp</a>&quot;</code><br />
 <code>#include &quot;<a class="el" href="backend_8hpp_source.html">backend.hpp</a>&quot;</code><br />
+</div><div class="textblock"><div class="dynheader">
+Include dependency graph for registry.hpp:</div>
+<div class="dyncontent">
+<div class="center"><img src="registry_8hpp__incl.png" border="0" usemap="#ainclude_2tenzor_2backend_2registry_8hpp" loading="lazy" alt=""/></div>
+<map name="ainclude_2tenzor_2backend_2registry_8hpp" id="ainclude_2tenzor_2backend_2registry_8hpp">
+<area shape="rect" title="Operation kernel registration and dispatch system." alt="" coords="713,5,885,50"/>
+<area shape="rect" title=" " alt="" coords="125,174,212,201"/>
+<area shape="poly" title=" " alt="" coords="714,53,227,174,226,169,713,48"/>
+<area shape="rect" title=" " alt="" coords="798,401,856,428"/>
+<area shape="poly" title=" " alt="" coords="886,44,942,63,995,92,1018,110,1035,132,1047,157,1051,187,772,326,703,363,681,377,701,373,770,353,1050,262,1046,295,1032,321,1011,344,985,362,927,390,872,407,871,402,925,385,983,358,1008,340,1028,318,1041,293,1047,267,772,358,702,378,676,379,700,358,770,321,1046,185,1042,159,1031,135,1014,114,992,96,940,68,884,49"/>
+<area shape="rect" title=" " alt="" coords="837,174,961,201"/>
+<area shape="poly" title=" " alt="" coords="815,49,885,159,880,162,810,52"/>
+<area shape="rect" title=" " alt="" coords="737,249,789,277"/>
+<area shape="poly" title=" " alt="" coords="851,48,905,76,955,113,973,134,984,156,985,179,974,203,947,222,902,238,805,258,804,253,901,233,944,217,970,200,980,178,979,157,969,137,951,117,902,81,849,53"/>
+<area shape="rect" title=" " alt="" coords="1086,98,1200,126"/>
+<area shape="poly" title=" " alt="" coords="886,47,1074,91,1072,96,884,52"/>
+<area shape="rect" href="tensor_8hpp.html" title="Core tensor class for multi&#45;dimensional array operations." alt="" coords="427,174,560,201"/>
+<area shape="poly" title=" " alt="" coords="725,53,668,74,611,100,562,132,521,165,517,161,559,128,608,96,666,69,723,48"/>
+<area shape="rect" href="device_8hpp.html" title="Device specification and management for tensors." alt="" coords="226,325,318,353"/>
+<area shape="poly" title=" " alt="" coords="714,36,560,50,379,76,292,94,216,117,155,144,132,159,116,175,106,195,107,215,117,235,133,254,180,289,229,316,227,320,177,293,130,258,112,238,102,217,101,194,111,172,129,155,152,139,214,112,291,89,378,70,559,45,713,31"/>
+<area shape="rect" href="backend_8hpp.html" title="Abstract backend interface for device&#45;specific implementations." alt="" coords="622,98,725,126"/>
+<area shape="poly" title=" " alt="" coords="768,53,708,92,705,87,765,48"/>
+<area shape="poly" title=" " alt="" coords="543,199,723,248,721,253,541,204"/>
+<area shape="rect" title=" " alt="" coords="528,325,604,353"/>
+<area shape="poly" title=" " alt="" coords="502,200,555,310,550,312,497,203"/>
+<area shape="rect" title=" " alt="" coords="549,249,612,277"/>
+<area shape="poly" title=" " alt="" coords="511,200,555,237,552,241,507,204"/>
+<area shape="rect" title=" " alt="" coords="278,249,352,277"/>
+<area shape="poly" title=" " alt="" coords="463,204,362,246,360,241,461,199"/>
+<area shape="rect" href="dtype_8hpp.html" title="Data type system for Tenzor tensors." alt="" coords="116,325,202,353"/>
+<area shape="poly" title=" " alt="" coords="427,199,341,217,295,232,252,252,212,282,180,315,176,311,208,278,250,247,293,227,340,212,426,193"/>
+<area shape="poly" title=" " alt="" coords="427,200,332,220,292,234,268,251,261,264,259,279,264,310,259,311,254,279,256,263,264,248,289,229,330,215,426,195"/>
+<area shape="rect" href="storage_8hpp.html" title="Memory storage abstraction for tensor data." alt="" coords="376,249,475,277"/>
+<area shape="poly" title=" " alt="" coords="483,204,450,240,446,236,480,200"/>
+<area shape="rect" title=" " alt="" coords="222,401,288,428"/>
+<area shape="poly" title=" " alt="" coords="178,351,227,389,224,393,175,355"/>
+<area shape="rect" title=" " alt="" coords="312,401,408,428"/>
+<area shape="poly" title=" " alt="" coords="196,351,311,392,309,398,194,356"/>
+<area shape="rect" title=" " alt="" coords="5,401,97,428"/>
+<area shape="poly" title=" " alt="" coords="141,355,84,394,81,390,138,351"/>
+<area shape="rect" title=" " alt="" coords="120,401,198,428"/>
+<area shape="poly" title=" " alt="" coords="162,353,162,385,156,385,156,353"/>
+<area shape="poly" title=" " alt="" coords="319,348,331,350,586,385,783,406,782,412,586,391,331,355,319,353"/>
+<area shape="poly" title=" " alt="" coords="272,354,264,386,259,385,267,353"/>
+<area shape="poly" title=" " alt="" coords="290,351,335,389,331,393,286,355"/>
+<area shape="poly" title=" " alt="" coords="452,275,529,315,526,320,449,280"/>
+<area shape="poly" title=" " alt="" coords="399,280,314,320,312,316,397,275"/>
+<area shape="rect" title=" " alt="" coords="343,325,412,353"/>
+<area shape="poly" title=" " alt="" coords="419,279,397,313,392,311,415,276"/>
+<area shape="rect" title=" " alt="" coords="436,325,503,353"/>
+<area shape="poly" title=" " alt="" coords="436,276,456,310,452,313,431,279"/>
+<area shape="poly" title=" " alt="" coords="622,122,448,144,230,176,227,177,226,172,229,171,447,138,621,116"/>
+<area shape="poly" title=" " alt="" coords="694,124,751,173,781,208,804,248,816,284,824,321,829,385,824,385,818,322,811,285,799,250,777,211,747,177,691,128"/>
+<area shape="poly" title=" " alt="" coords="715,124,845,166,844,171,713,129"/>
+<area shape="poly" title=" " alt="" coords="686,125,720,172,753,234,748,237,715,175,682,128"/>
+<area shape="poly" title=" " alt="" coords="642,129,540,170,538,165,640,124"/>
+<area shape="poly" title=" " alt="" coords="674,127,659,194,645,237,625,278,595,316,590,313,621,276,640,235,654,193,669,126"/>
+<area shape="poly" title=" " alt="" coords="666,128,632,175,596,237,592,234,627,172,661,125"/>
+<area shape="poly" title=" " alt="" coords="678,126,680,171,676,233,669,267,658,299,641,329,618,355,573,383,522,402,471,412,425,416,424,411,470,407,521,397,570,379,615,351,637,326,653,297,664,265,671,232,675,171,673,126"/>
+<area shape="poly" title=" " alt="" coords="622,124,526,143,413,171,360,188,313,207,276,228,253,251,248,265,248,280,258,310,253,312,243,281,243,264,249,248,273,224,310,203,358,183,412,166,525,138,621,119"/>
+</map>
+</div>
 </div>
 <p><a href="registry_8hpp_source.html">Go to the source code of this file.</a></p>
 <table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-nested-classes" class="groupheader"><a id="nested-classes" name="nested-classes"></a>
 Classes</h2></td></tr>
 <tr class="memitem:tenzor_3A_3AOperationRegistry" id="r_tenzor_3A_3AOperationRegistry"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1OperationRegistry.html">tenzor::OperationRegistry</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Thread-safe registry for operation kernels.  <a href="classtenzor_1_1OperationRegistry.html#details">More...</a><br /></td></tr>
 </table><table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-namespaces" class="groupheader"><a id="namespaces" name="namespaces"></a>
 Namespaces</h2></td></tr>
 <tr class="memitem:tenzor" id="r_tenzor"><td class="memItemLeft" align="right" valign="top">namespace &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html">tenzor</a></td></tr>
+<tr class="memdesc:namespacetenzor"><td class="mdescLeft">&#160;</td><td class="mdescRight">Main Tenzor namespace. <br /></td></tr>
 </table><table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-typedef-members" class="groupheader"><a id="typedef-members" name="typedef-members"></a>
 Typedefs</h2></td></tr>
 <tr class="memitem:a829391672bef2f5df6ec94a9aafa7230" id="r_a829391672bef2f5df6ec94a9aafa7230"><td class="memItemLeft" align="right" valign="top">using&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#a829391672bef2f5df6ec94a9aafa7230">tenzor::KernelFunction</a></td></tr>
+<tr class="memdesc:a829391672bef2f5df6ec94a9aafa7230"><td class="mdescLeft">&#160;</td><td class="mdescRight">Kernel function signature.  <br /></td></tr>
 </table><table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-func-members" class="groupheader"><a id="func-members" name="func-members"></a>
 Functions</h2></td></tr>
 <tr class="memitem:af4c2fe60b635d53ee226c194a39a8cad" id="r_af4c2fe60b635d53ee226c194a39a8cad"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#af4c2fe60b635d53ee226c194a39a8cad">tenzor::operation_registry</a> () -&gt; <a class="el" href="classtenzor_1_1OperationRegistry.html">OperationRegistry</a> &amp;</td></tr>
+<tr class="memdesc:af4c2fe60b635d53ee226c194a39a8cad"><td class="mdescLeft">&#160;</td><td class="mdescRight">Get global operation registry singleton.  <br /></td></tr>
 </table>
-</div><!-- contents -->
+<a name="details" id="details"></a><h2 id="header-details" class="groupheader">Detailed Description</h2>
+<div class="textblock"><p>Operation kernel registration and dispatch system. </p>
+<p>Provides a thread-safe registry for mapping operation names and device types to kernel implementations. Enables extensible operation support through dynamic kernel registration. </p>
+
+<p class="definition">Definition in file <a class="el" href="registry_8hpp_source.html">registry.hpp</a>.</p>
+</div></div><!-- contents -->
 </div><!-- doc-content -->
 <div id="page-nav" class="page-nav-panel">
 <div id="page-nav-resize-handle"></div>
@@ -132,8 +206,8 @@ Functions</h2></td></tr>
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><a href="dir_4f7edb362912b75e95599213beee2a17.html">tenzor</a></li><li class="navelem"><a href="dir_a17c2c11515cf3639c59a5ed15c726ad.html">backend</a></li><li class="navelem"><a href="registry_8hpp.html">registry.hpp</a></li>
-    <li class="footer">Generated by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
+    <li class="navelem"><a href="dir_d44c64559bbebec7f509842c48db8b23.html">include</a></li><li class="navelem"><a href="dir_14ba40437910c5dd1b08964ca20ae5af.html">tenzor</a></li><li class="navelem"><a href="dir_2992e1c9f681c22b056da3b57fbd5125.html">backend</a></li><li class="navelem"><a href="registry_8hpp.html">registry.hpp</a></li>
+    <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>
 </body>

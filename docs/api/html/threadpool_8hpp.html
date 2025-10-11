@@ -5,7 +5,7 @@
 <meta http-equiv="X-UA-Compatible" content="IE=11"/>
 <meta name="generator" content="Doxygen 1.14.0"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Tenzor: tenzor/parallel/threadpool.hpp File Reference</title>
+<title>Tenzor: include/tenzor/parallel/threadpool.hpp File Reference</title>
 <link href="tabs.css" rel="stylesheet" type="text/css"/>
 <script type="text/javascript" src="jquery.js"></script>
 <script type="text/javascript" src="dynsections.js"></script>
@@ -28,7 +28,7 @@
   <td id="projectalign">
    <div id="projectname">Tenzor<span id="projectnumber">&#160;1.0.0</span>
    </div>
-   <div id="projectbrief">Modern C++20 tensor library with automatic differentiation</div>
+   <div id="projectbrief">High-performance tensor library with automatic differentiation</div>
   </td>
  </tr>
  </tbody>
@@ -92,6 +92,9 @@ $(function(){initNavTree('threadpool_8hpp.html','',''); });
   <div class="headertitle"><div class="title">threadpool.hpp File Reference</div></div>
 </div><!--header-->
 <div class="contents">
+
+<p>Work-stealing thread pool for parallel tensor operations.  
+<a href="#details">More...</a></p>
 <div class="textblock"><code>#include &lt;thread&gt;</code><br />
 <code>#include &lt;vector&gt;</code><br />
 <code>#include &lt;queue&gt;</code><br />
@@ -100,22 +103,54 @@ $(function(){initNavTree('threadpool_8hpp.html','',''); });
 <code>#include &lt;mutex&gt;</code><br />
 <code>#include &lt;condition_variable&gt;</code><br />
 <code>#include &lt;atomic&gt;</code><br />
+</div><div class="textblock"><div class="dynheader">
+Include dependency graph for threadpool.hpp:</div>
+<div class="dyncontent">
+<div class="center"><img src="threadpool_8hpp__incl.png" border="0" usemap="#ainclude_2tenzor_2parallel_2threadpool_8hpp" loading="lazy" alt=""/></div>
+<map name="ainclude_2tenzor_2parallel_2threadpool_8hpp" id="ainclude_2tenzor_2parallel_2threadpool_8hpp">
+<area shape="rect" title="Work&#45;stealing thread pool for parallel tensor operations." alt="" coords="271,5,438,50"/>
+<area shape="rect" title=" " alt="" coords="5,98,69,126"/>
+<area shape="poly" title=" " alt="" coords="272,52,84,100,83,95,270,47"/>
+<area shape="rect" title=" " alt="" coords="92,98,155,126"/>
+<area shape="poly" title=" " alt="" coords="294,53,170,97,169,92,292,48"/>
+<area shape="rect" title=" " alt="" coords="178,98,240,126"/>
+<area shape="poly" title=" " alt="" coords="317,53,247,92,244,88,314,48"/>
+<area shape="rect" title=" " alt="" coords="263,98,350,126"/>
+<area shape="poly" title=" " alt="" coords="344,52,324,86,319,83,339,49"/>
+<area shape="rect" title=" " alt="" coords="374,98,434,126"/>
+<area shape="poly" title=" " alt="" coords="370,49,390,83,386,86,365,52"/>
+<area shape="rect" title=" " alt="" coords="457,98,521,126"/>
+<area shape="poly" title=" " alt="" coords="391,48,456,87,453,92,389,53"/>
+<area shape="rect" title=" " alt="" coords="545,98,686,126"/>
+<area shape="poly" title=" " alt="" coords="424,48,560,90,559,95,423,53"/>
+<area shape="rect" title=" " alt="" coords="710,98,777,126"/>
+<area shape="poly" title=" " alt="" coords="439,41,696,95,695,100,438,47"/>
+</map>
+</div>
 </div>
 <p><a href="threadpool_8hpp_source.html">Go to the source code of this file.</a></p>
 <table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-nested-classes" class="groupheader"><a id="nested-classes" name="nested-classes"></a>
 Classes</h2></td></tr>
 <tr class="memitem:tenzor_3A_3AThreadPool" id="r_tenzor_3A_3AThreadPool"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1ThreadPool.html">tenzor::ThreadPool</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Work-stealing thread pool for parallel task execution.  <a href="classtenzor_1_1ThreadPool.html#details">More...</a><br /></td></tr>
 </table><table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-namespaces" class="groupheader"><a id="namespaces" name="namespaces"></a>
 Namespaces</h2></td></tr>
 <tr class="memitem:tenzor" id="r_tenzor"><td class="memItemLeft" align="right" valign="top">namespace &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html">tenzor</a></td></tr>
+<tr class="memdesc:namespacetenzor"><td class="mdescLeft">&#160;</td><td class="mdescRight">Main Tenzor namespace. <br /></td></tr>
 </table><table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-func-members" class="groupheader"><a id="func-members" name="func-members"></a>
 Functions</h2></td></tr>
 <tr class="memitem:a6f2b379db31ead88b5ff49d1037605f7" id="r_a6f2b379db31ead88b5ff49d1037605f7"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#a6f2b379db31ead88b5ff49d1037605f7">tenzor::thread_pool</a> () -&gt; <a class="el" href="classtenzor_1_1ThreadPool.html">ThreadPool</a> &amp;</td></tr>
+<tr class="memdesc:a6f2b379db31ead88b5ff49d1037605f7"><td class="mdescLeft">&#160;</td><td class="mdescRight">Get global thread pool instance.  <br /></td></tr>
 </table>
-</div><!-- contents -->
+<a name="details" id="details"></a><h2 id="header-details" class="groupheader">Detailed Description</h2>
+<div class="textblock"><p>Work-stealing thread pool for parallel tensor operations. </p>
+<p>Provides efficient thread pool implementation for CPU-based parallel computations. </p>
+
+<p class="definition">Definition in file <a class="el" href="threadpool_8hpp_source.html">threadpool.hpp</a>.</p>
+</div></div><!-- contents -->
 </div><!-- doc-content -->
 <div id="page-nav" class="page-nav-panel">
 <div id="page-nav-resize-handle"></div>
@@ -128,8 +163,8 @@ Functions</h2></td></tr>
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><a href="dir_4f7edb362912b75e95599213beee2a17.html">tenzor</a></li><li class="navelem"><a href="dir_4a1f4f826d5b933793bf79312cc017c9.html">parallel</a></li><li class="navelem"><a href="threadpool_8hpp.html">threadpool.hpp</a></li>
-    <li class="footer">Generated by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
+    <li class="navelem"><a href="dir_d44c64559bbebec7f509842c48db8b23.html">include</a></li><li class="navelem"><a href="dir_14ba40437910c5dd1b08964ca20ae5af.html">tenzor</a></li><li class="navelem"><a href="dir_731150426551138f38ed7fbcbd46a602.html">parallel</a></li><li class="navelem"><a href="threadpool_8hpp.html">threadpool.hpp</a></li>
+    <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>
 </body>

@@ -1,4 +1,4 @@
 var searchData=
 [
-  ['dtype_5ft_0',['dtype_t',['../dtype_8hpp.html#aa97057b187cfe339a772d49fb802b120',1,'tenzor']]]
+  ['backendfactory_0',['BackendFactory',['../namespacetenzor.html#ac8566083b144833294adf23b8fbb0817',1,'tenzor']]]
 ];

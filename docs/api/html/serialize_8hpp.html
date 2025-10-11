@@ -5,7 +5,7 @@
 <meta http-equiv="X-UA-Compatible" content="IE=11"/>
 <meta name="generator" content="Doxygen 1.14.0"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Tenzor: tenzor/nn/serialize.hpp File Reference</title>
+<title>Tenzor: include/tenzor/nn/serialize.hpp File Reference</title>
 <link href="tabs.css" rel="stylesheet" type="text/css"/>
 <script type="text/javascript" src="jquery.js"></script>
 <script type="text/javascript" src="dynsections.js"></script>
@@ -28,7 +28,7 @@
   <td id="projectalign">
    <div id="projectname">Tenzor<span id="projectnumber">&#160;1.0.0</span>
    </div>
-   <div id="projectbrief">Modern C++20 tensor library with automatic differentiation</div>
+   <div id="projectbrief">High-performance tensor library with automatic differentiation</div>
   </td>
  </tr>
  </tbody>
@@ -92,27 +92,138 @@ $(function(){initNavTree('serialize_8hpp.html','',''); });
   <div class="headertitle"><div class="title">serialize.hpp File Reference</div></div>
 </div><!--header-->
 <div class="contents">
+
+<p>Model serialization and deserialization.  
+<a href="#details">More...</a></p>
 <div class="textblock"><code>#include &lt;string&gt;</code><br />
 <code>#include &lt;unordered_map&gt;</code><br />
 <code>#include &lt;fstream&gt;</code><br />
 <code>#include &quot;<a class="el" href="tensor_8hpp_source.html">../core/tensor.hpp</a>&quot;</code><br />
+</div><div class="textblock"><div class="dynheader">
+Include dependency graph for serialize.hpp:</div>
+<div class="dyncontent">
+<div class="center"><img src="serialize_8hpp__incl.png" border="0" usemap="#ainclude_2tenzor_2nn_2serialize_8hpp" loading="lazy" alt=""/></div>
+<map name="ainclude_2tenzor_2nn_2serialize_8hpp" id="ainclude_2tenzor_2nn_2serialize_8hpp">
+<area shape="rect" title="Model serialization and deserialization." alt="" coords="257,5,477,33"/>
+<area shape="rect" title=" " alt="" coords="98,308,156,336"/>
+<area shape="poly" title=" " alt="" coords="299,36,221,59,178,76,135,98,95,124,60,155,32,191,12,233,8,247,12,259,26,276,44,289,84,308,81,312,41,294,22,279,7,261,3,247,7,231,27,188,56,151,92,120,133,93,176,72,219,54,297,31"/>
+<area shape="rect" title=" " alt="" coords="381,81,504,109"/>
+<area shape="poly" title=" " alt="" coords="382,32,420,68,417,72,379,35"/>
+<area shape="rect" title=" " alt="" coords="528,81,600,109"/>
+<area shape="poly" title=" " alt="" coords="403,31,516,73,514,78,401,36"/>
+<area shape="rect" href="tensor_8hpp.html" title="Core tensor class for multi&#45;dimensional array operations." alt="" coords="224,81,357,109"/>
+<area shape="poly" title=" " alt="" coords="355,35,317,72,313,68,351,32"/>
+<area shape="rect" title=" " alt="" coords="22,232,98,260"/>
+<area shape="poly" title=" " alt="" coords="224,102,189,108,152,119,117,135,87,159,78,171,71,186,64,218,59,216,66,185,73,169,84,155,115,131,150,114,188,103,223,97"/>
+<area shape="rect" title=" " alt="" coords="220,157,282,184"/>
+<area shape="poly" title=" " alt="" coords="286,110,268,144,263,142,281,108"/>
+<area shape="rect" title=" " alt="" coords="306,157,358,184"/>
+<area shape="poly" title=" " alt="" coords="301,108,320,142,315,144,296,111"/>
+<area shape="rect" title=" " alt="" coords="383,157,457,184"/>
+<area shape="poly" title=" " alt="" coords="315,107,385,147,383,151,313,112"/>
+<area shape="rect" href="dtype_8hpp.html" title="Data type system for Tenzor tensors." alt="" coords="502,232,589,260"/>
+<area shape="poly" title=" " alt="" coords="351,107,432,129,468,141,492,155,519,184,537,217,533,219,515,187,489,159,466,146,430,134,350,112"/>
+<area shape="rect" href="device_8hpp.html" title="Device specification and management for tensors." alt="" coords="307,232,400,260"/>
+<area shape="poly" title=" " alt="" coords="354,107,424,127,453,140,472,155,477,167,478,179,465,199,441,216,413,229,410,224,439,211,461,195,472,177,472,168,467,158,451,145,423,132,353,112"/>
+<area shape="rect" href="storage_8hpp.html" title="Memory storage abstraction for tensor data." alt="" coords="98,157,196,184"/>
+<area shape="poly" title=" " alt="" coords="266,112,187,152,185,147,264,107"/>
+<area shape="rect" title=" " alt="" coords="309,308,374,336"/>
+<area shape="poly" title=" " alt="" coords="510,263,389,306,388,301,508,258"/>
+<area shape="rect" title=" " alt="" coords="399,308,495,336"/>
+<area shape="poly" title=" " alt="" coords="529,263,478,301,475,297,526,258"/>
+<area shape="rect" title=" " alt="" coords="620,308,711,336"/>
+<area shape="poly" title=" " alt="" coords="568,258,633,298,630,302,566,263"/>
+<area shape="rect" title=" " alt="" coords="519,308,596,336"/>
+<area shape="poly" title=" " alt="" coords="550,260,556,292,550,293,545,261"/>
+<area shape="poly" title=" " alt="" coords="314,263,172,309,170,304,312,258"/>
+<area shape="poly" title=" " alt="" coords="354,261,349,293,343,292,349,260"/>
+<area shape="poly" title=" " alt="" coords="372,258,420,296,417,300,369,263"/>
+<area shape="poly" title=" " alt="" coords="133,187,89,224,85,220,130,183"/>
+<area shape="poly" title=" " alt="" coords="185,182,303,224,301,229,183,187"/>
+<area shape="rect" title=" " alt="" coords="123,232,192,260"/>
+<area shape="poly" title=" " alt="" coords="151,184,156,217,151,217,146,185"/>
+<area shape="rect" title=" " alt="" coords="216,232,283,260"/>
+<area shape="poly" title=" " alt="" coords="167,183,220,221,217,225,164,187"/>
+</map>
+</div>
 </div>
 <p><a href="serialize_8hpp_source.html">Go to the source code of this file.</a></p>
 <table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-nested-classes" class="groupheader"><a id="nested-classes" name="nested-classes"></a>
 Classes</h2></td></tr>
 <tr class="memitem:tenzor_3A_3Ann_3A_3ASerializer" id="r_tenzor_3A_3Ann_3A_3ASerializer"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1nn_1_1Serializer.html">tenzor::nn::Serializer</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Serialization utilities for model state persistence.  <a href="classtenzor_1_1nn_1_1Serializer.html#details">More...</a><br /></td></tr>
 </table><table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-namespaces" class="groupheader"><a id="namespaces" name="namespaces"></a>
 Namespaces</h2></td></tr>
 <tr class="memitem:tenzor" id="r_tenzor"><td class="memItemLeft" align="right" valign="top">namespace &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html">tenzor</a></td></tr>
-<tr class="memitem:tenzor_3A_3Ann" id="r_tenzor_3A_3Ann"><td class="memItemLeft" align="right" valign="top">namespace &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor_1_1nn.html">tenzor::nn</a></td></tr>
+<tr class="memdesc:namespacetenzor"><td class="mdescLeft">&#160;</td><td class="mdescRight">Main Tenzor namespace. <br /></td></tr>
 </table><table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-var-members" class="groupheader"><a id="var-members" name="var-members"></a>
 Variables</h2></td></tr>
-<tr class="memitem:aeb7ea415f61699d33020d957644ab22d" id="r_aeb7ea415f61699d33020d957644ab22d"><td class="memItemLeft" align="right" valign="top">constexpr uint32_t&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor_1_1nn.html#aeb7ea415f61699d33020d957644ab22d">tenzor::nn::TENZOR_MAGIC</a> = 0x544E5A52</td></tr>
-<tr class="memitem:a57616c84ada19e34ed8c4c088e5c0d52" id="r_a57616c84ada19e34ed8c4c088e5c0d52"><td class="memItemLeft" align="right" valign="top">constexpr uint32_t&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor_1_1nn.html#a57616c84ada19e34ed8c4c088e5c0d52">tenzor::nn::TENZOR_SERIALIZE_VERSION</a> = 1</td></tr>
+<tr class="memitem:aeb7ea415f61699d33020d957644ab22d" id="r_aeb7ea415f61699d33020d957644ab22d"><td class="memItemLeft" align="right" valign="top">constexpr uint32_t&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#aeb7ea415f61699d33020d957644ab22d">tenzor::nn::TENZOR_MAGIC</a> = 0x544E5A52</td></tr>
+<tr class="memdesc:aeb7ea415f61699d33020d957644ab22d"><td class="mdescLeft">&#160;</td><td class="mdescRight">Magic number for file format validation ("TNZR" in ASCII)  <br /></td></tr>
+<tr class="memitem:a57616c84ada19e34ed8c4c088e5c0d52" id="r_a57616c84ada19e34ed8c4c088e5c0d52"><td class="memItemLeft" align="right" valign="top">constexpr uint32_t&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a57616c84ada19e34ed8c4c088e5c0d52">tenzor::nn::TENZOR_SERIALIZE_VERSION</a> = 1</td></tr>
+<tr class="memdesc:a57616c84ada19e34ed8c4c088e5c0d52"><td class="mdescLeft">&#160;</td><td class="mdescRight">File format version for compatibility checking.  <br /></td></tr>
 </table>
+<a name="details" id="details"></a><h2 id="header-details" class="groupheader">Detailed Description</h2>
+<div class="textblock"><p>Model serialization and deserialization. </p>
+<p>Provides utilities for saving and loading neural network model states, enabling checkpoint persistence, model sharing, and training resumption. </p>
+
+<p class="definition">Definition in file <a class="el" href="serialize_8hpp_source.html">serialize.hpp</a>.</p>
+</div><a name="doc-var-members" id="doc-var-members"></a><h2 id="header-doc-var-members" class="groupheader">Variable Documentation</h2>
+<a id="aeb7ea415f61699d33020d957644ab22d" name="aeb7ea415f61699d33020d957644ab22d"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#aeb7ea415f61699d33020d957644ab22d">&#9670;&#160;</a></span>TENZOR_MAGIC</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname">uint32_t tenzor::nn::TENZOR_MAGIC = 0x544E5A52</td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel constexpr">constexpr</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+
+<p>Magic number for file format validation ("TNZR" in ASCII) </p>
+
+<p class="definition">Definition at line <a class="el" href="serialize_8hpp_source.html#l00020">20</a> of file <a class="el" href="serialize_8hpp_source.html">serialize.hpp</a>.</p>
+
+</div>
+</div>
+<a id="a57616c84ada19e34ed8c4c088e5c0d52" name="a57616c84ada19e34ed8c4c088e5c0d52"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a57616c84ada19e34ed8c4c088e5c0d52">&#9670;&#160;</a></span>TENZOR_SERIALIZE_VERSION</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname">uint32_t tenzor::nn::TENZOR_SERIALIZE_VERSION = 1</td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel constexpr">constexpr</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+
+<p>File format version for compatibility checking. </p>
+
+<p class="definition">Definition at line <a class="el" href="serialize_8hpp_source.html#l00023">23</a> of file <a class="el" href="serialize_8hpp_source.html">serialize.hpp</a>.</p>
+
+</div>
+</div>
 </div><!-- contents -->
 </div><!-- doc-content -->
 <div id="page-nav" class="page-nav-panel">
@@ -126,8 +237,8 @@ Variables</h2></td></tr>
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><a href="dir_4f7edb362912b75e95599213beee2a17.html">tenzor</a></li><li class="navelem"><a href="dir_7d5460f3c919ba4808998a3c805d565d.html">nn</a></li><li class="navelem"><a href="serialize_8hpp.html">serialize.hpp</a></li>
-    <li class="footer">Generated by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
+    <li class="navelem"><a href="dir_d44c64559bbebec7f509842c48db8b23.html">include</a></li><li class="navelem"><a href="dir_14ba40437910c5dd1b08964ca20ae5af.html">tenzor</a></li><li class="navelem"><a href="dir_2996a04abcb928fe38186b609b0d69a7.html">nn</a></li><li class="navelem"><a href="serialize_8hpp.html">serialize.hpp</a></li>
+    <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>
 </body>

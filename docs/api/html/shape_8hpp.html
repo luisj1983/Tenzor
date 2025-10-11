@@ -5,7 +5,7 @@
 <meta http-equiv="X-UA-Compatible" content="IE=11"/>
 <meta name="generator" content="Doxygen 1.14.0"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Tenzor: tenzor/core/shape.hpp File Reference</title>
+<title>Tenzor: include/tenzor/core/shape.hpp File Reference</title>
 <link href="tabs.css" rel="stylesheet" type="text/css"/>
 <script type="text/javascript" src="jquery.js"></script>
 <script type="text/javascript" src="dynsections.js"></script>
@@ -28,7 +28,7 @@
   <td id="projectalign">
    <div id="projectname">Tenzor<span id="projectnumber">&#160;1.0.0</span>
    </div>
-   <div id="projectbrief">Modern C++20 tensor library with automatic differentiation</div>
+   <div id="projectbrief">High-performance tensor library with automatic differentiation</div>
   </td>
  </tr>
  </tbody>
@@ -92,29 +92,61 @@ $(function(){initNavTree('shape_8hpp.html','',''); });
   <div class="headertitle"><div class="title">shape.hpp File Reference</div></div>
 </div><!--header-->
 <div class="contents">
+
+<p>Shape and stride utilities for tensor operations.  
+<a href="#details">More...</a></p>
 <div class="textblock"><code>#include &lt;vector&gt;</code><br />
 <code>#include &lt;cstdint&gt;</code><br />
 <code>#include &lt;span&gt;</code><br />
 <code>#include &lt;algorithm&gt;</code><br />
 <code>#include &lt;numeric&gt;</code><br />
 <code>#include &lt;stdexcept&gt;</code><br />
+</div><div class="textblock"><div class="dynheader">
+Include dependency graph for shape.hpp:</div>
+<div class="dyncontent">
+<div class="center"><img src="shape_8hpp__incl.png" border="0" usemap="#ainclude_2tenzor_2core_2shape_8hpp" loading="lazy" alt=""/></div>
+<map name="ainclude_2tenzor_2core_2shape_8hpp" id="ainclude_2tenzor_2core_2shape_8hpp">
+<area shape="rect" title="Shape and stride utilities for tensor operations." alt="" coords="180,5,325,50"/>
+<area shape="rect" title=" " alt="" coords="5,98,68,126"/>
+<area shape="poly" title=" " alt="" coords="196,53,83,96,81,91,194,48"/>
+<area shape="rect" title=" " alt="" coords="92,98,157,126"/>
+<area shape="poly" title=" " alt="" coords="220,53,159,92,156,87,217,48"/>
+<area shape="rect" title=" " alt="" coords="181,98,233,126"/>
+<area shape="poly" title=" " alt="" coords="243,52,224,86,219,83,238,49"/>
+<area shape="rect" title=" " alt="" coords="257,98,341,126"/>
+<area shape="poly" title=" " alt="" coords="267,49,286,83,282,86,262,52"/>
+<area shape="rect" title=" " alt="" coords="366,98,440,126"/>
+<area shape="poly" title=" " alt="" coords="294,48,367,88,365,93,291,53"/>
+<area shape="rect" title=" " alt="" coords="464,98,550,126"/>
+<area shape="poly" title=" " alt="" coords="321,48,453,90,451,95,319,53"/>
+</map>
+</div>
 </div>
 <p><a href="shape_8hpp_source.html">Go to the source code of this file.</a></p>
 <table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-nested-classes" class="groupheader"><a id="nested-classes" name="nested-classes"></a>
 Classes</h2></td></tr>
 <tr class="memitem:tenzor_3A_3AShape" id="r_tenzor_3A_3AShape"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1Shape.html">tenzor::Shape</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Represents the shape (dimensions) of a tensor.  <a href="classtenzor_1_1Shape.html#details">More...</a><br /></td></tr>
 </table><table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-namespaces" class="groupheader"><a id="namespaces" name="namespaces"></a>
 Namespaces</h2></td></tr>
 <tr class="memitem:tenzor" id="r_tenzor"><td class="memItemLeft" align="right" valign="top">namespace &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html">tenzor</a></td></tr>
+<tr class="memdesc:namespacetenzor"><td class="mdescLeft">&#160;</td><td class="mdescRight">Main Tenzor namespace. <br /></td></tr>
 </table><table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-func-members" class="groupheader"><a id="func-members" name="func-members"></a>
 Functions</h2></td></tr>
 <tr class="memitem:ad393e596b1b9dcce1a421ddfa349d604" id="r_ad393e596b1b9dcce1a421ddfa349d604"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#ad393e596b1b9dcce1a421ddfa349d604">tenzor::compute_strides</a> (std::span&lt; const int64_t &gt; shape) -&gt; std::vector&lt; int64_t &gt;</td></tr>
+<tr class="memdesc:ad393e596b1b9dcce1a421ddfa349d604"><td class="mdescLeft">&#160;</td><td class="mdescRight">Compute row-major strides from shape.  <br /></td></tr>
 <tr class="memitem:acf22cfe8ec0be9f887f8193fc6e2c80f" id="r_acf22cfe8ec0be9f887f8193fc6e2c80f"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#acf22cfe8ec0be9f887f8193fc6e2c80f">tenzor::broadcast_shapes</a> (std::span&lt; const int64_t &gt; shape1, std::span&lt; const int64_t &gt; shape2) -&gt; std::vector&lt; int64_t &gt;</td></tr>
+<tr class="memdesc:acf22cfe8ec0be9f887f8193fc6e2c80f"><td class="mdescLeft">&#160;</td><td class="mdescRight">Compute broadcasted shape from two input shapes.  <br /></td></tr>
 </table>
-</div><!-- contents -->
+<a name="details" id="details"></a><h2 id="header-details" class="groupheader">Detailed Description</h2>
+<div class="textblock"><p>Shape and stride utilities for tensor operations. </p>
+<p>Provides shape representation, stride computation, and broadcasting utilities for multi-dimensional tensor operations. </p>
+
+<p class="definition">Definition in file <a class="el" href="shape_8hpp_source.html">shape.hpp</a>.</p>
+</div></div><!-- contents -->
 </div><!-- doc-content -->
 <div id="page-nav" class="page-nav-panel">
 <div id="page-nav-resize-handle"></div>
@@ -127,8 +159,8 @@ Functions</h2></td></tr>
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><a href="dir_4f7edb362912b75e95599213beee2a17.html">tenzor</a></li><li class="navelem"><a href="dir_30a03cb251cf6dbd88e21e04f540e848.html">core</a></li><li class="navelem"><a href="shape_8hpp.html">shape.hpp</a></li>
-    <li class="footer">Generated by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
+    <li class="navelem"><a href="dir_d44c64559bbebec7f509842c48db8b23.html">include</a></li><li class="navelem"><a href="dir_14ba40437910c5dd1b08964ca20ae5af.html">tenzor</a></li><li class="navelem"><a href="dir_5f1567d5508bbd804950a140dd8a1981.html">core</a></li><li class="navelem"><a href="shape_8hpp.html">shape.hpp</a></li>
+    <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>
 </body>

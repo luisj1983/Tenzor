@@ -5,7 +5,7 @@
 <meta http-equiv="X-UA-Compatible" content="IE=11"/>
 <meta name="generator" content="Doxygen 1.14.0"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Tenzor: tenzor/autograd/graph.hpp File Reference</title>
+<title>Tenzor: include/tenzor/autograd/graph.hpp File Reference</title>
 <link href="tabs.css" rel="stylesheet" type="text/css"/>
 <script type="text/javascript" src="jquery.js"></script>
 <script type="text/javascript" src="dynsections.js"></script>
@@ -28,7 +28,7 @@
   <td id="projectalign">
    <div id="projectname">Tenzor<span id="projectnumber">&#160;1.0.0</span>
    </div>
-   <div id="projectbrief">Modern C++20 tensor library with automatic differentiation</div>
+   <div id="projectbrief">High-performance tensor library with automatic differentiation</div>
   </td>
  </tr>
  </tbody>
@@ -92,24 +92,104 @@ $(function(){initNavTree('graph_8hpp.html','',''); });
   <div class="headertitle"><div class="title">graph.hpp File Reference</div></div>
 </div><!--header-->
 <div class="contents">
+
+<p>Computation graph structure for automatic differentiation.  
+<a href="#details">More...</a></p>
 <div class="textblock"><code>#include &lt;memory&gt;</code><br />
 <code>#include &lt;vector&gt;</code><br />
 <code>#include &lt;unordered_map&gt;</code><br />
 <code>#include &lt;unordered_set&gt;</code><br />
 <code>#include &quot;<a class="el" href="function_8hpp_source.html">function.hpp</a>&quot;</code><br />
+</div><div class="textblock"><div class="dynheader">
+Include dependency graph for graph.hpp:</div>
+<div class="dyncontent">
+<div class="center"><img src="graph_8hpp__incl.png" border="0" usemap="#ainclude_2tenzor_2autograd_2graph_8hpp" loading="lazy" alt=""/></div>
+<map name="ainclude_2tenzor_2autograd_2graph_8hpp" id="ainclude_2tenzor_2autograd_2graph_8hpp">
+<area shape="rect" title="Computation graph structure for automatic differentiation." alt="" coords="410,5,585,50"/>
+<area shape="rect" title=" " alt="" coords="68,401,145,428"/>
+<area shape="poly" title=" " alt="" coords="410,41,287,60,155,90,97,110,50,133,19,158,11,172,8,186,69,365,88,437,64,399,6,267,15,301,33,335,56,365,80,388,76,392,52,368,28,338,10,303,5,262,69,397,86,432,64,367,3,186,6,170,15,155,47,128,95,105,154,85,286,55,409,36"/>
+<area shape="rect" title=" " alt="" coords="594,325,656,353"/>
+<area shape="poly" title=" " alt="" coords="504,50,525,125,571,229,613,310,608,313,566,231,520,127,499,51"/>
+<area shape="rect" title=" " alt="" coords="534,98,658,126"/>
+<area shape="poly" title=" " alt="" coords="525,48,570,86,567,90,522,52"/>
+<area shape="rect" title=" " alt="" coords="682,98,796,126"/>
+<area shape="poly" title=" " alt="" coords="562,48,686,90,685,95,561,53"/>
+<area shape="rect" href="function_8hpp.html" title="Autograd function interface and built&#45;in operations." alt="" coords="292,98,394,126"/>
+<area shape="poly" title=" " alt="" coords="458,53,382,93,380,88,455,48"/>
+<area shape="poly" title=" " alt="" coords="292,119,258,125,222,136,187,152,158,176,140,199,126,225,110,283,105,339,106,385,101,385,100,339,105,282,122,223,135,196,154,172,185,148,220,131,257,120,291,114"/>
+<area shape="poly" title=" " alt="" coords="352,125,401,195,438,237,480,275,530,303,580,322,578,327,528,308,477,279,434,241,397,198,348,128"/>
+<area shape="rect" href="tensor_8hpp.html" title="Core tensor class for multi&#45;dimensional array operations." alt="" coords="276,249,409,277"/>
+<area shape="poly" title=" " alt="" coords="345,126,345,233,340,233,340,126"/>
+<area shape="rect" href="variable_8hpp.html" title="Automatic differentiation wrapper for tensors." alt="" coords="168,174,270,201"/>
+<area shape="poly" title=" " alt="" coords="322,129,255,168,252,163,319,124"/>
+<area shape="poly" title=" " alt="" coords="330,280,287,315,232,355,153,396,151,392,229,350,284,311,326,276"/>
+<area shape="poly" title=" " alt="" coords="394,275,580,323,578,328,393,280"/>
+<area shape="rect" title=" " alt="" coords="416,325,469,353"/>
+<area shape="poly" title=" " alt="" coords="362,275,414,314,411,318,359,280"/>
+<area shape="rect" title=" " alt="" coords="144,325,218,353"/>
+<area shape="poly" title=" " alt="" coords="315,280,225,321,222,316,313,275"/>
+<area shape="rect" href="dtype_8hpp.html" title="Data type system for Tenzor tensors." alt="" coords="518,401,604,428"/>
+<area shape="poly" title=" " alt="" coords="404,275,455,294,504,323,532,353,552,386,547,389,528,357,501,327,453,299,402,280"/>
+<area shape="rect" href="device_8hpp.html" title="Device specification and management for tensors." alt="" coords="402,401,494,428"/>
+<area shape="poly" title=" " alt="" coords="411,275,451,293,469,306,484,324,489,340,488,358,472,390,467,387,482,356,484,341,479,326,465,310,448,297,409,280"/>
+<area shape="rect" href="storage_8hpp.html" title="Memory storage abstraction for tensor data." alt="" coords="294,325,392,353"/>
+<area shape="poly" title=" " alt="" coords="345,278,345,309,340,309,340,278"/>
+<area shape="rect" title=" " alt="" coords="521,476,586,504"/>
+<area shape="poly" title=" " alt="" coords="563,429,559,461,554,460,557,429"/>
+<area shape="rect" title=" " alt="" coords="400,476,496,504"/>
+<area shape="poly" title=" " alt="" coords="543,431,482,470,479,466,540,427"/>
+<area shape="rect" title=" " alt="" coords="712,476,803,504"/>
+<area shape="poly" title=" " alt="" coords="597,426,709,468,707,473,595,431"/>
+<area shape="rect" title=" " alt="" coords="611,476,688,504"/>
+<area shape="poly" title=" " alt="" coords="579,427,624,464,620,468,575,431"/>
+<area shape="poly" title=" " alt="" coords="468,427,524,465,521,470,465,431"/>
+<area shape="poly" title=" " alt="" coords="451,429,451,461,445,461,445,429"/>
+<area shape="rect" title=" " alt="" coords="318,476,376,504"/>
+<area shape="poly" title=" " alt="" coords="431,431,378,469,375,465,428,427"/>
+<area shape="poly" title=" " alt="" coords="301,356,160,399,159,394,300,351"/>
+<area shape="poly" title=" " alt="" coords="363,351,419,390,416,394,360,355"/>
+<area shape="rect" title=" " alt="" coords="308,401,377,428"/>
+<area shape="poly" title=" " alt="" coords="345,353,345,385,340,385,340,353"/>
+<area shape="rect" title=" " alt="" coords="218,401,284,428"/>
+<area shape="poly" title=" " alt="" coords="328,355,280,393,277,389,325,351"/>
+<area shape="poly" title=" " alt="" coords="211,203,174,255,134,326,115,387,110,385,130,324,170,252,207,200"/>
+<area shape="poly" title=" " alt="" coords="242,200,309,239,306,243,239,204"/>
+<area shape="poly" title=" " alt="" coords="218,202,191,310,186,309,213,201"/>
+</map>
+</div>
+</div><div class="textblock"><div class="dynheader">
+This graph shows which files directly or indirectly include this file:</div>
+<div class="dyncontent">
+<div class="center"><img src="graph_8hpp__dep__incl.png" border="0" usemap="#ainclude_2tenzor_2autograd_2graph_8hppdep" loading="lazy" alt=""/></div>
+<map name="ainclude_2tenzor_2autograd_2graph_8hppdep" id="ainclude_2tenzor_2autograd_2graph_8hppdep">
+<area shape="rect" title="Computation graph structure for automatic differentiation." alt="" coords="10,5,186,50"/>
+<area shape="rect" href="engine_8hpp.html" title="Backward pass execution engine for automatic differentiation." alt="" coords="10,98,186,143"/>
+<area shape="poly" title=" " alt="" coords="101,66,101,98,95,98,95,66"/>
+<area shape="rect" href="tenzor_8hpp.html" title="Main header &#45; includes all public Tenzor APIs." alt="" coords="5,191,191,218"/>
+<area shape="poly" title=" " alt="" coords="101,158,101,190,95,190,95,158"/>
+</map>
+</div>
 </div>
 <p><a href="graph_8hpp_source.html">Go to the source code of this file.</a></p>
 <table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-nested-classes" class="groupheader"><a id="nested-classes" name="nested-classes"></a>
 Classes</h2></td></tr>
 <tr class="memitem:tenzor_3A_3AGraphNode" id="r_tenzor_3A_3AGraphNode"><td class="memItemLeft" align="right" valign="top">struct &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="structtenzor_1_1GraphNode.html">tenzor::GraphNode</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Node in the computation graph.  <a href="structtenzor_1_1GraphNode.html#details">More...</a><br /></td></tr>
 <tr class="memitem:tenzor_3A_3AComputationGraph" id="r_tenzor_3A_3AComputationGraph"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1ComputationGraph.html">tenzor::ComputationGraph</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Computation graph for automatic differentiation.  <a href="classtenzor_1_1ComputationGraph.html#details">More...</a><br /></td></tr>
 </table><table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-namespaces" class="groupheader"><a id="namespaces" name="namespaces"></a>
 Namespaces</h2></td></tr>
 <tr class="memitem:tenzor" id="r_tenzor"><td class="memItemLeft" align="right" valign="top">namespace &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html">tenzor</a></td></tr>
+<tr class="memdesc:namespacetenzor"><td class="mdescLeft">&#160;</td><td class="mdescRight">Main Tenzor namespace. <br /></td></tr>
 </table>
-</div><!-- contents -->
+<a name="details" id="details"></a><h2 id="header-details" class="groupheader">Detailed Description</h2>
+<div class="textblock"><p>Computation graph structure for automatic differentiation. </p>
+<p>Defines the graph representation used to track operations and dependencies for backpropagation in automatic differentiation. </p>
+
+<p class="definition">Definition in file <a class="el" href="graph_8hpp_source.html">graph.hpp</a>.</p>
+</div></div><!-- contents -->
 </div><!-- doc-content -->
 <div id="page-nav" class="page-nav-panel">
 <div id="page-nav-resize-handle"></div>
@@ -122,8 +202,8 @@ Namespaces</h2></td></tr>
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><a href="dir_4f7edb362912b75e95599213beee2a17.html">tenzor</a></li><li class="navelem"><a href="dir_a8af10209a5d43e76b135a85ab04875a.html">autograd</a></li><li class="navelem"><a href="graph_8hpp.html">graph.hpp</a></li>
-    <li class="footer">Generated by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
+    <li class="navelem"><a href="dir_d44c64559bbebec7f509842c48db8b23.html">include</a></li><li class="navelem"><a href="dir_14ba40437910c5dd1b08964ca20ae5af.html">tenzor</a></li><li class="navelem"><a href="dir_1204adbf8d2f8e90c5fef395b6535c41.html">autograd</a></li><li class="navelem"><a href="graph_8hpp.html">graph.hpp</a></li>
+    <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>
 </body>

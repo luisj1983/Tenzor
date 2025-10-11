@@ -1,5 +1,5 @@
 var searchData=
 [
-  ['training_5f_0',['training_',['../classtenzor_1_1nn_1_1Module.html#a2a865cc9749b143213de18b778dd3707',1,'tenzor::nn::Module']]],
-  ['type_1',['type',['../structtenzor_1_1Device.html#aa2efe8f5ebb726c35f037761dd425aed',1,'tenzor::Device']]]
+  ['ref_5fcount_0',['ref_count',['../structtenzor_1_1GraphNode.html#a0e77dc0bf74ab5f25a544eea1c70ed13',1,'tenzor::GraphNode']]],
+  ['requires_5fgrad_1',['requires_grad',['../classtenzor_1_1TensorImpl.html#af389dddf8256d92c80bd99737dc1879c',1,'tenzor::TensorImpl']]]
 ];

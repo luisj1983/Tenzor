@@ -2,6 +2,8 @@
 #include <pybind11/stl.h>
 #include <pybind11/numpy.h>
 #include <tenzor/tenzor.hpp>
+#include <tenzor/ops/indexing.hpp>
+#include <tenzor/nn/optim/scheduler.hpp>
 #include "numpy_interop.hpp"
 
 namespace py = pybind11;
@@ -128,7 +130,96 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def("__mul__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return a * b; })
         .def("__repr__", [](const tenzor::Tensor& t) {
             return "Tensor(shape=[...])";
-        });
+        })
+        // Python-style indexing
+        .def("__getitem__", [](const tenzor::Tensor& self, py::object key) -> tenzor::Tensor {
+            // Handle integer indexing
+            if (py::isinstance<py::int_>(key)) {
+                int64_t idx = py::cast<int64_t>(key);
+                auto shape = self.shape();
+                if (shape.empty()) {
+                    throw std::runtime_error("Cannot index scalar tensor");
+                }
+                // Handle negative indexing
+                if (idx < 0) {
+                    idx += shape[0];
+                }
+                if (idx < 0 || idx >= shape[0]) {
+                    throw std::out_of_range("Index out of range");
+                }
+                // Return slice along first dimension (squeeze will remove dim if size is 1)
+                auto sliced = self.slice(0, idx, idx + 1);
+                // Only squeeze if the dimension actually has size 1
+                auto sliced_shape = sliced.shape();
+                if (!sliced_shape.empty() && sliced_shape[0] == 1) {
+                    return sliced.squeeze(0);
+                }
+                return sliced;
+            }
+            // Handle slice objects (basic implementation)
+            else if (py::isinstance<py::slice>(key)) {
+                py::slice slice_obj = py::cast<py::slice>(key);
+                py::ssize_t start, stop, step, length;
+                auto shape = self.shape();
+                if (shape.empty()) {
+                    throw std::runtime_error("Cannot slice scalar tensor");
+                }
+                if (!slice_obj.compute(shape[0], &start, &stop, &step, &length)) {
+                    throw std::runtime_error("Invalid slice");
+                }
+                if (step != 1) {
+                    throw std::runtime_error("Slice step not supported yet");
+                }
+                return self.slice(0, start, stop);
+            }
+            // Handle tuple of indices/slices (basic implementation)
+            else if (py::isinstance<py::tuple>(key)) {
+                py::tuple indices = py::cast<py::tuple>(key);
+                tenzor::Tensor result = self;
+                int squeeze_count = 0;  // Track dimensions that need squeezing
+                for (size_t i = 0; i < indices.size(); ++i) {
+                    if (py::isinstance<py::int_>(indices[i])) {
+                        int64_t idx = py::cast<int64_t>(indices[i]);
+                        auto shape = result.shape();
+                        size_t dim = i - squeeze_count;  // Adjust for squeezed dimensions
+                        if (dim >= shape.size()) {
+                            throw std::out_of_range("Too many indices");
+                        }
+                        if (idx < 0) {
+                            idx += shape[dim];
+                        }
+                        result = result.slice(dim, idx, idx + 1);
+                        // Check if we can squeeze this dimension
+                        auto new_shape = result.shape();
+                        if (dim < new_shape.size() && new_shape[dim] == 1) {
+                            result = result.squeeze(dim);
+                            squeeze_count++;
+                        }
+                    } else if (py::isinstance<py::slice>(indices[i])) {
+                        py::slice slice_obj = py::cast<py::slice>(indices[i]);
+                        py::ssize_t start, stop, step, length;
+                        auto shape = result.shape();
+                        size_t dim = i - squeeze_count;  // Adjust for squeezed dimensions
+                        if (dim >= shape.size()) {
+                            throw std::out_of_range("Too many indices");
+                        }
+                        if (!slice_obj.compute(shape[dim], &start, &stop, &step, &length)) {
+                            throw std::runtime_error("Invalid slice");
+                        }
+                        if (step != 1) {
+                            throw std::runtime_error("Slice step not supported yet");
+                        }
+                        result = result.slice(dim, start, stop);
+                    }
+                }
+                return result;
+            }
+            throw std::runtime_error("Unsupported index type");
+        }, py::arg("key"), "Get tensor slice or element")
+        .def("__setitem__", [](tenzor::Tensor& self, py::object key, py::object value) {
+            // Basic implementation - can be extended for more complex indexing
+            throw std::runtime_error("__setitem__ not fully implemented yet. Use tensor operations instead.");
+        }, py::arg("key"), py::arg("value"), "Set tensor slice or element");
 
     // Operations
     m.def("zeros", &tenzor::zeros, "Create tensor filled with zeros",
@@ -209,6 +300,17 @@ PYBIND11_MODULE(tenzor_core, m) {
          py::arg("end_dim") = -1);
     m.def("contiguous", &tenzor::contiguous, "Make tensor contiguous");
 
+    // Indexing operations (only bind implemented functions)
+    m.def("slice", &tenzor::slice, "Slice tensor along dimension",
+         py::arg("input"), py::arg("dim"), py::arg("start"), py::arg("end"),
+         py::arg("step") = 1);
+    m.def("index_select", &tenzor::index_select, "Select indices along dimension",
+         py::arg("input"), py::arg("dim"), py::arg("index"));
+
+    // Note: The following operations are declared in headers but not yet implemented:
+    // gather, scatter, masked_select, masked_fill, where, take, put
+    // They can be added once the implementations are complete
+
     // Autograd
     py::class_<tenzor::Variable>(m, "Variable")
         .def(py::init<tenzor::Tensor, bool>(),
@@ -216,6 +318,38 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def("backward", &tenzor::Variable::backward, py::arg("gradient") = py::none())
         .def_property_readonly("data", py::overload_cast<>(&tenzor::Variable::tensor, py::const_))
         .def_property_readonly("grad", py::overload_cast<>(&tenzor::Variable::grad, py::const_));
+
+    // NoGradGuard for RAII-style gradient control
+    py::class_<tenzor::NoGradGuard>(m, "NoGradGuard")
+        .def(py::init<>(),
+             "Context manager for disabling gradient computation");
+
+    // Gradient control functions
+    m.def("is_grad_enabled", &tenzor::is_grad_enabled,
+          "Check if gradient computation is globally enabled");
+
+    m.def("set_grad_enabled", &tenzor::set_grad_enabled,
+          py::arg("enabled"),
+          "Set global gradient computation state");
+
+    // Python context manager for no_grad
+    m.def("no_grad", []() {
+        return tenzor::NoGradGuard();
+    }, "Context manager for disabling gradient computation");
+
+    // Python context manager for enable_grad
+    m.def("enable_grad", []() {
+        struct EnableGradGuard {
+            EnableGradGuard() : prev_state_(tenzor::is_grad_enabled()) {
+                tenzor::set_grad_enabled(true);
+            }
+            ~EnableGradGuard() {
+                tenzor::set_grad_enabled(prev_state_);
+            }
+            bool prev_state_;
+        };
+        return EnableGradGuard();
+    }, "Context manager for enabling gradient computation");
 
     // Neural network
     auto nn = m.def_submodule("nn", "Neural network components");
@@ -299,6 +433,14 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("normalized_shape"),
              py::arg("eps") = 1e-5,
              py::arg("elementwise_affine") = true);
+
+    py::class_<tenzor::nn::GroupNorm, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::GroupNorm>>(nn, "GroupNorm")
+        .def(py::init<int64_t, int64_t, double, bool>(),
+             py::arg("num_groups"),
+             py::arg("num_channels"),
+             py::arg("eps") = 1e-5,
+             py::arg("affine") = true);
 
     // Regularization layers
     py::class_<tenzor::nn::Dropout, tenzor::nn::Module,
@@ -539,4 +681,67 @@ PYBIND11_MODULE(tenzor_core, m) {
              "Get optimizer state dictionary")
         .def("load_state_dict", &tenzor::optim::AdamW::load_state_dict,
              py::arg("state"), "Load optimizer state dictionary");
+
+    // Learning rate schedulers
+    auto lr_scheduler = optim.def_submodule("lr_scheduler", "Learning rate scheduling");
+
+    // Base scheduler class
+    py::class_<tenzor::optim::LRScheduler>(lr_scheduler, "LRScheduler")
+        .def("step", &tenzor::optim::LRScheduler::step,
+             "Step the scheduler (typically called once per epoch)")
+        .def("get_last_lr", &tenzor::optim::LRScheduler::get_last_lr,
+             "Get the last computed learning rate")
+        .def("get_lr", &tenzor::optim::LRScheduler::get_lr,
+             "Get the current learning rate");
+
+    // StepLR scheduler
+    py::class_<tenzor::optim::StepLR, tenzor::optim::LRScheduler>(lr_scheduler, "StepLR")
+        .def(py::init<tenzor::optim::SGD&, int, double>(),
+             py::arg("optimizer"),
+             py::arg("step_size"),
+             py::arg("gamma") = 0.1,
+             "Decays learning rate by gamma every step_size epochs")
+        .def(py::init<tenzor::optim::Adam&, int, double>(),
+             py::arg("optimizer"),
+             py::arg("step_size"),
+             py::arg("gamma") = 0.1)
+        .def(py::init<tenzor::optim::AdamW&, int, double>(),
+             py::arg("optimizer"),
+             py::arg("step_size"),
+             py::arg("gamma") = 0.1)
+        .def("get_epoch", &tenzor::optim::StepLR::get_epoch,
+             "Get current epoch number");
+
+    // ExponentialLR scheduler
+    py::class_<tenzor::optim::ExponentialLR, tenzor::optim::LRScheduler>(lr_scheduler, "ExponentialLR")
+        .def(py::init<tenzor::optim::SGD&, double>(),
+             py::arg("optimizer"),
+             py::arg("gamma"),
+             "Decays learning rate exponentially by gamma every epoch")
+        .def(py::init<tenzor::optim::Adam&, double>(),
+             py::arg("optimizer"),
+             py::arg("gamma"))
+        .def(py::init<tenzor::optim::AdamW&, double>(),
+             py::arg("optimizer"),
+             py::arg("gamma"))
+        .def("get_epoch", &tenzor::optim::ExponentialLR::get_epoch,
+             "Get current epoch number");
+
+    // CosineAnnealingLR scheduler
+    py::class_<tenzor::optim::CosineAnnealingLR, tenzor::optim::LRScheduler>(lr_scheduler, "CosineAnnealingLR")
+        .def(py::init<tenzor::optim::SGD&, int, double>(),
+             py::arg("optimizer"),
+             py::arg("T_max"),
+             py::arg("eta_min") = 0.0,
+             "Cosine annealing learning rate schedule")
+        .def(py::init<tenzor::optim::Adam&, int, double>(),
+             py::arg("optimizer"),
+             py::arg("T_max"),
+             py::arg("eta_min") = 0.0)
+        .def(py::init<tenzor::optim::AdamW&, int, double>(),
+             py::arg("optimizer"),
+             py::arg("T_max"),
+             py::arg("eta_min") = 0.0)
+        .def("get_epoch", &tenzor::optim::CosineAnnealingLR::get_epoch,
+             "Get current epoch number");
 }

@@ -103,7 +103,7 @@ Public Member Functions</h2></td></tr>
 <tr class="memitem:a15578a9c8ca0b8787975a7c785822fc6" id="r_a15578a9c8ca0b8787975a7c785822fc6"><td class="memItemLeft" align="right" valign="top"><a id="a15578a9c8ca0b8787975a7c785822fc6" name="a15578a9c8ca0b8787975a7c785822fc6"></a>
 &#160;</td><td class="memItemRight" valign="bottom"><b>Tensor</b> ()=default</td></tr>
 <tr class="memdesc:a15578a9c8ca0b8787975a7c785822fc6"><td class="mdescLeft">&#160;</td><td class="mdescRight">Default constructor creating an empty tensor. <br /></td></tr>
-<tr class="memitem:a25a3affbf301315135e07846f8465a2a" id="r_a25a3affbf301315135e07846f8465a2a"><td class="memItemLeft" align="right" valign="top">&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a25a3affbf301315135e07846f8465a2a">Tensor</a> (std::vector&lt; int64_t &gt; <a class="el" href="#a0d9144bef927e13ac6ae404ff8c17564">shape</a>, <a class="el" href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a> <a class="el" href="#a58b5a3cd13870ec6bb03029fd05cb234">dtype</a>, <a class="el" href="structtenzor_1_1Device.html">Device</a> <a class="el" href="#a28afe9a096276af9ae92bb8b4a4715eb">device</a>)</td></tr>
+<tr class="memitem:a25a3affbf301315135e07846f8465a2a" id="r_a25a3affbf301315135e07846f8465a2a"><td class="memItemLeft" align="right" valign="top">&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a25a3affbf301315135e07846f8465a2a">Tensor</a> (std::vector&lt; int64_t &gt; <a class="el" href="#a0d9144bef927e13ac6ae404ff8c17564">shape</a>, <a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a> <a class="el" href="#a58b5a3cd13870ec6bb03029fd05cb234">dtype</a>, <a class="el" href="structtenzor_1_1Device.html">Device</a> <a class="el" href="#a28afe9a096276af9ae92bb8b4a4715eb">device</a>)</td></tr>
 <tr class="memdesc:a25a3affbf301315135e07846f8465a2a"><td class="mdescLeft">&#160;</td><td class="mdescRight">Construct tensor with specified shape, dtype, and device.  <br /></td></tr>
 <tr class="memitem:a25086ebaf72d547ac300a4a149b92d12" id="r_a25086ebaf72d547ac300a4a149b92d12"><td class="memItemLeft" align="right" valign="top"><a id="a25086ebaf72d547ac300a4a149b92d12" name="a25086ebaf72d547ac300a4a149b92d12"></a>
 &#160;</td><td class="memItemRight" valign="bottom"><b>Tensor</b> (const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &amp;)=default</td></tr>
@@ -128,7 +128,7 @@ Public Member Functions</h2></td></tr>
 <tr class="memdesc:a4ad97f8b68cc6837acc5a3c22c243273"><td class="mdescLeft">&#160;</td><td class="mdescRight">Get the number of dimensions.  <br /></td></tr>
 <tr class="memitem:a652febe5705eb0bcb1c959c39f3ef9eb" id="r_a652febe5705eb0bcb1c959c39f3ef9eb"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a652febe5705eb0bcb1c959c39f3ef9eb">numel</a> () const noexcept -&gt; int64_t</td></tr>
 <tr class="memdesc:a652febe5705eb0bcb1c959c39f3ef9eb"><td class="mdescLeft">&#160;</td><td class="mdescRight">Get the total number of elements.  <br /></td></tr>
-<tr class="memitem:a58b5a3cd13870ec6bb03029fd05cb234" id="r_a58b5a3cd13870ec6bb03029fd05cb234"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a58b5a3cd13870ec6bb03029fd05cb234">dtype</a> () const noexcept -&gt; <a class="el" href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a></td></tr>
+<tr class="memitem:a58b5a3cd13870ec6bb03029fd05cb234" id="r_a58b5a3cd13870ec6bb03029fd05cb234"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a58b5a3cd13870ec6bb03029fd05cb234">dtype</a> () const noexcept -&gt; <a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a></td></tr>
 <tr class="memdesc:a58b5a3cd13870ec6bb03029fd05cb234"><td class="mdescLeft">&#160;</td><td class="mdescRight">Get the data type of tensor elements.  <br /></td></tr>
 <tr class="memitem:a28afe9a096276af9ae92bb8b4a4715eb" id="r_a28afe9a096276af9ae92bb8b4a4715eb"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a28afe9a096276af9ae92bb8b4a4715eb">device</a> () const noexcept -&gt; const <a class="el" href="structtenzor_1_1Device.html">Device</a> &amp;</td></tr>
 <tr class="memdesc:a28afe9a096276af9ae92bb8b4a4715eb"><td class="mdescLeft">&#160;</td><td class="mdescRight">Get the device where tensor resides.  <br /></td></tr>
@@ -150,7 +150,7 @@ requires ScalarType&lt;T&gt;</td></tr>
 <tr class="memdesc:aa658d5dea93b7cae0c8ca0de4db5d462"><td class="mdescLeft">&#160;</td><td class="mdescRight">Extract scalar value from 0-dimensional tensor.  <br /></td></tr>
 <tr class="memitem:a2ff4ead7f9316c337347c5446e7d4c5a" id="r_a2ff4ead7f9316c337347c5446e7d4c5a"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a2ff4ead7f9316c337347c5446e7d4c5a">to</a> (<a class="el" href="structtenzor_1_1Device.html">Device</a> <a class="el" href="#a28afe9a096276af9ae92bb8b4a4715eb">device</a>) const -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
 <tr class="memdesc:a2ff4ead7f9316c337347c5446e7d4c5a"><td class="mdescLeft">&#160;</td><td class="mdescRight">Move tensor to specified device.  <br /></td></tr>
-<tr class="memitem:ae56cd7e3c058e179752c70f0b6daf37c" id="r_ae56cd7e3c058e179752c70f0b6daf37c"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#ae56cd7e3c058e179752c70f0b6daf37c">to</a> (<a class="el" href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a> <a class="el" href="#a58b5a3cd13870ec6bb03029fd05cb234">dtype</a>) const -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
+<tr class="memitem:ae56cd7e3c058e179752c70f0b6daf37c" id="r_ae56cd7e3c058e179752c70f0b6daf37c"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#ae56cd7e3c058e179752c70f0b6daf37c">to</a> (<a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a> <a class="el" href="#a58b5a3cd13870ec6bb03029fd05cb234">dtype</a>) const -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
 <tr class="memdesc:ae56cd7e3c058e179752c70f0b6daf37c"><td class="mdescLeft">&#160;</td><td class="mdescRight">Convert tensor to specified data type.  <br /></td></tr>
 <tr class="memitem:a8c91a334452a95c43ed7536d55cf0275" id="r_a8c91a334452a95c43ed7536d55cf0275"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a8c91a334452a95c43ed7536d55cf0275">cuda</a> (int32_t device_id=0) const -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
 <tr class="memdesc:a8c91a334452a95c43ed7536d55cf0275"><td class="mdescLeft">&#160;</td><td class="mdescRight">Move tensor to CUDA device.  <br /></td></tr>
@@ -263,7 +263,7 @@ auto&#160;</td><td class="memItemRight" valign="bottom"><b>cuda::contiguous_kern
 </ul>
 <p>Tensors use copy-on-write semantics for efficient memory usage.</p>
 <div class="fragment"><div class="line"><span class="comment">// Create tensors</span></div>
-<div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> a({3, 4}, <a class="code hl_enumvalue" href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
+<div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> a({3, 4}, <a class="code hl_enumvalue" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
 <div class="line"><a class="code hl_class" href="classtenzor_1_1Tensor.html">Tensor</a> b = a.<a class="code hl_function" href="#a8c91a334452a95c43ed7536d55cf0275">cuda</a>();  <span class="comment">// Move to GPU</span></div>
 <div class="line"> </div>
 <div class="line"><span class="comment">// Operations</span></div>
@@ -273,7 +273,7 @@ auto&#160;</td><td class="memItemRight" valign="bottom"><b>cuda::contiguous_kern
 <div class="ttc" id="aclasstenzor_1_1Tensor_html_a15578a9c8ca0b8787975a7c785822fc6"><div class="ttname"><a href="#a15578a9c8ca0b8787975a7c785822fc6">tenzor::Tensor::Tensor</a></div><div class="ttdeci">Tensor()=default</div><div class="ttdoc">Default constructor creating an empty tensor.</div></div>
 <div class="ttc" id="aclasstenzor_1_1Tensor_html_a8c91a334452a95c43ed7536d55cf0275"><div class="ttname"><a href="#a8c91a334452a95c43ed7536d55cf0275">tenzor::Tensor::cuda</a></div><div class="ttdeci">auto cuda(int32_t device_id=0) const -&gt; Tensor</div><div class="ttdoc">Move tensor to CUDA device.</div></div>
 <div class="ttc" id="aclasstenzor_1_1Tensor_html_ab898ad1bdc9a05c9be2583061fa6827c"><div class="ttname"><a href="#ab898ad1bdc9a05c9be2583061fa6827c">tenzor::Tensor::reshape</a></div><div class="ttdeci">auto reshape(std::vector&lt; int64_t &gt; new_shape) const -&gt; Tensor</div><div class="ttdoc">Reshape tensor to new dimensions.</div></div>
-<div class="ttc" id="adtype_8hpp_html_a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204"><div class="ttname"><a href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">tenzor::DType::Float32</a></div><div class="ttdeci">@ Float32</div><div class="ttdoc">32-bit floating point (float)</div><div class="ttdef"><b>Definition</b> <a href="dtype_8hpp_source.html#l00025">dtype.hpp:25</a></div></div>
+<div class="ttc" id="anamespacetenzor_html_a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204"><div class="ttname"><a href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">tenzor::DType::Float32</a></div><div class="ttdeci">@ Float32</div><div class="ttdoc">32-bit floating point (float)</div><div class="ttdef"><b>Definition</b> <a href="dtype_8hpp_source.html#l00025">dtype.hpp:25</a></div></div>
 <div class="ttc" id="astructtenzor_1_1Device_html_a77290e32e1fa7560bef5d05457f6157a"><div class="ttname"><a href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">tenzor::Device::cpu</a></div><div class="ttdeci">static auto cpu() -&gt; Device</div><div class="ttdoc">Create a CPU device.</div><div class="ttdef"><b>Definition</b> <a href="device_8hpp_source.html#l00056">device.hpp:56</a></div></div>
 </div><!-- fragment --> 
 <p class="definition">Definition at line <a class="el" href="tensor_8hpp_source.html#l00072">72</a> of file <a class="el" href="tensor_8hpp_source.html">tensor.hpp</a>.</p>
@@ -292,7 +292,7 @@ auto&#160;</td><td class="memItemRight" valign="bottom"><b>cuda::contiguous_kern
         <tr>
           <td class="paramkey"></td>
           <td></td>
-          <td class="paramtype"><a class="el" href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a></td>          <td class="paramname"><span class="paramname"><em>dtype</em></span>, </td>
+          <td class="paramtype"><a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a></td>          <td class="paramname"><span class="paramname"><em>dtype</em></span>, </td>
         </tr>
         <tr>
           <td class="paramkey"></td>
@@ -311,7 +311,7 @@ auto&#160;</td><td class="memItemRight" valign="bottom"><b>cuda::contiguous_kern
   </table>
   </dd>
 </dl>
-<div class="fragment"><div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> t({2, 3, 4}, <a class="code hl_enumvalue" href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a76d3773ac62efb2135846cc5f1dbd3c8">Device::cuda</a>(0));</div>
+<div class="fragment"><div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> t({2, 3, 4}, <a class="code hl_enumvalue" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a76d3773ac62efb2135846cc5f1dbd3c8">Device::cuda</a>(0));</div>
 <div class="ttc" id="astructtenzor_1_1Device_html_a76d3773ac62efb2135846cc5f1dbd3c8"><div class="ttname"><a href="structtenzor_1_1Device.html#a76d3773ac62efb2135846cc5f1dbd3c8">tenzor::Device::cuda</a></div><div class="ttdeci">static auto cuda(int32_t idx=0) -&gt; Device</div><div class="ttdoc">Create a CUDA device.</div><div class="ttdef"><b>Definition</b> <a href="device_8hpp_source.html#l00070">device.hpp:70</a></div></div>
 </div><!-- fragment --> 
 <p class="reference">References <a class="el" href="#a28afe9a096276af9ae92bb8b4a4715eb">device()</a>, <a class="el" href="#a58b5a3cd13870ec6bb03029fd05cb234">dtype()</a>, and <a class="el" href="#a0d9144bef927e13ac6ae404ff8c17564">shape()</a>.</p>
@@ -337,7 +337,7 @@ auto&#160;</td><td class="memItemRight" valign="bottom"><b>cuda::contiguous_kern
 <p>Create deep copy of tensor. </p>
 <p>Allocates new storage and copies all data.</p>
 <dl class="section return"><dt>Returns</dt><dd>New independent tensor with copied data</dd></dl>
-<div class="fragment"><div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> a({3, 4}, <a class="code hl_enumvalue" href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
+<div class="fragment"><div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> a({3, 4}, <a class="code hl_enumvalue" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
 <div class="line"><a class="code hl_class" href="classtenzor_1_1Tensor.html">Tensor</a> b = a.<a class="code hl_function" href="#ae7064890bed8d2dca420fc638ad508ed">clone</a>();  <span class="comment">// Independent copy</span></div>
 <div class="ttc" id="aclasstenzor_1_1Tensor_html_ae7064890bed8d2dca420fc638ad508ed"><div class="ttname"><a href="#ae7064890bed8d2dca420fc638ad508ed">tenzor::Tensor::clone</a></div><div class="ttdeci">auto clone() const -&gt; Tensor</div><div class="ttdoc">Create deep copy of tensor.</div></div>
 </div><!-- fragment --> 
@@ -369,7 +369,7 @@ auto&#160;</td><td class="memItemRight" valign="bottom"><b>cuda::contiguous_kern
 <div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> c = t.<a class="code hl_function" href="#a304d96ed483a620c19b0983593a4ddac">contiguous</a>();  <span class="comment">// Ensures contiguous layout</span></div>
 <div class="ttc" id="aclasstenzor_1_1Tensor_html_a304d96ed483a620c19b0983593a4ddac"><div class="ttname"><a href="#a304d96ed483a620c19b0983593a4ddac">tenzor::Tensor::contiguous</a></div><div class="ttdeci">auto contiguous() const -&gt; Tensor</div><div class="ttdoc">Return contiguous copy if needed.</div></div>
 </div><!-- fragment --> 
-<p class="reference">References <a class="el" href="#a304d96ed483a620c19b0983593a4ddac">contiguous()</a>, and <a class="el" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor()</a>.</p>
+<p class="reference">References <a class="el" href="#a304d96ed483a620c19b0983593a4ddac">contiguous()</a>, <a class="el" href="group__tensor__reduction.html#ga57c6304de0ccf7b02d2cf42923b2e3d9">tenzor::std()</a>, and <a class="el" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor()</a>.</p>
 
 <p class="reference">Referenced by <a class="el" href="#a304d96ed483a620c19b0983593a4ddac">contiguous()</a>.</p>
 
@@ -463,7 +463,7 @@ requires ScalarType&lt;T&gt;</div>
   </table>
   </dd>
 </dl>
-<div class="fragment"><div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> t({3, 4}, <a class="code hl_enumvalue" href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
+<div class="fragment"><div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> t({3, 4}, <a class="code hl_enumvalue" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
 <div class="line"><span class="keywordtype">float</span>* ptr = t.data&lt;<span class="keywordtype">float</span>&gt;();</div>
 <div class="line">ptr[0] = 1.0f;</div>
 </div><!-- fragment --> 
@@ -583,7 +583,7 @@ requires ScalarType&lt;T&gt;</div>
           <td class="memname">auto tenzor::Tensor::dtype </td>
           <td>(</td>
           <td class="paramname"><span class="paramname"><em></em></span></td><td>)</td>
-          <td> const -&gt;  <a class="el" href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a></td>
+          <td> const -&gt;  <a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a></td>
         </tr>
       </table>
   </td>
@@ -594,7 +594,7 @@ requires ScalarType&lt;T&gt;</div>
 </div><div class="memdoc">
 
 <p>Get the data type of tensor elements. </p>
-<dl class="section return"><dt>Returns</dt><dd><a class="el" href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14fee" title="Enumeration of supported tensor data types.">DType</a> enumeration value </dd></dl>
+<dl class="section return"><dt>Returns</dt><dd><a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14fee" title="Enumeration of supported tensor data types.">DType</a> enumeration value </dd></dl>
 
 <p class="reference">References <a class="el" href="#a58b5a3cd13870ec6bb03029fd05cb234">dtype()</a>.</p>
 
@@ -625,7 +625,7 @@ requires ScalarType&lt;T&gt;</div>
   </dd>
 </dl>
 <dl class="section return"><dt>Returns</dt><dd>Reference to this tensor</dd></dl>
-<div class="fragment"><div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> t({3, 4}, <a class="code hl_enumvalue" href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
+<div class="fragment"><div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> t({3, 4}, <a class="code hl_enumvalue" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
 <div class="line">t.fill_(1.5f);  <span class="comment">// All elements = 1.5</span></div>
 </div><!-- fragment --> 
 <p class="reference">References <a class="el" href="#ad1dcc0f283c9edfb302ec36bcb48b4ec">fill_()</a>, and <a class="el" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor()</a>.</p>
@@ -662,7 +662,7 @@ requires ScalarType&lt;T&gt;</div>
   </dd>
 </dl>
 <dl class="section return"><dt>Returns</dt><dd>Flattened tensor</dd></dl>
-<div class="fragment"><div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> t({2, 3, 4}, <a class="code hl_enumvalue" href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
+<div class="fragment"><div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> t({2, 3, 4}, <a class="code hl_enumvalue" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
 <div class="line"><a class="code hl_class" href="classtenzor_1_1Tensor.html">Tensor</a> f = t.<a class="code hl_function" href="#a16329d341575550105bba688ab8bff63">flatten</a>();         <span class="comment">// Shape: {24}</span></div>
 <div class="line"><a class="code hl_class" href="classtenzor_1_1Tensor.html">Tensor</a> f2 = t.<a class="code hl_function" href="#a16329d341575550105bba688ab8bff63">flatten</a>(1, 2);    <span class="comment">// Shape: {2, 12}</span></div>
 <div class="ttc" id="aclasstenzor_1_1Tensor_html_a16329d341575550105bba688ab8bff63"><div class="ttname"><a href="#a16329d341575550105bba688ab8bff63">tenzor::Tensor::flatten</a></div><div class="ttdeci">auto flatten(int64_t start_dim=0, int64_t end_dim=-1) const -&gt; Tensor</div><div class="ttdoc">Flatten tensor to 1D or partially flatten.</div></div>
@@ -833,7 +833,7 @@ requires ScalarType&lt;T&gt;</div>
 
 <p>Get the total number of elements. </p>
 <dl class="section return"><dt>Returns</dt><dd>Product of all dimension sizes</dd></dl>
-<div class="fragment"><div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> t({2, 3, 4}, <a class="code hl_enumvalue" href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
+<div class="fragment"><div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> t({2, 3, 4}, <a class="code hl_enumvalue" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
 <div class="line"><span class="keyword">auto</span> n = t.numel();  <span class="comment">// Returns 24</span></div>
 </div><!-- fragment --> 
 <p class="reference">References <a class="el" href="#a652febe5705eb0bcb1c959c39f3ef9eb">numel()</a>.</p>
@@ -977,8 +977,8 @@ requires ScalarType&lt;T&gt;</div>
   </dd>
 </dl>
 <dl class="section return"><dt>Returns</dt><dd>New tensor with sum</dd></dl>
-<div class="fragment"><div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> a({3, 4}, <a class="code hl_enumvalue" href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
-<div class="line"><a class="code hl_class" href="classtenzor_1_1Tensor.html">Tensor</a> b({3, 4}, DType::Float32, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
+<div class="fragment"><div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> a({3, 4}, <a class="code hl_enumvalue" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
+<div class="line"><a class="code hl_class" href="classtenzor_1_1Tensor.html">Tensor</a> b({3, 4}, <a class="code hl_enumvalue" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
 <div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> c = a + b;</div>
 </div><!-- fragment --> 
 <p class="reference">References <a class="el" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor()</a>.</p>
@@ -1317,7 +1317,7 @@ requires ScalarType&lt;T&gt;</div>
   </dd>
 </dl>
 <dl class="section return"><dt>Returns</dt><dd><a class="el" href="classtenzor_1_1Tensor.html" title="Multi-dimensional array with automatic differentiation support.">Tensor</a> with first dimension removed</dd></dl>
-<div class="fragment"><div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> t({3, 4}, <a class="code hl_enumvalue" href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
+<div class="fragment"><div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> t({3, 4}, <a class="code hl_enumvalue" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
 <div class="line"><a class="code hl_class" href="classtenzor_1_1Tensor.html">Tensor</a> row = t[0];    <span class="comment">// Shape: {4}</span></div>
 <div class="line"><a class="code hl_class" href="classtenzor_1_1Tensor.html">Tensor</a> last = t[-1];  <span class="comment">// Last row</span></div>
 </div><!-- fragment --> 
@@ -1354,11 +1354,11 @@ requires ScalarType&lt;T&gt;</div>
   </table>
   </dd>
 </dl>
-<div class="fragment"><div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> t({2, 3, 4}, <a class="code hl_enumvalue" href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
+<div class="fragment"><div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> t({2, 3, 4}, <a class="code hl_enumvalue" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
 <div class="line"><a class="code hl_class" href="classtenzor_1_1Tensor.html">Tensor</a> p = t.<a class="code hl_function" href="#a6059d3dd99f3a4e94610e9cde368c5b2">permute</a>({2, 0, 1});  <span class="comment">// Shape: {4, 2, 3}</span></div>
 <div class="ttc" id="aclasstenzor_1_1Tensor_html_a6059d3dd99f3a4e94610e9cde368c5b2"><div class="ttname"><a href="#a6059d3dd99f3a4e94610e9cde368c5b2">tenzor::Tensor::permute</a></div><div class="ttdeci">auto permute(std::vector&lt; int64_t &gt; dims) const -&gt; Tensor</div><div class="ttdoc">Permute dimensions.</div></div>
 </div><!-- fragment --> 
-<p class="reference">References <a class="el" href="#a6059d3dd99f3a4e94610e9cde368c5b2">permute()</a>, and <a class="el" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor()</a>.</p>
+<p class="reference">References <a class="el" href="#a6059d3dd99f3a4e94610e9cde368c5b2">permute()</a>, <a class="el" href="group__tensor__reduction.html#ga57c6304de0ccf7b02d2cf42923b2e3d9">tenzor::std()</a>, and <a class="el" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor()</a>.</p>
 
 <p class="reference">Referenced by <a class="el" href="#a6059d3dd99f3a4e94610e9cde368c5b2">permute()</a>.</p>
 
@@ -1426,11 +1426,11 @@ requires ScalarType&lt;T&gt;</div>
   </table>
   </dd>
 </dl>
-<div class="fragment"><div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> t({2, 6}, <a class="code hl_enumvalue" href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
+<div class="fragment"><div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> t({2, 6}, <a class="code hl_enumvalue" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
 <div class="line"><a class="code hl_class" href="classtenzor_1_1Tensor.html">Tensor</a> r = t.<a class="code hl_function" href="#ab898ad1bdc9a05c9be2583061fa6827c">reshape</a>({3, 4});  <span class="comment">// 2x6 -&gt; 3x4</span></div>
 <div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> a = t.reshape({-1});    <span class="comment">// Flatten to 1D</span></div>
 </div><!-- fragment --> 
-<p class="reference">References <a class="el" href="#ab898ad1bdc9a05c9be2583061fa6827c">reshape()</a>, and <a class="el" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor()</a>.</p>
+<p class="reference">References <a class="el" href="#ab898ad1bdc9a05c9be2583061fa6827c">reshape()</a>, <a class="el" href="group__tensor__reduction.html#ga57c6304de0ccf7b02d2cf42923b2e3d9">tenzor::std()</a>, and <a class="el" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor()</a>.</p>
 
 <p class="reference">Referenced by <a class="el" href="#ab898ad1bdc9a05c9be2583061fa6827c">reshape()</a>.</p>
 
@@ -1461,10 +1461,10 @@ requires ScalarType&lt;T&gt;</div>
 
 <p>Get the shape of the tensor. </p>
 <dl class="section return"><dt>Returns</dt><dd>Span of dimension sizes (e.g., {3, 4} for 3x4 matrix)</dd></dl>
-<div class="fragment"><div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> t({2, 3, 4}, <a class="code hl_enumvalue" href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
+<div class="fragment"><div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> t({2, 3, 4}, <a class="code hl_enumvalue" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
 <div class="line"><span class="keyword">auto</span> s = t.shape();  <span class="comment">// Returns {2, 3, 4}</span></div>
 </div><!-- fragment --> 
-<p class="reference">References <a class="el" href="#a0d9144bef927e13ac6ae404ff8c17564">shape()</a>.</p>
+<p class="reference">References <a class="el" href="#a0d9144bef927e13ac6ae404ff8c17564">shape()</a>, and <a class="el" href="group__tensor__reduction.html#ga57c6304de0ccf7b02d2cf42923b2e3d9">tenzor::std()</a>.</p>
 
 <p class="reference">Referenced by <a class="el" href="#a0d9144bef927e13ac6ae404ff8c17564">shape()</a>, and <a class="el" href="#a25a3affbf301315135e07846f8465a2a">Tensor()</a>.</p>
 
@@ -1510,7 +1510,7 @@ requires ScalarType&lt;T&gt;</div>
   </dd>
 </dl>
 <dl class="section return"><dt>Returns</dt><dd>Sliced tensor (shares storage)</dd></dl>
-<div class="fragment"><div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> t({10, 5}, <a class="code hl_enumvalue" href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
+<div class="fragment"><div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> t({10, 5}, <a class="code hl_enumvalue" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
 <div class="line"><a class="code hl_class" href="classtenzor_1_1Tensor.html">Tensor</a> s = t.<a class="code hl_function" href="#a64058479a10286292f1db15c8ca36785">slice</a>(0, 2, 7);     <span class="comment">// Rows 2-6</span></div>
 <div class="line"><a class="code hl_class" href="classtenzor_1_1Tensor.html">Tensor</a> s2 = t.<a class="code hl_function" href="#a64058479a10286292f1db15c8ca36785">slice</a>(0, 0, 10, 2); <span class="comment">// Every other row</span></div>
 <div class="ttc" id="aclasstenzor_1_1Tensor_html_a64058479a10286292f1db15c8ca36785"><div class="ttname"><a href="#a64058479a10286292f1db15c8ca36785">tenzor::Tensor::slice</a></div><div class="ttdeci">auto slice(int64_t dim, int64_t start, int64_t end, int64_t step=1) const -&gt; Tensor</div><div class="ttdoc">Slice tensor along a dimension.</div></div>
@@ -1544,12 +1544,12 @@ requires ScalarType&lt;T&gt;</div>
   </dd>
 </dl>
 <dl class="section return"><dt>Returns</dt><dd><a class="el" href="classtenzor_1_1Tensor.html" title="Multi-dimensional array with automatic differentiation support.">Tensor</a> with size-1 dimensions removed</dd></dl>
-<div class="fragment"><div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> t({1, 3, 1, 4}, <a class="code hl_enumvalue" href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
+<div class="fragment"><div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> t({1, 3, 1, 4}, <a class="code hl_enumvalue" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
 <div class="line"><a class="code hl_class" href="classtenzor_1_1Tensor.html">Tensor</a> s = t.<a class="code hl_function" href="#a6ed21c3e5978c025a977c483d403496d">squeeze</a>();     <span class="comment">// Shape: {3, 4}</span></div>
 <div class="line"><a class="code hl_class" href="classtenzor_1_1Tensor.html">Tensor</a> s2 = t.<a class="code hl_function" href="#a6ed21c3e5978c025a977c483d403496d">squeeze</a>(0);   <span class="comment">// Shape: {3, 1, 4}</span></div>
 <div class="ttc" id="aclasstenzor_1_1Tensor_html_a6ed21c3e5978c025a977c483d403496d"><div class="ttname"><a href="#a6ed21c3e5978c025a977c483d403496d">tenzor::Tensor::squeeze</a></div><div class="ttdeci">auto squeeze(std::optional&lt; int64_t &gt; dim=std::nullopt) const -&gt; Tensor</div><div class="ttdoc">Remove dimensions of size 1.</div></div>
 </div><!-- fragment --> 
-<p class="reference">References <a class="el" href="#a6ed21c3e5978c025a977c483d403496d">squeeze()</a>, and <a class="el" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor()</a>.</p>
+<p class="reference">References <a class="el" href="#a6ed21c3e5978c025a977c483d403496d">squeeze()</a>, <a class="el" href="group__tensor__reduction.html#ga57c6304de0ccf7b02d2cf42923b2e3d9">tenzor::std()</a>, and <a class="el" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor()</a>.</p>
 
 <p class="reference">Referenced by <a class="el" href="#a6ed21c3e5978c025a977c483d403496d">squeeze()</a>.</p>
 
@@ -1581,10 +1581,10 @@ requires ScalarType&lt;T&gt;</div>
 <p>Get the strides of the tensor. </p>
 <p>Strides define memory layout - the number of elements to skip to move to the next element along each dimension.</p>
 <dl class="section return"><dt>Returns</dt><dd>Span of stride values</dd></dl>
-<div class="fragment"><div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> t({2, 3}, <a class="code hl_enumvalue" href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
+<div class="fragment"><div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> t({2, 3}, <a class="code hl_enumvalue" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
 <div class="line"><span class="keyword">auto</span> s = t.strides();  <span class="comment">// Returns {3, 1} for row-major layout</span></div>
 </div><!-- fragment --> 
-<p class="reference">References <a class="el" href="#ad6ed982b9c03f83306a045ab14160e3a">strides()</a>.</p>
+<p class="reference">References <a class="el" href="group__tensor__reduction.html#ga57c6304de0ccf7b02d2cf42923b2e3d9">tenzor::std()</a>, and <a class="el" href="#ad6ed982b9c03f83306a045ab14160e3a">strides()</a>.</p>
 
 <p class="reference">Referenced by <a class="el" href="#ad6ed982b9c03f83306a045ab14160e3a">strides()</a>.</p>
 
@@ -1614,7 +1614,7 @@ requires ScalarType&lt;T&gt;</div>
   </dd>
 </dl>
 <dl class="section return"><dt>Returns</dt><dd>New tensor on specified device</dd></dl>
-<div class="fragment"><div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> cpu_t({3, 4}, <a class="code hl_enumvalue" href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
+<div class="fragment"><div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> cpu_t({3, 4}, <a class="code hl_enumvalue" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
 <div class="line"><a class="code hl_class" href="classtenzor_1_1Tensor.html">Tensor</a> gpu_t = cpu_t.<a class="code hl_function" href="#a2ff4ead7f9316c337347c5446e7d4c5a">to</a>(<a class="code hl_function" href="structtenzor_1_1Device.html#a76d3773ac62efb2135846cc5f1dbd3c8">Device::cuda</a>(0));</div>
 <div class="ttc" id="aclasstenzor_1_1Tensor_html_a2ff4ead7f9316c337347c5446e7d4c5a"><div class="ttname"><a href="#a2ff4ead7f9316c337347c5446e7d4c5a">tenzor::Tensor::to</a></div><div class="ttdeci">auto to(Device device) const -&gt; Tensor</div><div class="ttdoc">Move tensor to specified device.</div></div>
 </div><!-- fragment --> 
@@ -1633,7 +1633,7 @@ requires ScalarType&lt;T&gt;</div>
         <tr>
           <td class="memname">auto tenzor::Tensor::to </td>
           <td>(</td>
-          <td class="paramtype"><a class="el" href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a></td>          <td class="paramname"><span class="paramname"><em>dtype</em></span></td><td>)</td>
+          <td class="paramtype"><a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a></td>          <td class="paramname"><span class="paramname"><em>dtype</em></span></td><td>)</td>
           <td> const -&gt;  <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td>
         </tr>
       </table>
@@ -1647,9 +1647,9 @@ requires ScalarType&lt;T&gt;</div>
   </dd>
 </dl>
 <dl class="section return"><dt>Returns</dt><dd>New tensor with converted data type</dd></dl>
-<div class="fragment"><div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> f32_t({3, 4}, <a class="code hl_enumvalue" href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
-<div class="line"><a class="code hl_class" href="classtenzor_1_1Tensor.html">Tensor</a> f64_t = f32_t.<a class="code hl_function" href="#a2ff4ead7f9316c337347c5446e7d4c5a">to</a>(<a class="code hl_enumvalue" href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14feead2b556d8a8f5c8ac323f51a4b82e79a0">DType::Float64</a>);</div>
-<div class="ttc" id="adtype_8hpp_html_a5e94edb9b77a2828dfc7fa02bbc14feead2b556d8a8f5c8ac323f51a4b82e79a0"><div class="ttname"><a href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14feead2b556d8a8f5c8ac323f51a4b82e79a0">tenzor::DType::Float64</a></div><div class="ttdeci">@ Float64</div><div class="ttdoc">64-bit floating point (double)</div><div class="ttdef"><b>Definition</b> <a href="dtype_8hpp_source.html#l00026">dtype.hpp:26</a></div></div>
+<div class="fragment"><div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> f32_t({3, 4}, <a class="code hl_enumvalue" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
+<div class="line"><a class="code hl_class" href="classtenzor_1_1Tensor.html">Tensor</a> f64_t = f32_t.<a class="code hl_function" href="#a2ff4ead7f9316c337347c5446e7d4c5a">to</a>(<a class="code hl_enumvalue" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feead2b556d8a8f5c8ac323f51a4b82e79a0">DType::Float64</a>);</div>
+<div class="ttc" id="anamespacetenzor_html_a5e94edb9b77a2828dfc7fa02bbc14feead2b556d8a8f5c8ac323f51a4b82e79a0"><div class="ttname"><a href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feead2b556d8a8f5c8ac323f51a4b82e79a0">tenzor::DType::Float64</a></div><div class="ttdeci">@ Float64</div><div class="ttdoc">64-bit floating point (double)</div><div class="ttdef"><b>Definition</b> <a href="dtype_8hpp_source.html#l00026">dtype.hpp:26</a></div></div>
 </div><!-- fragment --> 
 <p class="reference">References <a class="el" href="#a58b5a3cd13870ec6bb03029fd05cb234">dtype()</a>, <a class="el" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor()</a>, and <a class="el" href="#a2ff4ead7f9316c337347c5446e7d4c5a">to()</a>.</p>
 
@@ -1683,7 +1683,7 @@ requires ScalarType&lt;T&gt;</div>
   </dd>
 </dl>
 <dl class="section return"><dt>Returns</dt><dd>Transposed tensor (shares storage)</dd></dl>
-<div class="fragment"><div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> t({2, 3, 4}, <a class="code hl_enumvalue" href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
+<div class="fragment"><div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> t({2, 3, 4}, <a class="code hl_enumvalue" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
 <div class="line"><a class="code hl_class" href="classtenzor_1_1Tensor.html">Tensor</a> t2 = t.<a class="code hl_function" href="#a787e134b42154e31f09896429a7b6b90">transpose</a>(0, 2);  <span class="comment">// Shape: {4, 3, 2}</span></div>
 <div class="ttc" id="aclasstenzor_1_1Tensor_html_a787e134b42154e31f09896429a7b6b90"><div class="ttname"><a href="#a787e134b42154e31f09896429a7b6b90">tenzor::Tensor::transpose</a></div><div class="ttdeci">auto transpose(int64_t dim0, int64_t dim1) const -&gt; Tensor</div><div class="ttdoc">Transpose two dimensions.</div></div>
 </div><!-- fragment --> 
@@ -1716,7 +1716,7 @@ requires ScalarType&lt;T&gt;</div>
   </dd>
 </dl>
 <dl class="section return"><dt>Returns</dt><dd><a class="el" href="classtenzor_1_1Tensor.html" title="Multi-dimensional array with automatic differentiation support.">Tensor</a> with added dimension</dd></dl>
-<div class="fragment"><div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> t({3, 4}, <a class="code hl_enumvalue" href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
+<div class="fragment"><div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> t({3, 4}, <a class="code hl_enumvalue" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
 <div class="line"><a class="code hl_class" href="classtenzor_1_1Tensor.html">Tensor</a> u = t.<a class="code hl_function" href="#a8689d8ea1bb52cb2e641d519244c73ee">unsqueeze</a>(0);  <span class="comment">// Shape: {1, 3, 4}</span></div>
 <div class="line"><a class="code hl_class" href="classtenzor_1_1Tensor.html">Tensor</a> u2 = t.<a class="code hl_function" href="#a8689d8ea1bb52cb2e641d519244c73ee">unsqueeze</a>(1); <span class="comment">// Shape: {3, 1, 4}</span></div>
 <div class="ttc" id="aclasstenzor_1_1Tensor_html_a8689d8ea1bb52cb2e641d519244c73ee"><div class="ttname"><a href="#a8689d8ea1bb52cb2e641d519244c73ee">tenzor::Tensor::unsqueeze</a></div><div class="ttdeci">auto unsqueeze(int64_t dim) const -&gt; Tensor</div><div class="ttdoc">Add dimension of size 1.</div></div>
@@ -1758,7 +1758,7 @@ requires ScalarType&lt;T&gt;</div>
   </dd>
 </dl>
 
-<p class="reference">References <a class="el" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor()</a>, and <a class="el" href="#aec356e2655c4b7ef788768613d1aabd9">view()</a>.</p>
+<p class="reference">References <a class="el" href="group__tensor__reduction.html#ga57c6304de0ccf7b02d2cf42923b2e3d9">tenzor::std()</a>, <a class="el" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor()</a>, and <a class="el" href="#aec356e2655c4b7ef788768613d1aabd9">view()</a>.</p>
 
 <p class="reference">Referenced by <a class="el" href="#aec356e2655c4b7ef788768613d1aabd9">view()</a>.</p>
 
@@ -1781,7 +1781,7 @@ requires ScalarType&lt;T&gt;</div>
 
 <p>Fill tensor with zeros. </p>
 <dl class="section return"><dt>Returns</dt><dd>Reference to this tensor</dd></dl>
-<div class="fragment"><div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> t({3, 4}, <a class="code hl_enumvalue" href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
+<div class="fragment"><div class="line"><a class="code hl_function" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> t({3, 4}, <a class="code hl_enumvalue" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
 <div class="line">t.zero_();  <span class="comment">// All elements = 0</span></div>
 </div><!-- fragment --> 
 <p class="reference">References <a class="el" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor()</a>, and <a class="el" href="#a5d75c500d2fd16109de26e6bd26695bb">zero_()</a>.</p>
@@ -1855,7 +1855,7 @@ requires ScalarType&lt;T&gt;</div>
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><b>tenzor</b></li><li class="navelem"><a href="classtenzor_1_1Tensor.html">Tensor</a></li>
+    <li class="navelem"><a href="namespacetenzor.html">tenzor</a></li><li class="navelem"><a href="classtenzor_1_1Tensor.html">Tensor</a></li>
     <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>

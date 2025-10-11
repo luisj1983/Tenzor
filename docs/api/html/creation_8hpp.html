@@ -5,7 +5,7 @@
 <meta http-equiv="X-UA-Compatible" content="IE=11"/>
 <meta name="generator" content="Doxygen 1.14.0"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Tenzor: tenzor/ops/creation.hpp File Reference</title>
+<title>Tenzor: include/tenzor/ops/creation.hpp File Reference</title>
 <link href="tabs.css" rel="stylesheet" type="text/css"/>
 <script type="text/javascript" src="jquery.js"></script>
 <script type="text/javascript" src="dynsections.js"></script>
@@ -28,7 +28,7 @@
   <td id="projectalign">
    <div id="projectname">Tenzor<span id="projectnumber">&#160;1.0.0</span>
    </div>
-   <div id="projectbrief">Modern C++20 tensor library with automatic differentiation</div>
+   <div id="projectbrief">High-performance tensor library with automatic differentiation</div>
   </td>
  </tr>
  </tbody>
@@ -92,6 +92,9 @@ $(function(){initNavTree('creation_8hpp.html','',''); });
   <div class="headertitle"><div class="title">creation.hpp File Reference</div></div>
 </div><!--header-->
 <div class="contents">
+
+<p>Tensor creation and initialization operations.  
+<a href="#details">More...</a></p>
 <div class="textblock"><code>#include &lt;vector&gt;</code><br />
 <code>#include &lt;optional&gt;</code><br />
 <code>#include &lt;cstring&gt;</code><br />
@@ -99,32 +102,111 @@ $(function(){initNavTree('creation_8hpp.html','',''); });
 <code>#include &quot;<a class="el" href="tensor_8hpp_source.html">../core/tensor.hpp</a>&quot;</code><br />
 <code>#include &quot;<a class="el" href="dtype_8hpp_source.html">../core/dtype.hpp</a>&quot;</code><br />
 <code>#include &quot;<a class="el" href="device_8hpp_source.html">../core/device.hpp</a>&quot;</code><br />
+</div><div class="textblock"><div class="dynheader">
+Include dependency graph for creation.hpp:</div>
+<div class="dyncontent">
+<div class="center"><img src="creation_8hpp__incl.png" border="0" usemap="#ainclude_2tenzor_2ops_2creation_8hpp" loading="lazy" alt=""/></div>
+<map name="ainclude_2tenzor_2ops_2creation_8hpp" id="ainclude_2tenzor_2ops_2creation_8hpp">
+<area shape="rect" title="Tensor creation and initialization operations." alt="" coords="434,5,575,50"/>
+<area shape="rect" title=" " alt="" coords="5,174,68,201"/>
+<area shape="poly" title=" " alt="" coords="435,45,336,68,228,101,145,135,75,169,73,164,143,130,226,95,334,63,433,40"/>
+<area shape="rect" title=" " alt="" coords="91,174,166,201"/>
+<area shape="poly" title=" " alt="" coords="435,50,362,72,287,100,220,134,163,167,160,163,217,129,285,96,361,67,433,45"/>
+<area shape="rect" title=" " alt="" coords="702,98,768,126"/>
+<area shape="poly" title=" " alt="" coords="567,48,689,91,687,96,565,53"/>
+<area shape="rect" title=" " alt="" coords="699,249,790,277"/>
+<area shape="poly" title=" " alt="" coords="529,49,723,237,719,241,525,52"/>
+<area shape="rect" href="tensor_8hpp.html" title="Core tensor class for multi&#45;dimensional array operations." alt="" coords="298,98,431,126"/>
+<area shape="poly" title=" " alt="" coords="469,53,401,92,398,88,466,48"/>
+<area shape="rect" href="dtype_8hpp.html" title="Data type system for Tenzor tensors." alt="" coords="541,174,628,201"/>
+<area shape="poly" title=" " alt="" coords="518,49,573,158,569,161,513,51"/>
+<area shape="rect" href="device_8hpp.html" title="Device specification and management for tensors." alt="" coords="380,249,472,277"/>
+<area shape="poly" title=" " alt="" coords="501,51,452,202,440,236,435,234,447,200,496,50"/>
+<area shape="poly" title=" " alt="" coords="298,129,83,176,82,170,297,123"/>
+<area shape="poly" title=" " alt="" coords="323,129,181,173,180,168,322,124"/>
+<area shape="rect" title=" " alt="" coords="94,249,171,277"/>
+<area shape="poly" title=" " alt="" coords="327,129,280,149,230,176,189,208,156,240,152,236,186,204,227,171,277,144,325,124"/>
+<area shape="rect" title=" " alt="" coords="364,174,416,201"/>
+<area shape="poly" title=" " alt="" coords="372,125,383,158,378,160,367,127"/>
+<area shape="poly" title=" " alt="" coords="405,124,532,166,530,171,403,129"/>
+<area shape="poly" title=" " alt="" coords="387,124,411,145,431,173,437,204,435,235,430,234,432,205,426,175,407,148,384,128"/>
+<area shape="rect" href="storage_8hpp.html" title="Memory storage abstraction for tensor data." alt="" coords="241,174,339,201"/>
+<area shape="poly" title=" " alt="" coords="353,128,316,164,312,161,349,124"/>
+<area shape="poly" title=" " alt="" coords="614,199,703,240,701,245,612,204"/>
+<area shape="rect" title=" " alt="" coords="501,325,566,353"/>
+<area shape="poly" title=" " alt="" coords="590,202,594,236,593,257,588,278,577,299,563,316,558,313,573,296,583,276,588,257,589,237,585,202"/>
+<area shape="rect" title=" " alt="" coords="602,325,698,353"/>
+<area shape="poly" title=" " alt="" coords="593,200,640,309,635,312,588,203"/>
+<area shape="rect" title=" " alt="" coords="496,249,574,277"/>
+<area shape="poly" title=" " alt="" coords="578,203,555,238,550,235,573,200"/>
+<area shape="poly" title=" " alt="" coords="447,275,504,314,501,318,444,280"/>
+<area shape="poly" title=" " alt="" coords="467,275,597,317,595,322,465,280"/>
+<area shape="rect" title=" " alt="" coords="397,325,455,353"/>
+<area shape="poly" title=" " alt="" coords="428,278,428,309,423,309,423,278"/>
+<area shape="poly" title=" " alt="" coords="263,204,175,245,173,240,261,199"/>
+<area shape="poly" title=" " alt="" coords="315,200,390,239,387,244,313,204"/>
+<area shape="rect" title=" " alt="" coords="195,249,264,277"/>
+<area shape="poly" title=" " alt="" coords="281,204,252,239,248,235,277,200"/>
+<area shape="rect" title=" " alt="" coords="289,249,355,277"/>
+<area shape="poly" title=" " alt="" coords="298,201,313,234,308,236,293,203"/>
+</map>
+</div>
+</div><div class="textblock"><div class="dynheader">
+This graph shows which files directly or indirectly include this file:</div>
+<div class="dyncontent">
+<div class="center"><img src="creation_8hpp__dep__incl.png" border="0" usemap="#ainclude_2tenzor_2ops_2creation_8hppdep" loading="lazy" alt=""/></div>
+<map name="ainclude_2tenzor_2ops_2creation_8hppdep" id="ainclude_2tenzor_2ops_2creation_8hppdep">
+<area shape="rect" title="Tensor creation and initialization operations." alt="" coords="28,5,168,50"/>
+<area shape="rect" href="tenzor_8hpp.html" title="Main header &#45; includes all public Tenzor APIs." alt="" coords="5,98,191,126"/>
+<area shape="poly" title=" " alt="" coords="101,66,101,97,95,97,95,66"/>
+</map>
+</div>
 </div>
 <p><a href="creation_8hpp_source.html">Go to the source code of this file.</a></p>
 <table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-namespaces" class="groupheader"><a id="namespaces" name="namespaces"></a>
 Namespaces</h2></td></tr>
 <tr class="memitem:tenzor" id="r_tenzor"><td class="memItemLeft" align="right" valign="top">namespace &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html">tenzor</a></td></tr>
+<tr class="memdesc:namespacetenzor"><td class="mdescLeft">&#160;</td><td class="mdescRight">Main Tenzor namespace. <br /></td></tr>
 </table><table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-func-members" class="groupheader"><a id="func-members" name="func-members"></a>
 Functions</h2></td></tr>
-<tr class="memitem:a280a2dbed0ffe44cfc9bdfe1f172a1bb" id="r_a280a2dbed0ffe44cfc9bdfe1f172a1bb"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#a280a2dbed0ffe44cfc9bdfe1f172a1bb">tenzor::zeros</a> (std::vector&lt; int64_t &gt; shape, <a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a> dtype=<a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="el" href="structtenzor_1_1Device.html">Device</a> device=<a class="el" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
-<tr class="memitem:a53b9520133d939bf68493eb8bb4ffd53" id="r_a53b9520133d939bf68493eb8bb4ffd53"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#a53b9520133d939bf68493eb8bb4ffd53">tenzor::ones</a> (std::vector&lt; int64_t &gt; shape, <a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a> dtype=<a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="el" href="structtenzor_1_1Device.html">Device</a> device=<a class="el" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
-<tr class="memitem:a9c65fe2701c31f23197f9d3b69780640" id="r_a9c65fe2701c31f23197f9d3b69780640"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#a9c65fe2701c31f23197f9d3b69780640">tenzor::full</a> (std::vector&lt; int64_t &gt; shape, float value, <a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a> dtype=<a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="el" href="structtenzor_1_1Device.html">Device</a> device=<a class="el" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
-<tr class="memitem:aa275eaf45fd54ad8e2cb448eb25632cc" id="r_aa275eaf45fd54ad8e2cb448eb25632cc"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#aa275eaf45fd54ad8e2cb448eb25632cc">tenzor::empty</a> (std::vector&lt; int64_t &gt; shape, <a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a> dtype=<a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="el" href="structtenzor_1_1Device.html">Device</a> device=<a class="el" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
-<tr class="memitem:aec66c6ef5f1a23ddd4664cf83c5ba4a6" id="r_aec66c6ef5f1a23ddd4664cf83c5ba4a6"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#aec66c6ef5f1a23ddd4664cf83c5ba4a6">tenzor::rand</a> (std::vector&lt; int64_t &gt; shape, <a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a> dtype=<a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="el" href="structtenzor_1_1Device.html">Device</a> device=<a class="el" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
-<tr class="memitem:a4974d521aa5af113df9abef79baa79d9" id="r_a4974d521aa5af113df9abef79baa79d9"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#a4974d521aa5af113df9abef79baa79d9">tenzor::randn</a> (std::vector&lt; int64_t &gt; shape, <a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a> dtype=<a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="el" href="structtenzor_1_1Device.html">Device</a> device=<a class="el" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
-<tr class="memitem:a036541290ccfef8cd1376fc81801a131" id="r_a036541290ccfef8cd1376fc81801a131"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#a036541290ccfef8cd1376fc81801a131">tenzor::arange</a> (float start, float end, float step=1.0f, <a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a> dtype=<a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="el" href="structtenzor_1_1Device.html">Device</a> device=<a class="el" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
-<tr class="memitem:a79e58373c5a35bc363512a11aa909c55" id="r_a79e58373c5a35bc363512a11aa909c55"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#a79e58373c5a35bc363512a11aa909c55">tenzor::linspace</a> (float start, float end, int64_t steps, <a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a> dtype=<a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="el" href="structtenzor_1_1Device.html">Device</a> device=<a class="el" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
-<tr class="memitem:a7459d8563b4e3d22256f82cd4e733666" id="r_a7459d8563b4e3d22256f82cd4e733666"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#a7459d8563b4e3d22256f82cd4e733666">tenzor::eye</a> (int64_t n, std::optional&lt; int64_t &gt; m=std::nullopt, <a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a> dtype=<a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="el" href="structtenzor_1_1Device.html">Device</a> device=<a class="el" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
-<tr class="memitem:a86a94559372a707b7d32b25bdb7e9c8d" id="r_a86a94559372a707b7d32b25bdb7e9c8d"><td class="memTemplParams" colspan="2">template&lt;typename T&gt; </td></tr>
-<tr class="memitem:a86a94559372a707b7d32b25bdb7e9c8d template"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#a86a94559372a707b7d32b25bdb7e9c8d">tenzor::from_data</a> (const T *data, std::vector&lt; int64_t &gt; shape, <a class="el" href="structtenzor_1_1Device.html">Device</a> device=<a class="el" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
-<tr class="memitem:a7cc2f693db94b734e01662a503f33e7d" id="r_a7cc2f693db94b734e01662a503f33e7d"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#a7cc2f693db94b734e01662a503f33e7d">tenzor::zeros_like</a> (const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &amp;tensor) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
-<tr class="memitem:a77383533d8386ed712aa6b58be2f3514" id="r_a77383533d8386ed712aa6b58be2f3514"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#a77383533d8386ed712aa6b58be2f3514">tenzor::ones_like</a> (const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &amp;tensor) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
-<tr class="memitem:a5f82d208679b8558089aa16229bc171b" id="r_a5f82d208679b8558089aa16229bc171b"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#a5f82d208679b8558089aa16229bc171b">tenzor::rand_like</a> (const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &amp;tensor) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
-<tr class="memitem:aab1ee393d9b3fd4a77935ebf4f6ce6fe" id="r_aab1ee393d9b3fd4a77935ebf4f6ce6fe"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#aab1ee393d9b3fd4a77935ebf4f6ce6fe">tenzor::randn_like</a> (const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &amp;tensor) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
+<tr class="memitem:ga280a2dbed0ffe44cfc9bdfe1f172a1bb" id="r_ga280a2dbed0ffe44cfc9bdfe1f172a1bb"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="group__tensor__creation.html#ga280a2dbed0ffe44cfc9bdfe1f172a1bb">tenzor::zeros</a> (std::vector&lt; int64_t &gt; shape, <a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a> dtype=<a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="el" href="structtenzor_1_1Device.html">Device</a> device=<a class="el" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
+<tr class="memdesc:ga280a2dbed0ffe44cfc9bdfe1f172a1bb"><td class="mdescLeft">&#160;</td><td class="mdescRight">Create tensor filled with zeros.  <br /></td></tr>
+<tr class="memitem:ga53b9520133d939bf68493eb8bb4ffd53" id="r_ga53b9520133d939bf68493eb8bb4ffd53"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="group__tensor__creation.html#ga53b9520133d939bf68493eb8bb4ffd53">tenzor::ones</a> (std::vector&lt; int64_t &gt; shape, <a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a> dtype=<a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="el" href="structtenzor_1_1Device.html">Device</a> device=<a class="el" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
+<tr class="memdesc:ga53b9520133d939bf68493eb8bb4ffd53"><td class="mdescLeft">&#160;</td><td class="mdescRight">Create tensor filled with ones.  <br /></td></tr>
+<tr class="memitem:ga9c65fe2701c31f23197f9d3b69780640" id="r_ga9c65fe2701c31f23197f9d3b69780640"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="group__tensor__creation.html#ga9c65fe2701c31f23197f9d3b69780640">tenzor::full</a> (std::vector&lt; int64_t &gt; shape, float value, <a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a> dtype=<a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="el" href="structtenzor_1_1Device.html">Device</a> device=<a class="el" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
+<tr class="memdesc:ga9c65fe2701c31f23197f9d3b69780640"><td class="mdescLeft">&#160;</td><td class="mdescRight">Create tensor filled with specific value.  <br /></td></tr>
+<tr class="memitem:gaa275eaf45fd54ad8e2cb448eb25632cc" id="r_gaa275eaf45fd54ad8e2cb448eb25632cc"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="group__tensor__creation.html#gaa275eaf45fd54ad8e2cb448eb25632cc">tenzor::empty</a> (std::vector&lt; int64_t &gt; shape, <a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a> dtype=<a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="el" href="structtenzor_1_1Device.html">Device</a> device=<a class="el" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
+<tr class="memdesc:gaa275eaf45fd54ad8e2cb448eb25632cc"><td class="mdescLeft">&#160;</td><td class="mdescRight">Create uninitialized tensor.  <br /></td></tr>
+<tr class="memitem:gaec66c6ef5f1a23ddd4664cf83c5ba4a6" id="r_gaec66c6ef5f1a23ddd4664cf83c5ba4a6"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="group__tensor__creation.html#gaec66c6ef5f1a23ddd4664cf83c5ba4a6">tenzor::rand</a> (std::vector&lt; int64_t &gt; shape, <a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a> dtype=<a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="el" href="structtenzor_1_1Device.html">Device</a> device=<a class="el" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
+<tr class="memdesc:gaec66c6ef5f1a23ddd4664cf83c5ba4a6"><td class="mdescLeft">&#160;</td><td class="mdescRight">Create tensor with random uniform values [0, 1).  <br /></td></tr>
+<tr class="memitem:ga4974d521aa5af113df9abef79baa79d9" id="r_ga4974d521aa5af113df9abef79baa79d9"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="group__tensor__creation.html#ga4974d521aa5af113df9abef79baa79d9">tenzor::randn</a> (std::vector&lt; int64_t &gt; shape, <a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a> dtype=<a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="el" href="structtenzor_1_1Device.html">Device</a> device=<a class="el" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
+<tr class="memdesc:ga4974d521aa5af113df9abef79baa79d9"><td class="mdescLeft">&#160;</td><td class="mdescRight">Create tensor with random normal values N(0, 1).  <br /></td></tr>
+<tr class="memitem:ga036541290ccfef8cd1376fc81801a131" id="r_ga036541290ccfef8cd1376fc81801a131"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="group__tensor__creation.html#ga036541290ccfef8cd1376fc81801a131">tenzor::arange</a> (float start, float end, float step=1.0f, <a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a> dtype=<a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="el" href="structtenzor_1_1Device.html">Device</a> device=<a class="el" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
+<tr class="memdesc:ga036541290ccfef8cd1376fc81801a131"><td class="mdescLeft">&#160;</td><td class="mdescRight">Create 1D tensor with evenly spaced values.  <br /></td></tr>
+<tr class="memitem:ga79e58373c5a35bc363512a11aa909c55" id="r_ga79e58373c5a35bc363512a11aa909c55"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="group__tensor__creation.html#ga79e58373c5a35bc363512a11aa909c55">tenzor::linspace</a> (float start, float end, int64_t steps, <a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a> dtype=<a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="el" href="structtenzor_1_1Device.html">Device</a> device=<a class="el" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
+<tr class="memdesc:ga79e58373c5a35bc363512a11aa909c55"><td class="mdescLeft">&#160;</td><td class="mdescRight">Create 1D tensor with linearly spaced values.  <br /></td></tr>
+<tr class="memitem:ga7459d8563b4e3d22256f82cd4e733666" id="r_ga7459d8563b4e3d22256f82cd4e733666"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="group__tensor__creation.html#ga7459d8563b4e3d22256f82cd4e733666">tenzor::eye</a> (int64_t n, std::optional&lt; int64_t &gt; m=std::nullopt, <a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a> dtype=<a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="el" href="structtenzor_1_1Device.html">Device</a> device=<a class="el" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
+<tr class="memdesc:ga7459d8563b4e3d22256f82cd4e733666"><td class="mdescLeft">&#160;</td><td class="mdescRight">Create identity matrix.  <br /></td></tr>
+<tr class="memitem:ga86a94559372a707b7d32b25bdb7e9c8d" id="r_ga86a94559372a707b7d32b25bdb7e9c8d"><td class="memTemplParams" colspan="2">template&lt;typename T&gt; </td></tr>
+<tr class="memitem:ga86a94559372a707b7d32b25bdb7e9c8d template"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="group__tensor__creation.html#ga86a94559372a707b7d32b25bdb7e9c8d">tenzor::from_data</a> (const T *data, std::vector&lt; int64_t &gt; shape, <a class="el" href="structtenzor_1_1Device.html">Device</a> device=<a class="el" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
+<tr class="memdesc:ga86a94559372a707b7d32b25bdb7e9c8d"><td class="mdescLeft">&#160;</td><td class="mdescRight">Create tensor from raw data array.  <br /></td></tr>
+<tr class="memitem:ga7cc2f693db94b734e01662a503f33e7d" id="r_ga7cc2f693db94b734e01662a503f33e7d"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="group__tensor__creation.html#ga7cc2f693db94b734e01662a503f33e7d">tenzor::zeros_like</a> (const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &amp;tensor) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
+<tr class="memdesc:ga7cc2f693db94b734e01662a503f33e7d"><td class="mdescLeft">&#160;</td><td class="mdescRight">Create zero tensor with same shape/dtype/device as input.  <br /></td></tr>
+<tr class="memitem:ga77383533d8386ed712aa6b58be2f3514" id="r_ga77383533d8386ed712aa6b58be2f3514"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="group__tensor__creation.html#ga77383533d8386ed712aa6b58be2f3514">tenzor::ones_like</a> (const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &amp;tensor) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
+<tr class="memdesc:ga77383533d8386ed712aa6b58be2f3514"><td class="mdescLeft">&#160;</td><td class="mdescRight">Create one tensor with same shape/dtype/device as input.  <br /></td></tr>
+<tr class="memitem:ga5f82d208679b8558089aa16229bc171b" id="r_ga5f82d208679b8558089aa16229bc171b"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="group__tensor__creation.html#ga5f82d208679b8558089aa16229bc171b">tenzor::rand_like</a> (const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &amp;tensor) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
+<tr class="memdesc:ga5f82d208679b8558089aa16229bc171b"><td class="mdescLeft">&#160;</td><td class="mdescRight">Create uniform random tensor with same shape/dtype/device as input.  <br /></td></tr>
+<tr class="memitem:gaab1ee393d9b3fd4a77935ebf4f6ce6fe" id="r_gaab1ee393d9b3fd4a77935ebf4f6ce6fe"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="group__tensor__creation.html#gaab1ee393d9b3fd4a77935ebf4f6ce6fe">tenzor::randn_like</a> (const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &amp;tensor) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
+<tr class="memdesc:gaab1ee393d9b3fd4a77935ebf4f6ce6fe"><td class="mdescLeft">&#160;</td><td class="mdescRight">Create normal random tensor with same shape/dtype/device as input.  <br /></td></tr>
 </table>
-</div><!-- contents -->
+<a name="details" id="details"></a><h2 id="header-details" class="groupheader">Detailed Description</h2>
+<div class="textblock"><p>Tensor creation and initialization operations. </p>
+<p>Provides functions for creating new tensors with various initialization patterns including zeros, ones, random values, ranges, and data copying. </p>
+
+<p class="definition">Definition in file <a class="el" href="creation_8hpp_source.html">creation.hpp</a>.</p>
+</div></div><!-- contents -->
 </div><!-- doc-content -->
 <div id="page-nav" class="page-nav-panel">
 <div id="page-nav-resize-handle"></div>
@@ -137,8 +219,8 @@ Functions</h2></td></tr>
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><a href="dir_4f7edb362912b75e95599213beee2a17.html">tenzor</a></li><li class="navelem"><a href="dir_7e10b9214d5d76fba878e81b49b0bd07.html">ops</a></li><li class="navelem"><a href="creation_8hpp.html">creation.hpp</a></li>
-    <li class="footer">Generated by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
+    <li class="navelem"><a href="dir_d44c64559bbebec7f509842c48db8b23.html">include</a></li><li class="navelem"><a href="dir_14ba40437910c5dd1b08964ca20ae5af.html">tenzor</a></li><li class="navelem"><a href="dir_be5836cfbdc05cededbe797d13e5fd88.html">ops</a></li><li class="navelem"><a href="creation_8hpp.html">creation.hpp</a></li>
+    <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>
 </body>

@@ -1,0 +1,12 @@
+<map id="include/tenzor/nn/optim/optimizer.hpp" name="include/tenzor/nn/optim/optimizer.hpp">
+<area shape="rect" id="Node000001" title="Base class for all optimizers." alt="" coords="205,5,381,50"/>
+<area shape="rect" id="Node000002" href="$adam_8hpp.html" title="Adam and AdamW optimizers." alt="" coords="5,98,181,143"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="232,59,142,100,140,95,230,54"/>
+<area shape="rect" id="Node000004" href="$scheduler_8hpp.html" title="Learning rate scheduling strategies." alt="" coords="205,98,381,143"/>
+<area shape="poly" id="edge3_Node000001_Node000004" title=" " alt="" coords="296,66,296,98,290,98,290,66"/>
+<area shape="rect" id="Node000005" href="$sgd_8hpp.html" title="Stochastic Gradient Descent optimizer." alt="" coords="405,98,581,143"/>
+<area shape="poly" id="edge4_Node000001_Node000005" title=" " alt="" coords="356,54,446,95,444,100,354,59"/>
+<area shape="rect" id="Node000003" href="$tenzor_8hpp.html" title="Main header &#45; includes all public Tenzor APIs." alt="" coords="200,191,386,218"/>
+<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="161,147,262,188,260,193,159,152"/>
+<area shape="poly" id="edge5_Node000005_Node000003" title=" " alt="" coords="427,152,326,193,324,188,425,147"/>
+</map>

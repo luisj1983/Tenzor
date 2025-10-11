@@ -1,3 +1,11 @@
+/**
+ * @file shape.hpp
+ * @brief Shape and stride utilities for tensor operations
+ *
+ * Provides shape representation, stride computation, and broadcasting
+ * utilities for multi-dimensional tensor operations.
+ */
+
 #pragma once
 
 #include <vector>
@@ -9,42 +17,157 @@
 
 namespace tenzor {
 
-// Shape utilities
+/**
+ * @brief Represents the shape (dimensions) of a tensor.
+ *
+ * Encapsulates tensor dimensions and provides utilities for shape
+ * manipulation, element counting, and comparison. Dimensions are
+ * stored as signed 64-bit integers to support negative indexing.
+ *
+ * @code
+ * Shape shape({2, 3, 4});  // 3D tensor: 2x3x4
+ * auto total_elements = shape.numel();  // Returns 24
+ * @endcode
+ */
 class Shape {
 public:
-    using size_type = int64_t;
+    using size_type = int64_t;  ///< Dimension size type (signed for negative indexing)
 
+    /**
+     * @brief Default constructor creates empty shape.
+     */
     Shape() = default;
+
+    /**
+     * @brief Construct shape from dimension vector.
+     *
+     * @param dims Vector of dimensions (e.g., {2, 3, 4})
+     *
+     * @code
+     * Shape shape({32, 64, 128});
+     * @endcode
+     */
     explicit Shape(std::vector<size_type> dims) : dims_(std::move(dims)) {}
 
-    // Access
+    /**
+     * @brief Access dimension by index (unchecked).
+     *
+     * @param idx Dimension index (0-based)
+     * @return Dimension size at index
+     *
+     * @warning No bounds checking. Use at() for checked access.
+     */
     auto operator[](size_t idx) const -> size_type { return dims_[idx]; }
+
+    /**
+     * @brief Access dimension by index (checked).
+     *
+     * @param idx Dimension index (0-based)
+     * @return Dimension size at index
+     * @throws std::out_of_range if index is out of bounds
+     */
     auto at(size_t idx) const -> size_type { return dims_.at(idx); }
+
+    /**
+     * @brief Get number of dimensions (rank).
+     *
+     * @return Number of dimensions
+     *
+     * @code
+     * Shape shape({2, 3, 4});
+     * auto rank = shape.size();  // Returns 3
+     * @endcode
+     */
     auto size() const -> size_t { return dims_.size(); }
+
+    /**
+     * @brief Get raw pointer to dimension data.
+     *
+     * @return Pointer to dimension array
+     */
     auto data() const -> const size_type* { return dims_.data(); }
+
+    /**
+     * @brief Get iterator to beginning of dimensions.
+     */
     auto begin() const { return dims_.begin(); }
+
+    /**
+     * @brief Get iterator to end of dimensions.
+     */
     auto end() const { return dims_.end(); }
 
-    // Modification
+    /**
+     * @brief Append a dimension to the shape.
+     *
+     * @param dim Dimension size to append
+     *
+     * @code
+     * Shape shape({2, 3});
+     * shape.push_back(4);  // Now {2, 3, 4}
+     * @endcode
+     */
     auto push_back(size_type dim) -> void { dims_.push_back(dim); }
+
+    /**
+     * @brief Resize number of dimensions.
+     *
+     * @param n New number of dimensions
+     *
+     * @note New dimensions are zero-initialized.
+     */
     auto resize(size_t n) -> void { dims_.resize(n); }
 
-    // Computation
+    /**
+     * @brief Compute total number of elements.
+     *
+     * Multiplies all dimensions to get total element count.
+     * Returns 1 for empty shapes.
+     *
+     * @return Total number of elements in tensor
+     *
+     * @code
+     * Shape shape({2, 3, 4});
+     * auto count = shape.numel();  // Returns 24
+     * @endcode
+     */
     auto numel() const -> size_type {
         return std::accumulate(dims_.begin(), dims_.end(), size_type{1},
                              std::multiplies<size_type>{});
     }
 
-    // Comparison
+    /**
+     * @brief Compare shapes for equality.
+     *
+     * @param other Shape to compare with
+     * @return true if all dimensions are equal
+     */
     auto operator==(const Shape& other) const -> bool {
         return dims_ == other.dims_;
     }
 
 private:
-    std::vector<size_type> dims_;
+    std::vector<size_type> dims_;  ///< Dimension storage
 };
 
-// Stride calculation
+/**
+ * @brief Compute row-major strides from shape.
+ *
+ * Calculates strides for contiguous row-major (C-style) layout.
+ * The last dimension has stride 1, each previous dimension's stride
+ * is the product of all subsequent dimensions.
+ *
+ * @param shape Tensor dimensions
+ * @return Stride vector for each dimension
+ *
+ * @code
+ * // For shape {2, 3, 4}
+ * auto strides = compute_strides({2, 3, 4});
+ * // Returns {12, 4, 1}
+ * @endcode
+ *
+ * @note Time complexity: O(n) where n is number of dimensions
+ */
 inline auto compute_strides(std::span<const int64_t> shape) -> std::vector<int64_t> {
     std::vector<int64_t> strides(shape.size());
     if (shape.empty()) return strides;
@@ -56,7 +179,33 @@ inline auto compute_strides(std::span<const int64_t> shape) -> std::vector<int64
     return strides;
 }
 
-// Broadcasting
+/**
+ * @brief Compute broadcasted shape from two input shapes.
+ *
+ * Applies NumPy-style broadcasting rules to determine the result shape
+ * when operating on tensors with different shapes. Two dimensions are
+ * compatible when:
+ * - They are equal, or
+ * - One of them is 1
+ *
+ * Shapes are aligned from the right (trailing dimensions).
+ *
+ * @param shape1 First tensor shape
+ * @param shape2 Second tensor shape
+ * @return Broadcasted result shape
+ * @throws std::runtime_error if shapes are not broadcastable
+ *
+ * @code
+ * // Broadcasting examples
+ * auto result1 = broadcast_shapes({3, 1, 4}, {2, 1});
+ * // Returns {3, 2, 4}
+ *
+ * auto result2 = broadcast_shapes({5, 1, 3}, {1, 8, 3});
+ * // Returns {5, 8, 3}
+ * @endcode
+ *
+ * @see https://numpy.org/doc/stable/user/basics.broadcasting.html
+ */
 inline auto broadcast_shapes(std::span<const int64_t> shape1,
                             std::span<const int64_t> shape2)
     -> std::vector<int64_t> {

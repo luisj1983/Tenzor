@@ -25,15 +25,26 @@
 var NAVTREE =
 [
   [ "Tenzor", "index.html", [
+    [ "Topics", "topics.html", "topics" ],
+    [ "Namespaces", "namespaces.html", [
+      [ "Namespace List", "namespaces.html", "namespaces_dup" ],
+      [ "Namespace Members", "namespacemembers.html", [
+        [ "All", "namespacemembers.html", null ],
+        [ "Functions", "namespacemembers_func.html", null ],
+        [ "Typedefs", "namespacemembers_type.html", null ],
+        [ "Enumerations", "namespacemembers_enum.html", null ]
+      ] ]
+    ] ],
     [ "Concepts", "concepts.html", "concepts" ],
     [ "Classes", "annotated.html", [
       [ "Class List", "annotated.html", "annotated_dup" ],
       [ "Class Index", "classes.html", null ],
       [ "Class Hierarchy", "hierarchy.html", "hierarchy" ],
       [ "Class Members", "functions.html", [
-        [ "All", "functions.html", null ],
-        [ "Functions", "functions_func.html", null ],
+        [ "All", "functions.html", "functions_dup" ],
+        [ "Functions", "functions_func.html", "functions_func" ],
         [ "Variables", "functions_vars.html", null ],
+        [ "Typedefs", "functions_type.html", null ],
         [ "Enumerations", "functions_enum.html", null ]
       ] ]
     ] ],
@@ -45,8 +56,11 @@ var NAVTREE =
 
 var NAVTREEINDEX =
 [
-"activations_8hpp_source.html",
-"classtenzor_1_1nn_1_1SELU.html#ab489d44eb550ca23dc9cd1e8c0562697"
+"activations_8hpp.html",
+"classtenzor_1_1OperationRegistry.html#a3814f225714b26584b4719837593c4ea",
+"classtenzor_1_1Variable.html#abd7936801200d5b9dbfccf007fbcdc22",
+"functions_o.html",
+"structtenzor_1_1Device.html#ae346dc4da2dc8f4dcbdb41ddf4d9e0ea"
 ];
 
 var SYNCONMSG = 'click to disable panel synchronization';

@@ -5,7 +5,7 @@
 <meta http-equiv="X-UA-Compatible" content="IE=11"/>
 <meta name="generator" content="Doxygen 1.14.0"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Tenzor: tenzor/ops/reduction.hpp File Reference</title>
+<title>Tenzor: include/tenzor/ops/reduction.hpp File Reference</title>
 <link href="tabs.css" rel="stylesheet" type="text/css"/>
 <script type="text/javascript" src="jquery.js"></script>
 <script type="text/javascript" src="dynsections.js"></script>
@@ -28,7 +28,7 @@
   <td id="projectalign">
    <div id="projectname">Tenzor<span id="projectnumber">&#160;1.0.0</span>
    </div>
-   <div id="projectbrief">Modern C++20 tensor library with automatic differentiation</div>
+   <div id="projectbrief">High-performance tensor library with automatic differentiation</div>
   </td>
  </tr>
  </tbody>
@@ -92,30 +92,109 @@ $(function(){initNavTree('reduction_8hpp.html','',''); });
   <div class="headertitle"><div class="title">reduction.hpp File Reference</div></div>
 </div><!--header-->
 <div class="contents">
+
+<p>Tensor reduction operations.  
+<a href="#details">More...</a></p>
 <div class="textblock"><code>#include &lt;optional&gt;</code><br />
 <code>#include &lt;vector&gt;</code><br />
 <code>#include &quot;<a class="el" href="tensor_8hpp_source.html">../core/tensor.hpp</a>&quot;</code><br />
+</div><div class="textblock"><div class="dynheader">
+Include dependency graph for reduction.hpp:</div>
+<div class="dyncontent">
+<div class="center"><img src="reduction_8hpp__incl.png" border="0" usemap="#ainclude_2tenzor_2ops_2reduction_8hpp" loading="lazy" alt=""/></div>
+<map name="ainclude_2tenzor_2ops_2reduction_8hpp" id="ainclude_2tenzor_2ops_2reduction_8hpp">
+<area shape="rect" title="Tensor reduction operations." alt="" coords="64,5,205,50"/>
+<area shape="rect" title=" " alt="" coords="5,174,80,201"/>
+<area shape="poly" title=" " alt="" coords="124,52,60,161,55,159,120,49"/>
+<area shape="rect" title=" " alt="" coords="103,174,166,201"/>
+<area shape="poly" title=" " alt="" coords="137,50,137,158,132,158,132,50"/>
+<area shape="rect" href="tensor_8hpp.html" title="Core tensor class for multi&#45;dimensional array operations." alt="" coords="197,98,330,126"/>
+<area shape="poly" title=" " alt="" coords="170,48,232,87,229,92,167,53"/>
+<area shape="poly" title=" " alt="" coords="225,129,96,171,94,166,223,124"/>
+<area shape="poly" title=" " alt="" coords="242,129,172,168,169,164,239,124"/>
+<area shape="rect" title=" " alt="" coords="415,249,491,277"/>
+<area shape="poly" title=" " alt="" coords="332,121,384,139,408,153,430,172,447,202,454,233,449,234,442,204,426,175,405,158,381,144,330,126"/>
+<area shape="rect" title=" " alt="" coords="363,174,415,201"/>
+<area shape="poly" title=" " alt="" coords="288,124,356,164,353,168,285,129"/>
+<area shape="rect" href="dtype_8hpp.html" title="Data type system for Tenzor tensors." alt="" coords="515,249,602,277"/>
+<area shape="poly" title=" " alt="" coords="327,124,391,143,456,171,502,203,538,237,535,241,498,207,453,176,389,148,325,129"/>
+<area shape="rect" href="device_8hpp.html" title="Device specification and management for tensors." alt="" coords="114,249,206,277"/>
+<area shape="poly" title=" " alt="" coords="257,127,180,238,175,235,253,124"/>
+<area shape="rect" href="storage_8hpp.html" title="Memory storage abstraction for tensor data." alt="" coords="240,174,338,201"/>
+<area shape="poly" title=" " alt="" coords="271,125,282,158,277,160,266,127"/>
+<area shape="rect" title=" " alt="" coords="406,325,471,353"/>
+<area shape="poly" title=" " alt="" coords="538,280,474,319,471,315,536,275"/>
+<area shape="rect" title=" " alt="" coords="261,325,357,353"/>
+<area shape="poly" title=" " alt="" coords="516,280,369,323,368,318,514,275"/>
+<area shape="rect" title=" " alt="" coords="609,325,700,353"/>
+<area shape="poly" title=" " alt="" coords="577,275,627,313,624,317,574,280"/>
+<area shape="rect" title=" " alt="" coords="508,325,585,353"/>
+<area shape="poly" title=" " alt="" coords="559,278,554,310,548,309,554,277"/>
+<area shape="poly" title=" " alt="" coords="207,274,392,322,390,328,206,279"/>
+<area shape="poly" title=" " alt="" coords="188,275,270,315,268,320,185,280"/>
+<area shape="rect" title=" " alt="" coords="131,325,189,353"/>
+<area shape="poly" title=" " alt="" coords="162,278,162,309,157,309,157,278"/>
+<area shape="poly" title=" " alt="" coords="320,199,411,240,409,245,317,204"/>
+<area shape="poly" title=" " alt="" coords="267,204,197,244,195,239,265,200"/>
+<area shape="rect" title=" " alt="" coords="321,249,390,277"/>
+<area shape="poly" title=" " alt="" coords="303,200,336,236,332,240,299,204"/>
+<area shape="rect" title=" " alt="" coords="231,249,297,277"/>
+<area shape="poly" title=" " alt="" coords="287,203,276,235,271,234,282,201"/>
+</map>
+</div>
+</div><div class="textblock"><div class="dynheader">
+This graph shows which files directly or indirectly include this file:</div>
+<div class="dyncontent">
+<div class="center"><img src="reduction_8hpp__dep__incl.png" border="0" usemap="#ainclude_2tenzor_2ops_2reduction_8hppdep" loading="lazy" alt=""/></div>
+<map name="ainclude_2tenzor_2ops_2reduction_8hppdep" id="ainclude_2tenzor_2ops_2reduction_8hppdep">
+<area shape="rect" title="Tensor reduction operations." alt="" coords="28,5,168,50"/>
+<area shape="rect" href="tenzor_8hpp.html" title="Main header &#45; includes all public Tenzor APIs." alt="" coords="5,98,191,126"/>
+<area shape="poly" title=" " alt="" coords="101,66,101,97,95,97,95,66"/>
+</map>
+</div>
 </div>
 <p><a href="reduction_8hpp_source.html">Go to the source code of this file.</a></p>
 <table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-namespaces" class="groupheader"><a id="namespaces" name="namespaces"></a>
 Namespaces</h2></td></tr>
 <tr class="memitem:tenzor" id="r_tenzor"><td class="memItemLeft" align="right" valign="top">namespace &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html">tenzor</a></td></tr>
+<tr class="memdesc:namespacetenzor"><td class="mdescLeft">&#160;</td><td class="mdescRight">Main Tenzor namespace. <br /></td></tr>
 </table><table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-func-members" class="groupheader"><a id="func-members" name="func-members"></a>
 Functions</h2></td></tr>
-<tr class="memitem:a7cc9365224f4cf815baadc5309f20fa4" id="r_a7cc9365224f4cf815baadc5309f20fa4"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#a7cc9365224f4cf815baadc5309f20fa4">tenzor::sum</a> (const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &amp;input, std::optional&lt; int64_t &gt; dim=std::nullopt, bool keepdim=false) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
-<tr class="memitem:af71412314ce6c6555bb96d965c8ce5ac" id="r_af71412314ce6c6555bb96d965c8ce5ac"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#af71412314ce6c6555bb96d965c8ce5ac">tenzor::mean</a> (const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &amp;input, std::optional&lt; int64_t &gt; dim=std::nullopt, bool keepdim=false) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
-<tr class="memitem:af74ba06b2ff284564f2f3c92021b2747" id="r_af74ba06b2ff284564f2f3c92021b2747"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#af74ba06b2ff284564f2f3c92021b2747">tenzor::max</a> (const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &amp;input, std::optional&lt; int64_t &gt; dim=std::nullopt, bool keepdim=false) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
-<tr class="memitem:a2b4afb17e2e6cfb7b5dadb0198259061" id="r_a2b4afb17e2e6cfb7b5dadb0198259061"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#a2b4afb17e2e6cfb7b5dadb0198259061">tenzor::min</a> (const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &amp;input, std::optional&lt; int64_t &gt; dim=std::nullopt, bool keepdim=false) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
-<tr class="memitem:ad6dc25b1e3a616a700a4eb13eb494736" id="r_ad6dc25b1e3a616a700a4eb13eb494736"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#ad6dc25b1e3a616a700a4eb13eb494736">tenzor::argmax</a> (const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &amp;input, std::optional&lt; int64_t &gt; dim=std::nullopt, bool keepdim=false) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
-<tr class="memitem:a0b3151ed819cab605f1fe2ef8a76603a" id="r_a0b3151ed819cab605f1fe2ef8a76603a"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#a0b3151ed819cab605f1fe2ef8a76603a">tenzor::argmin</a> (const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &amp;input, std::optional&lt; int64_t &gt; dim=std::nullopt, bool keepdim=false) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
-<tr class="memitem:aa5e520b7ba6533913ea3d478fad75680" id="r_aa5e520b7ba6533913ea3d478fad75680"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#aa5e520b7ba6533913ea3d478fad75680">tenzor::prod</a> (const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &amp;input, std::optional&lt; int64_t &gt; dim=std::nullopt, bool keepdim=false) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
-<tr class="memitem:a57c6304de0ccf7b02d2cf42923b2e3d9" id="r_a57c6304de0ccf7b02d2cf42923b2e3d9"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#a57c6304de0ccf7b02d2cf42923b2e3d9">tenzor::std</a> (const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &amp;input, std::optional&lt; int64_t &gt; dim=std::nullopt, bool keepdim=false, bool unbiased=true) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
-<tr class="memitem:a2896a98734268430fbbac454cd47d024" id="r_a2896a98734268430fbbac454cd47d024"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#a2896a98734268430fbbac454cd47d024">tenzor::var</a> (const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &amp;input, std::optional&lt; int64_t &gt; dim=std::nullopt, bool keepdim=false, bool unbiased=true) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
-<tr class="memitem:a10a740ae61dd6156aae50699bae7cfe1" id="r_a10a740ae61dd6156aae50699bae7cfe1"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html#a10a740ae61dd6156aae50699bae7cfe1">tenzor::norm</a> (const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &amp;input, float p=2.0f, std::optional&lt; int64_t &gt; dim=std::nullopt, bool keepdim=false) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
+<tr class="memitem:ga7cc9365224f4cf815baadc5309f20fa4" id="r_ga7cc9365224f4cf815baadc5309f20fa4"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="group__tensor__reduction.html#ga7cc9365224f4cf815baadc5309f20fa4">tenzor::sum</a> (const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &amp;input, std::optional&lt; int64_t &gt; dim=std::nullopt, bool keepdim=false) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
+<tr class="memdesc:ga7cc9365224f4cf815baadc5309f20fa4"><td class="mdescLeft">&#160;</td><td class="mdescRight">Sum of tensor elements.  <br /></td></tr>
+<tr class="memitem:gaf71412314ce6c6555bb96d965c8ce5ac" id="r_gaf71412314ce6c6555bb96d965c8ce5ac"><td class="memItemLeft" align="right" valign="top">
+auto&#160;</td><td class="memItemRight" valign="bottom"><b>tenzor::mean</b> (const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &amp;input, std::optional&lt; int64_t &gt; dim=std::nullopt, bool keepdim=false) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
+<tr class="memdesc:gaf71412314ce6c6555bb96d965c8ce5ac"><td class="mdescLeft">&#160;</td><td class="mdescRight">Mean (average) of tensor elements. <br /></td></tr>
+<tr class="memitem:gaf74ba06b2ff284564f2f3c92021b2747" id="r_gaf74ba06b2ff284564f2f3c92021b2747"><td class="memItemLeft" align="right" valign="top">
+auto&#160;</td><td class="memItemRight" valign="bottom"><b>tenzor::max</b> (const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &amp;input, std::optional&lt; int64_t &gt; dim=std::nullopt, bool keepdim=false) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
+<tr class="memdesc:gaf74ba06b2ff284564f2f3c92021b2747"><td class="mdescLeft">&#160;</td><td class="mdescRight">Maximum value of tensor elements. <br /></td></tr>
+<tr class="memitem:ga2b4afb17e2e6cfb7b5dadb0198259061" id="r_ga2b4afb17e2e6cfb7b5dadb0198259061"><td class="memItemLeft" align="right" valign="top">
+auto&#160;</td><td class="memItemRight" valign="bottom"><b>tenzor::min</b> (const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &amp;input, std::optional&lt; int64_t &gt; dim=std::nullopt, bool keepdim=false) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
+<tr class="memdesc:ga2b4afb17e2e6cfb7b5dadb0198259061"><td class="mdescLeft">&#160;</td><td class="mdescRight">Minimum value of tensor elements. <br /></td></tr>
+<tr class="memitem:gad6dc25b1e3a616a700a4eb13eb494736" id="r_gad6dc25b1e3a616a700a4eb13eb494736"><td class="memItemLeft" align="right" valign="top">
+auto&#160;</td><td class="memItemRight" valign="bottom"><b>tenzor::argmax</b> (const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &amp;input, std::optional&lt; int64_t &gt; dim=std::nullopt, bool keepdim=false) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
+<tr class="memdesc:gad6dc25b1e3a616a700a4eb13eb494736"><td class="mdescLeft">&#160;</td><td class="mdescRight">Indices of maximum values. <br /></td></tr>
+<tr class="memitem:ga0b3151ed819cab605f1fe2ef8a76603a" id="r_ga0b3151ed819cab605f1fe2ef8a76603a"><td class="memItemLeft" align="right" valign="top">
+auto&#160;</td><td class="memItemRight" valign="bottom"><b>tenzor::argmin</b> (const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &amp;input, std::optional&lt; int64_t &gt; dim=std::nullopt, bool keepdim=false) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
+<tr class="memdesc:ga0b3151ed819cab605f1fe2ef8a76603a"><td class="mdescLeft">&#160;</td><td class="mdescRight">Indices of minimum values. <br /></td></tr>
+<tr class="memitem:gaa5e520b7ba6533913ea3d478fad75680" id="r_gaa5e520b7ba6533913ea3d478fad75680"><td class="memItemLeft" align="right" valign="top">
+auto&#160;</td><td class="memItemRight" valign="bottom"><b>tenzor::prod</b> (const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &amp;input, std::optional&lt; int64_t &gt; dim=std::nullopt, bool keepdim=false) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
+<tr class="memdesc:gaa5e520b7ba6533913ea3d478fad75680"><td class="mdescLeft">&#160;</td><td class="mdescRight">Product of tensor elements. <br /></td></tr>
+<tr class="memitem:ga57c6304de0ccf7b02d2cf42923b2e3d9" id="r_ga57c6304de0ccf7b02d2cf42923b2e3d9"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="group__tensor__reduction.html#ga57c6304de0ccf7b02d2cf42923b2e3d9">tenzor::std</a> (const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &amp;input, std::optional&lt; int64_t &gt; dim=std::nullopt, bool keepdim=false, bool unbiased=true) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
+<tr class="memdesc:ga57c6304de0ccf7b02d2cf42923b2e3d9"><td class="mdescLeft">&#160;</td><td class="mdescRight">Standard deviation of tensor elements.  <br /></td></tr>
+<tr class="memitem:ga2896a98734268430fbbac454cd47d024" id="r_ga2896a98734268430fbbac454cd47d024"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="group__tensor__reduction.html#ga2896a98734268430fbbac454cd47d024">tenzor::var</a> (const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &amp;input, std::optional&lt; int64_t &gt; dim=std::nullopt, bool keepdim=false, bool unbiased=true) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
+<tr class="memdesc:ga2896a98734268430fbbac454cd47d024"><td class="mdescLeft">&#160;</td><td class="mdescRight">Variance of tensor elements.  <br /></td></tr>
+<tr class="memitem:ga10a740ae61dd6156aae50699bae7cfe1" id="r_ga10a740ae61dd6156aae50699bae7cfe1"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="group__tensor__reduction.html#ga10a740ae61dd6156aae50699bae7cfe1">tenzor::norm</a> (const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &amp;input, float p=2.0f, std::optional&lt; int64_t &gt; dim=std::nullopt, bool keepdim=false) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
+<tr class="memdesc:ga10a740ae61dd6156aae50699bae7cfe1"><td class="mdescLeft">&#160;</td><td class="mdescRight">p-norm of tensor.  <br /></td></tr>
 </table>
-</div><!-- contents -->
+<a name="details" id="details"></a><h2 id="header-details" class="groupheader">Detailed Description</h2>
+<div class="textblock"><p>Tensor reduction operations. </p>
+<p>Provides operations that reduce tensors along specified dimensions, including sum, mean, min, max, and statistical operations. </p>
+
+<p class="definition">Definition in file <a class="el" href="reduction_8hpp_source.html">reduction.hpp</a>.</p>
+</div></div><!-- contents -->
 </div><!-- doc-content -->
 <div id="page-nav" class="page-nav-panel">
 <div id="page-nav-resize-handle"></div>
@@ -128,8 +207,8 @@ Functions</h2></td></tr>
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><a href="dir_4f7edb362912b75e95599213beee2a17.html">tenzor</a></li><li class="navelem"><a href="dir_7e10b9214d5d76fba878e81b49b0bd07.html">ops</a></li><li class="navelem"><a href="reduction_8hpp.html">reduction.hpp</a></li>
-    <li class="footer">Generated by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
+    <li class="navelem"><a href="dir_d44c64559bbebec7f509842c48db8b23.html">include</a></li><li class="navelem"><a href="dir_14ba40437910c5dd1b08964ca20ae5af.html">tenzor</a></li><li class="navelem"><a href="dir_be5836cfbdc05cededbe797d13e5fd88.html">ops</a></li><li class="navelem"><a href="reduction_8hpp.html">reduction.hpp</a></li>
+    <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>
 </body>

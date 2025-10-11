@@ -92,18 +92,57 @@ $(function(){initNavTree('classtenzor_1_1nn_1_1CrossEntropyLoss.html','','classt
   <div class="headertitle"><div class="title">tenzor::nn::CrossEntropyLoss Class Reference</div></div>
 </div><!--header-->
 <div class="contents">
+
+<p>Cross Entropy Loss.  
+ <a href="#details">More...</a></p>
+
+<p><code>#include &lt;<a class="el" href="losses_8hpp_source.html">losses.hpp</a>&gt;</code></p>
 <table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-pub-methods" class="groupheader"><a id="pub-methods" name="pub-methods"></a>
 Public Member Functions</h2></td></tr>
 <tr class="memitem:a6056d817f97c34051bdb9cfe2b62756f" id="r_a6056d817f97c34051bdb9cfe2b62756f"><td class="memItemLeft" align="right" valign="top"><a id="a6056d817f97c34051bdb9cfe2b62756f" name="a6056d817f97c34051bdb9cfe2b62756f"></a>
-&#160;</td><td class="memItemRight" valign="bottom"><b>CrossEntropyLoss</b> (Reduction reduction=Reduction::Mean)</td></tr>
+&#160;</td><td class="memItemRight" valign="bottom"><b>CrossEntropyLoss</b> (<a class="el" href="losses_8hpp.html#aeb11febbc1aca7cd4e2eccca3fdb1158">Reduction</a> reduction=<a class="el" href="losses_8hpp.html#aeb11febbc1aca7cd4e2eccca3fdb1158a3d6c9ac08ada31c184094bbc67afe00d">Reduction::Mean</a>)</td></tr>
 <tr class="memitem:acd0b70e51fff1fdbee92c548c7b9aea3" id="r_acd0b70e51fff1fdbee92c548c7b9aea3"><td class="memItemLeft" align="right" valign="top"><a id="acd0b70e51fff1fdbee92c548c7b9aea3" name="acd0b70e51fff1fdbee92c548c7b9aea3"></a>
 auto&#160;</td><td class="memItemRight" valign="bottom"><b>forward</b> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input, const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &amp;target) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
 <tr class="memitem:ab255a215194facd3bf8d898808f1c337" id="r_ab255a215194facd3bf8d898808f1c337"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#ab255a215194facd3bf8d898808f1c337">operator()</a> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input, const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &amp;target) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
 </table>
 <a name="details" id="details"></a><h2 id="header-details" class="groupheader">Detailed Description</h2>
-<div class="textblock">
-<p class="definition">Definition at line <a class="el" href="losses_8hpp_source.html#l00030">30</a> of file <a class="el" href="losses_8hpp_source.html">losses.hpp</a>.</p>
+<div class="textblock"><p>Cross Entropy Loss. </p>
+<p>Computes the cross entropy loss between input logits and target class indices:</p>
+<p class="formulaDsp">
+<picture><source srcset="form_16_dark.png" media="(prefers-color-scheme: dark)"/><img class="formulaDsp" alt="\[\text{CrossEntropy}(x, y) = -\log\left(\frac{e^{x_y}}{\sum_j e^{x_j}}\right) = -x_y + \log\sum_j e^{x_j}
+\]" src="form_16.png"/></picture>
+</p>
+<p>Combines <a class="el" href="classtenzor_1_1nn_1_1LogSoftmax.html" title="Log-Softmax activation function.">LogSoftmax</a> and <a class="el" href="classtenzor_1_1nn_1_1NLLLoss.html" title="Negative Log Likelihood (NLL) Loss.">NLLLoss</a> in a single, numerically stable operation. This is the standard loss for multi-class classification.</p>
+<p><b>Use Cases:</b></p><ul>
+<li>Multi-class classification (mutually exclusive classes)</li>
+<li>Image classification</li>
+<li>Text classification</li>
+<li>Any task with discrete class labels</li>
+</ul>
+<p><b>Input Requirements:</b></p><ul>
+<li>input: Raw logits (unnormalized scores), shape (N, C) or (N, C, ...)</li>
+<li>target: Class indices (integers in [0, C-1]), shape (N) or (N, ...)</li>
+</ul>
+<p><b>Note:</b> Do NOT apply softmax to inputs; this loss expects raw logits.</p>
+<dl class="params"><dt>Parameters</dt><dd>
+  <table class="params">
+    <tr><td class="paramname">reduction</td><td>How to reduce the loss (default: Mean)</td></tr>
+  </table>
+  </dd>
+</dl>
+<dl class="section user"><dt>Complexity</dt><dd><ul>
+<li>Time: O(N * C) where N is batch size, C is number of classes</li>
+<li>Space: O(1) or O(N) depending on reduction mode</li>
+</ul>
+</dd></dl>
+<div class="fragment"><div class="line"><span class="keyword">auto</span> criterion = CrossEntropyLoss();</div>
+<div class="line"><span class="keyword">auto</span> logits = model.forward(images);  <span class="comment">// Shape: (batch, num_classes)</span></div>
+<div class="line"><span class="keyword">auto</span> targets = tensor({0, 2, 1});     <span class="comment">// Class indices</span></div>
+<div class="line"><span class="keyword">auto</span> loss = criterion(logits, targets);</div>
+</div><!-- fragment --><dl class="section see"><dt>See also</dt><dd><a class="el" href="classtenzor_1_1nn_1_1NLLLoss.html" title="Negative Log Likelihood (NLL) Loss.">NLLLoss</a>, <a class="el" href="classtenzor_1_1nn_1_1LogSoftmax.html" title="Log-Softmax activation function.">LogSoftmax</a>, <a class="el" href="classtenzor_1_1nn_1_1BCELoss.html" title="Binary Cross Entropy (BCE) Loss.">BCELoss</a> </dd></dl>
+
+<p class="definition">Definition at line <a class="el" href="losses_8hpp_source.html#l00133">133</a> of file <a class="el" href="losses_8hpp_source.html">losses.hpp</a>.</p>
 </div><a name="doc-func-members" id="doc-func-members"></a><h2 id="header-doc-func-members" class="groupheader">Member Function Documentation</h2>
 <a id="ab255a215194facd3bf8d898808f1c337" name="ab255a215194facd3bf8d898808f1c337"></a>
 <h2 class="memtitle"><span class="permalink"><a href="#ab255a215194facd3bf8d898808f1c337">&#9670;&#160;</a></span>operator()()</h2>
@@ -132,7 +171,7 @@ auto&#160;</td><td class="memItemRight" valign="bottom"><b>forward</b> (const <a
 </table>
 </div><div class="memdoc">
 
-<p class="definition">Definition at line <a class="el" href="losses_8hpp_source.html#l00035">35</a> of file <a class="el" href="losses_8hpp_source.html">losses.hpp</a>.</p>
+<p class="definition">Definition at line <a class="el" href="losses_8hpp_source.html#l00138">138</a> of file <a class="el" href="losses_8hpp_source.html">losses.hpp</a>.</p>
 
 </div>
 </div>
@@ -152,7 +191,7 @@ auto&#160;</td><td class="memItemRight" valign="bottom"><b>forward</b> (const <a
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><b>tenzor</b></li><li class="navelem"><b>nn</b></li><li class="navelem"><a href="classtenzor_1_1nn_1_1CrossEntropyLoss.html">CrossEntropyLoss</a></li>
+    <li class="navelem"><a href="namespacetenzor.html">tenzor</a></li><li class="navelem"><b>nn</b></li><li class="navelem"><a href="classtenzor_1_1nn_1_1CrossEntropyLoss.html">CrossEntropyLoss</a></li>
     <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>

@@ -92,95 +92,122 @@ $(function(){initNavTree('shape_8hpp_source.html','',''); });
   <div class="headertitle"><div class="title">shape.hpp</div></div>
 </div><!--header-->
 <div class="contents">
-<div class="fragment"><div class="line"><a id="l00001" name="l00001"></a><span class="lineno">    1</span><span class="preprocessor">#pragma once</span></div>
-<div class="line"><a id="l00002" name="l00002"></a><span class="lineno">    2</span> </div>
-<div class="line"><a id="l00003" name="l00003"></a><span class="lineno">    3</span><span class="preprocessor">#include &lt;vector&gt;</span></div>
-<div class="line"><a id="l00004" name="l00004"></a><span class="lineno">    4</span><span class="preprocessor">#include &lt;cstdint&gt;</span></div>
-<div class="line"><a id="l00005" name="l00005"></a><span class="lineno">    5</span><span class="preprocessor">#include &lt;span&gt;</span></div>
-<div class="line"><a id="l00006" name="l00006"></a><span class="lineno">    6</span><span class="preprocessor">#include &lt;algorithm&gt;</span></div>
-<div class="line"><a id="l00007" name="l00007"></a><span class="lineno">    7</span><span class="preprocessor">#include &lt;numeric&gt;</span></div>
-<div class="line"><a id="l00008" name="l00008"></a><span class="lineno">    8</span><span class="preprocessor">#include &lt;stdexcept&gt;</span></div>
-<div class="line"><a id="l00009" name="l00009"></a><span class="lineno">    9</span> </div>
-<div class="line"><a id="l00010" name="l00010"></a><span class="lineno">   10</span><span class="keyword">namespace </span>tenzor {</div>
-<div class="line"><a id="l00011" name="l00011"></a><span class="lineno">   11</span> </div>
-<div class="line"><a id="l00012" name="l00012"></a><span class="lineno">   12</span><span class="comment">// Shape utilities</span></div>
-<div class="foldopen" id="foldopen00013" data-start="{" data-end="};">
-<div class="line"><a id="l00013" name="l00013"></a><span class="lineno"><a class="line" href="classtenzor_1_1Shape.html">   13</a></span><span class="keyword">class </span>Shape {</div>
-<div class="line"><a id="l00014" name="l00014"></a><span class="lineno">   14</span><span class="keyword">public</span>:</div>
-<div class="line"><a id="l00015" name="l00015"></a><span class="lineno">   15</span>    <span class="keyword">using </span>size_type = int64_t;</div>
-<div class="line"><a id="l00016" name="l00016"></a><span class="lineno">   16</span> </div>
-<div class="line"><a id="l00017" name="l00017"></a><span class="lineno">   17</span>    Shape() = <span class="keywordflow">default</span>;</div>
-<div class="line"><a id="l00018" name="l00018"></a><span class="lineno">   18</span>    <span class="keyword">explicit</span> Shape(std::vector&lt;size_type&gt; dims) : dims_(std::move(dims)) {}</div>
-<div class="line"><a id="l00019" name="l00019"></a><span class="lineno">   19</span> </div>
-<div class="line"><a id="l00020" name="l00020"></a><span class="lineno">   20</span>    <span class="comment">// Access</span></div>
-<div class="line"><a id="l00021" name="l00021"></a><span class="lineno">   21</span>    <span class="keyword">auto</span> operator[](<span class="keywordtype">size_t</span> idx) <span class="keyword">const</span> -&gt; size_type { <span class="keywordflow">return</span> dims_[idx]; }</div>
-<div class="line"><a id="l00022" name="l00022"></a><span class="lineno">   22</span>    <span class="keyword">auto</span> at(<span class="keywordtype">size_t</span> idx) <span class="keyword">const</span> -&gt; size_type { <span class="keywordflow">return</span> dims_.at(idx); }</div>
-<div class="line"><a id="l00023" name="l00023"></a><span class="lineno">   23</span>    <span class="keyword">auto</span> size() <span class="keyword">const</span> -&gt; <span class="keywordtype">size_t</span> { <span class="keywordflow">return</span> dims_.size(); }</div>
-<div class="line"><a id="l00024" name="l00024"></a><span class="lineno">   24</span>    <span class="keyword">auto</span> data() <span class="keyword">const</span> -&gt; <span class="keyword">const</span> size_type* { <span class="keywordflow">return</span> dims_.data(); }</div>
-<div class="line"><a id="l00025" name="l00025"></a><span class="lineno">   25</span>    <span class="keyword">auto</span> begin()<span class="keyword"> const </span>{ <span class="keywordflow">return</span> dims_.begin(); }</div>
-<div class="line"><a id="l00026" name="l00026"></a><span class="lineno">   26</span>    <span class="keyword">auto</span> end()<span class="keyword"> const </span>{ <span class="keywordflow">return</span> dims_.end(); }</div>
-<div class="line"><a id="l00027" name="l00027"></a><span class="lineno">   27</span> </div>
-<div class="line"><a id="l00028" name="l00028"></a><span class="lineno">   28</span>    <span class="comment">// Modification</span></div>
-<div class="line"><a id="l00029" name="l00029"></a><span class="lineno">   29</span>    <span class="keyword">auto</span> push_back(size_type dim) -&gt; <span class="keywordtype">void</span> { dims_.push_back(dim); }</div>
-<div class="line"><a id="l00030" name="l00030"></a><span class="lineno">   30</span>    <span class="keyword">auto</span> resize(<span class="keywordtype">size_t</span> n) -&gt; <span class="keywordtype">void</span> { dims_.resize(n); }</div>
-<div class="line"><a id="l00031" name="l00031"></a><span class="lineno">   31</span> </div>
-<div class="line"><a id="l00032" name="l00032"></a><span class="lineno">   32</span>    <span class="comment">// Computation</span></div>
-<div class="line"><a id="l00033" name="l00033"></a><span class="lineno">   33</span>    <span class="keyword">auto</span> numel() <span class="keyword">const</span> -&gt; size_type {</div>
-<div class="line"><a id="l00034" name="l00034"></a><span class="lineno">   34</span>        <span class="keywordflow">return</span> std::accumulate(dims_.begin(), dims_.end(), size_type{1},</div>
-<div class="line"><a id="l00035" name="l00035"></a><span class="lineno">   35</span>                             std::multiplies&lt;size_type&gt;{});</div>
-<div class="line"><a id="l00036" name="l00036"></a><span class="lineno">   36</span>    }</div>
-<div class="line"><a id="l00037" name="l00037"></a><span class="lineno">   37</span> </div>
-<div class="line"><a id="l00038" name="l00038"></a><span class="lineno">   38</span>    <span class="comment">// Comparison</span></div>
-<div class="line"><a id="l00039" name="l00039"></a><span class="lineno">   39</span>    <span class="keyword">auto</span> operator==(<span class="keyword">const</span> Shape&amp; other) <span class="keyword">const</span> -&gt; <span class="keywordtype">bool</span> {</div>
-<div class="line"><a id="l00040" name="l00040"></a><span class="lineno">   40</span>        <span class="keywordflow">return</span> dims_ == other.dims_;</div>
-<div class="line"><a id="l00041" name="l00041"></a><span class="lineno">   41</span>    }</div>
-<div class="line"><a id="l00042" name="l00042"></a><span class="lineno">   42</span> </div>
-<div class="line"><a id="l00043" name="l00043"></a><span class="lineno">   43</span><span class="keyword">private</span>:</div>
-<div class="line"><a id="l00044" name="l00044"></a><span class="lineno">   44</span>    std::vector&lt;size_type&gt; dims_;</div>
-<div class="line"><a id="l00045" name="l00045"></a><span class="lineno">   45</span>};</div>
+<a href="shape_8hpp.html">Go to the documentation of this file.</a><div class="fragment"><div class="line"><a id="l00001" name="l00001"></a><span class="lineno">    1</span></div>
+<div class="line"><a id="l00008" name="l00008"></a><span class="lineno">    8</span> </div>
+<div class="line"><a id="l00009" name="l00009"></a><span class="lineno">    9</span><span class="preprocessor">#pragma once</span></div>
+<div class="line"><a id="l00010" name="l00010"></a><span class="lineno">   10</span> </div>
+<div class="line"><a id="l00011" name="l00011"></a><span class="lineno">   11</span><span class="preprocessor">#include &lt;vector&gt;</span></div>
+<div class="line"><a id="l00012" name="l00012"></a><span class="lineno">   12</span><span class="preprocessor">#include &lt;cstdint&gt;</span></div>
+<div class="line"><a id="l00013" name="l00013"></a><span class="lineno">   13</span><span class="preprocessor">#include &lt;span&gt;</span></div>
+<div class="line"><a id="l00014" name="l00014"></a><span class="lineno">   14</span><span class="preprocessor">#include &lt;algorithm&gt;</span></div>
+<div class="line"><a id="l00015" name="l00015"></a><span class="lineno">   15</span><span class="preprocessor">#include &lt;numeric&gt;</span></div>
+<div class="line"><a id="l00016" name="l00016"></a><span class="lineno">   16</span><span class="preprocessor">#include &lt;stdexcept&gt;</span></div>
+<div class="line"><a id="l00017" name="l00017"></a><span class="lineno">   17</span> </div>
+<div class="line"><a id="l00018" name="l00018"></a><span class="lineno">   18</span><span class="keyword">namespace </span><a class="code hl_namespace" href="namespacetenzor.html">tenzor</a> {</div>
+<div class="line"><a id="l00019" name="l00019"></a><span class="lineno">   19</span></div>
+<div class="foldopen" id="foldopen00032" data-start="{" data-end="};">
+<div class="line"><a id="l00032" name="l00032"></a><span class="lineno"><a class="line" href="classtenzor_1_1Shape.html">   32</a></span><span class="keyword">class </span><a class="code hl_function" href="classtenzor_1_1Shape.html#a22af3b01558c12071c4f06e670886df1">Shape</a> {</div>
+<div class="line"><a id="l00033" name="l00033"></a><span class="lineno">   33</span><span class="keyword">public</span>:</div>
+<div class="line"><a id="l00034" name="l00034"></a><span class="lineno"><a class="line" href="classtenzor_1_1Shape.html#a617019a634962a1d8705ae543345272a">   34</a></span>    <span class="keyword">using </span><a class="code hl_typedef" href="classtenzor_1_1Shape.html#a617019a634962a1d8705ae543345272a">size_type</a> = int64_t;  </div>
+<div class="line"><a id="l00035" name="l00035"></a><span class="lineno">   35</span></div>
+<div class="line"><a id="l00039" name="l00039"></a><span class="lineno"><a class="line" href="classtenzor_1_1Shape.html#a22af3b01558c12071c4f06e670886df1">   39</a></span>    <a class="code hl_function" href="classtenzor_1_1Shape.html#a22af3b01558c12071c4f06e670886df1">Shape</a>() = <span class="keywordflow">default</span>;</div>
+<div class="line"><a id="l00040" name="l00040"></a><span class="lineno">   40</span></div>
+<div class="line"><a id="l00050" name="l00050"></a><span class="lineno"><a class="line" href="classtenzor_1_1Shape.html#ab55017d7fdee1615820fb1fdf5cb7990">   50</a></span>    <span class="keyword">explicit</span> <a class="code hl_function" href="classtenzor_1_1Shape.html#ab55017d7fdee1615820fb1fdf5cb7990">Shape</a>(std::vector&lt;size_type&gt; dims) : dims_(<a class="code hl_function" href="group__tensor__reduction.html#ga57c6304de0ccf7b02d2cf42923b2e3d9">std</a>::move(dims)) {}</div>
+<div class="line"><a id="l00051" name="l00051"></a><span class="lineno">   51</span></div>
+<div class="line"><a id="l00060" name="l00060"></a><span class="lineno"><a class="line" href="classtenzor_1_1Shape.html#a337ff0133814946c1a1f600a4b960bf0">   60</a></span>    <span class="keyword">auto</span> <a class="code hl_function" href="classtenzor_1_1Shape.html#a337ff0133814946c1a1f600a4b960bf0">operator[]</a>(<span class="keywordtype">size_t</span> idx) <span class="keyword">const</span> -&gt; <a class="code hl_typedef" href="classtenzor_1_1Shape.html#a617019a634962a1d8705ae543345272a">size_type</a> { <span class="keywordflow">return</span> dims_[idx]; }</div>
+<div class="line"><a id="l00061" name="l00061"></a><span class="lineno">   61</span></div>
+<div class="line"><a id="l00069" name="l00069"></a><span class="lineno"><a class="line" href="classtenzor_1_1Shape.html#ab784d471ad491ca57d8675413b168eaa">   69</a></span>    <span class="keyword">auto</span> <a class="code hl_function" href="classtenzor_1_1Shape.html#ab784d471ad491ca57d8675413b168eaa">at</a>(<span class="keywordtype">size_t</span> idx) <span class="keyword">const</span> -&gt; <a class="code hl_typedef" href="classtenzor_1_1Shape.html#a617019a634962a1d8705ae543345272a">size_type</a> { <span class="keywordflow">return</span> dims_.at(idx); }</div>
+<div class="line"><a id="l00070" name="l00070"></a><span class="lineno">   70</span></div>
+<div class="line"><a id="l00081" name="l00081"></a><span class="lineno"><a class="line" href="classtenzor_1_1Shape.html#a1e1037db1a6d3d26df04581b2745f0c9">   81</a></span>    <span class="keyword">auto</span> <a class="code hl_function" href="classtenzor_1_1Shape.html#a1e1037db1a6d3d26df04581b2745f0c9">size</a>() const -&gt; <span class="keywordtype">size_t</span> { <span class="keywordflow">return</span> dims_.size(); }</div>
+<div class="line"><a id="l00082" name="l00082"></a><span class="lineno">   82</span></div>
+<div class="line"><a id="l00088" name="l00088"></a><span class="lineno"><a class="line" href="classtenzor_1_1Shape.html#adf2913b4783f390b5f529445f480c9e9">   88</a></span>    <span class="keyword">auto</span> <a class="code hl_function" href="classtenzor_1_1Shape.html#adf2913b4783f390b5f529445f480c9e9">data</a>() const -&gt; const <a class="code hl_typedef" href="classtenzor_1_1Shape.html#a617019a634962a1d8705ae543345272a">size_type</a>* { <span class="keywordflow">return</span> dims_.data(); }</div>
+<div class="line"><a id="l00089" name="l00089"></a><span class="lineno">   89</span></div>
+<div class="line"><a id="l00093" name="l00093"></a><span class="lineno"><a class="line" href="classtenzor_1_1Shape.html#a5a2a187e7431287717cc46a16640efcd">   93</a></span>    <span class="keyword">auto</span> <a class="code hl_function" href="classtenzor_1_1Shape.html#a5a2a187e7431287717cc46a16640efcd">begin</a>()<span class="keyword"> const </span>{ <span class="keywordflow">return</span> dims_.begin(); }</div>
+<div class="line"><a id="l00094" name="l00094"></a><span class="lineno">   94</span></div>
+<div class="line"><a id="l00098" name="l00098"></a><span class="lineno"><a class="line" href="classtenzor_1_1Shape.html#ae3707c79c5fb38b5b0c9106beeeddf82">   98</a></span>    <span class="keyword">auto</span> <a class="code hl_function" href="classtenzor_1_1Shape.html#ae3707c79c5fb38b5b0c9106beeeddf82">end</a>()<span class="keyword"> const </span>{ <span class="keywordflow">return</span> dims_.end(); }</div>
+<div class="line"><a id="l00099" name="l00099"></a><span class="lineno">   99</span></div>
+<div class="line"><a id="l00110" name="l00110"></a><span class="lineno"><a class="line" href="classtenzor_1_1Shape.html#a212fbb4824a7e64c44ee20e2e5b9ba5f">  110</a></span>    <span class="keyword">auto</span> <a class="code hl_function" href="classtenzor_1_1Shape.html#a212fbb4824a7e64c44ee20e2e5b9ba5f">push_back</a>(<a class="code hl_typedef" href="classtenzor_1_1Shape.html#a617019a634962a1d8705ae543345272a">size_type</a> dim) -&gt; <span class="keywordtype">void</span> { dims_.push_back(dim); }</div>
+<div class="line"><a id="l00111" name="l00111"></a><span class="lineno">  111</span></div>
+<div class="line"><a id="l00119" name="l00119"></a><span class="lineno"><a class="line" href="classtenzor_1_1Shape.html#ad2f6ef70e2111b1296b4661260024720">  119</a></span>    <span class="keyword">auto</span> <a class="code hl_function" href="classtenzor_1_1Shape.html#ad2f6ef70e2111b1296b4661260024720">resize</a>(<span class="keywordtype">size_t</span> n) -&gt; <span class="keywordtype">void</span> { dims_.resize(n); }</div>
+<div class="line"><a id="l00120" name="l00120"></a><span class="lineno">  120</span></div>
+<div class="foldopen" id="foldopen00134" data-start="{" data-end="}">
+<div class="line"><a id="l00134" name="l00134"></a><span class="lineno"><a class="line" href="classtenzor_1_1Shape.html#ad4a892d56570cada2b3070aa37bc44ba">  134</a></span>    <span class="keyword">auto</span> <a class="code hl_function" href="classtenzor_1_1Shape.html#ad4a892d56570cada2b3070aa37bc44ba">numel</a>() const -&gt; <a class="code hl_typedef" href="classtenzor_1_1Shape.html#a617019a634962a1d8705ae543345272a">size_type</a> {</div>
+<div class="line"><a id="l00135" name="l00135"></a><span class="lineno">  135</span>        <span class="keywordflow">return</span> std::accumulate(dims_.begin(), dims_.end(), <a class="code hl_typedef" href="classtenzor_1_1Shape.html#a617019a634962a1d8705ae543345272a">size_type</a>{1},</div>
+<div class="line"><a id="l00136" name="l00136"></a><span class="lineno">  136</span>                             std::multiplies&lt;size_type&gt;{});</div>
+<div class="line"><a id="l00137" name="l00137"></a><span class="lineno">  137</span>    }</div>
 </div>
-<div class="line"><a id="l00046" name="l00046"></a><span class="lineno">   46</span> </div>
-<div class="line"><a id="l00047" name="l00047"></a><span class="lineno">   47</span><span class="comment">// Stride calculation</span></div>
-<div class="line"><a id="l00048" name="l00048"></a><span class="lineno">   48</span><span class="keyword">inline</span> <span class="keyword">auto</span> compute_strides(std::span&lt;const int64_t&gt; shape) -&gt; std::vector&lt;int64_t&gt; {</div>
-<div class="line"><a id="l00049" name="l00049"></a><span class="lineno">   49</span>    std::vector&lt;int64_t&gt; strides(shape.size());</div>
-<div class="line"><a id="l00050" name="l00050"></a><span class="lineno">   50</span>    <span class="keywordflow">if</span> (shape.empty()) <span class="keywordflow">return</span> strides;</div>
-<div class="line"><a id="l00051" name="l00051"></a><span class="lineno">   51</span> </div>
-<div class="line"><a id="l00052" name="l00052"></a><span class="lineno">   52</span>    strides.back() = 1;</div>
-<div class="line"><a id="l00053" name="l00053"></a><span class="lineno">   53</span>    <span class="keywordflow">for</span> (int64_t i = <span class="keyword">static_cast&lt;</span>int64_t<span class="keyword">&gt;</span>(shape.size()) - 2; i &gt;= 0; --i) {</div>
-<div class="line"><a id="l00054" name="l00054"></a><span class="lineno">   54</span>        strides[i] = strides[i + 1] * shape[i + 1];</div>
-<div class="line"><a id="l00055" name="l00055"></a><span class="lineno">   55</span>    }</div>
-<div class="line"><a id="l00056" name="l00056"></a><span class="lineno">   56</span>    <span class="keywordflow">return</span> strides;</div>
-<div class="line"><a id="l00057" name="l00057"></a><span class="lineno">   57</span>}</div>
-<div class="line"><a id="l00058" name="l00058"></a><span class="lineno">   58</span> </div>
-<div class="line"><a id="l00059" name="l00059"></a><span class="lineno">   59</span><span class="comment">// Broadcasting</span></div>
-<div class="line"><a id="l00060" name="l00060"></a><span class="lineno">   60</span><span class="keyword">inline</span> <span class="keyword">auto</span> broadcast_shapes(std::span&lt;const int64_t&gt; shape1,</div>
-<div class="line"><a id="l00061" name="l00061"></a><span class="lineno">   61</span>                            std::span&lt;const int64_t&gt; shape2)</div>
-<div class="line"><a id="l00062" name="l00062"></a><span class="lineno">   62</span>    -&gt; std::vector&lt;int64_t&gt; {</div>
-<div class="line"><a id="l00063" name="l00063"></a><span class="lineno">   63</span>    <span class="keywordtype">size_t</span> ndim = std::max(shape1.size(), shape2.size());</div>
-<div class="line"><a id="l00064" name="l00064"></a><span class="lineno">   64</span>    std::vector&lt;int64_t&gt; result(ndim);</div>
-<div class="line"><a id="l00065" name="l00065"></a><span class="lineno">   65</span> </div>
-<div class="line"><a id="l00066" name="l00066"></a><span class="lineno">   66</span>    <span class="keywordflow">for</span> (<span class="keywordtype">size_t</span> i = 0; i &lt; ndim; ++i) {</div>
-<div class="line"><a id="l00067" name="l00067"></a><span class="lineno">   67</span>        int64_t dim1 = i &lt; shape1.size() ? shape1[shape1.size() - 1 - i] : 1;</div>
-<div class="line"><a id="l00068" name="l00068"></a><span class="lineno">   68</span>        int64_t dim2 = i &lt; shape2.size() ? shape2[shape2.size() - 1 - i] : 1;</div>
-<div class="line"><a id="l00069" name="l00069"></a><span class="lineno">   69</span> </div>
-<div class="line"><a id="l00070" name="l00070"></a><span class="lineno">   70</span>        <span class="keywordflow">if</span> (dim1 == dim2 || dim1 == 1 || dim2 == 1) {</div>
-<div class="line"><a id="l00071" name="l00071"></a><span class="lineno">   71</span>            result[ndim - 1 - i] = std::max(dim1, dim2);</div>
-<div class="line"><a id="l00072" name="l00072"></a><span class="lineno">   72</span>        } <span class="keywordflow">else</span> {</div>
-<div class="line"><a id="l00073" name="l00073"></a><span class="lineno">   73</span>            <span class="keywordflow">throw</span> std::runtime_error(<span class="stringliteral">&quot;Shapes are not broadcastable&quot;</span>);</div>
-<div class="line"><a id="l00074" name="l00074"></a><span class="lineno">   74</span>        }</div>
-<div class="line"><a id="l00075" name="l00075"></a><span class="lineno">   75</span>    }</div>
-<div class="line"><a id="l00076" name="l00076"></a><span class="lineno">   76</span> </div>
-<div class="line"><a id="l00077" name="l00077"></a><span class="lineno">   77</span>    <span class="keywordflow">return</span> result;</div>
-<div class="line"><a id="l00078" name="l00078"></a><span class="lineno">   78</span>}</div>
-<div class="line"><a id="l00079" name="l00079"></a><span class="lineno">   79</span> </div>
-<div class="line"><a id="l00080" name="l00080"></a><span class="lineno">   80</span>} <span class="comment">// namespace tenzor</span></div>
+<div class="line"><a id="l00138" name="l00138"></a><span class="lineno">  138</span></div>
+<div class="foldopen" id="foldopen00145" data-start="{" data-end="}">
+<div class="line"><a id="l00145" name="l00145"></a><span class="lineno"><a class="line" href="classtenzor_1_1Shape.html#ac328005886c80e7abc30977f26743a0e">  145</a></span>    <span class="keyword">auto</span> <a class="code hl_function" href="classtenzor_1_1Shape.html#ac328005886c80e7abc30977f26743a0e">operator==</a>(<span class="keyword">const</span> <a class="code hl_function" href="classtenzor_1_1Shape.html#a22af3b01558c12071c4f06e670886df1">Shape</a>&amp; other) <span class="keyword">const</span> -&gt; <span class="keywordtype">bool</span> {</div>
+<div class="line"><a id="l00146" name="l00146"></a><span class="lineno">  146</span>        <span class="keywordflow">return</span> dims_ == other.dims_;</div>
+<div class="line"><a id="l00147" name="l00147"></a><span class="lineno">  147</span>    }</div>
+</div>
+<div class="line"><a id="l00148" name="l00148"></a><span class="lineno">  148</span> </div>
+<div class="line"><a id="l00149" name="l00149"></a><span class="lineno">  149</span><span class="keyword">private</span>:</div>
+<div class="line"><a id="l00150" name="l00150"></a><span class="lineno">  150</span>    std::vector&lt;size_type&gt; dims_;  </div>
+<div class="line"><a id="l00151" name="l00151"></a><span class="lineno">  151</span>};</div>
+</div>
+<div class="line"><a id="l00152" name="l00152"></a><span class="lineno">  152</span></div>
+<div class="foldopen" id="foldopen00171" data-start="{" data-end="}">
+<div class="line"><a id="l00171" name="l00171"></a><span class="lineno"><a class="line" href="namespacetenzor.html#ad393e596b1b9dcce1a421ddfa349d604">  171</a></span><span class="keyword">inline</span> <span class="keyword">auto</span> <a class="code hl_function" href="namespacetenzor.html#ad393e596b1b9dcce1a421ddfa349d604">compute_strides</a>(std::span&lt;const int64_t&gt; shape) -&gt; std::vector&lt;int64_t&gt; {</div>
+<div class="line"><a id="l00172" name="l00172"></a><span class="lineno">  172</span>    std::vector&lt;int64_t&gt; strides(shape.size());</div>
+<div class="line"><a id="l00173" name="l00173"></a><span class="lineno">  173</span>    <span class="keywordflow">if</span> (shape.empty()) <span class="keywordflow">return</span> strides;</div>
+<div class="line"><a id="l00174" name="l00174"></a><span class="lineno">  174</span> </div>
+<div class="line"><a id="l00175" name="l00175"></a><span class="lineno">  175</span>    strides.back() = 1;</div>
+<div class="line"><a id="l00176" name="l00176"></a><span class="lineno">  176</span>    <span class="keywordflow">for</span> (int64_t i = <span class="keyword">static_cast&lt;</span>int64_t<span class="keyword">&gt;</span>(shape.size()) - 2; i &gt;= 0; --i) {</div>
+<div class="line"><a id="l00177" name="l00177"></a><span class="lineno">  177</span>        strides[i] = strides[i + 1] * shape[i + 1];</div>
+<div class="line"><a id="l00178" name="l00178"></a><span class="lineno">  178</span>    }</div>
+<div class="line"><a id="l00179" name="l00179"></a><span class="lineno">  179</span>    <span class="keywordflow">return</span> strides;</div>
+<div class="line"><a id="l00180" name="l00180"></a><span class="lineno">  180</span>}</div>
+</div>
+<div class="line"><a id="l00181" name="l00181"></a><span class="lineno">  181</span></div>
+<div class="foldopen" id="foldopen00209" data-start="{" data-end="}">
+<div class="line"><a id="l00209" name="l00209"></a><span class="lineno"><a class="line" href="namespacetenzor.html#acf22cfe8ec0be9f887f8193fc6e2c80f">  209</a></span><span class="keyword">inline</span> <span class="keyword">auto</span> <a class="code hl_function" href="namespacetenzor.html#acf22cfe8ec0be9f887f8193fc6e2c80f">broadcast_shapes</a>(std::span&lt;const int64_t&gt; shape1,</div>
+<div class="line"><a id="l00210" name="l00210"></a><span class="lineno">  210</span>                            std::span&lt;const int64_t&gt; shape2)</div>
+<div class="line"><a id="l00211" name="l00211"></a><span class="lineno">  211</span>    -&gt; std::vector&lt;int64_t&gt; {</div>
+<div class="line"><a id="l00212" name="l00212"></a><span class="lineno">  212</span>    <span class="keywordtype">size_t</span> ndim = std::max(shape1.size(), shape2.size());</div>
+<div class="line"><a id="l00213" name="l00213"></a><span class="lineno">  213</span>    std::vector&lt;int64_t&gt; result(ndim);</div>
+<div class="line"><a id="l00214" name="l00214"></a><span class="lineno">  214</span> </div>
+<div class="line"><a id="l00215" name="l00215"></a><span class="lineno">  215</span>    <span class="keywordflow">for</span> (<span class="keywordtype">size_t</span> i = 0; i &lt; ndim; ++i) {</div>
+<div class="line"><a id="l00216" name="l00216"></a><span class="lineno">  216</span>        int64_t dim1 = i &lt; shape1.size() ? shape1[shape1.size() - 1 - i] : 1;</div>
+<div class="line"><a id="l00217" name="l00217"></a><span class="lineno">  217</span>        int64_t dim2 = i &lt; shape2.size() ? shape2[shape2.size() - 1 - i] : 1;</div>
+<div class="line"><a id="l00218" name="l00218"></a><span class="lineno">  218</span> </div>
+<div class="line"><a id="l00219" name="l00219"></a><span class="lineno">  219</span>        <span class="keywordflow">if</span> (dim1 == dim2 || dim1 == 1 || dim2 == 1) {</div>
+<div class="line"><a id="l00220" name="l00220"></a><span class="lineno">  220</span>            result[ndim - 1 - i] = std::max(dim1, dim2);</div>
+<div class="line"><a id="l00221" name="l00221"></a><span class="lineno">  221</span>        } <span class="keywordflow">else</span> {</div>
+<div class="line"><a id="l00222" name="l00222"></a><span class="lineno">  222</span>            <span class="keywordflow">throw</span> std::runtime_error(<span class="stringliteral">&quot;Shapes are not broadcastable&quot;</span>);</div>
+<div class="line"><a id="l00223" name="l00223"></a><span class="lineno">  223</span>        }</div>
+<div class="line"><a id="l00224" name="l00224"></a><span class="lineno">  224</span>    }</div>
+<div class="line"><a id="l00225" name="l00225"></a><span class="lineno">  225</span> </div>
+<div class="line"><a id="l00226" name="l00226"></a><span class="lineno">  226</span>    <span class="keywordflow">return</span> result;</div>
+<div class="line"><a id="l00227" name="l00227"></a><span class="lineno">  227</span>}</div>
+</div>
+<div class="line"><a id="l00228" name="l00228"></a><span class="lineno">  228</span> </div>
+<div class="line"><a id="l00229" name="l00229"></a><span class="lineno">  229</span>} <span class="comment">// namespace tenzor</span></div>
+<div class="ttc" id="aclasstenzor_1_1Shape_html_a1e1037db1a6d3d26df04581b2745f0c9"><div class="ttname"><a href="classtenzor_1_1Shape.html#a1e1037db1a6d3d26df04581b2745f0c9">tenzor::Shape::size</a></div><div class="ttdeci">auto size() const -&gt; size_t</div><div class="ttdoc">Get number of dimensions (rank).</div><div class="ttdef"><b>Definition</b> <a href="#l00081">shape.hpp:81</a></div></div>
+<div class="ttc" id="aclasstenzor_1_1Shape_html_a212fbb4824a7e64c44ee20e2e5b9ba5f"><div class="ttname"><a href="classtenzor_1_1Shape.html#a212fbb4824a7e64c44ee20e2e5b9ba5f">tenzor::Shape::push_back</a></div><div class="ttdeci">auto push_back(size_type dim) -&gt; void</div><div class="ttdoc">Append a dimension to the shape.</div><div class="ttdef"><b>Definition</b> <a href="#l00110">shape.hpp:110</a></div></div>
+<div class="ttc" id="aclasstenzor_1_1Shape_html_a22af3b01558c12071c4f06e670886df1"><div class="ttname"><a href="classtenzor_1_1Shape.html#a22af3b01558c12071c4f06e670886df1">tenzor::Shape::Shape</a></div><div class="ttdeci">Shape()=default</div><div class="ttdoc">Default constructor creates empty shape.</div></div>
+<div class="ttc" id="aclasstenzor_1_1Shape_html_a337ff0133814946c1a1f600a4b960bf0"><div class="ttname"><a href="classtenzor_1_1Shape.html#a337ff0133814946c1a1f600a4b960bf0">tenzor::Shape::operator[]</a></div><div class="ttdeci">auto operator[](size_t idx) const -&gt; size_type</div><div class="ttdoc">Access dimension by index (unchecked).</div><div class="ttdef"><b>Definition</b> <a href="#l00060">shape.hpp:60</a></div></div>
+<div class="ttc" id="aclasstenzor_1_1Shape_html_a5a2a187e7431287717cc46a16640efcd"><div class="ttname"><a href="classtenzor_1_1Shape.html#a5a2a187e7431287717cc46a16640efcd">tenzor::Shape::begin</a></div><div class="ttdeci">auto begin() const</div><div class="ttdoc">Get iterator to beginning of dimensions.</div><div class="ttdef"><b>Definition</b> <a href="#l00093">shape.hpp:93</a></div></div>
+<div class="ttc" id="aclasstenzor_1_1Shape_html_a617019a634962a1d8705ae543345272a"><div class="ttname"><a href="classtenzor_1_1Shape.html#a617019a634962a1d8705ae543345272a">tenzor::Shape::size_type</a></div><div class="ttdeci">int64_t size_type</div><div class="ttdoc">Dimension size type (signed for negative indexing)</div><div class="ttdef"><b>Definition</b> <a href="#l00034">shape.hpp:34</a></div></div>
+<div class="ttc" id="aclasstenzor_1_1Shape_html_ab55017d7fdee1615820fb1fdf5cb7990"><div class="ttname"><a href="classtenzor_1_1Shape.html#ab55017d7fdee1615820fb1fdf5cb7990">tenzor::Shape::Shape</a></div><div class="ttdeci">Shape(std::vector&lt; size_type &gt; dims)</div><div class="ttdoc">Construct shape from dimension vector.</div><div class="ttdef"><b>Definition</b> <a href="#l00050">shape.hpp:50</a></div></div>
+<div class="ttc" id="aclasstenzor_1_1Shape_html_ab784d471ad491ca57d8675413b168eaa"><div class="ttname"><a href="classtenzor_1_1Shape.html#ab784d471ad491ca57d8675413b168eaa">tenzor::Shape::at</a></div><div class="ttdeci">auto at(size_t idx) const -&gt; size_type</div><div class="ttdoc">Access dimension by index (checked).</div><div class="ttdef"><b>Definition</b> <a href="#l00069">shape.hpp:69</a></div></div>
+<div class="ttc" id="aclasstenzor_1_1Shape_html_ac328005886c80e7abc30977f26743a0e"><div class="ttname"><a href="classtenzor_1_1Shape.html#ac328005886c80e7abc30977f26743a0e">tenzor::Shape::operator==</a></div><div class="ttdeci">auto operator==(const Shape &amp;other) const -&gt; bool</div><div class="ttdoc">Compare shapes for equality.</div><div class="ttdef"><b>Definition</b> <a href="#l00145">shape.hpp:145</a></div></div>
+<div class="ttc" id="aclasstenzor_1_1Shape_html_ad2f6ef70e2111b1296b4661260024720"><div class="ttname"><a href="classtenzor_1_1Shape.html#ad2f6ef70e2111b1296b4661260024720">tenzor::Shape::resize</a></div><div class="ttdeci">auto resize(size_t n) -&gt; void</div><div class="ttdoc">Resize number of dimensions.</div><div class="ttdef"><b>Definition</b> <a href="#l00119">shape.hpp:119</a></div></div>
+<div class="ttc" id="aclasstenzor_1_1Shape_html_ad4a892d56570cada2b3070aa37bc44ba"><div class="ttname"><a href="classtenzor_1_1Shape.html#ad4a892d56570cada2b3070aa37bc44ba">tenzor::Shape::numel</a></div><div class="ttdeci">auto numel() const -&gt; size_type</div><div class="ttdoc">Compute total number of elements.</div><div class="ttdef"><b>Definition</b> <a href="#l00134">shape.hpp:134</a></div></div>
+<div class="ttc" id="aclasstenzor_1_1Shape_html_adf2913b4783f390b5f529445f480c9e9"><div class="ttname"><a href="classtenzor_1_1Shape.html#adf2913b4783f390b5f529445f480c9e9">tenzor::Shape::data</a></div><div class="ttdeci">auto data() const -&gt; const size_type *</div><div class="ttdoc">Get raw pointer to dimension data.</div><div class="ttdef"><b>Definition</b> <a href="#l00088">shape.hpp:88</a></div></div>
+<div class="ttc" id="aclasstenzor_1_1Shape_html_ae3707c79c5fb38b5b0c9106beeeddf82"><div class="ttname"><a href="classtenzor_1_1Shape.html#ae3707c79c5fb38b5b0c9106beeeddf82">tenzor::Shape::end</a></div><div class="ttdeci">auto end() const</div><div class="ttdoc">Get iterator to end of dimensions.</div><div class="ttdef"><b>Definition</b> <a href="#l00098">shape.hpp:98</a></div></div>
+<div class="ttc" id="agroup__tensor__reduction_html_ga57c6304de0ccf7b02d2cf42923b2e3d9"><div class="ttname"><a href="group__tensor__reduction.html#ga57c6304de0ccf7b02d2cf42923b2e3d9">tenzor::std</a></div><div class="ttdeci">auto std(const Tensor &amp;input, std::optional&lt; int64_t &gt; dim=std::nullopt, bool keepdim=false, bool unbiased=true) -&gt; Tensor</div><div class="ttdoc">Standard deviation of tensor elements.</div></div>
+<div class="ttc" id="anamespacetenzor_html"><div class="ttname"><a href="namespacetenzor.html">tenzor</a></div><div class="ttdoc">Main Tenzor namespace.</div><div class="ttdef"><b>Definition</b> <a href="engine_8hpp_source.html#l00019">engine.hpp:19</a></div></div>
+<div class="ttc" id="anamespacetenzor_html_acf22cfe8ec0be9f887f8193fc6e2c80f"><div class="ttname"><a href="namespacetenzor.html#acf22cfe8ec0be9f887f8193fc6e2c80f">tenzor::broadcast_shapes</a></div><div class="ttdeci">auto broadcast_shapes(std::span&lt; const int64_t &gt; shape1, std::span&lt; const int64_t &gt; shape2) -&gt; std::vector&lt; int64_t &gt;</div><div class="ttdoc">Compute broadcasted shape from two input shapes.</div><div class="ttdef"><b>Definition</b> <a href="#l00209">shape.hpp:209</a></div></div>
+<div class="ttc" id="anamespacetenzor_html_ad393e596b1b9dcce1a421ddfa349d604"><div class="ttname"><a href="namespacetenzor.html#ad393e596b1b9dcce1a421ddfa349d604">tenzor::compute_strides</a></div><div class="ttdeci">auto compute_strides(std::span&lt; const int64_t &gt; shape) -&gt; std::vector&lt; int64_t &gt;</div><div class="ttdoc">Compute row-major strides from shape.</div><div class="ttdef"><b>Definition</b> <a href="#l00171">shape.hpp:171</a></div></div>
 </div><!-- fragment --></div><!-- contents -->
 </div><!-- doc-content -->
 </div><!-- container -->
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><a href="dir_d44c64559bbebec7f509842c48db8b23.html">include</a></li><li class="navelem"><a href="dir_14ba40437910c5dd1b08964ca20ae5af.html">tenzor</a></li><li class="navelem"><a href="dir_5f1567d5508bbd804950a140dd8a1981.html">core</a></li><li class="navelem"><b>shape.hpp</b></li>
+    <li class="navelem"><a href="dir_d44c64559bbebec7f509842c48db8b23.html">include</a></li><li class="navelem"><a href="dir_14ba40437910c5dd1b08964ca20ae5af.html">tenzor</a></li><li class="navelem"><a href="dir_5f1567d5508bbd804950a140dd8a1981.html">core</a></li><li class="navelem"><a href="shape_8hpp.html">shape.hpp</a></li>
     <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>

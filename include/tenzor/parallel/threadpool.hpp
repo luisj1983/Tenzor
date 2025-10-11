@@ -1,3 +1,10 @@
+/**
+ * @file threadpool.hpp
+ * @brief Work-stealing thread pool for parallel tensor operations
+ *
+ * Provides efficient thread pool implementation for CPU-based parallel computations.
+ */
+
 #pragma once
 
 #include <thread>
@@ -11,27 +18,90 @@
 
 namespace tenzor {
 
-// Work-stealing thread pool
+/**
+ * @brief Work-stealing thread pool for parallel task execution
+ *
+ * Maintains a pool of worker threads that execute submitted tasks.
+ * Provides efficient work distribution and load balancing.
+ *
+ * **Features:**
+ * - Fixed number of threads (typically hardware concurrency)
+ * - Task queue with automatic work distribution
+ * - Future-based result retrieval
+ * - Graceful shutdown on destruction
+ *
+ * **Use Cases:**
+ * - Parallel tensor operations (element-wise, reductions)
+ * - Data loading and preprocessing
+ * - Model inference batching
+ *
+ * @par Thread Safety
+ * All methods are thread-safe
+ *
+ * @code
+ * auto pool = ThreadPool(4);  // 4 worker threads
+ * auto future = pool.submit([]() {
+ *     return expensive_computation();
+ * });
+ * auto result = future.get();  // Wait for completion
+ * @endcode
+ *
+ * @see parallel_for for simpler data-parallel loops
+ */
 class ThreadPool {
 public:
+    /**
+     * @brief Construct thread pool with specified number of threads
+     * @param num_threads Number of worker threads (default: hardware concurrency)
+     */
     explicit ThreadPool(size_t num_threads = std::thread::hardware_concurrency());
+
+    /**
+     * @brief Destructor - waits for all tasks to complete
+     */
     ~ThreadPool();
 
     ThreadPool(const ThreadPool&) = delete;
     ThreadPool& operator=(const ThreadPool&) = delete;
 
-    // Submit task
+    /**
+     * @brief Submit task for asynchronous execution
+     *
+     * Queues task for execution and returns future for result retrieval.
+     *
+     * @tparam F Callable type
+     * @tparam Args Argument types
+     * @param func Callable object to execute
+     * @param args Arguments to pass to func
+     * @return Future for retrieving result
+     * @throws std::runtime_error if pool is stopped
+     */
     template<typename F, typename... Args>
     auto submit(F&& func, Args&&... args) -> std::future<std::invoke_result_t<F, Args...>>;
 
-    // Parallel for loop
+    /**
+     * @brief Execute loop iterations in parallel using thread pool
+     *
+     * Convenience method for parallel loops.
+     *
+     * @tparam F Function type with signature void(int64_t)
+     * @param begin Start of iteration range
+     * @param end End of iteration range
+     * @param func Function to execute for each iteration
+     */
     template<typename F>
     auto parallel_for(int64_t begin, int64_t end, F&& func) -> void;
 
-    // Get number of threads
+    /**
+     * @brief Get number of threads in pool
+     * @return Number of worker threads
+     */
     auto num_threads() const -> size_t { return num_threads_; }
 
-    // Get active thread count
+    /**
+     * @brief Get number of currently active (busy) threads
+     * @return Active thread count
+     */
     auto active_threads() const -> size_t;
 
 private:
@@ -93,7 +163,14 @@ auto ThreadPool::parallel_for(int64_t begin, int64_t end, F&& func) -> void {
     }
 }
 
-// Global thread pool
+/**
+ * @brief Get global thread pool instance
+ *
+ * Returns reference to singleton thread pool used by library operations.
+ * Thread pool is lazily initialized on first access.
+ *
+ * @return Reference to global ThreadPool
+ */
 auto thread_pool() -> ThreadPool&;
 
 } // namespace tenzor

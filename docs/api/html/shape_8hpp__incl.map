@@ -1,0 +1,15 @@
+<map id="include/tenzor/core/shape.hpp" name="include/tenzor/core/shape.hpp">
+<area shape="rect" id="Node000001" title="Shape and stride utilities for tensor operations." alt="" coords="180,5,325,50"/>
+<area shape="rect" id="Node000002" title=" " alt="" coords="5,98,68,126"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="196,53,83,96,81,91,194,48"/>
+<area shape="rect" id="Node000003" title=" " alt="" coords="92,98,157,126"/>
+<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="220,53,159,92,156,87,217,48"/>
+<area shape="rect" id="Node000004" title=" " alt="" coords="181,98,233,126"/>
+<area shape="poly" id="edge3_Node000001_Node000004" title=" " alt="" coords="243,52,224,86,219,83,238,49"/>
+<area shape="rect" id="Node000005" title=" " alt="" coords="257,98,341,126"/>
+<area shape="poly" id="edge4_Node000001_Node000005" title=" " alt="" coords="267,49,286,83,282,86,262,52"/>
+<area shape="rect" id="Node000006" title=" " alt="" coords="366,98,440,126"/>
+<area shape="poly" id="edge5_Node000001_Node000006" title=" " alt="" coords="294,48,367,88,365,93,291,53"/>
+<area shape="rect" id="Node000007" title=" " alt="" coords="464,98,550,126"/>
+<area shape="poly" id="edge6_Node000001_Node000007" title=" " alt="" coords="321,48,453,90,451,95,319,53"/>
+</map>

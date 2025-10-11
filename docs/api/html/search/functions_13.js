@@ -1,5 +1,5 @@
 var searchData=
 [
-  ['_7enogradguard_0',['~NoGradGuard',['../classtenzor_1_1NoGradGuard.html#a6d26d0ddad2b2f4cfde7fbbad95a2565',1,'tenzor::NoGradGuard']]],
-  ['_7etensor_1',['~Tensor',['../classtenzor_1_1Tensor.html#afe892240c38ca218ed8197b6ad3ade31',1,'tenzor::Tensor']]]
+  ['weight_0',['weight',['../classtenzor_1_1nn_1_1Linear.html#ac5531c6fdbdf5aa08fe47bc172ea0fc7',1,'tenzor::nn::Linear']]],
+  ['where_1',['where',['../group__tensor__indexing.html#gab5786f353b47c4848e5d1ae5a991cb52',1,'tenzor']]]
 ];

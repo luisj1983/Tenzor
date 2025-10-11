@@ -92,13 +92,18 @@ $(function(){initNavTree('classtenzor_1_1optim_1_1StepLR.html','','classtenzor_1
   <div class="headertitle"><div class="title">tenzor::optim::StepLR Class Reference</div></div>
 </div><!--header-->
 <div class="contents">
+
+<p>Step learning rate scheduler.  
+ <a href="#details">More...</a></p>
+
+<p><code>#include &lt;<a class="el" href="scheduler_8hpp_source.html">scheduler.hpp</a>&gt;</code></p>
 <div class="dynheader">
 Inheritance diagram for tenzor::optim::StepLR:</div>
 <div class="dyncontent">
 <div class="center"><img src="classtenzor_1_1optim_1_1StepLR__inherit__graph.png" border="0" usemap="#atenzor_1_1optim_1_1StepLR_inherit__map" loading="lazy" alt="Inheritance graph"/></div>
 <map name="atenzor_1_1optim_1_1StepLR_inherit__map" id="atenzor_1_1optim_1_1StepLR_inherit__map">
-<area shape="rect" title=" " alt="" coords="23,81,184,109"/>
-<area shape="rect" href="classtenzor_1_1optim_1_1LRScheduler.html" title=" " alt="" coords="5,5,202,33"/>
+<area shape="rect" title="Step learning rate scheduler." alt="" coords="23,81,184,109"/>
+<area shape="rect" href="classtenzor_1_1optim_1_1LRScheduler.html" title="Base class for learning rate schedulers." alt="" coords="5,5,202,33"/>
 <area shape="poly" title=" " alt="" coords="106,49,106,81,101,81,101,49"/>
 </map>
 <center><span class="legend">[<a target="top" href="graph_legend.html">legend</a>]</span></center></div>
@@ -107,8 +112,8 @@ Collaboration diagram for tenzor::optim::StepLR:</div>
 <div class="dyncontent">
 <div class="center"><img src="classtenzor_1_1optim_1_1StepLR__coll__graph.png" border="0" usemap="#atenzor_1_1optim_1_1StepLR_coll__map" loading="lazy" alt="Collaboration graph"/></div>
 <map name="atenzor_1_1optim_1_1StepLR_coll__map" id="atenzor_1_1optim_1_1StepLR_coll__map">
-<area shape="rect" title=" " alt="" coords="23,81,184,109"/>
-<area shape="rect" href="classtenzor_1_1optim_1_1LRScheduler.html" title=" " alt="" coords="5,5,202,33"/>
+<area shape="rect" title="Step learning rate scheduler." alt="" coords="23,81,184,109"/>
+<area shape="rect" href="classtenzor_1_1optim_1_1LRScheduler.html" title="Base class for learning rate schedulers." alt="" coords="5,5,202,33"/>
 <area shape="poly" title=" " alt="" coords="106,49,106,81,101,81,101,49"/>
 </map>
 <center><span class="legend">[<a target="top" href="graph_legend.html">legend</a>]</span></center></div>
@@ -122,14 +127,51 @@ Public Member Functions</h2></td></tr>
 <tr class="memitem:ae3328ab7935c1d75a5dac137ae45c407" id="r_ae3328ab7935c1d75a5dac137ae45c407"><td class="memItemLeft" align="right" valign="top"><a id="ae3328ab7935c1d75a5dac137ae45c407" name="ae3328ab7935c1d75a5dac137ae45c407"></a>
 &#160;</td><td class="memItemRight" valign="bottom"><b>StepLR</b> (<a class="el" href="classtenzor_1_1optim_1_1AdamW.html">AdamW</a> &amp;optimizer, int step_size, double gamma=0.1)</td></tr>
 <tr class="memitem:a8af6acebefbf262e694f64ad1bc6648e" id="r_a8af6acebefbf262e694f64ad1bc6648e"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a8af6acebefbf262e694f64ad1bc6648e">step</a> () -&gt; void override</td></tr>
+<tr class="memdesc:a8af6acebefbf262e694f64ad1bc6648e"><td class="mdescLeft">&#160;</td><td class="mdescRight">Update learning rate according to schedule.  <br /></td></tr>
 <tr class="memitem:a77572ad8ccf31140631542ebdfad98c1" id="r_a77572ad8ccf31140631542ebdfad98c1"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a77572ad8ccf31140631542ebdfad98c1">get_last_lr</a> () const -&gt; double override</td></tr>
+<tr class="memdesc:a77572ad8ccf31140631542ebdfad98c1"><td class="mdescLeft">&#160;</td><td class="mdescRight">Get the last computed learning rate.  <br /></td></tr>
 <tr class="memitem:a274d040780e830d8390e04739cf768fd" id="r_a274d040780e830d8390e04739cf768fd"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a274d040780e830d8390e04739cf768fd">get_epoch</a> () const -&gt; int</td></tr>
 <tr class="inherit_header pub_methods_classtenzor_1_1optim_1_1LRScheduler"><td colspan="2" onclick="javascript:dynsection.toggleInherit('pub_methods_classtenzor_1_1optim_1_1LRScheduler')"><span class="dynarrow"><span class="arrowhead closed"></span></span>Public Member Functions inherited from <a class="el" href="classtenzor_1_1optim_1_1LRScheduler.html">tenzor::optim::LRScheduler</a></td></tr>
 <tr class="memitem:aee2145a3df3be042426254e4c76594eb inherit pub_methods_classtenzor_1_1optim_1_1LRScheduler" id="r_aee2145a3df3be042426254e4c76594eb"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1optim_1_1LRScheduler.html#aee2145a3df3be042426254e4c76594eb">get_lr</a> () const -&gt; double</td></tr>
+<tr class="memdesc:aee2145a3df3be042426254e4c76594eb inherit pub_methods_classtenzor_1_1optim_1_1LRScheduler"><td class="mdescLeft">&#160;</td><td class="mdescRight">Get the current learning rate (alias for get_last_lr)  <br /></td></tr>
 </table>
 <a name="details" id="details"></a><h2 id="header-details" class="groupheader">Detailed Description</h2>
-<div class="textblock">
-<p class="definition">Definition at line <a class="el" href="scheduler_8hpp_source.html#l00036">36</a> of file <a class="el" href="scheduler_8hpp_source.html">scheduler.hpp</a>.</p>
+<div class="textblock"><p>Step learning rate scheduler. </p>
+<p>Multiplies learning rate by gamma every step_size epochs:</p>
+<p class="formulaDsp">
+<picture><source srcset="form_30_dark.png" media="(prefers-color-scheme: dark)"/><img class="formulaDsp" alt="\[\eta_t = \eta_0 \cdot \gamma^{\lfloor t / s \rfloor}
+\]" src="form_30.png"/></picture>
+</p>
+<p>where:</p><ul>
+<li><picture><source srcset="form_31_dark.png" media="(prefers-color-scheme: dark)"/><img class="formulaInl" alt="$\eta_0$" src="form_31.png"/></picture>: initial learning rate</li>
+<li><picture><source srcset="form_32_dark.png" media="(prefers-color-scheme: dark)"/><img class="formulaInl" alt="$\gamma$" src="form_32.png"/></picture>: multiplicative factor (default: 0.1)</li>
+<li><picture><source srcset="form_33_dark.png" media="(prefers-color-scheme: dark)"/><img class="formulaInl" alt="$s$" src="form_33.png"/></picture>: step size in epochs</li>
+<li><picture><source srcset="form_34_dark.png" media="(prefers-color-scheme: dark)"/><img class="formulaInl" alt="$t$" src="form_34.png"/></picture>: current epoch</li>
+</ul>
+<p><b>Use Cases:</b></p><ul>
+<li>Most common LR schedule</li>
+<li>Simple and effective</li>
+<li>Good default choice</li>
+</ul>
+<p><b>Typical Configuration:</b></p><ul>
+<li>step_size: 30-50 epochs</li>
+<li>gamma: 0.1 (reduce LR by 10x)</li>
+</ul>
+<dl class="params"><dt>Parameters</dt><dd>
+  <table class="params">
+    <tr><td class="paramname">optimizer</td><td><a class="el" href="classtenzor_1_1optim_1_1Optimizer.html" title="Abstract base class for all optimizers.">Optimizer</a> to schedule (<a class="el" href="classtenzor_1_1optim_1_1SGD.html" title="Stochastic Gradient Descent (SGD) optimizer.">SGD</a>, <a class="el" href="classtenzor_1_1optim_1_1Adam.html" title="Adam (Adaptive Moment Estimation) optimizer.">Adam</a>, or <a class="el" href="classtenzor_1_1optim_1_1AdamW.html" title="AdamW optimizer (Adam with decoupled weight decay)">AdamW</a>) </td></tr>
+    <tr><td class="paramname">step_size</td><td>Period of learning rate decay in epochs </td></tr>
+    <tr><td class="paramname">gamma</td><td>Multiplicative factor of learning rate decay (default: 0.1)</td></tr>
+  </table>
+  </dd>
+</dl>
+<div class="fragment"><div class="line"><span class="keyword">auto</span> scheduler = StepLR(optimizer, 30, 0.1);</div>
+<div class="line"><span class="comment">// LR = initial_lr at epochs 0-29</span></div>
+<div class="line"><span class="comment">// LR = initial_lr * 0.1 at epochs 30-59</span></div>
+<div class="line"><span class="comment">// LR = initial_lr * 0.01 at epochs 60-89</span></div>
+</div><!-- fragment --><dl class="section see"><dt>See also</dt><dd><a class="el" href="classtenzor_1_1optim_1_1ExponentialLR.html" title="Exponential learning rate scheduler.">ExponentialLR</a>, <a class="el" href="classtenzor_1_1optim_1_1CosineAnnealingLR.html" title="Cosine annealing learning rate scheduler.">CosineAnnealingLR</a> </dd></dl>
+
+<p class="definition">Definition at line <a class="el" href="scheduler_8hpp_source.html#l00114">114</a> of file <a class="el" href="scheduler_8hpp_source.html">scheduler.hpp</a>.</p>
 </div><a name="doc-func-members" id="doc-func-members"></a><h2 id="header-doc-func-members" class="groupheader">Member Function Documentation</h2>
 <a id="a274d040780e830d8390e04739cf768fd" name="a274d040780e830d8390e04739cf768fd"></a>
 <h2 class="memtitle"><span class="permalink"><a href="#a274d040780e830d8390e04739cf768fd">&#9670;&#160;</a></span>get_epoch()</h2>
@@ -154,7 +196,7 @@ Public Member Functions</h2></td></tr>
 </table>
 </div><div class="memdoc">
 
-<p class="definition">Definition at line <a class="el" href="scheduler_8hpp_source.html#l00051">51</a> of file <a class="el" href="scheduler_8hpp_source.html">scheduler.hpp</a>.</p>
+<p class="definition">Definition at line <a class="el" href="scheduler_8hpp_source.html#l00129">129</a> of file <a class="el" href="scheduler_8hpp_source.html">scheduler.hpp</a>.</p>
 
 </div>
 </div>
@@ -171,7 +213,7 @@ Public Member Functions</h2></td></tr>
           <td class="memname">auto tenzor::optim::StepLR::get_last_lr </td>
           <td>(</td>
           <td class="paramname"><span class="paramname"><em></em></span></td><td>)</td>
-          <td> const -&gt; double</td>
+          <td> const -&gt;  double</td>
         </tr>
       </table>
   </td>
@@ -181,9 +223,12 @@ Public Member Functions</h2></td></tr>
 </table>
 </div><div class="memdoc">
 
-<p>Implements <a class="el" href="classtenzor_1_1optim_1_1LRScheduler.html">tenzor::optim::LRScheduler</a>.</p>
+<p>Get the last computed learning rate. </p>
+<dl class="section return"><dt>Returns</dt><dd>Current learning rate value </dd></dl>
 
-<p class="definition">Definition at line <a class="el" href="scheduler_8hpp_source.html#l00048">48</a> of file <a class="el" href="scheduler_8hpp_source.html">scheduler.hpp</a>.</p>
+<p>Implements <a class="el" href="classtenzor_1_1optim_1_1LRScheduler.html#a37d4518a9d9dc0b542c77ebbbee9badc">tenzor::optim::LRScheduler</a>.</p>
+
+<p class="definition">Definition at line <a class="el" href="scheduler_8hpp_source.html#l00126">126</a> of file <a class="el" href="scheduler_8hpp_source.html">scheduler.hpp</a>.</p>
 
 </div>
 </div>
@@ -210,7 +255,10 @@ Public Member Functions</h2></td></tr>
 </table>
 </div><div class="memdoc">
 
-<p>Implements <a class="el" href="classtenzor_1_1optim_1_1LRScheduler.html">tenzor::optim::LRScheduler</a>.</p>
+<p>Update learning rate according to schedule. </p>
+<p>Typically called once per epoch after training. Updates the optimizer's learning rate based on the scheduling strategy. </p>
+
+<p>Implements <a class="el" href="classtenzor_1_1optim_1_1LRScheduler.html#a2d090466f1aba10effd366b22df409e2">tenzor::optim::LRScheduler</a>.</p>
 
 </div>
 </div>
@@ -230,7 +278,7 @@ Public Member Functions</h2></td></tr>
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><b>tenzor</b></li><li class="navelem"><b>optim</b></li><li class="navelem"><a href="classtenzor_1_1optim_1_1StepLR.html">StepLR</a></li>
+    <li class="navelem"><a href="namespacetenzor.html">tenzor</a></li><li class="navelem"><b>optim</b></li><li class="navelem"><a href="classtenzor_1_1optim_1_1StepLR.html">StepLR</a></li>
     <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>

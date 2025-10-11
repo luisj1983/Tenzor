@@ -1,6 +1,5 @@
 var classtenzor_1_1optim_1_1Optimizer =
 [
-    [ "~Optimizer", "classtenzor_1_1optim_1_1Optimizer.html#ae1cc0553222a56c766d09b86b6976757", null ],
     [ "Optimizer", "classtenzor_1_1optim_1_1Optimizer.html#ad9867275290bfc1f68c6c89e2d42bc19", null ],
     [ "load_state", "classtenzor_1_1optim_1_1Optimizer.html#a5087cbd6f617de50f99263a7ed6edac1", null ],
     [ "load_state_dict", "classtenzor_1_1optim_1_1Optimizer.html#a8431020b28c1cd800ea0a25af560b7c4", null ],

@@ -92,18 +92,59 @@ $(function(){initNavTree('classtenzor_1_1nn_1_1L1Loss.html','','classtenzor_1_1n
   <div class="headertitle"><div class="title">tenzor::nn::L1Loss Class Reference</div></div>
 </div><!--header-->
 <div class="contents">
+
+<p>L1 Loss (Mean Absolute Error)  
+ <a href="#details">More...</a></p>
+
+<p><code>#include &lt;<a class="el" href="losses_8hpp_source.html">losses.hpp</a>&gt;</code></p>
 <table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-pub-methods" class="groupheader"><a id="pub-methods" name="pub-methods"></a>
 Public Member Functions</h2></td></tr>
 <tr class="memitem:aff239694b1ded5cef63f21a00a6a14f0" id="r_aff239694b1ded5cef63f21a00a6a14f0"><td class="memItemLeft" align="right" valign="top"><a id="aff239694b1ded5cef63f21a00a6a14f0" name="aff239694b1ded5cef63f21a00a6a14f0"></a>
-&#160;</td><td class="memItemRight" valign="bottom"><b>L1Loss</b> (Reduction reduction=Reduction::Mean)</td></tr>
+&#160;</td><td class="memItemRight" valign="bottom"><b>L1Loss</b> (<a class="el" href="losses_8hpp.html#aeb11febbc1aca7cd4e2eccca3fdb1158">Reduction</a> reduction=<a class="el" href="losses_8hpp.html#aeb11febbc1aca7cd4e2eccca3fdb1158a3d6c9ac08ada31c184094bbc67afe00d">Reduction::Mean</a>)</td></tr>
 <tr class="memitem:a4c7bbd9cb2bfdc7887d945c564ee2f4e" id="r_a4c7bbd9cb2bfdc7887d945c564ee2f4e"><td class="memItemLeft" align="right" valign="top"><a id="a4c7bbd9cb2bfdc7887d945c564ee2f4e" name="a4c7bbd9cb2bfdc7887d945c564ee2f4e"></a>
 auto&#160;</td><td class="memItemRight" valign="bottom"><b>forward</b> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input, const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;target) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
 <tr class="memitem:ad0f2459f2bfd2813027b34bf7620072a" id="r_ad0f2459f2bfd2813027b34bf7620072a"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#ad0f2459f2bfd2813027b34bf7620072a">operator()</a> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input, const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;target) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
 </table>
 <a name="details" id="details"></a><h2 id="header-details" class="groupheader">Detailed Description</h2>
-<div class="textblock">
-<p class="definition">Definition at line <a class="el" href="losses_8hpp_source.html#l00086">86</a> of file <a class="el" href="losses_8hpp_source.html">losses.hpp</a>.</p>
+<div class="textblock"><p>L1 Loss (Mean Absolute Error) </p>
+<p>Computes the mean absolute error between input and target:</p>
+<p class="formulaDsp">
+<picture><source srcset="form_21_dark.png" media="(prefers-color-scheme: dark)"/><img class="formulaDsp" alt="\[\text{L1}(x, y) = \frac{1}{n}\sum_{i=1}^{n}|x_i - y_i|
+\]" src="form_21.png"/></picture>
+</p>
+<p>Also known as MAE (Mean Absolute Error).</p>
+<p><b>Advantages over MSE:</b></p><ul>
+<li>Robust to outliers (linear penalty vs quadratic)</li>
+<li>More balanced gradient magnitude (doesn't amplify large errors)</li>
+<li>Better for data with outliers or noise</li>
+</ul>
+<p><b>Disadvantages:</b></p><ul>
+<li>Not differentiable at zero (can cause optimization issues)</li>
+<li>Constant gradient magnitude (slower convergence near optimum)</li>
+</ul>
+<p><b>Use Cases:</b></p><ul>
+<li>Regression with outliers</li>
+<li>When all errors should be penalized equally</li>
+<li>Robust estimation tasks</li>
+</ul>
+<dl class="params"><dt>Parameters</dt><dd>
+  <table class="params">
+    <tr><td class="paramname">reduction</td><td>How to reduce the loss (default: Mean)</td></tr>
+  </table>
+  </dd>
+</dl>
+<dl class="section user"><dt>Complexity</dt><dd><ul>
+<li>Time: O(n)</li>
+<li>Space: O(1) or O(n) depending on reduction mode</li>
+</ul>
+</dd></dl>
+<div class="fragment"><div class="line"><span class="keyword">auto</span> criterion = L1Loss();</div>
+<div class="line"><span class="keyword">auto</span> predictions = model.forward(input);</div>
+<div class="line"><span class="keyword">auto</span> loss = criterion(predictions, targets);</div>
+</div><!-- fragment --><dl class="section see"><dt>See also</dt><dd><a class="el" href="classtenzor_1_1nn_1_1MSELoss.html" title="Mean Squared Error (MSE) Loss.">MSELoss</a>, <a class="el" href="classtenzor_1_1nn_1_1SmoothL1Loss.html" title="Smooth L1 Loss (Huber Loss)">SmoothL1Loss</a> </dd></dl>
+
+<p class="definition">Definition at line <a class="el" href="losses_8hpp_source.html#l00337">337</a> of file <a class="el" href="losses_8hpp_source.html">losses.hpp</a>.</p>
 </div><a name="doc-func-members" id="doc-func-members"></a><h2 id="header-doc-func-members" class="groupheader">Member Function Documentation</h2>
 <a id="ad0f2459f2bfd2813027b34bf7620072a" name="ad0f2459f2bfd2813027b34bf7620072a"></a>
 <h2 class="memtitle"><span class="permalink"><a href="#ad0f2459f2bfd2813027b34bf7620072a">&#9670;&#160;</a></span>operator()()</h2>
@@ -132,7 +173,7 @@ auto&#160;</td><td class="memItemRight" valign="bottom"><b>forward</b> (const <a
 </table>
 </div><div class="memdoc">
 
-<p class="definition">Definition at line <a class="el" href="losses_8hpp_source.html#l00091">91</a> of file <a class="el" href="losses_8hpp_source.html">losses.hpp</a>.</p>
+<p class="definition">Definition at line <a class="el" href="losses_8hpp_source.html#l00342">342</a> of file <a class="el" href="losses_8hpp_source.html">losses.hpp</a>.</p>
 
 </div>
 </div>
@@ -152,7 +193,7 @@ auto&#160;</td><td class="memItemRight" valign="bottom"><b>forward</b> (const <a
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><b>tenzor</b></li><li class="navelem"><b>nn</b></li><li class="navelem"><a href="classtenzor_1_1nn_1_1L1Loss.html">L1Loss</a></li>
+    <li class="navelem"><a href="namespacetenzor.html">tenzor</a></li><li class="navelem"><b>nn</b></li><li class="navelem"><a href="classtenzor_1_1nn_1_1L1Loss.html">L1Loss</a></li>
     <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>

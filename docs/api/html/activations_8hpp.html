@@ -5,7 +5,7 @@
 <meta http-equiv="X-UA-Compatible" content="IE=11"/>
 <meta name="generator" content="Doxygen 1.14.0"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Tenzor: tenzor/nn/activations/activations.hpp File Reference</title>
+<title>Tenzor: include/tenzor/nn/activations/activations.hpp File Reference</title>
 <link href="tabs.css" rel="stylesheet" type="text/css"/>
 <script type="text/javascript" src="jquery.js"></script>
 <script type="text/javascript" src="dynsections.js"></script>
@@ -28,7 +28,7 @@
   <td id="projectalign">
    <div id="projectname">Tenzor<span id="projectnumber">&#160;1.0.0</span>
    </div>
-   <div id="projectbrief">Modern C++20 tensor library with automatic differentiation</div>
+   <div id="projectbrief">High-performance tensor library with automatic differentiation</div>
   </td>
  </tr>
  </tbody>
@@ -92,44 +92,149 @@ $(function(){initNavTree('activations_8hpp.html','',''); });
   <div class="headertitle"><div class="title">activations.hpp File Reference</div></div>
 </div><!--header-->
 <div class="contents">
+
+<p>Neural network activation functions and layers.  
+<a href="#details">More...</a></p>
 <div class="textblock"><code>#include &quot;<a class="el" href="module_8hpp_source.html">../module.hpp</a>&quot;</code><br />
+</div><div class="textblock"><div class="dynheader">
+Include dependency graph for activations.hpp:</div>
+<div class="dyncontent">
+<div class="center"><img src="activations_8hpp__incl.png" border="0" usemap="#ainclude_2tenzor_2nn_2activations_2activations_8hpp" loading="lazy" alt=""/></div>
+<map name="ainclude_2tenzor_2nn_2activations_2activations_8hpp" id="ainclude_2tenzor_2nn_2activations_2activations_8hpp">
+<area shape="rect" title="Neural network activation functions and layers." alt="" coords="459,5,668,50"/>
+<area shape="rect" href="module_8hpp.html" title="Neural network module base class." alt="" coords="508,98,619,126"/>
+<area shape="poly" title=" " alt="" coords="566,50,566,82,561,82,561,50"/>
+<area shape="rect" title=" " alt="" coords="24,401,100,428"/>
+<area shape="poly" title=" " alt="" coords="508,115,398,116,264,123,199,131,140,142,93,157,60,176,26,215,16,234,10,255,11,299,23,352,43,387,38,390,18,354,5,300,5,254,11,233,21,212,56,172,90,152,139,137,198,126,264,118,397,111,508,109"/>
+<area shape="rect" title=" " alt="" coords="442,476,501,504"/>
+<area shape="poly" title=" " alt="" coords="578,125,597,148,619,181,636,220,643,263,309,402,226,439,199,452,224,449,307,429,643,338,640,365,631,387,616,408,598,425,557,455,516,475,514,470,554,450,595,421,612,404,626,385,635,363,639,342,309,434,225,454,194,454,223,434,307,397,639,261,631,221,614,184,593,152,574,128"/>
+<area shape="rect" title=" " alt="" coords="491,325,553,353"/>
+<area shape="poly" title=" " alt="" coords="564,126,530,310,525,309,559,125"/>
+<area shape="rect" title=" " alt="" coords="678,174,801,201"/>
+<area shape="poly" title=" " alt="" coords="596,124,695,165,693,170,594,129"/>
+<area shape="rect" href="variable_8hpp.html" title="Automatic differentiation wrapper for tensors." alt="" coords="70,174,246,201"/>
+<area shape="poly" title=" " alt="" coords="508,126,247,173,246,168,508,121"/>
+<area shape="rect" href="device_8hpp.html" title="Device specification and management for tensors." alt="" coords="468,401,560,428"/>
+<area shape="poly" title=" " alt="" coords="569,126,577,165,583,223,582,288,577,322,567,354,557,374,543,391,539,388,552,371,562,352,572,321,577,288,578,223,572,166,564,127"/>
+<area shape="poly" title=" " alt="" coords="140,204,113,224,83,252,53,287,31,326,28,341,31,357,45,387,40,390,26,359,23,341,26,324,49,284,79,249,110,220,137,200"/>
+<area shape="rect" title=" " alt="" coords="41,325,115,353"/>
+<area shape="poly" title=" " alt="" coords="154,203,95,313,90,310,149,200"/>
+<area shape="rect" href="tensor_8hpp.html" title="Core tensor class for multi&#45;dimensional array operations." alt="" coords="222,249,356,277"/>
+<area shape="poly" title=" " alt="" coords="183,200,254,239,251,244,180,204"/>
+<area shape="poly" title=" " alt="" coords="264,280,180,327,91,393,88,389,177,323,261,275"/>
+<area shape="poly" title=" " alt="" coords="331,275,477,320,475,326,330,280"/>
+<area shape="poly" title=" " alt="" coords="252,280,131,322,129,317,250,275"/>
+<area shape="rect" title=" " alt="" coords="313,325,366,353"/>
+<area shape="poly" title=" " alt="" coords="300,276,324,310,320,314,296,279"/>
+<area shape="rect" href="dtype_8hpp.html" title="Data type system for Tenzor tensors." alt="" coords="678,401,764,428"/>
+<area shape="poly" title=" " alt="" coords="319,275,422,323,451,337,480,350,576,379,663,399,662,405,575,384,479,355,449,342,420,327,317,280"/>
+<area shape="poly" title=" " alt="" coords="310,275,484,390,481,394,307,280"/>
+<area shape="rect" href="storage_8hpp.html" title="Memory storage abstraction for tensor data." alt="" coords="190,325,289,353"/>
+<area shape="poly" title=" " alt="" coords="282,279,259,313,255,310,278,276"/>
+<area shape="rect" title=" " alt="" coords="524,476,590,504"/>
+<area shape="poly" title=" " alt="" coords="693,431,601,472,599,467,690,426"/>
+<area shape="rect" title=" " alt="" coords="614,476,710,504"/>
+<area shape="poly" title=" " alt="" coords="712,431,684,466,680,462,708,427"/>
+<area shape="rect" title=" " alt="" coords="734,476,825,504"/>
+<area shape="poly" title=" " alt="" coords="733,427,762,462,758,466,729,431"/>
+<area shape="rect" title=" " alt="" coords="849,476,926,504"/>
+<area shape="poly" title=" " alt="" coords="752,426,845,467,843,472,750,431"/>
+<area shape="poly" title=" " alt="" coords="509,430,489,464,484,462,504,428"/>
+<area shape="poly" title=" " alt="" coords="524,428,544,462,539,464,520,430"/>
+<area shape="poly" title=" " alt="" coords="542,426,624,467,621,472,539,431"/>
+<area shape="poly" title=" " alt="" coords="209,356,109,397,107,392,207,351"/>
+<area shape="poly" title=" " alt="" coords="289,351,454,394,452,400,288,356"/>
+<area shape="rect" title=" " alt="" coords="148,401,217,428"/>
+<area shape="poly" title=" " alt="" coords="231,355,204,390,200,387,227,352"/>
+<area shape="rect" title=" " alt="" coords="241,401,307,428"/>
+<area shape="poly" title=" " alt="" coords="248,352,264,385,259,388,243,354"/>
+</map>
+</div>
+</div><div class="textblock"><div class="dynheader">
+This graph shows which files directly or indirectly include this file:</div>
+<div class="dyncontent">
+<div class="center"><img src="activations_8hpp__dep__incl.png" border="0" usemap="#ainclude_2tenzor_2nn_2activations_2activations_8hppdep" loading="lazy" alt=""/></div>
+<map name="ainclude_2tenzor_2nn_2activations_2activations_8hppdep" id="ainclude_2tenzor_2nn_2activations_2activations_8hppdep">
+<area shape="rect" title="Neural network activation functions and layers." alt="" coords="5,5,215,50"/>
+<area shape="rect" href="tenzor_8hpp.html" title="Main header &#45; includes all public Tenzor APIs." alt="" coords="17,98,203,126"/>
+<area shape="poly" title=" " alt="" coords="113,66,113,97,107,97,107,66"/>
+</map>
+</div>
 </div>
 <p><a href="activations_8hpp_source.html">Go to the source code of this file.</a></p>
 <table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-nested-classes" class="groupheader"><a id="nested-classes" name="nested-classes"></a>
 Classes</h2></td></tr>
 <tr class="memitem:tenzor_3A_3Ann_3A_3AReLU" id="r_tenzor_3A_3Ann_3A_3AReLU"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1nn_1_1ReLU.html">tenzor::nn::ReLU</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Rectified <a class="el" href="classtenzor_1_1nn_1_1Linear.html" title="Fully connected (linear/dense) layer.">Linear</a> Unit (<a class="el" href="classtenzor_1_1nn_1_1ReLU.html" title="Rectified Linear Unit (ReLU) activation.">ReLU</a>) activation.  <a href="classtenzor_1_1nn_1_1ReLU.html#details">More...</a><br /></td></tr>
 <tr class="memitem:tenzor_3A_3Ann_3A_3ALeakyReLU" id="r_tenzor_3A_3Ann_3A_3ALeakyReLU"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1nn_1_1LeakyReLU.html">tenzor::nn::LeakyReLU</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Leaky Rectified <a class="el" href="classtenzor_1_1nn_1_1Linear.html" title="Fully connected (linear/dense) layer.">Linear</a> Unit (Leaky <a class="el" href="classtenzor_1_1nn_1_1ReLU.html" title="Rectified Linear Unit (ReLU) activation.">ReLU</a>) activation.  <a href="classtenzor_1_1nn_1_1LeakyReLU.html#details">More...</a><br /></td></tr>
 <tr class="memitem:tenzor_3A_3Ann_3A_3ASigmoid" id="r_tenzor_3A_3Ann_3A_3ASigmoid"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1nn_1_1Sigmoid.html">tenzor::nn::Sigmoid</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight"><a class="el" href="classtenzor_1_1nn_1_1Sigmoid.html" title="Sigmoid activation function.">Sigmoid</a> activation function.  <a href="classtenzor_1_1nn_1_1Sigmoid.html#details">More...</a><br /></td></tr>
 <tr class="memitem:tenzor_3A_3Ann_3A_3ATanh" id="r_tenzor_3A_3Ann_3A_3ATanh"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1nn_1_1Tanh.html">tenzor::nn::Tanh</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Hyperbolic tangent (<a class="el" href="classtenzor_1_1nn_1_1Tanh.html" title="Hyperbolic tangent (Tanh) activation.">Tanh</a>) activation.  <a href="classtenzor_1_1nn_1_1Tanh.html#details">More...</a><br /></td></tr>
 <tr class="memitem:tenzor_3A_3Ann_3A_3AGELU" id="r_tenzor_3A_3Ann_3A_3AGELU"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1nn_1_1GELU.html">tenzor::nn::GELU</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Gaussian Error <a class="el" href="classtenzor_1_1nn_1_1Linear.html" title="Fully connected (linear/dense) layer.">Linear</a> Unit (<a class="el" href="classtenzor_1_1nn_1_1GELU.html" title="Gaussian Error Linear Unit (GELU) activation.">GELU</a>) activation.  <a href="classtenzor_1_1nn_1_1GELU.html#details">More...</a><br /></td></tr>
 <tr class="memitem:tenzor_3A_3Ann_3A_3ASoftmax" id="r_tenzor_3A_3Ann_3A_3ASoftmax"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1nn_1_1Softmax.html">tenzor::nn::Softmax</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight"><a class="el" href="classtenzor_1_1nn_1_1Softmax.html" title="Softmax activation function.">Softmax</a> activation function.  <a href="classtenzor_1_1nn_1_1Softmax.html#details">More...</a><br /></td></tr>
 <tr class="memitem:tenzor_3A_3Ann_3A_3ALogSoftmax" id="r_tenzor_3A_3Ann_3A_3ALogSoftmax"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1nn_1_1LogSoftmax.html">tenzor::nn::LogSoftmax</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Log-Softmax activation function.  <a href="classtenzor_1_1nn_1_1LogSoftmax.html#details">More...</a><br /></td></tr>
 <tr class="memitem:tenzor_3A_3Ann_3A_3AELU" id="r_tenzor_3A_3Ann_3A_3AELU"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1nn_1_1ELU.html">tenzor::nn::ELU</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Exponential <a class="el" href="classtenzor_1_1nn_1_1Linear.html" title="Fully connected (linear/dense) layer.">Linear</a> Unit (<a class="el" href="classtenzor_1_1nn_1_1ELU.html" title="Exponential Linear Unit (ELU) activation.">ELU</a>) activation.  <a href="classtenzor_1_1nn_1_1ELU.html#details">More...</a><br /></td></tr>
 <tr class="memitem:tenzor_3A_3Ann_3A_3ASELU" id="r_tenzor_3A_3Ann_3A_3ASELU"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1nn_1_1SELU.html">tenzor::nn::SELU</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Scaled Exponential <a class="el" href="classtenzor_1_1nn_1_1Linear.html" title="Fully connected (linear/dense) layer.">Linear</a> Unit (<a class="el" href="classtenzor_1_1nn_1_1SELU.html" title="Scaled Exponential Linear Unit (SELU) activation.">SELU</a>) activation.  <a href="classtenzor_1_1nn_1_1SELU.html#details">More...</a><br /></td></tr>
 <tr class="memitem:tenzor_3A_3Ann_3A_3ASwish" id="r_tenzor_3A_3Ann_3A_3ASwish"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1nn_1_1Swish.html">tenzor::nn::Swish</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight"><a class="el" href="classtenzor_1_1nn_1_1Swish.html" title="Swish (SiLU) activation function.">Swish</a> (SiLU) activation function.  <a href="classtenzor_1_1nn_1_1Swish.html#details">More...</a><br /></td></tr>
 <tr class="memitem:tenzor_3A_3Ann_3A_3AMish" id="r_tenzor_3A_3Ann_3A_3AMish"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1nn_1_1Mish.html">tenzor::nn::Mish</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight"><a class="el" href="classtenzor_1_1nn_1_1Mish.html" title="Mish activation function.">Mish</a> activation function.  <a href="classtenzor_1_1nn_1_1Mish.html#details">More...</a><br /></td></tr>
 </table><table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-namespaces" class="groupheader"><a id="namespaces" name="namespaces"></a>
 Namespaces</h2></td></tr>
 <tr class="memitem:tenzor" id="r_tenzor"><td class="memItemLeft" align="right" valign="top">namespace &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html">tenzor</a></td></tr>
-<tr class="memitem:tenzor_3A_3Ann" id="r_tenzor_3A_3Ann"><td class="memItemLeft" align="right" valign="top">namespace &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor_1_1nn.html">tenzor::nn</a></td></tr>
+<tr class="memdesc:namespacetenzor"><td class="mdescLeft">&#160;</td><td class="mdescRight">Main Tenzor namespace. <br /></td></tr>
 </table><table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-func-members" class="groupheader"><a id="func-members" name="func-members"></a>
 Functions</h2></td></tr>
-<tr class="memitem:af3c7a614ec2c4d2b546d874b5d5d45c2" id="r_af3c7a614ec2c4d2b546d874b5d5d45c2"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor_1_1nn.html#af3c7a614ec2c4d2b546d874b5d5d45c2">tenzor::nn::relu</a> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
-<tr class="memitem:aa1c6557725ab884588b4641ad70f1ce4" id="r_aa1c6557725ab884588b4641ad70f1ce4"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor_1_1nn.html#aa1c6557725ab884588b4641ad70f1ce4">tenzor::nn::leaky_relu</a> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input, double negative_slope=0.01) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
-<tr class="memitem:a9870f0b1ca41f7a4175ff031c4bbb65d" id="r_a9870f0b1ca41f7a4175ff031c4bbb65d"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor_1_1nn.html#a9870f0b1ca41f7a4175ff031c4bbb65d">tenzor::nn::sigmoid</a> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
-<tr class="memitem:a047f215e7169a071545fb26749d47ce3" id="r_a047f215e7169a071545fb26749d47ce3"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor_1_1nn.html#a047f215e7169a071545fb26749d47ce3">tenzor::nn::tanh</a> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
-<tr class="memitem:ac80b253bbbc565409805c52fb32c9138" id="r_ac80b253bbbc565409805c52fb32c9138"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor_1_1nn.html#ac80b253bbbc565409805c52fb32c9138">tenzor::nn::gelu</a> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
-<tr class="memitem:a5ee6f1993d6b91a8c52fff4f4770ca5f" id="r_a5ee6f1993d6b91a8c52fff4f4770ca5f"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor_1_1nn.html#a5ee6f1993d6b91a8c52fff4f4770ca5f">tenzor::nn::softmax</a> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input, int64_t dim=-1) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
-<tr class="memitem:ae392d181bdf193c32010e515c254b5bd" id="r_ae392d181bdf193c32010e515c254b5bd"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor_1_1nn.html#ae392d181bdf193c32010e515c254b5bd">tenzor::nn::log_softmax</a> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input, int64_t dim=-1) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
-<tr class="memitem:a7ff6135f0eb432cc7fe4860e464e9074" id="r_a7ff6135f0eb432cc7fe4860e464e9074"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor_1_1nn.html#a7ff6135f0eb432cc7fe4860e464e9074">tenzor::nn::elu</a> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input, double alpha=1.0) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
-<tr class="memitem:ac3e7403ba4db7c43889887f13e350780" id="r_ac3e7403ba4db7c43889887f13e350780"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor_1_1nn.html#ac3e7403ba4db7c43889887f13e350780">tenzor::nn::selu</a> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
-<tr class="memitem:ab90c24a38a49a61a6da7bfec1c1f7062" id="r_ab90c24a38a49a61a6da7bfec1c1f7062"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor_1_1nn.html#ab90c24a38a49a61a6da7bfec1c1f7062">tenzor::nn::swish</a> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
-<tr class="memitem:af59362ed23ab6e23e7fef8cc5c1224a0" id="r_af59362ed23ab6e23e7fef8cc5c1224a0"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor_1_1nn.html#af59362ed23ab6e23e7fef8cc5c1224a0">tenzor::nn::mish</a> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
+<tr class="memitem:gaf3c7a614ec2c4d2b546d874b5d5d45c2" id="r_gaf3c7a614ec2c4d2b546d874b5d5d45c2"><td class="memItemLeft" align="right" valign="top">
+auto&#160;</td><td class="memItemRight" valign="bottom"><b>tenzor::nn::relu</b> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
+<tr class="memdesc:gaf3c7a614ec2c4d2b546d874b5d5d45c2"><td class="mdescLeft">&#160;</td><td class="mdescRight">Functional <a class="el" href="classtenzor_1_1nn_1_1ReLU.html" title="Rectified Linear Unit (ReLU) activation.">ReLU</a>: max(0, x) <br /></td></tr>
+<tr class="memitem:gaa1c6557725ab884588b4641ad70f1ce4" id="r_gaa1c6557725ab884588b4641ad70f1ce4"><td class="memItemLeft" align="right" valign="top">
+auto&#160;</td><td class="memItemRight" valign="bottom"><b>tenzor::nn::leaky_relu</b> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input, double negative_slope=0.01) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
+<tr class="memdesc:gaa1c6557725ab884588b4641ad70f1ce4"><td class="mdescLeft">&#160;</td><td class="mdescRight">Functional Leaky <a class="el" href="classtenzor_1_1nn_1_1ReLU.html" title="Rectified Linear Unit (ReLU) activation.">ReLU</a> with configurable slope. <br /></td></tr>
+<tr class="memitem:ga9870f0b1ca41f7a4175ff031c4bbb65d" id="r_ga9870f0b1ca41f7a4175ff031c4bbb65d"><td class="memItemLeft" align="right" valign="top">
+auto&#160;</td><td class="memItemRight" valign="bottom"><b>tenzor::nn::sigmoid</b> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
+<tr class="memdesc:ga9870f0b1ca41f7a4175ff031c4bbb65d"><td class="mdescLeft">&#160;</td><td class="mdescRight">Functional sigmoid: 1 / (1 + exp(-x)) <br /></td></tr>
+<tr class="memitem:ga047f215e7169a071545fb26749d47ce3" id="r_ga047f215e7169a071545fb26749d47ce3"><td class="memItemLeft" align="right" valign="top">
+auto&#160;</td><td class="memItemRight" valign="bottom"><b>tenzor::nn::tanh</b> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
+<tr class="memdesc:ga047f215e7169a071545fb26749d47ce3"><td class="mdescLeft">&#160;</td><td class="mdescRight">Functional tanh: (exp(x) - exp(-x)) / (exp(x) + exp(-x)) <br /></td></tr>
+<tr class="memitem:gac80b253bbbc565409805c52fb32c9138" id="r_gac80b253bbbc565409805c52fb32c9138"><td class="memItemLeft" align="right" valign="top">
+auto&#160;</td><td class="memItemRight" valign="bottom"><b>tenzor::nn::gelu</b> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
+<tr class="memdesc:gac80b253bbbc565409805c52fb32c9138"><td class="mdescLeft">&#160;</td><td class="mdescRight">Functional <a class="el" href="classtenzor_1_1nn_1_1GELU.html" title="Gaussian Error Linear Unit (GELU) activation.">GELU</a>: Gaussian Error <a class="el" href="classtenzor_1_1nn_1_1Linear.html" title="Fully connected (linear/dense) layer.">Linear</a> Unit. <br /></td></tr>
+<tr class="memitem:ga5ee6f1993d6b91a8c52fff4f4770ca5f" id="r_ga5ee6f1993d6b91a8c52fff4f4770ca5f"><td class="memItemLeft" align="right" valign="top">
+auto&#160;</td><td class="memItemRight" valign="bottom"><b>tenzor::nn::softmax</b> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input, int64_t dim=-1) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
+<tr class="memdesc:ga5ee6f1993d6b91a8c52fff4f4770ca5f"><td class="mdescLeft">&#160;</td><td class="mdescRight">Functional softmax along specified dimension. <br /></td></tr>
+<tr class="memitem:gae392d181bdf193c32010e515c254b5bd" id="r_gae392d181bdf193c32010e515c254b5bd"><td class="memItemLeft" align="right" valign="top">
+auto&#160;</td><td class="memItemRight" valign="bottom"><b>tenzor::nn::log_softmax</b> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input, int64_t dim=-1) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
+<tr class="memdesc:gae392d181bdf193c32010e515c254b5bd"><td class="mdescLeft">&#160;</td><td class="mdescRight">Functional log-softmax (numerically stable) <br /></td></tr>
+<tr class="memitem:ga7ff6135f0eb432cc7fe4860e464e9074" id="r_ga7ff6135f0eb432cc7fe4860e464e9074"><td class="memItemLeft" align="right" valign="top">
+auto&#160;</td><td class="memItemRight" valign="bottom"><b>tenzor::nn::elu</b> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input, double alpha=1.0) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
+<tr class="memdesc:ga7ff6135f0eb432cc7fe4860e464e9074"><td class="mdescLeft">&#160;</td><td class="mdescRight">Functional <a class="el" href="classtenzor_1_1nn_1_1ELU.html" title="Exponential Linear Unit (ELU) activation.">ELU</a> with configurable alpha. <br /></td></tr>
+<tr class="memitem:gac3e7403ba4db7c43889887f13e350780" id="r_gac3e7403ba4db7c43889887f13e350780"><td class="memItemLeft" align="right" valign="top">
+auto&#160;</td><td class="memItemRight" valign="bottom"><b>tenzor::nn::selu</b> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
+<tr class="memdesc:gac3e7403ba4db7c43889887f13e350780"><td class="mdescLeft">&#160;</td><td class="mdescRight">Functional <a class="el" href="classtenzor_1_1nn_1_1SELU.html" title="Scaled Exponential Linear Unit (SELU) activation.">SELU</a>: Scaled <a class="el" href="classtenzor_1_1nn_1_1ELU.html" title="Exponential Linear Unit (ELU) activation.">ELU</a> for self-normalizing networks. <br /></td></tr>
+<tr class="memitem:gab90c24a38a49a61a6da7bfec1c1f7062" id="r_gab90c24a38a49a61a6da7bfec1c1f7062"><td class="memItemLeft" align="right" valign="top">
+auto&#160;</td><td class="memItemRight" valign="bottom"><b>tenzor::nn::swish</b> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
+<tr class="memdesc:gab90c24a38a49a61a6da7bfec1c1f7062"><td class="mdescLeft">&#160;</td><td class="mdescRight">Functional Swish/SiLU: x * sigmoid(x) <br /></td></tr>
+<tr class="memitem:gaf59362ed23ab6e23e7fef8cc5c1224a0" id="r_gaf59362ed23ab6e23e7fef8cc5c1224a0"><td class="memItemLeft" align="right" valign="top">
+auto&#160;</td><td class="memItemRight" valign="bottom"><b>tenzor::nn::mish</b> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
+<tr class="memdesc:gaf59362ed23ab6e23e7fef8cc5c1224a0"><td class="mdescLeft">&#160;</td><td class="mdescRight">Functional <a class="el" href="classtenzor_1_1nn_1_1Mish.html" title="Mish activation function.">Mish</a>: x * tanh(softplus(x)) <br /></td></tr>
 </table>
-</div><!-- contents -->
+<a name="details" id="details"></a><h2 id="header-details" class="groupheader">Detailed Description</h2>
+<div class="textblock"><p>Neural network activation functions and layers. </p>
+<p>This file provides a comprehensive set of activation functions commonly used in deep learning, including both module-based (stateful) and functional (stateless) implementations. Activation functions introduce non-linearity into neural networks, enabling them to learn complex patterns. </p>
+
+<p class="definition">Definition in file <a class="el" href="activations_8hpp_source.html">activations.hpp</a>.</p>
+</div></div><!-- contents -->
 </div><!-- doc-content -->
 <div id="page-nav" class="page-nav-panel">
 <div id="page-nav-resize-handle"></div>
@@ -142,8 +247,8 @@ Functions</h2></td></tr>
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><a href="dir_4f7edb362912b75e95599213beee2a17.html">tenzor</a></li><li class="navelem"><a href="dir_7d5460f3c919ba4808998a3c805d565d.html">nn</a></li><li class="navelem"><a href="dir_4c9a42c2150e3d128d39b016f1d38f28.html">activations</a></li><li class="navelem"><a href="activations_8hpp.html">activations.hpp</a></li>
-    <li class="footer">Generated by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
+    <li class="navelem"><a href="dir_d44c64559bbebec7f509842c48db8b23.html">include</a></li><li class="navelem"><a href="dir_14ba40437910c5dd1b08964ca20ae5af.html">tenzor</a></li><li class="navelem"><a href="dir_2996a04abcb928fe38186b609b0d69a7.html">nn</a></li><li class="navelem"><a href="dir_45805aaa1ae28ac35c2473b4557a60d3.html">activations</a></li><li class="navelem"><a href="activations_8hpp.html">activations.hpp</a></li>
+    <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>
 </body>

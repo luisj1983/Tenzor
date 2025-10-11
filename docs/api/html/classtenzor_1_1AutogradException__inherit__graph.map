@@ -1,6 +1,6 @@
 <map id="tenzor::AutogradException" name="tenzor::AutogradException">
-<area shape="rect" id="Node000001" title=" " alt="" coords="5,232,199,260"/>
-<area shape="rect" id="Node000002" href="$classtenzor_1_1TenzorException.html" title=" " alt="" coords="14,157,190,184"/>
+<area shape="rect" id="Node000001" title="Automatic differentiation errors." alt="" coords="5,232,199,260"/>
+<area shape="rect" id="Node000002" href="$classtenzor_1_1TenzorException.html" title="Base exception class for all Tenzor errors." alt="" coords="14,157,190,184"/>
 <area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="105,200,105,232,99,232,99,200"/>
 <area shape="rect" id="Node000003" title=" " alt="" coords="33,81,171,109"/>
 <area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="105,124,105,156,99,156,99,124"/>

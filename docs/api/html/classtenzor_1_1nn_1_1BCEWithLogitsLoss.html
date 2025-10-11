@@ -92,18 +92,55 @@ $(function(){initNavTree('classtenzor_1_1nn_1_1BCEWithLogitsLoss.html','','class
   <div class="headertitle"><div class="title">tenzor::nn::BCEWithLogitsLoss Class Reference</div></div>
 </div><!--header-->
 <div class="contents">
+
+<p>Binary Cross Entropy with Logits Loss.  
+ <a href="#details">More...</a></p>
+
+<p><code>#include &lt;<a class="el" href="losses_8hpp_source.html">losses.hpp</a>&gt;</code></p>
 <table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-pub-methods" class="groupheader"><a id="pub-methods" name="pub-methods"></a>
 Public Member Functions</h2></td></tr>
 <tr class="memitem:af8eaf153e91eb42b51c520417f72171f" id="r_af8eaf153e91eb42b51c520417f72171f"><td class="memItemLeft" align="right" valign="top"><a id="af8eaf153e91eb42b51c520417f72171f" name="af8eaf153e91eb42b51c520417f72171f"></a>
-&#160;</td><td class="memItemRight" valign="bottom"><b>BCEWithLogitsLoss</b> (Reduction reduction=Reduction::Mean)</td></tr>
+&#160;</td><td class="memItemRight" valign="bottom"><b>BCEWithLogitsLoss</b> (<a class="el" href="losses_8hpp.html#aeb11febbc1aca7cd4e2eccca3fdb1158">Reduction</a> reduction=<a class="el" href="losses_8hpp.html#aeb11febbc1aca7cd4e2eccca3fdb1158a3d6c9ac08ada31c184094bbc67afe00d">Reduction::Mean</a>)</td></tr>
 <tr class="memitem:abf419dbcb676fb89ff85c3403a520c9e" id="r_abf419dbcb676fb89ff85c3403a520c9e"><td class="memItemLeft" align="right" valign="top"><a id="abf419dbcb676fb89ff85c3403a520c9e" name="abf419dbcb676fb89ff85c3403a520c9e"></a>
 auto&#160;</td><td class="memItemRight" valign="bottom"><b>forward</b> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input, const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;target) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
 <tr class="memitem:a235b9364dfe279876837c8433f02a044" id="r_a235b9364dfe279876837c8433f02a044"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a235b9364dfe279876837c8433f02a044">operator()</a> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input, const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;target) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
 </table>
 <a name="details" id="details"></a><h2 id="header-details" class="groupheader">Detailed Description</h2>
-<div class="textblock">
-<p class="definition">Definition at line <a class="el" href="losses_8hpp_source.html#l00058">58</a> of file <a class="el" href="losses_8hpp_source.html">losses.hpp</a>.</p>
+<div class="textblock"><p>Binary Cross Entropy with Logits Loss. </p>
+<p>Combines sigmoid activation and BCE loss in a single, numerically stable operation:</p>
+<p class="formulaDsp">
+<picture><source srcset="form_18_dark.png" media="(prefers-color-scheme: dark)"/><img class="formulaDsp" alt="\[\text{BCEWithLogits}(x, y) = -\frac{1}{n}\sum_{i=1}^{n}\left[y_i\log(\sigma(x_i)) + (1-y_i)\log(1-\sigma(x_i))\right]
+\]" src="form_18.png"/></picture>
+</p>
+<p>where <picture><source srcset="form_19_dark.png" media="(prefers-color-scheme: dark)"/><img class="formulaInl" alt="$\sigma(x) = \frac{1}{1+e^{-x}}$" src="form_19.png"/></picture> is the sigmoid function.</p>
+<p><b>Advantages over <a class="el" href="classtenzor_1_1nn_1_1BCELoss.html" title="Binary Cross Entropy (BCE) Loss.">BCELoss</a>:</b></p><ul>
+<li>More numerically stable (uses log-sum-exp trick)</li>
+<li>Avoids computing sigmoid explicitly</li>
+<li>Better gradient behavior for extreme values</li>
+</ul>
+<p><b>Preferred Usage:</b> Always use this instead of <a class="el" href="classtenzor_1_1nn_1_1Sigmoid.html" title="Sigmoid activation function.">Sigmoid</a> + <a class="el" href="classtenzor_1_1nn_1_1BCELoss.html" title="Binary Cross Entropy (BCE) Loss.">BCELoss</a> for better numerical stability.</p>
+<p><b>Input Requirements:</b></p><ul>
+<li>input: Raw logits (before sigmoid)</li>
+<li>target: Binary labels (0 or 1)</li>
+</ul>
+<dl class="params"><dt>Parameters</dt><dd>
+  <table class="params">
+    <tr><td class="paramname">reduction</td><td>How to reduce the loss (default: Mean)</td></tr>
+  </table>
+  </dd>
+</dl>
+<dl class="section user"><dt>Complexity</dt><dd><ul>
+<li>Time: O(n)</li>
+<li>Space: O(1) or O(n) depending on reduction mode</li>
+</ul>
+</dd></dl>
+<div class="fragment"><div class="line"><span class="keyword">auto</span> criterion = BCEWithLogitsLoss();</div>
+<div class="line"><span class="keyword">auto</span> logits = model.forward(input);  <span class="comment">// No sigmoid needed</span></div>
+<div class="line"><span class="keyword">auto</span> loss = criterion(logits, binary_targets);</div>
+</div><!-- fragment --><dl class="section see"><dt>See also</dt><dd><a class="el" href="classtenzor_1_1nn_1_1BCELoss.html" title="Binary Cross Entropy (BCE) Loss.">BCELoss</a> </dd></dl>
+
+<p class="definition">Definition at line <a class="el" href="losses_8hpp_source.html#l00234">234</a> of file <a class="el" href="losses_8hpp_source.html">losses.hpp</a>.</p>
 </div><a name="doc-func-members" id="doc-func-members"></a><h2 id="header-doc-func-members" class="groupheader">Member Function Documentation</h2>
 <a id="a235b9364dfe279876837c8433f02a044" name="a235b9364dfe279876837c8433f02a044"></a>
 <h2 class="memtitle"><span class="permalink"><a href="#a235b9364dfe279876837c8433f02a044">&#9670;&#160;</a></span>operator()()</h2>
@@ -132,7 +169,7 @@ auto&#160;</td><td class="memItemRight" valign="bottom"><b>forward</b> (const <a
 </table>
 </div><div class="memdoc">
 
-<p class="definition">Definition at line <a class="el" href="losses_8hpp_source.html#l00063">63</a> of file <a class="el" href="losses_8hpp_source.html">losses.hpp</a>.</p>
+<p class="definition">Definition at line <a class="el" href="losses_8hpp_source.html#l00239">239</a> of file <a class="el" href="losses_8hpp_source.html">losses.hpp</a>.</p>
 
 </div>
 </div>
@@ -152,7 +189,7 @@ auto&#160;</td><td class="memItemRight" valign="bottom"><b>forward</b> (const <a
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><b>tenzor</b></li><li class="navelem"><b>nn</b></li><li class="navelem"><a href="classtenzor_1_1nn_1_1BCEWithLogitsLoss.html">BCEWithLogitsLoss</a></li>
+    <li class="navelem"><a href="namespacetenzor.html">tenzor</a></li><li class="navelem"><b>nn</b></li><li class="navelem"><a href="classtenzor_1_1nn_1_1BCEWithLogitsLoss.html">BCEWithLogitsLoss</a></li>
     <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>

@@ -1,5 +1,11 @@
 var searchData=
 [
-  ['grad_0',['grad',['../classtenzor_1_1Variable.html#a3c1c317a8266fbc139933308289b3378',1,'tenzor::Variable::grad() const -&gt; const std::optional&lt; Tensor &gt; &amp;'],['../classtenzor_1_1Variable.html#a5a2ef945b355d1495d173078732c88e0',1,'tenzor::Variable::grad() -&gt; std::optional&lt; Tensor &gt; &amp;']]],
-  ['grad_5ffn_1',['grad_fn',['../classtenzor_1_1Variable.html#a31054bc788898d0d79e796806c23e1e7',1,'tenzor::Variable']]]
+  ['gather_0',['gather',['../group__tensor__indexing.html#ga8afc968ceeaec0a557c68cd50332ea38',1,'tenzor']]],
+  ['gelu_1',['gelu',['../group__functional__activations.html#gac80b253bbbc565409805c52fb32c9138',1,'tenzor::nn']]],
+  ['get_5fbackend_2',['get_backend',['../classtenzor_1_1Dispatcher.html#a79f550db3332f759405b581957972434',1,'tenzor::Dispatcher::get_backend()'],['../classtenzor_1_1BackendLoader.html#a6c7909498c91e1faa7464079ff303487',1,'tenzor::BackendLoader::get_backend(std::string_view name) -&gt; Backend *'],['../classtenzor_1_1BackendLoader.html#aea89decd0cb2d4868fe6a446552ca292',1,'tenzor::BackendLoader::get_backend(Device::Type type) -&gt; Backend *']]],
+  ['get_5flast_5flr_3',['get_last_lr',['../classtenzor_1_1optim_1_1LRScheduler.html#a37d4518a9d9dc0b542c77ebbbee9badc',1,'tenzor::optim::LRScheduler::get_last_lr()'],['../classtenzor_1_1optim_1_1StepLR.html#a77572ad8ccf31140631542ebdfad98c1',1,'tenzor::optim::StepLR::get_last_lr()'],['../classtenzor_1_1optim_1_1ExponentialLR.html#ac11c879619240ca07fbfc1536f45a1dd',1,'tenzor::optim::ExponentialLR::get_last_lr()'],['../classtenzor_1_1optim_1_1CosineAnnealingLR.html#a4c2ac8b75254752647e2979bb72ffa39',1,'tenzor::optim::CosineAnnealingLR::get_last_lr()']]],
+  ['get_5flr_4',['get_lr',['../classtenzor_1_1optim_1_1Adam.html#a4b667fcc635a9b8cf9c99ca2033bce1e',1,'tenzor::optim::Adam::get_lr()'],['../classtenzor_1_1optim_1_1AdamW.html#a8aa2f98c53b5fa4bc84fc477396a4977',1,'tenzor::optim::AdamW::get_lr()'],['../classtenzor_1_1optim_1_1LRScheduler.html#aee2145a3df3be042426254e4c76594eb',1,'tenzor::optim::LRScheduler::get_lr()'],['../classtenzor_1_1optim_1_1SGD.html#a4790c6ae78d71658c2cca87988d3888b',1,'tenzor::optim::SGD::get_lr()']]],
+  ['grad_5',['grad',['../classtenzor_1_1Variable.html#a3c1c317a8266fbc139933308289b3378',1,'tenzor::Variable::grad() const -&gt; const std::optional&lt; Tensor &gt; &amp;'],['../classtenzor_1_1Variable.html#a5a2ef945b355d1495d173078732c88e0',1,'tenzor::Variable::grad() -&gt; std::optional&lt; Tensor &gt; &amp;']]],
+  ['grad_5ffn_6',['grad_fn',['../classtenzor_1_1Variable.html#a31054bc788898d0d79e796806c23e1e7',1,'tenzor::Variable']]],
+  ['groupnorm_7',['GroupNorm',['../classtenzor_1_1nn_1_1GroupNorm.html#ae7caaf20b1ba46641f5f5a6e77858438',1,'tenzor::nn::GroupNorm']]]
 ];

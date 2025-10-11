@@ -105,7 +105,7 @@ Collaboration diagram for tenzor::TensorImpl:</div>
 <area shape="rect" title="Internal tensor implementation (PImpl pattern)." alt="" coords="215,246,356,274"/>
 <area shape="rect" title=" " alt="" coords="5,106,180,151"/>
 <area shape="poly" title=" " alt="" coords="135,158,225,220,264,243,261,248,222,224,132,162"/>
-<area shape="rect" href="classtenzor_1_1Storage.html" title=" " alt="" coords="32,5,153,33"/>
+<area shape="rect" href="classtenzor_1_1Storage.html" title="Abstract base class for tensor memory storage." alt="" coords="32,5,153,33"/>
 <area shape="poly" title=" " alt="" coords="95,49,95,105,90,105,90,49"/>
 <area shape="rect" title=" " alt="" coords="203,114,368,142"/>
 <area shape="poly" title=" " alt="" coords="288,158,288,245,283,245,283,158"/>
@@ -116,7 +116,7 @@ Collaboration diagram for tenzor::TensorImpl:</div>
 <table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-pub-methods" class="groupheader"><a id="pub-methods" name="pub-methods"></a>
 Public Member Functions</h2></td></tr>
-<tr class="memitem:a55f6b69debb75b03c433a6275d923314" id="r_a55f6b69debb75b03c433a6275d923314"><td class="memItemLeft" align="right" valign="top">&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a55f6b69debb75b03c433a6275d923314">TensorImpl</a> (std::vector&lt; int64_t &gt; <a class="el" href="#aa44e6463472104d2d4d4a5542f70def4">shape</a>, <a class="el" href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a> <a class="el" href="#aa6a46163ef9901c5d944b1bbc4983fe6">dtype</a>, <a class="el" href="structtenzor_1_1Device.html">Device</a> <a class="el" href="#a51612d0dcfd09761a6bb55d42f3604ff">device</a>)</td></tr>
+<tr class="memitem:a55f6b69debb75b03c433a6275d923314" id="r_a55f6b69debb75b03c433a6275d923314"><td class="memItemLeft" align="right" valign="top">&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a55f6b69debb75b03c433a6275d923314">TensorImpl</a> (std::vector&lt; int64_t &gt; <a class="el" href="#aa44e6463472104d2d4d4a5542f70def4">shape</a>, <a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a> <a class="el" href="#aa6a46163ef9901c5d944b1bbc4983fe6">dtype</a>, <a class="el" href="structtenzor_1_1Device.html">Device</a> <a class="el" href="#a51612d0dcfd09761a6bb55d42f3604ff">device</a>)</td></tr>
 <tr class="memdesc:a55f6b69debb75b03c433a6275d923314"><td class="mdescLeft">&#160;</td><td class="mdescRight">Construct tensor implementation.  <br /></td></tr>
 <tr class="memitem:abf41f4deabfe21b7326f7dbd88769eb3" id="r_abf41f4deabfe21b7326f7dbd88769eb3"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#abf41f4deabfe21b7326f7dbd88769eb3">numel</a> () const -&gt; int64_t</td></tr>
 <tr class="memdesc:abf41f4deabfe21b7326f7dbd88769eb3"><td class="mdescLeft">&#160;</td><td class="mdescRight">Get total number of elements.  <br /></td></tr>
@@ -133,7 +133,7 @@ Public Attributes</h2></td></tr>
 <tr class="memdesc:af0ea8390de6c7575cacefabacd5be298"><td class="mdescLeft">&#160;</td><td class="mdescRight">Memory strides per dimension.  <br /></td></tr>
 <tr class="memitem:a85f01db9a220494ac9ee9ec128c7d903" id="r_a85f01db9a220494ac9ee9ec128c7d903"><td class="memItemLeft" align="right" valign="top">int64_t&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a85f01db9a220494ac9ee9ec128c7d903">offset</a> {0}</td></tr>
 <tr class="memdesc:a85f01db9a220494ac9ee9ec128c7d903"><td class="mdescLeft">&#160;</td><td class="mdescRight">Offset into storage.  <br /></td></tr>
-<tr class="memitem:aa6a46163ef9901c5d944b1bbc4983fe6" id="r_aa6a46163ef9901c5d944b1bbc4983fe6"><td class="memItemLeft" align="right" valign="top"><a class="el" href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a>&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#aa6a46163ef9901c5d944b1bbc4983fe6">dtype</a></td></tr>
+<tr class="memitem:aa6a46163ef9901c5d944b1bbc4983fe6" id="r_aa6a46163ef9901c5d944b1bbc4983fe6"><td class="memItemLeft" align="right" valign="top"><a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a>&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#aa6a46163ef9901c5d944b1bbc4983fe6">dtype</a></td></tr>
 <tr class="memdesc:aa6a46163ef9901c5d944b1bbc4983fe6"><td class="mdescLeft">&#160;</td><td class="mdescRight">Element data type.  <br /></td></tr>
 <tr class="memitem:a51612d0dcfd09761a6bb55d42f3604ff" id="r_a51612d0dcfd09761a6bb55d42f3604ff"><td class="memItemLeft" align="right" valign="top"><a class="el" href="structtenzor_1_1Device.html">Device</a>&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a51612d0dcfd09761a6bb55d42f3604ff">device</a></td></tr>
 <tr class="memdesc:a51612d0dcfd09761a6bb55d42f3604ff"><td class="mdescLeft">&#160;</td><td class="mdescRight"><a class="el" href="structtenzor_1_1Device.html" title="Device specification for tensor placement.">Device</a> location.  <br /></td></tr>
@@ -161,7 +161,7 @@ Public Attributes</h2></td></tr>
         <tr>
           <td class="paramkey"></td>
           <td></td>
-          <td class="paramtype"><a class="el" href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a></td>          <td class="paramname"><span class="paramname"><em>dtype</em></span>, </td>
+          <td class="paramtype"><a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a></td>          <td class="paramname"><span class="paramname"><em>dtype</em></span>, </td>
         </tr>
         <tr>
           <td class="paramkey"></td>
@@ -258,7 +258,7 @@ Public Attributes</h2></td></tr>
 <div class="memproto">
       <table class="memname">
         <tr>
-          <td class="memname"><a class="el" href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a> tenzor::TensorImpl::dtype</td>
+          <td class="memname"><a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a> tenzor::TensorImpl::dtype</td>
         </tr>
       </table>
 </div><div class="memdoc">
@@ -379,7 +379,7 @@ Public Attributes</h2></td></tr>
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><b>tenzor</b></li><li class="navelem"><a href="classtenzor_1_1TensorImpl.html">TensorImpl</a></li>
+    <li class="navelem"><a href="namespacetenzor.html">tenzor</a></li><li class="navelem"><a href="classtenzor_1_1TensorImpl.html">TensorImpl</a></li>
     <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>

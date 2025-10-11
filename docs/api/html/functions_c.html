@@ -28,7 +28,7 @@
   <td id="projectalign">
    <div id="projectname">Tenzor<span id="projectnumber">&#160;1.0.0</span>
    </div>
-   <div id="projectbrief">Modern C++20 tensor library with automatic differentiation</div>
+   <div id="projectbrief">High-performance tensor library with automatic differentiation</div>
   </td>
  </tr>
  </tbody>
@@ -89,11 +89,10 @@ $(function(){initNavTree('functions_c.html','',''); });
 </div>
 
 <div class="contents">
-<div class="textblock">Here is a list of all class members with links to the classes they belong to:</div>
+<div class="textblock">Here is a list of all documented class members with links to the class documentation for each member:</div>
 
 <h3 class="doxsection"><a id="index_c" name="index_c"></a>- c -</h3><ul>
 <li>check_device_compatibility()&#160;:&#160;<a class="el" href="classtenzor_1_1Dispatcher.html#aec11e56bcb63df78e43c2d9ea3eb29e1">tenzor::Dispatcher</a></li>
-<li>ClampBackward()&#160;:&#160;<a class="el" href="classtenzor_1_1ClampBackward.html#a6edbe9359058f96168614dd544f92bf8">tenzor::ClampBackward</a></li>
 <li>clear()&#160;:&#160;<a class="el" href="classtenzor_1_1ComputationGraph.html#a12dd4f19a398ea56a0fdf4ef56c93da8">tenzor::ComputationGraph</a></li>
 <li>clear_gradients()&#160;:&#160;<a class="el" href="classtenzor_1_1BackwardEngine.html#a8e159d2dc05773cef49fad11518688bf">tenzor::BackwardEngine</a></li>
 <li>clone()&#160;:&#160;<a class="el" href="classtenzor_1_1Tensor.html#ae7064890bed8d2dca420fc638ad508ed">tenzor::Tensor</a></li>
@@ -104,27 +103,10 @@ $(function(){initNavTree('functions_c.html','',''); });
 <li>Conv2d()&#160;:&#160;<a class="el" href="classtenzor_1_1nn_1_1Conv2d.html#ad292026afcef0b89d3f582a8eac82c8f">tenzor::nn::Conv2d</a></li>
 <li>ConvTranspose2d()&#160;:&#160;<a class="el" href="classtenzor_1_1nn_1_1ConvTranspose2d.html#a355c2a13942c640723b29aaec865519b">tenzor::nn::ConvTranspose2d</a></li>
 <li>copy()&#160;:&#160;<a class="el" href="classtenzor_1_1Backend.html#a3fcf2abe65b73fac32eb73efe54235a4">tenzor::Backend</a></li>
-<li>CosineAnnealingLR()&#160;:&#160;<a class="el" href="classtenzor_1_1optim_1_1CosineAnnealingLR.html#a0afb76ce38fa9d3d5826687aa37639f6">tenzor::optim::CosineAnnealingLR</a></li>
 <li>cpu()&#160;:&#160;<a class="el" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">tenzor::Device</a>, <a class="el" href="classtenzor_1_1nn_1_1Module.html#a225964899ba8f40295a53cb089d096aa">tenzor::nn::Module</a>, <a class="el" href="classtenzor_1_1Tensor.html#a26ed64caec49c6be22afee05f1f28f99">tenzor::Tensor</a></li>
-<li>cpu::clone_kernel&#160;:&#160;<a class="el" href="classtenzor_1_1Tensor.html#a2137159d10b0a95ad7e6a087a1891c82">tenzor::Tensor</a></li>
-<li>cpu::contiguous_kernel&#160;:&#160;<a class="el" href="classtenzor_1_1Tensor.html#ab2ddecb21c4ecf55a9b02ca8cd45311c">tenzor::Tensor</a></li>
-<li>cpu::permute_kernel&#160;:&#160;<a class="el" href="classtenzor_1_1Tensor.html#aaa0a466985f914b866f5a0ade3b666da">tenzor::Tensor</a></li>
-<li>cpu::reshape_kernel&#160;:&#160;<a class="el" href="classtenzor_1_1Tensor.html#a27d5fc22939e12f03a45e846ee10a172">tenzor::Tensor</a></li>
-<li>cpu::squeeze_kernel&#160;:&#160;<a class="el" href="classtenzor_1_1Tensor.html#ac96de921e617fdc438e5b983918d99d0">tenzor::Tensor</a></li>
-<li>cpu::transpose_kernel&#160;:&#160;<a class="el" href="classtenzor_1_1Tensor.html#a7f7287fc41b2519aa5675f8e417b458d">tenzor::Tensor</a></li>
-<li>cpu::unsqueeze_kernel&#160;:&#160;<a class="el" href="classtenzor_1_1Tensor.html#a69376e5b851f9fe41d00d6f624149b33">tenzor::Tensor</a></li>
 <li>CPUStorage()&#160;:&#160;<a class="el" href="classtenzor_1_1CPUStorage.html#a4f5cd27c91a37aa9de06e840e950569c">tenzor::CPUStorage</a></li>
 <li>create_stream()&#160;:&#160;<a class="el" href="classtenzor_1_1Backend.html#af72714e65de273ef1d438fcab0550c49">tenzor::Backend</a></li>
-<li>CrossEntropyLoss()&#160;:&#160;<a class="el" href="classtenzor_1_1nn_1_1CrossEntropyLoss.html#a6056d817f97c34051bdb9cfe2b62756f">tenzor::nn::CrossEntropyLoss</a></li>
 <li>cuda()&#160;:&#160;<a class="el" href="structtenzor_1_1Device.html#a76d3773ac62efb2135846cc5f1dbd3c8">tenzor::Device</a>, <a class="el" href="classtenzor_1_1nn_1_1Module.html#aef180bb39aba065beec4fec2d3ea48ad">tenzor::nn::Module</a>, <a class="el" href="classtenzor_1_1Tensor.html#a8c91a334452a95c43ed7536d55cf0275">tenzor::Tensor</a></li>
-<li>cuda::clone_kernel&#160;:&#160;<a class="el" href="classtenzor_1_1Tensor.html#a341d97265cea9138aa3eb3825f7e7f88">tenzor::Tensor</a></li>
-<li>cuda::contiguous_kernel&#160;:&#160;<a class="el" href="classtenzor_1_1Tensor.html#a0d8ec481b71c96ab3e718d0f96a8fd49">tenzor::Tensor</a></li>
-<li>cuda::CUDAKernelAccess&#160;:&#160;<a class="el" href="classtenzor_1_1Tensor.html#ab5c8d4c59f0e31de367d7ca8f13ad7b7">tenzor::Tensor</a></li>
-<li>cuda::permute_kernel&#160;:&#160;<a class="el" href="classtenzor_1_1Tensor.html#a0f4b8d00f2b6c581da1859ca3b7196eb">tenzor::Tensor</a></li>
-<li>cuda::reshape_kernel&#160;:&#160;<a class="el" href="classtenzor_1_1Tensor.html#a022ca5605202f1e4a65d1d465904ce2e">tenzor::Tensor</a></li>
-<li>cuda::squeeze_kernel&#160;:&#160;<a class="el" href="classtenzor_1_1Tensor.html#a4f27802d6c192d2307c70be8ba883320">tenzor::Tensor</a></li>
-<li>cuda::transpose_kernel&#160;:&#160;<a class="el" href="classtenzor_1_1Tensor.html#aaa5fa10d16858a9b05c216ddb332bad5">tenzor::Tensor</a></li>
-<li>cuda::unsqueeze_kernel&#160;:&#160;<a class="el" href="classtenzor_1_1Tensor.html#a2d644295cd5c7ff3ef9ce28697add46b">tenzor::Tensor</a></li>
 </ul>
 </div><!-- contents -->
 </div><!-- doc-content -->
@@ -132,7 +114,7 @@ $(function(){initNavTree('functions_c.html','',''); });
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="footer">Generated by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
+    <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>
 </body>

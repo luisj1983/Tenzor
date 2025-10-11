@@ -92,12 +92,17 @@ $(function(){initNavTree('classtenzor_1_1nn_1_1ReLU.html','','classtenzor_1_1nn_
   <div class="headertitle"><div class="title">tenzor::nn::ReLU Class Reference</div></div>
 </div><!--header-->
 <div class="contents">
+
+<p>Rectified <a class="el" href="classtenzor_1_1nn_1_1Linear.html" title="Fully connected (linear/dense) layer.">Linear</a> Unit (<a class="el" href="classtenzor_1_1nn_1_1ReLU.html" title="Rectified Linear Unit (ReLU) activation.">ReLU</a>) activation.  
+ <a href="#details">More...</a></p>
+
+<p><code>#include &lt;<a class="el" href="activations_8hpp_source.html">activations.hpp</a>&gt;</code></p>
 <div class="dynheader">
 Inheritance diagram for tenzor::nn::ReLU:</div>
 <div class="dyncontent">
 <div class="center"><img src="classtenzor_1_1nn_1_1ReLU__inherit__graph.png" border="0" usemap="#atenzor_1_1nn_1_1ReLU_inherit__map" loading="lazy" alt="Inheritance graph"/></div>
 <map name="atenzor_1_1nn_1_1ReLU_inherit__map" id="atenzor_1_1nn_1_1ReLU_inherit__map">
-<area shape="rect" title=" " alt="" coords="12,81,141,109"/>
+<area shape="rect" title="Rectified Linear Unit (ReLU) activation." alt="" coords="12,81,141,109"/>
 <area shape="rect" href="classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="5,5,148,33"/>
 <area shape="poly" title=" " alt="" coords="79,49,79,81,74,81,74,49"/>
 </map>
@@ -107,7 +112,7 @@ Collaboration diagram for tenzor::nn::ReLU:</div>
 <div class="dyncontent">
 <div class="center"><img src="classtenzor_1_1nn_1_1ReLU__coll__graph.png" border="0" usemap="#atenzor_1_1nn_1_1ReLU_coll__map" loading="lazy" alt="Collaboration graph"/></div>
 <map name="atenzor_1_1nn_1_1ReLU_coll__map" id="atenzor_1_1nn_1_1ReLU_coll__map">
-<area shape="rect" title=" " alt="" coords="962,5,1090,33"/>
+<area shape="rect" title="Rectified Linear Unit (ReLU) activation." alt="" coords="962,5,1090,33"/>
 <area shape="rect" href="classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="723,69,865,97"/>
 <area shape="poly" title=" " alt="" coords="848,61,888,49,961,30,962,35,890,54,850,66"/>
 <area shape="rect" title=" " alt="" coords="939,57,1113,102"/>
@@ -186,8 +191,47 @@ Additional Inherited Members</h2></td></tr>
 <tr class="memdesc:a9d9d2355bff1b6c5bfe300aa14e477a2 inherit pro_attribs_classtenzor_1_1nn_1_1Module"><td class="mdescLeft">&#160;</td><td class="mdescRight">Named submodules.  <br /></td></tr>
 </table>
 <a name="details" id="details"></a><h2 id="header-details" class="groupheader">Detailed Description</h2>
-<div class="textblock">
-<p class="definition">Definition at line <a class="el" href="activations_8hpp_source.html#l00009">9</a> of file <a class="el" href="activations_8hpp_source.html">activations.hpp</a>.</p>
+<div class="textblock"><p>Rectified <a class="el" href="classtenzor_1_1nn_1_1Linear.html" title="Fully connected (linear/dense) layer.">Linear</a> Unit (<a class="el" href="classtenzor_1_1nn_1_1ReLU.html" title="Rectified Linear Unit (ReLU) activation.">ReLU</a>) activation. </p>
+<p>Applies the rectified linear unit function element-wise:</p>
+<p class="formulaDsp">
+<picture><source srcset="form_0_dark.png" media="(prefers-color-scheme: dark)"/><img class="formulaDsp" alt="\[\text{ReLU}(x) = \max(0, x) = \begin{cases}
+  x &amp; \text{if } x &gt; 0 \\
+  0 &amp; \text{otherwise}
+\end{cases}
+\]" src="form_0.png"/></picture>
+</p>
+<p><a class="el" href="classtenzor_1_1nn_1_1ReLU.html" title="Rectified Linear Unit (ReLU) activation.">ReLU</a> is the most widely used activation function in deep learning due to:</p><ul>
+<li>Computational efficiency: O(n) complexity with simple max operation</li>
+<li>Gradient flow: Eliminates vanishing gradient problem for positive values</li>
+<li>Sparse activation: Typically ~50% of neurons are zero, promoting sparse representations</li>
+<li>Empirically superior convergence compared to sigmoid/tanh</li>
+</ul>
+<p><b>Use Cases:</b></p><ul>
+<li>Default choice for hidden layers in most architectures</li>
+<li>Convolutional neural networks (CNNs)</li>
+<li>Deep feedforward networks</li>
+<li>Not recommended for recurrent networks (use <a class="el" href="classtenzor_1_1nn_1_1Tanh.html" title="Hyperbolic tangent (Tanh) activation.">Tanh</a> instead)</li>
+</ul>
+<p><b>Limitations:</b></p><ul>
+<li>Dying <a class="el" href="classtenzor_1_1nn_1_1ReLU.html" title="Rectified Linear Unit (ReLU) activation.">ReLU</a> problem: Neurons can get stuck outputting zero</li>
+<li>Not zero-centered: Can cause gradient issues</li>
+<li>Unbounded output: Can lead to exploding activations</li>
+</ul>
+<dl class="section user"><dt>Complexity</dt><dd><ul>
+<li>Time: O(n) where n is the number of elements</li>
+<li>Space: O(1) in-place operation</li>
+</ul>
+</dd></dl>
+<dl class="section user"><dt>Thread Safety</dt><dd>Thread-safe for forward pass on different inputs</dd></dl>
+<div class="fragment"><div class="line"><span class="keyword">auto</span> <a class="code hl_function" href="group__functional__activations.html#gaf3c7a614ec2c4d2b546d874b5d5d45c2">relu</a> = ReLU();</div>
+<div class="line"><span class="keyword">auto</span> input = Variable::create(tensor({-1.0, 0.0, 1.0, 2.0}));</div>
+<div class="line"><span class="keyword">auto</span> output = <a class="code hl_function" href="group__functional__activations.html#gaf3c7a614ec2c4d2b546d874b5d5d45c2">relu</a>.forward(input);  <span class="comment">// Result: [0, 0, 1, 2]</span></div>
+<div class="ttc" id="agroup__functional__activations_html_gaf3c7a614ec2c4d2b546d874b5d5d45c2"><div class="ttname"><a href="group__functional__activations.html#gaf3c7a614ec2c4d2b546d874b5d5d45c2">tenzor::nn::relu</a></div><div class="ttdeci">auto relu(const Variable &amp;input) -&gt; Variable</div><div class="ttdoc">Functional ReLU: max(0, x)</div></div>
+</div><!-- fragment --><dl class="section see"><dt>See also</dt><dd><a class="el" href="classtenzor_1_1nn_1_1LeakyReLU.html" title="Leaky Rectified Linear Unit (Leaky ReLU) activation.">LeakyReLU</a> for variant that doesn't zero negative values </dd>
+<dd>
+<a class="el" href="classtenzor_1_1nn_1_1GELU.html" title="Gaussian Error Linear Unit (GELU) activation.">GELU</a> for smooth approximation with better gradient properties </dd></dl>
+
+<p class="definition">Definition at line <a class="el" href="activations_8hpp_source.html#l00063">63</a> of file <a class="el" href="activations_8hpp_source.html">activations.hpp</a>.</p>
 </div><a name="doc-func-members" id="doc-func-members"></a><h2 id="header-doc-func-members" class="groupheader">Member Function Documentation</h2>
 <a id="a59921b5596b7a7b0efe9739fd4296f3a" name="a59921b5596b7a7b0efe9739fd4296f3a"></a>
 <h2 class="memtitle"><span class="permalink"><a href="#a59921b5596b7a7b0efe9739fd4296f3a">&#9670;&#160;</a></span>forward()</h2>
@@ -241,7 +285,7 @@ Additional Inherited Members</h2></td></tr>
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><b>tenzor</b></li><li class="navelem"><b>nn</b></li><li class="navelem"><a href="classtenzor_1_1nn_1_1ReLU.html">ReLU</a></li>
+    <li class="navelem"><a href="namespacetenzor.html">tenzor</a></li><li class="navelem"><b>nn</b></li><li class="navelem"><a href="classtenzor_1_1nn_1_1ReLU.html">ReLU</a></li>
     <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>

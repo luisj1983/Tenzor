@@ -92,52 +92,71 @@ $(function(){initNavTree('tenzor_8hpp_source.html','',''); });
   <div class="headertitle"><div class="title">tenzor.hpp</div></div>
 </div><!--header-->
 <div class="contents">
-<div class="fragment"><div class="line"><a id="l00001" name="l00001"></a><span class="lineno">    1</span><span class="preprocessor">#pragma once</span></div>
-<div class="line"><a id="l00002" name="l00002"></a><span class="lineno">    2</span> </div>
-<div class="line"><a id="l00003" name="l00003"></a><span class="lineno">    3</span><span class="comment">// Tenzor - Neural Network Library</span></div>
-<div class="line"><a id="l00004" name="l00004"></a><span class="lineno">    4</span><span class="comment">// Convenience header including all public APIs</span></div>
-<div class="line"><a id="l00005" name="l00005"></a><span class="lineno">    5</span> </div>
-<div class="line"><a id="l00006" name="l00006"></a><span class="lineno">    6</span><span class="comment">// Core</span></div>
-<div class="line"><a id="l00007" name="l00007"></a><span class="lineno">    7</span><span class="preprocessor">#include &quot;<a class="code" href="tensor_8hpp.html">tenzor/core/tensor.hpp</a>&quot;</span></div>
-<div class="line"><a id="l00008" name="l00008"></a><span class="lineno">    8</span><span class="preprocessor">#include &quot;<a class="code" href="device_8hpp.html">tenzor/core/device.hpp</a>&quot;</span></div>
-<div class="line"><a id="l00009" name="l00009"></a><span class="lineno">    9</span><span class="preprocessor">#include &quot;<a class="code" href="dtype_8hpp.html">tenzor/core/dtype.hpp</a>&quot;</span></div>
-<div class="line"><a id="l00010" name="l00010"></a><span class="lineno">   10</span> </div>
-<div class="line"><a id="l00011" name="l00011"></a><span class="lineno">   11</span><span class="comment">// Operations</span></div>
-<div class="line"><a id="l00012" name="l00012"></a><span class="lineno">   12</span><span class="preprocessor">#include &quot;tenzor/ops/creation.hpp&quot;</span></div>
-<div class="line"><a id="l00013" name="l00013"></a><span class="lineno">   13</span><span class="preprocessor">#include &quot;tenzor/ops/math.hpp&quot;</span></div>
-<div class="line"><a id="l00014" name="l00014"></a><span class="lineno">   14</span><span class="preprocessor">#include &quot;tenzor/ops/reduction.hpp&quot;</span></div>
-<div class="line"><a id="l00015" name="l00015"></a><span class="lineno">   15</span><span class="preprocessor">#include &quot;tenzor/ops/transform.hpp&quot;</span></div>
-<div class="line"><a id="l00016" name="l00016"></a><span class="lineno">   16</span> </div>
-<div class="line"><a id="l00017" name="l00017"></a><span class="lineno">   17</span><span class="comment">// Autograd</span></div>
-<div class="line"><a id="l00018" name="l00018"></a><span class="lineno">   18</span><span class="preprocessor">#include &quot;<a class="code" href="variable_8hpp.html">tenzor/autograd/variable.hpp</a>&quot;</span></div>
-<div class="line"><a id="l00019" name="l00019"></a><span class="lineno">   19</span><span class="preprocessor">#include &quot;<a class="code" href="function_8hpp.html">tenzor/autograd/function.hpp</a>&quot;</span></div>
-<div class="line"><a id="l00020" name="l00020"></a><span class="lineno">   20</span><span class="preprocessor">#include &quot;tenzor/autograd/engine.hpp&quot;</span></div>
-<div class="line"><a id="l00021" name="l00021"></a><span class="lineno">   21</span><span class="preprocessor">#include &quot;tenzor/autograd/ops.hpp&quot;</span></div>
-<div class="line"><a id="l00022" name="l00022"></a><span class="lineno">   22</span> </div>
-<div class="line"><a id="l00023" name="l00023"></a><span class="lineno">   23</span><span class="comment">// Neural Network Modules</span></div>
-<div class="line"><a id="l00024" name="l00024"></a><span class="lineno">   24</span><span class="preprocessor">#include &quot;<a class="code" href="module_8hpp.html">tenzor/nn/module.hpp</a>&quot;</span></div>
-<div class="line"><a id="l00025" name="l00025"></a><span class="lineno">   25</span><span class="preprocessor">#include &quot;tenzor/nn/layers/linear.hpp&quot;</span></div>
-<div class="line"><a id="l00026" name="l00026"></a><span class="lineno">   26</span><span class="preprocessor">#include &quot;tenzor/nn/layers/conv.hpp&quot;</span></div>
-<div class="line"><a id="l00027" name="l00027"></a><span class="lineno">   27</span><span class="preprocessor">#include &quot;tenzor/nn/layers/batchnorm.hpp&quot;</span></div>
-<div class="line"><a id="l00028" name="l00028"></a><span class="lineno">   28</span><span class="preprocessor">#include &quot;tenzor/nn/layers/normalization.hpp&quot;</span></div>
-<div class="line"><a id="l00029" name="l00029"></a><span class="lineno">   29</span><span class="preprocessor">#include &quot;tenzor/nn/layers/dropout.hpp&quot;</span></div>
-<div class="line"><a id="l00030" name="l00030"></a><span class="lineno">   30</span><span class="preprocessor">#include &quot;tenzor/nn/layers/pooling.hpp&quot;</span></div>
-<div class="line"><a id="l00031" name="l00031"></a><span class="lineno">   31</span><span class="preprocessor">#include &quot;tenzor/nn/layers/flatten.hpp&quot;</span></div>
-<div class="line"><a id="l00032" name="l00032"></a><span class="lineno">   32</span><span class="preprocessor">#include &quot;tenzor/nn/activations/activations.hpp&quot;</span></div>
-<div class="line"><a id="l00033" name="l00033"></a><span class="lineno">   33</span><span class="preprocessor">#include &quot;tenzor/nn/loss/losses.hpp&quot;</span></div>
-<div class="line"><a id="l00034" name="l00034"></a><span class="lineno">   34</span><span class="preprocessor">#include &quot;tenzor/nn/optim/sgd.hpp&quot;</span></div>
-<div class="line"><a id="l00035" name="l00035"></a><span class="lineno">   35</span><span class="preprocessor">#include &quot;tenzor/nn/optim/adam.hpp&quot;</span></div>
-<div class="line"><a id="l00036" name="l00036"></a><span class="lineno">   36</span> </div>
-<div class="line"><a id="l00037" name="l00037"></a><span class="lineno">   37</span><span class="comment">// Initialization functions (from backend loader)</span></div>
-<div class="line"><a id="l00038" name="l00038"></a><span class="lineno">   38</span><span class="keyword">namespace </span>tenzor {</div>
-<div class="line"><a id="l00039" name="l00039"></a><span class="lineno">   39</span>    <span class="keywordtype">void</span> initialize();</div>
-<div class="line"><a id="l00040" name="l00040"></a><span class="lineno">   40</span>    <span class="keywordtype">void</span> finalize();</div>
-<div class="line"><a id="l00041" name="l00041"></a><span class="lineno">   41</span>}</div>
+<a href="tenzor_8hpp.html">Go to the documentation of this file.</a><div class="fragment"><div class="line"><a id="l00001" name="l00001"></a><span class="lineno">    1</span></div>
+<div class="line"><a id="l00074" name="l00074"></a><span class="lineno">   74</span> </div>
+<div class="line"><a id="l00075" name="l00075"></a><span class="lineno">   75</span><span class="preprocessor">#pragma once</span></div>
+<div class="line"><a id="l00076" name="l00076"></a><span class="lineno">   76</span> </div>
+<div class="line"><a id="l00077" name="l00077"></a><span class="lineno">   77</span><span class="comment">// Core tensor functionality</span></div>
+<div class="line"><a id="l00078" name="l00078"></a><span class="lineno">   78</span><span class="preprocessor">#include &quot;<a class="code" href="tensor_8hpp.html">tenzor/core/tensor.hpp</a>&quot;</span></div>
+<div class="line"><a id="l00079" name="l00079"></a><span class="lineno">   79</span><span class="preprocessor">#include &quot;<a class="code" href="device_8hpp.html">tenzor/core/device.hpp</a>&quot;</span></div>
+<div class="line"><a id="l00080" name="l00080"></a><span class="lineno">   80</span><span class="preprocessor">#include &quot;<a class="code" href="dtype_8hpp.html">tenzor/core/dtype.hpp</a>&quot;</span></div>
+<div class="line"><a id="l00081" name="l00081"></a><span class="lineno">   81</span> </div>
+<div class="line"><a id="l00082" name="l00082"></a><span class="lineno">   82</span><span class="comment">// Tensor operations</span></div>
+<div class="line"><a id="l00083" name="l00083"></a><span class="lineno">   83</span><span class="preprocessor">#include &quot;<a class="code" href="creation_8hpp.html">tenzor/ops/creation.hpp</a>&quot;</span></div>
+<div class="line"><a id="l00084" name="l00084"></a><span class="lineno">   84</span><span class="preprocessor">#include &quot;<a class="code" href="math_8hpp.html">tenzor/ops/math.hpp</a>&quot;</span></div>
+<div class="line"><a id="l00085" name="l00085"></a><span class="lineno">   85</span><span class="preprocessor">#include &quot;<a class="code" href="reduction_8hpp.html">tenzor/ops/reduction.hpp</a>&quot;</span></div>
+<div class="line"><a id="l00086" name="l00086"></a><span class="lineno">   86</span><span class="preprocessor">#include &quot;<a class="code" href="transform_8hpp.html">tenzor/ops/transform.hpp</a>&quot;</span></div>
+<div class="line"><a id="l00087" name="l00087"></a><span class="lineno">   87</span> </div>
+<div class="line"><a id="l00088" name="l00088"></a><span class="lineno">   88</span><span class="comment">// Automatic differentiation</span></div>
+<div class="line"><a id="l00089" name="l00089"></a><span class="lineno">   89</span><span class="preprocessor">#include &quot;<a class="code" href="variable_8hpp.html">tenzor/autograd/variable.hpp</a>&quot;</span></div>
+<div class="line"><a id="l00090" name="l00090"></a><span class="lineno">   90</span><span class="preprocessor">#include &quot;<a class="code" href="function_8hpp.html">tenzor/autograd/function.hpp</a>&quot;</span></div>
+<div class="line"><a id="l00091" name="l00091"></a><span class="lineno">   91</span><span class="preprocessor">#include &quot;<a class="code" href="engine_8hpp.html">tenzor/autograd/engine.hpp</a>&quot;</span></div>
+<div class="line"><a id="l00092" name="l00092"></a><span class="lineno">   92</span><span class="preprocessor">#include &quot;<a class="code" href="ops_8hpp.html">tenzor/autograd/ops.hpp</a>&quot;</span></div>
+<div class="line"><a id="l00093" name="l00093"></a><span class="lineno">   93</span> </div>
+<div class="line"><a id="l00094" name="l00094"></a><span class="lineno">   94</span><span class="comment">// Neural network modules</span></div>
+<div class="line"><a id="l00095" name="l00095"></a><span class="lineno">   95</span><span class="preprocessor">#include &quot;<a class="code" href="module_8hpp.html">tenzor/nn/module.hpp</a>&quot;</span></div>
+<div class="line"><a id="l00096" name="l00096"></a><span class="lineno">   96</span><span class="preprocessor">#include &quot;<a class="code" href="linear_8hpp.html">tenzor/nn/layers/linear.hpp</a>&quot;</span></div>
+<div class="line"><a id="l00097" name="l00097"></a><span class="lineno">   97</span><span class="preprocessor">#include &quot;<a class="code" href="conv_8hpp.html">tenzor/nn/layers/conv.hpp</a>&quot;</span></div>
+<div class="line"><a id="l00098" name="l00098"></a><span class="lineno">   98</span><span class="preprocessor">#include &quot;<a class="code" href="batchnorm_8hpp.html">tenzor/nn/layers/batchnorm.hpp</a>&quot;</span></div>
+<div class="line"><a id="l00099" name="l00099"></a><span class="lineno">   99</span><span class="preprocessor">#include &quot;<a class="code" href="normalization_8hpp.html">tenzor/nn/layers/normalization.hpp</a>&quot;</span></div>
+<div class="line"><a id="l00100" name="l00100"></a><span class="lineno">  100</span><span class="preprocessor">#include &quot;<a class="code" href="dropout_8hpp.html">tenzor/nn/layers/dropout.hpp</a>&quot;</span></div>
+<div class="line"><a id="l00101" name="l00101"></a><span class="lineno">  101</span><span class="preprocessor">#include &quot;<a class="code" href="pooling_8hpp.html">tenzor/nn/layers/pooling.hpp</a>&quot;</span></div>
+<div class="line"><a id="l00102" name="l00102"></a><span class="lineno">  102</span><span class="preprocessor">#include &quot;<a class="code" href="flatten_8hpp.html">tenzor/nn/layers/flatten.hpp</a>&quot;</span></div>
+<div class="line"><a id="l00103" name="l00103"></a><span class="lineno">  103</span><span class="preprocessor">#include &quot;<a class="code" href="activations_8hpp.html">tenzor/nn/activations/activations.hpp</a>&quot;</span></div>
+<div class="line"><a id="l00104" name="l00104"></a><span class="lineno">  104</span><span class="preprocessor">#include &quot;<a class="code" href="losses_8hpp.html">tenzor/nn/loss/losses.hpp</a>&quot;</span></div>
+<div class="line"><a id="l00105" name="l00105"></a><span class="lineno">  105</span><span class="preprocessor">#include &quot;<a class="code" href="sgd_8hpp.html">tenzor/nn/optim/sgd.hpp</a>&quot;</span></div>
+<div class="line"><a id="l00106" name="l00106"></a><span class="lineno">  106</span><span class="preprocessor">#include &quot;<a class="code" href="adam_8hpp.html">tenzor/nn/optim/adam.hpp</a>&quot;</span></div>
+<div class="line"><a id="l00107" name="l00107"></a><span class="lineno">  107</span></div>
+<div class="line"><a id="l00116" name="l00116"></a><span class="lineno">  116</span><span class="keyword">namespace </span><a class="code hl_namespace" href="namespacetenzor.html">tenzor</a> {</div>
+<div class="line"><a id="l00131" name="l00131"></a><span class="lineno"><a class="line" href="namespacetenzor.html#a0b8fd8e86990ee056ac6c70e1767e0f3">  131</a></span>    <span class="keywordtype">void</span> <a class="code hl_function" href="namespacetenzor.html#a0b8fd8e86990ee056ac6c70e1767e0f3">initialize</a>();</div>
+<div class="line"><a id="l00132" name="l00132"></a><span class="lineno">  132</span></div>
+<div class="line"><a id="l00139" name="l00139"></a><span class="lineno"><a class="line" href="namespacetenzor.html#aecdcfcc244b91719a74a5f44d0829f06">  139</a></span>    <span class="keywordtype">void</span> <a class="code hl_function" href="namespacetenzor.html#aecdcfcc244b91719a74a5f44d0829f06">finalize</a>();</div>
+<div class="line"><a id="l00140" name="l00140"></a><span class="lineno">  140</span>}</div>
+<div class="ttc" id="aactivations_8hpp_html"><div class="ttname"><a href="activations_8hpp.html">activations.hpp</a></div><div class="ttdoc">Neural network activation functions and layers.</div></div>
+<div class="ttc" id="aadam_8hpp_html"><div class="ttname"><a href="adam_8hpp.html">adam.hpp</a></div><div class="ttdoc">Adam and AdamW optimizers.</div></div>
+<div class="ttc" id="abatchnorm_8hpp_html"><div class="ttname"><a href="batchnorm_8hpp.html">batchnorm.hpp</a></div><div class="ttdoc">Batch normalization layers for neural networks.</div></div>
+<div class="ttc" id="aconv_8hpp_html"><div class="ttname"><a href="conv_8hpp.html">conv.hpp</a></div><div class="ttdoc">Convolutional neural network layers (1D, 2D, transposed)</div></div>
+<div class="ttc" id="acreation_8hpp_html"><div class="ttname"><a href="creation_8hpp.html">creation.hpp</a></div><div class="ttdoc">Tensor creation and initialization operations.</div></div>
 <div class="ttc" id="adevice_8hpp_html"><div class="ttname"><a href="device_8hpp.html">device.hpp</a></div><div class="ttdoc">Device specification and management for tensors.</div></div>
+<div class="ttc" id="adropout_8hpp_html"><div class="ttname"><a href="dropout_8hpp.html">dropout.hpp</a></div><div class="ttdoc">Dropout regularization layers.</div></div>
 <div class="ttc" id="adtype_8hpp_html"><div class="ttname"><a href="dtype_8hpp.html">dtype.hpp</a></div><div class="ttdoc">Data type system for Tenzor tensors.</div></div>
+<div class="ttc" id="aengine_8hpp_html"><div class="ttname"><a href="engine_8hpp.html">engine.hpp</a></div><div class="ttdoc">Backward pass execution engine for automatic differentiation.</div></div>
+<div class="ttc" id="aflatten_8hpp_html"><div class="ttname"><a href="flatten_8hpp.html">flatten.hpp</a></div><div class="ttdoc">Flatten layer for reshaping tensors.</div></div>
 <div class="ttc" id="afunction_8hpp_html"><div class="ttname"><a href="function_8hpp.html">function.hpp</a></div><div class="ttdoc">Autograd function interface and built-in operations.</div></div>
+<div class="ttc" id="alinear_8hpp_html"><div class="ttname"><a href="linear_8hpp.html">linear.hpp</a></div><div class="ttdoc">Fully connected (linear) neural network layer.</div></div>
+<div class="ttc" id="alosses_8hpp_html"><div class="ttname"><a href="losses_8hpp.html">losses.hpp</a></div><div class="ttdoc">Loss functions for neural network training.</div></div>
+<div class="ttc" id="amath_8hpp_html"><div class="ttname"><a href="math_8hpp.html">math.hpp</a></div><div class="ttdoc">Mathematical operations for tensors.</div></div>
 <div class="ttc" id="amodule_8hpp_html"><div class="ttname"><a href="module_8hpp.html">module.hpp</a></div><div class="ttdoc">Neural network module base class.</div></div>
+<div class="ttc" id="anamespacetenzor_html"><div class="ttname"><a href="namespacetenzor.html">tenzor</a></div><div class="ttdoc">Main Tenzor namespace.</div><div class="ttdef"><b>Definition</b> <a href="engine_8hpp_source.html#l00019">engine.hpp:19</a></div></div>
+<div class="ttc" id="anamespacetenzor_html_a0b8fd8e86990ee056ac6c70e1767e0f3"><div class="ttname"><a href="namespacetenzor.html#a0b8fd8e86990ee056ac6c70e1767e0f3">tenzor::initialize</a></div><div class="ttdeci">void initialize()</div><div class="ttdoc">Initialize Tenzor library.</div></div>
+<div class="ttc" id="anamespacetenzor_html_aecdcfcc244b91719a74a5f44d0829f06"><div class="ttname"><a href="namespacetenzor.html#aecdcfcc244b91719a74a5f44d0829f06">tenzor::finalize</a></div><div class="ttdeci">void finalize()</div><div class="ttdoc">Finalize and cleanup Tenzor library.</div></div>
+<div class="ttc" id="anormalization_8hpp_html"><div class="ttname"><a href="normalization_8hpp.html">normalization.hpp</a></div><div class="ttdoc">Layer and group normalization layers.</div></div>
+<div class="ttc" id="aops_8hpp_html"><div class="ttname"><a href="ops_8hpp.html">ops.hpp</a></div><div class="ttdoc">Gradient-aware tensor operations for automatic differentiation.</div></div>
+<div class="ttc" id="apooling_8hpp_html"><div class="ttname"><a href="pooling_8hpp.html">pooling.hpp</a></div><div class="ttdoc">Pooling layers for spatial downsampling.</div></div>
+<div class="ttc" id="areduction_8hpp_html"><div class="ttname"><a href="reduction_8hpp.html">reduction.hpp</a></div><div class="ttdoc">Tensor reduction operations.</div></div>
+<div class="ttc" id="asgd_8hpp_html"><div class="ttname"><a href="sgd_8hpp.html">sgd.hpp</a></div><div class="ttdoc">Stochastic Gradient Descent optimizer.</div></div>
 <div class="ttc" id="atensor_8hpp_html"><div class="ttname"><a href="tensor_8hpp.html">tensor.hpp</a></div><div class="ttdoc">Core tensor class for multi-dimensional array operations.</div></div>
+<div class="ttc" id="atransform_8hpp_html"><div class="ttname"><a href="transform_8hpp.html">transform.hpp</a></div><div class="ttdoc">Tensor shape transformation operations.</div></div>
 <div class="ttc" id="avariable_8hpp_html"><div class="ttname"><a href="variable_8hpp.html">variable.hpp</a></div><div class="ttdoc">Automatic differentiation wrapper for tensors.</div></div>
 </div><!-- fragment --></div><!-- contents -->
 </div><!-- doc-content -->
@@ -145,7 +164,7 @@ $(function(){initNavTree('tenzor_8hpp_source.html','',''); });
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><a href="dir_d44c64559bbebec7f509842c48db8b23.html">include</a></li><li class="navelem"><a href="dir_14ba40437910c5dd1b08964ca20ae5af.html">tenzor</a></li><li class="navelem"><b>tenzor.hpp</b></li>
+    <li class="navelem"><a href="dir_d44c64559bbebec7f509842c48db8b23.html">include</a></li><li class="navelem"><a href="dir_14ba40437910c5dd1b08964ca20ae5af.html">tenzor</a></li><li class="navelem"><a href="tenzor_8hpp.html">tenzor.hpp</a></li>
     <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>

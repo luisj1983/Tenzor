@@ -7,5 +7,5 @@ var dir_14ba40437910c5dd1b08964ca20ae5af =
     [ "ops", "dir_be5836cfbdc05cededbe797d13e5fd88.html", "dir_be5836cfbdc05cededbe797d13e5fd88" ],
     [ "parallel", "dir_731150426551138f38ed7fbcbd46a602.html", "dir_731150426551138f38ed7fbcbd46a602" ],
     [ "utils", "dir_16b01d04ecc528db8b9be846cd642082.html", "dir_16b01d04ecc528db8b9be846cd642082" ],
-    [ "tenzor.hpp", "tenzor_8hpp_source.html", null ]
+    [ "tenzor.hpp", "tenzor_8hpp.html", "tenzor_8hpp" ]
 ];

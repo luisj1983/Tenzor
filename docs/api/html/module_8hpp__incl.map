@@ -25,7 +25,7 @@
 <area shape="rect" id="Node000010" href="$dtype_8hpp.html" title="Data type system for Tenzor tensors." alt="" coords="678,308,764,336"/>
 <area shape="poly" id="edge13_Node000008_Node000010" title=" " alt="" coords="319,183,422,230,451,245,480,257,576,286,663,307,662,312,575,292,479,263,449,249,420,235,317,187"/>
 <area shape="poly" id="edge18_Node000008_Node000015" title=" " alt="" coords="310,183,484,297,481,302,307,187"/>
-<area shape="rect" id="Node000016" href="$storage_8hpp_source.html" title=" " alt="" coords="190,232,289,260"/>
+<area shape="rect" id="Node000016" href="$storage_8hpp.html" title="Memory storage abstraction for tensor data." alt="" coords="190,232,289,260"/>
 <area shape="poly" id="edge22_Node000008_Node000016" title=" " alt="" coords="282,186,259,221,255,218,278,183"/>
 <area shape="rect" id="Node000011" title=" " alt="" coords="524,384,590,411"/>
 <area shape="poly" id="edge14_Node000010_Node000011" title=" " alt="" coords="693,339,601,380,599,375,690,334"/>

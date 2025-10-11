@@ -92,36 +92,38 @@ $(function(){initNavTree('parallel__for_8hpp_source.html','',''); });
   <div class="headertitle"><div class="title">parallel_for.hpp</div></div>
 </div><!--header-->
 <div class="contents">
-<div class="fragment"><div class="line"><a id="l00001" name="l00001"></a><span class="lineno">    1</span><span class="preprocessor">#pragma once</span></div>
-<div class="line"><a id="l00002" name="l00002"></a><span class="lineno">    2</span> </div>
-<div class="line"><a id="l00003" name="l00003"></a><span class="lineno">    3</span><span class="preprocessor">#include &lt;functional&gt;</span></div>
-<div class="line"><a id="l00004" name="l00004"></a><span class="lineno">    4</span><span class="preprocessor">#include &lt;cstdint&gt;</span></div>
-<div class="line"><a id="l00005" name="l00005"></a><span class="lineno">    5</span> </div>
-<div class="line"><a id="l00006" name="l00006"></a><span class="lineno">    6</span><span class="keyword">namespace </span>tenzor {</div>
+<a href="parallel__for_8hpp.html">Go to the documentation of this file.</a><div class="fragment"><div class="line"><a id="l00001" name="l00001"></a><span class="lineno">    1</span></div>
 <div class="line"><a id="l00007" name="l00007"></a><span class="lineno">    7</span> </div>
-<div class="line"><a id="l00008" name="l00008"></a><span class="lineno">    8</span><span class="comment">// Parallel for execution</span></div>
-<div class="line"><a id="l00009" name="l00009"></a><span class="lineno">    9</span><span class="keyword">template</span>&lt;<span class="keyword">typename</span> F&gt;</div>
-<div class="line"><a id="l00010" name="l00010"></a><span class="lineno">   10</span><span class="keyword">auto</span> parallel_for(int64_t begin, int64_t end, F&amp;&amp; func) -&gt; void;</div>
-<div class="line"><a id="l00011" name="l00011"></a><span class="lineno">   11</span> </div>
-<div class="line"><a id="l00012" name="l00012"></a><span class="lineno">   12</span><span class="comment">// Parallel for with grain size</span></div>
-<div class="line"><a id="l00013" name="l00013"></a><span class="lineno">   13</span><span class="keyword">template</span>&lt;<span class="keyword">typename</span> F&gt;</div>
-<div class="line"><a id="l00014" name="l00014"></a><span class="lineno">   14</span><span class="keyword">auto</span> parallel_for(int64_t begin, int64_t end, int64_t grain_size, F&amp;&amp; func) -&gt; void;</div>
-<div class="line"><a id="l00015" name="l00015"></a><span class="lineno">   15</span> </div>
-<div class="line"><a id="l00016" name="l00016"></a><span class="lineno">   16</span><span class="comment">// Parallel reduce</span></div>
-<div class="line"><a id="l00017" name="l00017"></a><span class="lineno">   17</span><span class="keyword">template</span>&lt;<span class="keyword">typename</span> T, <span class="keyword">typename</span> F, <span class="keyword">typename</span> R&gt;</div>
-<div class="line"><a id="l00018" name="l00018"></a><span class="lineno">   18</span><span class="keyword">auto</span> parallel_reduce(int64_t begin, int64_t end,</div>
-<div class="line"><a id="l00019" name="l00019"></a><span class="lineno">   19</span>                    T init,</div>
-<div class="line"><a id="l00020" name="l00020"></a><span class="lineno">   20</span>                    F&amp;&amp; map_func,</div>
-<div class="line"><a id="l00021" name="l00021"></a><span class="lineno">   21</span>                    R&amp;&amp; reduce_func) -&gt; T;</div>
-<div class="line"><a id="l00022" name="l00022"></a><span class="lineno">   22</span> </div>
-<div class="line"><a id="l00023" name="l00023"></a><span class="lineno">   23</span>} <span class="comment">// namespace tenzor</span></div>
+<div class="line"><a id="l00008" name="l00008"></a><span class="lineno">    8</span><span class="preprocessor">#pragma once</span></div>
+<div class="line"><a id="l00009" name="l00009"></a><span class="lineno">    9</span> </div>
+<div class="line"><a id="l00010" name="l00010"></a><span class="lineno">   10</span><span class="preprocessor">#include &lt;functional&gt;</span></div>
+<div class="line"><a id="l00011" name="l00011"></a><span class="lineno">   11</span><span class="preprocessor">#include &lt;cstdint&gt;</span></div>
+<div class="line"><a id="l00012" name="l00012"></a><span class="lineno">   12</span> </div>
+<div class="line"><a id="l00013" name="l00013"></a><span class="lineno">   13</span><span class="keyword">namespace </span><a class="code hl_namespace" href="namespacetenzor.html">tenzor</a> {</div>
+<div class="line"><a id="l00014" name="l00014"></a><span class="lineno">   14</span></div>
+<div class="line"><a id="l00039" name="l00039"></a><span class="lineno">   39</span><span class="keyword">template</span>&lt;<span class="keyword">typename</span> F&gt;</div>
+<div class="line"><a id="l00040" name="l00040"></a><span class="lineno"><a class="line" href="namespacetenzor.html#a6e3b587d58c4ad5bbd0cbe5e308e955a">   40</a></span><span class="keyword">auto</span> <a class="code hl_function" href="namespacetenzor.html#a6e3b587d58c4ad5bbd0cbe5e308e955a">parallel_for</a>(int64_t begin, int64_t end, F&amp;&amp; func) -&gt; void;</div>
+<div class="line"><a id="l00041" name="l00041"></a><span class="lineno">   41</span></div>
+<div class="line"><a id="l00061" name="l00061"></a><span class="lineno">   61</span><span class="keyword">template</span>&lt;<span class="keyword">typename</span> F&gt;</div>
+<div class="line"><a id="l00062" name="l00062"></a><span class="lineno"><a class="line" href="namespacetenzor.html#a5a3216c62058c3f26b34c26130f2d7a9">   62</a></span><span class="keyword">auto</span> <a class="code hl_function" href="namespacetenzor.html#a6e3b587d58c4ad5bbd0cbe5e308e955a">parallel_for</a>(int64_t begin, int64_t end, int64_t grain_size, F&amp;&amp; func) -&gt; void;</div>
+<div class="line"><a id="l00063" name="l00063"></a><span class="lineno">   63</span></div>
+<div class="line"><a id="l00092" name="l00092"></a><span class="lineno">   92</span><span class="keyword">template</span>&lt;<span class="keyword">typename</span> T, <span class="keyword">typename</span> F, <span class="keyword">typename</span> R&gt;</div>
+<div class="line"><a id="l00093" name="l00093"></a><span class="lineno"><a class="line" href="namespacetenzor.html#a9f7dc5155c5651afeb01a40c3cc5eb04">   93</a></span><span class="keyword">auto</span> <a class="code hl_function" href="namespacetenzor.html#a9f7dc5155c5651afeb01a40c3cc5eb04">parallel_reduce</a>(int64_t begin, int64_t end,</div>
+<div class="line"><a id="l00094" name="l00094"></a><span class="lineno">   94</span>                    T init,</div>
+<div class="line"><a id="l00095" name="l00095"></a><span class="lineno">   95</span>                    F&amp;&amp; map_func,</div>
+<div class="line"><a id="l00096" name="l00096"></a><span class="lineno">   96</span>                    R&amp;&amp; reduce_func) -&gt; T;</div>
+<div class="line"><a id="l00097" name="l00097"></a><span class="lineno">   97</span> </div>
+<div class="line"><a id="l00098" name="l00098"></a><span class="lineno">   98</span>} <span class="comment">// namespace tenzor</span></div>
+<div class="ttc" id="anamespacetenzor_html"><div class="ttname"><a href="namespacetenzor.html">tenzor</a></div><div class="ttdoc">Main Tenzor namespace.</div><div class="ttdef"><b>Definition</b> <a href="engine_8hpp_source.html#l00019">engine.hpp:19</a></div></div>
+<div class="ttc" id="anamespacetenzor_html_a6e3b587d58c4ad5bbd0cbe5e308e955a"><div class="ttname"><a href="namespacetenzor.html#a6e3b587d58c4ad5bbd0cbe5e308e955a">tenzor::parallel_for</a></div><div class="ttdeci">auto parallel_for(int64_t begin, int64_t end, F &amp;&amp;func) -&gt; void</div><div class="ttdoc">Execute loop iterations in parallel.</div></div>
+<div class="ttc" id="anamespacetenzor_html_a9f7dc5155c5651afeb01a40c3cc5eb04"><div class="ttname"><a href="namespacetenzor.html#a9f7dc5155c5651afeb01a40c3cc5eb04">tenzor::parallel_reduce</a></div><div class="ttdeci">auto parallel_reduce(int64_t begin, int64_t end, T init, F &amp;&amp;map_func, R &amp;&amp;reduce_func) -&gt; T</div><div class="ttdoc">Parallel map-reduce operation.</div></div>
 </div><!-- fragment --></div><!-- contents -->
 </div><!-- doc-content -->
 </div><!-- container -->
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><a href="dir_d44c64559bbebec7f509842c48db8b23.html">include</a></li><li class="navelem"><a href="dir_14ba40437910c5dd1b08964ca20ae5af.html">tenzor</a></li><li class="navelem"><a href="dir_731150426551138f38ed7fbcbd46a602.html">parallel</a></li><li class="navelem"><b>parallel_for.hpp</b></li>
+    <li class="navelem"><a href="dir_d44c64559bbebec7f509842c48db8b23.html">include</a></li><li class="navelem"><a href="dir_14ba40437910c5dd1b08964ca20ae5af.html">tenzor</a></li><li class="navelem"><a href="dir_731150426551138f38ed7fbcbd46a602.html">parallel</a></li><li class="navelem"><a href="parallel__for_8hpp.html">parallel_for.hpp</a></li>
     <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>

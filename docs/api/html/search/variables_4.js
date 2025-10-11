@@ -1,4 +1,4 @@
 var searchData=
 [
-  ['offset_0',['offset',['../classtenzor_1_1TensorImpl.html#a85f01db9a220494ac9ee9ec128c7d903',1,'tenzor::TensorImpl']]]
+  ['lr_0',['lr',['../structtenzor_1_1optim_1_1ParamGroup.html#a1f79cbfd3592900332741e8f66a4b438',1,'tenzor::optim::ParamGroup']]]
 ];

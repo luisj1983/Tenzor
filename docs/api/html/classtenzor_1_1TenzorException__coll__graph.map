@@ -1,5 +1,5 @@
 <map id="tenzor::TenzorException" name="tenzor::TenzorException">
-<area shape="rect" id="Node000001" title=" " alt="" coords="5,157,182,184"/>
+<area shape="rect" id="Node000001" title="Base exception class for all Tenzor errors." alt="" coords="5,157,182,184"/>
 <area shape="rect" id="Node000002" title=" " alt="" coords="24,81,163,109"/>
 <area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="96,124,96,156,91,156,91,124"/>
 <area shape="rect" id="Node000003" title=" " alt="" coords="37,5,150,33"/>

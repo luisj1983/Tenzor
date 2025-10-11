@@ -1,0 +1,48 @@
+<map id="include/tenzor/nn/optim/sgd.hpp" name="include/tenzor/nn/optim/sgd.hpp">
+<area shape="rect" id="Node000001" title="Stochastic Gradient Descent optimizer." alt="" coords="212,5,387,50"/>
+<area shape="rect" id="Node000002" href="$optimizer_8hpp.html" title="Base class for all optimizers." alt="" coords="244,98,355,126"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="302,50,302,82,297,82,297,50"/>
+<area shape="rect" id="Node000003" title=" " alt="" coords="22,325,84,353"/>
+<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="272,128,234,149,195,176,158,210,124,247,72,314,68,311,120,244,154,206,191,172,231,144,270,124"/>
+<area shape="rect" id="Node000004" title=" " alt="" coords="175,401,251,428"/>
+<area shape="poly" id="edge3_Node000002_Node000004" title=" " alt="" coords="265,129,205,155,133,197,97,224,64,254,35,288,13,326,8,339,12,351,66,370,160,396,159,401,64,375,8,355,3,339,8,324,31,285,60,250,94,219,130,193,202,151,262,124"/>
+<area shape="rect" id="Node000005" title=" " alt="" coords="659,174,783,201"/>
+<area shape="poly" id="edge4_Node000002_Node000005" title=" " alt="" coords="356,120,644,170,643,175,355,125"/>
+<area shape="rect" id="Node000006" title=" " alt="" coords="576,476,634,504"/>
+<area shape="poly" id="edge5_Node000002_Node000006" title=" " alt="" coords="355,112,436,121,481,130,524,144,564,163,596,189,617,221,623,241,625,263,314,402,237,439,213,452,236,449,313,429,624,338,621,406,613,461,608,461,616,405,621,342,314,434,237,454,208,454,235,434,312,397,620,260,618,242,612,223,592,192,561,168,522,149,480,135,435,126,355,117"/>
+<area shape="rect" id="Node000007" href="$variable_8hpp.html" title="Automatic differentiation wrapper for tensors." alt="" coords="205,174,394,201"/>
+<area shape="poly" id="edge6_Node000002_Node000007" title=" " alt="" coords="302,126,302,158,297,158,297,126"/>
+<area shape="poly" id="edge7_Node000007_Node000004" title=" " alt="" coords="277,204,249,224,223,251,207,276,199,299,197,322,200,352,207,385,202,386,194,353,192,322,194,297,203,274,219,248,245,220,274,200"/>
+<area shape="rect" id="Node000008" title=" " alt="" coords="510,325,585,353"/>
+<area shape="poly" id="edge8_Node000007_Node000008" title=" " alt="" coords="323,199,515,315,512,319,320,204"/>
+<area shape="rect" id="Node000009" href="$tensor_8hpp.html" title="Core tensor class for multi&#45;dimensional array operations." alt="" coords="233,249,366,277"/>
+<area shape="poly" id="edge9_Node000007_Node000009" title=" " alt="" coords="302,202,302,234,297,234,297,202"/>
+<area shape="poly" id="edge11_Node000009_Node000003" title=" " alt="" coords="256,280,100,326,98,321,255,275"/>
+<area shape="poly" id="edge10_Node000009_Node000004" title=" " alt="" coords="301,278,293,313,277,354,261,375,244,392,240,388,257,371,272,351,288,312,295,277"/>
+<area shape="poly" id="edge13_Node000009_Node000008" title=" " alt="" coords="345,275,496,320,495,325,343,280"/>
+<area shape="rect" id="Node000010" title=" " alt="" coords="209,325,262,353"/>
+<area shape="poly" id="edge12_Node000009_Node000010" title=" " alt="" coords="290,279,259,315,255,311,286,276"/>
+<area shape="rect" id="Node000011" href="$dtype_8hpp.html" title="Data type system for Tenzor tensors." alt="" coords="64,401,151,428"/>
+<area shape="poly" id="edge14_Node000009_Node000011" title=" " alt="" coords="275,280,238,301,199,327,162,359,131,391,127,387,158,355,195,323,235,296,272,275"/>
+<area shape="rect" id="Node000016" href="$device_8hpp.html" title="Device specification and management for tensors." alt="" coords="460,401,552,428"/>
+<area shape="poly" id="edge19_Node000009_Node000016" title=" " alt="" coords="353,275,402,294,449,323,477,353,496,385,492,388,473,356,446,327,400,299,351,280"/>
+<area shape="rect" id="Node000017" href="$storage_8hpp.html" title="Memory storage abstraction for tensor data." alt="" coords="337,325,435,353"/>
+<area shape="poly" id="edge23_Node000009_Node000017" title=" " alt="" coords="317,276,361,313,358,317,313,280"/>
+<area shape="rect" id="Node000012" title=" " alt="" coords="454,476,519,504"/>
+<area shape="poly" id="edge15_Node000011_Node000012" title=" " alt="" coords="152,423,163,426,423,474,439,477,438,482,422,479,162,431,151,429"/>
+<area shape="rect" id="Node000013" title=" " alt="" coords="314,476,410,504"/>
+<area shape="poly" id="edge16_Node000011_Node000013" title=" " alt="" coords="152,426,303,469,301,474,151,431"/>
+<area shape="rect" id="Node000014" title=" " alt="" coords="162,476,253,504"/>
+<area shape="poly" id="edge17_Node000011_Node000014" title=" " alt="" coords="127,427,179,465,176,469,124,431"/>
+<area shape="rect" id="Node000015" title=" " alt="" coords="61,476,138,504"/>
+<area shape="poly" id="edge18_Node000011_Node000015" title=" " alt="" coords="109,429,105,461,100,460,104,429"/>
+<area shape="poly" id="edge21_Node000016_Node000006" title=" " alt="" coords="526,427,577,465,574,469,522,431"/>
+<area shape="poly" id="edge20_Node000016_Node000012" title=" " alt="" coords="505,430,496,462,491,461,500,428"/>
+<area shape="poly" id="edge22_Node000016_Node000013" title=" " alt="" coords="482,431,403,471,400,467,479,427"/>
+<area shape="poly" id="edge24_Node000017_Node000004" title=" " alt="" coords="356,356,259,397,256,392,354,351"/>
+<area shape="poly" id="edge27_Node000017_Node000016" title=" " alt="" coords="409,351,474,390,471,395,406,355"/>
+<area shape="rect" id="Node000018" title=" " alt="" coords="276,401,345,428"/>
+<area shape="poly" id="edge25_Node000017_Node000018" title=" " alt="" coords="375,355,336,392,333,388,371,351"/>
+<area shape="rect" id="Node000019" title=" " alt="" coords="369,401,435,428"/>
+<area shape="poly" id="edge26_Node000017_Node000019" title=" " alt="" coords="392,353,399,385,394,386,387,354"/>
+</map>

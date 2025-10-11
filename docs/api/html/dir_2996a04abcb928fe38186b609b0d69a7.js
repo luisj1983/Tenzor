@@ -5,5 +5,5 @@ var dir_2996a04abcb928fe38186b609b0d69a7 =
     [ "loss", "dir_383df7e77f472265e68a964705df9dac.html", "dir_383df7e77f472265e68a964705df9dac" ],
     [ "optim", "dir_773af256a187f753cf450a2e67d6bc80.html", "dir_773af256a187f753cf450a2e67d6bc80" ],
     [ "module.hpp", "module_8hpp.html", "module_8hpp" ],
-    [ "serialize.hpp", "serialize_8hpp_source.html", null ]
+    [ "serialize.hpp", "serialize_8hpp.html", "serialize_8hpp" ]
 ];

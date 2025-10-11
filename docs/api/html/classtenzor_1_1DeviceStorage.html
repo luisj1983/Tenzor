@@ -92,13 +92,18 @@ $(function(){initNavTree('classtenzor_1_1DeviceStorage.html','','classtenzor_1_1
   <div class="headertitle"><div class="title">tenzor::DeviceStorage Class Reference</div></div>
 </div><!--header-->
 <div class="contents">
+
+<p><a class="el" href="structtenzor_1_1Device.html" title="Device specification for tensor placement.">Device</a> (GPU) memory storage managed by backend.  
+ <a href="#details">More...</a></p>
+
+<p><code>#include &lt;<a class="el" href="storage_8hpp_source.html">storage.hpp</a>&gt;</code></p>
 <div class="dynheader">
 Inheritance diagram for tenzor::DeviceStorage:</div>
 <div class="dyncontent">
 <div class="center"><img src="classtenzor_1_1DeviceStorage__inherit__graph.png" border="0" usemap="#atenzor_1_1DeviceStorage_inherit__map" loading="lazy" alt="Inheritance graph"/></div>
 <map name="atenzor_1_1DeviceStorage_inherit__map" id="atenzor_1_1DeviceStorage_inherit__map">
-<area shape="rect" title=" " alt="" coords="5,81,171,109"/>
-<area shape="rect" href="classtenzor_1_1Storage.html" title=" " alt="" coords="28,5,148,33"/>
+<area shape="rect" title="Device (GPU) memory storage managed by backend." alt="" coords="5,81,171,109"/>
+<area shape="rect" href="classtenzor_1_1Storage.html" title="Abstract base class for tensor memory storage." alt="" coords="28,5,148,33"/>
 <area shape="poly" title=" " alt="" coords="91,49,91,81,85,81,85,49"/>
 </map>
 <center><span class="legend">[<a target="top" href="graph_legend.html">legend</a>]</span></center></div>
@@ -107,34 +112,167 @@ Collaboration diagram for tenzor::DeviceStorage:</div>
 <div class="dyncontent">
 <div class="center"><img src="classtenzor_1_1DeviceStorage__coll__graph.png" border="0" usemap="#atenzor_1_1DeviceStorage_coll__map" loading="lazy" alt="Collaboration graph"/></div>
 <map name="atenzor_1_1DeviceStorage_coll__map" id="atenzor_1_1DeviceStorage_coll__map">
-<area shape="rect" title=" " alt="" coords="5,81,171,109"/>
-<area shape="rect" href="classtenzor_1_1Storage.html" title=" " alt="" coords="28,5,148,33"/>
+<area shape="rect" title="Device (GPU) memory storage managed by backend." alt="" coords="5,81,171,109"/>
+<area shape="rect" href="classtenzor_1_1Storage.html" title="Abstract base class for tensor memory storage." alt="" coords="28,5,148,33"/>
 <area shape="poly" title=" " alt="" coords="91,49,91,81,85,81,85,49"/>
 </map>
 <center><span class="legend">[<a target="top" href="graph_legend.html">legend</a>]</span></center></div>
 <table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-pub-methods" class="groupheader"><a id="pub-methods" name="pub-methods"></a>
 Public Member Functions</h2></td></tr>
-<tr class="memitem:a5a0976287b244e14cda78092badaf4df" id="r_a5a0976287b244e14cda78092badaf4df"><td class="memItemLeft" align="right" valign="top"><a id="a5a0976287b244e14cda78092badaf4df" name="a5a0976287b244e14cda78092badaf4df"></a>
-&#160;</td><td class="memItemRight" valign="bottom"><b>DeviceStorage</b> (void *device_ptr, size_t size_bytes, <a class="el" href="structtenzor_1_1Device.html">Device</a> device, <a class="el" href="classtenzor_1_1Backend.html">Backend</a> *backend)</td></tr>
+<tr class="memitem:a5a0976287b244e14cda78092badaf4df" id="r_a5a0976287b244e14cda78092badaf4df"><td class="memItemLeft" align="right" valign="top">&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a5a0976287b244e14cda78092badaf4df">DeviceStorage</a> (void *device_ptr, size_t <a class="el" href="#a4ea1a54292dcf5dd519932bda266ed35">size_bytes</a>, <a class="el" href="structtenzor_1_1Device.html">Device</a> <a class="el" href="#a5be2369c4b8f815623fee9fea09803f1">device</a>, <a class="el" href="classtenzor_1_1Backend.html">Backend</a> *backend)</td></tr>
+<tr class="memdesc:a5a0976287b244e14cda78092badaf4df"><td class="mdescLeft">&#160;</td><td class="mdescRight">Construct device storage from existing allocation.  <br /></td></tr>
+<tr class="memitem:a6150b9c15d51e7784319a030f784efd3" id="r_a6150b9c15d51e7784319a030f784efd3"><td class="memItemLeft" align="right" valign="top">&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a6150b9c15d51e7784319a030f784efd3">~DeviceStorage</a> () override</td></tr>
+<tr class="memdesc:a6150b9c15d51e7784319a030f784efd3"><td class="mdescLeft">&#160;</td><td class="mdescRight">Destructor frees device memory via backend.  <br /></td></tr>
 <tr class="memitem:ab1fd3971b06d2ab874500352ef54f361" id="r_ab1fd3971b06d2ab874500352ef54f361"><td class="memItemLeft" align="right" valign="top"><a id="ab1fd3971b06d2ab874500352ef54f361" name="ab1fd3971b06d2ab874500352ef54f361"></a>
 &#160;</td><td class="memItemRight" valign="bottom"><b>DeviceStorage</b> (const <a class="el" href="classtenzor_1_1DeviceStorage.html">DeviceStorage</a> &amp;)=delete</td></tr>
 <tr class="memitem:aeef44f6b1cba5d8cdaedb7d8d09501a0" id="r_aeef44f6b1cba5d8cdaedb7d8d09501a0"><td class="memItemLeft" align="right" valign="top"><a id="aeef44f6b1cba5d8cdaedb7d8d09501a0" name="aeef44f6b1cba5d8cdaedb7d8d09501a0"></a>
 <a class="el" href="classtenzor_1_1DeviceStorage.html">DeviceStorage</a> &amp;&#160;</td><td class="memItemRight" valign="bottom"><b>operator=</b> (const <a class="el" href="classtenzor_1_1DeviceStorage.html">DeviceStorage</a> &amp;)=delete</td></tr>
-<tr class="memitem:ad183103b5c12bb56d8a457c128c0a70b" id="r_ad183103b5c12bb56d8a457c128c0a70b"><td class="memItemLeft" align="right" valign="top"><a id="ad183103b5c12bb56d8a457c128c0a70b" name="ad183103b5c12bb56d8a457c128c0a70b"></a>
-&#160;</td><td class="memItemRight" valign="bottom"><b>DeviceStorage</b> (<a class="el" href="classtenzor_1_1DeviceStorage.html">DeviceStorage</a> &amp;&amp;) noexcept</td></tr>
-<tr class="memitem:a8a4cf53798512c179e573ccac23f3f61" id="r_a8a4cf53798512c179e573ccac23f3f61"><td class="memItemLeft" align="right" valign="top"><a id="a8a4cf53798512c179e573ccac23f3f61" name="a8a4cf53798512c179e573ccac23f3f61"></a>
-<a class="el" href="classtenzor_1_1DeviceStorage.html">DeviceStorage</a> &amp;&#160;</td><td class="memItemRight" valign="bottom"><b>operator=</b> (<a class="el" href="classtenzor_1_1DeviceStorage.html">DeviceStorage</a> &amp;&amp;) noexcept</td></tr>
+<tr class="memitem:ad183103b5c12bb56d8a457c128c0a70b" id="r_ad183103b5c12bb56d8a457c128c0a70b"><td class="memItemLeft" align="right" valign="top">&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#ad183103b5c12bb56d8a457c128c0a70b">DeviceStorage</a> (<a class="el" href="classtenzor_1_1DeviceStorage.html">DeviceStorage</a> &amp;&amp;) noexcept</td></tr>
+<tr class="memdesc:ad183103b5c12bb56d8a457c128c0a70b"><td class="mdescLeft">&#160;</td><td class="mdescRight">Move constructor transfers ownership.  <br /></td></tr>
+<tr class="memitem:a8a4cf53798512c179e573ccac23f3f61" id="r_a8a4cf53798512c179e573ccac23f3f61"><td class="memItemLeft" align="right" valign="top"><a class="el" href="classtenzor_1_1DeviceStorage.html">DeviceStorage</a> &amp;&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a8a4cf53798512c179e573ccac23f3f61">operator=</a> (<a class="el" href="classtenzor_1_1DeviceStorage.html">DeviceStorage</a> &amp;&amp;) noexcept</td></tr>
+<tr class="memdesc:a8a4cf53798512c179e573ccac23f3f61"><td class="mdescLeft">&#160;</td><td class="mdescRight">Move assignment transfers ownership.  <br /></td></tr>
 <tr class="memitem:a98de955ace838697ab8d6ad411f65eca" id="r_a98de955ace838697ab8d6ad411f65eca"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a98de955ace838697ab8d6ad411f65eca">data</a> () -&gt; void *override</td></tr>
+<tr class="memdesc:a98de955ace838697ab8d6ad411f65eca"><td class="mdescLeft">&#160;</td><td class="mdescRight">Get mutable pointer to storage data.  <br /></td></tr>
 <tr class="memitem:a37dcafb452660ac45b0d7d29e1169def" id="r_a37dcafb452660ac45b0d7d29e1169def"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a37dcafb452660ac45b0d7d29e1169def">data</a> () const -&gt; const void *override</td></tr>
+<tr class="memdesc:a37dcafb452660ac45b0d7d29e1169def"><td class="mdescLeft">&#160;</td><td class="mdescRight">Get const pointer to storage data.  <br /></td></tr>
 <tr class="memitem:a4ea1a54292dcf5dd519932bda266ed35" id="r_a4ea1a54292dcf5dd519932bda266ed35"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a4ea1a54292dcf5dd519932bda266ed35">size_bytes</a> () const -&gt; size_t override</td></tr>
+<tr class="memdesc:a4ea1a54292dcf5dd519932bda266ed35"><td class="mdescLeft">&#160;</td><td class="mdescRight">Get total size of storage in bytes.  <br /></td></tr>
 <tr class="memitem:a5be2369c4b8f815623fee9fea09803f1" id="r_a5be2369c4b8f815623fee9fea09803f1"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a5be2369c4b8f815623fee9fea09803f1">device</a> () const -&gt; <a class="el" href="structtenzor_1_1Device.html">Device</a> override</td></tr>
+<tr class="memdesc:a5be2369c4b8f815623fee9fea09803f1"><td class="mdescLeft">&#160;</td><td class="mdescRight">Get device where storage resides.  <br /></td></tr>
 <tr class="memitem:a3688c808ac537dc02f99bba76660f222" id="r_a3688c808ac537dc02f99bba76660f222"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a3688c808ac537dc02f99bba76660f222">ref_count</a> () const -&gt; int64_t override</td></tr>
+<tr class="memdesc:a3688c808ac537dc02f99bba76660f222"><td class="mdescLeft">&#160;</td><td class="mdescRight">Get current reference count.  <br /></td></tr>
 </table>
 <a name="details" id="details"></a><h2 id="header-details" class="groupheader">Detailed Description</h2>
-<div class="textblock">
-<p class="definition">Definition at line <a class="el" href="storage_8hpp_source.html#l00050">50</a> of file <a class="el" href="storage_8hpp_source.html">storage.hpp</a>.</p>
-</div><a name="doc-func-members" id="doc-func-members"></a><h2 id="header-doc-func-members" class="groupheader">Member Function Documentation</h2>
+<div class="textblock"><p><a class="el" href="structtenzor_1_1Device.html" title="Device specification for tensor placement.">Device</a> (GPU) memory storage managed by backend. </p>
+<p>Manages device-side memory (CUDA, ROCm, OneAPI) through backend abstractions. Memory allocation and deallocation are delegated to the appropriate backend implementation.</p>
+<p>Unlike <a class="el" href="classtenzor_1_1CPUStorage.html" title="CPU memory storage with aligned allocation.">CPUStorage</a>, this class does not directly manage memory but coordinates with the backend system for proper lifecycle management.</p>
+<div class="fragment"><div class="line"><a class="code hl_class" href="classtenzor_1_1Backend.html">Backend</a>* backend = get_cuda_backend();</div>
+<div class="line"><span class="keywordtype">void</span>* device_ptr = backend-&gt;<a class="code hl_function" href="classtenzor_1_1Backend.html#ab38992a0043a2a318f952b5c1d1a1fff">allocate</a>(1024);</div>
+<div class="line"><span class="keyword">auto</span> storage = std::make_unique&lt;DeviceStorage&gt;(</div>
+<div class="line">    device_ptr, 1024, <a class="code hl_function" href="structtenzor_1_1Device.html#a76d3773ac62efb2135846cc5f1dbd3c8">Device::cuda</a>(0), backend</div>
+<div class="line">);</div>
+<div class="ttc" id="aclasstenzor_1_1Backend_html"><div class="ttname"><a href="classtenzor_1_1Backend.html">tenzor::Backend</a></div><div class="ttdoc">Abstract base class for device backend implementations.</div><div class="ttdef"><b>Definition</b> <a href="backend_8hpp_source.html#l00069">backend.hpp:69</a></div></div>
+<div class="ttc" id="aclasstenzor_1_1Backend_html_ab38992a0043a2a318f952b5c1d1a1fff"><div class="ttname"><a href="classtenzor_1_1Backend.html#ab38992a0043a2a318f952b5c1d1a1fff">tenzor::Backend::allocate</a></div><div class="ttdeci">virtual auto allocate(size_t bytes, int32_t device_id) -&gt; void *=0</div><div class="ttdoc">Allocate device memory.</div></div>
+<div class="ttc" id="astructtenzor_1_1Device_html_a76d3773ac62efb2135846cc5f1dbd3c8"><div class="ttname"><a href="structtenzor_1_1Device.html#a76d3773ac62efb2135846cc5f1dbd3c8">tenzor::Device::cuda</a></div><div class="ttdeci">static auto cuda(int32_t idx=0) -&gt; Device</div><div class="ttdoc">Create a CUDA device.</div><div class="ttdef"><b>Definition</b> <a href="device_8hpp_source.html#l00070">device.hpp:70</a></div></div>
+</div><!-- fragment --><dl class="section note"><dt>Note</dt><dd>This class is move-only (non-copyable). </dd></dl>
+<dl class="section warning"><dt>Warning</dt><dd><a class="el" href="structtenzor_1_1Device.html" title="Device specification for tensor placement.">Device</a> pointer must be valid for the backend type. </dd></dl>
+
+<p class="definition">Definition at line <a class="el" href="storage_8hpp_source.html#l00159">159</a> of file <a class="el" href="storage_8hpp_source.html">storage.hpp</a>.</p>
+</div><a name="doc-constructors" id="doc-constructors"></a><h2 id="header-doc-constructors" class="groupheader">Constructor &amp; Destructor Documentation</h2>
+<a id="a5a0976287b244e14cda78092badaf4df" name="a5a0976287b244e14cda78092badaf4df"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a5a0976287b244e14cda78092badaf4df">&#9670;&#160;</a></span>DeviceStorage() <span class="overload">[1/2]</span></h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname">tenzor::DeviceStorage::DeviceStorage </td>
+          <td>(</td>
+          <td class="paramtype">void *</td>          <td class="paramname"><span class="paramname"><em>device_ptr</em></span>, </td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype">size_t</td>          <td class="paramname"><span class="paramname"><em>size_bytes</em></span>, </td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype"><a class="el" href="structtenzor_1_1Device.html">Device</a></td>          <td class="paramname"><span class="paramname"><em>device</em></span>, </td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype"><a class="el" href="classtenzor_1_1Backend.html">Backend</a> *</td>          <td class="paramname"><span class="paramname"><em>backend</em></span>&#160;)</td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>Construct device storage from existing allocation. </p>
+<p>Takes ownership of pre-allocated device memory. The backend pointer must remain valid for the lifetime of this storage.</p>
+<dl class="params"><dt>Parameters</dt><dd>
+  <table class="params">
+    <tr><td class="paramname">device_ptr</td><td>Pointer to device memory </td></tr>
+    <tr><td class="paramname">size_bytes</td><td>Size of allocation in bytes </td></tr>
+    <tr><td class="paramname">device</td><td><a class="el" href="structtenzor_1_1Device.html" title="Device specification for tensor placement.">Device</a> specification </td></tr>
+    <tr><td class="paramname">backend</td><td><a class="el" href="classtenzor_1_1Backend.html" title="Abstract base class for device backend implementations.">Backend</a> managing this memory </td></tr>
+  </table>
+  </dd>
+</dl>
+
+<p class="reference">References <a class="el" href="storage_8hpp_source.html#l00203">device()</a>, and <a class="el" href="storage_8hpp_source.html#l00202">size_bytes()</a>.</p>
+
+<p class="reference">Referenced by <a class="el" href="#ad183103b5c12bb56d8a457c128c0a70b">DeviceStorage()</a>, <a class="el" href="#a8a4cf53798512c179e573ccac23f3f61">operator=()</a>, and <a class="el" href="#a6150b9c15d51e7784319a030f784efd3">~DeviceStorage()</a>.</p>
+
+</div>
+</div>
+<a id="a6150b9c15d51e7784319a030f784efd3" name="a6150b9c15d51e7784319a030f784efd3"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a6150b9c15d51e7784319a030f784efd3">&#9670;&#160;</a></span>~DeviceStorage()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname">tenzor::DeviceStorage::~DeviceStorage </td>
+          <td>(</td>
+          <td class="paramname"><span class="paramname"><em></em></span></td><td>)</td>
+          <td></td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel override">override</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+
+<p>Destructor frees device memory via backend. </p>
+<p>Delegates memory deallocation to the backend. </p>
+
+<p class="reference">References <a class="el" href="#a5a0976287b244e14cda78092badaf4df">DeviceStorage()</a>.</p>
+
+</div>
+</div>
+<a id="ad183103b5c12bb56d8a457c128c0a70b" name="ad183103b5c12bb56d8a457c128c0a70b"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#ad183103b5c12bb56d8a457c128c0a70b">&#9670;&#160;</a></span>DeviceStorage() <span class="overload">[2/2]</span></h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname">tenzor::DeviceStorage::DeviceStorage </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="classtenzor_1_1DeviceStorage.html">DeviceStorage</a> &amp;&amp;</td>          <td class="paramname"><span class="paramname"><em></em></span></td><td>)</td>
+          <td></td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel noexcept">noexcept</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+
+<p>Move constructor transfers ownership. </p>
+<dl class="params"><dt>Parameters</dt><dd>
+  <table class="params">
+    <tr><td class="paramname">other</td><td>Source storage (left in valid but unspecified state) </td></tr>
+  </table>
+  </dd>
+</dl>
+
+<p class="reference">References <a class="el" href="#a5a0976287b244e14cda78092badaf4df">DeviceStorage()</a>.</p>
+
+</div>
+</div>
+<a name="doc-func-members" id="doc-func-members"></a><h2 id="header-doc-func-members" class="groupheader">Member Function Documentation</h2>
 <a id="a98de955ace838697ab8d6ad411f65eca" name="a98de955ace838697ab8d6ad411f65eca"></a>
 <h2 class="memtitle"><span class="permalink"><a href="#a98de955ace838697ab8d6ad411f65eca">&#9670;&#160;</a></span>data() <span class="overload">[1/2]</span></h2>
 
@@ -148,7 +286,7 @@ Public Member Functions</h2></td></tr>
           <td class="memname">auto tenzor::DeviceStorage::data </td>
           <td>(</td>
           <td class="paramname"><span class="paramname"><em></em></span></td><td>)</td>
-          <td> -&gt; void*</td>
+          <td> -&gt;  void *override</td>
         </tr>
       </table>
   </td>
@@ -158,9 +296,16 @@ Public Member Functions</h2></td></tr>
 </table>
 </div><div class="memdoc">
 
-<p>Implements <a class="el" href="classtenzor_1_1Storage.html">tenzor::Storage</a>.</p>
+<p>Get mutable pointer to storage data. </p>
+<dl class="section return"><dt>Returns</dt><dd>Pointer to raw memory buffer </dd></dl>
 
-<p class="definition">Definition at line <a class="el" href="storage_8hpp_source.html#l00061">61</a> of file <a class="el" href="storage_8hpp_source.html">storage.hpp</a>.</p>
+<p>Implements <a class="el" href="classtenzor_1_1Storage.html#ac55a217c856248885fc9e6422893835e">tenzor::Storage</a>.</p>
+
+<p class="definition">Definition at line <a class="el" href="storage_8hpp_source.html#l00200">200</a> of file <a class="el" href="storage_8hpp_source.html">storage.hpp</a>.</p>
+
+<p class="reference">References <a class="el" href="storage_8hpp_source.html#l00200">data()</a>.</p>
+
+<p class="reference">Referenced by <a class="el" href="storage_8hpp_source.html#l00200">data()</a>.</p>
 
 </div>
 </div>
@@ -177,7 +322,7 @@ Public Member Functions</h2></td></tr>
           <td class="memname">auto tenzor::DeviceStorage::data </td>
           <td>(</td>
           <td class="paramname"><span class="paramname"><em></em></span></td><td>)</td>
-          <td> const -&gt; const void*</td>
+          <td> const -&gt;  const void *override</td>
         </tr>
       </table>
   </td>
@@ -187,9 +332,12 @@ Public Member Functions</h2></td></tr>
 </table>
 </div><div class="memdoc">
 
-<p>Implements <a class="el" href="classtenzor_1_1Storage.html">tenzor::Storage</a>.</p>
+<p>Get const pointer to storage data. </p>
+<dl class="section return"><dt>Returns</dt><dd>Const pointer to raw memory buffer </dd></dl>
 
-<p class="definition">Definition at line <a class="el" href="storage_8hpp_source.html#l00062">62</a> of file <a class="el" href="storage_8hpp_source.html">storage.hpp</a>.</p>
+<p>Implements <a class="el" href="classtenzor_1_1Storage.html#a16ab12d0419bfb14c8aa8c5dc71868a9">tenzor::Storage</a>.</p>
+
+<p class="definition">Definition at line <a class="el" href="storage_8hpp_source.html#l00201">201</a> of file <a class="el" href="storage_8hpp_source.html">storage.hpp</a>.</p>
 
 </div>
 </div>
@@ -206,7 +354,7 @@ Public Member Functions</h2></td></tr>
           <td class="memname">auto tenzor::DeviceStorage::device </td>
           <td>(</td>
           <td class="paramname"><span class="paramname"><em></em></span></td><td>)</td>
-          <td> const -&gt; <a class="el" href="structtenzor_1_1Device.html">Device</a></td>
+          <td> const -&gt;  <a class="el" href="structtenzor_1_1Device.html">Device</a></td>
         </tr>
       </table>
   </td>
@@ -216,9 +364,50 @@ Public Member Functions</h2></td></tr>
 </table>
 </div><div class="memdoc">
 
-<p>Implements <a class="el" href="classtenzor_1_1Storage.html">tenzor::Storage</a>.</p>
+<p>Get device where storage resides. </p>
+<dl class="section return"><dt>Returns</dt><dd><a class="el" href="structtenzor_1_1Device.html" title="Device specification for tensor placement.">Device</a> specification (CPU, CUDA, etc.) </dd></dl>
 
-<p class="definition">Definition at line <a class="el" href="storage_8hpp_source.html#l00064">64</a> of file <a class="el" href="storage_8hpp_source.html">storage.hpp</a>.</p>
+<p>Implements <a class="el" href="classtenzor_1_1Storage.html#a661378bfb0a42b354a9b018f668ca89d">tenzor::Storage</a>.</p>
+
+<p class="definition">Definition at line <a class="el" href="storage_8hpp_source.html#l00203">203</a> of file <a class="el" href="storage_8hpp_source.html">storage.hpp</a>.</p>
+
+<p class="reference">Referenced by <a class="el" href="#a5a0976287b244e14cda78092badaf4df">DeviceStorage()</a>.</p>
+
+</div>
+</div>
+<a id="a8a4cf53798512c179e573ccac23f3f61" name="a8a4cf53798512c179e573ccac23f3f61"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a8a4cf53798512c179e573ccac23f3f61">&#9670;&#160;</a></span>operator=()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname"><a class="el" href="classtenzor_1_1DeviceStorage.html">DeviceStorage</a> &amp; tenzor::DeviceStorage::operator= </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="classtenzor_1_1DeviceStorage.html">DeviceStorage</a> &amp;&amp;</td>          <td class="paramname"><span class="paramname"><em></em></span></td><td>)</td>
+          <td></td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel noexcept">noexcept</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+
+<p>Move assignment transfers ownership. </p>
+<dl class="params"><dt>Parameters</dt><dd>
+  <table class="params">
+    <tr><td class="paramname">other</td><td>Source storage (left in valid but unspecified state) </td></tr>
+  </table>
+  </dd>
+</dl>
+<dl class="section return"><dt>Returns</dt><dd>Reference to this </dd></dl>
+
+<p class="reference">References <a class="el" href="#a5a0976287b244e14cda78092badaf4df">DeviceStorage()</a>.</p>
 
 </div>
 </div>
@@ -235,7 +424,7 @@ Public Member Functions</h2></td></tr>
           <td class="memname">auto tenzor::DeviceStorage::ref_count </td>
           <td>(</td>
           <td class="paramname"><span class="paramname"><em></em></span></td><td>)</td>
-          <td> const -&gt; int64_t</td>
+          <td> const -&gt;  int64_t</td>
         </tr>
       </table>
   </td>
@@ -245,9 +434,13 @@ Public Member Functions</h2></td></tr>
 </table>
 </div><div class="memdoc">
 
-<p>Implements <a class="el" href="classtenzor_1_1Storage.html">tenzor::Storage</a>.</p>
+<p>Get current reference count. </p>
+<dl class="section return"><dt>Returns</dt><dd>Number of references to this storage</dd></dl>
+<dl class="section note"><dt>Note</dt><dd>Reference count is managed atomically for thread-safety. </dd></dl>
 
-<p class="definition">Definition at line <a class="el" href="storage_8hpp_source.html#l00065">65</a> of file <a class="el" href="storage_8hpp_source.html">storage.hpp</a>.</p>
+<p>Implements <a class="el" href="classtenzor_1_1Storage.html#a8889814f3a8e285c0edb66d46a764aa0">tenzor::Storage</a>.</p>
+
+<p class="definition">Definition at line <a class="el" href="storage_8hpp_source.html#l00204">204</a> of file <a class="el" href="storage_8hpp_source.html">storage.hpp</a>.</p>
 
 </div>
 </div>
@@ -264,7 +457,7 @@ Public Member Functions</h2></td></tr>
           <td class="memname">auto tenzor::DeviceStorage::size_bytes </td>
           <td>(</td>
           <td class="paramname"><span class="paramname"><em></em></span></td><td>)</td>
-          <td> const -&gt; size_t</td>
+          <td> const -&gt;  size_t</td>
         </tr>
       </table>
   </td>
@@ -274,9 +467,14 @@ Public Member Functions</h2></td></tr>
 </table>
 </div><div class="memdoc">
 
-<p>Implements <a class="el" href="classtenzor_1_1Storage.html">tenzor::Storage</a>.</p>
+<p>Get total size of storage in bytes. </p>
+<dl class="section return"><dt>Returns</dt><dd>Size of allocated memory in bytes </dd></dl>
 
-<p class="definition">Definition at line <a class="el" href="storage_8hpp_source.html#l00063">63</a> of file <a class="el" href="storage_8hpp_source.html">storage.hpp</a>.</p>
+<p>Implements <a class="el" href="classtenzor_1_1Storage.html#aab616941cd3d0627a71bc2b4ce633186">tenzor::Storage</a>.</p>
+
+<p class="definition">Definition at line <a class="el" href="storage_8hpp_source.html#l00202">202</a> of file <a class="el" href="storage_8hpp_source.html">storage.hpp</a>.</p>
+
+<p class="reference">Referenced by <a class="el" href="#a5a0976287b244e14cda78092badaf4df">DeviceStorage()</a>.</p>
 
 </div>
 </div>
@@ -296,7 +494,7 @@ Public Member Functions</h2></td></tr>
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><b>tenzor</b></li><li class="navelem"><a href="classtenzor_1_1DeviceStorage.html">DeviceStorage</a></li>
+    <li class="navelem"><a href="namespacetenzor.html">tenzor</a></li><li class="navelem"><a href="classtenzor_1_1DeviceStorage.html">DeviceStorage</a></li>
     <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>

@@ -1,5 +1,10 @@
 var searchData=
 [
-  ['zero_5f_0',['zero_',['../classtenzor_1_1Tensor.html#a5d75c500d2fd16109de26e6bd26695bb',1,'tenzor::Tensor']]],
-  ['zero_5fgrad_1',['zero_grad',['../classtenzor_1_1Variable.html#ae44d80001352d23adb3211042a93c9cc',1,'tenzor::Variable::zero_grad()'],['../classtenzor_1_1nn_1_1Module.html#a6431d1bc44c9d89b0be6495c0995cb78',1,'tenzor::nn::Module::zero_grad()']]]
+  ['uint16_0',['UInt16',['../namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea8bd950a9d7779b83f5c30046c9aaf1cf',1,'tenzor']]],
+  ['uint32_1',['UInt32',['../namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feeae7956ed7be1c5025a27ed3cb42a396bd',1,'tenzor']]],
+  ['uint64_2',['UInt64',['../namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feeaaf71234725f0470ccf993e263a8b820a',1,'tenzor']]],
+  ['uint8_3',['UInt8',['../namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feeab31df9c476d20e85ff898121efe11b5a',1,'tenzor']]],
+  ['unload_5fbackend_4',['unload_backend',['../classtenzor_1_1BackendLoader.html#a5dd69da6db4baad092714a781c6a7cb5',1,'tenzor::BackendLoader']]],
+  ['unlock_5',['unlock',['../classtenzor_1_1SpinLock.html#a9b95afa5f9ab91cf29f6d8aadd096346',1,'tenzor::SpinLock']]],
+  ['unsqueeze_6',['unsqueeze',['../classtenzor_1_1Tensor.html#a8689d8ea1bb52cb2e641d519244c73ee',1,'tenzor::Tensor::unsqueeze()'],['../group__tensor__transform.html#gac1babde4945f36b2fe2800a39d4e44da',1,'tenzor::unsqueeze()']]]
 ];

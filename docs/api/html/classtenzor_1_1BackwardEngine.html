@@ -92,20 +92,166 @@ $(function(){initNavTree('classtenzor_1_1BackwardEngine.html','','classtenzor_1_
   <div class="headertitle"><div class="title">tenzor::BackwardEngine Class Reference</div></div>
 </div><!--header-->
 <div class="contents">
+
+<p>Execution engine for backward pass gradient computation.  
+ <a href="#details">More...</a></p>
+
+<p><code>#include &lt;<a class="el" href="engine_8hpp_source.html">engine.hpp</a>&gt;</code></p>
 <table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-pub-methods" class="groupheader"><a id="pub-methods" name="pub-methods"></a>
 Public Member Functions</h2></td></tr>
-<tr class="memitem:a0f6d17f9b6acee2459862e58fce083d7" id="r_a0f6d17f9b6acee2459862e58fce083d7"><td class="memItemLeft" align="right" valign="top"><a id="a0f6d17f9b6acee2459862e58fce083d7" name="a0f6d17f9b6acee2459862e58fce083d7"></a>
-auto&#160;</td><td class="memItemRight" valign="bottom"><b>execute</b> (<a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;root, std::optional&lt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &gt; gradient) -&gt; void</td></tr>
-<tr class="memitem:aaa58a3aa3d3446afcdc4ebf9182c2f73" id="r_aaa58a3aa3d3446afcdc4ebf9182c2f73"><td class="memItemLeft" align="right" valign="top"><a id="aaa58a3aa3d3446afcdc4ebf9182c2f73" name="aaa58a3aa3d3446afcdc4ebf9182c2f73"></a>
-auto&#160;</td><td class="memItemRight" valign="bottom"><b>execute_multi</b> (std::vector&lt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a> * &gt; roots, std::vector&lt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &gt; gradients) -&gt; void</td></tr>
-<tr class="memitem:a8e159d2dc05773cef49fad11518688bf" id="r_a8e159d2dc05773cef49fad11518688bf"><td class="memItemLeft" align="right" valign="top"><a id="a8e159d2dc05773cef49fad11518688bf" name="a8e159d2dc05773cef49fad11518688bf"></a>
-auto&#160;</td><td class="memItemRight" valign="bottom"><b>clear_gradients</b> () -&gt; void</td></tr>
+<tr class="memitem:a7f32cc238b1f5d5ab5d1a8168a993c1e" id="r_a7f32cc238b1f5d5ab5d1a8168a993c1e"><td class="memItemLeft" align="right" valign="top"><a id="a7f32cc238b1f5d5ab5d1a8168a993c1e" name="a7f32cc238b1f5d5ab5d1a8168a993c1e"></a>
+&#160;</td><td class="memItemRight" valign="bottom"><b>BackwardEngine</b> ()=default</td></tr>
+<tr class="memdesc:a7f32cc238b1f5d5ab5d1a8168a993c1e"><td class="mdescLeft">&#160;</td><td class="mdescRight">Default constructor. <br /></td></tr>
+<tr class="memitem:a0f6d17f9b6acee2459862e58fce083d7" id="r_a0f6d17f9b6acee2459862e58fce083d7"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a0f6d17f9b6acee2459862e58fce083d7">execute</a> (<a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;root, std::optional&lt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &gt; gradient) -&gt; void</td></tr>
+<tr class="memdesc:a0f6d17f9b6acee2459862e58fce083d7"><td class="mdescLeft">&#160;</td><td class="mdescRight">Execute backward pass through computation graph.  <br /></td></tr>
+<tr class="memitem:aaa58a3aa3d3446afcdc4ebf9182c2f73" id="r_aaa58a3aa3d3446afcdc4ebf9182c2f73"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#aaa58a3aa3d3446afcdc4ebf9182c2f73">execute_multi</a> (std::vector&lt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a> * &gt; roots, std::vector&lt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &gt; gradients) -&gt; void</td></tr>
+<tr class="memdesc:aaa58a3aa3d3446afcdc4ebf9182c2f73"><td class="mdescLeft">&#160;</td><td class="mdescRight">Execute backward pass for multiple roots.  <br /></td></tr>
+<tr class="memitem:a8e159d2dc05773cef49fad11518688bf" id="r_a8e159d2dc05773cef49fad11518688bf"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a8e159d2dc05773cef49fad11518688bf">clear_gradients</a> () -&gt; void</td></tr>
+<tr class="memdesc:a8e159d2dc05773cef49fad11518688bf"><td class="mdescLeft">&#160;</td><td class="mdescRight">Clear gradient accumulation buffers.  <br /></td></tr>
 </table>
 <a name="details" id="details"></a><h2 id="header-details" class="groupheader">Detailed Description</h2>
-<div class="textblock">
-<p class="definition">Definition at line <a class="el" href="engine_8hpp_source.html#l00014">14</a> of file <a class="el" href="engine_8hpp_source.html">engine.hpp</a>.</p>
-</div><hr/>The documentation for this class was generated from the following file:<ul>
+<div class="textblock"><p>Execution engine for backward pass gradient computation. </p>
+<p><a class="el" href="classtenzor_1_1BackwardEngine.html" title="Execution engine for backward pass gradient computation.">BackwardEngine</a> orchestrates the backpropagation process through a computation graph. It performs topological sorting to determine the correct order of gradient computation and handles gradient accumulation for variables with multiple paths in the graph.</p>
+<p>Key features:</p><ul>
+<li>Automatic topological sorting of computation graph</li>
+<li>Gradient accumulation for multi-path graphs</li>
+<li>Support for single and multi-root backward passes</li>
+<li>Efficient gradient clearing and memory management</li>
+</ul>
+<p>The engine is typically accessed through <a class="el" href="classtenzor_1_1Variable.html#aeb5ad4007287588f5000c35a6a527bf8" title="Compute gradients via backpropagation.">Variable::backward()</a> rather than directly.</p>
+<div class="fragment"><div class="line"><span class="comment">// Indirect usage through Variable</span></div>
+<div class="line"><a class="code hl_class" href="classtenzor_1_1Variable.html">Variable</a> x(<a class="code hl_class" href="classtenzor_1_1Tensor.html">Tensor</a>({3, 4}, <a class="code hl_enumvalue" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()), <span class="keyword">true</span>);</div>
+<div class="line"><a class="code hl_class" href="classtenzor_1_1Variable.html">Variable</a> y = x * 2.0f + 1.0f;</div>
+<div class="line"><a class="code hl_class" href="classtenzor_1_1Variable.html">Variable</a> loss = y.sum();</div>
+<div class="line">loss.<a class="code hl_function" href="classtenzor_1_1Variable.html#aeb5ad4007287588f5000c35a6a527bf8">backward</a>();  <span class="comment">// Internally uses BackwardEngine</span></div>
+<div class="line"> </div>
+<div class="line"><span class="comment">// Direct usage (advanced)</span></div>
+<div class="line"><span class="keyword">auto</span>&amp; engine = <a class="code hl_function" href="namespacetenzor.html#a6bc71614dfd27bfaf3db9a1d3ceeb58d">backward_engine</a>();</div>
+<div class="line">engine.execute(loss, std::nullopt);</div>
+<div class="ttc" id="aclasstenzor_1_1Tensor_html"><div class="ttname"><a href="classtenzor_1_1Tensor.html">tenzor::Tensor</a></div><div class="ttdoc">Multi-dimensional array with automatic differentiation support.</div><div class="ttdef"><b>Definition</b> <a href="tensor_8hpp_source.html#l00072">tensor.hpp:72</a></div></div>
+<div class="ttc" id="aclasstenzor_1_1Variable_html"><div class="ttname"><a href="classtenzor_1_1Variable.html">tenzor::Variable</a></div><div class="ttdoc">Gradient-enabled tensor wrapper for automatic differentiation.</div><div class="ttdef"><b>Definition</b> <a href="variable_8hpp_source.html#l00049">variable.hpp:49</a></div></div>
+<div class="ttc" id="aclasstenzor_1_1Variable_html_aeb5ad4007287588f5000c35a6a527bf8"><div class="ttname"><a href="classtenzor_1_1Variable.html#aeb5ad4007287588f5000c35a6a527bf8">tenzor::Variable::backward</a></div><div class="ttdeci">auto backward(std::optional&lt; Tensor &gt; gradient=std::nullopt) -&gt; void</div><div class="ttdoc">Compute gradients via backpropagation.</div></div>
+<div class="ttc" id="anamespacetenzor_html_a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204"><div class="ttname"><a href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">tenzor::DType::Float32</a></div><div class="ttdeci">@ Float32</div><div class="ttdoc">32-bit floating point (float)</div><div class="ttdef"><b>Definition</b> <a href="dtype_8hpp_source.html#l00025">dtype.hpp:25</a></div></div>
+<div class="ttc" id="anamespacetenzor_html_a6bc71614dfd27bfaf3db9a1d3ceeb58d"><div class="ttname"><a href="namespacetenzor.html#a6bc71614dfd27bfaf3db9a1d3ceeb58d">tenzor::backward_engine</a></div><div class="ttdeci">auto backward_engine() -&gt; BackwardEngine &amp;</div><div class="ttdoc">Get global backward engine instance.</div></div>
+<div class="ttc" id="astructtenzor_1_1Device_html_a77290e32e1fa7560bef5d05457f6157a"><div class="ttname"><a href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">tenzor::Device::cpu</a></div><div class="ttdeci">static auto cpu() -&gt; Device</div><div class="ttdoc">Create a CPU device.</div><div class="ttdef"><b>Definition</b> <a href="device_8hpp_source.html#l00056">device.hpp:56</a></div></div>
+</div><!-- fragment --><dl class="section see"><dt>See also</dt><dd><a class="el" href="classtenzor_1_1Variable.html#aeb5ad4007287588f5000c35a6a527bf8" title="Compute gradients via backpropagation.">Variable::backward()</a> for user-facing API </dd>
+<dd>
+<a class="el" href="classtenzor_1_1Function.html" title="Base class for autograd differentiable functions.">Function</a> for gradient function interface </dd></dl>
+
+<p class="definition">Definition at line <a class="el" href="engine_8hpp_source.html#l00053">53</a> of file <a class="el" href="engine_8hpp_source.html">engine.hpp</a>.</p>
+</div><a name="doc-func-members" id="doc-func-members"></a><h2 id="header-doc-func-members" class="groupheader">Member Function Documentation</h2>
+<a id="a8e159d2dc05773cef49fad11518688bf" name="a8e159d2dc05773cef49fad11518688bf"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a8e159d2dc05773cef49fad11518688bf">&#9670;&#160;</a></span>clear_gradients()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname">auto tenzor::BackwardEngine::clear_gradients </td>
+          <td>(</td>
+          <td class="paramname"><span class="paramname"><em></em></span></td><td>)</td>
+          <td> -&gt;  void</td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>Clear gradient accumulation buffers. </p>
+<p>Clears all accumulated gradients stored internally by the engine. Call this between backward passes to free memory and reset state.</p>
+<dl class="section note"><dt>Note</dt><dd>This does not clear gradients in Variables themselves. Use <a class="el" href="classtenzor_1_1Variable.html#ae44d80001352d23adb3211042a93c9cc" title="Zero out gradient.">Variable::zero_grad()</a> for that. </dd></dl>
+
+</div>
+</div>
+<a id="a0f6d17f9b6acee2459862e58fce083d7" name="a0f6d17f9b6acee2459862e58fce083d7"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a0f6d17f9b6acee2459862e58fce083d7">&#9670;&#160;</a></span>execute()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname">auto tenzor::BackwardEngine::execute </td>
+          <td>(</td>
+          <td class="paramtype"><a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;</td>          <td class="paramname"><span class="paramname"><em>root</em></span>, </td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype">std::optional&lt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &gt;</td>          <td class="paramname"><span class="paramname"><em>gradient</em></span>&#160;) -&gt;  void</td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>Execute backward pass through computation graph. </p>
+<p>Computes gradients for all variables in the computation graph leading to the root variable. Performs topological sort to determine execution order and accumulates gradients for variables with multiple incoming paths.</p>
+<dl class="params"><dt>Parameters</dt><dd>
+  <table class="params">
+    <tr><td class="paramname">root</td><td>Root variable to compute gradients from </td></tr>
+    <tr><td class="paramname">gradient</td><td>Optional gradient tensor (required for non-scalar root)</td></tr>
+  </table>
+  </dd>
+</dl>
+<dl class="exception"><dt>Exceptions</dt><dd>
+  <table class="exception">
+    <tr><td class="paramname">std::runtime_error</td><td>if gradient is required but not provided</td></tr>
+  </table>
+  </dd>
+</dl>
+<div class="fragment"><div class="line"><a class="code hl_class" href="classtenzor_1_1Variable.html">Variable</a> x(<a class="code hl_class" href="classtenzor_1_1Tensor.html">Tensor</a>({3}, <a class="code hl_enumvalue" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()), <span class="keyword">true</span>);</div>
+<div class="line"><a class="code hl_class" href="classtenzor_1_1Variable.html">Variable</a> y = x * 2.0f;</div>
+<div class="line"><a class="code hl_class" href="classtenzor_1_1Variable.html">Variable</a> loss = y.sum();  <span class="comment">// Scalar</span></div>
+<div class="line"> </div>
+<div class="line"><a class="code hl_function" href="namespacetenzor.html#a6bc71614dfd27bfaf3db9a1d3ceeb58d">backward_engine</a>().execute(loss, std::nullopt);</div>
+<div class="line"><span class="comment">// x.grad() now contains computed gradients</span></div>
+</div><!-- fragment --> 
+</div>
+</div>
+<a id="aaa58a3aa3d3446afcdc4ebf9182c2f73" name="aaa58a3aa3d3446afcdc4ebf9182c2f73"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#aaa58a3aa3d3446afcdc4ebf9182c2f73">&#9670;&#160;</a></span>execute_multi()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname">auto tenzor::BackwardEngine::execute_multi </td>
+          <td>(</td>
+          <td class="paramtype">std::vector&lt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a> * &gt;</td>          <td class="paramname"><span class="paramname"><em>roots</em></span>, </td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype">std::vector&lt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &gt;</td>          <td class="paramname"><span class="paramname"><em>gradients</em></span>&#160;) -&gt;  void</td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>Execute backward pass for multiple roots. </p>
+<p>Computes gradients when there are multiple output variables. Each root must have a corresponding gradient provided.</p>
+<dl class="params"><dt>Parameters</dt><dd>
+  <table class="params">
+    <tr><td class="paramname">roots</td><td>Vector of root variables </td></tr>
+    <tr><td class="paramname">gradients</td><td>Vector of gradient tensors (one per root)</td></tr>
+  </table>
+  </dd>
+</dl>
+<dl class="exception"><dt>Exceptions</dt><dd>
+  <table class="exception">
+    <tr><td class="paramname">std::runtime_error</td><td>if roots and gradients size mismatch</td></tr>
+  </table>
+  </dd>
+</dl>
+<div class="fragment"><div class="line"><a class="code hl_class" href="classtenzor_1_1Variable.html">Variable</a> loss1 = compute_loss1(x);</div>
+<div class="line"><a class="code hl_class" href="classtenzor_1_1Variable.html">Variable</a> loss2 = compute_loss2(x);</div>
+<div class="line"> </div>
+<div class="line"><a class="code hl_function" href="namespacetenzor.html#a6bc71614dfd27bfaf3db9a1d3ceeb58d">backward_engine</a>().execute_multi(</div>
+<div class="line">    {&amp;loss1, &amp;loss2},</div>
+<div class="line">    {<a class="code hl_function" href="group__tensor__creation.html#ga77383533d8386ed712aa6b58be2f3514">ones_like</a>(loss1.<a class="code hl_function" href="classtenzor_1_1Variable.html#a6af01fe0cde210657acde477d3fed019">tensor</a>()), <a class="code hl_function" href="group__tensor__creation.html#ga77383533d8386ed712aa6b58be2f3514">ones_like</a>(loss2.<a class="code hl_function" href="classtenzor_1_1Variable.html#a6af01fe0cde210657acde477d3fed019">tensor</a>())}</div>
+<div class="line">);</div>
+<div class="ttc" id="aclasstenzor_1_1Variable_html_a6af01fe0cde210657acde477d3fed019"><div class="ttname"><a href="classtenzor_1_1Variable.html#a6af01fe0cde210657acde477d3fed019">tenzor::Variable::tensor</a></div><div class="ttdeci">auto tensor() const -&gt; const Tensor &amp;</div><div class="ttdoc">Get const reference to underlying tensor.</div></div>
+<div class="ttc" id="agroup__tensor__creation_html_ga77383533d8386ed712aa6b58be2f3514"><div class="ttname"><a href="group__tensor__creation.html#ga77383533d8386ed712aa6b58be2f3514">tenzor::ones_like</a></div><div class="ttdeci">auto ones_like(const Tensor &amp;tensor) -&gt; Tensor</div><div class="ttdoc">Create one tensor with same shape/dtype/device as input.</div></div>
+</div><!-- fragment --> 
+</div>
+</div>
+<hr/>The documentation for this class was generated from the following file:<ul>
 <li>include/tenzor/autograd/<a class="el" href="engine_8hpp_source.html">engine.hpp</a></li>
 </ul>
 </div><!-- contents -->
@@ -121,7 +267,7 @@ auto&#160;</td><td class="memItemRight" valign="bottom"><b>clear_gradients</b> (
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><b>tenzor</b></li><li class="navelem"><a href="classtenzor_1_1BackwardEngine.html">BackwardEngine</a></li>
+    <li class="navelem"><a href="namespacetenzor.html">tenzor</a></li><li class="navelem"><a href="classtenzor_1_1BackwardEngine.html">BackwardEngine</a></li>
     <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>

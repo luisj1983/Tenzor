@@ -173,12 +173,12 @@ Additional Inherited Members</h2></td></tr>
 <p>Implements forward and backward for sum reduction operation.</p>
 <p>Forward: y = sum(x, dim, keepdim) Backward: dL/dx = broadcast(dL/dy, original_shape)</p>
 <dl class="section note"><dt>Note</dt><dd>Gradient is broadcast back to original input shape. Original shape is saved.</dd></dl>
-<div class="fragment"><div class="line">Variable x(<a class="code hl_class" href="classtenzor_1_1Tensor.html">Tensor</a>({3, 4}, <a class="code hl_enumvalue" href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()), <span class="keyword">true</span>);</div>
+<div class="fragment"><div class="line">Variable x(<a class="code hl_class" href="classtenzor_1_1Tensor.html">Tensor</a>({3, 4}, <a class="code hl_enumvalue" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()), <span class="keyword">true</span>);</div>
 <div class="line"><a class="code hl_class" href="classtenzor_1_1Variable.html">Variable</a> y = x.sum(1);  <span class="comment">// Sum along dimension 1, shape: {3}</span></div>
 <div class="line"><span class="comment">// Gradient will broadcast back to {3, 4}</span></div>
 <div class="ttc" id="aclasstenzor_1_1Tensor_html"><div class="ttname"><a href="classtenzor_1_1Tensor.html">tenzor::Tensor</a></div><div class="ttdoc">Multi-dimensional array with automatic differentiation support.</div><div class="ttdef"><b>Definition</b> <a href="tensor_8hpp_source.html#l00072">tensor.hpp:72</a></div></div>
 <div class="ttc" id="aclasstenzor_1_1Variable_html"><div class="ttname"><a href="classtenzor_1_1Variable.html">tenzor::Variable</a></div><div class="ttdoc">Gradient-enabled tensor wrapper for automatic differentiation.</div><div class="ttdef"><b>Definition</b> <a href="variable_8hpp_source.html#l00049">variable.hpp:49</a></div></div>
-<div class="ttc" id="adtype_8hpp_html_a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204"><div class="ttname"><a href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">tenzor::DType::Float32</a></div><div class="ttdeci">@ Float32</div><div class="ttdoc">32-bit floating point (float)</div><div class="ttdef"><b>Definition</b> <a href="dtype_8hpp_source.html#l00025">dtype.hpp:25</a></div></div>
+<div class="ttc" id="anamespacetenzor_html_a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204"><div class="ttname"><a href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">tenzor::DType::Float32</a></div><div class="ttdeci">@ Float32</div><div class="ttdoc">32-bit floating point (float)</div><div class="ttdef"><b>Definition</b> <a href="dtype_8hpp_source.html#l00025">dtype.hpp:25</a></div></div>
 <div class="ttc" id="astructtenzor_1_1Device_html_a77290e32e1fa7560bef5d05457f6157a"><div class="ttname"><a href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">tenzor::Device::cpu</a></div><div class="ttdeci">static auto cpu() -&gt; Device</div><div class="ttdoc">Create a CPU device.</div><div class="ttdef"><b>Definition</b> <a href="device_8hpp_source.html#l00056">device.hpp:56</a></div></div>
 </div><!-- fragment --> 
 <p class="definition">Definition at line <a class="el" href="function_8hpp_source.html#l00282">282</a> of file <a class="el" href="function_8hpp_source.html">function.hpp</a>.</p>
@@ -305,7 +305,7 @@ Additional Inherited Members</h2></td></tr>
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><b>tenzor</b></li><li class="navelem"><a href="classtenzor_1_1SumBackward.html">SumBackward</a></li>
+    <li class="navelem"><a href="namespacetenzor.html">tenzor</a></li><li class="navelem"><a href="classtenzor_1_1SumBackward.html">SumBackward</a></li>
     <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>

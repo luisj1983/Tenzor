@@ -1,6 +1,6 @@
 var searchData=
 [
-  ['float16_0',['Float16',['../dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14feea26e6ed77470c6f2f830ecf874e6c0d55',1,'tenzor']]],
-  ['float32_1',['Float32',['../dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204',1,'tenzor']]],
-  ['float64_2',['Float64',['../dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14feead2b556d8a8f5c8ac323f51a4b82e79a0',1,'tenzor']]]
+  ['debug_0',['Debug',['../namespacetenzor.html#a73a4f7deebe32a56e7bf28bd1723a4beaa603905470e2a5b8c13e96b579ef0dba',1,'tenzor']]],
+  ['devicetodevice_1',['DeviceToDevice',['../namespacetenzor.html#a0eb44dbfb07fd2ce90ce212cf0107113ad9ccc4ace3b87f3b327a14e17ed5fc6a',1,'tenzor']]],
+  ['devicetohost_2',['DeviceToHost',['../namespacetenzor.html#a0eb44dbfb07fd2ce90ce212cf0107113a6170220e5a9b44706ce35a6ff1dc37fd',1,'tenzor']]]
 ];

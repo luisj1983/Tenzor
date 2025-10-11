@@ -133,7 +133,7 @@ Public Member Functions</h2></td></tr>
 <tr class="memdesc:a31054bc788898d0d79e796806c23e1e7"><td class="mdescLeft">&#160;</td><td class="mdescRight">Get gradient function.  <br /></td></tr>
 <tr class="memitem:abd7936801200d5b9dbfccf007fbcdc22" id="r_abd7936801200d5b9dbfccf007fbcdc22"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#abd7936801200d5b9dbfccf007fbcdc22">shape</a> () const -&gt; std::span&lt; const int64_t &gt;</td></tr>
 <tr class="memdesc:abd7936801200d5b9dbfccf007fbcdc22"><td class="mdescLeft">&#160;</td><td class="mdescRight">Get shape of underlying tensor.  <br /></td></tr>
-<tr class="memitem:aea3e0d3c09d368b3d6f9aec3e991404d" id="r_aea3e0d3c09d368b3d6f9aec3e991404d"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#aea3e0d3c09d368b3d6f9aec3e991404d">dtype</a> () const -&gt; <a class="el" href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a></td></tr>
+<tr class="memitem:aea3e0d3c09d368b3d6f9aec3e991404d" id="r_aea3e0d3c09d368b3d6f9aec3e991404d"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#aea3e0d3c09d368b3d6f9aec3e991404d">dtype</a> () const -&gt; <a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a></td></tr>
 <tr class="memdesc:aea3e0d3c09d368b3d6f9aec3e991404d"><td class="mdescLeft">&#160;</td><td class="mdescRight">Get data type of underlying tensor.  <br /></td></tr>
 <tr class="memitem:afe6e1016a7f2da6073901300ebe7accc" id="r_afe6e1016a7f2da6073901300ebe7accc"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#afe6e1016a7f2da6073901300ebe7accc">device</a> () const -&gt; const <a class="el" href="structtenzor_1_1Device.html">Device</a> &amp;</td></tr>
 <tr class="memdesc:afe6e1016a7f2da6073901300ebe7accc"><td class="mdescLeft">&#160;</td><td class="mdescRight">Get device of underlying tensor.  <br /></td></tr>
@@ -161,8 +161,8 @@ Friends</h2></td></tr>
 <li>Gradient accumulation for leaf variables</li>
 </ul>
 <div class="fragment"><div class="line"><span class="comment">// Create variables that require gradients</span></div>
-<div class="line"><a class="code hl_function" href="#a7b065622735a5528043e6477230259e5">Variable</a> x(<a class="code hl_class" href="classtenzor_1_1Tensor.html">Tensor</a>({2, 3}, <a class="code hl_enumvalue" href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()), <span class="keyword">true</span>);</div>
-<div class="line"><a class="code hl_class" href="classtenzor_1_1Variable.html">Variable</a> y(<a class="code hl_class" href="classtenzor_1_1Tensor.html">Tensor</a>({2, 3}, DType::Float32, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()), <span class="keyword">true</span>);</div>
+<div class="line"><a class="code hl_function" href="#a7b065622735a5528043e6477230259e5">Variable</a> x(<a class="code hl_class" href="classtenzor_1_1Tensor.html">Tensor</a>({2, 3}, <a class="code hl_enumvalue" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()), <span class="keyword">true</span>);</div>
+<div class="line"><a class="code hl_class" href="classtenzor_1_1Variable.html">Variable</a> y(<a class="code hl_class" href="classtenzor_1_1Tensor.html">Tensor</a>({2, 3}, <a class="code hl_enumvalue" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()), <span class="keyword">true</span>);</div>
 <div class="line"> </div>
 <div class="line"><span class="comment">// Perform operations (builds computation graph)</span></div>
 <div class="line"><a class="code hl_function" href="#a7b065622735a5528043e6477230259e5">Variable</a> z = x + y;</div>
@@ -178,7 +178,7 @@ Friends</h2></td></tr>
 <div class="ttc" id="aclasstenzor_1_1Variable_html_a3c1c317a8266fbc139933308289b3378"><div class="ttname"><a href="#a3c1c317a8266fbc139933308289b3378">tenzor::Variable::grad</a></div><div class="ttdeci">auto grad() const -&gt; const std::optional&lt; Tensor &gt; &amp;</div><div class="ttdoc">Get const reference to gradient.</div></div>
 <div class="ttc" id="aclasstenzor_1_1Variable_html_a7b065622735a5528043e6477230259e5"><div class="ttname"><a href="#a7b065622735a5528043e6477230259e5">tenzor::Variable::Variable</a></div><div class="ttdeci">Variable()=default</div><div class="ttdoc">Default constructor creating empty variable.</div></div>
 <div class="ttc" id="aclasstenzor_1_1Variable_html_aeb5ad4007287588f5000c35a6a527bf8"><div class="ttname"><a href="#aeb5ad4007287588f5000c35a6a527bf8">tenzor::Variable::backward</a></div><div class="ttdeci">auto backward(std::optional&lt; Tensor &gt; gradient=std::nullopt) -&gt; void</div><div class="ttdoc">Compute gradients via backpropagation.</div></div>
-<div class="ttc" id="adtype_8hpp_html_a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204"><div class="ttname"><a href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">tenzor::DType::Float32</a></div><div class="ttdeci">@ Float32</div><div class="ttdoc">32-bit floating point (float)</div><div class="ttdef"><b>Definition</b> <a href="dtype_8hpp_source.html#l00025">dtype.hpp:25</a></div></div>
+<div class="ttc" id="anamespacetenzor_html_a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204"><div class="ttname"><a href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">tenzor::DType::Float32</a></div><div class="ttdeci">@ Float32</div><div class="ttdoc">32-bit floating point (float)</div><div class="ttdef"><b>Definition</b> <a href="dtype_8hpp_source.html#l00025">dtype.hpp:25</a></div></div>
 <div class="ttc" id="astructtenzor_1_1Device_html_a77290e32e1fa7560bef5d05457f6157a"><div class="ttname"><a href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">tenzor::Device::cpu</a></div><div class="ttdeci">static auto cpu() -&gt; Device</div><div class="ttdoc">Create a CPU device.</div><div class="ttdef"><b>Definition</b> <a href="device_8hpp_source.html#l00056">device.hpp:56</a></div></div>
 </div><!-- fragment --> 
 <p class="definition">Definition at line <a class="el" href="variable_8hpp_source.html#l00049">49</a> of file <a class="el" href="variable_8hpp_source.html">variable.hpp</a>.</p>
@@ -218,7 +218,7 @@ Friends</h2></td></tr>
   </table>
   </dd>
 </dl>
-<div class="fragment"><div class="line"><a class="code hl_class" href="classtenzor_1_1Tensor.html">Tensor</a> t({3, 4}, <a class="code hl_enumvalue" href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
+<div class="fragment"><div class="line"><a class="code hl_class" href="classtenzor_1_1Tensor.html">Tensor</a> t({3, 4}, <a class="code hl_enumvalue" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>());</div>
 <div class="line"><a class="code hl_class" href="classtenzor_1_1Variable.html">Variable</a> v(t, <span class="keyword">true</span>);  <span class="comment">// Enable gradient tracking</span></div>
 </div><!-- fragment --> 
 <p class="reference">References <a class="el" href="#a6b37605397a8cf063c13c219fd289183">requires_grad()</a>.</p>
@@ -255,14 +255,14 @@ Friends</h2></td></tr>
   </table>
   </dd>
 </dl>
-<div class="fragment"><div class="line"><a class="code hl_function" href="#a7b065622735a5528043e6477230259e5">Variable</a> x(<a class="code hl_class" href="classtenzor_1_1Tensor.html">Tensor</a>({3}, <a class="code hl_enumvalue" href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()), <span class="keyword">true</span>);</div>
+<div class="fragment"><div class="line"><a class="code hl_function" href="#a7b065622735a5528043e6477230259e5">Variable</a> x(<a class="code hl_class" href="classtenzor_1_1Tensor.html">Tensor</a>({3}, <a class="code hl_enumvalue" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()), <span class="keyword">true</span>);</div>
 <div class="line"><a class="code hl_class" href="classtenzor_1_1Variable.html">Variable</a> y = x * 2.0f;</div>
 <div class="line"><a class="code hl_class" href="classtenzor_1_1Variable.html">Variable</a> loss = y.sum();  <span class="comment">// Scalar output</span></div>
 <div class="line"> </div>
 <div class="line">loss.<a class="code hl_function" href="#aeb5ad4007287588f5000c35a6a527bf8">backward</a>();  <span class="comment">// No gradient needed for scalar</span></div>
 <div class="line"><span class="comment">// x.grad() now contains gradient</span></div>
 </div><!-- fragment --> 
-<p class="reference">References <a class="el" href="#aeb5ad4007287588f5000c35a6a527bf8">backward()</a>.</p>
+<p class="reference">References <a class="el" href="#aeb5ad4007287588f5000c35a6a527bf8">backward()</a>, and <a class="el" href="group__tensor__reduction.html#ga57c6304de0ccf7b02d2cf42923b2e3d9">tenzor::std()</a>.</p>
 
 <p class="reference">Referenced by <a class="el" href="#aeb5ad4007287588f5000c35a6a527bf8">backward()</a>.</p>
 
@@ -328,13 +328,13 @@ Friends</h2></td></tr>
           <td class="memname">auto tenzor::Variable::dtype </td>
           <td>(</td>
           <td class="paramname"><span class="paramname"><em></em></span></td><td>)</td>
-          <td> const -&gt;  <a class="el" href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a></td>
+          <td> const -&gt;  <a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a></td>
         </tr>
       </table>
 </div><div class="memdoc">
 
 <p>Get data type of underlying tensor. </p>
-<dl class="section return"><dt>Returns</dt><dd><a class="el" href="dtype_8hpp.html#a5e94edb9b77a2828dfc7fa02bbc14fee" title="Enumeration of supported tensor data types.">DType</a> enumeration value </dd></dl>
+<dl class="section return"><dt>Returns</dt><dd><a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14fee" title="Enumeration of supported tensor data types.">DType</a> enumeration value </dd></dl>
 
 <p class="reference">References <a class="el" href="#aea3e0d3c09d368b3d6f9aec3e991404d">dtype()</a>.</p>
 
@@ -360,7 +360,7 @@ Friends</h2></td></tr>
 <p>Get mutable reference to gradient. </p>
 <dl class="section return"><dt>Returns</dt><dd>Optional tensor containing gradient </dd></dl>
 
-<p class="reference">References <a class="el" href="#a3c1c317a8266fbc139933308289b3378">grad()</a>.</p>
+<p class="reference">References <a class="el" href="#a3c1c317a8266fbc139933308289b3378">grad()</a>, and <a class="el" href="group__tensor__reduction.html#ga57c6304de0ccf7b02d2cf42923b2e3d9">tenzor::std()</a>.</p>
 
 </div>
 </div>
@@ -382,7 +382,7 @@ Friends</h2></td></tr>
 <p>Get const reference to gradient. </p>
 <dl class="section return"><dt>Returns</dt><dd>Optional tensor containing gradient (nullopt if no gradient) </dd></dl>
 
-<p class="reference">References <a class="el" href="#a3c1c317a8266fbc139933308289b3378">grad()</a>.</p>
+<p class="reference">References <a class="el" href="#a3c1c317a8266fbc139933308289b3378">grad()</a>, and <a class="el" href="group__tensor__reduction.html#ga57c6304de0ccf7b02d2cf42923b2e3d9">tenzor::std()</a>.</p>
 
 <p class="reference">Referenced by <a class="el" href="#a5a2ef945b355d1495d173078732c88e0">grad()</a>, and <a class="el" href="#a3c1c317a8266fbc139933308289b3378">grad()</a>.</p>
 
@@ -407,7 +407,7 @@ Friends</h2></td></tr>
 <p>Returns the function that created this variable in the forward pass.</p>
 <dl class="section return"><dt>Returns</dt><dd>Shared pointer to gradient function (nullptr for leaf variables) </dd></dl>
 
-<p class="reference">References <a class="el" href="#a31054bc788898d0d79e796806c23e1e7">grad_fn()</a>.</p>
+<p class="reference">References <a class="el" href="#a31054bc788898d0d79e796806c23e1e7">grad_fn()</a>, and <a class="el" href="group__tensor__reduction.html#ga57c6304de0ccf7b02d2cf42923b2e3d9">tenzor::std()</a>.</p>
 
 <p class="reference">Referenced by <a class="el" href="#a31054bc788898d0d79e796806c23e1e7">grad_fn()</a>.</p>
 
@@ -570,7 +570,7 @@ Friends</h2></td></tr>
 </dl>
 <dl class="section return"><dt>Returns</dt><dd>New variable with gradient function </dd></dl>
 
-<p class="reference">References <a class="el" href="#a7b065622735a5528043e6477230259e5">Variable()</a>.</p>
+<p class="reference">References <a class="el" href="group__tensor__reduction.html#ga57c6304de0ccf7b02d2cf42923b2e3d9">tenzor::std()</a>, and <a class="el" href="#a7b065622735a5528043e6477230259e5">Variable()</a>.</p>
 
 </div>
 </div>
@@ -622,7 +622,7 @@ Friends</h2></td></tr>
   </dd>
 </dl>
 
-<p class="reference">References <a class="el" href="#a8dbb34d1105cc2680347cb4adda81c2d">set_grad_fn()</a>.</p>
+<p class="reference">References <a class="el" href="#a8dbb34d1105cc2680347cb4adda81c2d">set_grad_fn()</a>, and <a class="el" href="group__tensor__reduction.html#ga57c6304de0ccf7b02d2cf42923b2e3d9">tenzor::std()</a>.</p>
 
 <p class="reference">Referenced by <a class="el" href="#a8dbb34d1105cc2680347cb4adda81c2d">set_grad_fn()</a>.</p>
 
@@ -675,7 +675,7 @@ Friends</h2></td></tr>
 <p>Get shape of underlying tensor. </p>
 <dl class="section return"><dt>Returns</dt><dd>Span of dimension sizes </dd></dl>
 
-<p class="reference">References <a class="el" href="#abd7936801200d5b9dbfccf007fbcdc22">shape()</a>.</p>
+<p class="reference">References <a class="el" href="#abd7936801200d5b9dbfccf007fbcdc22">shape()</a>, and <a class="el" href="group__tensor__reduction.html#ga57c6304de0ccf7b02d2cf42923b2e3d9">tenzor::std()</a>.</p>
 
 <p class="reference">Referenced by <a class="el" href="#abd7936801200d5b9dbfccf007fbcdc22">shape()</a>.</p>
 
@@ -819,7 +819,7 @@ Friends</h2></td></tr>
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><b>tenzor</b></li><li class="navelem"><a href="classtenzor_1_1Variable.html">Variable</a></li>
+    <li class="navelem"><a href="namespacetenzor.html">tenzor</a></li><li class="navelem"><a href="classtenzor_1_1Variable.html">Variable</a></li>
     <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>

@@ -1,5 +1,5 @@
 <map id="tenzor::nn::Dropout" name="tenzor::nn::Dropout">
-<area shape="rect" id="Node000001" title=" " alt="" coords="953,5,1099,33"/>
+<area shape="rect" id="Node000001" title="Standard dropout layer." alt="" coords="953,5,1099,33"/>
 <area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="723,69,865,97"/>
 <area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="848,61,888,49,957,31,958,36,890,54,850,66"/>
 <area shape="rect" id="Node000008" title=" " alt="" coords="939,57,1113,102"/>

@@ -1,12 +1,16 @@
 var searchData=
 [
-  ['register_5fbuffer_0',['register_buffer',['../classtenzor_1_1nn_1_1Module.html#a5b89236ed9d1ce5163a11a2a1af966d8',1,'tenzor::nn::Module']]],
-  ['register_5fmodule_1',['register_module',['../classtenzor_1_1nn_1_1Module.html#aea86ee5319d5a824640a22af07713b59',1,'tenzor::nn::Module']]],
-  ['register_5fparameter_2',['register_parameter',['../classtenzor_1_1nn_1_1Module.html#a30060ffd0dcd993038feb2afdbfd9291',1,'tenzor::nn::Module']]],
-  ['relu_3',['ReLU',['../classtenzor_1_1nn_1_1ReLU.html',1,'tenzor::nn']]],
-  ['relubackward_4',['ReLUBackward',['../classtenzor_1_1ReLUBackward.html',1,'tenzor']]],
-  ['requires_5fgrad_5',['requires_grad',['../classtenzor_1_1TensorImpl.html#af389dddf8256d92c80bd99737dc1879c',1,'tenzor::TensorImpl::requires_grad'],['../classtenzor_1_1Variable.html#a6b37605397a8cf063c13c219fd289183',1,'tenzor::Variable::requires_grad()'],['../classtenzor_1_1Tensor.html#a43f13ac065022ae21de465aead7969b1',1,'tenzor::Tensor::requires_grad() const noexcept -&gt; bool']]],
-  ['reshape_6',['reshape',['../classtenzor_1_1Tensor.html#ab898ad1bdc9a05c9be2583061fa6827c',1,'tenzor::Tensor']]],
-  ['rocm_7',['ROCm',['../structtenzor_1_1Device.html#ab9708f554426a88dfce8523bea324af9aaac90cc22a84fc8a7c459d88882125ed',1,'tenzor::Device']]],
-  ['rocm_8',['rocm',['../structtenzor_1_1Device.html#a4b474e551e43597eda043aadaf22ef45',1,'tenzor::Device']]]
+  ['parallel_5ffor_0',['parallel_for',['../classtenzor_1_1ThreadPool.html#ad414124baed2e2195adc54b4304fd5b6',1,'tenzor::ThreadPool::parallel_for()'],['../namespacetenzor.html#a6e3b587d58c4ad5bbd0cbe5e308e955a',1,'tenzor::parallel_for(int64_t begin, int64_t end, F &amp;&amp;func) -&gt; void'],['../namespacetenzor.html#a5a3216c62058c3f26b34c26130f2d7a9',1,'tenzor::parallel_for(int64_t begin, int64_t end, int64_t grain_size, F &amp;&amp;func) -&gt; void']]],
+  ['parallel_5ffor_2ehpp_1',['parallel_for.hpp',['../parallel__for_8hpp.html',1,'']]],
+  ['parallel_5freduce_2',['parallel_reduce',['../namespacetenzor.html#a9f7dc5155c5651afeb01a40c3cc5eb04',1,'tenzor']]],
+  ['parameters_3',['parameters',['../classtenzor_1_1nn_1_1Module.html#a9f6e7e89a8712a4d8642e0984ae4c180',1,'tenzor::nn::Module::parameters()'],['../classtenzor_1_1nn_1_1Sequential.html#a66c77f1f136c15ea600af77e96646b25',1,'tenzor::nn::Sequential::parameters()'],['../classtenzor_1_1optim_1_1Optimizer.html#ae6b8a782c341b25c797f553202023c80',1,'tenzor::optim::Optimizer::parameters()']]],
+  ['parameters_5f_4',['parameters_',['../classtenzor_1_1nn_1_1Module.html#a12d47f0ad557ed9b58b2713486122d78',1,'tenzor::nn::Module::parameters_'],['../classtenzor_1_1optim_1_1Optimizer.html#a7a87be2b3b934e52052814d601a67ad3',1,'tenzor::optim::Optimizer::parameters_']]],
+  ['paramgroup_5',['ParamGroup',['../structtenzor_1_1optim_1_1ParamGroup.html',1,'tenzor::optim']]],
+  ['params_6',['params',['../structtenzor_1_1optim_1_1ParamGroup.html#ac6e175935c59586284c1605761ae8de6',1,'tenzor::optim::ParamGroup']]],
+  ['permute_7',['permute',['../classtenzor_1_1Tensor.html#a6059d3dd99f3a4e94610e9cde368c5b2',1,'tenzor::Tensor::permute()'],['../group__tensor__transform.html#ga662859da2490a82a7e2b8e7006ca8fd5',1,'tenzor::permute()']]],
+  ['pooling_2ehpp_8',['pooling.hpp',['../pooling_8hpp.html',1,'']]],
+  ['pow_9',['pow',['../group__tensor__math.html#gaac8d85d36a4b94f1abca5a966ed75fa7',1,'tenzor']]],
+  ['prod_10',['prod',['../group__tensor__reduction.html#gaa5e520b7ba6533913ea3d478fad75680',1,'tenzor']]],
+  ['push_5fback_11',['push_back',['../classtenzor_1_1Shape.html#a212fbb4824a7e64c44ee20e2e5b9ba5f',1,'tenzor::Shape']]],
+  ['put_12',['put',['../group__tensor__indexing.html#gadf282a23a823ad953d9b7934dbe766db',1,'tenzor']]]
 ];

@@ -92,22 +92,209 @@ $(function(){initNavTree('classtenzor_1_1OperationRegistry.html','','classtenzor
   <div class="headertitle"><div class="title">tenzor::OperationRegistry Class Reference</div></div>
 </div><!--header-->
 <div class="contents">
+
+<p>Thread-safe registry for operation kernels.  
+ <a href="#details">More...</a></p>
+
+<p><code>#include &lt;<a class="el" href="registry_8hpp_source.html">registry.hpp</a>&gt;</code></p>
 <table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-pub-methods" class="groupheader"><a id="pub-methods" name="pub-methods"></a>
 Public Member Functions</h2></td></tr>
-<tr class="memitem:a4d93144bca38ed6ac96c8a86ea0f0b7e" id="r_a4d93144bca38ed6ac96c8a86ea0f0b7e"><td class="memItemLeft" align="right" valign="top"><a id="a4d93144bca38ed6ac96c8a86ea0f0b7e" name="a4d93144bca38ed6ac96c8a86ea0f0b7e"></a>
-auto&#160;</td><td class="memItemRight" valign="bottom"><b>register_kernel</b> (std::string_view op_name, <a class="el" href="structtenzor_1_1Device.html#ab9708f554426a88dfce8523bea324af9">Device::Type</a> device_type, KernelFunction kernel) -&gt; void</td></tr>
-<tr class="memitem:a3814f225714b26584b4719837593c4ea" id="r_a3814f225714b26584b4719837593c4ea"><td class="memItemLeft" align="right" valign="top"><a id="a3814f225714b26584b4719837593c4ea" name="a3814f225714b26584b4719837593c4ea"></a>
-auto&#160;</td><td class="memItemRight" valign="bottom"><b>dispatch</b> (const std::string &amp;op_name, std::span&lt; const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &gt; inputs, const OpAttributes &amp;attrs) -&gt; std::vector&lt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &gt;</td></tr>
-<tr class="memitem:a509ec3082ec02c40945f9886c9620c3a" id="r_a509ec3082ec02c40945f9886c9620c3a"><td class="memItemLeft" align="right" valign="top"><a id="a509ec3082ec02c40945f9886c9620c3a" name="a509ec3082ec02c40945f9886c9620c3a"></a>
-auto&#160;</td><td class="memItemRight" valign="bottom"><b>has_kernel</b> (std::string_view op_name, <a class="el" href="structtenzor_1_1Device.html#ab9708f554426a88dfce8523bea324af9">Device::Type</a> device_type) const -&gt; bool</td></tr>
-<tr class="memitem:a3598b05f8debd715c1d5f823d3aa8729" id="r_a3598b05f8debd715c1d5f823d3aa8729"><td class="memItemLeft" align="right" valign="top"><a id="a3598b05f8debd715c1d5f823d3aa8729" name="a3598b05f8debd715c1d5f823d3aa8729"></a>
-auto&#160;</td><td class="memItemRight" valign="bottom"><b>registered_operations</b> () const -&gt; std::vector&lt; std::string &gt;</td></tr>
+<tr class="memitem:a4d93144bca38ed6ac96c8a86ea0f0b7e" id="r_a4d93144bca38ed6ac96c8a86ea0f0b7e"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a4d93144bca38ed6ac96c8a86ea0f0b7e">register_kernel</a> (std::string_view op_name, <a class="el" href="structtenzor_1_1Device.html#ab9708f554426a88dfce8523bea324af9">Device::Type</a> device_type, <a class="el" href="namespacetenzor.html#a829391672bef2f5df6ec94a9aafa7230">KernelFunction</a> kernel) -&gt; void</td></tr>
+<tr class="memdesc:a4d93144bca38ed6ac96c8a86ea0f0b7e"><td class="mdescLeft">&#160;</td><td class="mdescRight">Register kernel implementation for operation and device.  <br /></td></tr>
+<tr class="memitem:a3814f225714b26584b4719837593c4ea" id="r_a3814f225714b26584b4719837593c4ea"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a3814f225714b26584b4719837593c4ea">dispatch</a> (const std::string &amp;op_name, std::span&lt; const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &gt; inputs, const <a class="el" href="namespacetenzor.html#a4b3b536bbfc180a1baca3de19c0cd2cc">OpAttributes</a> &amp;attrs) -&gt; std::vector&lt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &gt;</td></tr>
+<tr class="memdesc:a3814f225714b26584b4719837593c4ea"><td class="mdescLeft">&#160;</td><td class="mdescRight">Dispatch operation to appropriate kernel.  <br /></td></tr>
+<tr class="memitem:a509ec3082ec02c40945f9886c9620c3a" id="r_a509ec3082ec02c40945f9886c9620c3a"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a509ec3082ec02c40945f9886c9620c3a">has_kernel</a> (std::string_view op_name, <a class="el" href="structtenzor_1_1Device.html#ab9708f554426a88dfce8523bea324af9">Device::Type</a> device_type) const -&gt; bool</td></tr>
+<tr class="memdesc:a509ec3082ec02c40945f9886c9620c3a"><td class="mdescLeft">&#160;</td><td class="mdescRight">Check if kernel is registered.  <br /></td></tr>
+<tr class="memitem:a3598b05f8debd715c1d5f823d3aa8729" id="r_a3598b05f8debd715c1d5f823d3aa8729"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a3598b05f8debd715c1d5f823d3aa8729">registered_operations</a> () const -&gt; std::vector&lt; std::string &gt;</td></tr>
+<tr class="memdesc:a3598b05f8debd715c1d5f823d3aa8729"><td class="mdescLeft">&#160;</td><td class="mdescRight">Get list of all registered operation names.  <br /></td></tr>
 </table>
 <a name="details" id="details"></a><h2 id="header-details" class="groupheader">Detailed Description</h2>
-<div class="textblock">
-<p class="definition">Definition at line <a class="el" href="registry_8hpp_source.html#l00020">20</a> of file <a class="el" href="registry_8hpp_source.html">registry.hpp</a>.</p>
-</div><hr/>The documentation for this class was generated from the following file:<ul>
+<div class="textblock"><p>Thread-safe registry for operation kernels. </p>
+<p>Maintains a mapping from (operation_name, device_type) pairs to kernel implementations. Supports dynamic registration and lookup of kernels at runtime.</p>
+<p>The registry uses a two-level map:</p><ul>
+<li>First level: operation name -&gt; device map</li>
+<li>Second level: device type -&gt; kernel function</li>
+</ul>
+<p>This allows efficient lookup and supports multiple device implementations for each operation.</p>
+<div class="fragment"><div class="line">OperationRegistry&amp; registry = <a class="code hl_function" href="namespacetenzor.html#af4c2fe60b635d53ee226c194a39a8cad">operation_registry</a>();</div>
+<div class="line"> </div>
+<div class="line"><span class="comment">// Register CPU implementation</span></div>
+<div class="line">registry.<a class="code hl_function" href="#a4d93144bca38ed6ac96c8a86ea0f0b7e">register_kernel</a>(<span class="stringliteral">&quot;add&quot;</span>, <a class="code hl_enumvalue" href="structtenzor_1_1Device.html#ab9708f554426a88dfce8523bea324af9a2b55387dd066c5bac646ac61543d152d">Device::Type::CPU</a>, cpu_add_kernel);</div>
+<div class="line"> </div>
+<div class="line"><span class="comment">// Register CUDA implementation</span></div>
+<div class="line">registry.<a class="code hl_function" href="#a4d93144bca38ed6ac96c8a86ea0f0b7e">register_kernel</a>(<span class="stringliteral">&quot;add&quot;</span>, <a class="code hl_enumvalue" href="structtenzor_1_1Device.html#ab9708f554426a88dfce8523bea324af9aa33b7755e5f9b504d2d038eaca4ff28d">Device::Type::CUDA</a>, cuda_add_kernel);</div>
+<div class="line"> </div>
+<div class="line"><span class="comment">// Dispatch based on tensor device</span></div>
+<div class="line"><span class="keyword">auto</span> result = registry.<a class="code hl_function" href="#a3814f225714b26584b4719837593c4ea">dispatch</a>(<span class="stringliteral">&quot;add&quot;</span>, {tensor_a, tensor_b}, {});</div>
+<div class="ttc" id="aclasstenzor_1_1OperationRegistry_html_a3814f225714b26584b4719837593c4ea"><div class="ttname"><a href="#a3814f225714b26584b4719837593c4ea">tenzor::OperationRegistry::dispatch</a></div><div class="ttdeci">auto dispatch(const std::string &amp;op_name, std::span&lt; const Tensor &gt; inputs, const OpAttributes &amp;attrs) -&gt; std::vector&lt; Tensor &gt;</div><div class="ttdoc">Dispatch operation to appropriate kernel.</div></div>
+<div class="ttc" id="aclasstenzor_1_1OperationRegistry_html_a4d93144bca38ed6ac96c8a86ea0f0b7e"><div class="ttname"><a href="#a4d93144bca38ed6ac96c8a86ea0f0b7e">tenzor::OperationRegistry::register_kernel</a></div><div class="ttdeci">auto register_kernel(std::string_view op_name, Device::Type device_type, KernelFunction kernel) -&gt; void</div><div class="ttdoc">Register kernel implementation for operation and device.</div></div>
+<div class="ttc" id="anamespacetenzor_html_af4c2fe60b635d53ee226c194a39a8cad"><div class="ttname"><a href="namespacetenzor.html#af4c2fe60b635d53ee226c194a39a8cad">tenzor::operation_registry</a></div><div class="ttdeci">auto operation_registry() -&gt; OperationRegistry &amp;</div><div class="ttdoc">Get global operation registry singleton.</div></div>
+<div class="ttc" id="astructtenzor_1_1Device_html_ab9708f554426a88dfce8523bea324af9a2b55387dd066c5bac646ac61543d152d"><div class="ttname"><a href="structtenzor_1_1Device.html#ab9708f554426a88dfce8523bea324af9a2b55387dd066c5bac646ac61543d152d">tenzor::Device::Type::CPU</a></div><div class="ttdeci">@ CPU</div><div class="ttdoc">CPU backend.</div><div class="ttdef"><b>Definition</b> <a href="device_8hpp_source.html#l00038">device.hpp:38</a></div></div>
+<div class="ttc" id="astructtenzor_1_1Device_html_ab9708f554426a88dfce8523bea324af9aa33b7755e5f9b504d2d038eaca4ff28d"><div class="ttname"><a href="structtenzor_1_1Device.html#ab9708f554426a88dfce8523bea324af9aa33b7755e5f9b504d2d038eaca4ff28d">tenzor::Device::Type::CUDA</a></div><div class="ttdeci">@ CUDA</div><div class="ttdoc">NVIDIA CUDA backend.</div><div class="ttdef"><b>Definition</b> <a href="device_8hpp_source.html#l00039">device.hpp:39</a></div></div>
+</div><!-- fragment --><dl class="section note"><dt>Note</dt><dd>Thread-safe for concurrent registration and dispatch. </dd></dl>
+<dl class="section see"><dt>See also</dt><dd><a class="el" href="namespacetenzor.html#a829391672bef2f5df6ec94a9aafa7230" title="Kernel function signature.">KernelFunction</a> for kernel signature </dd>
+<dd>
+<a class="el" href="namespacetenzor.html#af4c2fe60b635d53ee226c194a39a8cad" title="Get global operation registry singleton.">operation_registry()</a> for global instance </dd></dl>
+
+<p class="definition">Definition at line <a class="el" href="registry_8hpp_source.html#l00075">75</a> of file <a class="el" href="registry_8hpp_source.html">registry.hpp</a>.</p>
+</div><a name="doc-func-members" id="doc-func-members"></a><h2 id="header-doc-func-members" class="groupheader">Member Function Documentation</h2>
+<a id="a3814f225714b26584b4719837593c4ea" name="a3814f225714b26584b4719837593c4ea"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a3814f225714b26584b4719837593c4ea">&#9670;&#160;</a></span>dispatch()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname">auto tenzor::OperationRegistry::dispatch </td>
+          <td>(</td>
+          <td class="paramtype">const std::string &amp;</td>          <td class="paramname"><span class="paramname"><em>op_name</em></span>, </td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype">std::span&lt; const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &gt;</td>          <td class="paramname"><span class="paramname"><em>inputs</em></span>, </td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype">const <a class="el" href="namespacetenzor.html#a4b3b536bbfc180a1baca3de19c0cd2cc">OpAttributes</a> &amp;</td>          <td class="paramname"><span class="paramname"><em>attrs</em></span>&#160;) -&gt;  std::vector&lt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &gt;</td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>Dispatch operation to appropriate kernel. </p>
+<p>Looks up and executes the kernel for the given operation and device type (inferred from input tensors). Returns the kernel's output.</p>
+<dl class="params"><dt>Parameters</dt><dd>
+  <table class="params">
+    <tr><td class="paramname">op_name</td><td>Operation identifier </td></tr>
+    <tr><td class="paramname">inputs</td><td>Input tensors (device type determines kernel selection) </td></tr>
+    <tr><td class="paramname">attrs</td><td>Operation-specific attributes </td></tr>
+  </table>
+  </dd>
+</dl>
+<dl class="section return"><dt>Returns</dt><dd>Vector of output tensors </dd></dl>
+<dl class="exception"><dt>Exceptions</dt><dd>
+  <table class="exception">
+    <tr><td class="paramname">std::runtime_error</td><td>if operation not registered for device type</td></tr>
+  </table>
+  </dd>
+</dl>
+<div class="fragment"><div class="line"><a class="code hl_class" href="classtenzor_1_1Tensor.html">Tensor</a> a({3, 4}, <a class="code hl_enumvalue" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a76d3773ac62efb2135846cc5f1dbd3c8">Device::cuda</a>(0));</div>
+<div class="line"><a class="code hl_class" href="classtenzor_1_1Tensor.html">Tensor</a> b({3, 4}, <a class="code hl_enumvalue" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a76d3773ac62efb2135846cc5f1dbd3c8">Device::cuda</a>(0));</div>
+<div class="line"><span class="keyword">auto</span> result = registry.dispatch(<span class="stringliteral">&quot;add&quot;</span>, {a, b}, {});</div>
+<div class="ttc" id="aclasstenzor_1_1Tensor_html"><div class="ttname"><a href="classtenzor_1_1Tensor.html">tenzor::Tensor</a></div><div class="ttdoc">Multi-dimensional array with automatic differentiation support.</div><div class="ttdef"><b>Definition</b> <a href="tensor_8hpp_source.html#l00072">tensor.hpp:72</a></div></div>
+<div class="ttc" id="anamespacetenzor_html_a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204"><div class="ttname"><a href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">tenzor::DType::Float32</a></div><div class="ttdeci">@ Float32</div><div class="ttdoc">32-bit floating point (float)</div><div class="ttdef"><b>Definition</b> <a href="dtype_8hpp_source.html#l00025">dtype.hpp:25</a></div></div>
+<div class="ttc" id="astructtenzor_1_1Device_html_a76d3773ac62efb2135846cc5f1dbd3c8"><div class="ttname"><a href="structtenzor_1_1Device.html#a76d3773ac62efb2135846cc5f1dbd3c8">tenzor::Device::cuda</a></div><div class="ttdeci">static auto cuda(int32_t idx=0) -&gt; Device</div><div class="ttdoc">Create a CUDA device.</div><div class="ttdef"><b>Definition</b> <a href="device_8hpp_source.html#l00070">device.hpp:70</a></div></div>
+</div><!-- fragment --><dl class="section note"><dt>Note</dt><dd>Thread-safe with shared locking for read access. </dd></dl>
+
+</div>
+</div>
+<a id="a509ec3082ec02c40945f9886c9620c3a" name="a509ec3082ec02c40945f9886c9620c3a"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a509ec3082ec02c40945f9886c9620c3a">&#9670;&#160;</a></span>has_kernel()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname">auto tenzor::OperationRegistry::has_kernel </td>
+          <td>(</td>
+          <td class="paramtype">std::string_view</td>          <td class="paramname"><span class="paramname"><em>op_name</em></span>, </td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype"><a class="el" href="structtenzor_1_1Device.html#ab9708f554426a88dfce8523bea324af9">Device::Type</a></td>          <td class="paramname"><span class="paramname"><em>device_type</em></span>&#160;) const -&gt;  bool</td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>Check if kernel is registered. </p>
+<dl class="params"><dt>Parameters</dt><dd>
+  <table class="params">
+    <tr><td class="paramname">op_name</td><td>Operation name to check </td></tr>
+    <tr><td class="paramname">device_type</td><td><a class="el" href="structtenzor_1_1Device.html" title="Device specification for tensor placement.">Device</a> type to check </td></tr>
+  </table>
+  </dd>
+</dl>
+<dl class="section return"><dt>Returns</dt><dd>true if kernel exists for (op_name, device_type)</dd></dl>
+<div class="fragment"><div class="line"><span class="keywordflow">if</span> (registry.has_kernel(<span class="stringliteral">&quot;conv2d&quot;</span>, <a class="code hl_enumvalue" href="structtenzor_1_1Device.html#ab9708f554426a88dfce8523bea324af9aa33b7755e5f9b504d2d038eaca4ff28d">Device::Type::CUDA</a>)) {</div>
+<div class="line">    std::cout &lt;&lt; <span class="stringliteral">&quot;CUDA convolution available&quot;</span> &lt;&lt; std::endl;</div>
+<div class="line">}</div>
+</div><!-- fragment --> 
+</div>
+</div>
+<a id="a4d93144bca38ed6ac96c8a86ea0f0b7e" name="a4d93144bca38ed6ac96c8a86ea0f0b7e"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a4d93144bca38ed6ac96c8a86ea0f0b7e">&#9670;&#160;</a></span>register_kernel()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname">auto tenzor::OperationRegistry::register_kernel </td>
+          <td>(</td>
+          <td class="paramtype">std::string_view</td>          <td class="paramname"><span class="paramname"><em>op_name</em></span>, </td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype"><a class="el" href="structtenzor_1_1Device.html#ab9708f554426a88dfce8523bea324af9">Device::Type</a></td>          <td class="paramname"><span class="paramname"><em>device_type</em></span>, </td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype"><a class="el" href="namespacetenzor.html#a829391672bef2f5df6ec94a9aafa7230">KernelFunction</a></td>          <td class="paramname"><span class="paramname"><em>kernel</em></span>&#160;) -&gt;  void</td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>Register kernel implementation for operation and device. </p>
+<p>Associates a kernel function with a specific operation name and device type. Overwrites any existing registration for the same (op_name, device_type) pair.</p>
+<dl class="params"><dt>Parameters</dt><dd>
+  <table class="params">
+    <tr><td class="paramname">op_name</td><td>Operation identifier (e.g., "add", "matmul", "conv2d") </td></tr>
+    <tr><td class="paramname">device_type</td><td>Target device type (CPU, CUDA, etc.) </td></tr>
+    <tr><td class="paramname">kernel</td><td>Kernel function to register</td></tr>
+  </table>
+  </dd>
+</dl>
+<div class="fragment"><div class="line">registry.register_kernel(<span class="stringliteral">&quot;matmul&quot;</span>, <a class="code hl_enumvalue" href="structtenzor_1_1Device.html#ab9708f554426a88dfce8523bea324af9aa33b7755e5f9b504d2d038eaca4ff28d">Device::Type::CUDA</a>,</div>
+<div class="line">    [](std::span&lt;const Tensor&gt; inputs, <span class="keyword">const</span> <a class="code hl_typedef" href="namespacetenzor.html#a4b3b536bbfc180a1baca3de19c0cd2cc">OpAttributes</a>&amp; attrs) {</div>
+<div class="line">        <span class="keywordflow">return</span> {cublas_matmul(inputs[0], inputs[1])};</div>
+<div class="line">    }</div>
+<div class="line">);</div>
+<div class="ttc" id="anamespacetenzor_html_a4b3b536bbfc180a1baca3de19c0cd2cc"><div class="ttname"><a href="namespacetenzor.html#a4b3b536bbfc180a1baca3de19c0cd2cc">tenzor::OpAttributes</a></div><div class="ttdeci">std::unordered_map&lt; std::string, std::string &gt; OpAttributes</div><div class="ttdoc">Generic operation attributes for kernel parameters.</div><div class="ttdef"><b>Definition</b> <a href="backend_8hpp_source.html#l00055">backend.hpp:55</a></div></div>
+</div><!-- fragment --><dl class="section note"><dt>Note</dt><dd>Thread-safe with exclusive locking. </dd></dl>
+
+</div>
+</div>
+<a id="a3598b05f8debd715c1d5f823d3aa8729" name="a3598b05f8debd715c1d5f823d3aa8729"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a3598b05f8debd715c1d5f823d3aa8729">&#9670;&#160;</a></span>registered_operations()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname">auto tenzor::OperationRegistry::registered_operations </td>
+          <td>(</td>
+          <td class="paramname"><span class="paramname"><em></em></span></td><td>)</td>
+          <td> const -&gt;  std::vector&lt; std::string &gt;</td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>Get list of all registered operation names. </p>
+<dl class="section return"><dt>Returns</dt><dd>Vector of unique operation names</dd></dl>
+<div class="fragment"><div class="line"><span class="keyword">auto</span> ops = registry.registered_operations();</div>
+<div class="line"><span class="keywordflow">for</span> (<span class="keyword">const</span> <span class="keyword">auto</span>&amp; op : ops) {</div>
+<div class="line">    std::cout &lt;&lt; <span class="stringliteral">&quot;Operation: &quot;</span> &lt;&lt; op &lt;&lt; std::endl;</div>
+<div class="line">}</div>
+</div><!-- fragment --> 
+<p class="reference">References <a class="el" href="group__tensor__reduction.html#ga57c6304de0ccf7b02d2cf42923b2e3d9">tenzor::std()</a>.</p>
+
+</div>
+</div>
+<hr/>The documentation for this class was generated from the following file:<ul>
 <li>include/tenzor/backend/<a class="el" href="registry_8hpp_source.html">registry.hpp</a></li>
 </ul>
 </div><!-- contents -->
@@ -123,7 +310,7 @@ auto&#160;</td><td class="memItemRight" valign="bottom"><b>registered_operations
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><b>tenzor</b></li><li class="navelem"><a href="classtenzor_1_1OperationRegistry.html">OperationRegistry</a></li>
+    <li class="navelem"><a href="namespacetenzor.html">tenzor</a></li><li class="navelem"><a href="classtenzor_1_1OperationRegistry.html">OperationRegistry</a></li>
     <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>

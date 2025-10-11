@@ -1,5 +1,5 @@
 <map id="tenzor::CPUStorage" name="tenzor::CPUStorage">
-<area shape="rect" id="Node000001" title=" " alt="" coords="5,81,153,109"/>
-<area shape="rect" id="Node000002" href="$classtenzor_1_1Storage.html" title=" " alt="" coords="19,5,139,33"/>
+<area shape="rect" id="Node000001" title="CPU memory storage with aligned allocation." alt="" coords="5,81,153,109"/>
+<area shape="rect" id="Node000002" href="$classtenzor_1_1Storage.html" title="Abstract base class for tensor memory storage." alt="" coords="19,5,139,33"/>
 <area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="82,49,82,81,76,81,76,49"/>
 </map>

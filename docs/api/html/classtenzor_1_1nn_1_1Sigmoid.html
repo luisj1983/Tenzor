@@ -92,12 +92,17 @@ $(function(){initNavTree('classtenzor_1_1nn_1_1Sigmoid.html','','classtenzor_1_1
   <div class="headertitle"><div class="title">tenzor::nn::Sigmoid Class Reference</div></div>
 </div><!--header-->
 <div class="contents">
+
+<p><a class="el" href="classtenzor_1_1nn_1_1Sigmoid.html" title="Sigmoid activation function.">Sigmoid</a> activation function.  
+ <a href="#details">More...</a></p>
+
+<p><code>#include &lt;<a class="el" href="activations_8hpp_source.html">activations.hpp</a>&gt;</code></p>
 <div class="dynheader">
 Inheritance diagram for tenzor::nn::Sigmoid:</div>
 <div class="dyncontent">
 <div class="center"><img src="classtenzor_1_1nn_1_1Sigmoid__inherit__graph.png" border="0" usemap="#atenzor_1_1nn_1_1Sigmoid_inherit__map" loading="lazy" alt="Inheritance graph"/></div>
 <map name="atenzor_1_1nn_1_1Sigmoid_inherit__map" id="atenzor_1_1nn_1_1Sigmoid_inherit__map">
-<area shape="rect" title=" " alt="" coords="5,81,153,109"/>
+<area shape="rect" title="Sigmoid activation function." alt="" coords="5,81,153,109"/>
 <area shape="rect" href="classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="8,5,150,33"/>
 <area shape="poly" title=" " alt="" coords="82,49,82,81,76,81,76,49"/>
 </map>
@@ -107,7 +112,7 @@ Collaboration diagram for tenzor::nn::Sigmoid:</div>
 <div class="dyncontent">
 <div class="center"><img src="classtenzor_1_1nn_1_1Sigmoid__coll__graph.png" border="0" usemap="#atenzor_1_1nn_1_1Sigmoid_coll__map" loading="lazy" alt="Collaboration graph"/></div>
 <map name="atenzor_1_1nn_1_1Sigmoid_coll__map" id="atenzor_1_1nn_1_1Sigmoid_coll__map">
-<area shape="rect" title=" " alt="" coords="952,5,1100,33"/>
+<area shape="rect" title="Sigmoid activation function." alt="" coords="952,5,1100,33"/>
 <area shape="rect" href="classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="723,69,865,97"/>
 <area shape="poly" title=" " alt="" coords="848,61,888,49,957,31,958,36,890,54,850,66"/>
 <area shape="rect" title=" " alt="" coords="939,57,1113,102"/>
@@ -186,8 +191,34 @@ Additional Inherited Members</h2></td></tr>
 <tr class="memdesc:a9d9d2355bff1b6c5bfe300aa14e477a2 inherit pro_attribs_classtenzor_1_1nn_1_1Module"><td class="mdescLeft">&#160;</td><td class="mdescRight">Named submodules.  <br /></td></tr>
 </table>
 <a name="details" id="details"></a><h2 id="header-details" class="groupheader">Detailed Description</h2>
-<div class="textblock">
-<p class="definition">Definition at line <a class="el" href="activations_8hpp_source.html#l00026">26</a> of file <a class="el" href="activations_8hpp_source.html">activations.hpp</a>.</p>
+<div class="textblock"><p><a class="el" href="classtenzor_1_1nn_1_1Sigmoid.html" title="Sigmoid activation function.">Sigmoid</a> activation function. </p>
+<p>Applies the sigmoid (logistic) function element-wise:</p>
+<p class="formulaDsp">
+<picture><source srcset="form_3_dark.png" media="(prefers-color-scheme: dark)"/><img class="formulaDsp" alt="\[\text{Sigmoid}(x) = \sigma(x) = \frac{1}{1 + e^{-x}}
+\]" src="form_3.png"/></picture>
+</p>
+<p><a class="el" href="classtenzor_1_1nn_1_1Sigmoid.html" title="Sigmoid activation function.">Sigmoid</a> squashes input values to range (0, 1), making it suitable for:</p><ul>
+<li>Binary classification (output layer)</li>
+<li>Probability estimation</li>
+<li>Gate mechanisms in LSTM/GRU</li>
+</ul>
+<p><b>Limitations:</b></p><ul>
+<li>Vanishing gradients: Gradients approach zero for large |x|</li>
+<li>Not zero-centered: Can slow down convergence</li>
+<li>Expensive computation: Requires exponential operation</li>
+</ul>
+<p><b>Note:</b> For hidden layers, prefer <a class="el" href="classtenzor_1_1nn_1_1ReLU.html" title="Rectified Linear Unit (ReLU) activation.">ReLU</a> or its variants for better gradient flow.</p>
+<dl class="section user"><dt>Complexity</dt><dd><ul>
+<li>Time: O(n)</li>
+<li>Space: O(1)</li>
+</ul>
+</dd></dl>
+<div class="fragment"><div class="line"><span class="keyword">auto</span> <a class="code hl_function" href="group__functional__activations.html#ga9870f0b1ca41f7a4175ff031c4bbb65d">sigmoid</a> = Sigmoid();</div>
+<div class="line"><span class="keyword">auto</span> output = <a class="code hl_function" href="group__functional__activations.html#ga9870f0b1ca41f7a4175ff031c4bbb65d">sigmoid</a>.forward(input);  <span class="comment">// Range: (0, 1)</span></div>
+<div class="ttc" id="agroup__functional__activations_html_ga9870f0b1ca41f7a4175ff031c4bbb65d"><div class="ttname"><a href="group__functional__activations.html#ga9870f0b1ca41f7a4175ff031c4bbb65d">tenzor::nn::sigmoid</a></div><div class="ttdeci">auto sigmoid(const Variable &amp;input) -&gt; Variable</div><div class="ttdoc">Functional sigmoid: 1 / (1 + exp(-x))</div></div>
+</div><!-- fragment --><dl class="section see"><dt>See also</dt><dd><a class="el" href="classtenzor_1_1nn_1_1Tanh.html" title="Hyperbolic tangent (Tanh) activation.">Tanh</a> for zero-centered alternative </dd></dl>
+
+<p class="definition">Definition at line <a class="el" href="activations_8hpp_source.html#l00152">152</a> of file <a class="el" href="activations_8hpp_source.html">activations.hpp</a>.</p>
 </div><a name="doc-func-members" id="doc-func-members"></a><h2 id="header-doc-func-members" class="groupheader">Member Function Documentation</h2>
 <a id="a04c7f9b82270d1ae89e97bbeca47069b" name="a04c7f9b82270d1ae89e97bbeca47069b"></a>
 <h2 class="memtitle"><span class="permalink"><a href="#a04c7f9b82270d1ae89e97bbeca47069b">&#9670;&#160;</a></span>forward()</h2>
@@ -241,7 +272,7 @@ Additional Inherited Members</h2></td></tr>
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><b>tenzor</b></li><li class="navelem"><b>nn</b></li><li class="navelem"><a href="classtenzor_1_1nn_1_1Sigmoid.html">Sigmoid</a></li>
+    <li class="navelem"><a href="namespacetenzor.html">tenzor</a></li><li class="navelem"><b>nn</b></li><li class="navelem"><a href="classtenzor_1_1nn_1_1Sigmoid.html">Sigmoid</a></li>
     <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>

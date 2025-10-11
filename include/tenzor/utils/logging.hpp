@@ -1,3 +1,11 @@
+/**
+ * @file logging.hpp
+ * @brief Logging system for debugging and diagnostics
+ *
+ * Provides structured logging with multiple severity levels,
+ * automatic source location tracking, and configurable outputs.
+ */
+
 #pragma once
 
 #include <string>
@@ -7,16 +15,46 @@
 
 namespace tenzor {
 
-// Log levels
+/**
+ * @brief Logging severity levels
+ *
+ * - Debug: Detailed debugging information
+ * - Info: General informational messages
+ * - Warning: Warning messages (non-critical issues)
+ * - Error: Error messages (recoverable errors)
+ * - Fatal: Fatal errors (program termination)
+ */
 enum class LogLevel {
-    Debug,
-    Info,
-    Warning,
-    Error,
-    Fatal
+    Debug,    ///< Detailed debugging information
+    Info,     ///< General informational messages
+    Warning,  ///< Warning messages
+    Error,    ///< Error messages
+    Fatal     ///< Fatal errors
 };
 
-// Logger class
+/**
+ * @brief Singleton logger for library diagnostics
+ *
+ * Provides structured logging with automatic source location tracking.
+ * Supports console and file output with configurable log levels.
+ *
+ * **Default Behavior:**
+ * - Log level: Info (Debug messages filtered)
+ * - Console output: Enabled
+ * - File output: Disabled
+ *
+ * @par Thread Safety
+ * Thread-safe for concurrent logging from multiple threads
+ *
+ * @code
+ * auto& logger = Logger::instance();
+ * logger.set_level(LogLevel::Debug);
+ * logger.set_output_file("tenzor.log");
+ *
+ * TENZOR_LOG_INFO("Model loaded successfully");
+ * TENZOR_LOG_WARNING("Using CPU fallback");
+ * @endcode
+ */
 class Logger {
 public:
     static auto instance() -> Logger&;

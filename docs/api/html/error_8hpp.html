@@ -5,7 +5,7 @@
 <meta http-equiv="X-UA-Compatible" content="IE=11"/>
 <meta name="generator" content="Doxygen 1.14.0"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Tenzor: tenzor/utils/error.hpp File Reference</title>
+<title>Tenzor: include/tenzor/utils/error.hpp File Reference</title>
 <link href="tabs.css" rel="stylesheet" type="text/css"/>
 <script type="text/javascript" src="jquery.js"></script>
 <script type="text/javascript" src="dynsections.js"></script>
@@ -28,7 +28,7 @@
   <td id="projectalign">
    <div id="projectname">Tenzor<span id="projectnumber">&#160;1.0.0</span>
    </div>
-   <div id="projectbrief">Modern C++20 tensor library with automatic differentiation</div>
+   <div id="projectbrief">High-performance tensor library with automatic differentiation</div>
   </td>
  </tr>
  </tbody>
@@ -92,27 +92,56 @@ $(function(){initNavTree('error_8hpp.html','',''); });
   <div class="headertitle"><div class="title">error.hpp File Reference</div></div>
 </div><!--header-->
 <div class="contents">
+
+<p>Exception classes and error handling.  
+<a href="#details">More...</a></p>
 <div class="textblock"><code>#include &lt;stdexcept&gt;</code><br />
 <code>#include &lt;string&gt;</code><br />
 <code>#include &lt;string_view&gt;</code><br />
 <code>#include &lt;source_location&gt;</code><br />
 <code>#include &lt;format&gt;</code><br />
+</div><div class="textblock"><div class="dynheader">
+Include dependency graph for error.hpp:</div>
+<div class="dyncontent">
+<div class="center"><img src="error_8hpp__incl.png" border="0" usemap="#ainclude_2tenzor_2utils_2error_8hpp" loading="lazy" alt=""/></div>
+<map name="ainclude_2tenzor_2utils_2error_8hpp" id="ainclude_2tenzor_2utils_2error_8hpp">
+<area shape="rect" title="Exception classes and error handling." alt="" coords="173,5,318,50"/>
+<area shape="rect" title=" " alt="" coords="5,98,91,126"/>
+<area shape="poly" title=" " alt="" coords="194,53,95,94,93,89,192,48"/>
+<area shape="rect" title=" " alt="" coords="115,98,173,126"/>
+<area shape="poly" title=" " alt="" coords="220,52,174,90,170,86,217,48"/>
+<area shape="rect" title=" " alt="" coords="197,98,294,126"/>
+<area shape="poly" title=" " alt="" coords="248,50,248,82,243,82,243,50"/>
+<area shape="rect" title=" " alt="" coords="317,98,440,126"/>
+<area shape="poly" title=" " alt="" coords="282,48,346,87,343,92,279,53"/>
+<area shape="rect" title=" " alt="" coords="465,98,530,126"/>
+<area shape="poly" title=" " alt="" coords="313,48,450,93,449,98,311,53"/>
+</map>
+</div>
 </div>
 <p><a href="error_8hpp_source.html">Go to the source code of this file.</a></p>
 <table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-nested-classes" class="groupheader"><a id="nested-classes" name="nested-classes"></a>
 Classes</h2></td></tr>
 <tr class="memitem:tenzor_3A_3ATenzorException" id="r_tenzor_3A_3ATenzorException"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1TenzorException.html">tenzor::TenzorException</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Base exception class for all Tenzor errors.  <a href="classtenzor_1_1TenzorException.html#details">More...</a><br /></td></tr>
 <tr class="memitem:tenzor_3A_3ADeviceException" id="r_tenzor_3A_3ADeviceException"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1DeviceException.html">tenzor::DeviceException</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Device-related errors (CUDA unavailable, invalid device ID, etc.)  <a href="classtenzor_1_1DeviceException.html#details">More...</a><br /></td></tr>
 <tr class="memitem:tenzor_3A_3ADTypeException" id="r_tenzor_3A_3ADTypeException"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1DTypeException.html">tenzor::DTypeException</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Data type errors (unsupported dtype, type mismatch, etc.)  <a href="classtenzor_1_1DTypeException.html#details">More...</a><br /></td></tr>
 <tr class="memitem:tenzor_3A_3AShapeException" id="r_tenzor_3A_3AShapeException"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1ShapeException.html">tenzor::ShapeException</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight"><a class="el" href="classtenzor_1_1Shape.html" title="Represents the shape (dimensions) of a tensor.">Shape</a> mismatch and dimension errors.  <a href="classtenzor_1_1ShapeException.html#details">More...</a><br /></td></tr>
 <tr class="memitem:tenzor_3A_3ABackendException" id="r_tenzor_3A_3ABackendException"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1BackendException.html">tenzor::BackendException</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight"><a class="el" href="classtenzor_1_1Backend.html" title="Abstract base class for device backend implementations.">Backend</a> and computation errors.  <a href="classtenzor_1_1BackendException.html#details">More...</a><br /></td></tr>
 <tr class="memitem:tenzor_3A_3AMemoryException" id="r_tenzor_3A_3AMemoryException"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1MemoryException.html">tenzor::MemoryException</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Memory allocation and management errors.  <a href="classtenzor_1_1MemoryException.html#details">More...</a><br /></td></tr>
 <tr class="memitem:tenzor_3A_3AAutogradException" id="r_tenzor_3A_3AAutogradException"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1AutogradException.html">tenzor::AutogradException</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Automatic differentiation errors.  <a href="classtenzor_1_1AutogradException.html#details">More...</a><br /></td></tr>
 </table><table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-namespaces" class="groupheader"><a id="namespaces" name="namespaces"></a>
 Namespaces</h2></td></tr>
 <tr class="memitem:tenzor" id="r_tenzor"><td class="memItemLeft" align="right" valign="top">namespace &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html">tenzor</a></td></tr>
+<tr class="memdesc:namespacetenzor"><td class="mdescLeft">&#160;</td><td class="mdescRight">Main Tenzor namespace. <br /></td></tr>
 </table><table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-define-members" class="groupheader"><a id="define-members" name="define-members"></a>
 Macros</h2></td></tr>
@@ -121,7 +150,12 @@ Macros</h2></td></tr>
 <tr class="memitem:ac3da190217e467eaf6c0278f02a0fcd2" id="r_ac3da190217e467eaf6c0278f02a0fcd2"><td class="memItemLeft" align="right" valign="top">#define&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#ac3da190217e467eaf6c0278f02a0fcd2">TENZOR_CHECK_DTYPE</a>(condition,  message)</td></tr>
 <tr class="memitem:a45e34c8697a7c18ef1776fe261d98582" id="r_a45e34c8697a7c18ef1776fe261d98582"><td class="memItemLeft" align="right" valign="top">#define&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a45e34c8697a7c18ef1776fe261d98582">TENZOR_CHECK_SHAPE</a>(condition,  message)</td></tr>
 </table>
-<a name="doc-define-members" id="doc-define-members"></a><h2 id="header-doc-define-members" class="groupheader">Macro Definition Documentation</h2>
+<a name="details" id="details"></a><h2 id="header-details" class="groupheader">Detailed Description</h2>
+<div class="textblock"><p>Exception classes and error handling. </p>
+<p>Provides hierarchy of exception classes for different error categories, with automatic source location tracking for debugging. </p>
+
+<p class="definition">Definition in file <a class="el" href="error_8hpp_source.html">error.hpp</a>.</p>
+</div><a name="doc-define-members" id="doc-define-members"></a><h2 id="header-doc-define-members" class="groupheader">Macro Definition Documentation</h2>
 <a id="af488b80400042210dc426dcb48479c7e" name="af488b80400042210dc426dcb48479c7e"></a>
 <h2 class="memtitle"><span class="permalink"><a href="#af488b80400042210dc426dcb48479c7e">&#9670;&#160;</a></span>TENZOR_CHECK</h2>
 
@@ -146,6 +180,8 @@ Macros</h2></td></tr>
 <div class="line">        } \</div>
 <div class="line">    } <span class="keywordflow">while</span> (0)</div>
 </div><!-- fragment -->
+<p class="definition">Definition at line <a class="el" href="error_8hpp_source.html#l00087">87</a> of file <a class="el" href="error_8hpp_source.html">error.hpp</a>.</p>
+
 </div>
 </div>
 <a id="ab45ce4cb6f8a3f1a37b3cbb3d05a4f65" name="ab45ce4cb6f8a3f1a37b3cbb3d05a4f65"></a>
@@ -172,6 +208,8 @@ Macros</h2></td></tr>
 <div class="line">        } \</div>
 <div class="line">    } <span class="keywordflow">while</span> (0)</div>
 </div><!-- fragment -->
+<p class="definition">Definition at line <a class="el" href="error_8hpp_source.html#l00094">94</a> of file <a class="el" href="error_8hpp_source.html">error.hpp</a>.</p>
+
 </div>
 </div>
 <a id="ac3da190217e467eaf6c0278f02a0fcd2" name="ac3da190217e467eaf6c0278f02a0fcd2"></a>
@@ -198,6 +236,8 @@ Macros</h2></td></tr>
 <div class="line">        } \</div>
 <div class="line">    } <span class="keywordflow">while</span> (0)</div>
 </div><!-- fragment -->
+<p class="definition">Definition at line <a class="el" href="error_8hpp_source.html#l00101">101</a> of file <a class="el" href="error_8hpp_source.html">error.hpp</a>.</p>
+
 </div>
 </div>
 <a id="a45e34c8697a7c18ef1776fe261d98582" name="a45e34c8697a7c18ef1776fe261d98582"></a>
@@ -224,6 +264,8 @@ Macros</h2></td></tr>
 <div class="line">        } \</div>
 <div class="line">    } <span class="keywordflow">while</span> (0)</div>
 </div><!-- fragment -->
+<p class="definition">Definition at line <a class="el" href="error_8hpp_source.html#l00108">108</a> of file <a class="el" href="error_8hpp_source.html">error.hpp</a>.</p>
+
 </div>
 </div>
 </div><!-- contents -->
@@ -239,8 +281,8 @@ Macros</h2></td></tr>
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><a href="dir_4f7edb362912b75e95599213beee2a17.html">tenzor</a></li><li class="navelem"><a href="dir_b4f8a9091db2466660d9700afb3e35b8.html">utils</a></li><li class="navelem"><a href="error_8hpp.html">error.hpp</a></li>
-    <li class="footer">Generated by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
+    <li class="navelem"><a href="dir_d44c64559bbebec7f509842c48db8b23.html">include</a></li><li class="navelem"><a href="dir_14ba40437910c5dd1b08964ca20ae5af.html">tenzor</a></li><li class="navelem"><a href="dir_16b01d04ecc528db8b9be846cd642082.html">utils</a></li><li class="navelem"><a href="error_8hpp.html">error.hpp</a></li>
+    <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>
 </body>

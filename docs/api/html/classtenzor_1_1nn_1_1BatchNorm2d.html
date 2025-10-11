@@ -92,12 +92,17 @@ $(function(){initNavTree('classtenzor_1_1nn_1_1BatchNorm2d.html','','classtenzor
   <div class="headertitle"><div class="title">tenzor::nn::BatchNorm2d Class Reference</div></div>
 </div><!--header-->
 <div class="contents">
+
+<p>Batch Normalization for 2D inputs (images).  
+ <a href="#details">More...</a></p>
+
+<p><code>#include &lt;<a class="el" href="batchnorm_8hpp_source.html">batchnorm.hpp</a>&gt;</code></p>
 <div class="dynheader">
 Inheritance diagram for tenzor::nn::BatchNorm2d:</div>
 <div class="dyncontent">
 <div class="center"><img src="classtenzor_1_1nn_1_1BatchNorm2d__inherit__graph.png" border="0" usemap="#atenzor_1_1nn_1_1BatchNorm2d_inherit__map" loading="lazy" alt="Inheritance graph"/></div>
 <map name="atenzor_1_1nn_1_1BatchNorm2d_inherit__map" id="atenzor_1_1nn_1_1BatchNorm2d_inherit__map">
-<area shape="rect" title=" " alt="" coords="5,81,189,109"/>
+<area shape="rect" title="Batch Normalization for 2D inputs (images)." alt="" coords="5,81,189,109"/>
 <area shape="rect" href="classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="26,5,168,33"/>
 <area shape="poly" title=" " alt="" coords="100,49,100,81,94,81,94,49"/>
 </map>
@@ -107,7 +112,7 @@ Collaboration diagram for tenzor::nn::BatchNorm2d:</div>
 <div class="dyncontent">
 <div class="center"><img src="classtenzor_1_1nn_1_1BatchNorm2d__coll__graph.png" border="0" usemap="#atenzor_1_1nn_1_1BatchNorm2d_coll__map" loading="lazy" alt="Collaboration graph"/></div>
 <map name="atenzor_1_1nn_1_1BatchNorm2d_coll__map" id="atenzor_1_1nn_1_1BatchNorm2d_coll__map">
-<area shape="rect" title=" " alt="" coords="939,5,1122,33"/>
+<area shape="rect" title="Batch Normalization for 2D inputs (images)." alt="" coords="939,5,1122,33"/>
 <area shape="rect" href="classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="723,69,865,97"/>
 <area shape="poly" title=" " alt="" coords="848,61,888,49,959,31,960,36,890,54,850,66"/>
 <area shape="rect" title=" " alt="" coords="944,57,1118,102"/>
@@ -129,10 +134,10 @@ Collaboration diagram for tenzor::nn::BatchNorm2d:</div>
 <table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-pub-methods" class="groupheader"><a id="pub-methods" name="pub-methods"></a>
 Public Member Functions</h2></td></tr>
-<tr class="memitem:a320e9af5a01ab23b4d7fb428e00d7430" id="r_a320e9af5a01ab23b4d7fb428e00d7430"><td class="memItemLeft" align="right" valign="top"><a id="a320e9af5a01ab23b4d7fb428e00d7430" name="a320e9af5a01ab23b4d7fb428e00d7430"></a>
-&#160;</td><td class="memItemRight" valign="bottom"><b>BatchNorm2d</b> (int64_t num_features, double eps=1e-5, double momentum=0.1, bool affine=true, bool track_running_stats=true)</td></tr>
+<tr class="memitem:a320e9af5a01ab23b4d7fb428e00d7430" id="r_a320e9af5a01ab23b4d7fb428e00d7430"><td class="memItemLeft" align="right" valign="top">&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a320e9af5a01ab23b4d7fb428e00d7430">BatchNorm2d</a> (int64_t num_features, double eps=1e-5, double momentum=0.1, bool affine=true, bool track_running_stats=true)</td></tr>
+<tr class="memdesc:a320e9af5a01ab23b4d7fb428e00d7430"><td class="mdescLeft">&#160;</td><td class="mdescRight">Construct batch normalization layer for 2D data.  <br /></td></tr>
 <tr class="memitem:ac35b4fdebbc059f3d0a2c4d35521b1d0" id="r_ac35b4fdebbc059f3d0a2c4d35521b1d0"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#ac35b4fdebbc059f3d0a2c4d35521b1d0">forward</a> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a> override</td></tr>
-<tr class="memdesc:ac35b4fdebbc059f3d0a2c4d35521b1d0"><td class="mdescLeft">&#160;</td><td class="mdescRight">Forward pass computation (must be implemented by derived classes).  <br /></td></tr>
+<tr class="memdesc:ac35b4fdebbc059f3d0a2c4d35521b1d0"><td class="mdescLeft">&#160;</td><td class="mdescRight">Forward pass through batch normalization.  <br /></td></tr>
 <tr class="inherit_header pub_methods_classtenzor_1_1nn_1_1Module"><td colspan="2" onclick="javascript:dynsection.toggleInherit('pub_methods_classtenzor_1_1nn_1_1Module')"><span class="dynarrow"><span class="arrowhead closed"></span></span>Public Member Functions inherited from <a class="el" href="classtenzor_1_1nn_1_1Module.html">tenzor::nn::Module</a></td></tr>
 <tr class="memitem:a875ff098390db49e49465127ac03eadb inherit pub_methods_classtenzor_1_1nn_1_1Module" id="r_a875ff098390db49e49465127ac03eadb"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1nn_1_1Module.html#a875ff098390db49e49465127ac03eadb">operator()</a> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
 <tr class="memdesc:a875ff098390db49e49465127ac03eadb inherit pub_methods_classtenzor_1_1nn_1_1Module"><td class="mdescLeft">&#160;</td><td class="mdescRight">Convenience operator for forward pass.  <br /></td></tr>
@@ -188,9 +193,83 @@ Additional Inherited Members</h2></td></tr>
 <tr class="memdesc:a9d9d2355bff1b6c5bfe300aa14e477a2 inherit pro_attribs_classtenzor_1_1nn_1_1Module"><td class="mdescLeft">&#160;</td><td class="mdescRight">Named submodules.  <br /></td></tr>
 </table>
 <a name="details" id="details"></a><h2 id="header-details" class="groupheader">Detailed Description</h2>
-<div class="textblock">
-<p class="definition">Definition at line <a class="el" href="batchnorm_8hpp_source.html#l00009">9</a> of file <a class="el" href="batchnorm_8hpp_source.html">batchnorm.hpp</a>.</p>
-</div><a name="doc-func-members" id="doc-func-members"></a><h2 id="header-doc-func-members" class="groupheader">Member Function Documentation</h2>
+<div class="textblock"><p>Batch Normalization for 2D inputs (images). </p>
+<p>Normalizes activations across the batch dimension for each feature channel. Commonly used in convolutional networks after convolution layers.</p>
+<p>Normalization formula:</p><ul>
+<li>y = (x - E[x]) / sqrt(Var[x] + eps) * gamma + beta</li>
+</ul>
+<p>Where E[x] and Var[x] are computed per-channel across batch and spatial dimensions.</p>
+<p><a class="el" href="classtenzor_1_1Shape.html" title="Represents the shape (dimensions) of a tensor.">Shape</a>:</p><ul>
+<li>Input: (N, C, H, W)</li>
+<li>Output: (N, C, H, W) (same as input)</li>
+<li>Weight (gamma): (C) if affine=true</li>
+<li>Bias (beta): (C) if affine=true</li>
+<li>Running mean: (C)</li>
+<li>Running variance: (C)</li>
+</ul>
+<div class="fragment"><div class="line"><a class="code hl_function" href="#a320e9af5a01ab23b4d7fb428e00d7430">BatchNorm2d</a> bn(64);  <span class="comment">// 64 feature channels</span></div>
+<div class="line"> </div>
+<div class="line"><a class="code hl_class" href="classtenzor_1_1Variable.html">Variable</a> x(<a class="code hl_class" href="classtenzor_1_1Tensor.html">Tensor</a>({batch, 64, 32, 32}, <a class="code hl_enumvalue" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()), <span class="keyword">true</span>);</div>
+<div class="line"><a class="code hl_class" href="classtenzor_1_1Variable.html">Variable</a> normalized = bn.forward(x);  <span class="comment">// Same shape</span></div>
+<div class="ttc" id="aclasstenzor_1_1Tensor_html"><div class="ttname"><a href="classtenzor_1_1Tensor.html">tenzor::Tensor</a></div><div class="ttdoc">Multi-dimensional array with automatic differentiation support.</div><div class="ttdef"><b>Definition</b> <a href="tensor_8hpp_source.html#l00072">tensor.hpp:72</a></div></div>
+<div class="ttc" id="aclasstenzor_1_1Variable_html"><div class="ttname"><a href="classtenzor_1_1Variable.html">tenzor::Variable</a></div><div class="ttdoc">Gradient-enabled tensor wrapper for automatic differentiation.</div><div class="ttdef"><b>Definition</b> <a href="variable_8hpp_source.html#l00049">variable.hpp:49</a></div></div>
+<div class="ttc" id="aclasstenzor_1_1nn_1_1BatchNorm2d_html_a320e9af5a01ab23b4d7fb428e00d7430"><div class="ttname"><a href="#a320e9af5a01ab23b4d7fb428e00d7430">tenzor::nn::BatchNorm2d::BatchNorm2d</a></div><div class="ttdeci">BatchNorm2d(int64_t num_features, double eps=1e-5, double momentum=0.1, bool affine=true, bool track_running_stats=true)</div><div class="ttdoc">Construct batch normalization layer for 2D data.</div></div>
+<div class="ttc" id="anamespacetenzor_html_a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204"><div class="ttname"><a href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">tenzor::DType::Float32</a></div><div class="ttdeci">@ Float32</div><div class="ttdoc">32-bit floating point (float)</div><div class="ttdef"><b>Definition</b> <a href="dtype_8hpp_source.html#l00025">dtype.hpp:25</a></div></div>
+<div class="ttc" id="astructtenzor_1_1Device_html_a77290e32e1fa7560bef5d05457f6157a"><div class="ttname"><a href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">tenzor::Device::cpu</a></div><div class="ttdeci">static auto cpu() -&gt; Device</div><div class="ttdoc">Create a CPU device.</div><div class="ttdef"><b>Definition</b> <a href="device_8hpp_source.html#l00056">device.hpp:56</a></div></div>
+</div><!-- fragment --><dl class="section see"><dt>See also</dt><dd><a class="el" href="classtenzor_1_1nn_1_1BatchNorm1d.html" title="Batch Normalization for 1D inputs (sequences).">BatchNorm1d</a> for 1D batch normalization </dd></dl>
+
+<p class="definition">Definition at line <a class="el" href="batchnorm_8hpp_source.html#l00044">44</a> of file <a class="el" href="batchnorm_8hpp_source.html">batchnorm.hpp</a>.</p>
+</div><a name="doc-constructors" id="doc-constructors"></a><h2 id="header-doc-constructors" class="groupheader">Constructor &amp; Destructor Documentation</h2>
+<a id="a320e9af5a01ab23b4d7fb428e00d7430" name="a320e9af5a01ab23b4d7fb428e00d7430"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a320e9af5a01ab23b4d7fb428e00d7430">&#9670;&#160;</a></span>BatchNorm2d()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname">tenzor::nn::BatchNorm2d::BatchNorm2d </td>
+          <td>(</td>
+          <td class="paramtype">int64_t</td>          <td class="paramname"><span class="paramname"><em>num_features</em></span>, </td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype">double</td>          <td class="paramname"><span class="paramname"><em>eps</em></span><span class="paramdefsep"> = </span><span class="paramdefval">1e-5</span>, </td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype">double</td>          <td class="paramname"><span class="paramname"><em>momentum</em></span><span class="paramdefsep"> = </span><span class="paramdefval">0.1</span>, </td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype">bool</td>          <td class="paramname"><span class="paramname"><em>affine</em></span><span class="paramdefsep"> = </span><span class="paramdefval">true</span>, </td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype">bool</td>          <td class="paramname"><span class="paramname"><em>track_running_stats</em></span><span class="paramdefsep"> = </span><span class="paramdefval">true</span>&#160;)</td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>Construct batch normalization layer for 2D data. </p>
+<dl class="params"><dt>Parameters</dt><dd>
+  <table class="params">
+    <tr><td class="paramname">num_features</td><td>Number of feature channels (C dimension) </td></tr>
+    <tr><td class="paramname">eps</td><td>Small constant for numerical stability (default: 1e-5) </td></tr>
+    <tr><td class="paramname">momentum</td><td>Momentum for running statistics update (default: 0.1) </td></tr>
+    <tr><td class="paramname">affine</td><td>If true, learn scale and shift parameters (default: true) </td></tr>
+    <tr><td class="paramname">track_running_stats</td><td>If true, track running mean/var (default: true)</td></tr>
+  </table>
+  </dd>
+</dl>
+<dl class="section note"><dt>Note</dt><dd>Momentum is used as: running_stat = (1-momentum)*running_stat + momentum*batch_stat </dd></dl>
+
+</div>
+</div>
+<a name="doc-func-members" id="doc-func-members"></a><h2 id="header-doc-func-members" class="groupheader">Member Function Documentation</h2>
 <a id="ac35b4fdebbc059f3d0a2c4d35521b1d0" name="ac35b4fdebbc059f3d0a2c4d35521b1d0"></a>
 <h2 class="memtitle"><span class="permalink"><a href="#ac35b4fdebbc059f3d0a2c4d35521b1d0">&#9670;&#160;</a></span>forward()</h2>
 
@@ -214,14 +293,15 @@ Additional Inherited Members</h2></td></tr>
 </table>
 </div><div class="memdoc">
 
-<p>Forward pass computation (must be implemented by derived classes). </p>
+<p>Forward pass through batch normalization. </p>
+<p>In training mode, normalizes using batch statistics and updates running statistics. In evaluation mode, normalizes using running statistics.</p>
 <dl class="params"><dt>Parameters</dt><dd>
   <table class="params">
-    <tr><td class="paramname">input</td><td>Input variable </td></tr>
+    <tr><td class="paramname">input</td><td>Input variable of shape (N, C, H, W) </td></tr>
   </table>
   </dd>
 </dl>
-<dl class="section return"><dt>Returns</dt><dd>Output variable </dd></dl>
+<dl class="section return"><dt>Returns</dt><dd>Normalized output of shape (N, C, H, W) </dd></dl>
 
 <p>Implements <a class="el" href="classtenzor_1_1nn_1_1Module.html#a7d3368489f9c108a2f1b01245e324fc0">tenzor::nn::Module</a>.</p>
 
@@ -243,7 +323,7 @@ Additional Inherited Members</h2></td></tr>
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><b>tenzor</b></li><li class="navelem"><b>nn</b></li><li class="navelem"><a href="classtenzor_1_1nn_1_1BatchNorm2d.html">BatchNorm2d</a></li>
+    <li class="navelem"><a href="namespacetenzor.html">tenzor</a></li><li class="navelem"><b>nn</b></li><li class="navelem"><a href="classtenzor_1_1nn_1_1BatchNorm2d.html">BatchNorm2d</a></li>
     <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>

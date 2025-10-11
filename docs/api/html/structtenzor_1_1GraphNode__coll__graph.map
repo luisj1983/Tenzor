@@ -1,5 +1,5 @@
 <map id="tenzor::GraphNode" name="tenzor::GraphNode">
-<area shape="rect" id="Node000001" title=" " alt="" coords="323,71,466,99"/>
+<area shape="rect" id="Node000001" title="Node in the computation graph." alt="" coords="323,71,466,99"/>
 <area shape="rect" id="Node000011" title=" " alt="" coords="655,5,820,50"/>
 <area shape="poly" id="edge12_Node000011_Node000001" title=" " alt="" coords="481,68,654,39,655,44,482,73"/>
 <area shape="rect" id="Node000002" title=" " alt="" coords="5,123,180,167"/>

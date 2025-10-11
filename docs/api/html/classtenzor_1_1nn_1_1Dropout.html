@@ -92,12 +92,17 @@ $(function(){initNavTree('classtenzor_1_1nn_1_1Dropout.html','','classtenzor_1_1
   <div class="headertitle"><div class="title">tenzor::nn::Dropout Class Reference</div></div>
 </div><!--header-->
 <div class="contents">
+
+<p>Standard dropout layer.  
+ <a href="#details">More...</a></p>
+
+<p><code>#include &lt;<a class="el" href="dropout_8hpp_source.html">dropout.hpp</a>&gt;</code></p>
 <div class="dynheader">
 Inheritance diagram for tenzor::nn::Dropout:</div>
 <div class="dyncontent">
 <div class="center"><img src="classtenzor_1_1nn_1_1Dropout__inherit__graph.png" border="0" usemap="#atenzor_1_1nn_1_1Dropout_inherit__map" loading="lazy" alt="Inheritance graph"/></div>
 <map name="atenzor_1_1nn_1_1Dropout_inherit__map" id="atenzor_1_1nn_1_1Dropout_inherit__map">
-<area shape="rect" title=" " alt="" coords="5,81,152,109"/>
+<area shape="rect" title="Standard dropout layer." alt="" coords="5,81,152,109"/>
 <area shape="rect" href="classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="7,5,150,33"/>
 <area shape="poly" title=" " alt="" coords="81,49,81,81,76,81,76,49"/>
 </map>
@@ -107,7 +112,7 @@ Collaboration diagram for tenzor::nn::Dropout:</div>
 <div class="dyncontent">
 <div class="center"><img src="classtenzor_1_1nn_1_1Dropout__coll__graph.png" border="0" usemap="#atenzor_1_1nn_1_1Dropout_coll__map" loading="lazy" alt="Collaboration graph"/></div>
 <map name="atenzor_1_1nn_1_1Dropout_coll__map" id="atenzor_1_1nn_1_1Dropout_coll__map">
-<area shape="rect" title=" " alt="" coords="953,5,1099,33"/>
+<area shape="rect" title="Standard dropout layer." alt="" coords="953,5,1099,33"/>
 <area shape="rect" href="classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="723,69,865,97"/>
 <area shape="poly" title=" " alt="" coords="848,61,888,49,957,31,958,36,890,54,850,66"/>
 <area shape="rect" title=" " alt="" coords="939,57,1113,102"/>
@@ -129,10 +134,10 @@ Collaboration diagram for tenzor::nn::Dropout:</div>
 <table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-pub-methods" class="groupheader"><a id="pub-methods" name="pub-methods"></a>
 Public Member Functions</h2></td></tr>
-<tr class="memitem:a022f8de50e23169302b9def30c024735" id="r_a022f8de50e23169302b9def30c024735"><td class="memItemLeft" align="right" valign="top"><a id="a022f8de50e23169302b9def30c024735" name="a022f8de50e23169302b9def30c024735"></a>
-&#160;</td><td class="memItemRight" valign="bottom"><b>Dropout</b> (double p=0.5)</td></tr>
+<tr class="memitem:a022f8de50e23169302b9def30c024735" id="r_a022f8de50e23169302b9def30c024735"><td class="memItemLeft" align="right" valign="top">&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a022f8de50e23169302b9def30c024735">Dropout</a> (double p=0.5)</td></tr>
+<tr class="memdesc:a022f8de50e23169302b9def30c024735"><td class="mdescLeft">&#160;</td><td class="mdescRight">Construct dropout layer.  <br /></td></tr>
 <tr class="memitem:af642eb79cd6688a86c9e5d2378d1466a" id="r_af642eb79cd6688a86c9e5d2378d1466a"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#af642eb79cd6688a86c9e5d2378d1466a">forward</a> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a> override</td></tr>
-<tr class="memdesc:af642eb79cd6688a86c9e5d2378d1466a"><td class="mdescLeft">&#160;</td><td class="mdescRight">Forward pass computation (must be implemented by derived classes).  <br /></td></tr>
+<tr class="memdesc:af642eb79cd6688a86c9e5d2378d1466a"><td class="mdescLeft">&#160;</td><td class="mdescRight">Forward pass through dropout.  <br /></td></tr>
 <tr class="inherit_header pub_methods_classtenzor_1_1nn_1_1Module"><td colspan="2" onclick="javascript:dynsection.toggleInherit('pub_methods_classtenzor_1_1nn_1_1Module')"><span class="dynarrow"><span class="arrowhead closed"></span></span>Public Member Functions inherited from <a class="el" href="classtenzor_1_1nn_1_1Module.html">tenzor::nn::Module</a></td></tr>
 <tr class="memitem:a875ff098390db49e49465127ac03eadb inherit pub_methods_classtenzor_1_1nn_1_1Module" id="r_a875ff098390db49e49465127ac03eadb"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1nn_1_1Module.html#a875ff098390db49e49465127ac03eadb">operator()</a> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
 <tr class="memdesc:a875ff098390db49e49465127ac03eadb inherit pub_methods_classtenzor_1_1nn_1_1Module"><td class="mdescLeft">&#160;</td><td class="mdescRight">Convenience operator for forward pass.  <br /></td></tr>
@@ -188,9 +193,74 @@ Additional Inherited Members</h2></td></tr>
 <tr class="memdesc:a9d9d2355bff1b6c5bfe300aa14e477a2 inherit pro_attribs_classtenzor_1_1nn_1_1Module"><td class="mdescLeft">&#160;</td><td class="mdescRight">Named submodules.  <br /></td></tr>
 </table>
 <a name="details" id="details"></a><h2 id="header-details" class="groupheader">Detailed Description</h2>
-<div class="textblock">
-<p class="definition">Definition at line <a class="el" href="dropout_8hpp_source.html#l00009">9</a> of file <a class="el" href="dropout_8hpp_source.html">dropout.hpp</a>.</p>
-</div><a name="doc-func-members" id="doc-func-members"></a><h2 id="header-doc-func-members" class="groupheader">Member Function Documentation</h2>
+<div class="textblock"><p>Standard dropout layer. </p>
+<p>During training, randomly zeros elements with probability p using samples from a Bernoulli distribution. Remaining elements are scaled by 1/(1-p). During evaluation, performs identity operation (no dropout).</p>
+<p><a class="el" href="classtenzor_1_1nn_1_1Dropout.html" title="Standard dropout layer.">Dropout</a> is a regularization technique that prevents co-adaptation of neurons and reduces overfitting.</p>
+<p><a class="el" href="classtenzor_1_1Shape.html" title="Represents the shape (dimensions) of a tensor.">Shape</a>:</p><ul>
+<li>Input: Any shape</li>
+<li>Output: Same as input</li>
+</ul>
+<div class="fragment"><div class="line"><a class="code hl_function" href="#a022f8de50e23169302b9def30c024735">Dropout</a> dropout(0.5);  <span class="comment">// Drop 50% of elements</span></div>
+<div class="line"> </div>
+<div class="line"><a class="code hl_class" href="classtenzor_1_1Variable.html">Variable</a> x(<a class="code hl_class" href="classtenzor_1_1Tensor.html">Tensor</a>({batch, 512}, <a class="code hl_enumvalue" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()), <span class="keyword">true</span>);</div>
+<div class="line"><a class="code hl_class" href="classtenzor_1_1Variable.html">Variable</a> dropped = dropout.forward(x);  <span class="comment">// Training mode</span></div>
+<div class="line"> </div>
+<div class="line">dropout.eval();  <span class="comment">// Switch to evaluation mode</span></div>
+<div class="line"><a class="code hl_class" href="classtenzor_1_1Variable.html">Variable</a> kept = dropout.forward(x);  <span class="comment">// No dropout applied</span></div>
+<div class="ttc" id="aclasstenzor_1_1Tensor_html"><div class="ttname"><a href="classtenzor_1_1Tensor.html">tenzor::Tensor</a></div><div class="ttdoc">Multi-dimensional array with automatic differentiation support.</div><div class="ttdef"><b>Definition</b> <a href="tensor_8hpp_source.html#l00072">tensor.hpp:72</a></div></div>
+<div class="ttc" id="aclasstenzor_1_1Variable_html"><div class="ttname"><a href="classtenzor_1_1Variable.html">tenzor::Variable</a></div><div class="ttdoc">Gradient-enabled tensor wrapper for automatic differentiation.</div><div class="ttdef"><b>Definition</b> <a href="variable_8hpp_source.html#l00049">variable.hpp:49</a></div></div>
+<div class="ttc" id="aclasstenzor_1_1nn_1_1Dropout_html_a022f8de50e23169302b9def30c024735"><div class="ttname"><a href="#a022f8de50e23169302b9def30c024735">tenzor::nn::Dropout::Dropout</a></div><div class="ttdeci">Dropout(double p=0.5)</div><div class="ttdoc">Construct dropout layer.</div></div>
+<div class="ttc" id="anamespacetenzor_html_a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204"><div class="ttname"><a href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">tenzor::DType::Float32</a></div><div class="ttdeci">@ Float32</div><div class="ttdoc">32-bit floating point (float)</div><div class="ttdef"><b>Definition</b> <a href="dtype_8hpp_source.html#l00025">dtype.hpp:25</a></div></div>
+<div class="ttc" id="astructtenzor_1_1Device_html_a77290e32e1fa7560bef5d05457f6157a"><div class="ttname"><a href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">tenzor::Device::cpu</a></div><div class="ttdeci">static auto cpu() -&gt; Device</div><div class="ttdoc">Create a CPU device.</div><div class="ttdef"><b>Definition</b> <a href="device_8hpp_source.html#l00056">device.hpp:56</a></div></div>
+</div><!-- fragment --><dl class="section see"><dt>See also</dt><dd><a class="el" href="classtenzor_1_1nn_1_1Dropout2d.html" title="2D spatial dropout layer.">Dropout2d</a> for spatial dropout </dd>
+<dd>
+<a class="el" href="classtenzor_1_1nn_1_1AlphaDropout.html" title="Alpha dropout for SELU networks.">AlphaDropout</a> for <a class="el" href="classtenzor_1_1nn_1_1SELU.html" title="Scaled Exponential Linear Unit (SELU) activation.">SELU</a> networks </dd></dl>
+
+<p class="definition">Definition at line <a class="el" href="dropout_8hpp_source.html#l00043">43</a> of file <a class="el" href="dropout_8hpp_source.html">dropout.hpp</a>.</p>
+</div><a name="doc-constructors" id="doc-constructors"></a><h2 id="header-doc-constructors" class="groupheader">Constructor &amp; Destructor Documentation</h2>
+<a id="a022f8de50e23169302b9def30c024735" name="a022f8de50e23169302b9def30c024735"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a022f8de50e23169302b9def30c024735">&#9670;&#160;</a></span>Dropout()</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname">tenzor::nn::Dropout::Dropout </td>
+          <td>(</td>
+          <td class="paramtype">double</td>          <td class="paramname"><span class="paramname"><em>p</em></span><span class="paramdefsep"> = </span><span class="paramdefval">0.5</span></td><td>)</td>
+          <td></td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel explicit">explicit</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+
+<p>Construct dropout layer. </p>
+<dl class="params"><dt>Parameters</dt><dd>
+  <table class="params">
+    <tr><td class="paramname">p</td><td>Probability of an element being zeroed (default: 0.5)</td></tr>
+  </table>
+  </dd>
+</dl>
+<dl class="exception"><dt>Exceptions</dt><dd>
+  <table class="exception">
+    <tr><td class="paramname">std::invalid_argument</td><td>if p not in [0, 1]</td></tr>
+  </table>
+  </dd>
+</dl>
+<div class="fragment"><div class="line"><a class="code hl_function" href="#a022f8de50e23169302b9def30c024735">Dropout</a> dropout1(0.5);   <span class="comment">// 50% dropout rate</span></div>
+<div class="line"><a class="code hl_function" href="#a022f8de50e23169302b9def30c024735">Dropout</a> dropout2(0.2);   <span class="comment">// 20% dropout rate</span></div>
+<div class="line"><a class="code hl_function" href="#a022f8de50e23169302b9def30c024735">Dropout</a> dropout3(0.0);   <span class="comment">// No dropout</span></div>
+</div><!-- fragment --> 
+</div>
+</div>
+<a name="doc-func-members" id="doc-func-members"></a><h2 id="header-doc-func-members" class="groupheader">Member Function Documentation</h2>
 <a id="af642eb79cd6688a86c9e5d2378d1466a" name="af642eb79cd6688a86c9e5d2378d1466a"></a>
 <h2 class="memtitle"><span class="permalink"><a href="#af642eb79cd6688a86c9e5d2378d1466a">&#9670;&#160;</a></span>forward()</h2>
 
@@ -214,14 +284,15 @@ Additional Inherited Members</h2></td></tr>
 </table>
 </div><div class="memdoc">
 
-<p>Forward pass computation (must be implemented by derived classes). </p>
+<p>Forward pass through dropout. </p>
+<p>In training mode: randomly zeros elements and scales remainder. In evaluation mode: returns input unchanged.</p>
 <dl class="params"><dt>Parameters</dt><dd>
   <table class="params">
-    <tr><td class="paramname">input</td><td>Input variable </td></tr>
+    <tr><td class="paramname">input</td><td>Input variable of any shape </td></tr>
   </table>
   </dd>
 </dl>
-<dl class="section return"><dt>Returns</dt><dd>Output variable </dd></dl>
+<dl class="section return"><dt>Returns</dt><dd>Output variable (same shape) </dd></dl>
 
 <p>Implements <a class="el" href="classtenzor_1_1nn_1_1Module.html#a7d3368489f9c108a2f1b01245e324fc0">tenzor::nn::Module</a>.</p>
 
@@ -243,7 +314,7 @@ Additional Inherited Members</h2></td></tr>
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><b>tenzor</b></li><li class="navelem"><b>nn</b></li><li class="navelem"><a href="classtenzor_1_1nn_1_1Dropout.html">Dropout</a></li>
+    <li class="navelem"><a href="namespacetenzor.html">tenzor</a></li><li class="navelem"><b>nn</b></li><li class="navelem"><a href="classtenzor_1_1nn_1_1Dropout.html">Dropout</a></li>
     <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>

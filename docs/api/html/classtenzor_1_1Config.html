@@ -92,6 +92,11 @@ $(function(){initNavTree('classtenzor_1_1Config.html','','classtenzor_1_1Config-
   <div class="headertitle"><div class="title">tenzor::Config Class Reference</div></div>
 </div><!--header-->
 <div class="contents">
+
+<p>Singleton configuration manager.  
+ <a href="#details">More...</a></p>
+
+<p><code>#include &lt;<a class="el" href="config_8hpp_source.html">config.hpp</a>&gt;</code></p>
 <table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-pub-methods" class="groupheader"><a id="pub-methods" name="pub-methods"></a>
 Public Member Functions</h2></td></tr>
@@ -122,8 +127,20 @@ Static Public Member Functions</h2></td></tr>
 static auto&#160;</td><td class="memItemRight" valign="bottom"><b>instance</b> () -&gt; <a class="el" href="classtenzor_1_1Config.html">Config</a> &amp;</td></tr>
 </table>
 <a name="details" id="details"></a><h2 id="header-details" class="groupheader">Detailed Description</h2>
-<div class="textblock">
-<p class="definition">Definition at line <a class="el" href="config_8hpp_source.html#l00010">10</a> of file <a class="el" href="config_8hpp_source.html">config.hpp</a>.</p>
+<div class="textblock"><p>Singleton configuration manager. </p>
+<p>Manages runtime configuration settings for the library. Settings can be loaded from files or set programmatically.</p>
+<p><b>Common Settings:</b></p><ul>
+<li>"num_threads": Number of CPU threads</li>
+<li>"device": Default device ("cpu", "cuda")</li>
+<li>"cudnn_benchmark": Enable cuDNN benchmarking</li>
+<li>"deterministic": Enable deterministic operations</li>
+</ul>
+<dl class="section user"><dt>Thread Safety</dt><dd>Not thread-safe. Configure before parallel operations begin.</dd></dl>
+<div class="fragment"><div class="line"><span class="keyword">auto</span>&amp; config = Config::instance();</div>
+<div class="line">config.set_int(<span class="stringliteral">&quot;num_threads&quot;</span>, 4);</div>
+<div class="line">config.set_bool(<span class="stringliteral">&quot;deterministic&quot;</span>, <span class="keyword">true</span>);</div>
+</div><!-- fragment --> 
+<p class="definition">Definition at line <a class="el" href="config_8hpp_source.html#l00037">37</a> of file <a class="el" href="config_8hpp_source.html">config.hpp</a>.</p>
 </div><hr/>The documentation for this class was generated from the following file:<ul>
 <li>include/tenzor/utils/<a class="el" href="config_8hpp_source.html">config.hpp</a></li>
 </ul>
@@ -140,7 +157,7 @@ static auto&#160;</td><td class="memItemRight" valign="bottom"><b>instance</b> (
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><b>tenzor</b></li><li class="navelem"><a href="classtenzor_1_1Config.html">Config</a></li>
+    <li class="navelem"><a href="namespacetenzor.html">tenzor</a></li><li class="navelem"><a href="classtenzor_1_1Config.html">Config</a></li>
     <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>

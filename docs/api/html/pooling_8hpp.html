@@ -5,7 +5,7 @@
 <meta http-equiv="X-UA-Compatible" content="IE=11"/>
 <meta name="generator" content="Doxygen 1.14.0"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Tenzor: tenzor/nn/layers/pooling.hpp File Reference</title>
+<title>Tenzor: include/tenzor/nn/layers/pooling.hpp File Reference</title>
 <link href="tabs.css" rel="stylesheet" type="text/css"/>
 <script type="text/javascript" src="jquery.js"></script>
 <script type="text/javascript" src="dynsections.js"></script>
@@ -28,7 +28,7 @@
   <td id="projectalign">
    <div id="projectname">Tenzor<span id="projectnumber">&#160;1.0.0</span>
    </div>
-   <div id="projectbrief">Modern C++20 tensor library with automatic differentiation</div>
+   <div id="projectbrief">High-performance tensor library with automatic differentiation</div>
   </td>
  </tr>
  </tbody>
@@ -92,22 +92,97 @@ $(function(){initNavTree('pooling_8hpp.html','',''); });
   <div class="headertitle"><div class="title">pooling.hpp File Reference</div></div>
 </div><!--header-->
 <div class="contents">
+
+<p>Pooling layers for spatial downsampling.  
+<a href="#details">More...</a></p>
 <div class="textblock"><code>#include &quot;<a class="el" href="module_8hpp_source.html">../module.hpp</a>&quot;</code><br />
+</div><div class="textblock"><div class="dynheader">
+Include dependency graph for pooling.hpp:</div>
+<div class="dyncontent">
+<div class="center"><img src="pooling_8hpp__incl.png" border="0" usemap="#ainclude_2tenzor_2nn_2layers_2pooling_8hpp" loading="lazy" alt=""/></div>
+<map name="ainclude_2tenzor_2nn_2layers_2pooling_8hpp" id="ainclude_2tenzor_2nn_2layers_2pooling_8hpp">
+<area shape="rect" title="Pooling layers for spatial downsampling." alt="" coords="475,5,652,50"/>
+<area shape="rect" href="module_8hpp.html" title="Neural network module base class." alt="" coords="508,98,619,126"/>
+<area shape="poly" title=" " alt="" coords="566,50,566,82,561,82,561,50"/>
+<area shape="rect" title=" " alt="" coords="24,401,100,428"/>
+<area shape="poly" title=" " alt="" coords="508,115,398,116,264,123,199,131,140,142,93,157,60,176,26,215,16,234,10,255,11,299,23,352,43,387,38,390,18,354,5,300,5,254,11,233,21,212,56,172,90,152,139,137,198,126,264,118,397,111,508,109"/>
+<area shape="rect" title=" " alt="" coords="442,476,501,504"/>
+<area shape="poly" title=" " alt="" coords="578,125,597,148,619,181,636,220,643,263,309,402,226,439,199,452,224,449,307,429,643,338,640,365,631,387,616,408,598,425,557,455,516,475,514,470,554,450,595,421,612,404,626,385,635,363,639,342,309,434,225,454,194,454,223,434,307,397,639,261,631,221,614,184,593,152,574,128"/>
+<area shape="rect" title=" " alt="" coords="491,325,553,353"/>
+<area shape="poly" title=" " alt="" coords="564,126,530,310,525,309,559,125"/>
+<area shape="rect" title=" " alt="" coords="678,174,801,201"/>
+<area shape="poly" title=" " alt="" coords="596,124,695,165,693,170,594,129"/>
+<area shape="rect" href="variable_8hpp.html" title="Automatic differentiation wrapper for tensors." alt="" coords="70,174,246,201"/>
+<area shape="poly" title=" " alt="" coords="508,126,247,173,246,168,508,121"/>
+<area shape="rect" href="device_8hpp.html" title="Device specification and management for tensors." alt="" coords="468,401,560,428"/>
+<area shape="poly" title=" " alt="" coords="569,126,577,165,583,223,582,288,577,322,567,354,557,374,543,391,539,388,552,371,562,352,572,321,577,288,578,223,572,166,564,127"/>
+<area shape="poly" title=" " alt="" coords="140,204,113,224,83,252,53,287,31,326,28,341,31,357,45,387,40,390,26,359,23,341,26,324,49,284,79,249,110,220,137,200"/>
+<area shape="rect" title=" " alt="" coords="41,325,115,353"/>
+<area shape="poly" title=" " alt="" coords="154,203,95,313,90,310,149,200"/>
+<area shape="rect" href="tensor_8hpp.html" title="Core tensor class for multi&#45;dimensional array operations." alt="" coords="222,249,356,277"/>
+<area shape="poly" title=" " alt="" coords="183,200,254,239,251,244,180,204"/>
+<area shape="poly" title=" " alt="" coords="264,280,180,327,91,393,88,389,177,323,261,275"/>
+<area shape="poly" title=" " alt="" coords="331,275,477,320,475,326,330,280"/>
+<area shape="poly" title=" " alt="" coords="252,280,131,322,129,317,250,275"/>
+<area shape="rect" title=" " alt="" coords="313,325,366,353"/>
+<area shape="poly" title=" " alt="" coords="300,276,324,310,320,314,296,279"/>
+<area shape="rect" href="dtype_8hpp.html" title="Data type system for Tenzor tensors." alt="" coords="678,401,764,428"/>
+<area shape="poly" title=" " alt="" coords="319,275,422,323,451,337,480,350,576,379,663,399,662,405,575,384,479,355,449,342,420,327,317,280"/>
+<area shape="poly" title=" " alt="" coords="310,275,484,390,481,394,307,280"/>
+<area shape="rect" href="storage_8hpp.html" title="Memory storage abstraction for tensor data." alt="" coords="190,325,289,353"/>
+<area shape="poly" title=" " alt="" coords="282,279,259,313,255,310,278,276"/>
+<area shape="rect" title=" " alt="" coords="524,476,590,504"/>
+<area shape="poly" title=" " alt="" coords="693,431,601,472,599,467,690,426"/>
+<area shape="rect" title=" " alt="" coords="614,476,710,504"/>
+<area shape="poly" title=" " alt="" coords="712,431,684,466,680,462,708,427"/>
+<area shape="rect" title=" " alt="" coords="734,476,825,504"/>
+<area shape="poly" title=" " alt="" coords="733,427,762,462,758,466,729,431"/>
+<area shape="rect" title=" " alt="" coords="849,476,926,504"/>
+<area shape="poly" title=" " alt="" coords="752,426,845,467,843,472,750,431"/>
+<area shape="poly" title=" " alt="" coords="509,430,489,464,484,462,504,428"/>
+<area shape="poly" title=" " alt="" coords="524,428,544,462,539,464,520,430"/>
+<area shape="poly" title=" " alt="" coords="542,426,624,467,621,472,539,431"/>
+<area shape="poly" title=" " alt="" coords="209,356,109,397,107,392,207,351"/>
+<area shape="poly" title=" " alt="" coords="289,351,454,394,452,400,288,356"/>
+<area shape="rect" title=" " alt="" coords="148,401,217,428"/>
+<area shape="poly" title=" " alt="" coords="231,355,204,390,200,387,227,352"/>
+<area shape="rect" title=" " alt="" coords="241,401,307,428"/>
+<area shape="poly" title=" " alt="" coords="248,352,264,385,259,388,243,354"/>
+</map>
+</div>
+</div><div class="textblock"><div class="dynheader">
+This graph shows which files directly or indirectly include this file:</div>
+<div class="dyncontent">
+<div class="center"><img src="pooling_8hpp__dep__incl.png" border="0" usemap="#ainclude_2tenzor_2nn_2layers_2pooling_8hppdep" loading="lazy" alt=""/></div>
+<map name="ainclude_2tenzor_2nn_2layers_2pooling_8hppdep" id="ainclude_2tenzor_2nn_2layers_2pooling_8hppdep">
+<area shape="rect" title="Pooling layers for spatial downsampling." alt="" coords="9,5,187,50"/>
+<area shape="rect" href="tenzor_8hpp.html" title="Main header &#45; includes all public Tenzor APIs." alt="" coords="5,98,191,126"/>
+<area shape="poly" title=" " alt="" coords="101,66,101,97,95,97,95,66"/>
+</map>
+</div>
 </div>
 <p><a href="pooling_8hpp_source.html">Go to the source code of this file.</a></p>
 <table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-nested-classes" class="groupheader"><a id="nested-classes" name="nested-classes"></a>
 Classes</h2></td></tr>
 <tr class="memitem:tenzor_3A_3Ann_3A_3AMaxPool2d" id="r_tenzor_3A_3Ann_3A_3AMaxPool2d"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1nn_1_1MaxPool2d.html">tenzor::nn::MaxPool2d</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">2D max pooling layer.  <a href="classtenzor_1_1nn_1_1MaxPool2d.html#details">More...</a><br /></td></tr>
 <tr class="memitem:tenzor_3A_3Ann_3A_3AAvgPool2d" id="r_tenzor_3A_3Ann_3A_3AAvgPool2d"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1nn_1_1AvgPool2d.html">tenzor::nn::AvgPool2d</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">2D average pooling layer.  <a href="classtenzor_1_1nn_1_1AvgPool2d.html#details">More...</a><br /></td></tr>
 <tr class="memitem:tenzor_3A_3Ann_3A_3AAdaptiveAvgPool2d" id="r_tenzor_3A_3Ann_3A_3AAdaptiveAvgPool2d"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1nn_1_1AdaptiveAvgPool2d.html">tenzor::nn::AdaptiveAvgPool2d</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">2D adaptive average pooling layer.  <a href="classtenzor_1_1nn_1_1AdaptiveAvgPool2d.html#details">More...</a><br /></td></tr>
 </table><table class="memberdecls">
 <tr class="heading"><td colspan="2"><h2 id="header-namespaces" class="groupheader"><a id="namespaces" name="namespaces"></a>
 Namespaces</h2></td></tr>
 <tr class="memitem:tenzor" id="r_tenzor"><td class="memItemLeft" align="right" valign="top">namespace &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor.html">tenzor</a></td></tr>
-<tr class="memitem:tenzor_3A_3Ann" id="r_tenzor_3A_3Ann"><td class="memItemLeft" align="right" valign="top">namespace &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="namespacetenzor_1_1nn.html">tenzor::nn</a></td></tr>
+<tr class="memdesc:namespacetenzor"><td class="mdescLeft">&#160;</td><td class="mdescRight">Main Tenzor namespace. <br /></td></tr>
 </table>
-</div><!-- contents -->
+<a name="details" id="details"></a><h2 id="header-details" class="groupheader">Detailed Description</h2>
+<div class="textblock"><p>Pooling layers for spatial downsampling. </p>
+<p>Implements max pooling, average pooling, and adaptive pooling operations for reducing spatial dimensions while retaining important features. </p>
+
+<p class="definition">Definition in file <a class="el" href="pooling_8hpp_source.html">pooling.hpp</a>.</p>
+</div></div><!-- contents -->
 </div><!-- doc-content -->
 <div id="page-nav" class="page-nav-panel">
 <div id="page-nav-resize-handle"></div>
@@ -120,8 +195,8 @@ Namespaces</h2></td></tr>
 <!-- start footer part -->
 <div id="nav-path" class="navpath"><!-- id is needed for treeview function! -->
   <ul>
-    <li class="navelem"><a href="dir_4f7edb362912b75e95599213beee2a17.html">tenzor</a></li><li class="navelem"><a href="dir_7d5460f3c919ba4808998a3c805d565d.html">nn</a></li><li class="navelem"><a href="dir_42b000f2f04d36cb6060c5991f86a9f5.html">layers</a></li><li class="navelem"><a href="pooling_8hpp.html">pooling.hpp</a></li>
-    <li class="footer">Generated by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
+    <li class="navelem"><a href="dir_d44c64559bbebec7f509842c48db8b23.html">include</a></li><li class="navelem"><a href="dir_14ba40437910c5dd1b08964ca20ae5af.html">tenzor</a></li><li class="navelem"><a href="dir_2996a04abcb928fe38186b609b0d69a7.html">nn</a></li><li class="navelem"><a href="dir_94e238e13457c10774be877e00275e8f.html">layers</a></li><li class="navelem"><a href="pooling_8hpp.html">pooling.hpp</a></li>
+    <li class="footer">Generated on <span class="timestamp"></span> for Tenzor by <a href="https://www.doxygen.org/index.html"><img class="footer" src="doxygen.svg" width="104" height="31" alt="doxygen"/></a> 1.14.0 </li>
   </ul>
 </div>
 </body>

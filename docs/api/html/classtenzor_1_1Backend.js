@@ -1,6 +1,5 @@
 var classtenzor_1_1Backend =
 [
-    [ "~Backend", "classtenzor_1_1Backend.html#ac2fdf10914e8558a45acafdce2d466ed", null ],
     [ "allocate", "classtenzor_1_1Backend.html#ab38992a0043a2a318f952b5c1d1a1fff", null ],
     [ "copy", "classtenzor_1_1Backend.html#a3fcf2abe65b73fac32eb73efe54235a4", null ],
     [ "create_stream", "classtenzor_1_1Backend.html#af72714e65de273ef1d438fcab0550c49", null ],

@@ -1,3 +1,11 @@
+/**
+ * @file error.hpp
+ * @brief Exception classes and error handling
+ *
+ * Provides hierarchy of exception classes for different error categories,
+ * with automatic source location tracking for debugging.
+ */
+
 #pragma once
 
 #include <stdexcept>
@@ -8,7 +16,19 @@
 
 namespace tenzor {
 
-// Base exception class
+/**
+ * @brief Base exception class for all Tenzor errors
+ *
+ * Automatically captures source location (file, line, function) where exception
+ * was thrown for easier debugging.
+ *
+ * All derived exceptions inherit source location tracking.
+ *
+ * @code
+ * throw TenzorException("Invalid tensor shape");
+ * // Output: "tensor.cpp:42 in compute(): Invalid tensor shape"
+ * @endcode
+ */
 class TenzorException : public std::runtime_error {
 public:
     explicit TenzorException(const std::string& message,
@@ -33,27 +53,32 @@ private:
     }
 };
 
-// Specific exception types
+/** @brief Device-related errors (CUDA unavailable, invalid device ID, etc.) */
 class DeviceException : public TenzorException {
     using TenzorException::TenzorException;
 };
 
+/** @brief Data type errors (unsupported dtype, type mismatch, etc.) */
 class DTypeException : public TenzorException {
     using TenzorException::TenzorException;
 };
 
+/** @brief Shape mismatch and dimension errors */
 class ShapeException : public TenzorException {
     using TenzorException::TenzorException;
 };
 
+/** @brief Backend and computation errors */
 class BackendException : public TenzorException {
     using TenzorException::TenzorException;
 };
 
+/** @brief Memory allocation and management errors */
 class MemoryException : public TenzorException {
     using TenzorException::TenzorException;
 };
 
+/** @brief Automatic differentiation errors */
 class AutogradException : public TenzorException {
     using TenzorException::TenzorException;
 };
