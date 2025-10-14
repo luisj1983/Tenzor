@@ -4,6 +4,14 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/ops/indexing.hpp>
 #include <tenzor/nn/optim/scheduler.hpp>
+#include <tenzor/nn/layers/rnn.hpp>
+#include <tenzor/nn/layers/attention.hpp>
+#include <tenzor/nn/layers/transformer.hpp>
+#include <tenzor/nn/layers/embedding.hpp>
+#include <tenzor/nn/optim/rmsprop.hpp>
+#include <tenzor/nn/optim/adagrad.hpp>
+#include <tenzor/nn/optim/adadelta.hpp>
+#include <tenzor/nn/loss/losses.hpp>
 #include "numpy_interop.hpp"
 
 namespace py = pybind11;
@@ -237,7 +245,10 @@ PYBIND11_MODULE(tenzor_core, m) {
          py::arg("dtype") = tenzor::DType::Float32,
          py::arg("device") = tenzor::Device::cpu());
 
-    m.def("matmul", &tenzor::matmul, "Matrix multiplication");
+    m.def("matmul", [](const tenzor::Tensor& a, const tenzor::Tensor& b) {
+         return tenzor::matmul(a, b);
+         }, "Matrix multiplication",
+         py::arg("a"), py::arg("b"));
 
     // Math operations - using lambda wrappers for overloaded functions
     m.def("exp", [](const tenzor::Tensor& t) { return tenzor::exp(t); },
@@ -288,7 +299,9 @@ PYBIND11_MODULE(tenzor_core, m) {
     // Transform operations
     m.def("transpose", &tenzor::transpose, "Transpose two dimensions",
          py::arg("input"), py::arg("dim0"), py::arg("dim1"));
-    m.def("permute", &tenzor::permute, "Permute dimensions",
+    m.def("permute", [](const tenzor::Tensor& input, std::vector<int64_t> dims) {
+         return tenzor::permute(input, dims);
+         }, "Permute dimensions",
          py::arg("input"), py::arg("dims"));
     m.def("squeeze", &tenzor::squeeze, "Remove dimensions of size 1",
          py::arg("input"), py::arg("dim") = py::none());
@@ -545,6 +558,185 @@ PYBIND11_MODULE(tenzor_core, m) {
                std::shared_ptr<tenzor::nn::Mish>>(nn, "Mish")
         .def(py::init<>());
 
+    // RNN layers
+    py::class_<tenzor::nn::RNNCell, tenzor::nn::Module, std::shared_ptr<tenzor::nn::RNNCell>>(nn, "RNNCell")
+        .def(py::init<int64_t, int64_t, const std::string&, bool>(),
+             py::arg("input_size"), py::arg("hidden_size"),
+             py::arg("nonlinearity") = "tanh", py::arg("bias") = true)
+        .def("forward", [](tenzor::nn::RNNCell& self, const tenzor::Variable& input, const tenzor::Variable& hx) {
+            return self.forward(input, hx);
+        }, py::arg("input"), py::arg("hx") = tenzor::Variable{});
+
+    py::class_<tenzor::nn::RNN, tenzor::nn::Module, std::shared_ptr<tenzor::nn::RNN>>(nn, "RNN")
+        .def(py::init<int64_t, int64_t, int64_t, const std::string&, bool, bool, double, bool>(),
+             py::arg("input_size"), py::arg("hidden_size"), py::arg("num_layers") = 1,
+             py::arg("nonlinearity") = "tanh", py::arg("bias") = true,
+             py::arg("batch_first") = false, py::arg("dropout") = 0.0,
+             py::arg("bidirectional") = false)
+        .def("forward", [](tenzor::nn::RNN& self, const tenzor::Variable& input, const tenzor::Variable& hx) {
+            return self.forward(input, hx);
+        }, py::arg("input"), py::arg("hx") = tenzor::Variable{});
+
+    py::class_<tenzor::nn::LSTMCell, tenzor::nn::Module, std::shared_ptr<tenzor::nn::LSTMCell>>(nn, "LSTMCell")
+        .def(py::init<int64_t, int64_t, bool>(),
+             py::arg("input_size"), py::arg("hidden_size"), py::arg("bias") = true)
+        .def("forward", [](tenzor::nn::LSTMCell& self, const tenzor::Variable& input,
+                           const tenzor::Variable& hx, const tenzor::Variable& cx) {
+            return self.forward(input, hx, cx);
+        }, py::arg("input"), py::arg("hx") = tenzor::Variable{},
+           py::arg("cx") = tenzor::Variable{});
+
+    py::class_<tenzor::nn::LSTM, tenzor::nn::Module, std::shared_ptr<tenzor::nn::LSTM>>(nn, "LSTM")
+        .def(py::init<int64_t, int64_t, int64_t, bool, bool, double, bool, int64_t>(),
+             py::arg("input_size"), py::arg("hidden_size"), py::arg("num_layers") = 1,
+             py::arg("bias") = true, py::arg("batch_first") = false,
+             py::arg("dropout") = 0.0, py::arg("bidirectional") = false,
+             py::arg("proj_size") = 0)
+        .def("forward", [](tenzor::nn::LSTM& self, const tenzor::Variable& input,
+                           const std::pair<tenzor::Variable, tenzor::Variable>& hx) {
+            return self.forward(input, hx);
+        }, py::arg("input"), py::arg("hx") = std::pair<tenzor::Variable, tenzor::Variable>{});
+
+    py::class_<tenzor::nn::GRUCell, tenzor::nn::Module, std::shared_ptr<tenzor::nn::GRUCell>>(nn, "GRUCell")
+        .def(py::init<int64_t, int64_t, bool>(),
+             py::arg("input_size"), py::arg("hidden_size"), py::arg("bias") = true)
+        .def("forward", [](tenzor::nn::GRUCell& self, const tenzor::Variable& input, const tenzor::Variable& hx) {
+            return self.forward(input, hx);
+        }, py::arg("input"), py::arg("hx") = tenzor::Variable{});
+
+    py::class_<tenzor::nn::GRU, tenzor::nn::Module, std::shared_ptr<tenzor::nn::GRU>>(nn, "GRU")
+        .def(py::init<int64_t, int64_t, int64_t, bool, bool, double, bool>(),
+             py::arg("input_size"), py::arg("hidden_size"), py::arg("num_layers") = 1,
+             py::arg("bias") = true, py::arg("batch_first") = false,
+             py::arg("dropout") = 0.0, py::arg("bidirectional") = false)
+        .def("forward", [](tenzor::nn::GRU& self, const tenzor::Variable& input, const tenzor::Variable& hx) {
+            return self.forward(input, hx);
+        }, py::arg("input"), py::arg("hx") = tenzor::Variable{});
+
+    // Attention and Transformer
+    py::class_<tenzor::nn::MultiheadAttention, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::MultiheadAttention>>(nn, "MultiheadAttention")
+        .def(py::init<int64_t, int64_t, double, bool, bool, bool, int64_t, int64_t, bool>(),
+             py::arg("embed_dim"), py::arg("num_heads"), py::arg("dropout") = 0.0,
+             py::arg("bias") = true, py::arg("add_bias_kv") = false,
+             py::arg("add_zero_attn") = false, py::arg("kdim") = 0,
+             py::arg("vdim") = 0, py::arg("batch_first") = false)
+        .def("forward", [](tenzor::nn::MultiheadAttention& self, const tenzor::Variable& query,
+                           const tenzor::Variable& key, const tenzor::Variable& value,
+                           const tenzor::Tensor& key_padding_mask, const tenzor::Tensor& attn_mask,
+                           bool need_weights) {
+            return self.forward(query, key, value, key_padding_mask, attn_mask, need_weights);
+        }, py::arg("query"), py::arg("key"), py::arg("value"),
+           py::arg("key_padding_mask") = tenzor::Tensor{},
+           py::arg("attn_mask") = tenzor::Tensor{},
+           py::arg("need_weights") = true);
+
+    py::class_<tenzor::nn::PositionalEncoding, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::PositionalEncoding>>(nn, "PositionalEncoding")
+        .def(py::init<int64_t, int64_t, double>(),
+             py::arg("d_model"), py::arg("max_len") = 5000, py::arg("dropout") = 0.0)
+        .def("forward", &tenzor::nn::PositionalEncoding::forward);
+
+    py::class_<tenzor::nn::TransformerEncoderLayer, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::TransformerEncoderLayer>>(nn, "TransformerEncoderLayer")
+        .def(py::init<int64_t, int64_t, int64_t, double, const std::string&, bool>(),
+             py::arg("d_model"), py::arg("nhead"), py::arg("dim_feedforward") = 2048,
+             py::arg("dropout") = 0.1, py::arg("activation") = "relu",
+             py::arg("batch_first") = false)
+        .def("forward", [](tenzor::nn::TransformerEncoderLayer& self, const tenzor::Variable& src,
+                           const tenzor::Tensor& src_mask, const tenzor::Tensor& src_key_padding_mask) {
+            return self.forward(src, src_mask, src_key_padding_mask);
+        }, py::arg("src"), py::arg("src_mask") = tenzor::Tensor{},
+           py::arg("src_key_padding_mask") = tenzor::Tensor{});
+
+    py::class_<tenzor::nn::TransformerEncoder, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::TransformerEncoder>>(nn, "TransformerEncoder")
+        .def(py::init<std::shared_ptr<tenzor::nn::TransformerEncoderLayer>, int64_t,
+                     std::shared_ptr<tenzor::nn::LayerNorm>>(),
+             py::arg("encoder_layer"), py::arg("num_layers"), py::arg("norm") = nullptr)
+        .def("forward", [](tenzor::nn::TransformerEncoder& self, const tenzor::Variable& src,
+                           const tenzor::Tensor& mask, const tenzor::Tensor& src_key_padding_mask) {
+            return self.forward(src, mask, src_key_padding_mask);
+        }, py::arg("src"), py::arg("mask") = tenzor::Tensor{},
+           py::arg("src_key_padding_mask") = tenzor::Tensor{});
+
+    py::class_<tenzor::nn::TransformerDecoderLayer, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::TransformerDecoderLayer>>(nn, "TransformerDecoderLayer")
+        .def(py::init<int64_t, int64_t, int64_t, double, const std::string&, bool>(),
+             py::arg("d_model"), py::arg("nhead"), py::arg("dim_feedforward") = 2048,
+             py::arg("dropout") = 0.1, py::arg("activation") = "relu",
+             py::arg("batch_first") = false)
+        .def("forward", [](tenzor::nn::TransformerDecoderLayer& self, const tenzor::Variable& tgt,
+                           const tenzor::Variable& memory, const tenzor::Tensor& tgt_mask,
+                           const tenzor::Tensor& memory_mask, const tenzor::Tensor& tgt_key_padding_mask,
+                           const tenzor::Tensor& memory_key_padding_mask) {
+            return self.forward(tgt, memory, tgt_mask, memory_mask, tgt_key_padding_mask, memory_key_padding_mask);
+        }, py::arg("tgt"), py::arg("memory"),
+           py::arg("tgt_mask") = tenzor::Tensor{},
+           py::arg("memory_mask") = tenzor::Tensor{},
+           py::arg("tgt_key_padding_mask") = tenzor::Tensor{},
+           py::arg("memory_key_padding_mask") = tenzor::Tensor{});
+
+    py::class_<tenzor::nn::TransformerDecoder, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::TransformerDecoder>>(nn, "TransformerDecoder")
+        .def(py::init<std::shared_ptr<tenzor::nn::TransformerDecoderLayer>, int64_t,
+                     std::shared_ptr<tenzor::nn::LayerNorm>>(),
+             py::arg("decoder_layer"), py::arg("num_layers"), py::arg("norm") = nullptr)
+        .def("forward", [](tenzor::nn::TransformerDecoder& self, const tenzor::Variable& tgt,
+                           const tenzor::Variable& memory, const tenzor::Tensor& tgt_mask,
+                           const tenzor::Tensor& memory_mask, const tenzor::Tensor& tgt_key_padding_mask,
+                           const tenzor::Tensor& memory_key_padding_mask) {
+            return self.forward(tgt, memory, tgt_mask, memory_mask, tgt_key_padding_mask, memory_key_padding_mask);
+        }, py::arg("tgt"), py::arg("memory"),
+           py::arg("tgt_mask") = tenzor::Tensor{},
+           py::arg("memory_mask") = tenzor::Tensor{},
+           py::arg("tgt_key_padding_mask") = tenzor::Tensor{},
+           py::arg("memory_key_padding_mask") = tenzor::Tensor{});
+
+    py::class_<tenzor::nn::Transformer, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::Transformer>>(nn, "Transformer")
+        .def(py::init<int64_t, int64_t, int64_t, int64_t, int64_t, double, const std::string&, bool>(),
+             py::arg("d_model") = 512, py::arg("nhead") = 8,
+             py::arg("num_encoder_layers") = 6, py::arg("num_decoder_layers") = 6,
+             py::arg("dim_feedforward") = 2048, py::arg("dropout") = 0.1,
+             py::arg("activation") = "relu", py::arg("batch_first") = false)
+        .def("forward", [](tenzor::nn::Transformer& self, const tenzor::Variable& src,
+                           const tenzor::Variable& tgt, const tenzor::Tensor& src_mask,
+                           const tenzor::Tensor& tgt_mask, const tenzor::Tensor& memory_mask,
+                           const tenzor::Tensor& src_key_padding_mask, const tenzor::Tensor& tgt_key_padding_mask,
+                           const tenzor::Tensor& memory_key_padding_mask) {
+            return self.forward(src, tgt, src_mask, tgt_mask, memory_mask,
+                              src_key_padding_mask, tgt_key_padding_mask, memory_key_padding_mask);
+        }, py::arg("src"), py::arg("tgt"),
+           py::arg("src_mask") = tenzor::Tensor{},
+           py::arg("tgt_mask") = tenzor::Tensor{},
+           py::arg("memory_mask") = tenzor::Tensor{},
+           py::arg("src_key_padding_mask") = tenzor::Tensor{},
+           py::arg("tgt_key_padding_mask") = tenzor::Tensor{},
+           py::arg("memory_key_padding_mask") = tenzor::Tensor{});
+
+    // Embedding layers
+    py::class_<tenzor::nn::Embedding, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::Embedding>>(nn, "Embedding")
+        .def(py::init<int64_t, int64_t, int64_t, double, double, bool, bool>(),
+             py::arg("num_embeddings"), py::arg("embedding_dim"),
+             py::arg("padding_idx") = -1, py::arg("max_norm") = 0.0,
+             py::arg("norm_type") = 2.0, py::arg("scale_grad_by_freq") = false,
+             py::arg("sparse") = false)
+        .def("forward", &tenzor::nn::Embedding::forward)
+        .def("weight", py::overload_cast<>(&tenzor::nn::Embedding::weight));
+
+    py::class_<tenzor::nn::EmbeddingBag, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::EmbeddingBag>>(nn, "EmbeddingBag")
+        .def(py::init<int64_t, int64_t, double, double, bool, const std::string&, bool, bool>(),
+             py::arg("num_embeddings"), py::arg("embedding_dim"),
+             py::arg("max_norm") = 0.0, py::arg("norm_type") = 2.0,
+             py::arg("scale_grad_by_freq") = false, py::arg("mode") = "mean",
+             py::arg("sparse") = false, py::arg("include_last_offset") = false)
+        .def("forward", [](tenzor::nn::EmbeddingBag& self, const tenzor::Variable& input, const tenzor::Variable& offsets) {
+            return self.forward(input, offsets);
+        }, py::arg("input"), py::arg("offsets") = tenzor::Variable{});
+
     // Functional activation functions
     nn.def("relu", &tenzor::nn::relu, "ReLU activation function");
     nn.def("leaky_relu", &tenzor::nn::leaky_relu, "Leaky ReLU activation function",
@@ -611,6 +803,32 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("reduction") = tenzor::nn::Reduction::Mean)
         .def("forward", &tenzor::nn::BCEWithLogitsLoss::forward)
         .def("__call__", &tenzor::nn::BCEWithLogitsLoss::operator());
+
+    // Advanced loss functions
+    py::class_<tenzor::nn::KLDivLoss>(nn, "KLDivLoss")
+        .def(py::init<const std::string&, bool>(),
+             py::arg("reduction") = "mean", py::arg("log_target") = false)
+        .def("forward", &tenzor::nn::KLDivLoss::forward)
+        .def("__call__", &tenzor::nn::KLDivLoss::operator());
+
+    py::class_<tenzor::nn::FocalLoss>(nn, "FocalLoss")
+        .def(py::init<double, double, const std::string&>(),
+             py::arg("alpha") = 1.0, py::arg("gamma") = 2.0,
+             py::arg("reduction") = "mean")
+        .def("forward", &tenzor::nn::FocalLoss::forward)
+        .def("__call__", &tenzor::nn::FocalLoss::operator());
+
+    py::class_<tenzor::nn::DiceLoss>(nn, "DiceLoss")
+        .def(py::init<double, const std::string&>(),
+             py::arg("smooth") = 1.0, py::arg("reduction") = "mean")
+        .def("forward", &tenzor::nn::DiceLoss::forward)
+        .def("__call__", &tenzor::nn::DiceLoss::operator());
+
+    py::class_<tenzor::nn::HuberLoss>(nn, "HuberLoss")
+        .def(py::init<double, const std::string&>(),
+             py::arg("delta") = 1.0, py::arg("reduction") = "mean")
+        .def("forward", &tenzor::nn::HuberLoss::forward)
+        .def("__call__", &tenzor::nn::HuberLoss::operator());
 
     // Functional loss functions
     nn.def("mse_loss", &tenzor::nn::mse_loss, "MSE loss function",
@@ -682,6 +900,32 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def("load_state_dict", &tenzor::optim::AdamW::load_state_dict,
              py::arg("state"), "Load optimizer state dictionary");
 
+    // Additional optimizers
+    py::class_<tenzor::optim::RMSprop>(optim, "RMSprop")
+        .def(py::init<std::vector<tenzor::Variable*>, double, double, double, double, double, bool>(),
+             py::arg("params"), py::arg("lr") = 0.01, py::arg("alpha") = 0.99,
+             py::arg("eps") = 1e-8, py::arg("weight_decay") = 0.0,
+             py::arg("momentum") = 0.0, py::arg("centered") = false)
+        .def("step", &tenzor::optim::RMSprop::step)
+        .def("zero_grad", &tenzor::optim::RMSprop::zero_grad)
+        .def("state_dict", &tenzor::optim::RMSprop::state_dict)
+        .def("load_state_dict", &tenzor::optim::RMSprop::load_state_dict);
+
+    py::class_<tenzor::optim::Adagrad>(optim, "Adagrad")
+        .def(py::init<std::vector<tenzor::Variable*>, double, double, double, double, double>(),
+             py::arg("params"), py::arg("lr") = 0.01, py::arg("lr_decay") = 0.0,
+             py::arg("weight_decay") = 0.0, py::arg("initial_accumulator_value") = 0.0,
+             py::arg("eps") = 1e-10)
+        .def("step", &tenzor::optim::Adagrad::step)
+        .def("zero_grad", &tenzor::optim::Adagrad::zero_grad);
+
+    py::class_<tenzor::optim::Adadelta>(optim, "Adadelta")
+        .def(py::init<std::vector<tenzor::Variable*>, double, double, double, double>(),
+             py::arg("params"), py::arg("lr") = 1.0, py::arg("rho") = 0.9,
+             py::arg("eps") = 1e-6, py::arg("weight_decay") = 0.0)
+        .def("step", &tenzor::optim::Adadelta::step)
+        .def("zero_grad", &tenzor::optim::Adadelta::zero_grad);
+
     // Learning rate schedulers
     auto lr_scheduler = optim.def_submodule("lr_scheduler", "Learning rate scheduling");
 
@@ -744,4 +988,84 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("eta_min") = 0.0)
         .def("get_epoch", &tenzor::optim::CosineAnnealingLR::get_epoch,
              "Get current epoch number");
+
+    // Advanced schedulers
+    py::class_<tenzor::optim::ReduceLROnPlateau, tenzor::optim::LRScheduler>(lr_scheduler, "ReduceLROnPlateau")
+        .def(py::init<tenzor::optim::SGD&, const std::string&, double, int64_t, double,
+                     const std::string&, int64_t, double, double>(),
+             py::arg("optimizer"), py::arg("mode") = "min", py::arg("factor") = 0.1,
+             py::arg("patience") = 10, py::arg("threshold") = 1e-4,
+             py::arg("threshold_mode") = "rel", py::arg("cooldown") = 0,
+             py::arg("min_lr") = 0.0, py::arg("eps") = 1e-8,
+             "Reduce learning rate when metric plateaus")
+        .def(py::init<tenzor::optim::Adam&, const std::string&, double, int64_t, double,
+                     const std::string&, int64_t, double, double>(),
+             py::arg("optimizer"), py::arg("mode") = "min", py::arg("factor") = 0.1,
+             py::arg("patience") = 10, py::arg("threshold") = 1e-4,
+             py::arg("threshold_mode") = "rel", py::arg("cooldown") = 0,
+             py::arg("min_lr") = 0.0, py::arg("eps") = 1e-8)
+        .def(py::init<tenzor::optim::AdamW&, const std::string&, double, int64_t, double,
+                     const std::string&, int64_t, double, double>(),
+             py::arg("optimizer"), py::arg("mode") = "min", py::arg("factor") = 0.1,
+             py::arg("patience") = 10, py::arg("threshold") = 1e-4,
+             py::arg("threshold_mode") = "rel", py::arg("cooldown") = 0,
+             py::arg("min_lr") = 0.0, py::arg("eps") = 1e-8)
+        .def("step", py::overload_cast<double>(&tenzor::optim::ReduceLROnPlateau::step));
+
+    py::class_<tenzor::optim::CyclicLR, tenzor::optim::LRScheduler>(lr_scheduler, "CyclicLR")
+        .def(py::init<tenzor::optim::SGD&, double, double, int64_t, int64_t,
+                     const std::string&, double, double, const std::string&>(),
+             py::arg("optimizer"), py::arg("base_lr"), py::arg("max_lr"),
+             py::arg("step_size_up") = 2000, py::arg("step_size_down") = -1,
+             py::arg("mode") = "triangular", py::arg("gamma") = 1.0,
+             py::arg("scale_fn") = 1.0, py::arg("scale_mode") = "cycle",
+             "Cyclic learning rate schedule")
+        .def(py::init<tenzor::optim::Adam&, double, double, int64_t, int64_t,
+                     const std::string&, double, double, const std::string&>(),
+             py::arg("optimizer"), py::arg("base_lr"), py::arg("max_lr"),
+             py::arg("step_size_up") = 2000, py::arg("step_size_down") = -1,
+             py::arg("mode") = "triangular", py::arg("gamma") = 1.0,
+             py::arg("scale_fn") = 1.0, py::arg("scale_mode") = "cycle")
+        .def(py::init<tenzor::optim::AdamW&, double, double, int64_t, int64_t,
+                     const std::string&, double, double, const std::string&>(),
+             py::arg("optimizer"), py::arg("base_lr"), py::arg("max_lr"),
+             py::arg("step_size_up") = 2000, py::arg("step_size_down") = -1,
+             py::arg("mode") = "triangular", py::arg("gamma") = 1.0,
+             py::arg("scale_fn") = 1.0, py::arg("scale_mode") = "cycle")
+        .def("step", &tenzor::optim::CyclicLR::step);
+
+    py::class_<tenzor::optim::OneCycleLR, tenzor::optim::LRScheduler>(lr_scheduler, "OneCycleLR")
+        .def(py::init<tenzor::optim::SGD&, double, int64_t, int64_t, int64_t, double,
+                     const std::string&, double, double>(),
+             py::arg("optimizer"), py::arg("max_lr"), py::arg("total_steps"),
+             py::arg("epochs") = -1, py::arg("steps_per_epoch") = -1,
+             py::arg("pct_start") = 0.3, py::arg("anneal_strategy") = "cos",
+             py::arg("div_factor") = 25.0, py::arg("final_div_factor") = 1e4,
+             "One cycle learning rate schedule")
+        .def(py::init<tenzor::optim::Adam&, double, int64_t, int64_t, int64_t, double,
+                     const std::string&, double, double>(),
+             py::arg("optimizer"), py::arg("max_lr"), py::arg("total_steps"),
+             py::arg("epochs") = -1, py::arg("steps_per_epoch") = -1,
+             py::arg("pct_start") = 0.3, py::arg("anneal_strategy") = "cos",
+             py::arg("div_factor") = 25.0, py::arg("final_div_factor") = 1e4)
+        .def(py::init<tenzor::optim::AdamW&, double, int64_t, int64_t, int64_t, double,
+                     const std::string&, double, double>(),
+             py::arg("optimizer"), py::arg("max_lr"), py::arg("total_steps"),
+             py::arg("epochs") = -1, py::arg("steps_per_epoch") = -1,
+             py::arg("pct_start") = 0.3, py::arg("anneal_strategy") = "cos",
+             py::arg("div_factor") = 25.0, py::arg("final_div_factor") = 1e4)
+        .def("step", &tenzor::optim::OneCycleLR::step);
+
+    py::class_<tenzor::optim::CosineAnnealingWarmRestarts, tenzor::optim::LRScheduler>(lr_scheduler, "CosineAnnealingWarmRestarts")
+        .def(py::init<tenzor::optim::SGD&, int64_t, int64_t, double>(),
+             py::arg("optimizer"), py::arg("T_0"), py::arg("T_mult") = 1,
+             py::arg("eta_min") = 0.0,
+             "Cosine annealing with warm restarts")
+        .def(py::init<tenzor::optim::Adam&, int64_t, int64_t, double>(),
+             py::arg("optimizer"), py::arg("T_0"), py::arg("T_mult") = 1,
+             py::arg("eta_min") = 0.0)
+        .def(py::init<tenzor::optim::AdamW&, int64_t, int64_t, double>(),
+             py::arg("optimizer"), py::arg("T_0"), py::arg("T_mult") = 1,
+             py::arg("eta_min") = 0.0)
+        .def("step", &tenzor::optim::CosineAnnealingWarmRestarts::step);
 }

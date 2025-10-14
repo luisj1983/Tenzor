@@ -1,0 +1,246 @@
+/**
+ * @file grad_scaler.cpp
+ * @brief Implementation of gradient scaler for automatic mixed precision training
+ */
+
+#include "tenzor/nn/amp/grad_scaler.hpp"
+#include "tenzor/ops/math.hpp"
+#include "tenzor/ops/creation.hpp"
+#include <cmath>
+#include <limits>
+#include <algorithm>
+#include <cstring>
+
+namespace tenzor {
+namespace nn {
+namespace amp {
+
+namespace {
+    // Helper function to manually copy tensor data without using clone()
+    auto copy_tensor(const Tensor& src) -> Tensor {
+        // Create new tensor with same properties
+        Tensor dst(std::vector<int64_t>(src.shape().begin(), src.shape().end()),
+                   src.dtype(),
+                   src.device());
+
+        // Copy data manually
+        const void* src_ptr = src.data_ptr();
+        void* dst_ptr = dst.data_ptr();
+        const size_t bytes = src.numel() * src.dtype_size();
+
+        std::memcpy(dst_ptr, src_ptr, bytes);
+
+        return dst;
+    }
+} // anonymous namespace
+
+GradScaler::GradScaler(float init_scale,
+                       float growth_factor,
+                       float backoff_factor,
+                       int growth_interval)
+    : scale_(init_scale)
+    , growth_factor_(growth_factor)
+    , backoff_factor_(backoff_factor)
+    , growth_interval_(growth_interval)
+    , growth_tracker_(0)
+    , found_inf_nan_(false)
+    , has_unscaled_(false) {
+
+    if (init_scale <= 0.0f) {
+        throw std::invalid_argument("init_scale must be positive");
+    }
+    if (growth_factor <= 1.0f) {
+        throw std::invalid_argument("growth_factor must be greater than 1.0");
+    }
+    if (backoff_factor <= 0.0f || backoff_factor >= 1.0f) {
+        throw std::invalid_argument("backoff_factor must be in range (0, 1)");
+    }
+    if (growth_interval <= 0) {
+        throw std::invalid_argument("growth_interval must be positive");
+    }
+}
+
+auto GradScaler::scale(const Variable& loss) -> Variable {
+    // Create a copy of the loss tensor and scale it directly
+    // This avoids dependency on tensor operations being registered
+    auto scaled_tensor = copy_tensor(loss.tensor());
+
+    // Get raw data and scale in-place
+    float* data = scaled_tensor.data<float>();
+    const int64_t numel = scaled_tensor.numel();
+
+    for (int64_t i = 0; i < numel; ++i) {
+        data[i] *= scale_;
+    }
+
+    // Return as Variable with same requires_grad as input
+    return Variable(scaled_tensor, loss.requires_grad());
+}
+
+auto GradScaler::unscale_(optim::Optimizer& optimizer) -> void {
+    if (has_unscaled_) {
+        return;  // Already unscaled
+    }
+
+    const float inv_scale = 1.0f / scale_;
+
+    // Unscale all parameter gradients
+    for (auto* param : optimizer.parameters()) {
+        if (!param->has_grad()) {
+            continue;
+        }
+
+        auto& grad = param->grad();
+        if (!grad.has_value()) {
+            continue;
+        }
+
+        // Get gradient data and unscale in-place
+        // This avoids dependency on tensor operations being registered
+        float* grad_data = grad->data<float>();
+        const int64_t numel = grad->numel();
+
+        // Unscale gradient: grad = grad / scale
+        for (int64_t i = 0; i < numel; ++i) {
+            grad_data[i] *= inv_scale;
+        }
+    }
+
+    has_unscaled_ = true;
+}
+
+auto GradScaler::check_inf_nan_(const optim::Optimizer& optimizer) const -> bool {
+    // Check if any gradient contains inf or nan
+    for (const auto* param : optimizer.parameters()) {
+        if (!param->has_grad()) {
+            continue;
+        }
+
+        const auto& grad = param->grad();
+        if (!grad.has_value()) {
+            continue;
+        }
+
+        // Get gradient data as float pointer
+        const auto& grad_tensor = *grad;
+        const float* data_ptr = grad_tensor.data<float>();
+        const int64_t numel = grad_tensor.numel();
+
+        // Check each element for inf or nan
+        for (int64_t i = 0; i < numel; ++i) {
+            const float val = data_ptr[i];
+            if (std::isinf(val) || std::isnan(val)) {
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+auto GradScaler::step(optim::Optimizer& optimizer) -> bool {
+    // Unscale gradients if not already done
+    if (!has_unscaled_) {
+        unscale_(optimizer);
+    }
+
+    // Check for inf/nan in unscaled gradients
+    found_inf_nan_ = check_inf_nan_(optimizer);
+
+    if (found_inf_nan_) {
+        // Skip optimizer step due to overflow
+        has_unscaled_ = false;  // Reset for next iteration
+        return false;
+    }
+
+    // Perform optimizer step
+    optimizer.step();
+
+    // Reset unscale flag for next iteration
+    has_unscaled_ = false;
+
+    return true;
+}
+
+auto GradScaler::update() -> void {
+    if (found_inf_nan_) {
+        // Overflow detected: decrease scale
+        scale_ *= backoff_factor_;
+
+        // Ensure scale doesn't become too small
+        scale_ = std::max(scale_, 1.0f);
+
+        // Reset growth tracker
+        growth_tracker_ = 0;
+
+        // Reset overflow flag
+        found_inf_nan_ = false;
+    } else {
+        // No overflow: increment growth tracker
+        growth_tracker_++;
+
+        // Increase scale if we've reached growth interval
+        if (growth_tracker_ >= growth_interval_) {
+            scale_ *= growth_factor_;
+
+            // Ensure scale doesn't become too large
+            scale_ = std::min(scale_, static_cast<float>(1ULL << 24));
+
+            // Reset growth tracker
+            growth_tracker_ = 0;
+        }
+    }
+}
+
+auto GradScaler::get_scale() const -> float {
+    return scale_;
+}
+
+auto GradScaler::get_growth_tracker() const -> int {
+    return growth_tracker_;
+}
+
+auto GradScaler::found_inf_nan() const -> bool {
+    return found_inf_nan_;
+}
+
+auto GradScaler::reset() -> void {
+    // Reset to initial state
+    const float init_scale = 65536.0f;  // Store initial scale
+    scale_ = init_scale;
+    growth_tracker_ = 0;
+    found_inf_nan_ = false;
+    has_unscaled_ = false;
+}
+
+auto GradScaler::state_dict() const -> std::unordered_map<std::string, float> {
+    return {
+        {"scale", scale_},
+        {"growth_factor", growth_factor_},
+        {"backoff_factor", backoff_factor_},
+        {"growth_interval", static_cast<float>(growth_interval_)},
+        {"growth_tracker", static_cast<float>(growth_tracker_)}
+    };
+}
+
+auto GradScaler::load_state_dict(const std::unordered_map<std::string, float>& state) -> void {
+    if (state.count("scale")) {
+        scale_ = state.at("scale");
+    }
+    if (state.count("growth_factor")) {
+        growth_factor_ = state.at("growth_factor");
+    }
+    if (state.count("backoff_factor")) {
+        backoff_factor_ = state.at("backoff_factor");
+    }
+    if (state.count("growth_interval")) {
+        growth_interval_ = static_cast<int>(state.at("growth_interval"));
+    }
+    if (state.count("growth_tracker")) {
+        growth_tracker_ = static_cast<int>(state.at("growth_tracker"));
+    }
+}
+
+} // namespace amp
+} // namespace nn
+} // namespace tenzor

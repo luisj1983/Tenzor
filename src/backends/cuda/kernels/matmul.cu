@@ -708,19 +708,18 @@ void batched_matmul_f64(
 // ============================================================================
 
 auto matmul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor {
-    // Validate inputs
-    if (!a.is_contiguous() || !b.is_contiguous()) {
-        throw std::runtime_error("matmul requires contiguous tensors");
-    }
+    // Make tensors contiguous if needed (does not break autograd chain)
+    Tensor a_contig = a.is_contiguous() ? a : a.contiguous();
+    Tensor b_contig = b.is_contiguous() ? b : b.contiguous();
 
-    if (a.device().type != Device::Type::CUDA || b.device().type != Device::Type::CUDA) {
+    if (a_contig.device().type != Device::Type::CUDA || b_contig.device().type != Device::Type::CUDA) {
         throw std::runtime_error("matmul_kernel requires CUDA tensors");
     }
 
     // Handle 2D matrices
-    if (a.ndim() == 2 && b.ndim() == 2) {
-        auto a_shape = a.shape();
-        auto b_shape = b.shape();
+    if (a_contig.ndim() == 2 && b_contig.ndim() == 2) {
+        auto a_shape = a_contig.shape();
+        auto b_shape = b_contig.shape();
 
         int64_t M = a_shape[0];
         int64_t K = a_shape[1];
@@ -736,26 +735,26 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Ten
         }
 
         // Create output tensor
-        Tensor result({M, N}, a.dtype(), a.device());
+        Tensor result({M, N}, a_contig.dtype(), a_contig.device());
 
         // Dispatch based on dtype
-        if (a.dtype() == DType::Float32 && b.dtype() == DType::Float32) {
-            const float* a_data = a.data<float>();
-            const float* b_data = b.data<float>();
+        if (a_contig.dtype() == DType::Float32 && b_contig.dtype() == DType::Float32) {
+            const float* a_data = a_contig.data<float>();
+            const float* b_data = b_contig.data<float>();
             float* c_data = result.data<float>();
 
             matmul_f32(a_data, b_data, c_data, M, N, K, stream);
 
-        } else if (a.dtype() == DType::Float64 && b.dtype() == DType::Float64) {
-            const double* a_data = a.data<double>();
-            const double* b_data = b.data<double>();
+        } else if (a_contig.dtype() == DType::Float64 && b_contig.dtype() == DType::Float64) {
+            const double* a_data = a_contig.data<double>();
+            const double* b_data = b_contig.data<double>();
             double* c_data = result.data<double>();
 
             matmul_f64(a_data, b_data, c_data, M, N, K, stream);
 
-        } else if (a.dtype() == DType::Int32 && b.dtype() == DType::Int32) {
-            const int32_t* a_data = a.data<int32_t>();
-            const int32_t* b_data = b.data<int32_t>();
+        } else if (a_contig.dtype() == DType::Int32 && b_contig.dtype() == DType::Int32) {
+            const int32_t* a_data = a_contig.data<int32_t>();
+            const int32_t* b_data = b_contig.data<int32_t>();
             int32_t* c_data = result.data<int32_t>();
 
             matmul_i32(a_data, b_data, c_data, M, N, K, stream);
@@ -763,8 +762,8 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Ten
         } else {
             throw std::runtime_error(
                 "matmul unsupported dtype combination: " +
-                std::string(dtype_name(a.dtype())) + " @ " +
-                std::string(dtype_name(b.dtype()))
+                std::string(dtype_name(a_contig.dtype())) + " @ " +
+                std::string(dtype_name(b_contig.dtype()))
             );
         }
 
@@ -772,9 +771,9 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Ten
     }
 
     // Handle batched 3D matrices (batch_size, M, N) @ (batch_size, N, K)
-    if (a.ndim() == 3 && b.ndim() == 3) {
-        auto a_shape = a.shape();
-        auto b_shape = b.shape();
+    if (a_contig.ndim() == 3 && b_contig.ndim() == 3) {
+        auto a_shape = a_contig.shape();
+        auto b_shape = b_contig.shape();
 
         int64_t batch_a = a_shape[0];
         int64_t batch_b = b_shape[0];
@@ -798,19 +797,19 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Ten
         }
 
         // Create output tensor
-        Tensor result({batch_size, M, N}, a.dtype(), a.device());
+        Tensor result({batch_size, M, N}, a_contig.dtype(), a_contig.device());
 
         // Dispatch based on dtype
-        if (a.dtype() == DType::Float32 && b.dtype() == DType::Float32) {
-            const float* a_data = a.data<float>();
-            const float* b_data = b.data<float>();
+        if (a_contig.dtype() == DType::Float32 && b_contig.dtype() == DType::Float32) {
+            const float* a_data = a_contig.data<float>();
+            const float* b_data = b_contig.data<float>();
             float* c_data = result.data<float>();
 
             batched_matmul_f32(a_data, b_data, c_data, batch_size, M, N, K, stream);
 
-        } else if (a.dtype() == DType::Float64 && b.dtype() == DType::Float64) {
-            const double* a_data = a.data<double>();
-            const double* b_data = b.data<double>();
+        } else if (a_contig.dtype() == DType::Float64 && b_contig.dtype() == DType::Float64) {
+            const double* a_data = a_contig.data<double>();
+            const double* b_data = b_contig.data<double>();
             double* c_data = result.data<double>();
 
             batched_matmul_f64(a_data, b_data, c_data, batch_size, M, N, K, stream);
@@ -818,7 +817,7 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Ten
         } else {
             throw std::runtime_error(
                 "Batched matmul unsupported dtype: " +
-                std::string(dtype_name(a.dtype()))
+                std::string(dtype_name(a_contig.dtype()))
             );
         }
 
@@ -827,7 +826,7 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Ten
 
     throw std::runtime_error(
         "matmul requires 2D or 3D tensors, got " +
-        std::to_string(a.ndim()) + "D and " + std::to_string(b.ndim()) + "D"
+        std::to_string(a_contig.ndim()) + "D and " + std::to_string(b_contig.ndim()) + "D"
     );
 }
 

@@ -136,6 +136,16 @@ auto initialize() -> void {
             return cpu_backend->dispatch("tanh_backward", inputs, attrs);
         });
 
+    registry.register_kernel("gelu", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("gelu", inputs, attrs);
+        });
+
+    registry.register_kernel("gelu_backward", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("gelu_backward", inputs, attrs);
+        });
+
     registry.register_kernel("leaky_relu", Device::Type::CPU,
         [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             return cpu_backend->dispatch("leaky_relu", inputs, attrs);
@@ -174,6 +184,11 @@ auto initialize() -> void {
     registry.register_kernel("abs", Device::Type::CPU,
         [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             return cpu_backend->dispatch("abs", inputs, attrs);
+        });
+
+    registry.register_kernel("sign", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("sign", inputs, attrs);
         });
 
     // Math operations
@@ -367,6 +382,16 @@ auto initialize() -> void {
                         return cuda_backend->dispatch("tanh_backward", inputs, attrs);
                     });
 
+                registry.register_kernel("gelu", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("gelu", inputs, attrs);
+                    });
+
+                registry.register_kernel("gelu_backward", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("gelu_backward", inputs, attrs);
+                    });
+
                 registry.register_kernel("leaky_relu", Device::Type::CUDA,
                     [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
                         return cuda_backend->dispatch("leaky_relu", inputs, attrs);
@@ -405,6 +430,11 @@ auto initialize() -> void {
                 registry.register_kernel("abs", Device::Type::CUDA,
                     [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
                         return cuda_backend->dispatch("abs", inputs, attrs);
+                    });
+
+                registry.register_kernel("sign", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("sign", inputs, attrs);
                     });
 
                 // Math operations
@@ -542,7 +572,7 @@ auto initialize() -> void {
         std::cout << "CUDA backend not found at: " << cuda_backend_path << std::endl;
     }
 
-    std::cout << "Tenzor initialization complete - 36 CPU operations registered" << std::endl;
+    std::cout << "Tenzor initialization complete - 38 CPU operations registered" << std::endl;
 
     g_initialized = true;
 }

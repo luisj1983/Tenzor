@@ -70,6 +70,14 @@ public:
      */
     auto get_lr() const -> double { return get_last_lr(); }
 
+    /**
+     * @brief Get last learning rates for all parameter groups
+     * @return Vector of learning rates (default: single element)
+     */
+    virtual auto get_last_lr_vec() const -> std::vector<double> {
+        return {get_last_lr()};
+    }
+
 protected:
     LRScheduler() = default;
 };
@@ -295,6 +303,483 @@ private:
     int T_max_;
     double eta_min_;
     int epoch_;
+
+    auto update_lr() -> void;
+    auto get_current_lr() const -> double;
+    auto set_optimizer_lr(double lr) -> void;
+};
+
+/**
+ * @brief Reduce learning rate on plateau scheduler
+ *
+ * Reduces learning rate when a metric has stopped improving.
+ * Monitors a quantity (e.g., validation loss) and reduces LR by factor
+ * when no improvement is seen for a patience number of epochs.
+ *
+ * \f[
+ * \text{if no improvement for patience epochs: } \eta_{new} = \eta \cdot \text{factor}
+ * \f]
+ *
+ * **Key Features:**
+ * - Metric-based (not epoch-based) - call step(metric) instead of step()
+ * - Automatic LR reduction when training plateaus
+ * - Configurable patience and threshold
+ * - Cooldown period after reduction
+ *
+ * **Use Cases:**
+ * - When you don't know optimal schedule in advance
+ * - Dynamic adjustment based on validation metrics
+ * - Automatic hyperparameter tuning
+ *
+ * **Typical Configuration:**
+ * - mode: "min" for loss, "max" for accuracy
+ * - factor: 0.1 (reduce by 10x)
+ * - patience: 10 epochs
+ * - threshold: 1e-4 (improvement threshold)
+ *
+ * @param optimizer Optimizer to schedule
+ * @param mode "min" for loss (reduce when not decreasing), "max" for metrics (reduce when not increasing)
+ * @param factor Multiplicative factor of learning rate decay (default: 0.1)
+ * @param patience Number of epochs with no improvement before reducing LR (default: 10)
+ * @param threshold Threshold for measuring improvement (default: 1e-4)
+ * @param threshold_mode "rel" for relative threshold, "abs" for absolute (default: "rel")
+ * @param cooldown Epochs to wait before resuming monitoring after LR reduction (default: 0)
+ * @param min_lr Minimum learning rate (default: 0.0)
+ * @param eps Minimum decay for learning rate (default: 1e-8)
+ *
+ * @code
+ * auto scheduler = ReduceLROnPlateau(optimizer, "min", 0.1, 10);
+ * for (int epoch = 0; epoch < 100; ++epoch) {
+ *     train_one_epoch();
+ *     double val_loss = validate();
+ *     scheduler.step(val_loss);  // Pass metric, not epoch-based!
+ * }
+ * @endcode
+ *
+ * @see CyclicLR, OneCycleLR
+ */
+class ReduceLROnPlateau : public LRScheduler {
+public:
+    // Constructor for SGD optimizer
+    ReduceLROnPlateau(SGD& optimizer,
+                     const std::string& mode = "min",
+                     double factor = 0.1,
+                     int64_t patience = 10,
+                     double threshold = 1e-4,
+                     const std::string& threshold_mode = "rel",
+                     int64_t cooldown = 0,
+                     double min_lr = 0.0,
+                     double eps = 1e-8);
+
+    // Constructor for Adam optimizer
+    ReduceLROnPlateau(Adam& optimizer,
+                     const std::string& mode = "min",
+                     double factor = 0.1,
+                     int64_t patience = 10,
+                     double threshold = 1e-4,
+                     const std::string& threshold_mode = "rel",
+                     int64_t cooldown = 0,
+                     double min_lr = 0.0,
+                     double eps = 1e-8);
+
+    // Constructor for AdamW optimizer
+    ReduceLROnPlateau(AdamW& optimizer,
+                     const std::string& mode = "min",
+                     double factor = 0.1,
+                     int64_t patience = 10,
+                     double threshold = 1e-4,
+                     const std::string& threshold_mode = "rel",
+                     int64_t cooldown = 0,
+                     double min_lr = 0.0,
+                     double eps = 1e-8);
+
+    // Metric-based step (not epoch-based!)
+    auto step(double metric) -> void;
+
+    // Override base step() to throw error (must use step(metric))
+    auto step() -> void override {
+        throw std::runtime_error("ReduceLROnPlateau requires metric argument: use step(metric)");
+    }
+
+    auto get_last_lr() const -> double override { return last_lr_; }
+
+    // Get number of bad epochs
+    auto get_num_bad_epochs() const -> int64_t { return num_bad_epochs_; }
+
+    // Check if in cooldown
+    auto in_cooldown() const -> bool { return cooldown_counter_ > 0; }
+
+private:
+    enum class OptimizerType { SGD, Adam, AdamW };
+
+    union OptimizerPtr {
+        SGD* sgd;
+        Adam* adam;
+        AdamW* adamw;
+        OptimizerPtr() : sgd(nullptr) {}
+    };
+
+    OptimizerPtr optimizer_;
+    OptimizerType optimizer_type_;
+    std::string mode_;
+    std::string threshold_mode_;
+    double factor_;
+    double threshold_;
+    double min_lr_;
+    double eps_;
+    int64_t patience_;
+    int64_t cooldown_;
+    double best_metric_;
+    int64_t num_bad_epochs_;
+    int64_t cooldown_counter_;
+    double last_lr_;
+
+    auto is_better(double current, double best) const -> bool;
+    auto reduce_lr() -> void;
+    auto get_current_lr() const -> double;
+    auto set_optimizer_lr(double lr) -> void;
+};
+
+/**
+ * @brief Cyclic learning rate scheduler
+ *
+ * Cycles learning rate between base_lr and max_lr with configurable cycle shape.
+ * Learning rate oscillates during training, which can help escape local minima
+ * and speed up convergence.
+ *
+ * **Cycle Modes:**
+ * - **triangular**: Linear increase then decrease (constant amplitude)
+ * - **triangular2**: Same but max_lr halves each cycle
+ * - **exp_range**: Exponential scaling with gamma per iteration
+ *
+ * **Important:** Call step() every batch, not every epoch!
+ *
+ * **Advantages:**
+ * - Helps escape saddle points
+ * - Often faster convergence
+ * - Can achieve better final accuracy
+ * - Self-regularizing effect
+ *
+ * **Use Cases:**
+ * - Training CNNs
+ * - When stuck in local minima
+ * - Alternative to fixed LR schedule
+ *
+ * **Typical Configuration:**
+ * - step_size_up: 2000-8000 iterations (2-8 epochs)
+ * - max_lr: 3-5x base_lr
+ * - mode: "triangular" or "triangular2"
+ *
+ * @param optimizer Optimizer to schedule
+ * @param base_lr Minimum learning rate in cycle
+ * @param max_lr Maximum learning rate in cycle
+ * @param step_size_up Number of iterations in increasing phase (default: 2000)
+ * @param step_size_down Number of iterations in decreasing phase (default: equals step_size_up)
+ * @param mode Cycle shape: "triangular", "triangular2", "exp_range" (default: "triangular")
+ * @param gamma Scaling factor for exp_range mode (default: 1.0)
+ * @param scale_fn Custom scaling function (default: 1.0)
+ * @param scale_mode "cycle" or "iterations" (default: "cycle")
+ *
+ * @code
+ * auto scheduler = CyclicLR(optimizer, 0.001, 0.006, 2000);
+ * for (int epoch = 0; epoch < num_epochs; ++epoch) {
+ *     for (auto batch : dataloader) {
+ *         optimizer.step();
+ *         scheduler.step();  // Call every batch!
+ *     }
+ * }
+ * @endcode
+ *
+ * @see OneCycleLR, ReduceLROnPlateau
+ */
+class CyclicLR : public LRScheduler {
+public:
+    // Constructor for SGD optimizer
+    CyclicLR(SGD& optimizer,
+             double base_lr, double max_lr,
+             int64_t step_size_up = 2000,
+             int64_t step_size_down = -1,
+             const std::string& mode = "triangular",
+             double gamma = 1.0,
+             double scale_fn = 1.0,
+             const std::string& scale_mode = "cycle");
+
+    // Constructor for Adam optimizer
+    CyclicLR(Adam& optimizer,
+             double base_lr, double max_lr,
+             int64_t step_size_up = 2000,
+             int64_t step_size_down = -1,
+             const std::string& mode = "triangular",
+             double gamma = 1.0,
+             double scale_fn = 1.0,
+             const std::string& scale_mode = "cycle");
+
+    // Constructor for AdamW optimizer
+    CyclicLR(AdamW& optimizer,
+             double base_lr, double max_lr,
+             int64_t step_size_up = 2000,
+             int64_t step_size_down = -1,
+             const std::string& mode = "triangular",
+             double gamma = 1.0,
+             double scale_fn = 1.0,
+             const std::string& scale_mode = "cycle");
+
+    auto step() -> void override;
+    auto get_last_lr() const -> double override { return last_lr_; }
+
+    // Get current iteration
+    auto get_iteration() const -> int64_t { return step_count_; }
+
+    // Get current cycle
+    auto get_cycle() const -> int64_t { return step_count_ / cycle_size_; }
+
+private:
+    enum class OptimizerType { SGD, Adam, AdamW };
+
+    union OptimizerPtr {
+        SGD* sgd;
+        Adam* adam;
+        AdamW* adamw;
+        OptimizerPtr() : sgd(nullptr) {}
+    };
+
+    OptimizerPtr optimizer_;
+    OptimizerType optimizer_type_;
+    double base_lr_;
+    double max_lr_;
+    int64_t step_size_up_;
+    int64_t step_size_down_;
+    int64_t cycle_size_;
+    std::string mode_;
+    double gamma_;
+    double scale_fn_;
+    std::string scale_mode_;
+    int64_t step_count_;
+    double last_lr_;
+
+    auto compute_lr() -> double;
+    auto get_scale_factor(int64_t cycle) const -> double;
+    auto get_current_lr() const -> double;
+    auto set_optimizer_lr(double lr) -> void;
+};
+
+/**
+ * @brief One cycle learning rate scheduler
+ *
+ * Implements the 1cycle learning rate policy popularized by Leslie Smith.
+ * Two-phase schedule:
+ * 1. Warmup: Increase from initial_lr to max_lr
+ * 2. Annealing: Decrease from max_lr to final_lr
+ *
+ * \f[
+ * \text{Phase 1: } \eta_t \text{ increases from } \frac{\eta_{max}}{div} \text{ to } \eta_{max} \\
+ * \text{Phase 2: } \eta_t \text{ decreases from } \eta_{max} \text{ to } \frac{\eta_{max}}{final\_div}
+ * \f]
+ *
+ * **Important:** Call step() every batch, not every epoch!
+ *
+ * **Advantages:**
+ * - Fast convergence (often 5-10x faster)
+ * - Better final accuracy
+ * - Built-in warmup and annealing
+ * - Single hyperparameter (max_lr)
+ *
+ * **Use Cases:**
+ * - Training modern architectures (ResNets, Transformers)
+ * - When total training steps are known
+ * - Fast training with good results
+ *
+ * **Typical Configuration:**
+ * - max_lr: Find with LR range test
+ * - pct_start: 0.3 (30% for warmup)
+ * - anneal_strategy: "cos" or "linear"
+ *
+ * @param optimizer Optimizer to schedule
+ * @param max_lr Maximum learning rate
+ * @param total_steps Total number of training steps
+ * @param epochs Alternative to total_steps
+ * @param steps_per_epoch Alternative to total_steps (with epochs)
+ * @param pct_start Percentage of cycle for warmup (default: 0.3)
+ * @param anneal_strategy "cos" or "linear" annealing (default: "cos")
+ * @param div_factor Initial LR = max_lr / div_factor (default: 25.0)
+ * @param final_div_factor Final LR = max_lr / final_div_factor (default: 1e4)
+ *
+ * @code
+ * int total_steps = num_epochs * batches_per_epoch;
+ * auto scheduler = OneCycleLR(optimizer, 0.1, total_steps);
+ * for (int epoch = 0; epoch < num_epochs; ++epoch) {
+ *     for (auto batch : dataloader) {
+ *         optimizer.step();
+ *         scheduler.step();  // Call every batch!
+ *     }
+ * }
+ * @endcode
+ *
+ * @see CyclicLR, CosineAnnealingLR
+ */
+class OneCycleLR : public LRScheduler {
+public:
+    // Constructor for SGD optimizer
+    OneCycleLR(SGD& optimizer,
+               double max_lr,
+               int64_t total_steps,
+               int64_t epochs = -1,
+               int64_t steps_per_epoch = -1,
+               double pct_start = 0.3,
+               const std::string& anneal_strategy = "cos",
+               double div_factor = 25.0,
+               double final_div_factor = 1e4);
+
+    // Constructor for Adam optimizer
+    OneCycleLR(Adam& optimizer,
+               double max_lr,
+               int64_t total_steps,
+               int64_t epochs = -1,
+               int64_t steps_per_epoch = -1,
+               double pct_start = 0.3,
+               const std::string& anneal_strategy = "cos",
+               double div_factor = 25.0,
+               double final_div_factor = 1e4);
+
+    // Constructor for AdamW optimizer
+    OneCycleLR(AdamW& optimizer,
+               double max_lr,
+               int64_t total_steps,
+               int64_t epochs = -1,
+               int64_t steps_per_epoch = -1,
+               double pct_start = 0.3,
+               const std::string& anneal_strategy = "cos",
+               double div_factor = 25.0,
+               double final_div_factor = 1e4);
+
+    auto step() -> void override;
+    auto get_last_lr() const -> double override { return last_lr_; }
+
+    // Get current step
+    auto get_step() const -> int64_t { return step_count_; }
+
+private:
+    enum class OptimizerType { SGD, Adam, AdamW };
+
+    union OptimizerPtr {
+        SGD* sgd;
+        Adam* adam;
+        AdamW* adamw;
+        OptimizerPtr() : sgd(nullptr) {}
+    };
+
+    OptimizerPtr optimizer_;
+    OptimizerType optimizer_type_;
+    double max_lr_;
+    double pct_start_;
+    double div_factor_;
+    double final_div_factor_;
+    int64_t total_steps_;
+    int64_t step_count_;
+    std::string anneal_strategy_;
+    double last_lr_;
+
+    auto compute_lr() -> double;
+    auto anneal_func(double start, double end, double pct) -> double;
+    auto get_current_lr() const -> double;
+    auto set_optimizer_lr(double lr) -> void;
+};
+
+/**
+ * @brief Cosine annealing with warm restarts
+ *
+ * Implements SGDR: Stochastic Gradient Descent with Warm Restarts.
+ * Periodically resets learning rate to initial value, creating
+ * multiple cosine annealing cycles with increasing periods.
+ *
+ * \f[
+ * \eta_t = \eta_{min} + \frac{\eta_0 - \eta_{min}}{2}\left(1 + \cos\left(\frac{T_{cur}}{T_i}\pi\right)\right)
+ * \f]
+ *
+ * After each restart, the period multiplies by T_mult.
+ *
+ * **Advantages:**
+ * - Escapes local minima via restarts
+ * - Can achieve better results than standard schedules
+ * - Multiple attempts at different learning rates
+ * - Built-in exploration/exploitation balance
+ *
+ * **Use Cases:**
+ * - Long training runs
+ * - When you want multiple optimization attempts
+ * - Snapshot ensembling (save models at each restart)
+ *
+ * **Typical Configuration:**
+ * - T_0: 10-50 epochs for first restart
+ * - T_mult: 1 (constant period) or 2 (doubling period)
+ * - eta_min: 0.0 or small positive value
+ *
+ * @param optimizer Optimizer to schedule
+ * @param T_0 Number of iterations for the first restart
+ * @param T_mult Period multiplier after each restart (default: 1)
+ * @param eta_min Minimum learning rate (default: 0.0)
+ *
+ * @code
+ * auto scheduler = CosineAnnealingWarmRestarts(optimizer, 10, 2);
+ * // Restarts at epochs: 10, 30, 70, 150, ...
+ * // (periods: 10, 20, 40, 80, ...)
+ * for (int epoch = 0; epoch < 200; ++epoch) {
+ *     train_one_epoch();
+ *     scheduler.step();
+ * }
+ * @endcode
+ *
+ * @see CosineAnnealingLR, OneCycleLR
+ */
+class CosineAnnealingWarmRestarts : public LRScheduler {
+public:
+    // Constructor for SGD optimizer
+    CosineAnnealingWarmRestarts(SGD& optimizer,
+                               int64_t T_0,
+                               int64_t T_mult = 1,
+                               double eta_min = 0.0);
+
+    // Constructor for Adam optimizer
+    CosineAnnealingWarmRestarts(Adam& optimizer,
+                               int64_t T_0,
+                               int64_t T_mult = 1,
+                               double eta_min = 0.0);
+
+    // Constructor for AdamW optimizer
+    CosineAnnealingWarmRestarts(AdamW& optimizer,
+                               int64_t T_0,
+                               int64_t T_mult = 1,
+                               double eta_min = 0.0);
+
+    auto step() -> void override;
+    auto get_last_lr() const -> double override { return last_lr_; }
+
+    // Get current iteration within restart period
+    auto get_T_cur() const -> int64_t { return T_cur_; }
+
+    // Get current period length
+    auto get_T_i() const -> int64_t { return T_i_; }
+
+private:
+    enum class OptimizerType { SGD, Adam, AdamW };
+
+    union OptimizerPtr {
+        SGD* sgd;
+        Adam* adam;
+        AdamW* adamw;
+        OptimizerPtr() : sgd(nullptr) {}
+    };
+
+    OptimizerPtr optimizer_;
+    OptimizerType optimizer_type_;
+    int64_t T_0_;
+    int64_t T_i_;
+    int64_t T_mult_;
+    int64_t T_cur_;
+    double eta_min_;
+    double base_lr_;
+    int64_t step_count_;
+    double last_lr_;
 
     auto update_lr() -> void;
     auto get_current_lr() const -> double;

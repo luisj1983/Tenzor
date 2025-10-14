@@ -47,6 +47,17 @@ auto div(const Tensor& a, const Tensor& b) -> Tensor;
  */
 auto matmul(const Tensor& a, const Tensor& b) -> Tensor;
 
+/**
+ * @brief Batch matrix multiplication.
+ *
+ * Performs matrix multiplication for each corresponding pair of matrices in a batch.
+ * @param a Left batch of matrices (batch, n, m)
+ * @param b Right batch of matrices (batch, m, p)
+ * @return Result batch of matrices (batch, n, p)
+ * @throws std::runtime_error if inputs are not 3D or dimensions don't match
+ */
+auto bmm(const Tensor& a, const Tensor& b) -> Tensor;
+
 /** @brief Dot product (1D tensors) or matrix-vector product. */
 auto dot(const Tensor& a, const Tensor& b) -> Tensor;
 

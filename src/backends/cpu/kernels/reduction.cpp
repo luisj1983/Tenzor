@@ -20,7 +20,7 @@ static auto compute_reduction_shape(const std::vector<int64_t>& input_shape,
         if (keepdim) {
             return std::vector<int64_t>(input_shape.size(), 1);
         }
-        return {1};  // Scalar
+        return {};  // Scalar (0D tensor)
     }
 
     std::vector<int64_t> output_shape = input_shape;
@@ -28,9 +28,7 @@ static auto compute_reduction_shape(const std::vector<int64_t>& input_shape,
         output_shape[dim] = 1;
     } else {
         output_shape.erase(output_shape.begin() + dim);
-        if (output_shape.empty()) {
-            output_shape = {1};  // Ensure at least 1D
-        }
+        // Keep empty shape for scalar result
     }
     return output_shape;
 }

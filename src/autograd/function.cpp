@@ -31,40 +31,107 @@ auto Function::saved_tensors() const -> const std::vector<Tensor>& {
     return saved_tensors_;
 }
 
+// Helper function to reduce gradient along broadcasted dimensions
+static auto reduce_grad_for_broadcasting(const Tensor& grad, const std::vector<int64_t>& target_shape) -> Tensor {
+    auto grad_shape_vec = std::vector<int64_t>(grad.shape().begin(), grad.shape().end());
+
+    // If shapes match, no reduction needed
+    if (grad_shape_vec == target_shape) {
+        return grad;
+    }
+
+    auto result = grad;
+
+    // Handle size difference (prepended dimensions in grad)
+    int64_t ndim_diff = static_cast<int64_t>(grad_shape_vec.size()) - static_cast<int64_t>(target_shape.size());
+
+    if (ndim_diff > 0) {
+        // grad has MORE dimensions than target - sum along prepended dimensions
+        for (int64_t i = 0; i < ndim_diff; ++i) {
+            result = tenzor::sum(result, 0, false);  // Sum and remove dimension
+        }
+    } else if (ndim_diff < 0) {
+        // grad has FEWER dimensions than target - broadcast by adding dimensions
+        // This happens when gradient was reduced to scalar but target has shape
+        // We need to broadcast the scalar to target shape
+        return expand(result, target_shape);
+    }
+
+    // Now result and target should have same ndim
+    // Sum along dimensions that were broadcasted (size 1 in target but > 1 in result)
+    auto result_shape_vec = std::vector<int64_t>(result.shape().begin(), result.shape().end());
+    for (size_t i = 0; i < target_shape.size(); ++i) {
+        if (target_shape[i] == 1 && result_shape_vec[i] > 1) {
+            result = tenzor::sum(result, static_cast<int64_t>(i), true);  // Keep dim as size 1
+            result_shape_vec = std::vector<int64_t>(result.shape().begin(), result.shape().end());
+        }
+    }
+
+    // Final reshape to exact target shape (handle keepdim=true above)
+    if (result_shape_vec != target_shape) {
+        result = reshape(result, target_shape);
+    }
+
+    return result;
+}
+
 // AddBackward implementation
 auto AddBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
+    // Save input shapes for broadcasting-aware backward pass
+    input_shape_a_ = std::vector<int64_t>(inputs[0].shape().begin(), inputs[0].shape().end());
+    input_shape_b_ = std::vector<int64_t>(inputs[1].shape().begin(), inputs[1].shape().end());
+
     auto result = add(inputs[0].tensor(), inputs[1].tensor());
     return {Variable(result, true)};
 }
 
 auto AddBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
-    return {grad_outputs[0], grad_outputs[0]};
+    // Reduce gradients to match input shapes (handle broadcasting)
+    auto grad_a = reduce_grad_for_broadcasting(grad_outputs[0], input_shape_a_);
+    auto grad_b = reduce_grad_for_broadcasting(grad_outputs[0], input_shape_b_);
+    return {grad_a, grad_b};
 }
 
 // SubBackward implementation
 auto SubBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
+    // Save input shapes for broadcasting-aware backward pass
+    input_shape_a_ = std::vector<int64_t>(inputs[0].shape().begin(), inputs[0].shape().end());
+    input_shape_b_ = std::vector<int64_t>(inputs[1].shape().begin(), inputs[1].shape().end());
+
     auto result = sub(inputs[0].tensor(), inputs[1].tensor());
     return {Variable(result, true)};
 }
 
 auto SubBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
     // d(a-b)/da = 1, d(a-b)/db = -1
-    return {grad_outputs[0], neg(grad_outputs[0])};
+    // Handle broadcasting
+    auto grad_a = reduce_grad_for_broadcasting(grad_outputs[0], input_shape_a_);
+    auto grad_b_unreduced = neg(grad_outputs[0]);
+    auto grad_b = reduce_grad_for_broadcasting(grad_b_unreduced, input_shape_b_);
+    return {grad_a, grad_b};
 }
 
 // MulBackward implementation
 auto MulBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
     saved_tensors_ = {inputs[0].tensor(), inputs[1].tensor()};
+    // Save input shapes for broadcasting-aware backward pass
+    input_shape_a_ = std::vector<int64_t>(inputs[0].shape().begin(), inputs[0].shape().end());
+    input_shape_b_ = std::vector<int64_t>(inputs[1].shape().begin(), inputs[1].shape().end());
+
     auto result = mul(inputs[0].tensor(), inputs[1].tensor());
     return {Variable(result, true)};
 }
 
 auto MulBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
     // d(a*b)/da = b, d(a*b)/db = a
-    return {
-        mul(grad_outputs[0], saved_tensors_[1]),
-        mul(grad_outputs[0], saved_tensors_[0])
-    };
+    // Handle broadcasting
+    auto grad_a_unreduced = mul(grad_outputs[0], saved_tensors_[1]);
+    auto grad_b_unreduced = mul(grad_outputs[0], saved_tensors_[0]);
+
+    auto grad_a = reduce_grad_for_broadcasting(grad_a_unreduced, input_shape_a_);
+    auto grad_b = reduce_grad_for_broadcasting(grad_b_unreduced, input_shape_b_);
+
+    return {grad_a, grad_b};
 }
 
 // DivBackward implementation
@@ -271,6 +338,39 @@ auto LogSoftmaxBackward::backward(std::vector<Tensor> grad_outputs) -> std::vect
     return {grad_input};
 }
 
+// SoftmaxBackward implementation
+auto SoftmaxBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
+    OpAttributes attrs;
+    attrs["dim"] = std::to_string(dim_);
+    std::vector<Tensor> input_tensors = {inputs[0].tensor()};
+    auto result = Dispatcher::dispatch("softmax", input_tensors, attrs)[0];
+
+    // Save output for backward
+    saved_tensors_ = {result};
+
+    return {Variable(result, true)};
+}
+
+auto SoftmaxBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    // Softmax backward: dL/dx = y * (dL/dy - sum(dL/dy * y))
+    const auto& output = saved_tensors_[0];  // y = softmax(x)
+    const auto& grad_output = grad_outputs[0];  // dL/dy
+
+    // Compute dL/dy * y (element-wise)
+    auto grad_y_prod = mul(grad_output, output);
+
+    // Sum along the softmax dimension
+    auto grad_y_sum = tenzor::sum(grad_y_prod, dim_, true);
+
+    // Compute dL/dy - sum(dL/dy * y) (broadcast)
+    auto grad_centered = sub(grad_output, grad_y_sum);
+
+    // Multiply by y to get final gradient
+    auto grad_input = mul(grad_centered, output);
+
+    return {grad_input};
+}
+
 // AbsBackward implementation
 auto AbsBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
     saved_tensors_ = {inputs[0].tensor()};
@@ -388,6 +488,65 @@ auto MaxBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
 
         return {mul(grad_expanded, mask)};
     }
+}
+
+// ReshapeBackward implementation
+auto ReshapeBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
+    throw std::runtime_error("ReshapeBackward::forward should not be called");
+}
+
+auto ReshapeBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    // Reshape gradient back to input shape and ensure contiguity
+    // Reshape may create non-contiguous views, which can cause issues in element-wise operations
+    auto grad_input = reshape(grad_outputs[0], input_shape_).contiguous();
+    return {grad_input};
+}
+
+// PermuteBackward implementation
+auto PermuteBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
+    throw std::runtime_error("PermuteBackward::forward should not be called");
+}
+
+auto PermuteBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    // Apply inverse permutation to gradient and ensure contiguity
+    // Permute creates non-contiguous views, which can cause issues in element-wise operations
+    auto grad_input = permute(grad_outputs[0], inv_dims_).contiguous();
+    return {grad_input};
+}
+
+// BmmBackward implementation
+auto BmmBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
+    saved_tensors_ = {inputs[0].tensor(), inputs[1].tensor()};
+    auto result = bmm(inputs[0].tensor(), inputs[1].tensor());
+    return {Variable(result, true)};
+}
+
+auto BmmBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    // For C = bmm(A, B):
+    // A: (batch, n, m), B: (batch, m, p), C: (batch, n, p)
+    // grad_output: (batch, n, p)
+    //
+    // Backward gradients:
+    // grad_a = grad_output @ B^T = (batch, n, p) @ (batch, p, m) = (batch, n, m)
+    // grad_b = A^T @ grad_output = (batch, m, n) @ (batch, n, p) = (batch, m, p)
+
+    const auto& a = saved_tensors_[0];
+    const auto& b = saved_tensors_[1];
+    const auto& grad_output = grad_outputs[0];
+
+    // Transpose last two dimensions: (batch, m, p) -> (batch, p, m)
+    auto b_transposed = permute(b, {0, 2, 1});
+
+    // grad_a = grad_output @ b^T
+    auto grad_a = bmm(grad_output, b_transposed);
+
+    // Transpose a: (batch, n, m) -> (batch, m, n)
+    auto a_transposed = permute(a, {0, 2, 1});
+
+    // grad_b = a^T @ grad_output
+    auto grad_b = bmm(a_transposed, grad_output);
+
+    return {grad_a, grad_b};
 }
 
 } // namespace tenzor

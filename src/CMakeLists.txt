@@ -15,13 +15,16 @@ set(TENZOR_CORE_SOURCES
     ops/indexing.cpp
     ops/reduction.cpp
     ops/transform.cpp
+    ops/fused_ops.cpp
     autograd/variable.cpp
     autograd/graph.cpp
     autograd/function.cpp
     autograd/engine.cpp
     autograd/ops.cpp
+    autograd/checkpoint.cpp
     nn/module.cpp
     nn/serialize.cpp
+    nn/checkpoint.cpp
     nn/layers/linear.cpp
     nn/layers/conv.cpp
     nn/layers/batchnorm.cpp
@@ -29,16 +32,34 @@ set(TENZOR_CORE_SOURCES
     nn/layers/pooling.cpp
     nn/layers/normalization.cpp
     nn/layers/flatten.cpp
+    nn/layers/embedding.cpp
+    nn/layers/attention.cpp
+    nn/layers/transformer.cpp
+    nn/layers/rnn.cpp
+    nn/layers/lstm.cpp
+    nn/layers/gru.cpp
     nn/activations/activations.cpp
     nn/loss/losses.cpp
+    nn/loss/losses_advanced.cpp
     nn/optim/optimizer.cpp
     nn/optim/sgd.cpp
     nn/optim/adam.cpp
+    nn/optim/rmsprop.cpp
+    nn/optim/adagrad.cpp
+    nn/optim/adadelta.cpp
     nn/optim/scheduler.cpp
+    nn/optim/scheduler_advanced.cpp
+    nn/amp/grad_scaler.cpp
+    nn/parallel/data_parallel.cpp
     parallel/threadpool.cpp
+    data/dataloader.cpp
     utils/logging.cpp
     utils/error.cpp
     utils/config.cpp
+    utils/benchmark.cpp
+    backends/cpu/simd.cpp
+    backends/cpu/kernels/math_simd.cpp
+    backends/cpu/kernels/activations_simd.cpp
 )
 
 # Create core library

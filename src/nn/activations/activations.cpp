@@ -93,7 +93,7 @@ auto Tanh::forward(const Variable& input) -> Variable {
 Softmax::Softmax(int64_t dim) : dim_(dim) {}
 
 auto Softmax::forward(const Variable& input) -> Variable {
-    return softmax(input, dim_);
+    return tenzor::softmax(input, dim_);
 }
 
 // Functional implementations with autograd support
@@ -193,11 +193,8 @@ auto gelu(const Variable& input) -> Variable {
 }
 
 auto softmax(const Variable& input, int64_t dim) -> Variable {
-    OpAttributes attrs;
-    attrs["dim"] = std::to_string(dim);
-    std::vector<Tensor> inputs = {input.tensor()};
-    auto result = Dispatcher::dispatch("softmax", inputs, attrs)[0];
-    return Variable(result, input.requires_grad());
+    // Use autograd-aware version from tenzor namespace
+    return tenzor::softmax(input, dim);
 }
 
 auto log_softmax(const Variable& input, int64_t dim) -> Variable {

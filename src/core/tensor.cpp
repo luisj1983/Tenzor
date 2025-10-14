@@ -99,51 +99,51 @@ auto Tensor::is_contiguous() const noexcept -> bool {
 
 // Template instantiations for common types
 template<> auto Tensor::data<float>() -> float* {
-    return static_cast<float*>(impl_->storage->data());
+    return static_cast<float*>(impl_->storage->data()) + impl_->offset;
 }
 
 template<> auto Tensor::data<float>() const -> const float* {
-    return static_cast<const float*>(impl_->storage->data());
+    return static_cast<const float*>(impl_->storage->data()) + impl_->offset;
 }
 
 template<> auto Tensor::data<double>() -> double* {
-    return static_cast<double*>(impl_->storage->data());
+    return static_cast<double*>(impl_->storage->data()) + impl_->offset;
 }
 
 template<> auto Tensor::data<double>() const -> const double* {
-    return static_cast<const double*>(impl_->storage->data());
+    return static_cast<const double*>(impl_->storage->data()) + impl_->offset;
 }
 
 template<> auto Tensor::data<int32_t>() -> int32_t* {
-    return static_cast<int32_t*>(impl_->storage->data());
+    return static_cast<int32_t*>(impl_->storage->data()) + impl_->offset;
 }
 
 template<> auto Tensor::data<int32_t>() const -> const int32_t* {
-    return static_cast<const int32_t*>(impl_->storage->data());
+    return static_cast<const int32_t*>(impl_->storage->data()) + impl_->offset;
 }
 
 template<> auto Tensor::data<int64_t>() -> int64_t* {
-    return static_cast<int64_t*>(impl_->storage->data());
+    return static_cast<int64_t*>(impl_->storage->data()) + impl_->offset;
 }
 
 template<> auto Tensor::data<int64_t>() const -> const int64_t* {
-    return static_cast<const int64_t*>(impl_->storage->data());
+    return static_cast<const int64_t*>(impl_->storage->data()) + impl_->offset;
 }
 
 template<> auto Tensor::data<uint8_t>() -> uint8_t* {
-    return static_cast<uint8_t*>(impl_->storage->data());
+    return static_cast<uint8_t*>(impl_->storage->data()) + impl_->offset;
 }
 
 template<> auto Tensor::data<uint8_t>() const -> const uint8_t* {
-    return static_cast<const uint8_t*>(impl_->storage->data());
+    return static_cast<const uint8_t*>(impl_->storage->data()) + impl_->offset;
 }
 
 template<> auto Tensor::data<bool>() -> bool* {
-    return static_cast<bool*>(impl_->storage->data());
+    return static_cast<bool*>(impl_->storage->data()) + impl_->offset;
 }
 
 template<> auto Tensor::data<bool>() const -> const bool* {
-    return static_cast<const bool*>(impl_->storage->data());
+    return static_cast<const bool*>(impl_->storage->data()) + impl_->offset;
 }
 
 // Template instantiations for item<T>() - extract scalar from single-element tensor
@@ -353,7 +353,7 @@ auto Tensor::to(Device device) const -> Tensor {
 
         // Step 2: Copy from GPU to CPU with stride handling
         // We need to copy element-by-element due to non-contiguous layout
-        const size_t size_bytes = numel() * dtype_size(impl_->dtype);
+        const size_t size_bytes = numel() * dtype_size();
         std::vector<uint8_t> temp_buffer(size_bytes);
 
         // Get backend
@@ -370,7 +370,7 @@ auto Tensor::to(Device device) const -> Tensor {
 
         // Now rearrange into contiguous layout on CPU
         const int64_t ndims = ndim();
-        const size_t element_size = dtype_size(impl_->dtype);
+        const size_t element_size = dtype_size();
         std::vector<int64_t> indices(ndims, 0);
         int64_t dst_offset = 0;
 
@@ -427,7 +427,7 @@ auto Tensor::to(Device device) const -> Tensor {
     result.impl_->requires_grad = cont.impl_->requires_grad;
 
     // Copy data using backend
-    const size_t size_bytes = cont.numel() * dtype_size(cont.dtype());
+    const size_t size_bytes = cont.numel() * cont.dtype_size();
 
     // Determine copy kind
     CopyKind copy_kind;
@@ -633,7 +633,25 @@ auto Tensor::reshape(std::vector<int64_t> new_shape) const -> Tensor {
 
     // Validate total elements match
     if (total != numel()) {
-        throw std::invalid_argument("Shape incompatible with number of elements");
+        std::string current_shape_str = "[";
+        for (size_t i = 0; i < shape().size(); ++i) {
+            current_shape_str += std::to_string(shape()[i]);
+            if (i < shape().size() - 1) current_shape_str += ", ";
+        }
+        current_shape_str += "]";
+
+        std::string target_shape_str = "[";
+        for (size_t i = 0; i < new_shape.size(); ++i) {
+            target_shape_str += std::to_string(new_shape[i]);
+            if (i < new_shape.size() - 1) target_shape_str += ", ";
+        }
+        target_shape_str += "]";
+
+        throw std::invalid_argument(
+            "Shape incompatible with number of elements: trying to reshape " +
+            current_shape_str + " (numel=" + std::to_string(numel()) + ") to " +
+            target_shape_str + " (total=" + std::to_string(total) + ")"
+        );
     }
 
     // Build attributes with new shape
@@ -899,8 +917,54 @@ auto Tensor::operator[](int64_t idx) const -> Tensor {
 }
 
 auto Tensor::slice(int64_t dim, int64_t start, int64_t end, int64_t step) const -> Tensor {
-    // TODO: Implement slice
-    return *this;
+    if (!impl_) {
+        throw std::runtime_error("Cannot slice null tensor");
+    }
+
+    const int64_t ndims = ndim();
+
+    // Normalize dimension
+    if (dim < 0) dim += ndims;
+    if (dim < 0 || dim >= ndims) {
+        throw std::out_of_range("Dimension out of range for slice");
+    }
+
+    const int64_t dim_size = impl_->shape[dim];
+
+    // Normalize start and end indices
+    if (start < 0) start += dim_size;
+    if (end < 0) end += dim_size;
+
+    // Clamp to valid range
+    start = std::clamp(start, int64_t{0}, dim_size);
+    end = std::clamp(end, int64_t{0}, dim_size);
+
+    if (step <= 0) {
+        throw std::invalid_argument("Step must be positive");
+    }
+
+    // Calculate new dimension size
+    int64_t new_dim_size = 0;
+    if (end > start) {
+        new_dim_size = (end - start + step - 1) / step;  // Ceiling division
+    }
+
+    // Create new tensor that shares storage with original
+    Tensor result;
+    result.impl_ = std::make_shared<TensorImpl>(*impl_);
+
+    // Update shape for sliced dimension
+    result.impl_->shape[dim] = new_dim_size;
+
+    // Update offset to start at the correct position
+    result.impl_->offset += start * impl_->strides[dim];
+
+    // Update stride if step != 1
+    if (step != 1) {
+        result.impl_->strides[dim] *= step;
+    }
+
+    return result;
 }
 
 // Comparison
@@ -922,6 +986,39 @@ auto Tensor::operator<(const Tensor& other) const -> Tensor {
 auto Tensor::operator>(const Tensor& other) const -> Tensor {
     // TODO: Implement element-wise comparison
     return *this;
+}
+
+// ============================================================================
+// Phase 8 Utility Methods
+// ============================================================================
+
+auto Tensor::dtype_size() const noexcept -> size_t {
+    if (!impl_) return 0;
+    return tenzor::dtype_size(impl_->dtype);
+}
+
+auto Tensor::data_ptr() -> void* {
+    if (!impl_ || !impl_->storage) {
+        return nullptr;
+    }
+    return impl_->storage->data();
+}
+
+auto Tensor::data_ptr() const -> const void* {
+    if (!impl_ || !impl_->storage) {
+        return nullptr;
+    }
+    return impl_->storage->data();
+}
+
+auto Tensor::zeros_like(const Tensor& other) -> Tensor {
+    if (!other.impl_) {
+        return Tensor();
+    }
+
+    // Create zero tensor with same shape, dtype, and device
+    std::vector<int64_t> shape_vec(other.shape().begin(), other.shape().end());
+    return tenzor::zeros(shape_vec, other.dtype(), other.device());
 }
 
 } // namespace tenzor

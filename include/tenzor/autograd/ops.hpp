@@ -179,6 +179,25 @@ auto clamp(const Variable& input, float min, float max) -> Variable;
 // ============================================================================
 
 /**
+ * @brief Softmax activation with gradient tracking.
+ *
+ * Computes softmax activation along specified dimension.
+ * Formula: softmax(x_i) = exp(x_i) / sum(exp(x_j))
+ *
+ * @param input Input variable
+ * @param dim Dimension to compute softmax along
+ * @return Variable containing softmax probabilities with gradient function
+ *
+ * @code
+ * Variable logits(Tensor({batch, classes}, DType::Float32, Device::cpu()), true);
+ * Variable probs = softmax(logits, 1);  // Along class dimension
+ * @endcode
+ *
+ * @see SoftmaxBackward for gradient implementation
+ */
+auto softmax(const Variable& input, int64_t dim) -> Variable;
+
+/**
  * @brief Log-softmax activation with gradient tracking.
  *
  * Computes numerically stable log-softmax along specified dimension.
@@ -198,5 +217,94 @@ auto clamp(const Variable& input, float min, float max) -> Variable;
  * @see LogSoftmaxBackward for gradient implementation
  */
 auto log_softmax(const Variable& input, int64_t dim) -> Variable;
+
+// ============================================================================
+// Shape Transformation Operations
+// ============================================================================
+
+/**
+ * @brief Reshape tensor with gradient tracking.
+ *
+ * Reshapes input variable to the specified shape while preserving gradients.
+ * Gradients are reshaped back to original input shape during backpropagation.
+ *
+ * @param input Input variable
+ * @param shape New shape for the tensor
+ * @return Variable containing reshaped tensor with gradient function
+ *
+ * @code
+ * Variable x(Tensor({3, 4}, DType::Float32, Device::cpu()), true);
+ * Variable y = reshape(x, {12});  // Shape: {12}
+ * Variable z = reshape(x, {2, 6}); // Shape: {2, 6}
+ * @endcode
+ *
+ * @see ReshapeBackward for gradient implementation
+ */
+auto reshape(const Variable& input, const std::vector<int64_t>& shape) -> Variable;
+
+/**
+ * @brief Permute dimensions with gradient tracking.
+ *
+ * Permutes the dimensions of input variable according to specified order.
+ * Gradients are permuted back using inverse permutation during backpropagation.
+ *
+ * @param input Input variable
+ * @param dims New order of dimensions
+ * @return Variable containing permuted tensor with gradient function
+ *
+ * @code
+ * Variable x(Tensor({2, 3, 4}, DType::Float32, Device::cpu()), true);
+ * Variable y = permute(x, {2, 0, 1});  // Shape: {4, 2, 3}
+ * @endcode
+ *
+ * @see PermuteBackward for gradient implementation
+ */
+auto permute(const Variable& input, const std::vector<int64_t>& dims) -> Variable;
+
+// ============================================================================
+// Matrix Operations
+// ============================================================================
+
+/**
+ * @brief Batch matrix multiplication with gradient tracking.
+ *
+ * Computes batched matrix multiplication of two 3D tensors.
+ * For inputs (batch, n, m) and (batch, m, p), outputs (batch, n, p).
+ * Gradients are computed using matrix multiplication chain rule.
+ *
+ * @param a First input variable (batch, n, m)
+ * @param b Second input variable (batch, m, p)
+ * @return Variable containing bmm(a, b) with gradient function
+ *
+ * @code
+ * Variable a(Tensor({32, 10, 20}, DType::Float32, Device::cpu()), true);
+ * Variable b(Tensor({32, 20, 30}, DType::Float32, Device::cpu()), true);
+ * Variable c = bmm(a, b);  // Shape: {32, 10, 30}
+ * @endcode
+ *
+ * @see BmmBackward for gradient implementation
+ */
+auto bmm(const Variable& a, const Variable& b) -> Variable;
+
+/**
+ * @brief Matrix multiplication with gradient tracking.
+ *
+ * Computes matrix multiplication of two 2D tensors.
+ * For inputs (n, m) and (m, p), outputs (n, p).
+ * Gradients are computed using matrix multiplication chain rule.
+ *
+ * @param a First input variable (n, m)
+ * @param b Second input variable (m, p)
+ * @return Variable containing matmul(a, b) with gradient function
+ *
+ * @code
+ * Variable a(Tensor({10, 20}, DType::Float32, Device::cpu()), true);
+ * Variable b(Tensor({20, 30}, DType::Float32, Device::cpu()), true);
+ * Variable c = matmul(a, b);  // Shape: {10, 30}
+ * @endcode
+ *
+ * @see MatMulBackward for gradient implementation
+ */
+auto matmul(const Variable& a, const Variable& b) -> Variable;
 
 } // namespace tenzor

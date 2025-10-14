@@ -51,19 +51,147 @@ auto contiguous(const Tensor& input) -> Tensor {
 
 // Additional stub implementations
 auto cat(std::span<const Tensor> tensors, int64_t dim) -> Tensor {
-    // TODO: Implement concatenation
     if (tensors.empty()) {
         throw std::invalid_argument("Cannot concatenate empty tensor list");
     }
-    return tensors[0];
+
+    if (tensors.size() == 1) {
+        return tensors[0];
+    }
+
+    // Validate all tensors have compatible shapes
+    auto first_shape = tensors[0].shape();
+    int64_t ndim = first_shape.size();
+
+    // Normalize dim
+    if (dim < 0) {
+        dim += ndim;
+    }
+    if (dim < 0 || dim >= ndim) {
+        throw std::invalid_argument("Dimension out of range for concatenation");
+    }
+
+    // Check all tensors have same ndim and same shape except at dim
+    int64_t total_size_at_dim = 0;
+    for (const auto& t : tensors) {
+        auto shape = t.shape();
+        if (shape.size() != static_cast<size_t>(ndim)) {
+            throw std::invalid_argument("All tensors must have the same number of dimensions");
+        }
+        for (int64_t i = 0; i < ndim; ++i) {
+            if (i != dim && shape[i] != first_shape[i]) {
+                throw std::invalid_argument("All tensors must have the same shape except in the concatenation dimension");
+            }
+        }
+        total_size_at_dim += shape[dim];
+    }
+
+    // Create output shape
+    std::vector<int64_t> out_shape(first_shape.begin(), first_shape.end());
+    out_shape[dim] = total_size_at_dim;
+
+    // For CPU, manually concatenate
+    if (tensors[0].device().type == Device::Type::CPU) {
+        auto output = zeros(out_shape, tensors[0].dtype(), Device::cpu());
+        float* out_data = output.data<float>();
+
+        // Calculate output strides
+        std::vector<int64_t> out_strides(ndim);
+        int64_t stride = 1;
+        for (int64_t i = ndim - 1; i >= 0; --i) {
+            out_strides[i] = stride;
+            stride *= out_shape[i];
+        }
+
+        int64_t offset_at_dim = 0;
+        for (const auto& t : tensors) {
+            // Make tensor contiguous to ensure proper data layout
+            auto t_cont = t.is_contiguous() ? t : t.contiguous();
+            const float* in_data = t_cont.data<float>();
+            auto in_shape = t_cont.shape();
+
+            // Calculate input strides (contiguous)
+            std::vector<int64_t> in_strides(ndim);
+            int64_t in_stride = 1;
+            for (int64_t i = ndim - 1; i >= 0; --i) {
+                in_strides[i] = in_stride;
+                in_stride *= in_shape[i];
+            }
+
+            // Copy data element by element
+            int64_t in_size = 1;
+            for (auto s : in_shape) {
+                in_size *= s;
+            }
+
+            for (int64_t in_idx = 0; in_idx < in_size; ++in_idx) {
+                // Calculate coordinates in input (row-major order)
+                int64_t temp = in_idx;
+                std::vector<int64_t> coords(ndim);
+                for (int64_t i = ndim - 1; i >= 0; --i) {
+                    coords[i] = temp % in_shape[i];
+                    temp /= in_shape[i];
+                }
+
+                // Adjust coordinate at concatenation dimension
+                coords[dim] += offset_at_dim;
+
+                // Calculate output index using row-major strides
+                int64_t out_idx = 0;
+                for (int64_t i = 0; i < ndim; ++i) {
+                    out_idx += coords[i] * out_strides[i];
+                }
+
+                out_data[out_idx] = in_data[in_idx];
+            }
+
+            offset_at_dim += in_shape[dim];
+        }
+
+        return output;
+    }
+
+    // For non-CPU devices, use dispatcher
+    // This is a simplified fallback - proper implementation would use device-specific kernels
+    throw std::runtime_error("Concatenation on non-CPU devices not yet implemented");
 }
 
 auto stack(std::span<const Tensor> tensors, int64_t dim) -> Tensor {
-    // TODO: Implement stack
     if (tensors.empty()) {
         throw std::invalid_argument("Cannot stack empty tensor list");
     }
-    return tensors[0];
+
+    // All tensors must have the same shape
+    auto first_shape = tensors[0].shape();
+    for (size_t i = 1; i < tensors.size(); ++i) {
+        auto shape = tensors[i].shape();
+        if (shape.size() != first_shape.size()) {
+            throw std::invalid_argument("All tensors must have the same number of dimensions for stacking");
+        }
+        for (size_t j = 0; j < shape.size(); ++j) {
+            if (shape[j] != first_shape[j]) {
+                throw std::invalid_argument("All tensors must have the same shape for stacking");
+            }
+        }
+    }
+
+    // Normalize dim
+    int64_t ndim = first_shape.size();
+    if (dim < 0) {
+        dim += ndim + 1;
+    }
+    if (dim < 0 || dim > ndim) {
+        throw std::invalid_argument("Dimension out of range for stack");
+    }
+
+    // Stack is equivalent to: unsqueeze each tensor at dim, then concatenate
+    std::vector<Tensor> unsqueezed;
+    unsqueezed.reserve(tensors.size());
+    for (const auto& t : tensors) {
+        unsqueezed.push_back(t.unsqueeze(dim));
+    }
+
+    return cat(std::span<const Tensor>(unsqueezed), dim);
 }
 
 auto split(const Tensor& input, int64_t split_size, int64_t dim) -> std::vector<Tensor> {
@@ -72,8 +200,43 @@ auto split(const Tensor& input, int64_t split_size, int64_t dim) -> std::vector<
 }
 
 auto chunk(const Tensor& input, int64_t chunks, int64_t dim) -> std::vector<Tensor> {
-    // TODO: Implement chunk
-    return {input};
+    if (chunks <= 0) {
+        throw std::invalid_argument("Number of chunks must be positive");
+    }
+
+    // Get input shape and normalize dimension
+    auto shape = input.shape();
+    int64_t ndim = shape.size();
+
+    if (dim < 0) {
+        dim += ndim;
+    }
+    if (dim < 0 || dim >= ndim) {
+        throw std::invalid_argument("Dimension out of range for chunk");
+    }
+
+    int64_t dim_size = shape[dim];
+
+    // Calculate chunk size (ceiling division)
+    int64_t chunk_size = (dim_size + chunks - 1) / chunks;
+
+    // Split tensor into chunks
+    std::vector<Tensor> result;
+    result.reserve(chunks);
+
+    for (int64_t i = 0; i < chunks; ++i) {
+        int64_t start = i * chunk_size;
+        int64_t end = std::min(start + chunk_size, dim_size);
+
+        // Stop if we've exhausted the dimension
+        if (start >= dim_size) {
+            break;
+        }
+
+        result.push_back(input.slice(dim, start, end));
+    }
+
+    return result;
 }
 
 auto repeat(const Tensor& input, std::vector<int64_t> repeats) -> Tensor {

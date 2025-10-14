@@ -3,6 +3,7 @@
 #include <unordered_set>
 #include <functional>
 #include <stdexcept>
+#include <iostream>
 
 namespace tenzor {
 
@@ -54,12 +55,14 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient) -> 
         // Accumulate gradients to input variables (only leaf variables)
         const auto& input_vars = function->input_variables();
         for (size_t i = 0; i < input_vars.size() && i < input_grads.size(); ++i) {
-            if (input_vars[i] && input_vars[i]->requires_grad() && input_vars[i]->is_leaf()) {
-                // Accumulate gradient to the leaf variable
-                if (input_vars[i]->has_grad()) {
-                    input_vars[i]->grad() = input_vars[i]->grad().value() + input_grads[i];
-                } else {
-                    input_vars[i]->grad() = input_grads[i];
+            if (input_vars[i]) {
+                if (input_vars[i]->requires_grad() && input_vars[i]->is_leaf()) {
+                    // Accumulate gradient to the leaf variable
+                    if (input_vars[i]->has_grad()) {
+                        input_vars[i]->grad() = input_vars[i]->grad().value() + input_grads[i];
+                    } else {
+                        input_vars[i]->grad() = input_grads[i];
+                    }
                 }
             }
         }

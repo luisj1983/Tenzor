@@ -100,10 +100,18 @@
 #include "tenzor/nn/layers/dropout.hpp"
 #include "tenzor/nn/layers/pooling.hpp"
 #include "tenzor/nn/layers/flatten.hpp"
+#include "tenzor/nn/layers/rnn.hpp"
+#include "tenzor/nn/layers/embedding.hpp"
+#include "tenzor/nn/layers/attention.hpp"
+#include "tenzor/nn/layers/transformer.hpp"
 #include "tenzor/nn/activations/activations.hpp"
 #include "tenzor/nn/loss/losses.hpp"
 #include "tenzor/nn/optim/sgd.hpp"
 #include "tenzor/nn/optim/adam.hpp"
+#include "tenzor/nn/optim/rmsprop.hpp"
+#include "tenzor/nn/optim/adagrad.hpp"
+#include "tenzor/nn/optim/adadelta.hpp"
+#include "tenzor/nn/optim/scheduler.hpp"
 
 /**
  * @brief Main Tenzor namespace

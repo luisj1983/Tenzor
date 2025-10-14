@@ -205,10 +205,29 @@ public:
     }
 
     auto forward(const Variable& x) -> Variable override {
+        std::cout << "  MLP forward: input shape [" << x.shape()[0] << ", " << x.shape()[1] << "]" << std::endl;
+
+        std::cout << "  fc1..." << std::endl;
         auto out = fc1->forward(x);
+        std::cout << "  fc1 output: [" << out.shape()[0] << ", " << out.shape()[1] << "]" << std::endl;
+
+        std::cout << "  relu1..." << std::endl;
         out = relu1->forward(out);
-        out = dropout->forward(out);
+        std::cout << "  relu1 output: [" << out.shape()[0] << ", " << out.shape()[1] << "]" << std::endl;
+
+        std::cout << "  dropout..." << std::endl;
+        try {
+            out = dropout->forward(out);
+            std::cout << "  dropout output: [" << out.shape()[0] << ", " << out.shape()[1] << "]" << std::endl;
+        } catch (const std::exception& e) {
+            std::cout << "  ERROR in dropout: " << e.what() << std::endl;
+            throw;
+        }
+
+        std::cout << "  fc2..." << std::endl;
         out = fc2->forward(out);
+        std::cout << "  fc2 output: [" << out.shape()[0] << ", " << out.shape()[1] << "]" << std::endl;
+
         return out;
     }
 
@@ -277,7 +296,7 @@ TEST(CUDATrainingTest, SimpleCNN_MNIST) {
         std::cout << "Epoch " << epoch << ": Zero grad..." << std::endl;
         optimizer.zero_grad();
         std::cout << "Epoch " << epoch << ": Backward..." << std::endl;
-        loss.backward(ones({1}, DType::Float32, device));
+        loss.backward();  // Scalar loss - no gradient argument needed
         std::cout << "Epoch " << epoch << ": Backward complete" << std::endl;
 
         // Check gradients were computed
@@ -347,7 +366,7 @@ TEST(CUDATrainingTest, MLP_GPU) {
 
     // Backward pass
     optimizer.zero_grad();
-    loss.backward(ones({1}, DType::Float32, device));
+    loss.backward();  // Scalar loss - no gradient argument needed
 
     // Verify gradients
     for (auto* param : params) {
@@ -429,7 +448,7 @@ TEST(CUDATrainingTest, CompleteTrainingLoop) {
 
             // Backward
             optimizer.zero_grad();
-            loss.backward(ones({1}, DType::Float32, device));
+            loss.backward();  // Scalar loss - no gradient argument needed
 
             // Update
             optimizer.step();
@@ -546,7 +565,7 @@ TEST(CUDATrainingTest, PerformanceBenchmark) {
         auto loss = mse_loss(output, target, Reduction::Mean);
 
         cpu_optimizer.zero_grad();
-        loss.backward(ones({1}, DType::Float32, cpu_device));
+        loss.backward();  // Scalar loss - no gradient argument needed
         cpu_optimizer.step();
     }
     auto cpu_end = std::chrono::high_resolution_clock::now();
@@ -563,7 +582,7 @@ TEST(CUDATrainingTest, PerformanceBenchmark) {
         auto loss = mse_loss(output, target, Reduction::Mean);
 
         cuda_optimizer.zero_grad();
-        loss.backward(ones({1}, DType::Float32, cuda_device));
+        loss.backward();  // Scalar loss - no gradient argument needed
         cuda_optimizer.step();
     }
     auto cuda_end = std::chrono::high_resolution_clock::now();
@@ -610,7 +629,7 @@ TEST(CUDATrainingTest, GradientFlowVerification) {
 
     // Backward pass
     optimizer.zero_grad();
-    loss.backward(ones({1}, DType::Float32, device));
+    loss.backward();  // Scalar loss - no gradient argument needed
 
     // Verify all parameters have gradients
     int params_with_grad = 0;
@@ -745,18 +764,42 @@ TEST(CUDATrainingTest, BatchSizeScaling) {
     std::vector<int> batch_sizes = {16, 32, 64, 128};
 
     for (int batch_size : batch_sizes) {
+        std::cout << "\n=== Batch size " << batch_size << " ===" << std::endl;
+
         auto input = Variable(randn({batch_size, 784}, DType::Float32, device), true);
         auto target_data = zeros({batch_size, 10}, DType::Float32, device);
         auto target = Variable(target_data, false);
 
         auto start = std::chrono::high_resolution_clock::now();
 
+        std::cout << "Forward pass..." << std::endl;
         auto output = model->forward(input);
-        auto loss = mse_loss(output, target, Reduction::Mean);
+        std::cout << "Forward complete. Output shape: [" << output.shape()[0] << ", " << output.shape()[1] << "]" << std::endl;
 
+        std::cout << "Computing loss..." << std::endl;
+        auto loss = mse_loss(output, target, Reduction::Mean);
+        std::cout << "Loss computed" << std::endl;
+
+        std::cout << "Zeroing gradients..." << std::endl;
         optimizer.zero_grad();
-        loss.backward(ones({1}, DType::Float32, device));
-        optimizer.step();
+
+        std::cout << "Backward pass..." << std::endl;
+        try {
+            loss.backward();  // Scalar loss - no gradient argument needed
+            std::cout << "Backward complete" << std::endl;
+        } catch (const std::exception& e) {
+            std::cout << "Error in backward: " << e.what() << std::endl;
+            throw;
+        }
+
+        std::cout << "Optimizer step..." << std::endl;
+        try {
+            optimizer.step();
+            std::cout << "Optimizer step complete" << std::endl;
+        } catch (const std::exception& e) {
+            std::cout << "Error in optimizer step: " << e.what() << std::endl;
+            throw;
+        }
 
         auto end = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
@@ -806,7 +849,7 @@ TEST(CUDATrainingTest, MultiEpochTrainingWithValidation) {
             auto loss = mse_loss(output, target, Reduction::Mean);
 
             optimizer.zero_grad();
-            loss.backward(ones({1}, DType::Float32, device));
+            loss.backward();  // Scalar loss - no gradient argument needed
             optimizer.step();
 
             // Transfer loss to CPU before accessing

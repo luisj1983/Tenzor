@@ -443,5 +443,281 @@ auto l1_loss(const Variable& input, const Variable& target,
 
 /** @} */ // end of functional_losses group
 
+/**
+ * @brief Kullback-Leibler Divergence Loss
+ *
+ * Computes the KL divergence between input and target distributions:
+ *
+ * \f[
+ * \text{KL}(P||Q) = \sum_i P_i \cdot \log\left(\frac{P_i}{Q_i}\right) = \sum_i P_i \cdot (\log P_i - \log Q_i)
+ * \f]
+ *
+ * Measures how one probability distribution diverges from a second, expected distribution.
+ *
+ * **Input Format:**
+ * - input: Log-probabilities (log Q), typically from LogSoftmax
+ * - target: Probabilities (P) or log-probabilities if log_target=true
+ *
+ * **Use Cases:**
+ * - Distillation (matching teacher distribution)
+ * - Variational inference (VAE loss)
+ * - Policy gradient methods (RL)
+ * - Measuring distribution similarity
+ *
+ * **Reduction Modes:**
+ * - "mean": Average over all elements
+ * - "sum": Sum all elements
+ * - "batchmean": Sum over elements, divide by batch size (standard for KL)
+ * - "none": Return per-element loss
+ *
+ * **Important:** Unlike CrossEntropy, KL divergence is asymmetric: KL(P||Q) ≠ KL(Q||P)
+ *
+ * @param reduction How to reduce the loss (default: Mean)
+ * @param log_target If true, target is log-probabilities (default: false)
+ *
+ * @par Complexity
+ * - Time: O(n)
+ * - Space: O(1) or O(n) depending on reduction mode
+ *
+ * @code
+ * auto criterion = KLDivLoss("batchmean");
+ * auto student_log_probs = log_softmax(student_logits);  // Log Q
+ * auto teacher_probs = softmax(teacher_logits);           // P
+ * auto loss = criterion(student_log_probs, teacher_probs);
+ * @endcode
+ *
+ * @see CrossEntropyLoss, NLLLoss
+ */
+class KLDivLoss {
+public:
+    explicit KLDivLoss(const std::string& reduction = "mean", bool log_target = false);
+
+    auto forward(const Variable& input, const Variable& target) -> Variable;
+    auto operator()(const Variable& input, const Variable& target) -> Variable {
+        return forward(input, target);
+    }
+
+private:
+    std::string reduction_;
+    bool log_target_;
+};
+
+/**
+ * @brief Focal Loss
+ *
+ * Addresses class imbalance by down-weighting easy examples:
+ *
+ * \f[
+ * \text{FL}(p_t) = -\alpha_t (1 - p_t)^\gamma \log(p_t)
+ * \f]
+ *
+ * where \f$p_t\f$ is the model's estimated probability for the target class.
+ *
+ * **Key Features:**
+ * - Down-weights easy examples (high confidence correct predictions)
+ * - Focuses training on hard examples
+ * - Addresses extreme class imbalance
+ * - α (alpha): Class weighting factor
+ * - γ (gamma): Focusing parameter (default: 2.0)
+ *
+ * **Effect of Gamma:**
+ * - γ = 0: Equivalent to CrossEntropyLoss
+ * - γ = 1: Moderate focusing on hard examples
+ * - γ = 2: Standard focal loss (recommended)
+ * - γ = 5: Strong focusing on hardest examples
+ *
+ * **Use Cases:**
+ * - Object detection (RetinaNet)
+ * - Extreme class imbalance (1:1000 ratio)
+ * - Medical diagnosis (rare diseases)
+ * - Fraud detection
+ *
+ * **Typical Configuration:**
+ * - alpha: 0.25 for foreground, 0.75 for background
+ * - gamma: 2.0 (standard)
+ *
+ * @param alpha Weighting factor for classes (default: 1.0)
+ * @param gamma Focusing parameter (default: 2.0)
+ * @param reduction How to reduce the loss (default: Mean)
+ *
+ * @par Complexity
+ * - Time: O(n)
+ * - Space: O(1) or O(n) depending on reduction mode
+ *
+ * @code
+ * auto criterion = FocalLoss(0.25, 2.0);
+ * auto logits = model.forward(input);
+ * auto loss = criterion(logits, targets);
+ * @endcode
+ *
+ * @see CrossEntropyLoss, BCEWithLogitsLoss
+ */
+class FocalLoss {
+public:
+    explicit FocalLoss(double alpha = 1.0, double gamma = 2.0,
+                      const std::string& reduction = "mean");
+
+    auto forward(const Variable& input, const Variable& target) -> Variable;
+    auto operator()(const Variable& input, const Variable& target) -> Variable {
+        return forward(input, target);
+    }
+
+private:
+    double alpha_;
+    double gamma_;
+    std::string reduction_;
+};
+
+/**
+ * @brief Dice Loss
+ *
+ * Computes the Dice coefficient loss for segmentation tasks:
+ *
+ * \f[
+ * \text{Dice} = 1 - \frac{2|X \cap Y| + \text{smooth}}{|X| + |Y| + \text{smooth}}
+ * \f]
+ *
+ * Based on the Sørensen–Dice coefficient, measuring overlap between two sets.
+ *
+ * **Advantages:**
+ * - Handles class imbalance naturally (no per-class weighting needed)
+ * - Differentiable approximation of IoU
+ * - Works well for small objects
+ * - Range: [0, 1] where 0 is perfect overlap
+ *
+ * **Use Cases:**
+ * - Medical image segmentation
+ * - Semantic segmentation
+ * - Instance segmentation
+ * - Any task with large class imbalance in pixels/voxels
+ *
+ * **Smooth Parameter:**
+ * - Prevents division by zero
+ * - Typical values: 1.0 (Laplace smoothing) or 1e-5
+ *
+ * **Input Requirements:**
+ * - input: Probabilities (after sigmoid/softmax), shape (N, C, H, W)
+ * - target: Binary masks (0 or 1), same shape as input
+ *
+ * @param smooth Smoothing factor to avoid division by zero (default: 1.0)
+ * @param reduction How to reduce the loss (default: Mean)
+ *
+ * @par Complexity
+ * - Time: O(n)
+ * - Space: O(1)
+ *
+ * @code
+ * auto criterion = DiceLoss(1.0);
+ * auto probs = sigmoid(logits);  // Convert to probabilities
+ * auto loss = criterion(probs, masks);
+ * @endcode
+ *
+ * @see BCEWithLogitsLoss, FocalLoss
+ */
+class DiceLoss {
+public:
+    explicit DiceLoss(double smooth = 1.0, const std::string& reduction = "mean");
+
+    auto forward(const Variable& input, const Variable& target) -> Variable;
+    auto operator()(const Variable& input, const Variable& target) -> Variable {
+        return forward(input, target);
+    }
+
+private:
+    double smooth_;
+    std::string reduction_;
+};
+
+/**
+ * @brief Huber Loss (Smooth L1 Loss variant)
+ *
+ * Computes a robust loss that is quadratic for small errors and linear for large errors:
+ *
+ * \f[
+ * L_\delta(x, y) = \begin{cases}
+ *   \frac{1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+ *   \delta \cdot (|x - y| - \frac{\delta}{2}) & \text{otherwise}
+ * \end{cases}
+ * \f]
+ *
+ * **Advantages:**
+ * - Robust to outliers (like L1)
+ * - Smooth gradients near zero (like L2)
+ * - Configurable transition point (delta)
+ *
+ * **Comparison:**
+ * - L2 (MSE): Sensitive to outliers, smooth everywhere
+ * - L1 (MAE): Robust but not smooth at zero
+ * - Huber: Best of both worlds
+ *
+ * **Delta Parameter:**
+ * - Controls transition between quadratic and linear regions
+ * - Small delta: More like L1 (robust, less smooth)
+ * - Large delta: More like L2 (smooth, less robust)
+ * - Typical: 1.0
+ *
+ * **Use Cases:**
+ * - Regression with outliers
+ * - Reinforcement learning (value function estimation)
+ * - Robust estimation
+ * - Any task requiring balance between L1 and L2
+ *
+ * @param delta Threshold for switching between L1 and L2 (default: 1.0)
+ * @param reduction How to reduce the loss (default: Mean)
+ *
+ * @par Complexity
+ * - Time: O(n)
+ * - Space: O(1) or O(n) depending on reduction mode
+ *
+ * @code
+ * auto criterion = HuberLoss(1.0);
+ * auto predictions = model.forward(input);
+ * auto loss = criterion(predictions, targets);
+ * @endcode
+ *
+ * @see MSELoss, L1Loss, SmoothL1Loss
+ */
+class HuberLoss {
+public:
+    explicit HuberLoss(double delta = 1.0, const std::string& reduction = "mean");
+
+    auto forward(const Variable& input, const Variable& target) -> Variable;
+    auto operator()(const Variable& input, const Variable& target) -> Variable {
+        return forward(input, target);
+    }
+
+private:
+    double delta_;
+    std::string reduction_;
+};
+
+/**
+ * @defgroup functional_advanced_losses Functional Advanced Loss Functions
+ * @brief Stateless advanced loss functions for flexible use
+ * @{
+ */
+
+/** @brief Functional KL divergence loss computation */
+auto kl_div_loss(const Variable& input, const Variable& target,
+                const std::string& reduction = "mean",
+                bool log_target = false) -> Variable;
+
+/** @brief Functional focal loss computation */
+auto focal_loss(const Variable& input, const Variable& target,
+               double alpha = 1.0, double gamma = 2.0,
+               const std::string& reduction = "mean") -> Variable;
+
+/** @brief Functional Dice loss computation */
+auto dice_loss(const Variable& input, const Variable& target,
+              double smooth = 1.0,
+              const std::string& reduction = "mean") -> Variable;
+
+/** @brief Functional Huber loss computation */
+auto huber_loss(const Variable& input, const Variable& target,
+               double delta = 1.0,
+               const std::string& reduction = "mean") -> Variable;
+
+/** @} */ // end of functional_advanced_losses group
+
 } // namespace nn
 } // namespace tenzor

@@ -350,6 +350,23 @@ __global__ void clamp_kernel_f64(const double* input, double* output, double min
     }
 }
 
+// Sign kernel (float)
+__global__ void sign_kernel_f32(const float* input, float* output, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        float val = input[idx];
+        // Sign function: -1 if x < 0, 0 if x == 0, +1 if x > 0
+        output[idx] = (val > 0.0f) - (val < 0.0f);
+    }
+}
+
+// Sign kernel (double)
+__global__ void sign_kernel_f64(const double* input, double* output, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        double val = input[idx];
+        output[idx] = (val > 0.0) - (val < 0.0);
+    }
+}
+
 // ============================================================================
 // Optimized Kernels with Shared Memory (for reduction-like operations)
 // ============================================================================
@@ -900,6 +917,27 @@ auto clamp_kernel(const Tensor& input, float min_val, float max_val, cudaStream_
         clamp_kernel_f64<<<grid, block, 0, stream>>>(input.data<double>(), result.data<double>(), min_d, max_d, n);
     } else {
         throw std::runtime_error("clamp operation only supports Float32 and Float64 dtypes");
+    }
+
+    CUDA_CHECK(cudaGetLastError());
+    return result;
+}
+
+// Sign kernel launcher
+auto sign_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (input.dtype() == DType::Float32) {
+        sign_kernel_f32<<<grid, block, 0, stream>>>(input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        sign_kernel_f64<<<grid, block, 0, stream>>>(input.data<double>(), result.data<double>(), n);
+    } else {
+        throw std::runtime_error("sign operation only supports Float32 and Float64 dtypes");
     }
 
     CUDA_CHECK(cudaGetLastError());

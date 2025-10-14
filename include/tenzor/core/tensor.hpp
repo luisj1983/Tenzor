@@ -662,6 +662,57 @@ public:
      */
     auto contiguous() const -> Tensor;
 
+    // ============================================================================
+    // Utility Methods (Phase 8 additions)
+    // ============================================================================
+
+    /**
+     * @brief Get size of data type in bytes.
+     *
+     * @return Number of bytes per element
+     *
+     * @code
+     * Tensor t({3, 4}, DType::Float32, Device::cpu());
+     * size_t bytes = t.dtype_size();  // Returns 4
+     * @endcode
+     */
+    auto dtype_size() const noexcept -> size_t;
+
+    /**
+     * @brief Get raw pointer to tensor data (type-erased).
+     *
+     * Returns void* pointer to raw data buffer. Use with caution.
+     * Prefer typed data<T>() method when possible.
+     *
+     * @return Void pointer to first element
+     *
+     * @code
+     * Tensor t({3, 4}, DType::Float32, Device::cpu());
+     * void* ptr = t.data_ptr();
+     * @endcode
+     */
+    auto data_ptr() -> void*;
+
+    /**
+     * @brief Get const raw pointer to tensor data (type-erased).
+     *
+     * @return Const void pointer to first element
+     */
+    auto data_ptr() const -> const void*;
+
+    /**
+     * @brief Create zero tensor with same shape and dtype as input.
+     *
+     * @param other Template tensor
+     * @return New zero tensor with same shape/dtype/device
+     *
+     * @code
+     * Tensor a({3, 4}, DType::Float32, Device::cpu());
+     * Tensor zeros = Tensor::zeros_like(a);
+     * @endcode
+     */
+    static auto zeros_like(const Tensor& other) -> Tensor;
+
     // Implementation access
     auto impl() const -> const std::shared_ptr<TensorImpl>& { return impl_; }
 

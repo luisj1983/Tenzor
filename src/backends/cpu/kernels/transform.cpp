@@ -163,7 +163,7 @@ auto contiguous_kernel(const Tensor& input) -> Tensor {
     const int64_t total_elements = input.numel();
     const size_t element_size = dtype_size(input.dtype());
 
-    // Get raw pointers
+    // Get raw pointers (accounting for offset in the source tensor)
     auto* src = static_cast<uint8_t*>(const_cast<void*>(
         static_cast<const void*>(input.data<uint8_t>())));
     auto* dst = static_cast<uint8_t*>(static_cast<void*>(result.data<uint8_t>()));
@@ -171,8 +171,8 @@ auto contiguous_kernel(const Tensor& input) -> Tensor {
     const int64_t ndims = input.ndim();
 
     if (ndims == 0) {
-        // Scalar tensor - direct copy
-        std::memcpy(dst, src, element_size);
+        // Scalar tensor - direct copy (account for offset)
+        std::memcpy(dst, src + input.impl_->offset * element_size, element_size);
         return result;
     }
 
@@ -182,10 +182,11 @@ auto contiguous_kernel(const Tensor& input) -> Tensor {
 
     auto strides = input.strides();
     auto shape = input.shape();
+    const int64_t input_offset = input.impl_->offset;
 
     for (int64_t i = 0; i < total_elements; ++i) {
-        // Calculate source offset using strides
-        int64_t src_offset = 0;
+        // Calculate source offset using strides (including base offset)
+        int64_t src_offset = input_offset;
         for (int64_t dim = 0; dim < ndims; ++dim) {
             src_offset += indices[dim] * strides[dim];
         }

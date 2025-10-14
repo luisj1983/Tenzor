@@ -40,11 +40,12 @@ TEST(LinearTest, WithBias) {
     auto linear = nn::Linear(3, 2, true);
 
     // Check bias is initialized
-    auto bias_opt = linear.bias();
-    EXPECT_TRUE(bias_opt.has_value());
+    EXPECT_TRUE(linear.has_bias());
+    auto bias_ptr = linear.bias();
+    EXPECT_NE(bias_ptr, nullptr);
 
     // Check bias shape
-    auto bias_shape = bias_opt->shape();
+    auto bias_shape = bias_ptr->shape();
     EXPECT_EQ(bias_shape.size(), 1);
     EXPECT_EQ(bias_shape[0], 2);
 
@@ -62,8 +63,9 @@ TEST(LinearTest, NoBias) {
     auto linear = nn::Linear(3, 2, false);
 
     // Check bias is not initialized
-    auto bias_opt = linear.bias();
-    EXPECT_FALSE(bias_opt.has_value());
+    EXPECT_FALSE(linear.has_bias());
+    auto bias_ptr = linear.bias();
+    EXPECT_EQ(bias_ptr, nullptr);
 
     // Test forward pass still works
     auto input = Variable(ones({4, 3}), true);

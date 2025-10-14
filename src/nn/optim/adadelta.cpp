@@ -1,0 +1,154 @@
+/**
+ * @file adadelta.cpp
+ * @brief Implementation of Adadelta optimizer
+ */
+
+#include "tenzor/nn/optim/adadelta.hpp"
+#include "tenzor/core/tensor.hpp"
+#include "tenzor/ops/creation.hpp"
+#include <cmath>
+#include <stdexcept>
+
+namespace tenzor {
+namespace optim {
+
+Adadelta::Adadelta(std::vector<Variable*> params,
+                   double lr, double rho, double eps, double weight_decay)
+    : Optimizer(params),
+      lr_(lr),
+      rho_(rho),
+      eps_(eps),
+      weight_decay_(weight_decay) {
+
+    if (lr < 0.0) {
+        throw std::invalid_argument("Learning rate must be non-negative");
+    }
+    if (rho < 0.0 || rho > 1.0) {
+        throw std::invalid_argument("Rho must be in [0, 1]");
+    }
+    if (eps < 0.0) {
+        throw std::invalid_argument("Epsilon must be non-negative");
+    }
+    if (weight_decay < 0.0) {
+        throw std::invalid_argument("Weight decay must be non-negative");
+    }
+
+    initialize_buffers();
+}
+
+auto Adadelta::initialize_buffers() -> void {
+    square_avg_.clear();
+    acc_delta_.clear();
+
+    for (auto* param : parameters_) {
+        const auto& param_data = param->tensor();
+
+        // Initialize E[g^2] to zeros
+        square_avg_.push_back(zeros_like(param_data));
+
+        // Initialize E[Δθ^2] to zeros
+        acc_delta_.push_back(zeros_like(param_data));
+    }
+}
+
+auto Adadelta::step() -> void {
+    for (size_t i = 0; i < parameters_.size(); ++i) {
+        auto* param = parameters_[i];
+
+        if (!param->has_grad()) {
+            continue;  // Skip parameters without gradients
+        }
+
+        const auto& grad = param->grad().value();
+        const auto& param_data = param->tensor();
+
+        auto grad_ptr = const_cast<float*>(grad.data<float>());
+        auto param_ptr = const_cast<float*>(param_data.data<float>());
+        auto square_avg_ptr = square_avg_[i].data<float>();
+        auto acc_delta_ptr = acc_delta_[i].data<float>();
+
+        int64_t numel = param_data.numel();
+
+        // Apply weight decay if specified
+        if (weight_decay_ > 0.0) {
+            for (int64_t j = 0; j < numel; ++j) {
+                grad_ptr[j] += weight_decay_ * param_ptr[j];
+            }
+        }
+
+        // Adadelta update:
+        // accumulate_grad = rho * accumulate_grad + (1 - rho) * grad^2
+        // std = sqrt(accumulate_grad + epsilon)
+        // delta = - (sqrt(accumulate_update + epsilon) / std) * grad
+        // accumulate_update = rho * accumulate_update + (1 - rho) * delta^2
+        // param = param + lr * delta
+
+        for (int64_t j = 0; j < numel; ++j) {
+            // Accumulate squared gradient
+            square_avg_ptr[j] = rho_ * square_avg_ptr[j] +
+                                (1.0 - rho_) * grad_ptr[j] * grad_ptr[j];
+
+            // Compute std of gradients
+            float std_grad = std::sqrt(square_avg_ptr[j] + eps_);
+
+            // Compute std of updates (using previous accumulator)
+            float std_delta = std::sqrt(acc_delta_ptr[j] + eps_);
+
+            // Compute parameter update
+            float delta = -(std_delta / std_grad) * grad_ptr[j];
+
+            // Apply update to parameter
+            param_ptr[j] += lr_ * delta;
+
+            // Accumulate squared update (after applying delta)
+            acc_delta_ptr[j] = rho_ * acc_delta_ptr[j] +
+                               (1.0 - rho_) * delta * delta;
+        }
+    }
+}
+
+auto Adadelta::zero_grad() -> void {
+    Optimizer::zero_grad();
+}
+
+auto Adadelta::set_lr(double lr) -> void {
+    if (lr < 0.0) {
+        throw std::invalid_argument("Learning rate must be non-negative");
+    }
+    lr_ = lr;
+}
+
+auto Adadelta::get_lr() const -> double {
+    return lr_;
+}
+
+auto Adadelta::state_dict() const -> std::unordered_map<std::string, Tensor> {
+    std::unordered_map<std::string, Tensor> state;
+
+    for (size_t i = 0; i < parameters_.size(); ++i) {
+        std::string prefix = "param_" + std::to_string(i);
+        state[prefix + ".square_avg"] = square_avg_[i];
+        state[prefix + ".acc_delta"] = acc_delta_[i];
+    }
+
+    return state;
+}
+
+auto Adadelta::load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void {
+    for (size_t i = 0; i < parameters_.size(); ++i) {
+        std::string prefix = "param_" + std::to_string(i);
+
+        auto it = state.find(prefix + ".square_avg");
+        if (it != state.end()) {
+            square_avg_[i] = it->second;
+        }
+
+        it = state.find(prefix + ".acc_delta");
+        if (it != state.end()) {
+            acc_delta_[i] = it->second;
+        }
+    }
+}
+
+} // namespace optim
+} // namespace tenzor

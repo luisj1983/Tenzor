@@ -14,6 +14,7 @@ namespace cpu {
     auto sqrt_kernel(const Tensor& input) -> Tensor;
     auto neg_kernel(const Tensor& input) -> Tensor;
     auto abs_kernel(const Tensor& input) -> Tensor;
+    auto sign_kernel(const Tensor& input) -> Tensor;
     auto clamp_kernel(const Tensor& input, float min_val, float max_val) -> Tensor;
     auto log_kernel(const Tensor& input) -> Tensor;
     auto exp_kernel(const Tensor& input) -> Tensor;
@@ -30,6 +31,8 @@ namespace cpu {
     auto sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Tensor;
     auto tanh_kernel(const Tensor& input) -> Tensor;
     auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Tensor;
+    auto gelu_kernel(const Tensor& input) -> Tensor;
+    auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Tensor;
     auto leaky_relu_kernel(const Tensor& input, float alpha) -> Tensor;
     auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, float alpha) -> Tensor;
     auto softmax_kernel(const Tensor& input, int64_t dim) -> Tensor;
@@ -65,6 +68,15 @@ namespace cpu {
     auto conv2d_backward_input_kernel(const Tensor& grad_output, const Tensor& weight, const std::vector<int64_t>& input_shape, int64_t stride, int64_t padding, int64_t dilation, int64_t groups) -> Tensor;
     auto conv2d_backward_weight_kernel(const Tensor& grad_output, const Tensor& input, const std::vector<int64_t>& weight_shape, int64_t stride, int64_t padding, int64_t dilation, int64_t groups) -> Tensor;
     auto conv2d_backward_bias_kernel(const Tensor& grad_output) -> Tensor;
+
+    // Fused operation kernels
+    auto fused_linear_relu_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias) -> Tensor;
+    auto fused_conv2d_relu_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding) -> Tensor;
+    auto fused_batchnorm_relu_kernel(const Tensor& input, const Tensor& running_mean, const Tensor& running_var, const Tensor& weight, const Tensor& bias, float eps) -> Tensor;
+    auto fused_softmax_cross_entropy_kernel(const Tensor& logits, const Tensor& targets, const std::string& reduction) -> Tensor;
+    auto fused_add_relu_kernel(const Tensor& a, const Tensor& b) -> Tensor;
+    auto fused_gelu_kernel(const Tensor& input) -> Tensor;
+    auto fused_layer_norm_kernel(const Tensor& input, const std::vector<int64_t>& normalized_shape, const Tensor& weight, const Tensor& bias, float eps) -> Tensor;
 } // namespace cpu
 
 class CPUBackend : public Backend {
@@ -244,6 +256,12 @@ public:
             }
             return {cpu::abs_kernel(inputs[0])};
         }
+        else if (op_name == "sign") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("sign operation requires exactly 1 input");
+            }
+            return {cpu::sign_kernel(inputs[0])};
+        }
         else if (op_name == "clamp") {
             if (inputs.size() != 1) {
                 throw std::invalid_argument("clamp operation requires exactly 1 input");
@@ -316,6 +334,18 @@ public:
                 throw std::invalid_argument("tanh_backward operation requires exactly 2 inputs");
             }
             return {cpu::tanh_backward_kernel(inputs[0], inputs[1])};
+        }
+        else if (op_name == "gelu") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("gelu operation requires exactly 1 input");
+            }
+            return {cpu::gelu_kernel(inputs[0])};
+        }
+        else if (op_name == "gelu_backward") {
+            if (inputs.size() != 2) {
+                throw std::invalid_argument("gelu_backward operation requires exactly 2 inputs");
+            }
+            return {cpu::gelu_backward_kernel(inputs[0], inputs[1])};
         }
         else if (op_name == "leaky_relu") {
             if (inputs.size() != 1) {
@@ -732,6 +762,85 @@ public:
                 throw std::invalid_argument("conv2d_backward_bias operation requires exactly 1 input (grad_output)");
             }
             return {cpu::conv2d_backward_bias_kernel(inputs[0])};
+        }
+        else if (op_name == "fused_linear_relu") {
+            if (inputs.size() < 2) {
+                throw std::invalid_argument("fused_linear_relu operation requires at least 2 inputs");
+            }
+            const Tensor* bias = (inputs.size() >= 3) ? &inputs[2] : nullptr;
+            return {cpu::fused_linear_relu_kernel(inputs[0], inputs[1], bias)};
+        }
+        else if (op_name == "fused_conv2d_relu") {
+            if (inputs.size() < 2) {
+                throw std::invalid_argument("fused_conv2d_relu operation requires at least 2 inputs");
+            }
+            const Tensor* bias = (inputs.size() >= 3) ? &inputs[2] : nullptr;
+            int64_t stride = 1;
+            int64_t padding = 0;
+            if (attrs.contains("stride")) {
+                stride = std::stoll(attrs.at("stride"));
+            }
+            if (attrs.contains("padding")) {
+                padding = std::stoll(attrs.at("padding"));
+            }
+            return {cpu::fused_conv2d_relu_kernel(inputs[0], inputs[1], bias, stride, padding)};
+        }
+        else if (op_name == "fused_batchnorm_relu") {
+            if (inputs.size() != 5) {
+                throw std::invalid_argument("fused_batchnorm_relu operation requires exactly 5 inputs");
+            }
+            float eps = 1e-5f;
+            if (attrs.contains("eps")) {
+                eps = std::stof(attrs.at("eps"));
+            }
+            return {cpu::fused_batchnorm_relu_kernel(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], eps)};
+        }
+        else if (op_name == "fused_softmax_cross_entropy") {
+            if (inputs.size() != 2) {
+                throw std::invalid_argument("fused_softmax_cross_entropy operation requires exactly 2 inputs");
+            }
+            std::string reduction = "mean";
+            if (attrs.contains("reduction")) {
+                reduction = attrs.at("reduction");
+            }
+            return {cpu::fused_softmax_cross_entropy_kernel(inputs[0], inputs[1], reduction)};
+        }
+        else if (op_name == "fused_add_relu") {
+            if (inputs.size() != 2) {
+                throw std::invalid_argument("fused_add_relu operation requires exactly 2 inputs");
+            }
+            return {cpu::fused_add_relu_kernel(inputs[0], inputs[1])};
+        }
+        else if (op_name == "fused_gelu") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("fused_gelu operation requires exactly 1 input");
+            }
+            return {cpu::fused_gelu_kernel(inputs[0])};
+        }
+        else if (op_name == "fused_layer_norm") {
+            if (inputs.size() != 3) {
+                throw std::invalid_argument("fused_layer_norm operation requires exactly 3 inputs");
+            }
+            // Parse normalized_shape from comma-separated string
+            std::vector<int64_t> normalized_shape;
+            if (attrs.contains("normalized_shape")) {
+                std::string shape_str = attrs.at("normalized_shape");
+                size_t pos = 0;
+                while (pos < shape_str.size()) {
+                    size_t comma = shape_str.find(',', pos);
+                    if (comma == std::string::npos) {
+                        normalized_shape.push_back(std::stoll(shape_str.substr(pos)));
+                        break;
+                    }
+                    normalized_shape.push_back(std::stoll(shape_str.substr(pos, comma - pos)));
+                    pos = comma + 1;
+                }
+            }
+            float eps = 1e-5f;
+            if (attrs.contains("eps")) {
+                eps = std::stof(attrs.at("eps"));
+            }
+            return {cpu::fused_layer_norm_kernel(inputs[0], normalized_shape, inputs[1], inputs[2], eps)};
         }
         else {
             throw std::runtime_error("CPUBackend: Unknown operation '" + op_name + "'");

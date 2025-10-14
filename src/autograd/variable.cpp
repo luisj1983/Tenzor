@@ -101,14 +101,19 @@ auto set_grad_enabled(bool enabled) -> void {
 auto Variable::operator+(const Variable& other) const -> Variable {
     auto grad_fn = std::make_shared<AddBackward>();
 
-    // Set up backward graph
+    // Set up backward graph - MUST maintain index correspondence with input_grads!
+    // Use nullptr for leaf variables to preserve indices
     std::vector<std::shared_ptr<Function>> next_funcs;
-    if (grad_fn_) next_funcs.push_back(grad_fn_);
-    if (other.grad_fn_) next_funcs.push_back(other.grad_fn_);
+    next_funcs.push_back(grad_fn_);        // nullptr if this is leaf
+    next_funcs.push_back(other.grad_fn_);  // nullptr if other is leaf
     grad_fn->set_next_functions(next_funcs);
 
     // Track input variables for gradient accumulation
     grad_fn->set_input_variables({const_cast<Variable*>(this), const_cast<Variable*>(&other)});
+
+    // Save input shapes for broadcasting-aware backward pass
+    grad_fn->input_shape_a_ = std::vector<int64_t>(data_.shape().begin(), data_.shape().end());
+    grad_fn->input_shape_b_ = std::vector<int64_t>(other.data_.shape().begin(), other.data_.shape().end());
 
     // Compute result
     auto result = data_ + other.data_;
@@ -124,14 +129,19 @@ auto Variable::operator+(const Variable& other) const -> Variable {
 auto Variable::operator-(const Variable& other) const -> Variable {
     auto grad_fn = std::make_shared<SubBackward>();
 
-    // Set up backward graph
+    // Set up backward graph - MUST maintain index correspondence with input_grads!
+    // Use nullptr for leaf variables to preserve indices
     std::vector<std::shared_ptr<Function>> next_funcs;
-    if (grad_fn_) next_funcs.push_back(grad_fn_);
-    if (other.grad_fn_) next_funcs.push_back(other.grad_fn_);
+    next_funcs.push_back(grad_fn_);        // nullptr if this is leaf
+    next_funcs.push_back(other.grad_fn_);  // nullptr if other is leaf
     grad_fn->set_next_functions(next_funcs);
 
     // Track input variables for gradient accumulation
     grad_fn->set_input_variables({const_cast<Variable*>(this), const_cast<Variable*>(&other)});
+
+    // Save input shapes for broadcasting-aware backward pass
+    grad_fn->input_shape_a_ = std::vector<int64_t>(data_.shape().begin(), data_.shape().end());
+    grad_fn->input_shape_b_ = std::vector<int64_t>(other.data_.shape().begin(), other.data_.shape().end());
 
     // Compute result
     auto result = data_ - other.data_;
@@ -147,17 +157,20 @@ auto Variable::operator-(const Variable& other) const -> Variable {
 auto Variable::operator*(const Variable& other) const -> Variable {
     auto grad_fn = std::make_shared<MulBackward>();
 
-    // Set up backward graph
+    // Set up backward graph - MUST maintain index correspondence with input_grads!
+    // Use nullptr for leaf variables to preserve indices
     std::vector<std::shared_ptr<Function>> next_funcs;
-    if (grad_fn_) next_funcs.push_back(grad_fn_);
-    if (other.grad_fn_) next_funcs.push_back(other.grad_fn_);
+    next_funcs.push_back(grad_fn_);        // nullptr if this is leaf
+    next_funcs.push_back(other.grad_fn_);  // nullptr if other is leaf
     grad_fn->set_next_functions(next_funcs);
 
     // Track input variables for gradient accumulation
     grad_fn->set_input_variables({const_cast<Variable*>(this), const_cast<Variable*>(&other)});
 
-    // Save tensors for backward - clone to preserve values
+    // Save tensors AND input shapes for backward - clone to preserve values
     grad_fn->saved_tensors_ = {data_.clone(), other.data_.clone()};
+    grad_fn->input_shape_a_ = std::vector<int64_t>(data_.shape().begin(), data_.shape().end());
+    grad_fn->input_shape_b_ = std::vector<int64_t>(other.data_.shape().begin(), other.data_.shape().end());
 
     // Compute result
     auto result = data_ * other.data_;
@@ -173,10 +186,11 @@ auto Variable::operator*(const Variable& other) const -> Variable {
 auto Variable::operator/(const Variable& other) const -> Variable {
     auto grad_fn = std::make_shared<DivBackward>();
 
-    // Set up backward graph
+    // Set up backward graph - MUST maintain index correspondence with input_grads!
+    // Use nullptr for leaf variables to preserve indices
     std::vector<std::shared_ptr<Function>> next_funcs;
-    if (grad_fn_) next_funcs.push_back(grad_fn_);
-    if (other.grad_fn_) next_funcs.push_back(other.grad_fn_);
+    next_funcs.push_back(grad_fn_);        // nullptr if this is leaf
+    next_funcs.push_back(other.grad_fn_);  // nullptr if other is leaf
     grad_fn->set_next_functions(next_funcs);
 
     // Track input variables for gradient accumulation

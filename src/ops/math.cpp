@@ -1,33 +1,116 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/backend/dispatch.hpp"
+#include "tenzor/ops/indexing.hpp"
+#include "tenzor/ops/transform.hpp"
+#include "tenzor/ops/creation.hpp"
+#include <cstring>
+#include <stdexcept>
+#include <iostream>
+#include <vector>
 
 namespace tenzor {
 
 // Stub implementations - will be dispatched to backend kernels
 
 auto add(const Tensor& a, const Tensor& b) -> Tensor {
-    std::vector<Tensor> inputs = {a, b};
+    // Ensure tensors are contiguous before element-wise operation
+    // Permute and reshape can create non-contiguous views
+    Tensor a_contiguous = a.is_contiguous() ? a : a.contiguous();
+    Tensor b_contiguous = b.is_contiguous() ? b : b.contiguous();
+    std::vector<Tensor> inputs = {a_contiguous, b_contiguous};
     return Dispatcher::dispatch("add", inputs)[0];
 }
 
 auto sub(const Tensor& a, const Tensor& b) -> Tensor {
-    std::vector<Tensor> inputs = {a, b};
+    // Ensure tensors are contiguous before element-wise operation
+    Tensor a_contiguous = a.is_contiguous() ? a : a.contiguous();
+    Tensor b_contiguous = b.is_contiguous() ? b : b.contiguous();
+    std::vector<Tensor> inputs = {a_contiguous, b_contiguous};
     return Dispatcher::dispatch("sub", inputs)[0];
 }
 
 auto mul(const Tensor& a, const Tensor& b) -> Tensor {
-    std::vector<Tensor> inputs = {a, b};
+    // Ensure tensors are contiguous before element-wise operation
+    Tensor a_contiguous = a.is_contiguous() ? a : a.contiguous();
+    Tensor b_contiguous = b.is_contiguous() ? b : b.contiguous();
+    std::vector<Tensor> inputs = {a_contiguous, b_contiguous};
     return Dispatcher::dispatch("mul", inputs)[0];
 }
 
 auto div(const Tensor& a, const Tensor& b) -> Tensor {
-    std::vector<Tensor> inputs = {a, b};
+    // Ensure tensors are contiguous before element-wise operation
+    Tensor a_contiguous = a.is_contiguous() ? a : a.contiguous();
+    Tensor b_contiguous = b.is_contiguous() ? b : b.contiguous();
+    std::vector<Tensor> inputs = {a_contiguous, b_contiguous};
     return Dispatcher::dispatch("div", inputs)[0];
 }
 
 auto matmul(const Tensor& a, const Tensor& b) -> Tensor {
     std::vector<Tensor> inputs = {a, b};
     return Dispatcher::dispatch("matmul", inputs)[0];
+}
+
+auto bmm(const Tensor& a, const Tensor& b) -> Tensor {
+    // Validate inputs are 3D
+    if (a.shape().size() != 3 || b.shape().size() != 3) {
+        throw std::runtime_error(
+            "bmm requires 3D tensors, got shapes: [" +
+            std::to_string(a.shape().size()) + "D] and [" +
+            std::to_string(b.shape().size()) + "D]");
+    }
+
+    int64_t batch_size = a.shape()[0];
+    int64_t n = a.shape()[1];
+    int64_t m = a.shape()[2];
+
+    if (b.shape()[0] != batch_size || b.shape()[1] != m) {
+        throw std::runtime_error(
+            "bmm dimension mismatch: expected b.shape=[" +
+            std::to_string(batch_size) + ", " + std::to_string(m) + ", *], got [" +
+            std::to_string(b.shape()[0]) + ", " + std::to_string(b.shape()[1]) + ", " +
+            std::to_string(b.shape()[2]) + "]");
+    }
+
+    int64_t p = b.shape()[2];
+
+    // Validate dtype support
+    if (a.dtype() != DType::Float32 && a.dtype() != DType::Float64) {
+        throw std::runtime_error(
+            "bmm currently only supports Float32 and Float64 dtypes, got: " +
+            std::to_string(static_cast<int>(a.dtype())));
+    }
+
+    // Process each batch by extracting 2D slices and performing matmul
+    // This preserves the computational graph for autograd operations
+    std::vector<Tensor> batch_results;
+    batch_results.reserve(batch_size);
+
+    for (int64_t batch = 0; batch < batch_size; ++batch) {
+        // Extract 2D slices from 3D tensors using slice and reshape operations
+        // slice(input, dim, start, end) extracts input[start:end] along dimension dim
+        // Then reshape removes the singleton dimension to get proper 2D tensors
+
+        // Extract a_batch: slice to (1, n, m) then reshape to (n, m)
+        Tensor a_slice = slice(a, 0, batch, batch + 1);  // Shape: (1, n, m)
+        Tensor a_batch = reshape(a_slice, {n, m});        // Shape: (n, m)
+
+        // Extract b_batch: slice to (1, m, p) then reshape to (m, p)
+        Tensor b_slice = slice(b, 0, batch, batch + 1);  // Shape: (1, m, p)
+        Tensor b_batch = reshape(b_slice, {m, p});        // Shape: (m, p)
+
+        // Perform 2D matrix multiplication on this batch
+        // This properly handles both contiguous and non-contiguous tensors
+        // and maintains the autograd computational graph
+        Tensor result_batch = matmul(a_batch, b_batch);  // Shape: (n, p)
+
+        // Store the result for this batch
+        batch_results.push_back(result_batch);
+    }
+
+    // Stack all batch results along dimension 0 to create the 3D output tensor
+    // stack() concatenates tensors and adds a new dimension, creating shape (batch_size, n, p)
+    // This maintains the computational graph connection for autograd
+    return stack(batch_results, 0);
 }
 
 auto dot(const Tensor& a, const Tensor& b) -> Tensor {

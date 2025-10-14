@@ -1221,17 +1221,16 @@ auto div_kernel(const Tensor& a, const Tensor& b) -> Tensor {
 }
 
 auto matmul_kernel(const Tensor& a, const Tensor& b) -> Tensor {
-    // Validate inputs
-    if (!a.is_contiguous() || !b.is_contiguous()) {
-        throw std::runtime_error("matmul requires contiguous tensors");
-    }
+    // Make tensors contiguous if needed (does not break autograd chain)
+    Tensor a_contig = a.is_contiguous() ? a : a.contiguous();
+    Tensor b_contig = b.is_contiguous() ? b : b.contiguous();
 
-    if (a.ndim() != 2 || b.ndim() != 2) {
+    if (a_contig.ndim() != 2 || b_contig.ndim() != 2) {
         throw std::runtime_error("matmul requires 2D tensors (matrices)");
     }
 
-    auto a_shape = a.shape();
-    auto b_shape = b.shape();
+    auto a_shape = a_contig.shape();
+    auto b_shape = b_contig.shape();
 
     int64_t M = a_shape[0];  // Rows of A
     int64_t K = a_shape[1];  // Cols of A
@@ -1248,26 +1247,26 @@ auto matmul_kernel(const Tensor& a, const Tensor& b) -> Tensor {
     }
 
     // Create output tensor
-    Tensor result({M, N}, a.dtype(), a.device());
+    Tensor result({M, N}, a_contig.dtype(), a_contig.device());
 
     // Dispatch based on dtype
-    if (a.dtype() == DType::Float32 && b.dtype() == DType::Float32) {
-        const float* a_data = a.data<float>();
-        const float* b_data = b.data<float>();
+    if (a_contig.dtype() == DType::Float32 && b_contig.dtype() == DType::Float32) {
+        const float* a_data = a_contig.data<float>();
+        const float* b_data = b_contig.data<float>();
         float* c_data = result.data<float>();
 
         matmul_blocked_float32(a_data, b_data, c_data, M, N, K);
 
-    } else if (a.dtype() == DType::Float64 && b.dtype() == DType::Float64) {
-        const double* a_data = a.data<double>();
-        const double* b_data = b.data<double>();
+    } else if (a_contig.dtype() == DType::Float64 && b_contig.dtype() == DType::Float64) {
+        const double* a_data = a_contig.data<double>();
+        const double* b_data = b_contig.data<double>();
         double* c_data = result.data<double>();
 
         matmul_blocked_float64(a_data, b_data, c_data, M, N, K);
 
-    } else if (a.dtype() == DType::Int32 && b.dtype() == DType::Int32) {
-        const int32_t* a_data = a.data<int32_t>();
-        const int32_t* b_data = b.data<int32_t>();
+    } else if (a_contig.dtype() == DType::Int32 && b_contig.dtype() == DType::Int32) {
+        const int32_t* a_data = a_contig.data<int32_t>();
+        const int32_t* b_data = b_contig.data<int32_t>();
         int32_t* c_data = result.data<int32_t>();
 
         matmul_blocked_int32(a_data, b_data, c_data, M, N, K);
@@ -1275,8 +1274,8 @@ auto matmul_kernel(const Tensor& a, const Tensor& b) -> Tensor {
     } else {
         throw std::runtime_error(
             "matmul unsupported dtype combination: " +
-            std::string(dtype_name(a.dtype())) + " @ " +
-            std::string(dtype_name(b.dtype()))
+            std::string(dtype_name(a_contig.dtype())) + " @ " +
+            std::string(dtype_name(b_contig.dtype()))
         );
     }
 
@@ -1643,6 +1642,38 @@ auto pow_kernel(const Tensor& input, float exponent) -> Tensor {
 
     } else {
         throw std::runtime_error("pow operation only supports Float32 and Float64 dtypes");
+    }
+
+    return result;
+}
+
+// Sign kernel - sign function
+auto sign_kernel(const Tensor& input) -> Tensor {
+    auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    Tensor result(shape_vec, input.dtype(), input.device());
+    size_t n = static_cast<size_t>(input.numel());
+
+    if (input.dtype() == DType::Float32) {
+        const float* in_data = input.data<float>();
+        float* out_data = result.data<float>();
+
+        // Sign function: -1 if x < 0, 0 if x == 0, +1 if x > 0
+        for (size_t i = 0; i < n; ++i) {
+            float val = in_data[i];
+            out_data[i] = (val > 0.0f) - (val < 0.0f);
+        }
+
+    } else if (input.dtype() == DType::Float64) {
+        const double* in_data = input.data<double>();
+        double* out_data = result.data<double>();
+
+        for (size_t i = 0; i < n; ++i) {
+            double val = in_data[i];
+            out_data[i] = (val > 0.0) - (val < 0.0);
+        }
+
+    } else {
+        throw std::runtime_error("sign operation only supports Float32 and Float64 dtypes");
     }
 
     return result;

@@ -1,7 +1,9 @@
 #include "tenzor/backend/backend.hpp"
+#include "tenzor/backend/caching_allocator.hpp"
 #include <cuda_runtime.h>
 #include <stdexcept>
 #include <limits>
+#include <cstdlib>
 
 namespace tenzor {
 
@@ -19,6 +21,7 @@ namespace cuda {
     auto sqrt_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
     auto neg_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
     auto abs_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
+    auto sign_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
     auto log_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
     auto exp_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
 
@@ -78,6 +81,12 @@ namespace cuda {
 
 class CUDABackend : public Backend {
 public:
+    CUDABackend() {
+        // Check if caching allocator is enabled via environment variable
+        const char* enable_caching = std::getenv("TENZOR_ENABLE_CACHING_ALLOCATOR");
+        use_caching_allocator_ = (enable_caching != nullptr && std::string(enable_caching) == "1");
+    }
+
     auto name() const -> std::string_view override {
         return "cuda";
     }
@@ -98,6 +107,10 @@ public:
             return nullptr;
         }
 
+        if (use_caching_allocator_) {
+            return backend::CachingAllocator::get().allocate(bytes, device_id);
+        }
+
         void* ptr = nullptr;
         cudaSetDevice(device_id);
         cudaError_t err = cudaMalloc(&ptr, bytes);
@@ -114,6 +127,19 @@ public:
         if (ptr == nullptr) {
             return;
         }
+
+        if (use_caching_allocator_) {
+            // Note: we don't know the device_id here, but CachingAllocator tracks it
+            // For proper integration, we'd need to look up the device from the pointer
+            int device_id = 0;
+            cudaPointerAttributes attrs;
+            if (cudaPointerGetAttributes(&attrs, ptr) == cudaSuccess) {
+                device_id = attrs.device;
+            }
+            backend::CachingAllocator::get().free(ptr, device_id);
+            return;
+        }
+
         cudaFree(ptr);
     }
 
@@ -304,6 +330,12 @@ public:
                     throw std::invalid_argument("abs operation requires exactly 1 input");
                 }
                 return {cuda::abs_kernel(inputs[0], stream)};
+            }
+            else if (op_name == "sign") {
+                if (inputs.size() != 1) {
+                    throw std::invalid_argument("sign operation requires exactly 1 input");
+                }
+                return {cuda::sign_kernel(inputs[0], stream)};
             }
             else if (op_name == "clamp") {
                 if (inputs.size() != 1) {
@@ -779,6 +811,9 @@ public:
             throw;
         }
     }
+
+private:
+    bool use_caching_allocator_{false};
 };
 
 extern "C" {

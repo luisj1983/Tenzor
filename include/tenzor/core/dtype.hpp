@@ -15,6 +15,10 @@
 
 namespace tenzor {
 
+// Forward declarations for half-precision types
+struct Float16;
+struct BFloat16;
+
 /**
  * @brief Enumeration of supported tensor data types.
  *
@@ -42,7 +46,8 @@ enum class DType : uint8_t {
 /**
  * @brief Concept for valid scalar types.
  *
- * Requires type to be arithmetic (integers, floats) or complex numbers.
+ * Requires type to be arithmetic (integers, floats), complex numbers,
+ * or half-precision types (Float16, BFloat16).
  * Used to constrain template parameters to valid tensor element types.
  *
  * @tparam T Type to check
@@ -50,7 +55,9 @@ enum class DType : uint8_t {
 template<typename T>
 concept ScalarType = std::is_arithmetic_v<T> ||
                      std::is_same_v<T, std::complex<float>> ||
-                     std::is_same_v<T, std::complex<double>>;
+                     std::is_same_v<T, std::complex<double>> ||
+                     std::is_same_v<T, Float16> ||
+                     std::is_same_v<T, BFloat16>;
 
 /**
  * @brief Concept for integral types.
@@ -111,6 +118,61 @@ template<> struct dtype_traits<DType::Complex128> { using type = std::complex<do
  */
 template<DType dt>
 using dtype_t = typename dtype_traits<dt>::type;
+
+// ============================================================================
+// Half-Precision Types
+// ============================================================================
+
+/**
+ * @brief IEEE 754 16-bit floating point (half precision)
+ *
+ * Memory layout: 1 sign bit, 5 exponent bits, 10 mantissa bits
+ * Range: approximately ±65,504
+ * Precision: ~3 decimal digits
+ */
+struct Float16 {
+    uint16_t bits{0};
+
+    Float16() = default;
+    explicit Float16(float f);
+    explicit Float16(uint16_t b) : bits(b) {}
+
+    explicit operator float() const;
+
+    auto operator==(const Float16& other) const -> bool { return bits == other.bits; }
+    auto operator!=(const Float16& other) const -> bool { return bits != other.bits; }
+};
+
+/**
+ * @brief Brain Float16 (BFloat16) - Google's 16-bit floating point
+ *
+ * Memory layout: 1 sign bit, 8 exponent bits, 7 mantissa bits
+ * Same range as Float32, but lower precision
+ * Range: approximately ±3.4×10^38
+ * Precision: ~2 decimal digits
+ *
+ * Advantages over Float16:
+ * - Same dynamic range as Float32 (same exponent bits)
+ * - Direct truncation from Float32 (simple conversion)
+ * - Better for deep learning (wider range, less overflow/underflow)
+ */
+struct BFloat16 {
+    uint16_t bits{0};
+
+    BFloat16() = default;
+    explicit BFloat16(float f);
+    explicit BFloat16(uint16_t b) : bits(b) {}
+
+    explicit operator float() const;
+
+    auto operator==(const BFloat16& other) const -> bool { return bits == other.bits; }
+    auto operator!=(const BFloat16& other) const -> bool { return bits != other.bits; }
+};
+
+/// @brief Specialization for Float16
+template<> struct dtype_traits<DType::Float16> { using type = Float16; };
+/// @brief Specialization for BFloat16
+template<> struct dtype_traits<DType::BFloat16> { using type = BFloat16; };
 
 /**
  * @brief Get the size in bytes of a data type.

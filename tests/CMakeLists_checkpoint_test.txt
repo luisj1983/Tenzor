@@ -1,0 +1,4 @@
+# Add test executable
+add_executable(test_checkpoint_leaf_fix test_checkpoint_leaf_fix.cpp)
+target_link_libraries(test_checkpoint_leaf_fix tenzor_core)
+target_include_directories(test_checkpoint_leaf_fix PRIVATE ${PROJECT_SOURCE_DIR}/include)

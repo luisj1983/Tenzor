@@ -313,6 +313,81 @@ auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Ten
 }
 
 // ============================================================================
+// GELU Activation
+// ============================================================================
+
+// Forward: 0.5 * x * (1 + erf(x / sqrt(2)))
+// GELU (Gaussian Error Linear Unit)
+auto gelu_kernel(const Tensor& input) -> Tensor {
+    auto output = zeros_like(input);
+    constexpr float sqrt_2 = 1.41421356237f;
+
+    if (input.dtype() == DType::Float32) {
+        const float* in_data = input.data<float>();
+        float* out_data = output.data<float>();
+        size_t n = input.numel();
+
+        for (size_t i = 0; i < n; ++i) {
+            float x = in_data[i];
+            out_data[i] = 0.5f * x * (1.0f + std::erf(x / sqrt_2));
+        }
+    } else if (input.dtype() == DType::Float64) {
+        const double* in_data = input.data<double>();
+        double* out_data = output.data<double>();
+        size_t n = input.numel();
+        constexpr double sqrt_2_d = 1.41421356237;
+
+        for (size_t i = 0; i < n; ++i) {
+            double x = in_data[i];
+            out_data[i] = 0.5 * x * (1.0 + std::erf(x / sqrt_2_d));
+        }
+    } else {
+        throw std::runtime_error("GELU only supports Float32 and Float64");
+    }
+
+    return output;
+}
+
+// Backward: grad_out * (0.5 * (1 + erf(x/sqrt(2))) + x * (1/sqrt(2*pi)) * exp(-x^2/2))
+auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Tensor {
+    auto grad_input = zeros_like(input);
+    constexpr float sqrt_2 = 1.41421356237f;
+    constexpr float sqrt_2_pi = 2.50662827463f;  // sqrt(2*pi)
+
+    if (input.dtype() == DType::Float32) {
+        const float* grad_out_data = grad_output.data<float>();
+        const float* in_data = input.data<float>();
+        float* grad_in_data = grad_input.data<float>();
+        size_t n = input.numel();
+
+        for (size_t i = 0; i < n; ++i) {
+            float x = in_data[i];
+            float cdf = 0.5f * (1.0f + std::erf(x / sqrt_2));
+            float pdf = (1.0f / sqrt_2_pi) * std::exp(-0.5f * x * x);
+            grad_in_data[i] = grad_out_data[i] * (cdf + x * pdf);
+        }
+    } else if (input.dtype() == DType::Float64) {
+        const double* grad_out_data = grad_output.data<double>();
+        const double* in_data = input.data<double>();
+        double* grad_in_data = grad_input.data<double>();
+        size_t n = input.numel();
+        constexpr double sqrt_2_d = 1.41421356237;
+        constexpr double sqrt_2_pi_d = 2.50662827463;
+
+        for (size_t i = 0; i < n; ++i) {
+            double x = in_data[i];
+            double cdf = 0.5 * (1.0 + std::erf(x / sqrt_2_d));
+            double pdf = (1.0 / sqrt_2_pi_d) * std::exp(-0.5 * x * x);
+            grad_in_data[i] = grad_out_data[i] * (cdf + x * pdf);
+        }
+    } else {
+        throw std::runtime_error("GELU backward only supports Float32 and Float64");
+    }
+
+    return grad_input;
+}
+
+// ============================================================================
 // Leaky ReLU Activation
 // ============================================================================
 

@@ -84,20 +84,28 @@ public:
      *
      * @return Const reference to weight variable
      */
-    auto weight() const -> const Variable& { return weight_; }
+    auto weight() const -> const Variable& { return parameters_.at("weight"); }
 
     /**
-     * @brief Get bias parameter.
-     *
-     * @return Const reference to optional bias variable
+     * @brief Check if layer has bias.
      */
-    auto bias() const -> const std::optional<Variable>& { return bias_; }
+    auto has_bias() const -> bool { return has_bias_; }
+
+    /**
+     * @brief Get bias parameter (if present).
+     *
+     * @return Pointer to bias variable, or nullptr if no bias
+     */
+    auto bias() const -> const Variable* {
+        if (!has_bias_) return nullptr;
+        auto it = parameters_.find("bias");
+        return (it != parameters_.end()) ? &it->second : nullptr;
+    }
 
 private:
     int64_t in_features_;                   ///< Input feature dimension
     int64_t out_features_;                  ///< Output feature dimension
-    Variable weight_;                       ///< Weight matrix [out_features, in_features]
-    std::optional<Variable> bias_;          ///< Bias vector [out_features]
+    bool has_bias_;                         ///< Whether this layer has bias
 
     /**
      * @brief Initialize parameters using Kaiming uniform.

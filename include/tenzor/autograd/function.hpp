@@ -153,55 +153,68 @@ protected:
 /**
  * @brief Addition gradient function.
  *
- * Implements forward and backward for element-wise addition.
+ * Implements forward and backward for element-wise addition with broadcasting support.
  *
- * Forward: C = A + B
- * Backward: dL/dA = dL/dC, dL/dB = dL/dC
+ * Forward: C = A + B (with broadcasting)
+ * Backward: dL/dA = sum_reduce(dL/dC), dL/dB = sum_reduce(dL/dC)
  *
- * @note Gradients are passed through unchanged to both inputs.
+ * @note Gradients are sum-reduced along broadcasted dimensions to match input shapes.
  *
  * @code
  * Variable a(Tensor({2, 3}, DType::Float32, Device::cpu()), true);
- * Variable b(Tensor({2, 3}, DType::Float32, Device::cpu()), true);
- * Variable c = a + b;  // Uses AddBackward internally
+ * Variable b(Tensor({3}, DType::Float32, Device::cpu()), true);
+ * Variable c = a + b;  // Broadcasting: {2,3} + {3} -> {2,3}
+ * // Backward: grad_b summed from {2,3} to {3}
  * @endcode
  */
 class AddBackward : public Function {
 public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+
+    // Public for direct access from Variable operators
+    std::vector<int64_t> input_shape_a_;
+    std::vector<int64_t> input_shape_b_;
 };
 
 /**
  * @brief Subtraction gradient function.
  *
- * Implements forward and backward for element-wise subtraction.
+ * Implements forward and backward for element-wise subtraction with broadcasting support.
  *
- * Forward: C = A - B
- * Backward: dL/dA = dL/dC, dL/dB = -dL/dC
+ * Forward: C = A - B (with broadcasting)
+ * Backward: dL/dA = sum_reduce(dL/dC), dL/dB = -sum_reduce(dL/dC)
  *
- * @note Gradient is passed through unchanged to first input and negated for second.
+ * @note Gradients are sum-reduced along broadcasted dimensions to match input shapes.
  */
 class SubBackward : public Function {
 public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+
+    // Public for direct access from Variable operators
+    std::vector<int64_t> input_shape_a_;
+    std::vector<int64_t> input_shape_b_;
 };
 
 /**
  * @brief Multiplication gradient function.
  *
- * Implements forward and backward for element-wise multiplication.
+ * Implements forward and backward for element-wise multiplication with broadcasting support.
  *
- * Forward: C = A * B
- * Backward: dL/dA = dL/dC * B, dL/dB = dL/dC * A
+ * Forward: C = A * B (with broadcasting)
+ * Backward: dL/dA = sum_reduce(dL/dC * B), dL/dB = sum_reduce(dL/dC * A)
  *
- * @note Uses product rule for differentiation. Input tensors are saved for backward pass.
+ * @note Uses product rule for differentiation. Input tensors and shapes are saved for backward pass.
  */
 class MulBackward : public Function {
 public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+
+    // Public for direct access from Variable operators
+    std::vector<int64_t> input_shape_a_;
+    std::vector<int64_t> input_shape_b_;
 };
 
 /**
@@ -376,6 +389,25 @@ private:
 };
 
 /**
+ * @brief Softmax gradient function.
+ *
+ * Implements softmax activation with autograd support.
+ *
+ * Forward: y_i = exp(x_i) / sum(exp(x_j))
+ * Backward: dL/dx_i = y_i * (dL/dy_i - sum_j(dL/dy_j * y_j))
+ *
+ * @note Output is saved for gradient computation.
+ */
+class SoftmaxBackward : public Function {
+public:
+    SoftmaxBackward(int64_t dim) : dim_(dim) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+private:
+    int64_t dim_;
+};
+
+/**
  * @brief Absolute value gradient function.
  *
  * Forward: y = |x|
@@ -429,6 +461,84 @@ public:
 private:
     std::optional<int64_t> dim_;
     bool keepdim_;
+};
+
+/**
+ * @brief Reshape gradient function.
+ *
+ * Forward: y = reshape(x, shape)
+ * Backward: dL/dx = reshape(dL/dy, input_shape)
+ *
+ * @note Original input shape is saved for gradient reshaping.
+ *
+ * @code
+ * Variable x(Tensor({3, 4}, DType::Float32, Device::cpu()), true);
+ * Variable y = reshape(x, {12});  // Forward: {3, 4} -> {12}
+ * // Backward: gradient reshaped from {12} back to {3, 4}
+ * @endcode
+ */
+class ReshapeBackward : public Function {
+public:
+    ReshapeBackward(std::vector<int64_t> input_shape) : input_shape_(std::move(input_shape)) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+private:
+    std::vector<int64_t> input_shape_;
+};
+
+/**
+ * @brief Permute gradient function.
+ *
+ * Forward: y = permute(x, dims)
+ * Backward: dL/dx = permute(dL/dy, inverse_dims)
+ *
+ * @note Inverse permutation is computed and saved for gradient computation.
+ *
+ * @code
+ * Variable x(Tensor({2, 3, 4}, DType::Float32, Device::cpu()), true);
+ * Variable y = permute(x, {2, 0, 1});  // Forward: {2, 3, 4} -> {4, 2, 3}
+ * // Backward: gradient permuted from {4, 2, 3} back to {2, 3, 4}
+ * @endcode
+ */
+class PermuteBackward : public Function {
+public:
+    PermuteBackward(std::vector<int64_t> dims) : dims_(std::move(dims)) {
+        // Compute inverse permutation
+        inv_dims_.resize(dims_.size());
+        for (size_t i = 0; i < dims_.size(); ++i) {
+            inv_dims_[dims_[i]] = static_cast<int64_t>(i);
+        }
+    }
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+private:
+    std::vector<int64_t> dims_;
+    std::vector<int64_t> inv_dims_;
+};
+
+/**
+ * @brief Batch matrix multiplication gradient function.
+ *
+ * Implements forward and backward for batched matrix multiplication.
+ *
+ * Forward: C = bmm(A, B) where A: (batch, n, m), B: (batch, m, p), C: (batch, n, p)
+ * Backward:
+ *   dL/dA = bmm(dL/dC, permute(B, {0, 2, 1}))
+ *   dL/dB = bmm(permute(A, {0, 2, 1}), dL/dC)
+ *
+ * @note Input tensors are saved for gradient computation using transposition.
+ *
+ * @code
+ * Variable a(Tensor({32, 10, 20}, DType::Float32, Device::cpu()), true);
+ * Variable b(Tensor({32, 20, 30}, DType::Float32, Device::cpu()), true);
+ * Variable c = bmm(a, b);  // Uses BmmBackward internally
+ * c.backward();  // Computes gradients w.r.t. a and b
+ * @endcode
+ */
+class BmmBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
 };
 
 } // namespace tenzor

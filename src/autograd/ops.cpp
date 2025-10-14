@@ -2,6 +2,7 @@
 #include "tenzor/autograd/function.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/math.hpp"
+#include "tenzor/ops/transform.hpp"
 #include "tenzor/backend/dispatch.hpp"
 
 namespace tenzor {
@@ -19,9 +20,9 @@ auto sum(const Variable& input, std::optional<int64_t> dim, bool keepdim) -> Var
 
     // Set up backward graph
     std::vector<std::shared_ptr<Function>> next_funcs;
-    if (input.grad_fn()) {
-        next_funcs.push_back(input.grad_fn());
-    }
+
+    next_funcs.push_back(input.grad_fn());  // nullptr if input is leaf
+
     grad_fn->set_next_functions(next_funcs);
 
     // Track input variable
@@ -46,9 +47,11 @@ auto mean(const Variable& input, std::optional<int64_t> dim, bool keepdim) -> Va
     grad_fn->save_for_backward({input.tensor()});
 
     std::vector<std::shared_ptr<Function>> next_funcs;
-    if (input.grad_fn()) {
-        next_funcs.push_back(input.grad_fn());
-    }
+
+
+    next_funcs.push_back(input.grad_fn());  // nullptr if input is leaf
+
+
     grad_fn->set_next_functions(next_funcs);
 
     grad_fn->set_input_variables({const_cast<Variable*>(&input)});
@@ -71,9 +74,11 @@ auto log(const Variable& input) -> Variable {
     grad_fn->save_for_backward({input.tensor()});
 
     std::vector<std::shared_ptr<Function>> next_funcs;
-    if (input.grad_fn()) {
-        next_funcs.push_back(input.grad_fn());
-    }
+
+
+    next_funcs.push_back(input.grad_fn());  // nullptr if input is leaf
+
+
     grad_fn->set_next_functions(next_funcs);
 
     grad_fn->set_input_variables({const_cast<Variable*>(&input)});
@@ -99,9 +104,11 @@ auto exp(const Variable& input) -> Variable {
     grad_fn->save_for_backward({result_tensor});
 
     std::vector<std::shared_ptr<Function>> next_funcs;
-    if (input.grad_fn()) {
-        next_funcs.push_back(input.grad_fn());
-    }
+
+
+    next_funcs.push_back(input.grad_fn());  // nullptr if input is leaf
+
+
     grad_fn->set_next_functions(next_funcs);
 
     grad_fn->set_input_variables({const_cast<Variable*>(&input)});
@@ -120,14 +127,51 @@ auto neg(const Variable& input) -> Variable {
     auto grad_fn = std::make_shared<NegBackward>();
 
     std::vector<std::shared_ptr<Function>> next_funcs;
-    if (input.grad_fn()) {
-        next_funcs.push_back(input.grad_fn());
-    }
+
+
+    next_funcs.push_back(input.grad_fn());  // nullptr if input is leaf
+
+
     grad_fn->set_next_functions(next_funcs);
 
     grad_fn->set_input_variables({const_cast<Variable*>(&input)});
 
     auto result_tensor = tenzor::neg(input.tensor());
+    Variable output(result_tensor, true);
+    output.set_grad_fn(grad_fn);
+
+    return output;
+}
+
+auto softmax(const Variable& input, int64_t dim) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        OpAttributes attrs;
+        attrs["dim"] = std::to_string(dim);
+        std::vector<Tensor> inputs = {input.tensor()};
+        auto result = Dispatcher::dispatch("softmax", inputs, attrs)[0];
+        return Variable(result, false);
+    }
+
+    auto grad_fn = std::make_shared<SoftmaxBackward>(dim);
+
+    // Compute forward and save output for backward
+    OpAttributes attrs;
+    attrs["dim"] = std::to_string(dim);
+    std::vector<Tensor> input_tensors = {input.tensor()};
+    auto result_tensor = Dispatcher::dispatch("softmax", input_tensors, attrs)[0];
+
+    grad_fn->save_for_backward({result_tensor});
+
+    std::vector<std::shared_ptr<Function>> next_funcs;
+
+
+    next_funcs.push_back(input.grad_fn());  // nullptr if input is leaf
+
+
+    grad_fn->set_next_functions(next_funcs);
+
+    grad_fn->set_input_variables({const_cast<Variable*>(&input)});
+
     Variable output(result_tensor, true);
     output.set_grad_fn(grad_fn);
 
@@ -154,9 +198,11 @@ auto log_softmax(const Variable& input, int64_t dim) -> Variable {
     grad_fn->save_for_backward({result_tensor});
 
     std::vector<std::shared_ptr<Function>> next_funcs;
-    if (input.grad_fn()) {
-        next_funcs.push_back(input.grad_fn());
-    }
+
+
+    next_funcs.push_back(input.grad_fn());  // nullptr if input is leaf
+
+
     grad_fn->set_next_functions(next_funcs);
 
     grad_fn->set_input_variables({const_cast<Variable*>(&input)});
@@ -178,9 +224,11 @@ auto abs(const Variable& input) -> Variable {
     grad_fn->save_for_backward({input.tensor()});
 
     std::vector<std::shared_ptr<Function>> next_funcs;
-    if (input.grad_fn()) {
-        next_funcs.push_back(input.grad_fn());
-    }
+
+
+    next_funcs.push_back(input.grad_fn());  // nullptr if input is leaf
+
+
     grad_fn->set_next_functions(next_funcs);
 
     grad_fn->set_input_variables({const_cast<Variable*>(&input)});
@@ -203,9 +251,11 @@ auto clamp(const Variable& input, float min, float max) -> Variable {
     grad_fn->save_for_backward({input.tensor()});
 
     std::vector<std::shared_ptr<Function>> next_funcs;
-    if (input.grad_fn()) {
-        next_funcs.push_back(input.grad_fn());
-    }
+
+
+    next_funcs.push_back(input.grad_fn());  // nullptr if input is leaf
+
+
     grad_fn->set_next_functions(next_funcs);
 
     grad_fn->set_input_variables({const_cast<Variable*>(&input)});
@@ -231,13 +281,127 @@ auto max(const Variable& input, std::optional<int64_t> dim, bool keepdim) -> Var
     grad_fn->save_for_backward({input.tensor(), result_tensor});
 
     std::vector<std::shared_ptr<Function>> next_funcs;
-    if (input.grad_fn()) {
-        next_funcs.push_back(input.grad_fn());
-    }
+
+
+    next_funcs.push_back(input.grad_fn());  // nullptr if input is leaf
+
+
     grad_fn->set_next_functions(next_funcs);
 
     grad_fn->set_input_variables({const_cast<Variable*>(&input)});
 
+    Variable output(result_tensor, true);
+    output.set_grad_fn(grad_fn);
+
+    return output;
+}
+
+auto reshape(const Variable& input, const std::vector<int64_t>& shape) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        // No gradient needed, just compute
+        return Variable(tenzor::reshape(input.tensor(), shape), false);
+    }
+
+    // Save original input shape for backward pass
+    std::vector<int64_t> input_shape(input.shape().begin(), input.shape().end());
+    auto grad_fn = std::make_shared<ReshapeBackward>(input_shape);
+
+    // Set up backward graph
+    std::vector<std::shared_ptr<Function>> next_funcs;
+
+    next_funcs.push_back(input.grad_fn());  // nullptr if input is leaf
+
+    grad_fn->set_next_functions(next_funcs);
+
+    // Track input variable
+    grad_fn->set_input_variables({const_cast<Variable*>(&input)});
+
+    // Compute result
+    auto result_tensor = tenzor::reshape(input.tensor(), shape);
+    Variable output(result_tensor, true);
+    output.set_grad_fn(grad_fn);
+
+    return output;
+}
+
+auto permute(const Variable& input, const std::vector<int64_t>& dims) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        // No gradient needed, just compute
+        return Variable(tenzor::permute(input.tensor(), dims), false);
+    }
+
+    auto grad_fn = std::make_shared<PermuteBackward>(dims);
+
+    // Set up backward graph
+    std::vector<std::shared_ptr<Function>> next_funcs;
+
+    next_funcs.push_back(input.grad_fn());  // nullptr if input is leaf
+
+    grad_fn->set_next_functions(next_funcs);
+
+    // Track input variable
+    grad_fn->set_input_variables({const_cast<Variable*>(&input)});
+
+    // Compute result
+    auto result_tensor = tenzor::permute(input.tensor(), dims);
+    Variable output(result_tensor, true);
+    output.set_grad_fn(grad_fn);
+
+    return output;
+}
+
+auto bmm(const Variable& a, const Variable& b) -> Variable {
+    if ((!a.requires_grad() && !b.requires_grad()) || !is_grad_enabled()) {
+        // No gradient needed, just compute
+        return Variable(tenzor::bmm(a.tensor(), b.tensor()), false);
+    }
+
+    auto grad_fn = std::make_shared<BmmBackward>();
+
+    // Save input tensors for backward pass
+    grad_fn->save_for_backward({a.tensor(), b.tensor()});
+
+    // Set up backward graph - MUST maintain index correspondence with input_grads!
+    // Use nullptr for leaf variables to preserve indices
+    std::vector<std::shared_ptr<Function>> next_funcs;
+    next_funcs.push_back(a.grad_fn());  // nullptr if a is leaf
+    next_funcs.push_back(b.grad_fn());  // nullptr if b is leaf
+    grad_fn->set_next_functions(next_funcs);
+
+    // Track input variables
+    grad_fn->set_input_variables({const_cast<Variable*>(&a), const_cast<Variable*>(&b)});
+
+    // Compute result
+    auto result_tensor = tenzor::bmm(a.tensor(), b.tensor());
+    Variable output(result_tensor, true);
+    output.set_grad_fn(grad_fn);
+
+    return output;
+}
+
+auto matmul(const Variable& a, const Variable& b) -> Variable {
+    if ((!a.requires_grad() && !b.requires_grad()) || !is_grad_enabled()) {
+        // No gradient needed, just compute
+        return Variable(tenzor::matmul(a.tensor(), b.tensor()), false);
+    }
+
+    auto grad_fn = std::make_shared<MatMulBackward>();
+
+    // Save input tensors for backward pass
+    grad_fn->save_for_backward({a.tensor(), b.tensor()});
+
+    // Set up backward graph - MUST maintain index correspondence with input_grads!
+    // Use nullptr for leaf variables to preserve indices
+    std::vector<std::shared_ptr<Function>> next_funcs;
+    next_funcs.push_back(a.grad_fn());  // nullptr if a is leaf
+    next_funcs.push_back(b.grad_fn());  // nullptr if b is leaf
+    grad_fn->set_next_functions(next_funcs);
+
+    // Track input variables
+    grad_fn->set_input_variables({const_cast<Variable*>(&a), const_cast<Variable*>(&b)});
+
+    // Compute result
+    auto result_tensor = tenzor::matmul(a.tensor(), b.tensor());
     Variable output(result_tensor, true);
     output.set_grad_fn(grad_fn);
 

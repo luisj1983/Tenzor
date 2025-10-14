@@ -27,12 +27,19 @@ public:
     }
 
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
-        auto& grad_output = grad_outputs[0];
+        auto& grad_output_orig = grad_outputs[0];
         auto saved = saved_tensors();
-        auto& input = saved[0];
-        auto& mean = saved[1];
-        auto& rstd = saved[2];  // reciprocal std (1 / sqrt(var + eps))
-        auto& weight = saved[3];
+        auto& input_orig = saved[0];
+        auto& mean_orig = saved[1];
+        auto& rstd_orig = saved[2];  // reciprocal std (1 / sqrt(var + eps))
+        auto& weight_orig = saved[3];
+
+        // Make all tensors contiguous for pointer-based access
+        auto grad_output = grad_output_orig.contiguous();
+        auto input = input_orig.contiguous();
+        auto mean = mean_orig.contiguous();
+        auto rstd = rstd_orig.contiguous();
+        auto weight = weight_orig.contiguous();
 
         auto shape = input.shape();
         int64_t batch_size = 1;
@@ -49,10 +56,11 @@ public:
         auto* grad_out_data = grad_output.data<float>();
         auto* weight_data = weight.data<float>();
 
-        // Allocate gradient tensors
+        // Allocate gradient tensors on same device as input
+        // Use the contiguous tensor's device to ensure consistency
         auto grad_input = zeros_like(input);
-        auto grad_weight = zeros({N});
-        auto grad_bias = zeros({N});
+        auto grad_weight = zeros({N}, grad_output.dtype(), grad_output.device());
+        auto grad_bias = zeros({N}, grad_output.dtype(), grad_output.device());
 
         auto* grad_in_data = grad_input.data<float>();
         auto* grad_weight_data = grad_weight.data<float>();
@@ -95,7 +103,7 @@ public:
             }
         }
 
-        return {grad_input, grad_weight, grad_bias};
+        return {grad_input.contiguous(), grad_weight.contiguous(), grad_bias.contiguous()};
     }
 
 private:
@@ -228,6 +236,21 @@ auto LayerNorm::forward(const Variable& input) -> Variable {
 
         result.set_grad_fn(grad_fn);
 
+        // Set next functions to chain backward pass
+        std::vector<std::shared_ptr<Function>> next_funcs;
+        next_funcs.push_back(input.grad_fn());  // nullptr if input is leaf
+        if (elementwise_affine_) {
+            auto weight_it = parameters_.find("weight");
+            auto bias_it = parameters_.find("bias");
+            if (weight_it != parameters_.end() && weight_it->second.requires_grad()) {
+                next_funcs.push_back(weight_it->second.grad_fn());
+            }
+            if (bias_it != parameters_.end() && bias_it->second.requires_grad()) {
+                next_funcs.push_back(bias_it->second.grad_fn());
+            }
+        }
+        grad_fn->set_next_functions(next_funcs);
+
         // Track input variables
         std::vector<Variable*> input_vars;
         if (input.requires_grad()) {
@@ -275,12 +298,19 @@ public:
     }
 
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
-        auto& grad_output = grad_outputs[0];
+        auto& grad_output_orig = grad_outputs[0];
         auto saved = saved_tensors();
-        auto& input = saved[0];
-        auto& mean = saved[1];
-        auto& rstd = saved[2];
-        auto& weight = saved[3];
+        auto& input_orig = saved[0];
+        auto& mean_orig = saved[1];
+        auto& rstd_orig = saved[2];
+        auto& weight_orig = saved[3];
+
+        // Make all tensors contiguous for pointer-based access
+        auto grad_output = grad_output_orig.contiguous();
+        auto input = input_orig.contiguous();
+        auto mean = mean_orig.contiguous();
+        auto rstd = rstd_orig.contiguous();
+        auto weight = weight_orig.contiguous();
 
         auto shape = input.shape();
         int64_t N = shape[0];
@@ -296,8 +326,8 @@ public:
         auto* weight_data = weight.data<float>();
 
         auto grad_input = zeros_like(input);
-        auto grad_weight = zeros({C});
-        auto grad_bias = zeros({C});
+        auto grad_weight = zeros({C}, grad_output.dtype(), grad_output.device());
+        auto grad_bias = zeros({C}, grad_output.dtype(), grad_output.device());
 
         auto* grad_in_data = grad_input.data<float>();
         auto* grad_weight_data = grad_weight.data<float>();
@@ -354,7 +384,7 @@ public:
             }
         }
 
-        return {grad_input, grad_weight, grad_bias};
+        return {grad_input.contiguous(), grad_weight.contiguous(), grad_bias.contiguous()};
     }
 
 private:
@@ -516,6 +546,21 @@ auto GroupNorm::forward(const Variable& input) -> Variable {
         );
 
         result.set_grad_fn(grad_fn);
+
+        // Set next functions to chain backward pass
+        std::vector<std::shared_ptr<Function>> next_funcs;
+        next_funcs.push_back(input.grad_fn());  // nullptr if input is leaf
+        if (affine_) {
+            auto weight_it = parameters_.find("weight");
+            auto bias_it = parameters_.find("bias");
+            if (weight_it != parameters_.end() && weight_it->second.requires_grad()) {
+                next_funcs.push_back(weight_it->second.grad_fn());
+            }
+            if (bias_it != parameters_.end() && bias_it->second.requires_grad()) {
+                next_funcs.push_back(bias_it->second.grad_fn());
+            }
+        }
+        grad_fn->set_next_functions(next_funcs);
 
         // Track input variables
         std::vector<Variable*> input_vars;
