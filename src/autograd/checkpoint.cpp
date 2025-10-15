@@ -73,15 +73,15 @@ auto CheckpointFunction::backward(std::vector<Tensor> grad_outputs) -> std::vect
     // Time the recomputation
     auto start_time = std::chrono::high_resolution_clock::now();
 
-    // Recompute forward pass with gradient tracking enabled
-    // CRITICAL: Keep these Variables alive throughout the entire backward pass
-    // Store them as a member so they outlive this function
+    // Create fresh Variables with gradient tracking enabled for recomputation
+    // These form an independent autograd graph that can handle nested checkpoints
     cached_recompute_inputs_.clear();
     cached_recompute_inputs_.reserve(saved_tensors().size());
     for (const auto& tensor : saved_tensors()) {
-        cached_recompute_inputs_.emplace_back(tensor, true); // Enable gradient tracking
+        cached_recompute_inputs_.emplace_back(tensor, true);
     }
 
+    // Recompute forward pass - nested checkpoints work naturally in this fresh graph
     auto recomputed_outputs = recompute_forward(cached_recompute_inputs_);
 
     // Validate output count
@@ -92,75 +92,56 @@ auto CheckpointFunction::backward(std::vector<Tensor> grad_outputs) -> std::vect
     const auto& original_inputs = get_original_inputs();
     const auto& next_fns = next_functions();
 
-    // Call backward() - gradients will accumulate to the computation graph's Variables
-    // NOTE: These are the ORIGINAL Variables in the lambda, not our copies
+    // Use standard autograd backward - handles all complexity including nested checkpoints
     for (size_t i = 0; i < recomputed_outputs.size(); ++i) {
         if (recomputed_outputs[i].requires_grad() && recomputed_outputs[i].grad_fn()) {
+            // retain_graph=true allows multiple outputs and nested checkpoints
             recomputed_outputs[i].backward(grad_outputs[i], /*retain_graph=*/true);
         }
     }
 
-    // Extract gradients from cached_recompute_inputs_ directly
-    // The computation graph references cached_recompute_inputs_ when lambda takes const reference
-    std::unordered_map<size_t, Tensor> found_gradients;
-    for (size_t i = 0; i < cached_recompute_inputs_.size(); ++i) {
-        if (cached_recompute_inputs_[i].has_grad()) {
-            found_gradients[i] = cached_recompute_inputs_[i].grad().value();
-        }
-    }
-
-    // For leaf inputs, manually accumulate gradients to original_inputs
-    // (since they won't propagate automatically through the graph)
-    for (size_t i = 0; i < cached_recompute_inputs_.size(); ++i) {
-        bool is_leaf = (i >= next_fns.size()) || !next_fns[i];
-
-        if (is_leaf && i < original_inputs.size() && original_inputs[i] != nullptr) {
-            auto grad_it = found_gradients.find(i);
-            if (grad_it != found_gradients.end()) {
-                const Tensor& grad_tensor = grad_it->second;
-
-                if (original_inputs[i]->has_grad()) {
-                    // Accumulate to existing gradient
-                    original_inputs[i]->grad() =
-                        original_inputs[i]->grad().value() + grad_tensor;
-                } else {
-                    // Set new gradient
-                    original_inputs[i]->grad() = grad_tensor;
-                }
-            }
-        }
-    }
-
-    // Extract gradients for return using the found_gradients map
+    // Extract gradients from the recomputed inputs
+    // Standard Variable::backward() has already propagated gradients correctly
     std::vector<Tensor> input_grads;
     input_grads.reserve(cached_recompute_inputs_.size());
 
     for (size_t i = 0; i < cached_recompute_inputs_.size(); ++i) {
         bool is_leaf = (i >= next_fns.size()) || !next_fns[i];
 
-        // Check if original is a heap copy
-        bool original_is_heap_copy = false;
-        if (is_leaf && i < original_inputs.size() && original_inputs[i] != nullptr) {
-            for (const auto& copy : input_variable_copies_) {
-                if (original_inputs[i] == copy.get()) {
-                    original_is_heap_copy = true;
-                    break;
-                }
-            }
-        }
+        if (cached_recompute_inputs_[i].has_grad()) {
+            const Tensor& grad_tensor = cached_recompute_inputs_[i].grad().value();
 
-        if (is_leaf && i < original_inputs.size() && original_inputs[i] != nullptr && !original_is_heap_copy) {
-            // TRUE original leaf - already accumulated to original_inputs above, return zero
-            input_grads.push_back(Tensor::zeros_like(cached_recompute_inputs_[i].tensor()));
-        } else {
-            // Non-leaf or heap copy - return gradient for propagation
-            auto grad_it = found_gradients.find(i);
-            if (grad_it != found_gradients.end()) {
-                input_grads.push_back(grad_it->second);
+            // For leaf variables, accumulate to original Variable
+            if (is_leaf && i < original_inputs.size() && original_inputs[i] != nullptr) {
+                // Check if this is a true original leaf (not a heap copy)
+                bool is_heap_copy = false;
+                for (const auto& copy : input_variable_copies_) {
+                    if (original_inputs[i] == copy.get()) {
+                        is_heap_copy = true;
+                        break;
+                    }
+                }
+
+                if (!is_heap_copy) {
+                    // Accumulate to original leaf Variable
+                    if (original_inputs[i]->has_grad()) {
+                        original_inputs[i]->grad() = original_inputs[i]->grad().value() + grad_tensor;
+                    } else {
+                        original_inputs[i]->grad() = grad_tensor;
+                    }
+                    // Return zero for leaf (gradient already accumulated)
+                    input_grads.push_back(Tensor::zeros_like(cached_recompute_inputs_[i].tensor()));
+                } else {
+                    // Heap copy - return gradient for further propagation
+                    input_grads.push_back(grad_tensor);
+                }
             } else {
-                // No gradient found - return zero
-                input_grads.push_back(Tensor::zeros_like(cached_recompute_inputs_[i].tensor()));
+                // Non-leaf - return gradient for further propagation
+                input_grads.push_back(grad_tensor);
             }
+        } else {
+            // No gradient computed - return zero
+            input_grads.push_back(Tensor::zeros_like(cached_recompute_inputs_[i].tensor()));
         }
     }
 

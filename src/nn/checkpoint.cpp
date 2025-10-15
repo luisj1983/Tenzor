@@ -189,6 +189,41 @@ auto ModelCheckpoint::verify_checkpoint(const std::string& path) -> bool {
         file.read(reinterpret_cast<char*>(&version), sizeof(version));
         if (version > CHECKPOINT_VERSION) return false;
 
+        // Read config flags
+        uint8_t config_flags;
+        file.read(reinterpret_cast<char*>(&config_flags), sizeof(config_flags));
+        bool verify_checksum = (config_flags & 4) != 0;
+
+        // If checksum verification is enabled, verify file integrity
+        if (verify_checksum) {
+            // Get file size
+            file.seekg(0, std::ios::end);
+            size_t file_size = file.tellg();
+
+            // Check if file is large enough to contain checksum
+            if (file_size < sizeof(uint64_t)) {
+                return false;
+            }
+
+            // Read entire file content (excluding the checksum at the end)
+            file.seekg(0, std::ios::beg);
+            size_t content_size = file_size - sizeof(uint64_t);
+            std::vector<uint8_t> file_content(content_size);
+            file.read(reinterpret_cast<char*>(file_content.data()), content_size);
+
+            // Read stored checksum
+            uint64_t stored_checksum;
+            file.read(reinterpret_cast<char*>(&stored_checksum), sizeof(stored_checksum));
+
+            // Compute actual checksum
+            uint64_t computed_checksum = compute_checksum(file_content.data(), file_content.size());
+
+            // Verify checksums match
+            if (computed_checksum != stored_checksum) {
+                return false;  // Checksum mismatch = corrupted file
+            }
+        }
+
         return true;
     } catch (...) {
         return false;
@@ -343,15 +378,35 @@ auto ModelCheckpoint::write_checkpoint(const std::string& path, const Checkpoint
 
     // ========== Footer ==========
     if (checkpoint.config.verify_checksum) {
-        // Compute and write checksum of entire file
+        // Compute and write checksum of entire file content
         file.flush();
-        uint64_t checksum = compute_checksum(nullptr, 0); // Simplified
-        file.write(reinterpret_cast<const char*>(&checksum), sizeof(checksum));
-    }
 
-    file.close();
-    if (!file) {
-        throw std::runtime_error("Failed to write checkpoint file");
+        // Get current position (end of content, before checksum)
+        auto content_end = file.tellp();
+
+        // Read all content written so far
+        file.close();
+        std::ifstream read_file(path, std::ios::binary);
+        std::vector<uint8_t> content(content_end);
+        read_file.read(reinterpret_cast<char*>(content.data()), content_end);
+        read_file.close();
+
+        // Compute checksum on content
+        uint64_t checksum = compute_checksum(content.data(), content.size());
+
+        // Reopen file in append mode and write checksum
+        std::ofstream append_file(path, std::ios::binary | std::ios::app);
+        append_file.write(reinterpret_cast<const char*>(&checksum), sizeof(checksum));
+        append_file.close();
+
+        if (!append_file) {
+            throw std::runtime_error("Failed to write checkpoint checksum");
+        }
+    } else {
+        file.close();
+        if (!file) {
+            throw std::runtime_error("Failed to write checkpoint file");
+        }
     }
 }
 
@@ -516,17 +571,25 @@ auto ModelCheckpoint::read_checkpoint(const std::string& path) -> Checkpoint {
 }
 
 auto ModelCheckpoint::compute_checksum(const void* data, size_t size) -> uint64_t {
-    // CRC64 implementation (simplified for now)
-    // In production, use a proper CRC64 or hash function
-    uint64_t checksum = 0xFFFFFFFFFFFFFFFFULL;
+    // Proper CRC64-ECMA implementation
+    // Polynomial: 0x42F0E1EBA9EA3693
+    static constexpr uint64_t POLY = 0x42F0E1EBA9EA3693ULL;
 
+    uint64_t crc = 0xFFFFFFFFFFFFFFFFULL;
     const uint8_t* bytes = static_cast<const uint8_t*>(data);
+
     for (size_t i = 0; i < size; ++i) {
-        checksum ^= static_cast<uint64_t>(bytes[i]);
-        checksum = (checksum << 1) | (checksum >> 63);
+        crc ^= static_cast<uint64_t>(bytes[i]) << 56;
+        for (int j = 0; j < 8; ++j) {
+            if (crc & 0x8000000000000000ULL) {
+                crc = (crc << 1) ^ POLY;
+            } else {
+                crc <<= 1;
+            }
+        }
     }
 
-    return checksum;
+    return crc ^ 0xFFFFFFFFFFFFFFFFULL;
 }
 
 auto ModelCheckpoint::compress_data(
@@ -630,7 +693,7 @@ auto AutoCheckpoint::step(
         cleanup();
     }
 
-    return is_best;
+    return true;  // Fixed: Return "saved" status instead of "is_best"
 }
 
 auto AutoCheckpoint::set_metric_mode(const std::string& mode) -> void {
