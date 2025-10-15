@@ -1,23 +1,5 @@
 #include "tenzor/backend/caching_allocator.hpp"
-
-#ifdef __CUDACC__
 #include <cuda_runtime.h>
-#else
-// CUDA runtime stubs for when CUDA is not available
-typedef enum { cudaSuccess = 0 } cudaError_t;
-inline cudaError_t cudaSetDevice(int) { return cudaSuccess; }
-inline cudaError_t cudaMalloc(void** ptr, size_t) { *ptr = nullptr; return cudaSuccess; }
-inline cudaError_t cudaFree(void*) { return cudaSuccess; }
-inline const char* cudaGetErrorString(cudaError_t) { return "CUDA not available"; }
-
-struct cudaPointerAttributes {
-    int device;
-};
-inline cudaError_t cudaPointerGetAttributes(cudaPointerAttributes* attr, const void*) {
-    attr->device = 0;
-    return cudaSuccess;
-}
-#endif
 
 #include <algorithm>
 #include <stdexcept>

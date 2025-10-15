@@ -3,7 +3,6 @@
 #include <unordered_set>
 #include <functional>
 #include <stdexcept>
-#include <iostream>
 
 namespace tenzor {
 
@@ -28,29 +27,13 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient, boo
     auto sorted = topological_sort(root.grad_fn());
 
     // Execute backward in reverse topological order
-    std::cout << "Starting backward execution with " << sorted.size() << " functions" << std::endl;
-
-    // First, validate all pointers are non-null
-    for (size_t i = 0; i < sorted.size(); ++i) {
-        if (!sorted[i]) {
-            std::cout << "ERROR: Function at index " << i << " is nullptr!" << std::endl;
-        }
-    }
-    std::cout << "Pointer validation complete" << std::endl;
-
-    size_t counter = 1;
-    for (auto it = sorted.rbegin(); it != sorted.rend(); ++it, ++counter) {
-        std::cout << "Processing function " << counter << "/" << sorted.size();
-
+    for (auto it = sorted.rbegin(); it != sorted.rend(); ++it) {
         // Check if shared_ptr is valid before dereferencing
         if (!*it) {
-            std::cout << " - NULLPTR DETECTED! Skipping..." << std::endl;
             continue;
         }
 
         auto& function = *it;
-        std::cout << " at address: " << function.get()
-                  << " (type: " << typeid(*function).name() << ")" << std::endl;
 
         // Get the gradient for this function's output
         std::vector<Tensor> grad_outputs;
@@ -70,16 +53,11 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient, boo
         }
 
         // Compute gradients for inputs
-        std::cout << "  Calling backward()..." << std::flush;
         auto input_grads = function->backward(grad_outputs);
-        std::cout << " OK, returned " << input_grads.size() << " gradients" << std::endl;
 
         // Accumulate gradients to input variables
-        std::cout << "  Getting input_variables()..." << std::flush;
         const auto& input_vars = function->input_variables();
-        std::cout << " got " << input_vars.size() << " input vars" << std::endl;
 
-        std::cout << "  Accumulating to input vars..." << std::flush;
         for (size_t i = 0; i < input_vars.size() && i < input_grads.size(); ++i) {
             // Get reference to Variable (stored by value)
             Variable& var = const_cast<Variable&>(input_vars[i]);
@@ -88,8 +66,6 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient, boo
             if (!var.requires_grad()) {
                 continue;
             }
-
-            std::cout << " [" << i << "]" << std::flush;
 
             Tensor grad_to_apply = input_grads[i];
 
@@ -109,24 +85,17 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient, boo
                 }
             }
         }
-        std::cout << " done" << std::endl;
 
         // Also accumulate to next functions for non-leaf variables
-        std::cout << "  Getting next_functions()..." << std::flush;
         const auto& next_funcs = function->next_functions();
-        std::cout << " got " << next_funcs.size() << " next funcs" << std::endl;
 
-        std::cout << "  Accumulating to next funcs..." << std::flush;
         for (size_t i = 0; i < next_funcs.size() && i < input_grads.size(); ++i) {
-            std::cout << " [" << i << "]" << std::flush;
             if (next_funcs[i]) {
                 accumulate_grad(next_funcs[i].get(), input_grads[i]);
             }
         }
-        std::cout << " done" << std::endl;
     }
 
-    std::cout << "Backward execution complete" << std::endl;
     clear_gradients();
 
     // Clear computation graph if not retaining
