@@ -83,21 +83,21 @@ public:
      *
      * Recursively collects parameters from this module and all submodules.
      *
-     * @return Vector of pointers to all parameters
+     * @return Vector of shared pointers to all parameters
      *
      * @code
      * auto params = model.parameters();
-     * for (auto* param : params) {
+     * for (auto& param : params) {
      *     param->zero_grad();
      * }
      * @endcode
      */
-    virtual auto parameters() -> std::vector<Variable*>;
+    virtual auto parameters() -> std::vector<std::shared_ptr<Variable>>;
 
     /**
      * @brief Get all parameters with names.
      *
-     * @return Vector of (name, parameter) pairs
+     * @return Vector of (name, shared_ptr to parameter) pairs
      *
      * @code
      * for (auto& [name, param] : model.named_parameters()) {
@@ -105,7 +105,7 @@ public:
      * }
      * @endcode
      */
-    virtual auto named_parameters() -> std::vector<std::pair<std::string, Variable*>>;
+    virtual auto named_parameters() -> std::vector<std::pair<std::string, std::shared_ptr<Variable>>>;
 
     /**
      * @brief Get all buffers (non-trainable tensors).
@@ -113,16 +113,16 @@ public:
      * Buffers are tensors that are part of module state but not optimized.
      * Examples: running statistics in BatchNorm.
      *
-     * @return Vector of pointers to all buffers
+     * @return Vector of shared pointers to all buffers
      */
-    auto buffers() -> std::vector<Variable*>;
+    auto buffers() -> std::vector<std::shared_ptr<Variable>>;
 
     /**
      * @brief Get all buffers with names.
      *
-     * @return Vector of (name, buffer) pairs
+     * @return Vector of (name, shared_ptr to buffer) pairs
      */
-    auto named_buffers() -> std::vector<std::pair<std::string, Variable*>>;
+    auto named_buffers() -> std::vector<std::pair<std::string, std::shared_ptr<Variable>>>;
 
     // ============================================================================
     // Training Mode
@@ -249,9 +249,10 @@ protected:
      * @brief Register a parameter.
      *
      * Adds a trainable parameter to this module.
+     * Parameters are stored as shared_ptr to ensure stable addresses for autograd.
      *
      * @param name Parameter name
-     * @param param Parameter variable
+     * @param param Parameter variable (will be wrapped in shared_ptr)
      */
     auto register_parameter(std::string name, Variable param) -> void;
 
@@ -261,7 +262,7 @@ protected:
      * Adds a non-trainable tensor to this module.
      *
      * @param name Buffer name
-     * @param buffer Buffer variable
+     * @param buffer Buffer variable (will be wrapped in shared_ptr)
      */
     auto register_buffer(std::string name, Variable buffer) -> void;
 
@@ -275,10 +276,10 @@ protected:
      */
     auto register_module(std::string name, std::shared_ptr<Module> module) -> void;
 
-    bool training_{true};                                              ///< Training mode flag
-    std::unordered_map<std::string, Variable> parameters_;             ///< Named parameters
-    std::unordered_map<std::string, Variable> buffers_;                ///< Named buffers
-    std::unordered_map<std::string, std::shared_ptr<Module>> submodules_;  ///< Named submodules
+    bool training_{true};                                                         ///< Training mode flag
+    std::unordered_map<std::string, std::shared_ptr<Variable>> parameters_;       ///< Named parameters (stable addresses)
+    std::unordered_map<std::string, std::shared_ptr<Variable>> buffers_;          ///< Named buffers (stable addresses)
+    std::unordered_map<std::string, std::shared_ptr<Module>> submodules_;         ///< Named submodules
 };
 
 /**
@@ -347,16 +348,16 @@ public:
     /**
      * @brief Get all parameters preserving module order.
      *
-     * @return Vector of parameter pointers
+     * @return Vector of shared pointers to parameters
      */
-    auto parameters() -> std::vector<Variable*> override;
+    auto parameters() -> std::vector<std::shared_ptr<Variable>> override;
 
     /**
      * @brief Get named parameters preserving module order.
      *
-     * @return Vector of (name, parameter) pairs
+     * @return Vector of (name, shared_ptr to parameter) pairs
      */
-    auto named_parameters() -> std::vector<std::pair<std::string, Variable*>> override;
+    auto named_parameters() -> std::vector<std::pair<std::string, std::shared_ptr<Variable>>> override;
 
     /**
      * @brief Get state dictionary.

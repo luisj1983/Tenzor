@@ -25,8 +25,13 @@ auto sum(const Variable& input, std::optional<int64_t> dim, bool keepdim) -> Var
 
     grad_fn->set_next_functions(next_funcs);
 
-    // Track input variable
-    grad_fn->set_input_variables({const_cast<Variable*>(&input)});
+    // Track input variable - only if it requires gradients
+    std::vector<Variable> input_vars;
+    if (input.requires_grad() && (input.is_leaf() || input.retains_grad())) {
+        input_vars.push_back(input);
+    }
+
+    grad_fn->set_input_variables(input_vars);
 
     // Compute result
     auto result_tensor = tenzor::sum(input.tensor(), dim, keepdim);
@@ -54,7 +59,12 @@ auto mean(const Variable& input, std::optional<int64_t> dim, bool keepdim) -> Va
 
     grad_fn->set_next_functions(next_funcs);
 
-    grad_fn->set_input_variables({const_cast<Variable*>(&input)});
+    std::vector<Variable> input_vars;
+    if (input.requires_grad() && (input.is_leaf() || input.retains_grad())) {
+        input_vars.push_back(input);
+    }
+
+    grad_fn->set_input_variables(input_vars);
 
     auto result_tensor = tenzor::mean(input.tensor(), dim, keepdim);
     Variable output(result_tensor, true);
@@ -81,7 +91,12 @@ auto log(const Variable& input) -> Variable {
 
     grad_fn->set_next_functions(next_funcs);
 
-    grad_fn->set_input_variables({const_cast<Variable*>(&input)});
+    std::vector<Variable> input_vars;
+    if (input.requires_grad() && (input.is_leaf() || input.retains_grad())) {
+        input_vars.push_back(input);
+    }
+
+    grad_fn->set_input_variables(input_vars);
 
     auto result_tensor = tenzor::log(input.tensor());
     Variable output(result_tensor, true);
@@ -111,7 +126,12 @@ auto exp(const Variable& input) -> Variable {
 
     grad_fn->set_next_functions(next_funcs);
 
-    grad_fn->set_input_variables({const_cast<Variable*>(&input)});
+    std::vector<Variable> input_vars;
+    if (input.requires_grad() && (input.is_leaf() || input.retains_grad())) {
+        input_vars.push_back(input);
+    }
+
+    grad_fn->set_input_variables(input_vars);
 
     Variable output(result_tensor, true);
     output.set_grad_fn(grad_fn);
@@ -134,7 +154,12 @@ auto neg(const Variable& input) -> Variable {
 
     grad_fn->set_next_functions(next_funcs);
 
-    grad_fn->set_input_variables({const_cast<Variable*>(&input)});
+    std::vector<Variable> input_vars;
+    if (input.requires_grad() && (input.is_leaf() || input.retains_grad())) {
+        input_vars.push_back(input);
+    }
+
+    grad_fn->set_input_variables(input_vars);
 
     auto result_tensor = tenzor::neg(input.tensor());
     Variable output(result_tensor, true);
@@ -170,7 +195,12 @@ auto softmax(const Variable& input, int64_t dim) -> Variable {
 
     grad_fn->set_next_functions(next_funcs);
 
-    grad_fn->set_input_variables({const_cast<Variable*>(&input)});
+    std::vector<Variable> input_vars;
+    if (input.requires_grad() && (input.is_leaf() || input.retains_grad())) {
+        input_vars.push_back(input);
+    }
+
+    grad_fn->set_input_variables(input_vars);
 
     Variable output(result_tensor, true);
     output.set_grad_fn(grad_fn);
@@ -205,7 +235,12 @@ auto log_softmax(const Variable& input, int64_t dim) -> Variable {
 
     grad_fn->set_next_functions(next_funcs);
 
-    grad_fn->set_input_variables({const_cast<Variable*>(&input)});
+    std::vector<Variable> input_vars;
+    if (input.requires_grad() && (input.is_leaf() || input.retains_grad())) {
+        input_vars.push_back(input);
+    }
+
+    grad_fn->set_input_variables(input_vars);
 
     Variable output(result_tensor, true);
     output.set_grad_fn(grad_fn);
@@ -231,7 +266,12 @@ auto abs(const Variable& input) -> Variable {
 
     grad_fn->set_next_functions(next_funcs);
 
-    grad_fn->set_input_variables({const_cast<Variable*>(&input)});
+    std::vector<Variable> input_vars;
+    if (input.requires_grad() && (input.is_leaf() || input.retains_grad())) {
+        input_vars.push_back(input);
+    }
+
+    grad_fn->set_input_variables(input_vars);
 
     auto result_tensor = tenzor::abs(input.tensor());
     Variable output(result_tensor, true);
@@ -258,7 +298,12 @@ auto clamp(const Variable& input, float min, float max) -> Variable {
 
     grad_fn->set_next_functions(next_funcs);
 
-    grad_fn->set_input_variables({const_cast<Variable*>(&input)});
+    std::vector<Variable> input_vars;
+    if (input.requires_grad() && (input.is_leaf() || input.retains_grad())) {
+        input_vars.push_back(input);
+    }
+
+    grad_fn->set_input_variables(input_vars);
 
     auto result_tensor = tenzor::clamp(input.tensor(), min, max);
     Variable output(result_tensor, true);
@@ -288,7 +333,12 @@ auto max(const Variable& input, std::optional<int64_t> dim, bool keepdim) -> Var
 
     grad_fn->set_next_functions(next_funcs);
 
-    grad_fn->set_input_variables({const_cast<Variable*>(&input)});
+    std::vector<Variable> input_vars;
+    if (input.requires_grad() && (input.is_leaf() || input.retains_grad())) {
+        input_vars.push_back(input);
+    }
+
+    grad_fn->set_input_variables(input_vars);
 
     Variable output(result_tensor, true);
     output.set_grad_fn(grad_fn);
@@ -313,8 +363,13 @@ auto reshape(const Variable& input, const std::vector<int64_t>& shape) -> Variab
 
     grad_fn->set_next_functions(next_funcs);
 
-    // Track input variable
-    grad_fn->set_input_variables({const_cast<Variable*>(&input)});
+    // Track input variable - only if it requires gradients
+    std::vector<Variable> input_vars;
+    if (input.requires_grad() && (input.is_leaf() || input.retains_grad())) {
+        input_vars.push_back(input);
+    }
+
+    grad_fn->set_input_variables(input_vars);
 
     // Compute result
     auto result_tensor = tenzor::reshape(input.tensor(), shape);
@@ -339,8 +394,13 @@ auto permute(const Variable& input, const std::vector<int64_t>& dims) -> Variabl
 
     grad_fn->set_next_functions(next_funcs);
 
-    // Track input variable
-    grad_fn->set_input_variables({const_cast<Variable*>(&input)});
+    // Track input variable - only if it requires gradients
+    std::vector<Variable> input_vars;
+    if (input.requires_grad() && (input.is_leaf() || input.retains_grad())) {
+        input_vars.push_back(input);
+    }
+
+    grad_fn->set_input_variables(input_vars);
 
     // Compute result
     auto result_tensor = tenzor::permute(input.tensor(), dims);
@@ -368,8 +428,15 @@ auto bmm(const Variable& a, const Variable& b) -> Variable {
     next_funcs.push_back(b.grad_fn());  // nullptr if b is leaf
     grad_fn->set_next_functions(next_funcs);
 
-    // Track input variables
-    grad_fn->set_input_variables({const_cast<Variable*>(&a), const_cast<Variable*>(&b)});
+    // Track input variables - only if they require gradients
+    std::vector<Variable> input_vars;
+    if (a.requires_grad() && (a.is_leaf() || a.retains_grad())) {
+        input_vars.push_back(a);
+    }
+    if (b.requires_grad() && (b.is_leaf() || b.retains_grad())) {
+        input_vars.push_back(b);
+    }
+    grad_fn->set_input_variables(input_vars);
 
     // Compute result
     auto result_tensor = tenzor::bmm(a.tensor(), b.tensor());
@@ -397,8 +464,15 @@ auto matmul(const Variable& a, const Variable& b) -> Variable {
     next_funcs.push_back(b.grad_fn());  // nullptr if b is leaf
     grad_fn->set_next_functions(next_funcs);
 
-    // Track input variables
-    grad_fn->set_input_variables({const_cast<Variable*>(&a), const_cast<Variable*>(&b)});
+    // Track input variables - only if they require gradients
+    std::vector<Variable> input_vars;
+    if (a.requires_grad() && (a.is_leaf() || a.retains_grad())) {
+        input_vars.push_back(a);
+    }
+    if (b.requires_grad() && (b.is_leaf() || b.retains_grad())) {
+        input_vars.push_back(b);
+    }
+    grad_fn->set_input_variables(input_vars);
 
     // Compute result
     auto result_tensor = tenzor::matmul(a.tensor(), b.tensor());

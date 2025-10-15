@@ -22,12 +22,12 @@ protected:
         // Create simple test parameters
         param1_ = std::make_shared<Variable>(ones({2, 3}), true);
         param2_ = std::make_shared<Variable>(ones({4}), true);
-        params_ = {param1_.get(), param2_.get()};
+        params_ = {param1_, param2_};
     }
 
     std::shared_ptr<Variable> param1_;
     std::shared_ptr<Variable> param2_;
-    std::vector<Variable*> params_;
+    std::vector<std::shared_ptr<Variable>> params_;
 };
 
 // ============================================================================
@@ -327,7 +327,7 @@ TEST_F(OptimizersExtendedTest, RMSpropConvergence) {
     auto param_ptr = param->tensor().data<float>();
     param_ptr[0] = 10.0f;  // Start far from optimum
 
-    auto optimizer = RMSprop({param.get()}, 0.1);
+    auto optimizer = RMSprop(std::vector<std::shared_ptr<Variable>>{param}, 0.1);
 
     for (int i = 0; i < 100; ++i) {
         optimizer.zero_grad();
@@ -351,7 +351,7 @@ TEST_F(OptimizersExtendedTest, AdagradConvergence) {
     auto param_ptr = param->tensor().data<float>();
     param_ptr[0] = 10.0f;
 
-    auto optimizer = Adagrad({param.get()}, 1.0);
+    auto optimizer = Adagrad(std::vector<std::shared_ptr<Variable>>{param}, 1.0);
 
     for (int i = 0; i < 100; ++i) {
         optimizer.zero_grad();
@@ -375,7 +375,7 @@ TEST_F(OptimizersExtendedTest, AdadeltaConvergence) {
     param_ptr[0] = 10.0f;
 
     // Use larger eps for better initial convergence (common in practice)
-    auto optimizer = Adadelta({param.get()}, 1.0, 0.95, 1e-4);
+    auto optimizer = Adadelta(std::vector<std::shared_ptr<Variable>>{param}, 1.0, 0.95, 1e-4);
 
     for (int i = 0; i < 500; ++i) {
         optimizer.zero_grad();

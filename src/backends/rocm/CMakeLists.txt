@@ -1,25 +1,126 @@
 # ROCm Backend
 # Requires ROCm 5.0 or higher for AMD GPUs
+# Mirrors CUDA backend structure for consistency
 
-# Find ROCm/HIP
-find_package(hip QUIET)
-find_package(rocblas QUIET)
+# HIP language should already be enabled at project level
+
+# Remove HIP-specific flags from CMAKE_CXX_FLAGS for this directory
+# CMake's HIP language support pollutes CXX_FLAGS with HIP flags
+string(REGEX REPLACE "-x hip" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+string(REGEX REPLACE "--offload-arch=[^ ]+" "" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+
+# Find ROCm/HIP packages
+find_package(hip QUIET CONFIG PATHS /opt/rocm)
+find_package(rocblas QUIET CONFIG PATHS /opt/rocm)
+find_package(hiprand QUIET CONFIG PATHS /opt/rocm)
 
 if(NOT hip_FOUND)
     message(WARNING "ROCm/HIP not found. ROCm backend will not be built.")
     message(WARNING "Install ROCm from: https://rocm.docs.amd.com/")
+    message(WARNING "Make sure ROCm is installed in /opt/rocm or set ROCM_PATH environment variable")
     return()
 endif()
 
-message(STATUS "ROCm Backend: Found HIP")
+# Get HIP version
+if(DEFINED HIP_VERSION)
+    message(STATUS "ROCm Backend: Found HIP ${HIP_VERSION}")
+else()
+    message(STATUS "ROCm Backend: Found HIP")
+endif()
 
-set(ROCM_BACKEND_SOURCES
-    rocm_backend.cpp
-    kernels/math.cpp
+# Separate C++ sources and HIP sources to avoid CMake flag conflicts
+set(ROCM_HIP_SOURCES
+    ../../backend/rocm_caching_allocator.hip.cpp
+    kernels/math.hip.cpp
+    kernels/activations.hip.cpp
+    kernels/batchnorm.hip.cpp
+    kernels/conv2d.hip.cpp
+    kernels/pooling.hip.cpp
+    kernels/indexing.hip.cpp
+    kernels/transform.hip.cpp
+    kernels/fused_ops.hip.cpp
+    kernels/reduction.hip.cpp
+    kernels/matmul_stub.hip.cpp
 )
 
-# Create ROCm backend shared library
-add_library(tenzor_backend_rocm SHARED ${ROCM_BACKEND_SOURCES})
+# Mark .hip.cpp files to be compiled as HIP language
+set_source_files_properties(
+    ${ROCM_HIP_SOURCES}
+    PROPERTIES LANGUAGE HIP
+)
+
+# Create HIP kernels library (static, internal use only)
+add_library(tenzor_rocm_kernels STATIC ${ROCM_HIP_SOURCES})
+
+# Set properties for HIP kernels library
+# Note: HIP_SEPARABLE_COMPILATION OFF to avoid RDC linking issues
+set_target_properties(tenzor_rocm_kernels PROPERTIES
+    HIP_SEPARABLE_COMPILATION OFF
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+    POSITION_INDEPENDENT_CODE ON
+    LINKER_LANGUAGE HIP
+)
+
+# Include directories for HIP kernels
+target_include_directories(tenzor_rocm_kernels PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${HIP_INCLUDE_DIRS}
+    ${ROCM_PATH}/include
+    /opt/rocm/include
+)
+
+# HIP-specific compile options
+# Note: Removed -fgpu-rdc to avoid relocatable device code linking issues
+target_compile_options(tenzor_rocm_kernels PRIVATE
+    $<$<COMPILE_LANGUAGE:HIP>:-ffast-math>
+    $<$<COMPILE_LANGUAGE:HIP>:-munsafe-fp-atomics>
+    $<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:HIP>>:-O3>
+    $<$<AND:$<CONFIG:Debug>,$<COMPILE_LANGUAGE:HIP>>:-g -ggdb>
+)
+
+# HIP-specific definitions
+target_compile_definitions(tenzor_rocm_kernels PRIVATE
+    __HIP_PLATFORM_AMD__
+    __HIP_PLATFORM_HCC__
+    TENZOR_ROCM_BACKEND
+)
+
+# Add hipRAND support to kernels library if available
+if(hiprand_FOUND)
+    target_compile_definitions(tenzor_rocm_kernels PRIVATE TENZOR_HAS_HIPRAND)
+    target_link_libraries(tenzor_rocm_kernels PRIVATE hip::hiprand)
+endif()
+
+# Manually compile rocm_backend.cpp to avoid HIP flag pollution
+# CMake's HIP language support adds HIP flags to all CXX compilation in this directory
+set(ROCM_BACKEND_OBJ "${CMAKE_CURRENT_BINARY_DIR}/rocm_backend.cpp.o")
+add_custom_command(
+    OUTPUT ${ROCM_BACKEND_OBJ}
+    COMMAND ${CMAKE_CXX_COMPILER}
+        -c ${CMAKE_CURRENT_SOURCE_DIR}/rocm_backend.cpp
+        -o ${ROCM_BACKEND_OBJ}
+        -std=c++20 -fPIC
+        -O3 -DNDEBUG
+        -Wall -Wextra -pedantic
+        -march=native
+        -Wno-unused-parameter -Wno-unused-variable
+        -fopenmp
+        -I${CMAKE_SOURCE_DIR}/include
+        -isystem /opt/rocm/include
+        -DTENZOR_HAS_MIOPEN
+        -DTENZOR_HAS_ROCBLAS
+        -DTENZOR_ROCM_BACKEND
+        -DUSE_PROF_API=1
+        -D__HIP_PLATFORM_AMD__=1
+        -Dtenzor_backend_rocm_EXPORTS
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/rocm_backend.cpp
+    COMMENT "Compiling rocm_backend.cpp (pure C++, no HIP flags)"
+    VERBATIM
+)
+
+# Create ROCm backend shared library using the manually compiled object
+add_library(tenzor_backend_rocm SHARED ${ROCM_BACKEND_OBJ})
 
 # Set target properties
 set_target_properties(tenzor_backend_rocm PROPERTIES
@@ -27,68 +128,120 @@ set_target_properties(tenzor_backend_rocm PROPERTIES
     SOVERSION 1
     OUTPUT_NAME "tenzor_backend_rocm"
     PREFIX ""  # Remove 'lib' prefix on Unix
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+    POSITION_INDEPENDENT_CODE ON
+    LINKER_LANGUAGE HIP
 )
 
 # Include directories
 target_include_directories(tenzor_backend_rocm PRIVATE
     ${CMAKE_SOURCE_DIR}/include
+    ${HIP_INCLUDE_DIRS}
+    ${ROCM_PATH}/include
+    /opt/rocm/include
 )
 
-# Link against core library and HIP
+# Link against core library, HIP kernels, and HIP runtime
 target_link_libraries(tenzor_backend_rocm PRIVATE
     tenzor_core
+    tenzor_rocm_kernels
+    hip::device
     hip::host
+    $<TARGET_NAME_IF_EXISTS:hip::amdhip64>
 )
 
-# Link rocBLAS if available
+# Link rocBLAS if available (equivalent to cuBLAS)
 if(rocblas_FOUND)
     target_link_libraries(tenzor_backend_rocm PRIVATE roc::rocblas)
     target_compile_definitions(tenzor_backend_rocm PRIVATE TENZOR_HAS_ROCBLAS)
     message(STATUS "ROCm Backend: rocBLAS support enabled")
+else()
+    message(STATUS "ROCm Backend: rocBLAS not found")
 endif()
 
-# Find MIOpen (ROCm's DNN library)
-find_package(MIOpen QUIET)
+# Link hipRAND if available (equivalent to cuRAND)
+if(hiprand_FOUND)
+    target_link_libraries(tenzor_backend_rocm PRIVATE hip::hiprand)
+    target_compile_definitions(tenzor_backend_rocm PRIVATE TENZOR_HAS_HIPRAND)
+    message(STATUS "ROCm Backend: hipRAND support enabled")
+else()
+    message(STATUS "ROCm Backend: hipRAND not found")
+endif()
+
+# Find MIOpen (ROCm's DNN library - equivalent to cuDNN)
+find_package(MIOpen QUIET CONFIG PATHS /opt/rocm)
 if(MIOpen_FOUND)
+    target_include_directories(tenzor_backend_rocm PRIVATE ${MIOpen_INCLUDE_DIRS})
     target_link_libraries(tenzor_backend_rocm PRIVATE MIOpen)
     target_compile_definitions(tenzor_backend_rocm PRIVATE TENZOR_HAS_MIOPEN)
     message(STATUS "ROCm Backend: MIOpen support enabled")
 else()
-    message(STATUS "ROCm Backend: MIOpen not found, using built-in kernels")
+    message(STATUS "ROCm Backend: MIOpen not found, using built-in convolution kernels")
 endif()
 
-# HIP architecture flags
-# Common AMD GPU architectures:
-# gfx900 = Vega (MI25), gfx906 = Vega 7nm (MI50/MI60), gfx908 = CDNA (MI100)
-# gfx90a = CDNA2 (MI200 series), gfx940 = CDNA3 (MI300)
-if(NOT DEFINED CMAKE_HIP_ARCHITECTURES)
-    set(CMAKE_HIP_ARCHITECTURES "gfx900;gfx906;gfx908;gfx90a;gfx940")
-    message(STATUS "ROCm Backend: Building for architectures: ${CMAKE_HIP_ARCHITECTURES}")
-else()
-    message(STATUS "ROCm Backend: Using user-specified architectures: ${CMAKE_HIP_ARCHITECTURES}")
-endif()
-
-# Set HIP architectures
-set_target_properties(tenzor_backend_rocm PROPERTIES
-    HIP_ARCHITECTURES "${CMAKE_HIP_ARCHITECTURES}"
+# C++ backend definitions (HIP definitions are on the kernels library)
+target_compile_definitions(tenzor_backend_rocm PRIVATE
+    TENZOR_ROCM_BACKEND
 )
 
-# Compiler options
-target_compile_options(tenzor_backend_rocm PRIVATE
-    -ffast-math
+# Override compile options to force C++ compilation (override any -x hip flags)
+# This is necessary because CMake's HIP language support adds HIP flags globally
+set_source_files_properties(rocm_backend.cpp PROPERTIES
+    COMPILE_FLAGS "-x c++"
 )
 
-# Installation
+# Installation rules
 install(TARGETS tenzor_backend_rocm
     LIBRARY DESTINATION lib/tenzor/backends
     RUNTIME DESTINATION bin
+    ARCHIVE DESTINATION lib/tenzor/backends
 )
 
+# Install header files for ROCm backend if they exist
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/rocm_fp16.hpp")
+    install(FILES rocm_fp16.hpp
+        DESTINATION include/tenzor/backends/rocm
+    )
+endif()
+
+# Summary message
 message(STATUS "ROCm Backend: Configured successfully")
+if(DEFINED HIP_VERSION)
+    message(STATUS "  HIP Version: ${HIP_VERSION}")
+endif()
 message(STATUS "  HIP Architectures: ${CMAKE_HIP_ARCHITECTURES}")
+message(STATUS "  Sources:")
+message(STATUS "    - rocm_caching_allocator.hip.cpp (HIP-optimized memory allocator)")
+message(STATUS "  Kernel Sources:")
+message(STATUS "    - math.hip.cpp (element-wise operations, broadcasting)")
+message(STATUS "    - activations.hip.cpp (ReLU, sigmoid, tanh, GELU, etc.)")
+message(STATUS "    - batchnorm.hip.cpp (BatchNorm, LayerNorm, GroupNorm)")
+message(STATUS "    - conv2d.hip.cpp (convolution with im2col/col2im)")
+message(STATUS "    - pooling.hip.cpp (MaxPool, AvgPool, adaptive)")
+message(STATUS "    - indexing.hip.cpp (gather, scatter, masked ops)")
+message(STATUS "    - transform.hip.cpp (reshape, transpose, permute, cat)")
+message(STATUS "    - fused_ops.hip.cpp (fused operations for optimization)")
+message(STATUS "    - reduction.hip.cpp (sum, mean, max, min reductions)")
+message(STATUS "  Note: Matmul/GEMM operations use rocBLAS library")
 if(rocblas_FOUND)
     message(STATUS "  rocBLAS: Enabled")
+else()
+    message(STATUS "  rocBLAS: Not found")
+endif()
+if(hiprand_FOUND)
+    message(STATUS "  hipRAND: Enabled")
+else()
+    message(STATUS "  hipRAND: Not found")
 endif()
 if(MIOpen_FOUND)
-    message(STATUS "  MIOpen: Enabled")
+    if(DEFINED MIOpen_VERSION)
+        message(STATUS "  MIOpen: ${MIOpen_VERSION}")
+    else()
+        message(STATUS "  MIOpen: Enabled")
+    endif()
+else()
+    message(STATUS "  MIOpen: Not found")
 endif()
+message(STATUS "  NOTE: To compile for your specific GPU, set CMAKE_HIP_ARCHITECTURES")
+message(STATUS "        Example: cmake -DCMAKE_HIP_ARCHITECTURES=\"gfx906;gfx908\"")

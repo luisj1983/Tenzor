@@ -511,8 +511,22 @@ auto Conv2d::forward(const Variable& input) -> Variable {
     int64_t out_h = calculate_output_size(height, kernel_size_, stride_, padding_, dilation_);
     int64_t out_w = calculate_output_size(width, kernel_size_, stride_, padding_, dilation_);
 
+    // Validate output dimensions to prevent memory allocation errors
+    if (out_h <= 0 || out_w <= 0) {
+        throw std::invalid_argument(
+            "Invalid Conv2d configuration: output dimensions are non-positive (out_h=" +
+            std::to_string(out_h) + ", out_w=" + std::to_string(out_w) + "). " +
+            "Input size=" + std::to_string(height) + "x" + std::to_string(width) +
+            ", kernel_size=" + std::to_string(kernel_size_) +
+            ", stride=" + std::to_string(stride_) +
+            ", padding=" + std::to_string(padding_) +
+            ", dilation=" + std::to_string(dilation_) +
+            ". Try reducing kernel_size, dilation, or increasing input size/padding."
+        );
+    }
+
     // Get weight from parameters
-    Variable& weight = parameters_["weight"];
+    auto& weight = *parameters_["weight"];
 
     // Get weight shape information
     auto weight_shape = weight.tensor().shape();
@@ -636,7 +650,7 @@ auto Conv2d::forward(const Variable& input) -> Variable {
     // Add bias if present
     auto bias_it = parameters_.find("bias");
     if (bias_it != parameters_.end()) {
-        Variable& bias = bias_it->second;
+        auto& bias = *bias_it->second;
 
         // Get bias on CPU if we're using GPU
         Tensor bias_work = use_gpu ? bias.tensor().to(Device::cpu()) : bias.tensor();
@@ -674,7 +688,7 @@ auto Conv2d::forward(const Variable& input) -> Variable {
         // Prepare tensors to save
         std::vector<Tensor> tensors_to_save;
         if (bias_it != parameters_.end()) {
-            Variable& bias = bias_it->second;
+            auto& bias = *bias_it->second;
             tensors_to_save = {input.tensor(), weight.tensor(), bias.tensor()};
         } else {
             tensors_to_save = {input.tensor(), weight.tensor()};
@@ -687,16 +701,16 @@ auto Conv2d::forward(const Variable& input) -> Variable {
 
         result.set_grad_fn(backward_fn);
 
-        // Track input variables for gradient accumulation
-        std::vector<Variable*> input_vars;
+        // Track input variables for gradient accumulation using pointers
+        std::vector<Variable> input_vars;
         if (input.requires_grad()) {
-            input_vars.push_back(const_cast<Variable*>(&input));
+            input_vars.push_back(input);
         }
         if (weight.requires_grad()) {
-            input_vars.push_back(&weight);
+            input_vars.push_back(*parameters_["weight"]);
         }
-        if (bias_it != parameters_.end() && bias_it->second.requires_grad()) {
-            input_vars.push_back(&(bias_it->second));
+        if (bias_it != parameters_.end() && bias_it->second->requires_grad()) {
+            input_vars.push_back(*bias_it->second);
         }
         backward_fn->set_input_variables(input_vars);
 
@@ -720,13 +734,13 @@ auto Conv2d::reset_parameters() -> void {
     // Reinitialize weight by creating a new Variable
     std::vector<int64_t> weight_shape = {out_channels_, in_channels_ / groups_, kernel_size_, kernel_size_};
     auto new_weight_tensor = randn(weight_shape) * std;
-    parameters_["weight"] = Variable(new_weight_tensor, true);
+    parameters_["weight"] = std::make_shared<Variable>(new_weight_tensor, true);
 
     // Initialize bias with zeros
     auto bias_it = parameters_.find("bias");
     if (bias_it != parameters_.end()) {
         std::vector<int64_t> bias_shape = {out_channels_};
-        bias_it->second = Variable(zeros(bias_shape), true);
+        bias_it->second = std::make_shared<Variable>(zeros(bias_shape), true);
     }
 }
 
@@ -1059,6 +1073,19 @@ auto Conv1d::forward(const Variable& input) -> Variable {
     // Calculate output length: L_out = floor((L + 2*padding - dilation*(kernel_size-1) - 1) / stride + 1)
     int64_t length_out = calculate_output_size(length, kernel_size_, stride_, padding_, dilation_);
 
+    // Validate output size to prevent memory allocation errors
+    if (length_out <= 0) {
+        throw std::invalid_argument(
+            "Invalid Conv1d configuration: output length is non-positive (" +
+            std::to_string(length_out) + "). Input length=" + std::to_string(length) +
+            ", kernel_size=" + std::to_string(kernel_size_) +
+            ", stride=" + std::to_string(stride_) +
+            ", padding=" + std::to_string(padding_) +
+            ", dilation=" + std::to_string(dilation_) +
+            ". Try reducing kernel_size, dilation, or increasing input length/padding."
+        );
+    }
+
     // Strategy: Use Conv2d internally by treating 1D as 2D with height=1
     // Reshape input from [batch, channels, length] to [batch, channels, 1, length]
     auto input_4d = input.tensor().reshape({batch, in_channels, 1, length});
@@ -1073,7 +1100,7 @@ auto Conv1d::forward(const Variable& input) -> Variable {
     bool use_gpu = (original_device.type == Device::Type::CUDA);
 
     Tensor input_work = use_gpu ? input_4d.to(Device::cpu()) : input_4d;
-    Variable& weight = parameters_["weight"];
+    auto& weight = *parameters_["weight"];
     Tensor weight_work = use_gpu ? weight.tensor().to(Device::cpu()) : weight.tensor();
 
     auto weight_shape = weight.tensor().shape();
@@ -1158,8 +1185,9 @@ auto Conv1d::forward(const Variable& input) -> Variable {
     }
 
     // Add bias if present
-    if (parameters_.find("bias") != parameters_.end()) {
-        Variable& bias = parameters_["bias"];
+    auto bias_it = parameters_.find("bias");
+    if (bias_it != parameters_.end()) {
+        auto& bias = *bias_it->second;
         Tensor bias_work = use_gpu ? bias.tensor().to(Device::cpu()) : bias.tensor();
         float* out_data = output_work.data<float>();
         const float* bias_data = bias_work.data<float>();
@@ -1186,8 +1214,9 @@ auto Conv1d::forward(const Variable& input) -> Variable {
 
     if (input.requires_grad() || weight.requires_grad()) {
         std::vector<Tensor> tensors_to_save;
-        if (parameters_.find("bias") != parameters_.end()) {
-            tensors_to_save = {input.tensor(), weight.tensor(), parameters_["bias"].tensor()};
+        if (bias_it != parameters_.end()) {
+            auto& bias = *bias_it->second;
+            tensors_to_save = {input.tensor(), weight.tensor(), bias.tensor()};
         } else {
             tensors_to_save = {input.tensor(), weight.tensor()};
         }
@@ -1198,15 +1227,16 @@ auto Conv1d::forward(const Variable& input) -> Variable {
 
         result.set_grad_fn(backward_fn);
 
-        std::vector<Variable*> input_vars;
+        // Track input variables for gradient accumulation using pointers
+        std::vector<Variable> input_vars;
         if (input.requires_grad()) {
-            input_vars.push_back(const_cast<Variable*>(&input));
+            input_vars.push_back(input);
         }
         if (weight.requires_grad()) {
-            input_vars.push_back(&weight);
+            input_vars.push_back(*parameters_["weight"]);
         }
-        if (parameters_.find("bias") != parameters_.end() && parameters_["bias"].requires_grad()) {
-            input_vars.push_back(&parameters_["bias"]);
+        if (bias_it != parameters_.end() && bias_it->second->requires_grad()) {
+            input_vars.push_back(*bias_it->second);
         }
         backward_fn->set_input_variables(input_vars);
 
@@ -1227,13 +1257,14 @@ auto Conv1d::reset_parameters() -> void {
 
     std::vector<int64_t> weight_shape = {out_channels_, in_channels_ / groups_, kernel_size_};
     auto new_weight_tensor = randn(weight_shape) * std;
-    parameters_["weight"] = Variable(new_weight_tensor, true);
+    parameters_["weight"] = std::make_shared<Variable>(new_weight_tensor, true);
 
-    if (parameters_.find("bias") != parameters_.end()) {
+    auto bias_it = parameters_.find("bias");
+    if (bias_it != parameters_.end()) {
         float bound = 1.0f / std::sqrt(static_cast<float>(fan_in));
         std::vector<int64_t> bias_shape = {out_channels_};
         auto new_bias_tensor = (randn(bias_shape) * 2.0f * bound) - bound;
-        parameters_["bias"] = Variable(new_bias_tensor, true);
+        bias_it->second = std::make_shared<Variable>(new_bias_tensor, true);
     }
 }
 
@@ -1606,6 +1637,20 @@ auto ConvTranspose2d::forward(const Variable& input) -> Variable {
     int64_t height_out = (height_in - 1) * stride_ - 2 * padding_ + kernel_size_ + output_padding_;
     int64_t width_out = (width_in - 1) * stride_ - 2 * padding_ + kernel_size_ + output_padding_;
 
+    // Validate output dimensions to prevent memory allocation errors
+    if (height_out <= 0 || width_out <= 0) {
+        throw std::invalid_argument(
+            "Invalid ConvTranspose2d configuration: output dimensions are non-positive (out_h=" +
+            std::to_string(height_out) + ", out_w=" + std::to_string(width_out) + "). " +
+            "Input size=" + std::to_string(height_in) + "x" + std::to_string(width_in) +
+            ", kernel_size=" + std::to_string(kernel_size_) +
+            ", stride=" + std::to_string(stride_) +
+            ", padding=" + std::to_string(padding_) +
+            ", output_padding=" + std::to_string(output_padding_) +
+            ". Check your layer configuration."
+        );
+    }
+
     Device original_device = input.tensor().device();
     bool use_gpu = (original_device.type == Device::Type::CUDA);
 
@@ -1723,8 +1768,9 @@ auto ConvTranspose2d::forward(const Variable& input) -> Variable {
     }
 
     // Add bias if present
-    if (parameters_.find("bias") != parameters_.end()) {
-        Variable& bias = parameters_["bias"];
+    auto bias_it = parameters_.find("bias");
+    if (bias_it != parameters_.end()) {
+        auto& bias = *bias_it->second;
         Tensor bias_work = use_gpu ? bias.tensor().to(Device::cpu()) : bias.tensor();
         float* out_data = output_work.data<float>();
         const float* bias_data = bias_work.data<float>();
@@ -1767,15 +1813,19 @@ auto ConvTranspose2d::forward(const Variable& input) -> Variable {
 
         result.set_grad_fn(backward_fn);
 
-        std::vector<Variable*> input_vars;
+        // Track input variables for gradient accumulation
+        std::vector<Variable> input_vars;
         if (input.requires_grad()) {
-            input_vars.push_back(const_cast<Variable*>(&input));
+            input_vars.push_back(input);
         }
         if (weight_.requires_grad()) {
-            input_vars.push_back(&weight_);
+            input_vars.push_back(*parameters_["weight"]);
         }
-        if (bias_ && bias_->requires_grad()) {
-            input_vars.push_back(&(*bias_));
+        if (bias_) {
+            auto bias_it = parameters_.find("bias");
+            if (bias_it != parameters_.end() && bias_it->second->requires_grad()) {
+                input_vars.push_back(*bias_it->second);
+            }
         }
         backward_fn->set_input_variables(input_vars);
 
@@ -1797,14 +1847,14 @@ auto ConvTranspose2d::reset_parameters() -> void {
     std::vector<int64_t> weight_shape = {in_channels_, out_channels_ / groups_, kernel_size_, kernel_size_};
     auto new_weight_tensor = randn(weight_shape) * std;
     weight_ = Variable(new_weight_tensor, true);
-    parameters_["weight"] = weight_;
+    parameters_["weight"] = std::make_shared<Variable>(weight_);
 
     if (bias_) {
         float bound = 1.0f / std::sqrt(static_cast<float>(fan_in));
         std::vector<int64_t> bias_shape = {out_channels_};
         auto new_bias_tensor = (randn(bias_shape) * 2.0f * bound) - bound;
         *bias_ = Variable(new_bias_tensor, true);
-        parameters_["bias"] = *bias_;
+        parameters_["bias"] = std::make_shared<Variable>(*bias_);
     }
 }
 

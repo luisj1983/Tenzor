@@ -12,9 +12,9 @@
 namespace tenzor {
 namespace optim {
 
-Adadelta::Adadelta(std::vector<Variable*> params,
+Adadelta::Adadelta(std::vector<std::shared_ptr<Variable>> params,
                    double lr, double rho, double eps, double weight_decay)
-    : Optimizer(params),
+    : Optimizer(std::move(params)),
       lr_(lr),
       rho_(rho),
       eps_(eps),
@@ -40,7 +40,8 @@ auto Adadelta::initialize_buffers() -> void {
     square_avg_.clear();
     acc_delta_.clear();
 
-    for (auto* param : parameters_) {
+    for (auto& param : parameters_) {
+        if (!param) continue;
         const auto& param_data = param->tensor();
 
         // Initialize E[g^2] to zeros
@@ -53,9 +54,9 @@ auto Adadelta::initialize_buffers() -> void {
 
 auto Adadelta::step() -> void {
     for (size_t i = 0; i < parameters_.size(); ++i) {
-        auto* param = parameters_[i];
+        auto& param = parameters_[i];
 
-        if (!param->has_grad()) {
+        if (!param || !param->has_grad()) {
             continue;  // Skip parameters without gradients
         }
 

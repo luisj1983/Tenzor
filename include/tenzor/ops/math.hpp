@@ -153,6 +153,58 @@ auto clamp_min(const Tensor& input, float min) -> Tensor;
 auto clamp_max(const Tensor& input, float max) -> Tensor;
 
 /// @}
+/// @name Comparison Operations
+/// @{
+
+/**
+ * @brief Element-wise equality comparison.
+ * @param a First tensor
+ * @param b Second tensor (must be broadcastable with a)
+ * @return Boolean tensor with true where a == b
+ */
+auto eq(const Tensor& a, const Tensor& b) -> Tensor;
+
+/**
+ * @brief Element-wise inequality comparison.
+ * @param a First tensor
+ * @param b Second tensor (must be broadcastable with a)
+ * @return Boolean tensor with true where a != b
+ */
+auto ne(const Tensor& a, const Tensor& b) -> Tensor;
+
+/**
+ * @brief Element-wise less-than comparison.
+ * @param a First tensor
+ * @param b Second tensor (must be broadcastable with a)
+ * @return Boolean tensor with true where a < b
+ */
+auto lt(const Tensor& a, const Tensor& b) -> Tensor;
+
+/**
+ * @brief Element-wise less-than-or-equal comparison.
+ * @param a First tensor
+ * @param b Second tensor (must be broadcastable with a)
+ * @return Boolean tensor with true where a <= b
+ */
+auto le(const Tensor& a, const Tensor& b) -> Tensor;
+
+/**
+ * @brief Element-wise greater-than comparison.
+ * @param a First tensor
+ * @param b Second tensor (must be broadcastable with a)
+ * @return Boolean tensor with true where a > b
+ */
+auto gt(const Tensor& a, const Tensor& b) -> Tensor;
+
+/**
+ * @brief Element-wise greater-than-or-equal comparison.
+ * @param a First tensor
+ * @param b Second tensor (must be broadcastable with a)
+ * @return Boolean tensor with true where a >= b
+ */
+auto ge(const Tensor& a, const Tensor& b) -> Tensor;
+
+/// @}
 /** @} */ // end of tensor_math group
 
 } // namespace tenzor

@@ -238,32 +238,39 @@ auto LayerNorm::forward(const Variable& input) -> Variable {
 
         // Set next functions to chain backward pass
         std::vector<std::shared_ptr<Function>> next_funcs;
-        next_funcs.push_back(input.grad_fn());  // nullptr if input is leaf
+        // Only add grad_fn if it exists (not null)
+        if (auto input_grad_fn = input.grad_fn()) {
+            next_funcs.push_back(input_grad_fn);
+        }
         if (elementwise_affine_) {
             auto weight_it = parameters_.find("weight");
             auto bias_it = parameters_.find("bias");
-            if (weight_it != parameters_.end() && weight_it->second.requires_grad()) {
-                next_funcs.push_back(weight_it->second.grad_fn());
+            if (weight_it != parameters_.end() && weight_it->second->requires_grad()) {
+                if (auto weight_grad_fn = weight_it->second->grad_fn()) {
+                    next_funcs.push_back(weight_grad_fn);
+                }
             }
-            if (bias_it != parameters_.end() && bias_it->second.requires_grad()) {
-                next_funcs.push_back(bias_it->second.grad_fn());
+            if (bias_it != parameters_.end() && bias_it->second->requires_grad()) {
+                if (auto bias_grad_fn = bias_it->second->grad_fn()) {
+                    next_funcs.push_back(bias_grad_fn);
+                }
             }
         }
         grad_fn->set_next_functions(next_funcs);
 
         // Track input variables
-        std::vector<Variable*> input_vars;
+        std::vector<Variable> input_vars;
         if (input.requires_grad()) {
-            input_vars.push_back(const_cast<Variable*>(&input));
+            input_vars.push_back(input);
         }
         if (elementwise_affine_) {
             auto weight_it = parameters_.find("weight");
             auto bias_it = parameters_.find("bias");
-            if (weight_it != parameters_.end() && weight_it->second.requires_grad()) {
-                input_vars.push_back(&(weight_it->second));
+            if (weight_it != parameters_.end() && weight_it->second->requires_grad()) {
+                input_vars.push_back(*weight_it->second);
             }
-            if (bias_it != parameters_.end() && bias_it->second.requires_grad()) {
-                input_vars.push_back(&(bias_it->second));
+            if (bias_it != parameters_.end() && bias_it->second->requires_grad()) {
+                input_vars.push_back(*bias_it->second);
             }
         }
         grad_fn->set_input_variables(input_vars);
@@ -549,32 +556,39 @@ auto GroupNorm::forward(const Variable& input) -> Variable {
 
         // Set next functions to chain backward pass
         std::vector<std::shared_ptr<Function>> next_funcs;
-        next_funcs.push_back(input.grad_fn());  // nullptr if input is leaf
+        // Only add grad_fn if it exists (not null)
+        if (auto input_grad_fn = input.grad_fn()) {
+            next_funcs.push_back(input_grad_fn);
+        }
         if (affine_) {
             auto weight_it = parameters_.find("weight");
             auto bias_it = parameters_.find("bias");
-            if (weight_it != parameters_.end() && weight_it->second.requires_grad()) {
-                next_funcs.push_back(weight_it->second.grad_fn());
+            if (weight_it != parameters_.end() && weight_it->second->requires_grad()) {
+                if (auto weight_grad_fn = weight_it->second->grad_fn()) {
+                    next_funcs.push_back(weight_grad_fn);
+                }
             }
-            if (bias_it != parameters_.end() && bias_it->second.requires_grad()) {
-                next_funcs.push_back(bias_it->second.grad_fn());
+            if (bias_it != parameters_.end() && bias_it->second->requires_grad()) {
+                if (auto bias_grad_fn = bias_it->second->grad_fn()) {
+                    next_funcs.push_back(bias_grad_fn);
+                }
             }
         }
         grad_fn->set_next_functions(next_funcs);
 
         // Track input variables
-        std::vector<Variable*> input_vars;
+        std::vector<Variable> input_vars;
         if (input.requires_grad()) {
-            input_vars.push_back(const_cast<Variable*>(&input));
+            input_vars.push_back(input);
         }
         if (affine_) {
             auto weight_it = parameters_.find("weight");
             auto bias_it = parameters_.find("bias");
-            if (weight_it != parameters_.end() && weight_it->second.requires_grad()) {
-                input_vars.push_back(&(weight_it->second));
+            if (weight_it != parameters_.end() && weight_it->second->requires_grad()) {
+                input_vars.push_back(*weight_it->second);
             }
-            if (bias_it != parameters_.end() && bias_it->second.requires_grad()) {
-                input_vars.push_back(&(bias_it->second));
+            if (bias_it != parameters_.end() && bias_it->second->requires_grad()) {
+                input_vars.push_back(*bias_it->second);
             }
         }
         grad_fn->set_input_variables(input_vars);

@@ -195,7 +195,7 @@ auto EmbeddingBag::forward(const Variable& input, const Variable& offsets) -> Va
     // Check if offsets is empty/uninitialized
     bool offsets_empty = false;
     try {
-        offsets_empty = (offsets.tensor().numel() == 0);
+        offsets_empty = (!offsets.is_initialized() || offsets.tensor().numel() == 0);
     } catch (...) {
         // Variable not initialized, treat as empty
         offsets_empty = true;
@@ -224,7 +224,7 @@ auto EmbeddingBag::aggregate_embeddings(const Variable& embeddings, const Variab
     int64_t embedding_dim = emb_shape[1];
 
     // If no offsets, aggregate all embeddings into single vector
-    if (offsets.tensor().numel() == 0) {
+    if (!offsets.is_initialized() || offsets.tensor().numel() == 0) {
         auto output = zeros({1, embedding_dim});
         auto output_ptr = output.data<float>();
 

@@ -82,9 +82,9 @@ public:
     /**
      * @brief Get weight parameter.
      *
-     * @return Const reference to weight variable
+     * @return Const reference to shared_ptr to weight variable
      */
-    auto weight() const -> const Variable& { return parameters_.at("weight"); }
+    auto weight() const -> const std::shared_ptr<Variable>& { return parameters_.at("weight"); }
 
     /**
      * @brief Check if layer has bias.
@@ -94,12 +94,12 @@ public:
     /**
      * @brief Get bias parameter (if present).
      *
-     * @return Pointer to bias variable, or nullptr if no bias
+     * @return Shared pointer to bias variable, or nullptr if no bias
      */
-    auto bias() const -> const Variable* {
+    auto bias() const -> std::shared_ptr<Variable> {
         if (!has_bias_) return nullptr;
         auto it = parameters_.find("bias");
-        return (it != parameters_.end()) ? &it->second : nullptr;
+        return (it != parameters_.end()) ? it->second : nullptr;
     }
 
 private:

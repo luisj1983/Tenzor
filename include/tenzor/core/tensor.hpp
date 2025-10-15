@@ -44,6 +44,9 @@ namespace cuda {
     auto unsqueeze_kernel(const tenzor::Tensor& input, int64_t dim) -> tenzor::Tensor;
     auto contiguous_kernel(const tenzor::Tensor& input) -> tenzor::Tensor;
 }
+namespace rocm {
+    class HIPKernelAccess;  // Forward declaration for friend access
+}
 
 /**
  * @brief Multi-dimensional array with automatic differentiation support.
@@ -217,7 +220,7 @@ public:
      * ptr[0] = 1.0f;
      * @endcode
      */
-    template<typename T> requires ScalarType<T>
+    template<typename T>
     auto data() -> T*;
 
     /**
@@ -227,7 +230,7 @@ public:
      * @return Const pointer to first element
      * @throws std::runtime_error if type doesn't match dtype
      */
-    template<typename T> requires ScalarType<T>
+    template<typename T>
     auto data() const -> const T*;
 
     /**
@@ -614,6 +617,22 @@ public:
      */
     auto operator>(const Tensor& other) const -> Tensor;
 
+    /**
+     * @brief Element-wise less-than-or-equal comparison.
+     *
+     * @param other Tensor to compare
+     * @return Boolean tensor with comparison results
+     */
+    auto operator<=(const Tensor& other) const -> Tensor;
+
+    /**
+     * @brief Element-wise greater-than-or-equal comparison.
+     *
+     * @param other Tensor to compare
+     * @return Boolean tensor with comparison results
+     */
+    auto operator>=(const Tensor& other) const -> Tensor;
+
     // ============================================================================
     // Memory Management
     // ============================================================================
@@ -721,6 +740,7 @@ private:
 
     friend class Variable;
     friend class cuda::CUDAKernelAccess;  // Allow CUDA kernels to access impl_
+    friend class rocm::HIPKernelAccess;   // Allow ROCm/HIP kernels to access impl_
 
     // Friend declarations for backend kernels that need direct access to impl_
     friend auto cpu::clone_kernel(const Tensor& input) -> Tensor;

@@ -113,7 +113,7 @@ public:
      * @param initial_accumulator_value Starting value for gradient accumulator
      * @param eps Epsilon for numerical stability
      */
-    Adagrad(std::vector<Variable*> params,
+    Adagrad(std::vector<std::shared_ptr<Variable>> params,
             double lr = 1e-2,
             double lr_decay = 0.0,
             double weight_decay = 0.0,

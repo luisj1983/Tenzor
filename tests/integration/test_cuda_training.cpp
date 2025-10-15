@@ -301,7 +301,7 @@ TEST(CUDATrainingTest, SimpleCNN_MNIST) {
 
         // Check gradients were computed
         bool has_gradients = true;
-        for (auto* param : params) {
+        for (const auto& param : params) {
             if (param->requires_grad() && !param->has_grad()) {
                 has_gradients = false;
                 break;
@@ -369,7 +369,7 @@ TEST(CUDATrainingTest, MLP_GPU) {
     loss.backward();  // Scalar loss - no gradient argument needed
 
     // Verify gradients
-    for (auto* param : params) {
+    for (const auto& param : params) {
         if (param->requires_grad()) {
             EXPECT_TRUE(param->has_grad()) << "Parameter missing gradient";
         }
@@ -635,7 +635,7 @@ TEST(CUDATrainingTest, GradientFlowVerification) {
     int params_with_grad = 0;
     int total_params = 0;
 
-    for (auto* param : params) {
+    for (const auto& param : params) {
         if (param->requires_grad()) {
             total_params++;
             if (param->has_grad()) {
@@ -647,7 +647,7 @@ TEST(CUDATrainingTest, GradientFlowVerification) {
 
                 // Transfer to CPU before accessing data
                 auto grad_cpu = grad_data.to(Device::cpu());
-                const float* grad_ptr = grad_cpu.template data<float>();
+                const float* grad_ptr = grad_cpu.data<float>();
                 for (size_t i = 0; i < std::min(static_cast<size_t>(10), static_cast<size_t>(grad_cpu.numel())); i++) {
                     if (std::abs(grad_ptr[i]) > 1e-8) {
                         has_nonzero = true;

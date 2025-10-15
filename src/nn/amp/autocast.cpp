@@ -1,0 +1,167 @@
+/**
+ * @file autocast.cpp
+ * @brief Implementation of automatic mixed precision context manager
+ */
+
+#include "tenzor/nn/amp/autocast.hpp"
+#include <unordered_set>
+#include <algorithm>
+
+namespace tenzor {
+namespace nn {
+namespace amp {
+
+// Thread-local state initialization
+thread_local bool Autocast::enabled_ = false;
+thread_local std::optional<DType> Autocast::dtype_ = std::nullopt;
+thread_local std::optional<Device::Type> Autocast::device_type_ = std::nullopt;
+
+// Operations that benefit from lower precision (compute-heavy)
+static const std::unordered_set<std::string> COMPUTE_HEAVY_OPS = {
+    "matmul",
+    "mm",
+    "bmm",
+    "addmm",
+    "baddbmm",
+    "conv1d",
+    "conv2d",
+    "conv3d",
+    "conv_transpose1d",
+    "conv_transpose2d",
+    "conv_transpose3d",
+    "linear",
+    "gru",
+    "lstm",
+    "rnn",
+    "transformer"
+};
+
+// Operations that need higher precision for numerical stability
+static const std::unordered_set<std::string> STABILITY_CRITICAL_OPS = {
+    "softmax",
+    "log_softmax",
+    "cross_entropy",
+    "nll_loss",
+    "batch_norm",
+    "layer_norm",
+    "group_norm",
+    "instance_norm",
+    "normalize",
+    "sum",
+    "mean",
+    "var",
+    "std",
+    "prod",
+    "cumsum",
+    "cumprod",
+    "amax",
+    "amin",
+    "argmax",
+    "argmin"
+};
+
+Autocast::Autocast(bool enabled, DType dtype, Device::Type device_type)
+    : prev_enabled_(enabled_)
+    , prev_dtype_(dtype_)
+    , prev_device_type_(device_type_) {
+
+    // Validate dtype
+    if (enabled && dtype != DType::Float16 && dtype != DType::BFloat16) {
+        throw std::invalid_argument(
+            "Autocast: dtype must be Float16 or BFloat16"
+        );
+    }
+
+    // Set new state
+    enabled_ = enabled;
+    if (enabled) {
+        dtype_ = dtype;
+        device_type_ = device_type;
+    } else {
+        dtype_ = std::nullopt;
+        device_type_ = std::nullopt;
+    }
+}
+
+Autocast::~Autocast() {
+    // Restore previous state
+    enabled_ = prev_enabled_;
+    dtype_ = prev_dtype_;
+    device_type_ = prev_device_type_;
+}
+
+auto Autocast::is_enabled() -> bool {
+    return enabled_;
+}
+
+auto Autocast::get_dtype() -> std::optional<DType> {
+    return dtype_;
+}
+
+auto Autocast::get_device_type() -> std::optional<Device::Type> {
+    return device_type_;
+}
+
+auto Autocast::should_autocast(const std::string& op_name, const Device& device) -> bool {
+    // Autocast must be enabled
+    if (!enabled_) {
+        return false;
+    }
+
+    // Check if device matches
+    if (device_type_.has_value() && device.type != device_type_.value()) {
+        return false;
+    }
+
+    // Don't autocast CPU operations by default (no Tensor Core benefit)
+    if (device.type == Device::Type::CPU &&
+        (!device_type_.has_value() || device_type_.value() != Device::Type::CPU)) {
+        return false;
+    }
+
+    // Stability-critical operations should not be autocast
+    if (is_stability_critical_op(op_name)) {
+        return false;
+    }
+
+    // Compute-heavy operations should be autocast
+    if (is_compute_heavy_op(op_name)) {
+        return true;
+    }
+
+    // By default, don't autocast other operations
+    return false;
+}
+
+auto Autocast::get_autocast_dtype(const std::string& op_name, DType input_dtype) -> DType {
+    if (!enabled_ || !dtype_.has_value()) {
+        return input_dtype;
+    }
+
+    // If input is already in lower precision, keep it
+    if (input_dtype == DType::Float16 || input_dtype == DType::BFloat16) {
+        return input_dtype;
+    }
+
+    // If input is Float32 or Float64, autocast to target dtype
+    if (input_dtype == DType::Float32 || input_dtype == DType::Float64) {
+        if (should_autocast(op_name, Device::cuda(0))) {
+            return dtype_.value();
+        }
+    }
+
+    // For other dtypes (integers, etc.), keep original
+    return input_dtype;
+}
+
+auto Autocast::is_compute_heavy_op(const std::string& op_name) -> bool {
+    return COMPUTE_HEAVY_OPS.find(op_name) != COMPUTE_HEAVY_OPS.end();
+}
+
+auto Autocast::is_stability_critical_op(const std::string& op_name) -> bool {
+    return STABILITY_CRITICAL_OPS.find(op_name) != STABILITY_CRITICAL_OPS.end();
+}
+
+} // namespace amp
+} // namespace nn
+} // namespace tenzor

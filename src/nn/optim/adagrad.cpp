@@ -12,10 +12,10 @@
 namespace tenzor {
 namespace optim {
 
-Adagrad::Adagrad(std::vector<Variable*> params,
+Adagrad::Adagrad(std::vector<std::shared_ptr<Variable>> params,
                  double lr, double lr_decay, double weight_decay,
                  double initial_accumulator_value, double eps)
-    : Optimizer(params),
+    : Optimizer(std::move(params)),
       lr_(lr),
       lr_decay_(lr_decay),
       weight_decay_(weight_decay),
@@ -45,7 +45,8 @@ Adagrad::Adagrad(std::vector<Variable*> params,
 auto Adagrad::initialize_buffers() -> void {
     sum_.clear();
 
-    for (auto* param : parameters_) {
+    for (auto& param : parameters_) {
+        if (!param) continue;
         const auto& param_data = param->tensor();
 
         // Initialize accumulator G_0
@@ -77,9 +78,9 @@ auto Adagrad::step() -> void {
     double current_lr = effective_lr();
 
     for (size_t i = 0; i < parameters_.size(); ++i) {
-        auto* param = parameters_[i];
+        auto& param = parameters_[i];
 
-        if (!param->has_grad()) {
+        if (!param || !param->has_grad()) {
             continue;  // Skip parameters without gradients
         }
 

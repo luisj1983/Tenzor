@@ -24,6 +24,14 @@ namespace cpu {
     auto max_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
     auto min_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
 
+    // Comparison operations
+    auto eq_kernel(const Tensor& a, const Tensor& b) -> Tensor;
+    auto ne_kernel(const Tensor& a, const Tensor& b) -> Tensor;
+    auto lt_kernel(const Tensor& a, const Tensor& b) -> Tensor;
+    auto le_kernel(const Tensor& a, const Tensor& b) -> Tensor;
+    auto gt_kernel(const Tensor& a, const Tensor& b) -> Tensor;
+    auto ge_kernel(const Tensor& a, const Tensor& b) -> Tensor;
+
     // Activation kernels
     auto relu_kernel(const Tensor& input) -> Tensor;
     auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Tensor;
@@ -841,6 +849,42 @@ public:
                 eps = std::stof(attrs.at("eps"));
             }
             return {cpu::fused_layer_norm_kernel(inputs[0], normalized_shape, inputs[1], inputs[2], eps)};
+        }
+        else if (op_name == "eq") {
+            if (inputs.size() != 2) {
+                throw std::invalid_argument("eq operation requires exactly 2 inputs");
+            }
+            return {cpu::eq_kernel(inputs[0], inputs[1])};
+        }
+        else if (op_name == "ne") {
+            if (inputs.size() != 2) {
+                throw std::invalid_argument("ne operation requires exactly 2 inputs");
+            }
+            return {cpu::ne_kernel(inputs[0], inputs[1])};
+        }
+        else if (op_name == "lt") {
+            if (inputs.size() != 2) {
+                throw std::invalid_argument("lt operation requires exactly 2 inputs");
+            }
+            return {cpu::lt_kernel(inputs[0], inputs[1])};
+        }
+        else if (op_name == "le") {
+            if (inputs.size() != 2) {
+                throw std::invalid_argument("le operation requires exactly 2 inputs");
+            }
+            return {cpu::le_kernel(inputs[0], inputs[1])};
+        }
+        else if (op_name == "gt") {
+            if (inputs.size() != 2) {
+                throw std::invalid_argument("gt operation requires exactly 2 inputs");
+            }
+            return {cpu::gt_kernel(inputs[0], inputs[1])};
+        }
+        else if (op_name == "ge") {
+            if (inputs.size() != 2) {
+                throw std::invalid_argument("ge operation requires exactly 2 inputs");
+            }
+            return {cpu::ge_kernel(inputs[0], inputs[1])};
         }
         else {
             throw std::runtime_error("CPUBackend: Unknown operation '" + op_name + "'");

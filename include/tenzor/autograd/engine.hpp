@@ -67,6 +67,7 @@ public:
      *
      * @param root Root variable to compute gradients from
      * @param gradient Optional gradient tensor (required for non-scalar root)
+     * @param retain_graph If true, keep computation graph for multiple backward passes
      *
      * @throws std::runtime_error if gradient is required but not provided
      *
@@ -75,11 +76,11 @@ public:
      * Variable y = x * 2.0f;
      * Variable loss = y.sum();  // Scalar
      *
-     * backward_engine().execute(loss, std::nullopt);
+     * backward_engine().execute(loss, std::nullopt, false);
      * // x.grad() now contains computed gradients
      * @endcode
      */
-    auto execute(Variable& root, std::optional<Tensor> gradient) -> void;
+    auto execute(Variable& root, std::optional<Tensor> gradient, bool retain_graph = false) -> void;
 
     /**
      * @brief Execute backward pass for multiple roots.

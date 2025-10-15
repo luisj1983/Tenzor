@@ -235,12 +235,32 @@ target_link_libraries(test_chunk PRIVATE
     GTest::gtest_main
 )
 
+# Split operation tests
+add_executable(test_split_operation
+    test_split_operation.cpp
+)
+
+target_link_libraries(test_split_operation PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
 # GradScaler (AMP) tests
 add_executable(test_grad_scaler
     unit/test_grad_scaler.cpp
 )
 
 target_link_libraries(test_grad_scaler PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+# Autocast tests
+add_executable(test_autocast
+    unit/test_autocast.cpp
+)
+
+target_link_libraries(test_autocast PRIVATE
     tenzor_core
     GTest::gtest_main
 )
@@ -261,6 +281,16 @@ add_executable(test_fp16
 )
 
 target_link_libraries(test_fp16 PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+# DType conversion tests
+add_executable(test_dtype_conversion
+    test_dtype_conversion.cpp
+)
+
+target_link_libraries(test_dtype_conversion PRIVATE
     tenzor_core
     GTest::gtest_main
 )
@@ -351,6 +381,26 @@ if(TENZOR_BUILD_CUDA)
         ${CUDAToolkit_INCLUDE_DIRS}
     )
 
+    # DataParallel single-GPU tests (comprehensive)
+    add_executable(test_data_parallel_single_gpu
+        unit/test_data_parallel_single_gpu.cpp
+    )
+
+    target_link_libraries(test_data_parallel_single_gpu PRIVATE
+        tenzor_core
+        tenzor_backend_cuda
+        GTest::gtest_main
+        CUDA::cudart
+    )
+
+    target_include_directories(test_data_parallel_single_gpu PRIVATE
+        ${CUDAToolkit_INCLUDE_DIRS}
+    )
+
+    target_compile_definitions(test_data_parallel_single_gpu PRIVATE
+        TENZOR_USE_CUDA
+    )
+
     # CUDA kernel tests
     add_executable(test_cuda_kernels
         backends/test_cuda_kernels.cpp
@@ -386,6 +436,44 @@ if(TENZOR_BUILD_CUDA)
     )
 
     set_target_properties(test_cuda_training PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+    )
+
+    # CUDA concatenation tests
+    add_executable(test_cuda_cat
+        test_cuda_cat.cpp
+    )
+
+    target_link_libraries(test_cuda_cat PRIVATE
+        tenzor_core
+        CUDA::cudart
+    )
+
+    target_include_directories(test_cuda_cat PRIVATE
+        ${CUDAToolkit_INCLUDE_DIRS}
+    )
+
+    set_target_properties(test_cuda_cat PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON
+    )
+
+    # FP16/BF16 kernel tests
+    add_executable(test_fp16_kernels
+        backends/test_fp16_kernels.cpp
+    )
+
+    target_link_libraries(test_fp16_kernels PRIVATE
+        tenzor_core
+        tenzor_backend_cuda
+        GTest::gtest_main
+        CUDA::cudart
+    )
+
+    target_include_directories(test_fp16_kernels PRIVATE
+        ${CUDAToolkit_INCLUDE_DIRS}
+    )
+
+    set_target_properties(test_fp16_kernels PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
     )
 endif()
@@ -463,36 +551,40 @@ endif()
 # )
 
 # Register tests with CTest
+# Note: Using longer discovery timeout (30 seconds) because ROCm backend initialization can be slow
 include(GoogleTest)
-gtest_discover_tests(tenzor_unit_tests)
-gtest_discover_tests(tenzor_integration_tests)
-gtest_discover_tests(test_dropout)
-gtest_discover_tests(test_batchnorm2d)
-gtest_discover_tests(test_conv2d)
-gtest_discover_tests(test_pooling)
-gtest_discover_tests(test_conv1d)
-# gtest_discover_tests(test_convtranspose2d)
-gtest_discover_tests(test_schedulers)
-gtest_discover_tests(test_normalization)
-gtest_discover_tests(test_serialization)
-gtest_discover_tests(test_embedding)
-gtest_discover_tests(test_optimizers_extended)
-gtest_discover_tests(test_schedulers_advanced)
-gtest_discover_tests(test_losses_advanced)
-gtest_discover_tests(test_rnn)
-gtest_discover_tests(test_lstm)
-gtest_discover_tests(test_gru)
-gtest_discover_tests(test_attention)
-gtest_discover_tests(test_transformer)
-gtest_discover_tests(test_chunk)
-gtest_discover_tests(test_bmm_autograd)
-gtest_discover_tests(test_grad_scaler)
-gtest_discover_tests(test_dataloader)
-gtest_discover_tests(test_fp16)
-gtest_discover_tests(test_gradient_checkpoint)
-gtest_discover_tests(test_model_checkpoint)
+gtest_discover_tests(tenzor_unit_tests DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(tenzor_integration_tests DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_dropout DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_batchnorm2d DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_conv2d DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_pooling DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_conv1d DISCOVERY_TIMEOUT 30)
+# gtest_discover_tests(test_convtranspose2d DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_schedulers DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_normalization DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_serialization DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_embedding DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_optimizers_extended DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_schedulers_advanced DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_losses_advanced DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_rnn DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_lstm DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_gru DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_attention DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_transformer DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_chunk DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_split_operation DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_bmm_autograd DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_grad_scaler DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_autocast DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_dataloader DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_fp16 DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_dtype_conversion DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_gradient_checkpoint DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_model_checkpoint DISCOVERY_TIMEOUT 30)
 
-gtest_discover_tests(test_fused_ops)
+gtest_discover_tests(test_fused_ops DISCOVERY_TIMEOUT 30)
 
 # SIMD operations tests
 add_executable(test_simd_ops
@@ -504,7 +596,19 @@ target_link_libraries(test_simd_ops PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_simd_ops)
+gtest_discover_tests(test_simd_ops DISCOVERY_TIMEOUT 30)
+
+# Comparison operators tests
+add_executable(test_comparison_operators
+    test_comparison_operators.cpp
+)
+
+target_link_libraries(test_comparison_operators PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_comparison_operators DISCOVERY_TIMEOUT 30)
 
 # Benchmark suite
 add_executable(benchmark_suite
@@ -525,10 +629,46 @@ target_link_libraries(debug_dataloader PRIVATE
 )
 
 if(TENZOR_BUILD_CUDA)
-    gtest_discover_tests(test_cuda_kernels)
-    gtest_discover_tests(test_cuda_training)
-    gtest_discover_tests(test_caching_allocator)
-    gtest_discover_tests(test_data_parallel)
+    gtest_discover_tests(test_cuda_kernels DISCOVERY_TIMEOUT 30)
+    gtest_discover_tests(test_cuda_training DISCOVERY_TIMEOUT 30)
+    gtest_discover_tests(test_caching_allocator DISCOVERY_TIMEOUT 30)
+    gtest_discover_tests(test_data_parallel DISCOVERY_TIMEOUT 30)
+    gtest_discover_tests(test_data_parallel_single_gpu DISCOVERY_TIMEOUT 30)
+    gtest_discover_tests(test_fp16_kernels DISCOVERY_TIMEOUT 30)
+endif()
+
+# ROCm-specific tests
+if(TENZOR_BUILD_ROCM)
+    find_package(hip REQUIRED)
+
+    # ROCm backend tests
+    add_executable(test_rocm_backend
+        backends/test_rocm_backend.cpp
+    )
+
+    target_link_libraries(test_rocm_backend PRIVATE
+        tenzor_core
+        GTest::gtest_main
+    )
+
+    # ROCm kernel tests (comprehensive)
+    add_executable(test_rocm_kernels
+        backends/test_rocm_kernels.cpp
+    )
+
+    target_link_libraries(test_rocm_kernels PRIVATE
+        tenzor_core
+        GTest::gtest_main
+        hip::host
+    )
+
+    target_include_directories(test_rocm_kernels PRIVATE
+        ${ROCM_PATH}/include
+    )
+
+    # ROCm initialization can be slow, use 60 second timeout
+    gtest_discover_tests(test_rocm_backend DISCOVERY_TIMEOUT 60)
+    gtest_discover_tests(test_rocm_kernels DISCOVERY_TIMEOUT 60)
 endif()
 # Debug tests commented out - tmp files not tracked in git
 # add_executable(debug_multi_linear ../tests/tmp/debug_multi_linear.cpp)
@@ -556,3 +696,10 @@ endif()
 add_executable(test_checkpoint_leaf_fix test_checkpoint_leaf_fix.cpp)
 target_link_libraries(test_checkpoint_leaf_fix tenzor_core)
 target_include_directories(test_checkpoint_leaf_fix PRIVATE ${PROJECT_SOURCE_DIR}/include)
+
+# Manual KLDiv debug test
+add_executable(test_kldiv_manual test_kldiv_manual.cpp)
+target_link_libraries(test_kldiv_manual PRIVATE tenzor_core GTest::gtest_main)
+add_test(NAME KLDivManual.StepByStepBackward COMMAND test_kldiv_manual --gtest_filter=KLDivManual.StepByStepBackward)
+add_test(NAME KLDivManual.SimpleSubtract COMMAND test_kldiv_manual --gtest_filter=KLDivManual.SimpleSubtract)
+add_test(NAME KLDivManual.SimpleMultiply COMMAND test_kldiv_manual --gtest_filter=KLDivManual.SimpleMultiply)

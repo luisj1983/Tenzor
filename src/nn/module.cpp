@@ -5,22 +5,22 @@
 
 namespace tenzor::nn {
 
-auto Module::parameters() -> std::vector<Variable*> {
-    std::vector<Variable*> params;
+auto Module::parameters() -> std::vector<std::shared_ptr<Variable>> {
+    std::vector<std::shared_ptr<Variable>> params;
 
     // Add own parameters in a consistent order (weight before bias)
     // This ensures tests can rely on params[0] being weight
     if (parameters_.find("weight") != parameters_.end()) {
-        params.push_back(&parameters_["weight"]);
+        params.push_back(parameters_["weight"]);
     }
     if (parameters_.find("bias") != parameters_.end()) {
-        params.push_back(&parameters_["bias"]);
+        params.push_back(parameters_["bias"]);
     }
 
     // Add any other parameters not named "weight" or "bias"
     for (auto& [name, param] : parameters_) {
         if (name != "weight" && name != "bias") {
-            params.push_back(&param);
+            params.push_back(param);
         }
     }
 
@@ -33,11 +33,11 @@ auto Module::parameters() -> std::vector<Variable*> {
     return params;
 }
 
-auto Module::named_parameters() -> std::vector<std::pair<std::string, Variable*>> {
-    std::vector<std::pair<std::string, Variable*>> params;
+auto Module::named_parameters() -> std::vector<std::pair<std::string, std::shared_ptr<Variable>>> {
+    std::vector<std::pair<std::string, std::shared_ptr<Variable>>> params;
 
     for (auto& [name, param] : parameters_) {
-        params.emplace_back(name, &param);
+        params.emplace_back(name, param);
     }
 
     for (auto& [name, module] : submodules_) {
@@ -64,12 +64,12 @@ auto Module::eval() -> void {
 auto Module::to(Device device) -> void {
     // Transfer parameters
     for (auto& [_, param] : parameters_) {
-        param.tensor() = param.tensor().to(device);
+        param->tensor() = param->tensor().to(device);
     }
 
     // Transfer buffers (running_mean, running_var, etc.)
     for (auto& [_, buffer] : buffers_) {
-        buffer.tensor() = buffer.tensor().to(device);
+        buffer->tensor() = buffer->tensor().to(device);
     }
 
     // Recursively transfer submodules
@@ -87,28 +87,32 @@ auto Module::cpu() -> void {
 }
 
 auto Module::zero_grad() -> void {
-    for (auto* param : parameters()) {
-        param->zero_grad();
+    for (auto& param : parameters()) {
+        if (param) {
+            param->zero_grad();
+        }
     }
 }
 
 auto Module::register_parameter(std::string name, Variable param) -> void {
-    parameters_[std::move(name)] = std::move(param);
+    // Wrap Variable in shared_ptr for stable address (prevents dangling pointers in autograd)
+    parameters_[std::move(name)] = std::make_shared<Variable>(std::move(param));
 }
 
 auto Module::register_buffer(std::string name, Variable buffer) -> void {
-    buffers_[std::move(name)] = std::move(buffer);
+    // Wrap Variable in shared_ptr for stable address
+    buffers_[std::move(name)] = std::make_shared<Variable>(std::move(buffer));
 }
 
 auto Module::register_module(std::string name, std::shared_ptr<Module> module) -> void {
     submodules_[std::move(name)] = std::move(module);
 }
 
-auto Module::buffers() -> std::vector<Variable*> {
-    std::vector<Variable*> bufs;
+auto Module::buffers() -> std::vector<std::shared_ptr<Variable>> {
+    std::vector<std::shared_ptr<Variable>> bufs;
 
     for (auto& [name, buffer] : buffers_) {
-        bufs.push_back(&buffer);
+        bufs.push_back(buffer);
     }
 
     for (auto& [name, module] : submodules_) {
@@ -119,11 +123,11 @@ auto Module::buffers() -> std::vector<Variable*> {
     return bufs;
 }
 
-auto Module::named_buffers() -> std::vector<std::pair<std::string, Variable*>> {
-    std::vector<std::pair<std::string, Variable*>> bufs;
+auto Module::named_buffers() -> std::vector<std::pair<std::string, std::shared_ptr<Variable>>> {
+    std::vector<std::pair<std::string, std::shared_ptr<Variable>>> bufs;
 
     for (auto& [name, buffer] : buffers_) {
-        bufs.emplace_back(name, &buffer);
+        bufs.emplace_back(name, buffer);
     }
 
     for (auto& [name, module] : submodules_) {
@@ -141,12 +145,12 @@ auto Module::state_dict() const -> std::unordered_map<std::string, Tensor> {
 
     // Add own parameters
     for (const auto& [name, param] : parameters_) {
-        state[name] = param.tensor().clone();
+        state[name] = param->tensor().clone();
     }
 
     // Add own buffers
     for (const auto& [name, buffer] : buffers_) {
-        state[name] = buffer.tensor().clone();
+        state[name] = buffer->tensor().clone();
     }
 
     // Add submodule state with prefixed names
@@ -167,16 +171,16 @@ auto Module::load_state_dict(const std::unordered_map<std::string, Tensor>& stat
         if (it != state.end()) {
             // Verify shapes match
             const auto& loaded_tensor = it->second;
-            if (param.tensor().shape().size() != loaded_tensor.shape().size() ||
-                !std::equal(param.tensor().shape().begin(), param.tensor().shape().end(),
+            if (param->tensor().shape().size() != loaded_tensor.shape().size() ||
+                !std::equal(param->tensor().shape().begin(), param->tensor().shape().end(),
                            loaded_tensor.shape().begin())) {
                 throw std::runtime_error("Shape mismatch for parameter '" + name + "'");
             }
-            if (param.tensor().dtype() != loaded_tensor.dtype()) {
+            if (param->tensor().dtype() != loaded_tensor.dtype()) {
                 throw std::runtime_error("DType mismatch for parameter '" + name + "'");
             }
             // Copy data
-            param.tensor() = loaded_tensor.clone();
+            param->tensor() = loaded_tensor.clone();
         }
     }
 
@@ -185,15 +189,15 @@ auto Module::load_state_dict(const std::unordered_map<std::string, Tensor>& stat
         auto it = state.find(name);
         if (it != state.end()) {
             const auto& loaded_tensor = it->second;
-            if (buffer.tensor().shape().size() != loaded_tensor.shape().size() ||
-                !std::equal(buffer.tensor().shape().begin(), buffer.tensor().shape().end(),
+            if (buffer->tensor().shape().size() != loaded_tensor.shape().size() ||
+                !std::equal(buffer->tensor().shape().begin(), buffer->tensor().shape().end(),
                            loaded_tensor.shape().begin())) {
                 throw std::runtime_error("Shape mismatch for buffer '" + name + "'");
             }
-            if (buffer.tensor().dtype() != loaded_tensor.dtype()) {
+            if (buffer->tensor().dtype() != loaded_tensor.dtype()) {
                 throw std::runtime_error("DType mismatch for buffer '" + name + "'");
             }
-            buffer.tensor() = loaded_tensor.clone();
+            buffer->tensor() = loaded_tensor.clone();
         }
     }
 
@@ -243,8 +247,8 @@ auto Sequential::forward(const Variable& input) -> Variable {
     return output;
 }
 
-auto Sequential::parameters() -> std::vector<Variable*> {
-    std::vector<Variable*> params;
+auto Sequential::parameters() -> std::vector<std::shared_ptr<Variable>> {
+    std::vector<std::shared_ptr<Variable>> params;
     // Iterate over modules_ in order (not submodules_ which is unordered)
     for (auto& module : modules_) {
         auto sub_params = module->parameters();
@@ -253,8 +257,8 @@ auto Sequential::parameters() -> std::vector<Variable*> {
     return params;
 }
 
-auto Sequential::named_parameters() -> std::vector<std::pair<std::string, Variable*>> {
-    std::vector<std::pair<std::string, Variable*>> params;
+auto Sequential::named_parameters() -> std::vector<std::pair<std::string, std::shared_ptr<Variable>>> {
+    std::vector<std::pair<std::string, std::shared_ptr<Variable>>> params;
     // Use module index to generate names in order
     for (size_t i = 0; i < modules_.size(); ++i) {
         std::string prefix = "module_" + std::to_string(i);

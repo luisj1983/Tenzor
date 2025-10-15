@@ -1679,5 +1679,400 @@ auto sign_kernel(const Tensor& input) -> Tensor {
     return result;
 }
 
+
+// ============================================================================
+// Comparison Operations
+// ============================================================================
+
+// Equal kernel - element-wise equality comparison
+auto eq_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+    detail::validate_elementwise(a, b);
+
+    auto shape_a = a.shape();
+    auto shape_b = b.shape();
+    std::vector<int64_t> shape_a_vec(shape_a.begin(), shape_a.end());
+    std::vector<int64_t> shape_b_vec(shape_b.begin(), shape_b.end());
+
+    std::vector<int64_t> output_shape = detail::compute_broadcast_shape(shape_a_vec, shape_b_vec);
+    Tensor result(output_shape, DType::Bool, a.device());
+
+    if (detail::have_same_shape(a, b)) {
+        size_t n = static_cast<size_t>(a.numel());
+        bool* c_data = result.data<bool>();
+
+        if (a.dtype() == DType::Float32) {
+            const float* a_data = a.data<float>();
+            const float* b_data = b.data<float>();
+            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] == b_data[i]); }
+        } else if (a.dtype() == DType::Float64) {
+            const double* a_data = a.data<double>();
+            const double* b_data = b.data<double>();
+            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] == b_data[i]); }
+        } else if (a.dtype() == DType::Int32) {
+            const int32_t* a_data = a.data<int32_t>();
+            const int32_t* b_data = b.data<int32_t>();
+            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] == b_data[i]); }
+        } else if (a.dtype() == DType::Int64) {
+            const int64_t* a_data = a.data<int64_t>();
+            const int64_t* b_data = b.data<int64_t>();
+            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] == b_data[i]); }
+        } else {
+            throw std::runtime_error("Unsupported dtype for eq operation");
+        }
+    } else {
+        bool* c_data = result.data<bool>();
+        if (a.dtype() == DType::Float32) {
+            const float* a_data = a.data<float>();
+            const float* b_data = b.data<float>();
+            detail::broadcast_op<float, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](float x, float y) { return x == y; });
+        } else if (a.dtype() == DType::Float64) {
+            const double* a_data = a.data<double>();
+            const double* b_data = b.data<double>();
+            detail::broadcast_op<double, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](double x, double y) { return x == y; });
+        } else if (a.dtype() == DType::Int32) {
+            const int32_t* a_data = a.data<int32_t>();
+            const int32_t* b_data = b.data<int32_t>();
+            detail::broadcast_op<int32_t, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](int32_t x, int32_t y) { return x == y; });
+        } else if (a.dtype() == DType::Int64) {
+            const int64_t* a_data = a.data<int64_t>();
+            const int64_t* b_data = b.data<int64_t>();
+            detail::broadcast_op<int64_t, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](int64_t x, int64_t y) { return x == y; });
+        } else {
+            throw std::runtime_error("Unsupported dtype for eq operation");
+        }
+    }
+
+    return result;
+}
+
+// Not equal kernel
+auto ne_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+    detail::validate_elementwise(a, b);
+
+    auto shape_a = a.shape();
+    auto shape_b = b.shape();
+    std::vector<int64_t> shape_a_vec(shape_a.begin(), shape_a.end());
+    std::vector<int64_t> shape_b_vec(shape_b.begin(), shape_b.end());
+
+    std::vector<int64_t> output_shape = detail::compute_broadcast_shape(shape_a_vec, shape_b_vec);
+    Tensor result(output_shape, DType::Bool, a.device());
+
+    if (detail::have_same_shape(a, b)) {
+        size_t n = static_cast<size_t>(a.numel());
+        bool* c_data = result.data<bool>();
+
+        if (a.dtype() == DType::Float32) {
+            const float* a_data = a.data<float>();
+            const float* b_data = b.data<float>();
+            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] != b_data[i]); }
+        } else if (a.dtype() == DType::Float64) {
+            const double* a_data = a.data<double>();
+            const double* b_data = b.data<double>();
+            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] != b_data[i]); }
+        } else if (a.dtype() == DType::Int32) {
+            const int32_t* a_data = a.data<int32_t>();
+            const int32_t* b_data = b.data<int32_t>();
+            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] != b_data[i]); }
+        } else if (a.dtype() == DType::Int64) {
+            const int64_t* a_data = a.data<int64_t>();
+            const int64_t* b_data = b.data<int64_t>();
+            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] != b_data[i]); }
+        } else {
+            throw std::runtime_error("Unsupported dtype for ne operation");
+        }
+    } else {
+        bool* c_data = result.data<bool>();
+        if (a.dtype() == DType::Float32) {
+            const float* a_data = a.data<float>();
+            const float* b_data = b.data<float>();
+            detail::broadcast_op<float, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](float x, float y) { return x != y; });
+        } else if (a.dtype() == DType::Float64) {
+            const double* a_data = a.data<double>();
+            const double* b_data = b.data<double>();
+            detail::broadcast_op<double, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](double x, double y) { return x != y; });
+        } else if (a.dtype() == DType::Int32) {
+            const int32_t* a_data = a.data<int32_t>();
+            const int32_t* b_data = b.data<int32_t>();
+            detail::broadcast_op<int32_t, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](int32_t x, int32_t y) { return x != y; });
+        } else if (a.dtype() == DType::Int64) {
+            const int64_t* a_data = a.data<int64_t>();
+            const int64_t* b_data = b.data<int64_t>();
+            detail::broadcast_op<int64_t, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](int64_t x, int64_t y) { return x != y; });
+        } else {
+            throw std::runtime_error("Unsupported dtype for ne operation");
+        }
+    }
+
+    return result;
+}
+
+// Less than kernel
+auto lt_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+    detail::validate_elementwise(a, b);
+
+    auto shape_a = a.shape();
+    auto shape_b = b.shape();
+    std::vector<int64_t> shape_a_vec(shape_a.begin(), shape_a.end());
+    std::vector<int64_t> shape_b_vec(shape_b.begin(), shape_b.end());
+
+    std::vector<int64_t> output_shape = detail::compute_broadcast_shape(shape_a_vec, shape_b_vec);
+    Tensor result(output_shape, DType::Bool, a.device());
+
+    if (detail::have_same_shape(a, b)) {
+        size_t n = static_cast<size_t>(a.numel());
+        bool* c_data = result.data<bool>();
+
+        if (a.dtype() == DType::Float32) {
+            const float* a_data = a.data<float>();
+            const float* b_data = b.data<float>();
+            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] < b_data[i]); }
+        } else if (a.dtype() == DType::Float64) {
+            const double* a_data = a.data<double>();
+            const double* b_data = b.data<double>();
+            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] < b_data[i]); }
+        } else if (a.dtype() == DType::Int32) {
+            const int32_t* a_data = a.data<int32_t>();
+            const int32_t* b_data = b.data<int32_t>();
+            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] < b_data[i]); }
+        } else if (a.dtype() == DType::Int64) {
+            const int64_t* a_data = a.data<int64_t>();
+            const int64_t* b_data = b.data<int64_t>();
+            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] < b_data[i]); }
+        } else {
+            throw std::runtime_error("Unsupported dtype for lt operation");
+        }
+    } else {
+        bool* c_data = result.data<bool>();
+        if (a.dtype() == DType::Float32) {
+            const float* a_data = a.data<float>();
+            const float* b_data = b.data<float>();
+            detail::broadcast_op<float, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](float x, float y) { return x < y; });
+        } else if (a.dtype() == DType::Float64) {
+            const double* a_data = a.data<double>();
+            const double* b_data = b.data<double>();
+            detail::broadcast_op<double, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](double x, double y) { return x < y; });
+        } else if (a.dtype() == DType::Int32) {
+            const int32_t* a_data = a.data<int32_t>();
+            const int32_t* b_data = b.data<int32_t>();
+            detail::broadcast_op<int32_t, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](int32_t x, int32_t y) { return x < y; });
+        } else if (a.dtype() == DType::Int64) {
+            const int64_t* a_data = a.data<int64_t>();
+            const int64_t* b_data = b.data<int64_t>();
+            detail::broadcast_op<int64_t, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](int64_t x, int64_t y) { return x < y; });
+        } else {
+            throw std::runtime_error("Unsupported dtype for lt operation");
+        }
+    }
+
+    return result;
+}
+
+// Less than or equal kernel
+auto le_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+    detail::validate_elementwise(a, b);
+
+    auto shape_a = a.shape();
+    auto shape_b = b.shape();
+    std::vector<int64_t> shape_a_vec(shape_a.begin(), shape_a.end());
+    std::vector<int64_t> shape_b_vec(shape_b.begin(), shape_b.end());
+
+    std::vector<int64_t> output_shape = detail::compute_broadcast_shape(shape_a_vec, shape_b_vec);
+    Tensor result(output_shape, DType::Bool, a.device());
+
+    if (detail::have_same_shape(a, b)) {
+        size_t n = static_cast<size_t>(a.numel());
+        bool* c_data = result.data<bool>();
+
+        if (a.dtype() == DType::Float32) {
+            const float* a_data = a.data<float>();
+            const float* b_data = b.data<float>();
+            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] <= b_data[i]); }
+        } else if (a.dtype() == DType::Float64) {
+            const double* a_data = a.data<double>();
+            const double* b_data = b.data<double>();
+            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] <= b_data[i]); }
+        } else if (a.dtype() == DType::Int32) {
+            const int32_t* a_data = a.data<int32_t>();
+            const int32_t* b_data = b.data<int32_t>();
+            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] <= b_data[i]); }
+        } else if (a.dtype() == DType::Int64) {
+            const int64_t* a_data = a.data<int64_t>();
+            const int64_t* b_data = b.data<int64_t>();
+            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] <= b_data[i]); }
+        } else {
+            throw std::runtime_error("Unsupported dtype for le operation");
+        }
+    } else {
+        bool* c_data = result.data<bool>();
+        if (a.dtype() == DType::Float32) {
+            const float* a_data = a.data<float>();
+            const float* b_data = b.data<float>();
+            detail::broadcast_op<float, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](float x, float y) { return x <= y; });
+        } else if (a.dtype() == DType::Float64) {
+            const double* a_data = a.data<double>();
+            const double* b_data = b.data<double>();
+            detail::broadcast_op<double, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](double x, double y) { return x <= y; });
+        } else if (a.dtype() == DType::Int32) {
+            const int32_t* a_data = a.data<int32_t>();
+            const int32_t* b_data = b.data<int32_t>();
+            detail::broadcast_op<int32_t, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](int32_t x, int32_t y) { return x <= y; });
+        } else if (a.dtype() == DType::Int64) {
+            const int64_t* a_data = a.data<int64_t>();
+            const int64_t* b_data = b.data<int64_t>();
+            detail::broadcast_op<int64_t, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](int64_t x, int64_t y) { return x <= y; });
+        } else {
+            throw std::runtime_error("Unsupported dtype for le operation");
+        }
+    }
+
+    return result;
+}
+
+// Greater than kernel
+auto gt_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+    detail::validate_elementwise(a, b);
+
+    auto shape_a = a.shape();
+    auto shape_b = b.shape();
+    std::vector<int64_t> shape_a_vec(shape_a.begin(), shape_a.end());
+    std::vector<int64_t> shape_b_vec(shape_b.begin(), shape_b.end());
+
+    std::vector<int64_t> output_shape = detail::compute_broadcast_shape(shape_a_vec, shape_b_vec);
+    Tensor result(output_shape, DType::Bool, a.device());
+
+    if (detail::have_same_shape(a, b)) {
+        size_t n = static_cast<size_t>(a.numel());
+        bool* c_data = result.data<bool>();
+
+        if (a.dtype() == DType::Float32) {
+            const float* a_data = a.data<float>();
+            const float* b_data = b.data<float>();
+            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] > b_data[i]); }
+        } else if (a.dtype() == DType::Float64) {
+            const double* a_data = a.data<double>();
+            const double* b_data = b.data<double>();
+            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] > b_data[i]); }
+        } else if (a.dtype() == DType::Int32) {
+            const int32_t* a_data = a.data<int32_t>();
+            const int32_t* b_data = b.data<int32_t>();
+            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] > b_data[i]); }
+        } else if (a.dtype() == DType::Int64) {
+            const int64_t* a_data = a.data<int64_t>();
+            const int64_t* b_data = b.data<int64_t>();
+            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] > b_data[i]); }
+        } else {
+            throw std::runtime_error("Unsupported dtype for gt operation");
+        }
+    } else {
+        bool* c_data = result.data<bool>();
+        if (a.dtype() == DType::Float32) {
+            const float* a_data = a.data<float>();
+            const float* b_data = b.data<float>();
+            detail::broadcast_op<float, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](float x, float y) { return x > y; });
+        } else if (a.dtype() == DType::Float64) {
+            const double* a_data = a.data<double>();
+            const double* b_data = b.data<double>();
+            detail::broadcast_op<double, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](double x, double y) { return x > y; });
+        } else if (a.dtype() == DType::Int32) {
+            const int32_t* a_data = a.data<int32_t>();
+            const int32_t* b_data = b.data<int32_t>();
+            detail::broadcast_op<int32_t, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](int32_t x, int32_t y) { return x > y; });
+        } else if (a.dtype() == DType::Int64) {
+            const int64_t* a_data = a.data<int64_t>();
+            const int64_t* b_data = b.data<int64_t>();
+            detail::broadcast_op<int64_t, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](int64_t x, int64_t y) { return x > y; });
+        } else {
+            throw std::runtime_error("Unsupported dtype for gt operation");
+        }
+    }
+
+    return result;
+}
+
+// Greater than or equal kernel
+auto ge_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+    detail::validate_elementwise(a, b);
+
+    auto shape_a = a.shape();
+    auto shape_b = b.shape();
+    std::vector<int64_t> shape_a_vec(shape_a.begin(), shape_a.end());
+    std::vector<int64_t> shape_b_vec(shape_b.begin(), shape_b.end());
+
+    std::vector<int64_t> output_shape = detail::compute_broadcast_shape(shape_a_vec, shape_b_vec);
+    Tensor result(output_shape, DType::Bool, a.device());
+
+    if (detail::have_same_shape(a, b)) {
+        size_t n = static_cast<size_t>(a.numel());
+        bool* c_data = result.data<bool>();
+
+        if (a.dtype() == DType::Float32) {
+            const float* a_data = a.data<float>();
+            const float* b_data = b.data<float>();
+            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] >= b_data[i]); }
+        } else if (a.dtype() == DType::Float64) {
+            const double* a_data = a.data<double>();
+            const double* b_data = b.data<double>();
+            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] >= b_data[i]); }
+        } else if (a.dtype() == DType::Int32) {
+            const int32_t* a_data = a.data<int32_t>();
+            const int32_t* b_data = b.data<int32_t>();
+            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] >= b_data[i]); }
+        } else if (a.dtype() == DType::Int64) {
+            const int64_t* a_data = a.data<int64_t>();
+            const int64_t* b_data = b.data<int64_t>();
+            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] >= b_data[i]); }
+        } else {
+            throw std::runtime_error("Unsupported dtype for ge operation");
+        }
+    } else {
+        bool* c_data = result.data<bool>();
+        if (a.dtype() == DType::Float32) {
+            const float* a_data = a.data<float>();
+            const float* b_data = b.data<float>();
+            detail::broadcast_op<float, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](float x, float y) { return x >= y; });
+        } else if (a.dtype() == DType::Float64) {
+            const double* a_data = a.data<double>();
+            const double* b_data = b.data<double>();
+            detail::broadcast_op<double, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](double x, double y) { return x >= y; });
+        } else if (a.dtype() == DType::Int32) {
+            const int32_t* a_data = a.data<int32_t>();
+            const int32_t* b_data = b.data<int32_t>();
+            detail::broadcast_op<int32_t, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](int32_t x, int32_t y) { return x >= y; });
+        } else if (a.dtype() == DType::Int64) {
+            const int64_t* a_data = a.data<int64_t>();
+            const int64_t* b_data = b.data<int64_t>();
+            detail::broadcast_op<int64_t, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](int64_t x, int64_t y) { return x >= y; });
+        } else {
+            throw std::runtime_error("Unsupported dtype for ge operation");
+        }
+    }
+
+    return result;
+}
+
 } // namespace cpu
 } // namespace tenzor

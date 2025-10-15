@@ -2,6 +2,9 @@
 #include "tenzor/core/dtype.hpp"
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
+#include <cuda_fp16.h>        // For __half
+#include <cuda_bf16.h>        // For __nv_bfloat16
+#include <mma.h>              // For Tensor Cores (WMMA)
 #include <stdexcept>
 #include <string>
 
@@ -24,6 +27,34 @@ namespace cuda {
                 std::string("CUDA error: ") + cudaGetErrorString(error));      \
         }                                                                      \
     } while (0)
+
+// ============================================================================
+// FP16/BF16 Conversion Utilities
+// ============================================================================
+
+// Convert Tenzor Float16 to CUDA __half
+__device__ __host__ inline __half to_cuda_half(const Float16& x) {
+    __half_raw raw;
+    raw.x = x.bits;
+    return raw;
+}
+
+// Convert CUDA __half to Tenzor Float16
+__device__ __host__ inline Float16 from_cuda_half(const __half& x) {
+    return Float16(__half_as_ushort(x));
+}
+
+// Convert Tenzor BFloat16 to CUDA __nv_bfloat16
+__device__ __host__ inline __nv_bfloat16 to_cuda_bfloat16(const BFloat16& x) {
+    __nv_bfloat16_raw raw;
+    raw.x = x.bits;
+    return raw;
+}
+
+// Convert CUDA __nv_bfloat16 to Tenzor BFloat16
+__device__ __host__ inline BFloat16 from_cuda_bfloat16(const __nv_bfloat16& x) {
+    return BFloat16(__bfloat16_as_ushort(x));
+}
 
 // ============================================================================
 // Tiled Matrix Multiplication Kernels
@@ -428,6 +459,276 @@ __global__ void batched_matmul_tiled_f64_kernel(
 }
 
 // ============================================================================
+// FP16 Tensor Core Matrix Multiplication (WMMA)
+// ============================================================================
+
+// WMMA dimensions for FP16 Tensor Cores
+constexpr int WMMA_M = 16;
+constexpr int WMMA_N = 16;
+constexpr int WMMA_K = 16;
+
+/**
+ * FP16 Tensor Core matmul using WMMA API
+ * Requires matrix dimensions to be multiples of 16
+ * Uses row-major layout for both input and output matrices
+ * Each warp computes one 16x16 output tile
+ */
+__global__ void matmul_tensor_core_f16_kernel(
+    const __half* __restrict__ A,
+    const __half* __restrict__ B,
+    __half* __restrict__ C,
+    int64_t M, int64_t N, int64_t K) {
+
+    using namespace nvcuda::wmma;
+
+    // Calculate warp position in output matrix
+    // Each block contains multiple warps arranged in 2D
+    const int warpM = (blockIdx.y * blockDim.y + threadIdx.y);
+    const int warpN = (blockIdx.x * blockDim.x + threadIdx.x);
+
+    // Check if this warp is within bounds
+    if (warpM * WMMA_M >= M || warpN * WMMA_N >= N) {
+        return;
+    }
+
+    // Declare WMMA fragments
+    fragment<matrix_a, WMMA_M, WMMA_N, WMMA_K, __half, row_major> a_frag;
+    fragment<matrix_b, WMMA_M, WMMA_N, WMMA_K, __half, row_major> b_frag;
+    fragment<accumulator, WMMA_M, WMMA_N, WMMA_K, __half> acc_frag;
+
+    // Initialize accumulator to zero
+    fill_fragment(acc_frag, __float2half(0.0f));
+
+    // Loop over K dimension in chunks of WMMA_K
+    for (int64_t k = 0; k < K; k += WMMA_K) {
+        // Bounds check for K dimension
+        if (k + WMMA_K <= K) {
+            // Calculate starting positions in A and B
+            const int64_t aRow = warpM * WMMA_M;
+            const int64_t aCol = k;
+            const int64_t bRow = k;
+            const int64_t bCol = warpN * WMMA_N;
+
+            // Load matrices from global memory into fragments
+            load_matrix_sync(a_frag, A + aRow * K + aCol, K);
+            load_matrix_sync(b_frag, B + bRow * N + bCol, N);
+
+            // Perform matrix multiply-accumulate using Tensor Cores
+            mma_sync(acc_frag, a_frag, b_frag, acc_frag);
+        } else {
+            // Handle edge case where K is not a multiple of WMMA_K
+            // Load partial tiles with bounds checking
+            const int64_t aRow = warpM * WMMA_M;
+            const int64_t aCol = k;
+            const int64_t bRow = k;
+            const int64_t bCol = warpN * WMMA_N;
+
+            // Create temporary padded tiles in shared memory
+            __shared__ __half As[WMMA_M][WMMA_K];
+            __shared__ __half Bs[WMMA_K][WMMA_N];
+
+            // Load with bounds checking
+            for (int i = threadIdx.y; i < WMMA_M; i += blockDim.y) {
+                for (int j = threadIdx.x; j < WMMA_K; j += blockDim.x) {
+                    const int64_t row = aRow + i;
+                    const int64_t col = aCol + j;
+                    As[i][j] = (row < M && col < K) ? A[row * K + col] : __float2half(0.0f);
+                }
+            }
+
+            for (int i = threadIdx.y; i < WMMA_K; i += blockDim.y) {
+                for (int j = threadIdx.x; j < WMMA_N; j += blockDim.x) {
+                    const int64_t row = bRow + i;
+                    const int64_t col = bCol + j;
+                    Bs[i][j] = (row < K && col < N) ? B[row * N + col] : __float2half(0.0f);
+                }
+            }
+
+            __syncthreads();
+
+            // Load from shared memory
+            load_matrix_sync(a_frag, &As[0][0], WMMA_K);
+            load_matrix_sync(b_frag, &Bs[0][0], WMMA_N);
+
+            // Perform matrix multiply-accumulate
+            mma_sync(acc_frag, a_frag, b_frag, acc_frag);
+
+            __syncthreads();
+        }
+    }
+
+    // Store result to global memory
+    const int64_t cRow = warpM * WMMA_M;
+    const int64_t cCol = warpN * WMMA_N;
+
+    if (cRow < M && cCol < N) {
+        // Check if we need bounds checking for the store
+        if (cRow + WMMA_M <= M && cCol + WMMA_N <= N) {
+            // Full tile can be stored directly
+            store_matrix_sync(C + cRow * N + cCol, acc_frag, N, mem_row_major);
+        } else {
+            // Partial tile - store to shared memory first, then copy with bounds checking
+            __shared__ __half Cs[WMMA_M][WMMA_N];
+            store_matrix_sync(&Cs[0][0], acc_frag, WMMA_N, mem_row_major);
+
+            __syncthreads();
+
+            for (int i = threadIdx.y; i < WMMA_M; i += blockDim.y) {
+                for (int j = threadIdx.x; j < WMMA_N; j += blockDim.x) {
+                    const int64_t row = cRow + i;
+                    const int64_t col = cCol + j;
+                    if (row < M && col < N) {
+                        C[row * N + col] = Cs[i][j];
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * FP16 fallback kernel for non-16-aligned dimensions
+ * Standard tiled matmul without Tensor Cores
+ */
+template<int TILE_M, int TILE_N, int TILE_K>
+__global__ void matmul_tiled_f16_kernel(
+    const __half* __restrict__ A,
+    const __half* __restrict__ B,
+    __half* __restrict__ C,
+    int64_t M, int64_t N, int64_t K,
+    int64_t lda, int64_t ldb, int64_t ldc) {
+
+    // Shared memory for tiles
+    __shared__ __half As[TILE_M][TILE_K];
+    __shared__ __half Bs[TILE_K][TILE_N];
+
+    // Thread indices
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+
+    // Block indices
+    int bx = blockIdx.x;
+    int by = blockIdx.y;
+
+    // Global row and column indices
+    int row = by * TILE_M + ty;
+    int col = bx * TILE_N + tx;
+
+    // Accumulator for the result
+    __half sum = __float2half(0.0f);
+
+    // Loop over tiles
+    int num_tiles = (K + TILE_K - 1) / TILE_K;
+
+    for (int t = 0; t < num_tiles; ++t) {
+        // Load tile of A into shared memory
+        if (tx < TILE_K) {
+            int a_col = t * TILE_K + tx;
+            if (row < M && a_col < K) {
+                As[ty][tx] = A[row * lda + a_col];
+            } else {
+                As[ty][tx] = __float2half(0.0f);
+            }
+        }
+
+        // Load tile of B into shared memory
+        if (ty < TILE_K) {
+            int b_row = t * TILE_K + ty;
+            if (b_row < K && col < N) {
+                Bs[ty][tx] = B[b_row * ldb + col];
+            } else {
+                Bs[ty][tx] = __float2half(0.0f);
+            }
+        }
+
+        // Synchronize to ensure tiles are loaded
+        __syncthreads();
+
+        // Compute partial dot product
+        #pragma unroll
+        for (int k = 0; k < TILE_K; ++k) {
+            sum = __hadd(sum, __hmul(As[ty][k], Bs[k][tx]));
+        }
+
+        // Synchronize before loading next tile
+        __syncthreads();
+    }
+
+    // Write result
+    if (row < M && col < N) {
+        C[row * ldc + col] = sum;
+    }
+}
+
+/**
+ * Batched FP16 Tensor Core matmul
+ */
+__global__ void batched_matmul_tensor_core_f16_kernel(
+    const __half* __restrict__ A,
+    const __half* __restrict__ B,
+    __half* __restrict__ C,
+    int64_t batch_size,
+    int64_t M, int64_t N, int64_t K,
+    int64_t stride_a, int64_t stride_b, int64_t stride_c) {
+
+    using namespace nvcuda::wmma;
+
+    // Batch index
+    const int batch_idx = blockIdx.z;
+
+    if (batch_idx >= batch_size) {
+        return;
+    }
+
+    // Offset pointers for this batch
+    const __half* A_batch = A + batch_idx * stride_a;
+    const __half* B_batch = B + batch_idx * stride_b;
+    __half* C_batch = C + batch_idx * stride_c;
+
+    // Calculate warp position in output matrix
+    const int warpM = (blockIdx.y * blockDim.y + threadIdx.y);
+    const int warpN = (blockIdx.x * blockDim.x + threadIdx.x);
+
+    // Check if this warp is within bounds
+    if (warpM * WMMA_M >= M || warpN * WMMA_N >= N) {
+        return;
+    }
+
+    // Declare WMMA fragments
+    fragment<matrix_a, WMMA_M, WMMA_N, WMMA_K, __half, row_major> a_frag;
+    fragment<matrix_b, WMMA_M, WMMA_N, WMMA_K, __half, row_major> b_frag;
+    fragment<accumulator, WMMA_M, WMMA_N, WMMA_K, __half> acc_frag;
+
+    // Initialize accumulator to zero
+    fill_fragment(acc_frag, __float2half(0.0f));
+
+    // Loop over K dimension in chunks of WMMA_K
+    for (int64_t k = 0; k < K; k += WMMA_K) {
+        if (k + WMMA_K <= K) {
+            const int64_t aRow = warpM * WMMA_M;
+            const int64_t aCol = k;
+            const int64_t bRow = k;
+            const int64_t bCol = warpN * WMMA_N;
+
+            // Load matrices from global memory into fragments
+            load_matrix_sync(a_frag, A_batch + aRow * K + aCol, K);
+            load_matrix_sync(b_frag, B_batch + bRow * N + bCol, N);
+
+            // Perform matrix multiply-accumulate using Tensor Cores
+            mma_sync(acc_frag, a_frag, b_frag, acc_frag);
+        }
+    }
+
+    // Store result to global memory
+    const int64_t cRow = warpM * WMMA_M;
+    const int64_t cCol = warpN * WMMA_N;
+
+    if (cRow < M && cCol < N && cRow + WMMA_M <= M && cCol + WMMA_N <= N) {
+        store_matrix_sync(C_batch + cRow * N + cCol, acc_frag, N, mem_row_major);
+    }
+}
+
+// ============================================================================
 // cuBLAS Helper Functions
 // ============================================================================
 
@@ -635,6 +936,40 @@ void matmul_i32(
     CUDA_CHECK(cudaGetLastError());
 }
 
+/**
+ * FP16 matrix multiplication with Tensor Core acceleration
+ * Automatically selects between Tensor Core and fallback kernel based on dimensions
+ */
+void matmul_f16(
+    const __half* A, const __half* B, __half* C,
+    int64_t M, int64_t N, int64_t K,
+    cudaStream_t stream = 0) {
+
+    // Check if dimensions are multiples of 16 (Tensor Core requirement)
+    const bool use_tensor_cores = (M % WMMA_M == 0) && (N % WMMA_N == 0) && (K % WMMA_K == 0);
+
+    if (use_tensor_cores) {
+        // Use Tensor Cores for optimal performance
+        // Each block has 4 warps arranged as (4, 1)
+        // Each warp handles one 16x16 tile
+        dim3 block(1, 4);  // 4 warps per block (128 threads total)
+        dim3 grid((N + WMMA_N - 1) / WMMA_N,
+                  (M + WMMA_M - 1) / WMMA_M);
+
+        matmul_tensor_core_f16_kernel<<<grid, block, 0, stream>>>(A, B, C, M, N, K);
+    } else {
+        // Fall back to standard tiled kernel for non-aligned dimensions
+        dim3 block(TILE_SIZE, TILE_SIZE);
+        dim3 grid((N + TILE_SIZE - 1) / TILE_SIZE,
+                  (M + TILE_SIZE - 1) / TILE_SIZE);
+
+        matmul_tiled_f16_kernel<TILE_SIZE, TILE_SIZE, TILE_SIZE_K>
+            <<<grid, block, 0, stream>>>(A, B, C, M, N, K, K, N, N);
+    }
+
+    CUDA_CHECK(cudaGetLastError());
+}
+
 // ============================================================================
 // Host Functions - Batched Matrix Multiplication
 // ============================================================================
@@ -703,6 +1038,50 @@ void batched_matmul_f64(
     CUDA_CHECK(cudaGetLastError());
 }
 
+/**
+ * Batched FP16 matrix multiplication with Tensor Core acceleration
+ */
+void batched_matmul_f16(
+    const __half* A, const __half* B, __half* C,
+    int64_t batch_size, int64_t M, int64_t N, int64_t K,
+    cudaStream_t stream = 0) {
+
+    int64_t stride_a = M * K;
+    int64_t stride_b = K * N;
+    int64_t stride_c = M * N;
+
+    // Check if dimensions are multiples of 16 (Tensor Core requirement)
+    const bool use_tensor_cores = (M % WMMA_M == 0) && (N % WMMA_N == 0) && (K % WMMA_K == 0);
+
+    if (use_tensor_cores) {
+        // Use Tensor Cores for optimal performance
+        dim3 block(1, 4);  // 4 warps per block
+        dim3 grid((N + WMMA_N - 1) / WMMA_N,
+                  (M + WMMA_M - 1) / WMMA_M,
+                  batch_size);
+
+        batched_matmul_tensor_core_f16_kernel<<<grid, block, 0, stream>>>(
+            A, B, C, batch_size, M, N, K,
+            stride_a, stride_b, stride_c);
+    } else {
+        // Fall back to standard tiled kernel
+        dim3 block(TILE_SIZE, TILE_SIZE);
+        dim3 grid((N + TILE_SIZE - 1) / TILE_SIZE,
+                  (M + TILE_SIZE - 1) / TILE_SIZE,
+                  batch_size);
+
+        batched_matmul_tiled_f32_kernel<TILE_SIZE, TILE_SIZE, TILE_SIZE_K>
+            <<<grid, block, 0, stream>>>(
+                reinterpret_cast<const float*>(A),
+                reinterpret_cast<const float*>(B),
+                reinterpret_cast<float*>(C),
+                batch_size, M, N, K,
+                stride_a, stride_b, stride_c);
+    }
+
+    CUDA_CHECK(cudaGetLastError());
+}
+
 // ============================================================================
 // Public API - Matrix Multiplication
 // ============================================================================
@@ -751,6 +1130,18 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Ten
             double* c_data = result.data<double>();
 
             matmul_f64(a_data, b_data, c_data, M, N, K, stream);
+
+        } else if (a_contig.dtype() == DType::Float16 && b_contig.dtype() == DType::Float16) {
+            const Float16* a_data = a_contig.data<Float16>();
+            const Float16* b_data = b_contig.data<Float16>();
+            Float16* c_data = result.data<Float16>();
+
+            // Convert to CUDA __half pointers
+            const __half* a_half = reinterpret_cast<const __half*>(a_data);
+            const __half* b_half = reinterpret_cast<const __half*>(b_data);
+            __half* c_half = reinterpret_cast<__half*>(c_data);
+
+            matmul_f16(a_half, b_half, c_half, M, N, K, stream);
 
         } else if (a_contig.dtype() == DType::Int32 && b_contig.dtype() == DType::Int32) {
             const int32_t* a_data = a_contig.data<int32_t>();
@@ -813,6 +1204,18 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Ten
             double* c_data = result.data<double>();
 
             batched_matmul_f64(a_data, b_data, c_data, batch_size, M, N, K, stream);
+
+        } else if (a_contig.dtype() == DType::Float16 && b_contig.dtype() == DType::Float16) {
+            const Float16* a_data = a_contig.data<Float16>();
+            const Float16* b_data = b_contig.data<Float16>();
+            Float16* c_data = result.data<Float16>();
+
+            // Convert to CUDA __half pointers
+            const __half* a_half = reinterpret_cast<const __half*>(a_data);
+            const __half* b_half = reinterpret_cast<const __half*>(b_data);
+            __half* c_half = reinterpret_cast<__half*>(c_data);
+
+            batched_matmul_f16(a_half, b_half, c_half, batch_size, M, N, K, stream);
 
         } else {
             throw std::runtime_error(

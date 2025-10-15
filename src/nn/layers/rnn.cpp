@@ -50,7 +50,7 @@ auto RNNCell::forward(const Variable& input, const Variable& hx) -> Variable {
 
     // Initialize hidden state if not provided
     Variable h = hx;
-    if (h.tensor().numel() == 0) {
+    if (!h.is_initialized() || h.tensor().numel() == 0) {
         h = Variable(zeros({batch_size, hidden_size_},
                           input.dtype(), input.device()), false);
     }
@@ -154,7 +154,7 @@ auto RNN::forward(const Variable& input, const Variable& hx) -> std::pair<Variab
 
     // Initialize hidden state if not provided
     Variable h = hx;
-    if (h.tensor().numel() == 0) {
+    if (!h.is_initialized() || h.tensor().numel() == 0) {
         h = Variable(zeros({num_layers_ * num_directions, batch_size, hidden_size_},
                           input.dtype(), input.device()), false);
     }

@@ -1,5 +1,38 @@
 cmake_minimum_required(VERSION 3.25)
-project(tenzor VERSION 1.0.0 LANGUAGES CXX)
+
+# Set default HIP architecture before project() if building ROCm backend
+# Auto-detect GPU architecture if not specified
+if(TENZOR_BUILD_ROCM OR NOT DEFINED TENZOR_BUILD_ROCM)
+    if(NOT CMAKE_HIP_ARCHITECTURES)
+        # Try to auto-detect GPU architecture
+        execute_process(
+            COMMAND /opt/rocm/bin/rocm_agent_enumerator
+            OUTPUT_VARIABLE ROCM_AGENTS
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+        )
+
+        # Extract first non-gfx agent (skip CPU)
+        string(REGEX MATCH "gfx[0-9a-z]+" DETECTED_ARCH "${ROCM_AGENTS}")
+
+        if(DETECTED_ARCH)
+            set(CMAKE_HIP_ARCHITECTURES "${DETECTED_ARCH}" CACHE STRING "HIP GPU architectures" FORCE)
+            message(STATUS "Auto-detected GPU architecture: ${DETECTED_ARCH}")
+        else()
+            # Fallback to common architecture
+            set(CMAKE_HIP_ARCHITECTURES "gfx900;gfx90c;gfx906;gfx908" CACHE STRING "HIP GPU architectures" FORCE)
+            message(STATUS "Could not detect GPU, using common architectures: gfx900;gfx90c;gfx906;gfx908")
+        endif()
+    endif()
+endif()
+
+# Determine languages to enable
+set(TENZOR_LANGUAGES CXX)
+if(TENZOR_BUILD_ROCM OR NOT DEFINED TENZOR_BUILD_ROCM)
+    list(APPEND TENZOR_LANGUAGES HIP)
+endif()
+
+project(tenzor VERSION 1.0.0 LANGUAGES ${TENZOR_LANGUAGES})
 
 # C++ standard
 set(CMAKE_CXX_STANDARD 23)
@@ -8,7 +41,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Build options
 option(TENZOR_BUILD_CUDA "Build CUDA backend" ON)
-option(TENZOR_BUILD_ROCM "Build ROCm backend" OFF)
+option(TENZOR_BUILD_ROCM "Build ROCm backend" OFF) #do not enable, causes system crashes
 option(TENZOR_BUILD_ONEAPI "Build OneAPI backend" OFF)
 option(TENZOR_BUILD_PYTHON "Build Python bindings" ON)
 option(TENZOR_BUILD_TESTS "Build tests" ON)

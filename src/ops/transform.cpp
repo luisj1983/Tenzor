@@ -90,6 +90,16 @@ auto cat(std::span<const Tensor> tensors, int64_t dim) -> Tensor {
     std::vector<int64_t> out_shape(first_shape.begin(), first_shape.end());
     out_shape[dim] = total_size_at_dim;
 
+    // For non-CPU devices, use dispatcher to route to backend-specific implementation
+    if (tensors[0].device().type != Device::Type::CPU) {
+        OpAttributes attrs;
+        attrs["dim"] = std::to_string(dim);
+
+        // Convert span to vector for dispatch
+        std::vector<Tensor> tensor_vec(tensors.begin(), tensors.end());
+        return Dispatcher::dispatch("cat", std::span<const Tensor>(tensor_vec), attrs)[0];
+    }
+
     // For CPU, manually concatenate
     if (tensors[0].device().type == Device::Type::CPU) {
         auto output = zeros(out_shape, tensors[0].dtype(), Device::cpu());
@@ -151,9 +161,8 @@ auto cat(std::span<const Tensor> tensors, int64_t dim) -> Tensor {
         return output;
     }
 
-    // For non-CPU devices, use dispatcher
-    // This is a simplified fallback - proper implementation would use device-specific kernels
-    throw std::runtime_error("Concatenation on non-CPU devices not yet implemented");
+    // Should never reach here - all device types are handled above
+    throw std::runtime_error("Unsupported device type for concatenation");
 }
 
 auto stack(std::span<const Tensor> tensors, int64_t dim) -> Tensor {
@@ -195,8 +204,44 @@ auto stack(std::span<const Tensor> tensors, int64_t dim) -> Tensor {
 }
 
 auto split(const Tensor& input, int64_t split_size, int64_t dim) -> std::vector<Tensor> {
-    // TODO: Implement split
-    return {input};
+    if (split_size <= 0) {
+        throw std::invalid_argument("Split size must be positive");
+    }
+
+    // Get input shape and normalize dimension
+    auto shape = input.shape();
+    int64_t ndim = shape.size();
+
+    if (dim < 0) {
+        dim += ndim;
+    }
+    if (dim < 0 || dim >= ndim) {
+        throw std::invalid_argument("Dimension out of range for split");
+    }
+
+    int64_t dim_size = shape[dim];
+
+    // Calculate number of splits needed
+    int64_t num_splits = (dim_size + split_size - 1) / split_size;  // Ceiling division
+
+    // Split tensor into chunks using slice (creates views, no copying)
+    std::vector<Tensor> result;
+    result.reserve(num_splits);
+
+    for (int64_t i = 0; i < num_splits; ++i) {
+        int64_t start = i * split_size;
+        int64_t end = std::min(start + split_size, dim_size);
+
+        // Stop if we've exhausted the dimension (shouldn't happen with ceiling division)
+        if (start >= dim_size) {
+            break;
+        }
+
+        // Use slice to create a view (zero-copy)
+        result.push_back(input.slice(dim, start, end));
+    }
+
+    return result;
 }
 
 auto chunk(const Tensor& input, int64_t chunks, int64_t dim) -> std::vector<Tensor> {

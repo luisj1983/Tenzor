@@ -110,6 +110,42 @@ void broadcast_op(const T* a_data, const T* b_data, T* c_data,
     }
 }
 
+// Generic broadcast operation template with different output type (for comparisons)
+template<typename TIn, typename TOut, typename Op>
+void broadcast_op(const TIn* a_data, const TIn* b_data, TOut* c_data,
+                  std::span<const int64_t> shape_a,
+                  std::span<const int64_t> shape_b,
+                  std::span<const int64_t> output_shape,
+                  Op op) {
+
+    auto strides_a = compute_broadcast_strides(shape_a, output_shape);
+    auto strides_b = compute_broadcast_strides(shape_b, output_shape);
+
+    int64_t total_elements = 1;
+    for (auto dim : output_shape) {
+        total_elements *= dim;
+    }
+
+    // Iterate over all output elements
+    for (int64_t out_idx = 0; out_idx < total_elements; ++out_idx) {
+        // Convert flat index to multi-dimensional index
+        int64_t idx_a = 0;
+        int64_t idx_b = 0;
+        int64_t tmp = out_idx;
+
+        for (size_t i = 0; i < output_shape.size(); ++i) {
+            int64_t coord = tmp % output_shape[output_shape.size() - 1 - i];
+            tmp /= output_shape[output_shape.size() - 1 - i];
+
+            int64_t stride_idx = output_shape.size() - 1 - i;
+            idx_a += coord * strides_a[stride_idx];
+            idx_b += coord * strides_b[stride_idx];
+        }
+
+        c_data[out_idx] = op(a_data[idx_a], b_data[idx_b]);
+    }
+}
+
 } // namespace detail
 } // namespace cpu
 } // namespace tenzor

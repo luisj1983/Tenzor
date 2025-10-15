@@ -58,7 +58,8 @@ auto Linear::forward(const Variable& input) -> Variable {
         std::cout << "    Linear::forward - reshape OK, shape: [" << input_2d.shape()[0] << ", " << input_2d.shape()[1] << "]" << std::endl;
 
         // Get weight from parameters (ensures correct device)
-        auto& weight = parameters_["weight"];
+        auto& weight_ptr = parameters_["weight"];
+        auto& weight = *weight_ptr;
         std::cout << "    Linear::forward - weight shape: [" << weight.shape()[0] << ", " << weight.shape()[1] << "]" << std::endl;
 
         // TODO: Handle device mismatch properly with device transfer op
@@ -96,7 +97,8 @@ auto Linear::forward(const Variable& input) -> Variable {
         // Add bias if present (Variable operators already use autograd)
         auto bias_it = parameters_.find("bias");
         if (bias_it != parameters_.end()) {
-            auto& bias = bias_it->second;
+            auto& bias_ptr = bias_it->second;
+            auto& bias = *bias_ptr;
             std::cout << "    Linear::forward - adding bias [" << bias.shape()[0] << "] to output [";
             for (size_t i = 0; i < output.shape().size(); ++i) {
                 std::cout << output.shape()[i];

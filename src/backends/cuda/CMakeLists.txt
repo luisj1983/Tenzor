@@ -23,6 +23,8 @@ set(CUDA_BACKEND_SOURCES
     kernels/transform.cu
     kernels/batchnorm.cu
     kernels/conv2d.cu
+    kernels/lstm.cu
+    cudnn_ops.cu
 )
 
 # Create CUDA backend shared library
@@ -50,6 +52,7 @@ target_link_libraries(tenzor_backend_cuda PRIVATE
     tenzor_core
     CUDA::cudart
     CUDA::cuda_driver
+    CUDA::curand
 )
 
 # Link cuBLAS if available
@@ -60,12 +63,54 @@ if(TARGET CUDA::cublas)
 endif()
 
 # Link cuDNN if available
+# First try to find cuDNN using find_package
 find_package(CUDNN QUIET)
+
+# If not found, try manual detection
+if(NOT CUDNN_FOUND)
+    # Try to find cuDNN in CUDA Toolkit directories
+    find_path(CUDNN_INCLUDE_DIR cudnn.h
+        HINTS
+        ${CUDAToolkit_INCLUDE_DIRS}
+        /usr/local/cuda/include
+        /usr/include
+        $ENV{CUDA_PATH}/include
+    )
+
+    find_library(CUDNN_LIBRARY cudnn
+        HINTS
+        ${CUDAToolkit_LIBRARY_DIR}
+        /usr/local/cuda/lib64
+        /usr/lib/x86_64-linux-gnu
+        $ENV{CUDA_PATH}/lib64
+    )
+
+    if(CUDNN_INCLUDE_DIR AND CUDNN_LIBRARY)
+        set(CUDNN_FOUND TRUE)
+        set(CUDNN_INCLUDE_DIRS ${CUDNN_INCLUDE_DIR})
+        set(CUDNN_LIBRARIES ${CUDNN_LIBRARY})
+
+        # Try to extract version
+        if(EXISTS "${CUDNN_INCLUDE_DIR}/cudnn_version.h")
+            file(READ "${CUDNN_INCLUDE_DIR}/cudnn_version.h" CUDNN_VERSION_CONTENT)
+            string(REGEX MATCH "define CUDNN_MAJOR * +([0-9]+)" _ "${CUDNN_VERSION_CONTENT}")
+            set(CUDNN_MAJOR_VERSION ${CMAKE_MATCH_1})
+            string(REGEX MATCH "define CUDNN_MINOR * +([0-9]+)" _ "${CUDNN_VERSION_CONTENT}")
+            set(CUDNN_MINOR_VERSION ${CMAKE_MATCH_1})
+            string(REGEX MATCH "define CUDNN_PATCHLEVEL * +([0-9]+)" _ "${CUDNN_VERSION_CONTENT}")
+            set(CUDNN_PATCH_VERSION ${CMAKE_MATCH_1})
+            set(CUDNN_VERSION "${CUDNN_MAJOR_VERSION}.${CUDNN_MINOR_VERSION}.${CUDNN_PATCH_VERSION}")
+        endif()
+    endif()
+endif()
+
 if(CUDNN_FOUND)
     target_include_directories(tenzor_backend_cuda PRIVATE ${CUDNN_INCLUDE_DIRS})
     target_link_libraries(tenzor_backend_cuda PRIVATE ${CUDNN_LIBRARIES})
     target_compile_definitions(tenzor_backend_cuda PRIVATE TENZOR_HAS_CUDNN)
-    message(STATUS "CUDA Backend: cuDNN support enabled")
+    message(STATUS "CUDA Backend: cuDNN support enabled (${CUDNN_VERSION})")
+    message(STATUS "  cuDNN Include: ${CUDNN_INCLUDE_DIRS}")
+    message(STATUS "  cuDNN Library: ${CUDNN_LIBRARIES}")
 else()
     message(STATUS "CUDA Backend: cuDNN not found, using built-in convolution kernels")
 endif()
@@ -99,6 +144,20 @@ foreach(ARCH ${CMAKE_CUDA_ARCHITECTURES})
     )
 endforeach()
 
+# Enable Tensor Core support for architectures >= 70 (Volta+)
+set(HAS_TENSOR_CORES FALSE)
+foreach(ARCH ${CMAKE_CUDA_ARCHITECTURES})
+    if(ARCH GREATER_EQUAL 70)
+        set(HAS_TENSOR_CORES TRUE)
+        break()
+    endif()
+endforeach()
+
+if(HAS_TENSOR_CORES)
+    target_compile_definitions(tenzor_backend_cuda PRIVATE TENZOR_HAS_TENSOR_CORES)
+    message(STATUS "CUDA Backend: Tensor Core support enabled (compute capability >= 7.0)")
+endif()
+
 # Optimization flags
 if(CMAKE_BUILD_TYPE MATCHES "Release|RelWithDebInfo")
     target_compile_options(tenzor_backend_cuda PRIVATE
@@ -122,10 +181,16 @@ install(TARGETS tenzor_backend_cuda
 message(STATUS "CUDA Backend: Configured successfully")
 message(STATUS "  CUDA Version: ${CUDAToolkit_VERSION}")
 message(STATUS "  CUDA Architectures: ${CMAKE_CUDA_ARCHITECTURES}")
+if(HAS_TENSOR_CORES)
+    message(STATUS "  Tensor Cores: Enabled")
+endif()
 if(TARGET CUDA::cublas)
     message(STATUS "  cuBLAS: Enabled")
 else()
     message(STATUS "  cuBLAS: Not found")
+endif()
+if(TARGET CUDA::curand)
+    message(STATUS "  cuRAND: Enabled")
 endif()
 if(CUDNN_FOUND)
     message(STATUS "  cuDNN: ${CUDNN_VERSION}")

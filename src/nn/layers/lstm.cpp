@@ -52,11 +52,11 @@ auto LSTMCell::forward(const Variable& input, const Variable& hx, const Variable
     Variable h = hx;
     Variable c = cx;
 
-    if (h.tensor().numel() == 0) {
+    if (!h.is_initialized() || h.tensor().numel() == 0) {
         h = Variable(zeros({batch_size, hidden_size_},
                           input.dtype(), input.device()), false);
     }
-    if (c.tensor().numel() == 0) {
+    if (!c.is_initialized() || c.tensor().numel() == 0) {
         c = Variable(zeros({batch_size, hidden_size_},
                           input.dtype(), input.device()), false);
     }
@@ -87,6 +87,12 @@ auto LSTMCell::forward(const Variable& input, const Variable& hx, const Variable
     if (gh_shape.size() != 2 || gh_shape[0] != batch_size || gh_shape[1] != 4 * hidden_size_) {
         std::ostringstream oss;
         oss << "gates_ih has wrong shape: (" << gh_shape[0] << ", " << gh_shape[1]
+            << "), expected (" << batch_size << ", " << (4 * hidden_size_) << ")";
+        throw std::runtime_error(oss.str());
+    }
+    if (ghh_shape.size() != 2 || ghh_shape[0] != batch_size || ghh_shape[1] != 4 * hidden_size_) {
+        std::ostringstream oss;
+        oss << "gates_hh has wrong shape: (" << ghh_shape[0] << ", " << ghh_shape[1]
             << "), expected (" << batch_size << ", " << (4 * hidden_size_) << ")";
         throw std::runtime_error(oss.str());
     }
@@ -231,11 +237,11 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
     Variable h = h0;
     Variable c = c0;
 
-    if (h.tensor().numel() == 0) {
+    if (!h.is_initialized() || h.tensor().numel() == 0) {
         h = Variable(zeros({num_layers_ * num_directions, batch_size, hidden_size_},
                           input.dtype(), input.device()), false);
     }
-    if (c.tensor().numel() == 0) {
+    if (!c.is_initialized() || c.tensor().numel() == 0) {
         c = Variable(zeros({num_layers_ * num_directions, batch_size, hidden_size_},
                           input.dtype(), input.device()), false);
     }

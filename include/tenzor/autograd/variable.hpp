@@ -10,12 +10,71 @@
 
 #include <memory>
 #include <optional>
+#include <functional>
 #include "../core/tensor.hpp"
 
 namespace tenzor {
 
 // Forward declarations
 class Function;
+
+/**
+ * @brief Implementation class for Variable's handle pattern.
+ *
+ * VariableImpl holds all state for a Variable, enabling handle semantics
+ * with shallow copy behavior. Multiple Variable handles can reference the
+ * same VariableImpl for zero-copy operations.
+ *
+ * This follows the PImpl (Pointer to Implementation) pattern, matching
+ * Tensor's architecture where Tensor is a handle to TensorImpl.
+ *
+ * @note Thread safety: VariableImpl is NOT thread-safe by default.
+ *       External synchronization required for concurrent access to mutable
+ *       state (grad_, hooks_). Read-only operations on data_ and grad_fn_
+ *       are safe due to shared_ptr semantics.
+ */
+struct VariableImpl {
+    /**
+     * @brief Construct VariableImpl with tensor data.
+     *
+     * @param data Underlying tensor (moved into impl)
+     * @param requires_grad Whether to track gradients
+     */
+    explicit VariableImpl(Tensor data, bool requires_grad = false)
+        : data_(std::move(data)),
+          requires_grad_(requires_grad) {}
+
+    // Default copy/move constructors for standard semantics
+    VariableImpl(const VariableImpl&) = default;
+    VariableImpl(VariableImpl&&) noexcept = default;
+    VariableImpl& operator=(const VariableImpl&) = default;
+    VariableImpl& operator=(VariableImpl&&) noexcept = default;
+    ~VariableImpl() = default;
+
+    // === State Members (moved from Variable) ===
+
+    /// Underlying tensor data (handle type, already thread-safe)
+    Tensor data_;
+
+    /// Accumulated gradient tensor (requires synchronization for writes)
+    std::optional<Tensor> grad_;
+
+    /// Gradient function that created this variable (thread-safe for reads)
+    std::shared_ptr<Function> grad_fn_;
+
+    /// Whether gradient tracking is enabled (consider atomic if modified concurrently)
+    bool requires_grad_{false};
+
+    /// Whether to retain gradient for non-leaf variables (consider atomic if modified concurrently)
+    bool retain_grad_{false};
+
+    /// Backward hooks (requires synchronization for modifications)
+    std::vector<std::function<Tensor(const Tensor&)>> hooks_;
+
+    // Note: No mutex included in initial implementation (Option B from design doc).
+    // Users responsible for external synchronization if accessing Variable handles
+    // from multiple threads. This matches PyTorch's behavior.
+};
 
 /**
  * @brief Gradient-enabled tensor wrapper for automatic differentiation.
@@ -109,6 +168,16 @@ public:
      */
     auto has_grad() const -> bool;
 
+    /**
+     * @brief Set gradient tensor directly.
+     *
+     * Sets the gradient tensor for this variable. Used internally
+     * for gradient checkpointing and custom backward passes.
+     *
+     * @param gradient Tensor to set as gradient
+     */
+    auto set_grad(Tensor gradient) -> void;
+
     // ============================================================================
     // Gradient Computation
     // ============================================================================
@@ -121,6 +190,7 @@ public:
      * a gradient tensor must be provided.
      *
      * @param gradient Optional gradient tensor (required for non-scalar outputs)
+     * @param retain_graph If true, keep computation graph for multiple backward passes
      * @throws std::runtime_error if gradient is required but not provided
      *
      * @code
@@ -128,11 +198,15 @@ public:
      * Variable y = x * 2.0f;
      * Variable loss = y.sum();  // Scalar output
      *
-     * loss.backward();  // No gradient needed for scalar
+     * loss.backward(std::nullopt, false);  // Normal backward, clears graph
      * // x.grad() now contains gradient
+     *
+     * // For multiple backward passes:
+     * loss.backward(std::nullopt, true);  // First backward, keep graph
+     * loss.backward(std::nullopt, false); // Second backward, clear graph
      * @endcode
      */
-    auto backward(std::optional<Tensor> gradient = std::nullopt) -> void;
+    auto backward(std::optional<Tensor> gradient = std::nullopt, bool retain_graph = false) -> void;
 
     // ============================================================================
     // Gradient Management
@@ -192,6 +266,50 @@ public:
      */
     auto is_leaf() const -> bool;
 
+    /**
+     * @brief Register a backward hook function.
+     *
+     * Registers a callable that will be called during backward pass after
+     * the gradient has been computed. The hook receives the gradient as input
+     * and can modify or inspect it.
+     *
+     * @param hook Function that takes gradient tensor and returns (optionally modified) gradient
+     * @return Hook handle (currently unused, for future hook removal)
+     *
+     * @code
+     * Variable x(tensor, true);
+     * x.register_hook([](const Tensor& grad) {
+     *     std::cout << "Gradient norm: " << grad.norm().item<float>() << std::endl;
+     *     return grad;  // Return unmodified gradient
+     * });
+     * @endcode
+     */
+    auto register_hook(std::function<Tensor(const Tensor&)> hook) -> size_t;
+
+    /**
+     * @brief Enable gradient retention for non-leaf variables.
+     *
+     * By default, only leaf variables retain gradients after backward().
+     * Call this to retain gradients for intermediate (non-leaf) variables.
+     *
+     * @code
+     * Variable x(tensor, true);
+     * Variable y = x * 2.0f;  // Non-leaf
+     * y.retain_grad();  // Keep gradient after backward()
+     * Variable loss = y.sum();
+     * loss.backward();
+     * // y.grad() is now available (normally would be cleared)
+     * @endcode
+     */
+    auto retain_grad() -> void;
+
+    /**
+     * @brief Check if variable retains gradient.
+     *
+     * @return true if gradients should be retained (even for non-leaf variables)
+     */
+    auto retains_grad() const -> bool;
+
     // ============================================================================
     // Autograd Context
     // ============================================================================
@@ -218,6 +336,20 @@ public:
     // ============================================================================
     // Tensor Properties
     // ============================================================================
+
+    /**
+     * @brief Check if variable is initialized with valid data.
+     *
+     * @return true if variable has been constructed with a tensor
+     */
+    auto is_initialized() const -> bool;
+
+    /**
+     * @brief Boolean conversion operator for validity checking.
+     *
+     * @return true if variable is initialized
+     */
+    explicit operator bool() const;
 
     /**
      * @brief Get shape of underlying tensor.
@@ -277,10 +409,7 @@ public:
     auto operator/(const Variable& other) const -> Variable;
 
 private:
-    Tensor data_;
-    std::optional<Tensor> grad_;
-    std::shared_ptr<Function> grad_fn_;
-    bool requires_grad_{false};
+    std::shared_ptr<VariableImpl> impl_;
 
     friend class Function;
     friend class BackwardEngine;

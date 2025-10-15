@@ -98,53 +98,35 @@ auto Tensor::is_contiguous() const noexcept -> bool {
 }
 
 // Template instantiations for common types
-template<> auto Tensor::data<float>() -> float* {
-    return static_cast<float*>(impl_->storage->data()) + impl_->offset;
+template<typename T>
+auto Tensor::data() -> T* {
+    return static_cast<T*>(impl_->storage->data()) + impl_->offset;
 }
 
-template<> auto Tensor::data<float>() const -> const float* {
-    return static_cast<const float*>(impl_->storage->data()) + impl_->offset;
+template<typename T>
+auto Tensor::data() const -> const T* {
+    return static_cast<const T*>(impl_->storage->data()) + impl_->offset;
 }
 
-template<> auto Tensor::data<double>() -> double* {
-    return static_cast<double*>(impl_->storage->data()) + impl_->offset;
-}
-
-template<> auto Tensor::data<double>() const -> const double* {
-    return static_cast<const double*>(impl_->storage->data()) + impl_->offset;
-}
-
-template<> auto Tensor::data<int32_t>() -> int32_t* {
-    return static_cast<int32_t*>(impl_->storage->data()) + impl_->offset;
-}
-
-template<> auto Tensor::data<int32_t>() const -> const int32_t* {
-    return static_cast<const int32_t*>(impl_->storage->data()) + impl_->offset;
-}
-
-template<> auto Tensor::data<int64_t>() -> int64_t* {
-    return static_cast<int64_t*>(impl_->storage->data()) + impl_->offset;
-}
-
-template<> auto Tensor::data<int64_t>() const -> const int64_t* {
-    return static_cast<const int64_t*>(impl_->storage->data()) + impl_->offset;
-}
-
-template<> auto Tensor::data<uint8_t>() -> uint8_t* {
-    return static_cast<uint8_t*>(impl_->storage->data()) + impl_->offset;
-}
-
-template<> auto Tensor::data<uint8_t>() const -> const uint8_t* {
-    return static_cast<const uint8_t*>(impl_->storage->data()) + impl_->offset;
-}
-
-template<> auto Tensor::data<bool>() -> bool* {
-    return static_cast<bool*>(impl_->storage->data()) + impl_->offset;
-}
-
-template<> auto Tensor::data<bool>() const -> const bool* {
-    return static_cast<const bool*>(impl_->storage->data()) + impl_->offset;
-}
+// Explicit instantiations
+template auto Tensor::data<float>() -> float*;
+template auto Tensor::data<float>() const -> const float*;
+template auto Tensor::data<double>() -> double*;
+template auto Tensor::data<double>() const -> const double*;
+template auto Tensor::data<Float16>() -> Float16*;
+template auto Tensor::data<Float16>() const -> const Float16*;
+template auto Tensor::data<BFloat16>() -> BFloat16*;
+template auto Tensor::data<BFloat16>() const -> const BFloat16*;
+template auto Tensor::data<int8_t>() -> int8_t*;
+template auto Tensor::data<int8_t>() const -> const int8_t*;
+template auto Tensor::data<int32_t>() -> int32_t*;
+template auto Tensor::data<int32_t>() const -> const int32_t*;
+template auto Tensor::data<int64_t>() -> int64_t*;
+template auto Tensor::data<int64_t>() const -> const int64_t*;
+template auto Tensor::data<uint8_t>() -> uint8_t*;
+template auto Tensor::data<uint8_t>() const -> const uint8_t*;
+template auto Tensor::data<bool>() -> bool*;
+template auto Tensor::data<bool>() const -> const bool*;
 
 // Template instantiations for item<T>() - extract scalar from single-element tensor
 template<> auto Tensor::item<float>() const -> float {
@@ -460,8 +442,134 @@ auto Tensor::to(Device device) const -> Tensor {
 }
 
 auto Tensor::to(DType dtype) const -> Tensor {
-    // TODO: Implement dtype conversion
-    return *this;
+    if (!impl_) {
+        return *this;
+    }
+
+    // If already the target dtype, return as-is
+    if (impl_->dtype == dtype) {
+        return *this;
+    }
+
+    // For dtype conversion, we need to work on CPU for element-wise conversion
+    // If tensor is on GPU, move to CPU first
+    const bool was_on_gpu = impl_->device.type != Device::Type::CPU;
+    Tensor cpu_tensor = was_on_gpu ? cpu() : *this;
+
+    // Ensure contiguous layout for efficient conversion
+    if (!cpu_tensor.is_contiguous()) {
+        cpu_tensor = cpu_tensor.contiguous();
+    }
+
+    // Create output tensor with target dtype on CPU
+    Tensor result(cpu_tensor.impl_->shape, dtype, Device::cpu());
+    result.impl_->requires_grad = cpu_tensor.impl_->requires_grad;
+
+    const int64_t n = cpu_tensor.numel();
+    const DType src_dtype = cpu_tensor.impl_->dtype;
+
+    // Dispatch based on source and destination dtypes
+    // Use template helper to avoid code duplication
+    auto convert_elements = [&]<typename SrcT, typename DstT>() {
+        const SrcT* src_ptr = cpu_tensor.data<SrcT>();
+        DstT* dst_ptr = result.data<DstT>();
+
+        for (int64_t i = 0; i < n; ++i) {
+            if constexpr (std::is_same_v<SrcT, DstT>) {
+                dst_ptr[i] = src_ptr[i];
+            } else if constexpr (std::is_same_v<SrcT, Float16> || std::is_same_v<SrcT, BFloat16>) {
+                // Convert half-precision to float, then to target
+                float intermediate = static_cast<float>(src_ptr[i]);
+                if constexpr (std::is_same_v<DstT, Float16> || std::is_same_v<DstT, BFloat16>) {
+                    dst_ptr[i] = DstT(intermediate);
+                } else if constexpr (std::is_same_v<DstT, std::complex<float>>) {
+                    dst_ptr[i] = std::complex<float>(intermediate, 0.0f);
+                } else if constexpr (std::is_same_v<DstT, std::complex<double>>) {
+                    dst_ptr[i] = std::complex<double>(static_cast<double>(intermediate), 0.0);
+                } else {
+                    dst_ptr[i] = static_cast<DstT>(intermediate);
+                }
+            } else if constexpr (std::is_same_v<DstT, Float16> || std::is_same_v<DstT, BFloat16>) {
+                // Convert source to float, then to half-precision
+                float intermediate;
+                if constexpr (std::is_same_v<SrcT, std::complex<float>>) {
+                    intermediate = src_ptr[i].real();
+                } else if constexpr (std::is_same_v<SrcT, std::complex<double>>) {
+                    intermediate = static_cast<float>(src_ptr[i].real());
+                } else {
+                    intermediate = static_cast<float>(src_ptr[i]);
+                }
+                dst_ptr[i] = DstT(intermediate);
+            } else if constexpr (std::is_same_v<SrcT, std::complex<float>> || std::is_same_v<SrcT, std::complex<double>>) {
+                // Convert from complex (take real part)
+                if constexpr (std::is_same_v<DstT, std::complex<float>>) {
+                    dst_ptr[i] = std::complex<float>(src_ptr[i]);
+                } else if constexpr (std::is_same_v<DstT, std::complex<double>>) {
+                    dst_ptr[i] = std::complex<double>(src_ptr[i]);
+                } else {
+                    dst_ptr[i] = static_cast<DstT>(src_ptr[i].real());
+                }
+            } else if constexpr (std::is_same_v<DstT, std::complex<float>> || std::is_same_v<DstT, std::complex<double>>) {
+                // Convert to complex (set imaginary to 0)
+                using RealType = typename DstT::value_type;
+                dst_ptr[i] = DstT(static_cast<RealType>(src_ptr[i]), RealType{0});
+            } else {
+                // Standard numeric conversion
+                dst_ptr[i] = static_cast<DstT>(src_ptr[i]);
+            }
+        }
+    };
+
+    // Macro to reduce code duplication for source type dispatch
+    #define DISPATCH_SRC_DTYPE(src_dtype, SrcT) \
+        case src_dtype: { \
+            switch (dtype) { \
+                case DType::Float32: convert_elements.template operator()<SrcT, float>(); break; \
+                case DType::Float64: convert_elements.template operator()<SrcT, double>(); break; \
+                case DType::Float16: convert_elements.template operator()<SrcT, Float16>(); break; \
+                case DType::BFloat16: convert_elements.template operator()<SrcT, BFloat16>(); break; \
+                case DType::Int8: convert_elements.template operator()<SrcT, int8_t>(); break; \
+                case DType::Int16: convert_elements.template operator()<SrcT, int16_t>(); break; \
+                case DType::Int32: convert_elements.template operator()<SrcT, int32_t>(); break; \
+                case DType::Int64: convert_elements.template operator()<SrcT, int64_t>(); break; \
+                case DType::UInt8: convert_elements.template operator()<SrcT, uint8_t>(); break; \
+                case DType::UInt16: convert_elements.template operator()<SrcT, uint16_t>(); break; \
+                case DType::UInt32: convert_elements.template operator()<SrcT, uint32_t>(); break; \
+                case DType::UInt64: convert_elements.template operator()<SrcT, uint64_t>(); break; \
+                case DType::Bool: convert_elements.template operator()<SrcT, bool>(); break; \
+                case DType::Complex64: convert_elements.template operator()<SrcT, std::complex<float>>(); break; \
+                case DType::Complex128: convert_elements.template operator()<SrcT, std::complex<double>>(); break; \
+            } \
+            break; \
+        }
+
+    // Dispatch based on source dtype
+    switch (src_dtype) {
+        DISPATCH_SRC_DTYPE(DType::Float32, float)
+        DISPATCH_SRC_DTYPE(DType::Float64, double)
+        DISPATCH_SRC_DTYPE(DType::Float16, Float16)
+        DISPATCH_SRC_DTYPE(DType::BFloat16, BFloat16)
+        DISPATCH_SRC_DTYPE(DType::Int8, int8_t)
+        DISPATCH_SRC_DTYPE(DType::Int16, int16_t)
+        DISPATCH_SRC_DTYPE(DType::Int32, int32_t)
+        DISPATCH_SRC_DTYPE(DType::Int64, int64_t)
+        DISPATCH_SRC_DTYPE(DType::UInt8, uint8_t)
+        DISPATCH_SRC_DTYPE(DType::UInt16, uint16_t)
+        DISPATCH_SRC_DTYPE(DType::UInt32, uint32_t)
+        DISPATCH_SRC_DTYPE(DType::UInt64, uint64_t)
+        DISPATCH_SRC_DTYPE(DType::Bool, bool)
+        DISPATCH_SRC_DTYPE(DType::Complex64, std::complex<float>)
+        DISPATCH_SRC_DTYPE(DType::Complex128, std::complex<double>)
+    }
+
+    #undef DISPATCH_SRC_DTYPE
+
+    // If original tensor was on GPU, move result back to GPU
+    if (was_on_gpu) {
+        return result.to(impl_->device);
+    }
+
+    return result;
 }
 
 auto Tensor::cuda(int32_t device_id) const -> Tensor {
@@ -967,25 +1075,29 @@ auto Tensor::slice(int64_t dim, int64_t start, int64_t end, int64_t step) const 
     return result;
 }
 
-// Comparison
+// Comparison operators - delegate to dedicated comparison functions
 auto Tensor::operator==(const Tensor& other) const -> Tensor {
-    // TODO: Implement element-wise comparison
-    return *this;
+    return tenzor::eq(*this, other);
 }
 
 auto Tensor::operator!=(const Tensor& other) const -> Tensor {
-    // TODO: Implement element-wise comparison
-    return *this;
+    return tenzor::ne(*this, other);
 }
 
 auto Tensor::operator<(const Tensor& other) const -> Tensor {
-    // TODO: Implement element-wise comparison
-    return *this;
+    return tenzor::lt(*this, other);
 }
 
 auto Tensor::operator>(const Tensor& other) const -> Tensor {
-    // TODO: Implement element-wise comparison
-    return *this;
+    return tenzor::gt(*this, other);
+}
+
+auto Tensor::operator<=(const Tensor& other) const -> Tensor {
+    return tenzor::le(*this, other);
+}
+
+auto Tensor::operator>=(const Tensor& other) const -> Tensor {
+    return tenzor::ge(*this, other);
 }
 
 // ============================================================================

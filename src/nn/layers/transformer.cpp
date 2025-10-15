@@ -209,7 +209,7 @@ TransformerEncoder::TransformerEncoder(
     std::shared_ptr<TransformerEncoderLayer> encoder_layer,
     int64_t num_layers,
     std::shared_ptr<LayerNorm> norm)
-    : num_layers_(num_layers), norm_(norm) {
+    : norm_(norm), num_layers_(num_layers) {
 
     // Create independent copies of the encoder layer for each position
     // Each layer must have its own parameters and internal state
@@ -375,7 +375,7 @@ TransformerDecoder::TransformerDecoder(
     std::shared_ptr<TransformerDecoderLayer> decoder_layer,
     int64_t num_layers,
     std::shared_ptr<LayerNorm> norm)
-    : num_layers_(num_layers), norm_(norm) {
+    : norm_(norm), num_layers_(num_layers) {
 
     // Create independent copies of the decoder layer for each position
     // Each layer must have its own parameters and internal state

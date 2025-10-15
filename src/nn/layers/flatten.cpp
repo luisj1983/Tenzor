@@ -87,7 +87,9 @@ auto Flatten::forward(const Variable& input) -> Variable {
         auto flatten_fn = std::make_shared<FlattenBackward>(input_shape_vec);
 
         // Track input variable for gradient accumulation
-        flatten_fn->set_input_variables({const_cast<Variable*>(&input)});
+        std::vector<Variable> input_vars;
+        input_vars.push_back(input);
+        flatten_fn->set_input_variables(input_vars);
 
         // Set up backward graph - link to input's grad_fn if it exists
         std::vector<std::shared_ptr<Function>> next_funcs;

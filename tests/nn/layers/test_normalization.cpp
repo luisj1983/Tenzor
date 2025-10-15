@@ -152,7 +152,7 @@ TEST(LayerNormTest, BackwardGradientFlow) {
 
     EXPECT_TRUE(input.has_grad());
     auto params = ln.parameters();
-    for (auto* param : params) {
+    for (auto& param : params) {
         EXPECT_TRUE(param->has_grad());
     }
 }
@@ -491,7 +491,7 @@ TEST(NormalizationTest, ZeroGrad) {
 
     ln.zero_grad();
     auto params = ln.parameters();
-    for (auto* param : params) {
+    for (auto& param : params) {
         if (param->has_grad()) {
             auto grad_data = param->grad().value().data<float>();
             for (int i = 0; i < 4; i++) {

@@ -15,11 +15,11 @@ auto Function::next_functions() const -> const std::vector<std::shared_ptr<Funct
     return next_functions_;
 }
 
-auto Function::set_input_variables(std::vector<Variable*> inputs) -> void {
+auto Function::set_input_variables(std::vector<Variable> inputs) -> void {
     input_variables_ = std::move(inputs);
 }
 
-auto Function::input_variables() const -> const std::vector<Variable*>& {
+auto Function::input_variables() const -> const std::vector<Variable>& {
     return input_variables_;
 }
 
@@ -268,7 +268,8 @@ auto MeanBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
 
         // Scale the expanded gradient using native Tensor multiplication
         // This now uses CUDA broadcasting automatically
-        auto scale_tensor = full(input_shape_vec, scale, input.dtype(), expanded.device());
+        // Use expanded.dtype() to ensure dtypes match for element-wise operations
+        auto scale_tensor = full(input_shape_vec, scale, expanded.dtype(), expanded.device());
         return {mul(expanded, scale_tensor)};
     }
 }

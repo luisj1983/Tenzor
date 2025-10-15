@@ -59,8 +59,8 @@ public:
         int64_t H_out = grad_shape[2];
         int64_t W_out = grad_shape[3];
 
-        // Initialize gradient w.r.t input with zeros
-        auto grad_input = zeros({N, C, H_in, W_in});
+        // Initialize gradient w.r.t input with zeros on same device
+        auto grad_input = zeros({N, C, H_in, W_in}, grad_output.dtype(), grad_output.device());
         float* grad_input_data = grad_input.data<float>();
         const float* grad_output_data = grad_output.data<float>();
         const float* indices_data = indices.data<float>();
@@ -111,9 +111,9 @@ auto MaxPool2d::forward(const Variable& input) -> Variable {
     int64_t H_out = calculate_pool_output_size(H_in, kernel_size_, stride_, padding_);
     int64_t W_out = calculate_pool_output_size(W_in, kernel_size_, stride_, padding_);
 
-    // Create output tensor and indices tensor
-    auto output = zeros({N, C, H_out, W_out});
-    auto indices = zeros({N, C, H_out, W_out});
+    // Create output tensor and indices tensor on same device as input
+    auto output = zeros({N, C, H_out, W_out}, input.tensor().dtype(), input.tensor().device());
+    auto indices = zeros({N, C, H_out, W_out}, input.tensor().dtype(), input.tensor().device());
 
     const float* input_data = input.tensor().data<float>();
     float* output_data = output.data<float>();
@@ -168,7 +168,8 @@ auto MaxPool2d::forward(const Variable& input) -> Variable {
 
         result.set_grad_fn(backward_fn);
 
-        std::vector<Variable*> input_vars = {const_cast<Variable*>(&input)};
+        std::vector<Variable> input_vars;
+        input_vars.push_back(input);
         backward_fn->set_input_variables(input_vars);
     }
 
@@ -204,8 +205,8 @@ public:
         int64_t H_out = grad_shape[2];
         int64_t W_out = grad_shape[3];
 
-        // Initialize gradient w.r.t input with zeros
-        auto grad_input = zeros({N, C, H_in_, W_in_});
+        // Initialize gradient w.r.t input with zeros on same device
+        auto grad_input = zeros({N, C, H_in_, W_in_}, grad_output.dtype(), grad_output.device());
         float* grad_input_data = grad_input.data<float>();
         const float* grad_output_data = grad_output.data<float>();
 
@@ -279,8 +280,8 @@ auto AvgPool2d::forward(const Variable& input) -> Variable {
     int64_t H_out = calculate_pool_output_size(H_in, kernel_size_, stride_, padding_);
     int64_t W_out = calculate_pool_output_size(W_in, kernel_size_, stride_, padding_);
 
-    // Create output tensor
-    auto output = zeros({N, C, H_out, W_out});
+    // Create output tensor on same device as input
+    auto output = zeros({N, C, H_out, W_out}, input.tensor().dtype(), input.tensor().device());
 
     const float* input_data = input.tensor().data<float>();
     float* output_data = output.data<float>();
@@ -331,7 +332,8 @@ auto AvgPool2d::forward(const Variable& input) -> Variable {
 
         result.set_grad_fn(backward_fn);
 
-        std::vector<Variable*> input_vars = {const_cast<Variable*>(&input)};
+        std::vector<Variable> input_vars;
+        input_vars.push_back(input);
         backward_fn->set_input_variables(input_vars);
     }
 
@@ -364,8 +366,8 @@ public:
         int64_t N = grad_shape[0];
         int64_t C = grad_shape[1];
 
-        // Initialize gradient w.r.t input with zeros
-        auto grad_input = zeros({N, C, H_in_, W_in_});
+        // Initialize gradient w.r.t input with zeros on same device
+        auto grad_input = zeros({N, C, H_in_, W_in_}, grad_output.dtype(), grad_output.device());
         float* grad_input_data = grad_input.data<float>();
         const float* grad_output_data = grad_output.data<float>();
 
@@ -428,8 +430,8 @@ auto AdaptiveAvgPool2d::forward(const Variable& input) -> Variable {
     int64_t H_out = output_h_;
     int64_t W_out = output_w_;
 
-    // Create output tensor
-    auto output = zeros({N, C, H_out, W_out});
+    // Create output tensor on same device as input
+    auto output = zeros({N, C, H_out, W_out}, input.tensor().dtype(), input.tensor().device());
 
     const float* input_data = input.tensor().data<float>();
     float* output_data = output.data<float>();
@@ -478,7 +480,8 @@ auto AdaptiveAvgPool2d::forward(const Variable& input) -> Variable {
 
         result.set_grad_fn(backward_fn);
 
-        std::vector<Variable*> input_vars = {const_cast<Variable*>(&input)};
+        std::vector<Variable> input_vars;
+        input_vars.push_back(input);
         backward_fn->set_input_variables(input_vars);
     }
 

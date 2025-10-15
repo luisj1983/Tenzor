@@ -80,7 +80,7 @@ TEST(LinearTest, WeightShape) {
     auto linear = nn::Linear(10, 5);
     auto weight = linear.weight();
 
-    auto weight_shape = weight.shape();
+    auto weight_shape = weight->shape();
     EXPECT_EQ(weight_shape.size(), 2);
     EXPECT_EQ(weight_shape[0], 5);  // out_features
     EXPECT_EQ(weight_shape[1], 10); // in_features
@@ -168,7 +168,7 @@ TEST(LinearTest, ConsistentOutput) {
     auto data2 = output2.tensor().data<float>();
     auto size = output1.tensor().numel();
 
-    for (size_t i = 0; i < size; ++i) {
+    for (size_t i = 0; i < static_cast<size_t>(size); ++i) {
         EXPECT_FLOAT_EQ(data1[i], data2[i]);
     }
 }

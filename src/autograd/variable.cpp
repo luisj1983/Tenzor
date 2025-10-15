@@ -4,6 +4,7 @@
 #include "tenzor/ops/creation.hpp"
 #include <atomic>
 #include <iostream>
+#include <vector>
 
 namespace tenzor {
 
@@ -11,72 +12,104 @@ namespace tenzor {
 static std::atomic<bool> grad_enabled{true};
 
 Variable::Variable(Tensor data, bool requires_grad)
-    : data_(std::move(data)), requires_grad_(requires_grad) {}
+    : impl_(std::make_shared<VariableImpl>(std::move(data), requires_grad)) {
+}
+
+auto Variable::is_initialized() const -> bool {
+    return impl_ != nullptr;
+}
+
+Variable::operator bool() const {
+    return is_initialized();
+}
 
 auto Variable::tensor() const -> const Tensor& {
-    return data_;
+    if (!impl_) {
+        throw std::runtime_error("Cannot access tensor of uninitialized Variable");
+    }
+    return impl_->data_;
 }
 
 auto Variable::tensor() -> Tensor& {
-    return data_;
+    if (!impl_) {
+        throw std::runtime_error("Cannot access tensor of uninitialized Variable");
+    }
+    return impl_->data_;
 }
 
 auto Variable::grad() const -> const std::optional<Tensor>& {
-    return grad_;
+    return impl_->grad_;
 }
 
 auto Variable::grad() -> std::optional<Tensor>& {
-    return grad_;
+    return impl_->grad_;
 }
 
 auto Variable::has_grad() const -> bool {
-    return grad_.has_value();
+    return impl_ && impl_->grad_.has_value();
 }
 
-auto Variable::backward(std::optional<Tensor> gradient) -> void {
-    backward_engine().execute(*this, gradient);
+auto Variable::set_grad(Tensor gradient) -> void {
+    impl_->grad_ = std::move(gradient);
+}
+
+auto Variable::backward(std::optional<Tensor> gradient, bool retain_graph) -> void {
+    backward_engine().execute(*this, gradient, retain_graph);
+}
+
+auto Variable::register_hook(std::function<Tensor(const Tensor&)> hook) -> size_t {
+    impl_->hooks_.push_back(std::move(hook));
+    return impl_->hooks_.size() - 1;
+}
+
+auto Variable::retain_grad() -> void {
+    impl_->retain_grad_ = true;
+}
+
+auto Variable::retains_grad() const -> bool {
+    return impl_ && impl_->retain_grad_;
 }
 
 auto Variable::zero_grad() -> void {
-    if (grad_.has_value()) {
-        grad_ = zeros_like(grad_.value());
+    if (impl_ && impl_->grad_.has_value()) {
+        impl_->grad_ = zeros_like(impl_->grad_.value());
     }
 }
 
 auto Variable::detach() -> Variable {
-    return Variable(data_.detach(), false);
+    return Variable(impl_->data_.detach(), false);
 }
 
 auto Variable::requires_grad() const -> bool {
-    return requires_grad_;
+    return impl_ && impl_->requires_grad_;
 }
 
 auto Variable::set_requires_grad(bool requires_grad) -> void {
-    requires_grad_ = requires_grad;
+    impl_->requires_grad_ = requires_grad;
 }
 
 auto Variable::is_leaf() const -> bool {
-    return !grad_fn_;
+    return !impl_ || !impl_->grad_fn_;
 }
 
 auto Variable::set_grad_fn(std::shared_ptr<Function> fn) -> void {
-    grad_fn_ = std::move(fn);
+    impl_->grad_fn_ = std::move(fn);
 }
 
 auto Variable::grad_fn() const -> std::shared_ptr<Function> {
-    return grad_fn_;
+    return impl_ ? impl_->grad_fn_ : nullptr;
 }
 
 auto Variable::shape() const -> std::span<const int64_t> {
-    return data_.shape();
+    return impl_->data_.shape();
 }
 
 auto Variable::dtype() const -> DType {
-    return data_.dtype();
+    return impl_->data_.dtype();
 }
 
 auto Variable::device() const -> const Device& {
-    return data_.device();
+    return impl_->data_.device();
 }
 
 // NoGradGuard implementation
@@ -104,22 +137,23 @@ auto Variable::operator+(const Variable& other) const -> Variable {
     // Set up backward graph - MUST maintain index correspondence with input_grads!
     // Use nullptr for leaf variables to preserve indices
     std::vector<std::shared_ptr<Function>> next_funcs;
-    next_funcs.push_back(grad_fn_);        // nullptr if this is leaf
-    next_funcs.push_back(other.grad_fn_);  // nullptr if other is leaf
+    next_funcs.push_back(impl_->grad_fn_);        // nullptr if this is leaf
+    next_funcs.push_back(other.impl_->grad_fn_);  // nullptr if other is leaf
     grad_fn->set_next_functions(next_funcs);
 
     // Track input variables for gradient accumulation
-    grad_fn->set_input_variables({const_cast<Variable*>(this), const_cast<Variable*>(&other)});
+    // Store Variables by value - their impl_ shared_ptr keeps data alive
+    grad_fn->set_input_variables({*this, other});
 
     // Save input shapes for broadcasting-aware backward pass
-    grad_fn->input_shape_a_ = std::vector<int64_t>(data_.shape().begin(), data_.shape().end());
-    grad_fn->input_shape_b_ = std::vector<int64_t>(other.data_.shape().begin(), other.data_.shape().end());
+    grad_fn->input_shape_a_ = std::vector<int64_t>(impl_->data_.shape().begin(), impl_->data_.shape().end());
+    grad_fn->input_shape_b_ = std::vector<int64_t>(other.impl_->data_.shape().begin(), other.impl_->data_.shape().end());
 
     // Compute result
-    auto result = data_ + other.data_;
-    Variable output(result, requires_grad_ || other.requires_grad_);
+    auto result = impl_->data_ + other.impl_->data_;
+    Variable output(result, impl_->requires_grad_ || other.impl_->requires_grad_);
 
-    if (is_grad_enabled() && (requires_grad_ || other.requires_grad_)) {
+    if (is_grad_enabled() && (impl_->requires_grad_ || other.impl_->requires_grad_)) {
         output.set_grad_fn(grad_fn);
     }
 
@@ -132,22 +166,23 @@ auto Variable::operator-(const Variable& other) const -> Variable {
     // Set up backward graph - MUST maintain index correspondence with input_grads!
     // Use nullptr for leaf variables to preserve indices
     std::vector<std::shared_ptr<Function>> next_funcs;
-    next_funcs.push_back(grad_fn_);        // nullptr if this is leaf
-    next_funcs.push_back(other.grad_fn_);  // nullptr if other is leaf
+    next_funcs.push_back(impl_->grad_fn_);        // nullptr if this is leaf
+    next_funcs.push_back(other.impl_->grad_fn_);  // nullptr if other is leaf
     grad_fn->set_next_functions(next_funcs);
 
     // Track input variables for gradient accumulation
-    grad_fn->set_input_variables({const_cast<Variable*>(this), const_cast<Variable*>(&other)});
+    // Store Variables by value - their impl_ shared_ptr keeps data alive
+    grad_fn->set_input_variables({*this, other});
 
     // Save input shapes for broadcasting-aware backward pass
-    grad_fn->input_shape_a_ = std::vector<int64_t>(data_.shape().begin(), data_.shape().end());
-    grad_fn->input_shape_b_ = std::vector<int64_t>(other.data_.shape().begin(), other.data_.shape().end());
+    grad_fn->input_shape_a_ = std::vector<int64_t>(impl_->data_.shape().begin(), impl_->data_.shape().end());
+    grad_fn->input_shape_b_ = std::vector<int64_t>(other.impl_->data_.shape().begin(), other.impl_->data_.shape().end());
 
     // Compute result
-    auto result = data_ - other.data_;
-    Variable output(result, requires_grad_ || other.requires_grad_);
+    auto result = impl_->data_ - other.impl_->data_;
+    Variable output(result, impl_->requires_grad_ || other.impl_->requires_grad_);
 
-    if (is_grad_enabled() && (requires_grad_ || other.requires_grad_)) {
+    if (is_grad_enabled() && (impl_->requires_grad_ || other.impl_->requires_grad_)) {
         output.set_grad_fn(grad_fn);
     }
 
@@ -160,23 +195,24 @@ auto Variable::operator*(const Variable& other) const -> Variable {
     // Set up backward graph - MUST maintain index correspondence with input_grads!
     // Use nullptr for leaf variables to preserve indices
     std::vector<std::shared_ptr<Function>> next_funcs;
-    next_funcs.push_back(grad_fn_);        // nullptr if this is leaf
-    next_funcs.push_back(other.grad_fn_);  // nullptr if other is leaf
+    next_funcs.push_back(impl_->grad_fn_);        // nullptr if this is leaf
+    next_funcs.push_back(other.impl_->grad_fn_);  // nullptr if other is leaf
     grad_fn->set_next_functions(next_funcs);
 
     // Track input variables for gradient accumulation
-    grad_fn->set_input_variables({const_cast<Variable*>(this), const_cast<Variable*>(&other)});
+    // Store Variables by value - their impl_ shared_ptr keeps data alive
+    grad_fn->set_input_variables({*this, other});
 
     // Save tensors AND input shapes for backward - clone to preserve values
-    grad_fn->saved_tensors_ = {data_.clone(), other.data_.clone()};
-    grad_fn->input_shape_a_ = std::vector<int64_t>(data_.shape().begin(), data_.shape().end());
-    grad_fn->input_shape_b_ = std::vector<int64_t>(other.data_.shape().begin(), other.data_.shape().end());
+    grad_fn->saved_tensors_ = {impl_->data_.clone(), other.impl_->data_.clone()};
+    grad_fn->input_shape_a_ = std::vector<int64_t>(impl_->data_.shape().begin(), impl_->data_.shape().end());
+    grad_fn->input_shape_b_ = std::vector<int64_t>(other.impl_->data_.shape().begin(), other.impl_->data_.shape().end());
 
     // Compute result
-    auto result = data_ * other.data_;
-    Variable output(result, requires_grad_ || other.requires_grad_);
+    auto result = impl_->data_ * other.impl_->data_;
+    Variable output(result, impl_->requires_grad_ || other.impl_->requires_grad_);
 
-    if (is_grad_enabled() && (requires_grad_ || other.requires_grad_)) {
+    if (is_grad_enabled() && (impl_->requires_grad_ || other.impl_->requires_grad_)) {
         output.set_grad_fn(grad_fn);
     }
 
@@ -189,21 +225,22 @@ auto Variable::operator/(const Variable& other) const -> Variable {
     // Set up backward graph - MUST maintain index correspondence with input_grads!
     // Use nullptr for leaf variables to preserve indices
     std::vector<std::shared_ptr<Function>> next_funcs;
-    next_funcs.push_back(grad_fn_);        // nullptr if this is leaf
-    next_funcs.push_back(other.grad_fn_);  // nullptr if other is leaf
+    next_funcs.push_back(impl_->grad_fn_);        // nullptr if this is leaf
+    next_funcs.push_back(other.impl_->grad_fn_);  // nullptr if other is leaf
     grad_fn->set_next_functions(next_funcs);
 
     // Track input variables for gradient accumulation
-    grad_fn->set_input_variables({const_cast<Variable*>(this), const_cast<Variable*>(&other)});
+    // Store Variables by value - their impl_ shared_ptr keeps data alive
+    grad_fn->set_input_variables({*this, other});
 
     // Save tensors for backward - clone to preserve values
-    grad_fn->saved_tensors_ = {data_.clone(), other.data_.clone()};
+    grad_fn->saved_tensors_ = {impl_->data_.clone(), other.impl_->data_.clone()};
 
     // Compute result
-    auto result = data_ / other.data_;
-    Variable output(result, requires_grad_ || other.requires_grad_);
+    auto result = impl_->data_ / other.impl_->data_;
+    Variable output(result, impl_->requires_grad_ || other.impl_->requires_grad_);
 
-    if (is_grad_enabled() && (requires_grad_ || other.requires_grad_)) {
+    if (is_grad_enabled() && (impl_->requires_grad_ || other.impl_->requires_grad_)) {
         output.set_grad_fn(grad_fn);
     }
 

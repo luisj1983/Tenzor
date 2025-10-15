@@ -1,6 +1,8 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
+#include <cuda_bf16.h>
 #include <curand_kernel.h>
 #include <cmath>
 #include <stdexcept>
@@ -10,6 +12,34 @@
 
 namespace tenzor {
 namespace cuda {
+
+// ============================================================================
+// FP16/BF16 Conversion Functions
+// ============================================================================
+
+// Convert Tenzor Float16 to CUDA __half
+__device__ __host__ inline __half to_cuda_half(const Float16& x) {
+    __half_raw raw;
+    raw.x = x.bits;
+    return __half(raw);
+}
+
+// Convert CUDA __half to Tenzor Float16
+__device__ __host__ inline Float16 from_cuda_half(const __half& x) {
+    return Float16(__half_as_ushort(x));
+}
+
+// Convert Tenzor BFloat16 to CUDA __nv_bfloat16
+__device__ __host__ inline __nv_bfloat16 to_cuda_bfloat16(const BFloat16& x) {
+    __nv_bfloat16_raw raw;
+    raw.x = x.bits;
+    return __nv_bfloat16(raw);
+}
+
+// Convert CUDA __nv_bfloat16 to Tenzor BFloat16
+__device__ __host__ inline BFloat16 from_cuda_bfloat16(const __nv_bfloat16& x) {
+    return BFloat16(__bfloat16_as_ushort(x));
+}
 
 // ============================================================================
 // CUDA Error Checking
@@ -240,6 +270,70 @@ __global__ void div_kernel_device(const T* a, const T* b, T* c, int64_t n) {
 }
 
 // ============================================================================
+// FP16 Binary Operations
+// ============================================================================
+
+// FP16 addition kernel
+__global__ void add_kernel_f16(const __half* a, const __half* b, __half* c, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        c[idx] = __hadd(a[idx], b[idx]);
+    }
+}
+
+// FP16 subtraction kernel
+__global__ void sub_kernel_f16(const __half* a, const __half* b, __half* c, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        c[idx] = __hsub(a[idx], b[idx]);
+    }
+}
+
+// FP16 multiplication kernel
+__global__ void mul_kernel_f16(const __half* a, const __half* b, __half* c, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        c[idx] = __hmul(a[idx], b[idx]);
+    }
+}
+
+// FP16 division kernel
+__global__ void div_kernel_f16(const __half* a, const __half* b, __half* c, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        c[idx] = __hdiv(a[idx], b[idx]);
+    }
+}
+
+// ============================================================================
+// BFloat16 Binary Operations
+// ============================================================================
+
+// BFloat16 addition kernel
+__global__ void add_kernel_bf16(const __nv_bfloat16* a, const __nv_bfloat16* b, __nv_bfloat16* c, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        c[idx] = __hadd(a[idx], b[idx]);
+    }
+}
+
+// BFloat16 subtraction kernel
+__global__ void sub_kernel_bf16(const __nv_bfloat16* a, const __nv_bfloat16* b, __nv_bfloat16* c, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        c[idx] = __hsub(a[idx], b[idx]);
+    }
+}
+
+// BFloat16 multiplication kernel
+__global__ void mul_kernel_bf16(const __nv_bfloat16* a, const __nv_bfloat16* b, __nv_bfloat16* c, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        c[idx] = __hmul(a[idx], b[idx]);
+    }
+}
+
+// BFloat16 division kernel
+__global__ void div_kernel_bf16(const __nv_bfloat16* a, const __nv_bfloat16* b, __nv_bfloat16* c, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        c[idx] = __hdiv(a[idx], b[idx]);
+    }
+}
+
+// ============================================================================
 // Unary Operations
 // ============================================================================
 
@@ -271,6 +365,42 @@ __global__ void abs_kernel_f32(const float* input, float* output, int64_t n) {
 __global__ void abs_kernel_f64(const double* input, double* output, int64_t n) {
     CUDA_KERNEL_LOOP(idx, n) {
         output[idx] = fabs(input[idx]);
+    }
+}
+
+// ============================================================================
+// FP16 Unary Operations
+// ============================================================================
+
+// FP16 negate kernel
+__global__ void neg_kernel_f16(const __half* input, __half* output, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = __hneg(input[idx]);
+    }
+}
+
+// FP16 absolute value kernel
+__global__ void abs_kernel_f16(const __half* input, __half* output, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = __habs(input[idx]);
+    }
+}
+
+// ============================================================================
+// BFloat16 Unary Operations
+// ============================================================================
+
+// BFloat16 negate kernel
+__global__ void neg_kernel_bf16(const __nv_bfloat16* input, __nv_bfloat16* output, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = __hneg(input[idx]);
+    }
+}
+
+// BFloat16 absolute value kernel
+__global__ void abs_kernel_bf16(const __nv_bfloat16* input, __nv_bfloat16* output, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = __habs(input[idx]);
     }
 }
 
@@ -368,6 +498,118 @@ __global__ void sign_kernel_f64(const double* input, double* output, int64_t n) 
 }
 
 // ============================================================================
+// FP16 Mathematical Functions
+// ============================================================================
+
+// FP16 square root kernel
+__global__ void sqrt_kernel_f16(const __half* input, __half* output, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = hsqrt(input[idx]);
+    }
+}
+
+// FP16 exponential kernel
+__global__ void exp_kernel_f16(const __half* input, __half* output, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = hexp(input[idx]);
+    }
+}
+
+// FP16 natural logarithm kernel
+__global__ void log_kernel_f16(const __half* input, __half* output, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = hlog(input[idx]);
+    }
+}
+
+// FP16 power kernel
+__global__ void pow_kernel_f16(const __half* input, __half* output, __half exponent, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        float val = __half2float(input[idx]);
+        float exp_val = __half2float(exponent);
+        output[idx] = __float2half(powf(val, exp_val));
+    }
+}
+
+// FP16 clamp kernel
+__global__ void clamp_kernel_f16(const __half* input, __half* output, __half min_val, __half max_val, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        __half val = input[idx];
+        output[idx] = __hmax(__hmin(val, max_val), min_val);
+    }
+}
+
+// FP16 sign kernel
+__global__ void sign_kernel_f16(const __half* input, __half* output, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        __half val = input[idx];
+        __half zero = __float2half(0.0f);
+        __half one = __float2half(1.0f);
+        __half neg_one = __float2half(-1.0f);
+
+        bool is_pos = __hgt(val, zero);
+        bool is_neg = __hlt(val, zero);
+        output[idx] = is_pos ? one : (is_neg ? neg_one : zero);
+    }
+}
+
+// ============================================================================
+// BFloat16 Mathematical Functions
+// ============================================================================
+
+// BFloat16 square root kernel
+__global__ void sqrt_kernel_bf16(const __nv_bfloat16* input, __nv_bfloat16* output, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = hsqrt(input[idx]);
+    }
+}
+
+// BFloat16 exponential kernel
+__global__ void exp_kernel_bf16(const __nv_bfloat16* input, __nv_bfloat16* output, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = hexp(input[idx]);
+    }
+}
+
+// BFloat16 natural logarithm kernel
+__global__ void log_kernel_bf16(const __nv_bfloat16* input, __nv_bfloat16* output, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = hlog(input[idx]);
+    }
+}
+
+// BFloat16 power kernel
+__global__ void pow_kernel_bf16(const __nv_bfloat16* input, __nv_bfloat16* output, __nv_bfloat16 exponent, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        float val = __bfloat162float(input[idx]);
+        float exp_val = __bfloat162float(exponent);
+        output[idx] = __float2bfloat16(powf(val, exp_val));
+    }
+}
+
+// BFloat16 clamp kernel
+__global__ void clamp_kernel_bf16(const __nv_bfloat16* input, __nv_bfloat16* output, __nv_bfloat16 min_val, __nv_bfloat16 max_val, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        __nv_bfloat16 val = input[idx];
+        output[idx] = __hmax(__hmin(val, max_val), min_val);
+    }
+}
+
+// BFloat16 sign kernel
+__global__ void sign_kernel_bf16(const __nv_bfloat16* input, __nv_bfloat16* output, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        __nv_bfloat16 val = input[idx];
+        __nv_bfloat16 zero = __float2bfloat16(0.0f);
+        __nv_bfloat16 one = __float2bfloat16(1.0f);
+        __nv_bfloat16 neg_one = __float2bfloat16(-1.0f);
+
+        bool is_pos = __hgt(val, zero);
+        bool is_neg = __hlt(val, zero);
+        output[idx] = is_pos ? one : (is_neg ? neg_one : zero);
+    }
+}
+
+// ============================================================================
 // Optimized Kernels with Shared Memory (for reduction-like operations)
 // ============================================================================
 
@@ -437,6 +679,16 @@ auto add_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
         } else if (a.dtype() == DType::Int64) {
             add_kernel_device<<<grid, block, 0, stream>>>(
                 a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(), n);
+        } else if (a.dtype() == DType::Float16) {
+            add_kernel_f16<<<grid, block, 0, stream>>>(
+                reinterpret_cast<const __half*>(a.data<Float16>()),
+                reinterpret_cast<const __half*>(b.data<Float16>()),
+                reinterpret_cast<__half*>(result.data<Float16>()), n);
+        } else if (a.dtype() == DType::BFloat16) {
+            add_kernel_bf16<<<grid, block, 0, stream>>>(
+                reinterpret_cast<const __nv_bfloat16*>(a.data<BFloat16>()),
+                reinterpret_cast<const __nv_bfloat16*>(b.data<BFloat16>()),
+                reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), n);
         } else {
             throw std::runtime_error("Unsupported dtype for add operation");
         }
@@ -485,6 +737,18 @@ auto add_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
         broadcast_kernel<<<grid, block, 0, stream>>>(
             a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(),
             d_strides_a, d_strides_b, d_output_shape, ndim, n, AddOp());
+    } else if (a.dtype() == DType::Float16) {
+        broadcast_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __half*>(a.data<Float16>()),
+            reinterpret_cast<const __half*>(b.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, AddOp());
+    } else if (a.dtype() == DType::BFloat16) {
+        broadcast_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(a.data<BFloat16>()),
+            reinterpret_cast<const __nv_bfloat16*>(b.data<BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, AddOp());
     } else {
         throw std::runtime_error("Unsupported dtype for add operation");
     }
@@ -529,6 +793,16 @@ auto sub_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
             sub_kernel_device<<<grid, block, 0, stream>>>(a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(), n);
         } else if (a.dtype() == DType::Int64) {
             sub_kernel_device<<<grid, block, 0, stream>>>(a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(), n);
+        } else if (a.dtype() == DType::Float16) {
+            sub_kernel_f16<<<grid, block, 0, stream>>>(
+                reinterpret_cast<const __half*>(a.data<Float16>()),
+                reinterpret_cast<const __half*>(b.data<Float16>()),
+                reinterpret_cast<__half*>(result.data<Float16>()), n);
+        } else if (a.dtype() == DType::BFloat16) {
+            sub_kernel_bf16<<<grid, block, 0, stream>>>(
+                reinterpret_cast<const __nv_bfloat16*>(a.data<BFloat16>()),
+                reinterpret_cast<const __nv_bfloat16*>(b.data<BFloat16>()),
+                reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), n);
         } else {
             throw std::runtime_error("Unsupported dtype for sub operation");
         }
@@ -575,6 +849,18 @@ auto sub_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
         broadcast_kernel<<<grid, block, 0, stream>>>(
             a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(),
             d_strides_a, d_strides_b, d_output_shape, ndim, n, SubOp());
+    } else if (a.dtype() == DType::Float16) {
+        broadcast_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __half*>(a.data<Float16>()),
+            reinterpret_cast<const __half*>(b.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, SubOp());
+    } else if (a.dtype() == DType::BFloat16) {
+        broadcast_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(a.data<BFloat16>()),
+            reinterpret_cast<const __nv_bfloat16*>(b.data<BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, SubOp());
     } else {
         throw std::runtime_error("Unsupported dtype for sub operation");
     }
@@ -618,6 +904,16 @@ auto mul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
             mul_kernel_device<<<grid, block, 0, stream>>>(a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(), n);
         } else if (a.dtype() == DType::Int64) {
             mul_kernel_device<<<grid, block, 0, stream>>>(a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(), n);
+        } else if (a.dtype() == DType::Float16) {
+            mul_kernel_f16<<<grid, block, 0, stream>>>(
+                reinterpret_cast<const __half*>(a.data<Float16>()),
+                reinterpret_cast<const __half*>(b.data<Float16>()),
+                reinterpret_cast<__half*>(result.data<Float16>()), n);
+        } else if (a.dtype() == DType::BFloat16) {
+            mul_kernel_bf16<<<grid, block, 0, stream>>>(
+                reinterpret_cast<const __nv_bfloat16*>(a.data<BFloat16>()),
+                reinterpret_cast<const __nv_bfloat16*>(b.data<BFloat16>()),
+                reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), n);
         } else {
             throw std::runtime_error("Unsupported dtype for mul operation");
         }
@@ -664,6 +960,18 @@ auto mul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
         broadcast_kernel<<<grid, block, 0, stream>>>(
             a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(),
             d_strides_a, d_strides_b, d_output_shape, ndim, n, MulOp());
+    } else if (a.dtype() == DType::Float16) {
+        broadcast_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __half*>(a.data<Float16>()),
+            reinterpret_cast<const __half*>(b.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, MulOp());
+    } else if (a.dtype() == DType::BFloat16) {
+        broadcast_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(a.data<BFloat16>()),
+            reinterpret_cast<const __nv_bfloat16*>(b.data<BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, MulOp());
     } else {
         throw std::runtime_error("Unsupported dtype for mul operation");
     }
@@ -707,6 +1015,16 @@ auto div_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
             div_kernel_device<<<grid, block, 0, stream>>>(a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(), n);
         } else if (a.dtype() == DType::Int64) {
             div_kernel_device<<<grid, block, 0, stream>>>(a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(), n);
+        } else if (a.dtype() == DType::Float16) {
+            div_kernel_f16<<<grid, block, 0, stream>>>(
+                reinterpret_cast<const __half*>(a.data<Float16>()),
+                reinterpret_cast<const __half*>(b.data<Float16>()),
+                reinterpret_cast<__half*>(result.data<Float16>()), n);
+        } else if (a.dtype() == DType::BFloat16) {
+            div_kernel_bf16<<<grid, block, 0, stream>>>(
+                reinterpret_cast<const __nv_bfloat16*>(a.data<BFloat16>()),
+                reinterpret_cast<const __nv_bfloat16*>(b.data<BFloat16>()),
+                reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), n);
         } else {
             throw std::runtime_error("Unsupported dtype for div operation");
         }
@@ -753,6 +1071,18 @@ auto div_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
         broadcast_kernel<<<grid, block, 0, stream>>>(
             a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(),
             d_strides_a, d_strides_b, d_output_shape, ndim, n, DivOp());
+    } else if (a.dtype() == DType::Float16) {
+        broadcast_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __half*>(a.data<Float16>()),
+            reinterpret_cast<const __half*>(b.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, DivOp());
+    } else if (a.dtype() == DType::BFloat16) {
+        broadcast_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(a.data<BFloat16>()),
+            reinterpret_cast<const __nv_bfloat16*>(b.data<BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, DivOp());
     } else {
         throw std::runtime_error("Unsupported dtype for div operation");
     }
@@ -782,6 +1112,14 @@ auto neg_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
         neg_kernel_device<<<grid, block, 0, stream>>>(input.data<int32_t>(), result.data<int32_t>(), n);
     } else if (input.dtype() == DType::Int64) {
         neg_kernel_device<<<grid, block, 0, stream>>>(input.data<int64_t>(), result.data<int64_t>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        neg_kernel_f16<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        neg_kernel_bf16<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(input.data<BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), n);
     } else {
         throw std::runtime_error("Unsupported dtype for neg operation");
     }
@@ -807,6 +1145,14 @@ auto abs_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
         abs_kernel_device<<<grid, block, 0, stream>>>(input.data<int32_t>(), result.data<int32_t>(), n);
     } else if (input.dtype() == DType::Int64) {
         abs_kernel_device<<<grid, block, 0, stream>>>(input.data<int64_t>(), result.data<int64_t>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        abs_kernel_f16<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        abs_kernel_bf16<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(input.data<BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), n);
     } else {
         throw std::runtime_error("Unsupported dtype for abs operation");
     }
@@ -828,8 +1174,16 @@ auto sqrt_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
         sqrt_kernel_f32<<<grid, block, 0, stream>>>(input.data<float>(), result.data<float>(), n);
     } else if (input.dtype() == DType::Float64) {
         sqrt_kernel_f64<<<grid, block, 0, stream>>>(input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        sqrt_kernel_f16<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        sqrt_kernel_bf16<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(input.data<BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), n);
     } else {
-        throw std::runtime_error("sqrt operation only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("sqrt operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     CUDA_CHECK(cudaGetLastError());
@@ -849,8 +1203,16 @@ auto exp_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
         exp_kernel_f32<<<grid, block, 0, stream>>>(input.data<float>(), result.data<float>(), n);
     } else if (input.dtype() == DType::Float64) {
         exp_kernel_f64<<<grid, block, 0, stream>>>(input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        exp_kernel_f16<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        exp_kernel_bf16<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(input.data<BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), n);
     } else {
-        throw std::runtime_error("exp operation only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("exp operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     CUDA_CHECK(cudaGetLastError());
@@ -870,8 +1232,16 @@ auto log_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
         log_kernel_f32<<<grid, block, 0, stream>>>(input.data<float>(), result.data<float>(), n);
     } else if (input.dtype() == DType::Float64) {
         log_kernel_f64<<<grid, block, 0, stream>>>(input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        log_kernel_f16<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        log_kernel_bf16<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(input.data<BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), n);
     } else {
-        throw std::runtime_error("log operation only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("log operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     CUDA_CHECK(cudaGetLastError());
@@ -892,8 +1262,18 @@ auto pow_kernel(const Tensor& input, float exponent, cudaStream_t stream) -> Ten
     } else if (input.dtype() == DType::Float64) {
         double exp_d = static_cast<double>(exponent);
         pow_kernel_f64<<<grid, block, 0, stream>>>(input.data<double>(), result.data<double>(), exp_d, n);
+    } else if (input.dtype() == DType::Float16) {
+        __half exp_h = __float2half(exponent);
+        pow_kernel_f16<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), exp_h, n);
+    } else if (input.dtype() == DType::BFloat16) {
+        __nv_bfloat16 exp_bf = __float2bfloat16(exponent);
+        pow_kernel_bf16<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(input.data<BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), exp_bf, n);
     } else {
-        throw std::runtime_error("pow operation only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("pow operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     CUDA_CHECK(cudaGetLastError());
@@ -915,8 +1295,20 @@ auto clamp_kernel(const Tensor& input, float min_val, float max_val, cudaStream_
         double min_d = static_cast<double>(min_val);
         double max_d = static_cast<double>(max_val);
         clamp_kernel_f64<<<grid, block, 0, stream>>>(input.data<double>(), result.data<double>(), min_d, max_d, n);
+    } else if (input.dtype() == DType::Float16) {
+        __half min_h = __float2half(min_val);
+        __half max_h = __float2half(max_val);
+        clamp_kernel_f16<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), min_h, max_h, n);
+    } else if (input.dtype() == DType::BFloat16) {
+        __nv_bfloat16 min_bf = __float2bfloat16(min_val);
+        __nv_bfloat16 max_bf = __float2bfloat16(max_val);
+        clamp_kernel_bf16<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(input.data<BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), min_bf, max_bf, n);
     } else {
-        throw std::runtime_error("clamp operation only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("clamp operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     CUDA_CHECK(cudaGetLastError());
@@ -936,8 +1328,16 @@ auto sign_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
         sign_kernel_f32<<<grid, block, 0, stream>>>(input.data<float>(), result.data<float>(), n);
     } else if (input.dtype() == DType::Float64) {
         sign_kernel_f64<<<grid, block, 0, stream>>>(input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        sign_kernel_f16<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()), n);
+    } else if (input.dtype() == DType::BFloat16) {
+        sign_kernel_bf16<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(input.data<BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), n);
     } else {
-        throw std::runtime_error("sign operation only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("sign operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     CUDA_CHECK(cudaGetLastError());
@@ -1061,6 +1461,18 @@ auto expand_kernel(const Tensor& input, const std::vector<int64_t>& shape, void*
             input.data<int64_t>(), result.data<int64_t>(),
             d_input_shape, d_input_strides, d_output_shape,
             input_ndim, output_ndim, n);
+    } else if (input.dtype() == DType::Float16) {
+        expand_kernel_device<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()),
+            d_input_shape, d_input_strides, d_output_shape,
+            input_ndim, output_ndim, n);
+    } else if (input.dtype() == DType::BFloat16) {
+        expand_kernel_device<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __nv_bfloat16*>(input.data<BFloat16>()),
+            reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()),
+            d_input_shape, d_input_strides, d_output_shape,
+            input_ndim, output_ndim, n);
     } else {
         throw std::runtime_error("Unsupported dtype for expand operation");
     }
@@ -1112,6 +1524,14 @@ auto fill_kernel(const Tensor& tensor, float value, cudaStream_t stream) -> Tens
     } else if (tensor.dtype() == DType::Int64) {
         fill_kernel_device<<<grid, block, 0, stream>>>(
             result.data<int64_t>(), static_cast<int64_t>(value), n);
+    } else if (tensor.dtype() == DType::Float16) {
+        __half h_value = __float2half(value);
+        fill_kernel_device<<<grid, block, 0, stream>>>(
+            reinterpret_cast<__half*>(result.data<Float16>()), h_value, n);
+    } else if (tensor.dtype() == DType::BFloat16) {
+        __nv_bfloat16 bf_value = __float2bfloat16(value);
+        fill_kernel_device<<<grid, block, 0, stream>>>(
+            reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), bf_value, n);
     } else {
         throw std::runtime_error("Unsupported dtype for fill operation");
     }
@@ -1145,6 +1565,14 @@ auto zeros_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
     } else if (dtype == DType::Int64) {
         fill_kernel_device<<<grid, block, 0, stream>>>(
             result.data<int64_t>(), static_cast<int64_t>(0), n);
+    } else if (dtype == DType::Float16) {
+        __half zero_h = __float2half(0.0f);
+        fill_kernel_device<<<grid, block, 0, stream>>>(
+            reinterpret_cast<__half*>(result.data<Float16>()), zero_h, n);
+    } else if (dtype == DType::BFloat16) {
+        __nv_bfloat16 zero_bf = __float2bfloat16(0.0f);
+        fill_kernel_device<<<grid, block, 0, stream>>>(
+            reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), zero_bf, n);
     } else {
         throw std::runtime_error("Unsupported dtype for zeros operation");
     }
@@ -1177,6 +1605,14 @@ auto ones_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
     } else if (dtype == DType::Int64) {
         fill_kernel_device<<<grid, block, 0, stream>>>(
             result.data<int64_t>(), static_cast<int64_t>(1), n);
+    } else if (dtype == DType::Float16) {
+        __half one_h = __float2half(1.0f);
+        fill_kernel_device<<<grid, block, 0, stream>>>(
+            reinterpret_cast<__half*>(result.data<Float16>()), one_h, n);
+    } else if (dtype == DType::BFloat16) {
+        __nv_bfloat16 one_bf = __float2bfloat16(1.0f);
+        fill_kernel_device<<<grid, block, 0, stream>>>(
+            reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), one_bf, n);
     } else {
         throw std::runtime_error("Unsupported dtype for ones operation");
     }
@@ -1209,6 +1645,14 @@ auto full_kernel(const std::vector<int64_t>& shape, float value, DType dtype, De
     } else if (dtype == DType::Int64) {
         fill_kernel_device<<<grid, block, 0, stream>>>(
             result.data<int64_t>(), static_cast<int64_t>(value), n);
+    } else if (dtype == DType::Float16) {
+        __half h_value = __float2half(value);
+        fill_kernel_device<<<grid, block, 0, stream>>>(
+            reinterpret_cast<__half*>(result.data<Float16>()), h_value, n);
+    } else if (dtype == DType::BFloat16) {
+        __nv_bfloat16 bf_value = __float2bfloat16(value);
+        fill_kernel_device<<<grid, block, 0, stream>>>(
+            reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), bf_value, n);
     } else {
         throw std::runtime_error("Unsupported dtype for full operation");
     }
@@ -1243,10 +1687,42 @@ __global__ void randn_kernel_device(float* output, curandState* states, int64_t 
     }
 }
 
+// FP16 uniform random kernel
+__global__ void rand_kernel_f16(__half* output, curandState* states, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        float val = curand_uniform(&states[idx]);
+        output[idx] = __float2half(val);
+    }
+}
+
+// FP16 normal distribution kernel
+__global__ void randn_kernel_f16(__half* output, curandState* states, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        float val = curand_normal(&states[idx]);
+        output[idx] = __float2half(val);
+    }
+}
+
+// BFloat16 uniform random kernel
+__global__ void rand_kernel_bf16(__nv_bfloat16* output, curandState* states, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        float val = curand_uniform(&states[idx]);
+        output[idx] = __float2bfloat16(val);
+    }
+}
+
+// BFloat16 normal distribution kernel
+__global__ void randn_kernel_bf16(__nv_bfloat16* output, curandState* states, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        float val = curand_normal(&states[idx]);
+        output[idx] = __float2bfloat16(val);
+    }
+}
+
 // Rand kernel launcher - uniform random [0, 1)
 auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, cudaStream_t stream) -> Tensor {
-    if (dtype != DType::Float32 && dtype != DType::Float64) {
-        throw std::runtime_error("rand operation only supports Float32 and Float64 dtypes");
+    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16 && dtype != DType::BFloat16) {
+        throw std::runtime_error("rand operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     Tensor result(shape, dtype, device);
@@ -1284,6 +1760,14 @@ auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
         CUDA_CHECK(cudaMemcpy(output_double, temp_float, n * sizeof(float), cudaMemcpyDeviceToDevice));
         // Note: This copies as bytes, need proper conversion kernel for production
         CUDA_CHECK(cudaFree(temp_float));
+    } else if (dtype == DType::Float16) {
+        rand_kernel_f16<<<grid, block, 0, stream>>>(
+            reinterpret_cast<__half*>(result.data<Float16>()), d_states, n);
+        CUDA_CHECK(cudaGetLastError());
+    } else if (dtype == DType::BFloat16) {
+        rand_kernel_bf16<<<grid, block, 0, stream>>>(
+            reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), d_states, n);
+        CUDA_CHECK(cudaGetLastError());
     }
 
     // Cleanup
@@ -1294,8 +1778,8 @@ auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
 
 // Randn kernel launcher - normal distribution N(0,1)
 auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, cudaStream_t stream) -> Tensor {
-    if (dtype != DType::Float32 && dtype != DType::Float64) {
-        throw std::runtime_error("randn operation only supports Float32 and Float64 dtypes");
+    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16 && dtype != DType::BFloat16) {
+        throw std::runtime_error("randn operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
     Tensor result(shape, dtype, device);
@@ -1333,12 +1817,220 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
         CUDA_CHECK(cudaMemcpy(output_double, temp_float, n * sizeof(float), cudaMemcpyDeviceToDevice));
         // Note: This copies as bytes, need proper conversion kernel for production
         CUDA_CHECK(cudaFree(temp_float));
+    } else if (dtype == DType::Float16) {
+        randn_kernel_f16<<<grid, block, 0, stream>>>(
+            reinterpret_cast<__half*>(result.data<Float16>()), d_states, n);
+        CUDA_CHECK(cudaGetLastError());
+    } else if (dtype == DType::BFloat16) {
+        randn_kernel_bf16<<<grid, block, 0, stream>>>(
+            reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), d_states, n);
+        CUDA_CHECK(cudaGetLastError());
     }
 
     // Cleanup
     CUDA_CHECK(cudaFree(d_states));
 
     return result;
+}
+
+// ============================================================================
+// Comparison Operations
+// ============================================================================
+
+// Comparison operation functors
+struct EqOp {
+    template<typename T>
+    __device__ bool operator()(T a, T b) const { return a == b; }
+};
+
+struct NeOp {
+    template<typename T>
+    __device__ bool operator()(T a, T b) const { return a != b; }
+};
+
+struct LtOp {
+    template<typename T>
+    __device__ bool operator()(T a, T b) const { return a < b; }
+};
+
+struct LeOp {
+    template<typename T>
+    __device__ bool operator()(T a, T b) const { return a <= b; }
+};
+
+struct GtOp {
+    template<typename T>
+    __device__ bool operator()(T a, T b) const { return a > b; }
+};
+
+struct GeOp {
+    template<typename T>
+    __device__ bool operator()(T a, T b) const { return a >= b; }
+};
+
+// Fast path: element-wise comparison (same shape)
+template<typename T, typename Op>
+__global__ void compare_kernel_device(const T* a, const T* b, bool* c, int64_t n, Op op) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        c[idx] = op(a[idx], b[idx]);
+    }
+}
+
+// Generic broadcast comparison kernel
+template<typename T, typename Op>
+__global__ void broadcast_compare_kernel(
+    const T* a, const T* b, bool* c,
+    const int64_t* strides_a, const int64_t* strides_b,
+    const int64_t* output_shape, int64_t ndim, int64_t n, Op op) {
+
+    CUDA_KERNEL_LOOP(out_idx, n) {
+        int64_t idx_a = 0;
+        int64_t idx_b = 0;
+        int64_t tmp = out_idx;
+
+        // Convert flat index to multi-dimensional indices
+        for (int64_t i = ndim - 1; i >= 0; --i) {
+            int64_t coord = tmp % output_shape[i];
+            tmp /= output_shape[i];
+            idx_a += coord * strides_a[i];
+            idx_b += coord * strides_b[i];
+        }
+
+        c[out_idx] = op(a[idx_a], b[idx_b]);
+    }
+}
+
+// Generic comparison launcher
+template<typename Op>
+auto compare_kernel_launcher(const Tensor& a, const Tensor& b, cudaStream_t stream, Op op) -> Tensor {
+    if (a.dtype() != b.dtype()) {
+        throw std::runtime_error("Tensors must have the same dtype for comparison");
+    }
+
+    auto a_shape_span = a.shape();
+    auto b_shape_span = b.shape();
+    std::vector<int64_t> a_shape_vec(a_shape_span.begin(), a_shape_span.end());
+    std::vector<int64_t> b_shape_vec(b_shape_span.begin(), b_shape_span.end());
+
+    // Check if broadcastable
+    if (!detail::are_broadcastable(a_shape_vec, b_shape_vec)) {
+        throw std::runtime_error("Shapes are not broadcastable");
+    }
+
+    // Check for fast path (same shape, no broadcasting needed)
+    if (detail::have_same_shape(a, b)) {
+        int64_t n = a.numel();
+        std::vector<int64_t> output_shape(a_shape_vec);
+        Tensor result(output_shape, DType::Bool, a.device());  // Result is Bool type
+
+        if (n == 0) {
+            return result;
+        }
+
+        dim3 grid, block;
+        compute_launch_config_1d(n, grid, block);
+
+        if (a.dtype() == DType::Float32) {
+            compare_kernel_device<<<grid, block, 0, stream>>>(
+                a.data<float>(), b.data<float>(), result.data<bool>(), n, op);
+        } else if (a.dtype() == DType::Float64) {
+            compare_kernel_device<<<grid, block, 0, stream>>>(
+                a.data<double>(), b.data<double>(), result.data<bool>(), n, op);
+        } else if (a.dtype() == DType::Int32) {
+            compare_kernel_device<<<grid, block, 0, stream>>>(
+                a.data<int32_t>(), b.data<int32_t>(), result.data<bool>(), n, op);
+        } else if (a.dtype() == DType::Int64) {
+            compare_kernel_device<<<grid, block, 0, stream>>>(
+                a.data<int64_t>(), b.data<int64_t>(), result.data<bool>(), n, op);
+        } else {
+            throw std::runtime_error("Unsupported dtype for comparison operation");
+        }
+
+        CUDA_CHECK(cudaGetLastError());
+        return result;
+    }
+
+    // Broadcasting path
+    std::vector<int64_t> output_shape = detail::compute_broadcast_shape(a_shape_vec, b_shape_vec);
+    Tensor result(output_shape, DType::Bool, a.device());
+
+    // Compute strides
+    std::vector<int64_t> strides_a = detail::compute_broadcast_strides(a_shape_vec, output_shape);
+    std::vector<int64_t> strides_b = detail::compute_broadcast_strides(b_shape_vec, output_shape);
+
+    // Copy strides to device
+    int64_t* d_strides_a;
+    int64_t* d_strides_b;
+    int64_t* d_output_shape;
+    CUDA_CHECK(cudaMalloc(&d_strides_a, output_shape.size() * sizeof(int64_t)));
+    CUDA_CHECK(cudaMalloc(&d_strides_b, output_shape.size() * sizeof(int64_t)));
+    CUDA_CHECK(cudaMalloc(&d_output_shape, output_shape.size() * sizeof(int64_t)));
+    CUDA_CHECK(cudaMemcpy(d_strides_a, strides_a.data(), output_shape.size() * sizeof(int64_t), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_strides_b, strides_b.data(), output_shape.size() * sizeof(int64_t), cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_output_shape, output_shape.data(), output_shape.size() * sizeof(int64_t), cudaMemcpyHostToDevice));
+
+    int64_t n = result.numel();
+    int64_t ndim = output_shape.size();
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (a.dtype() == DType::Float32) {
+        broadcast_compare_kernel<<<grid, block, 0, stream>>>(
+            a.data<float>(), b.data<float>(), result.data<bool>(),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, op);
+    } else if (a.dtype() == DType::Float64) {
+        broadcast_compare_kernel<<<grid, block, 0, stream>>>(
+            a.data<double>(), b.data<double>(), result.data<bool>(),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, op);
+    } else if (a.dtype() == DType::Int32) {
+        broadcast_compare_kernel<<<grid, block, 0, stream>>>(
+            a.data<int32_t>(), b.data<int32_t>(), result.data<bool>(),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, op);
+    } else if (a.dtype() == DType::Int64) {
+        broadcast_compare_kernel<<<grid, block, 0, stream>>>(
+            a.data<int64_t>(), b.data<int64_t>(), result.data<bool>(),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, op);
+    } else {
+        throw std::runtime_error("Unsupported dtype for comparison operation");
+    }
+
+    // Cleanup
+    CUDA_CHECK(cudaFree(d_strides_a));
+    CUDA_CHECK(cudaFree(d_strides_b));
+    CUDA_CHECK(cudaFree(d_output_shape));
+    CUDA_CHECK(cudaGetLastError());
+
+    return result;
+}
+
+// Equal kernel launcher
+auto eq_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor {
+    return compare_kernel_launcher(a, b, stream, EqOp());
+}
+
+// Not equal kernel launcher
+auto ne_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor {
+    return compare_kernel_launcher(a, b, stream, NeOp());
+}
+
+// Less than kernel launcher
+auto lt_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor {
+    return compare_kernel_launcher(a, b, stream, LtOp());
+}
+
+// Less than or equal kernel launcher
+auto le_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor {
+    return compare_kernel_launcher(a, b, stream, LeOp());
+}
+
+// Greater than kernel launcher
+auto gt_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor {
+    return compare_kernel_launcher(a, b, stream, GtOp());
+}
+
+// Greater than or equal kernel launcher
+auto ge_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor {
+    return compare_kernel_launcher(a, b, stream, GeOp());
 }
 
 } // namespace cuda

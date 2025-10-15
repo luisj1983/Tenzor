@@ -66,7 +66,7 @@ namespace optim {
  */
 class Adam : public Optimizer {
 public:
-    Adam(std::vector<Variable*> params,
+    Adam(std::vector<std::shared_ptr<Variable>> params,
          double lr = 1e-3,
          double beta1 = 0.9,
          double beta2 = 0.999,
@@ -151,7 +151,7 @@ private:
  */
 class AdamW : public Optimizer {
 public:
-    AdamW(std::vector<Variable*> params,
+    AdamW(std::vector<std::shared_ptr<Variable>> params,
           double lr = 1e-3,
           double beta1 = 0.9,
           double beta2 = 0.999,

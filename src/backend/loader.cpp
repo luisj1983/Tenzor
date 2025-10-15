@@ -60,6 +60,8 @@ auto BackendLoader::register_backend(std::string_view name,
         device_type = Device::Type::CPU;
     } else if (backend_name == "cuda") {
         device_type = Device::Type::CUDA;
+    } else if (backend_name == "rocm") {
+        device_type = Device::Type::ROCm;
     } else {
         device_type = Device::Type::CPU; // Default fallback
     }
@@ -105,7 +107,7 @@ auto BackendLoader::load_library(const std::filesystem::path& path) -> LibHandle
     #ifdef _WIN32
         return LoadLibraryA(path.string().c_str());
     #else
-        return dlopen(path.c_str(), RTLD_LAZY | RTLD_LOCAL);
+        return dlopen(path.c_str(), RTLD_LAZY | RTLD_GLOBAL);
     #endif
 }
 

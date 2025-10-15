@@ -16,6 +16,7 @@ set(TENZOR_CORE_SOURCES
     ops/reduction.cpp
     ops/transform.cpp
     ops/fused_ops.cpp
+    ops/advanced.cpp
     autograd/variable.cpp
     autograd/graph.cpp
     autograd/function.cpp
@@ -50,6 +51,7 @@ set(TENZOR_CORE_SOURCES
     nn/optim/scheduler.cpp
     nn/optim/scheduler_advanced.cpp
     nn/amp/grad_scaler.cpp
+    nn/amp/autocast.cpp
     nn/parallel/data_parallel.cpp
     parallel/threadpool.cpp
     data/dataloader.cpp
@@ -92,6 +94,20 @@ endif()
 target_compile_definitions(tenzor_core PRIVATE
     TENZOR_VERSION="${PROJECT_VERSION}"
 )
+
+# Add CUDA definition and includes if CUDA backend is enabled
+if(TENZOR_BUILD_CUDA)
+    find_package(CUDAToolkit REQUIRED)
+    target_compile_definitions(tenzor_core PRIVATE
+        TENZOR_USE_CUDA
+    )
+    target_include_directories(tenzor_core PRIVATE
+        ${CUDAToolkit_INCLUDE_DIRS}
+    )
+    target_link_libraries(tenzor_core PRIVATE
+        CUDA::cudart
+    )
+endif()
 
 # Build backends
 add_subdirectory(backends)

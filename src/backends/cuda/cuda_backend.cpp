@@ -1,5 +1,8 @@
 #include "tenzor/backend/backend.hpp"
 #include "tenzor/backend/caching_allocator.hpp"
+#ifdef TENZOR_HAS_CUDNN
+#include "tenzor/backend/cudnn_wrapper.hpp"
+#endif
 #include <cuda_runtime.h>
 #include <stdexcept>
 #include <limits>
@@ -60,6 +63,7 @@ namespace cuda {
     auto squeeze_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Tensor;
     auto unsqueeze_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Tensor;
     auto expand_kernel(const Tensor& input, const std::vector<int64_t>& shape, void* stream) -> Tensor;
+    auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, cudaStream_t stream) -> Tensor;
 
     // Fill operations
     auto zeros_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, cudaStream_t stream) -> Tensor;
@@ -71,12 +75,28 @@ namespace cuda {
     auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, cudaStream_t stream) -> Tensor;
     auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, cudaStream_t stream) -> Tensor;
 
+    // Comparison operations
+    auto eq_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor;
+    auto ne_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor;
+    auto lt_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor;
+    auto le_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor;
+    auto gt_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor;
+    auto ge_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor;
+
     // BatchNorm2d operations
     auto batchnorm2d_mean_var(const Tensor& input, Tensor& mean, Tensor& variance, cudaStream_t stream) -> void;
     auto batchnorm2d_forward(const Tensor& input, const Tensor& mean, const Tensor& variance, float epsilon, cudaStream_t stream) -> Tensor;
     auto batchnorm2d_forward_affine(const Tensor& input, const Tensor& mean, const Tensor& variance, const Tensor& gamma, const Tensor& beta, float epsilon, cudaStream_t stream) -> Tensor;
     auto batchnorm2d_update_running_stats(Tensor& running_mean, Tensor& running_var, const Tensor& batch_mean, const Tensor& batch_var, float momentum, cudaStream_t stream) -> void;
     auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const Tensor& mean, const Tensor& variance, const Tensor& gamma, float epsilon, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
+
+    // Conv2d operations (custom kernels - fallback)
+    auto conv2d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t dilation, int64_t groups, cudaStream_t stream) -> Tensor;
+    auto conv2d_backward_kernel(const Tensor& grad_output, const Tensor& input, const Tensor& weight, int64_t stride, int64_t padding, int64_t dilation, int64_t groups, bool compute_grad_input, bool compute_grad_weight, bool compute_grad_bias, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
+
+    // LSTM operations (custom kernels - fallback)
+    auto lstm_cell_forward_kernel(const Tensor& gates, const Tensor& c_prev, int64_t batch_size, int64_t hidden_size, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
+    auto lstm_cell_backward_kernel(const Tensor& grad_h, const Tensor& grad_c, const Tensor& gates, const Tensor& c_prev, const Tensor& c_out, int64_t batch_size, int64_t hidden_size, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
 } // namespace cuda
 
 class CUDABackend : public Backend {
@@ -493,6 +513,8 @@ public:
                     auto dtype_str = attrs.at("dtype");
                     if (dtype_str == "float32") dtype = DType::Float32;
                     else if (dtype_str == "float64") dtype = DType::Float64;
+                    else if (dtype_str == "float16") dtype = DType::Float16;
+                    else if (dtype_str == "bfloat16") dtype = DType::BFloat16;
                     else if (dtype_str == "int32") dtype = DType::Int32;
                     else if (dtype_str == "int64") dtype = DType::Int64;
                 }
@@ -520,6 +542,8 @@ public:
                     auto dtype_str = attrs.at("dtype");
                     if (dtype_str == "float32") dtype = DType::Float32;
                     else if (dtype_str == "float64") dtype = DType::Float64;
+                    else if (dtype_str == "float16") dtype = DType::Float16;
+                    else if (dtype_str == "bfloat16") dtype = DType::BFloat16;
                     else if (dtype_str == "int32") dtype = DType::Int32;
                     else if (dtype_str == "int64") dtype = DType::Int64;
                 }
@@ -553,6 +577,8 @@ public:
                     auto dtype_str = attrs.at("dtype");
                     if (dtype_str == "float32") dtype = DType::Float32;
                     else if (dtype_str == "float64") dtype = DType::Float64;
+                    else if (dtype_str == "float16") dtype = DType::Float16;
+                    else if (dtype_str == "bfloat16") dtype = DType::BFloat16;
                     else if (dtype_str == "int32") dtype = DType::Int32;
                     else if (dtype_str == "int64") dtype = DType::Int64;
                 }
@@ -612,6 +638,8 @@ public:
                     auto dtype_str = attrs.at("dtype");
                     if (dtype_str == "float32") dtype = DType::Float32;
                     else if (dtype_str == "float64") dtype = DType::Float64;
+                    else if (dtype_str == "float16") dtype = DType::Float16;
+                    else if (dtype_str == "bfloat16") dtype = DType::BFloat16;
                     else if (dtype_str == "int32") dtype = DType::Int32;
                     else if (dtype_str == "int64") dtype = DType::Int64;
                 }
@@ -640,6 +668,8 @@ public:
                     auto dtype_str = attrs.at("dtype");
                     if (dtype_str == "float32") dtype = DType::Float32;
                     else if (dtype_str == "float64") dtype = DType::Float64;
+                    else if (dtype_str == "float16") dtype = DType::Float16;
+                    else if (dtype_str == "bfloat16") dtype = DType::BFloat16;
                     else if (dtype_str == "int32") dtype = DType::Int32;
                     else if (dtype_str == "int64") dtype = DType::Int64;
                 }
@@ -735,6 +765,16 @@ public:
                 }
                 return {cuda::unsqueeze_kernel(inputs[0], dim, stream)};
             }
+            else if (op_name == "cat") {
+                if (inputs.empty()) {
+                    throw std::invalid_argument("cat operation requires at least 1 input tensor");
+                }
+                int64_t dim = 0;
+                if (attrs.contains("dim")) {
+                    dim = std::stoll(attrs.at("dim"));
+                }
+                return {cuda::cat_kernel(inputs, dim, stream)};
+            }
             else if (op_name == "batchnorm2d_mean_var") {
                 if (inputs.size() != 1) {
                     throw std::invalid_argument("batchnorm2d_mean_var operation requires exactly 1 input");
@@ -794,6 +834,143 @@ public:
                 }
                 auto [grad_input, grad_gamma, grad_beta] = cuda::batchnorm2d_backward(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], epsilon, stream);
                 return {grad_input, grad_gamma, grad_beta};
+            }
+            else if (op_name == "eq") {
+                if (inputs.size() != 2) {
+                    throw std::invalid_argument("eq operation requires exactly 2 inputs");
+                }
+                return {cuda::eq_kernel(inputs[0], inputs[1], stream)};
+            }
+            else if (op_name == "ne") {
+                if (inputs.size() != 2) {
+                    throw std::invalid_argument("ne operation requires exactly 2 inputs");
+                }
+                return {cuda::ne_kernel(inputs[0], inputs[1], stream)};
+            }
+            else if (op_name == "lt") {
+                if (inputs.size() != 2) {
+                    throw std::invalid_argument("lt operation requires exactly 2 inputs");
+                }
+                return {cuda::lt_kernel(inputs[0], inputs[1], stream)};
+            }
+            else if (op_name == "le") {
+                if (inputs.size() != 2) {
+                    throw std::invalid_argument("le operation requires exactly 2 inputs");
+                }
+                return {cuda::le_kernel(inputs[0], inputs[1], stream)};
+            }
+            else if (op_name == "gt") {
+                if (inputs.size() != 2) {
+                    throw std::invalid_argument("gt operation requires exactly 2 inputs");
+                }
+                return {cuda::gt_kernel(inputs[0], inputs[1], stream)};
+            }
+            else if (op_name == "ge") {
+                if (inputs.size() != 2) {
+                    throw std::invalid_argument("ge operation requires exactly 2 inputs");
+                }
+                return {cuda::ge_kernel(inputs[0], inputs[1], stream)};
+            }
+            else if (op_name == "conv2d_forward") {
+                // Parse conv2d parameters
+                int64_t stride = 1, padding = 0, dilation = 1, groups = 1;
+                if (attrs.contains("stride")) stride = std::stoll(attrs.at("stride"));
+                if (attrs.contains("padding")) padding = std::stoll(attrs.at("padding"));
+                if (attrs.contains("dilation")) dilation = std::stoll(attrs.at("dilation"));
+                if (attrs.contains("groups")) groups = std::stoll(attrs.at("groups"));
+
+                const Tensor* bias_ptr = nullptr;
+                if (inputs.size() == 3) {
+                    bias_ptr = &inputs[2];
+                } else if (inputs.size() != 2) {
+                    throw std::invalid_argument("conv2d_forward requires 2 or 3 inputs (input, weight, optional bias)");
+                }
+
+                #ifdef TENZOR_HAS_CUDNN
+                // Try cuDNN first (10-30% faster)
+                try {
+                    return {cuda::cudnn_conv2d_forward(inputs[0], inputs[1], bias_ptr, stride, padding, dilation, groups, stream)};
+                } catch (const std::exception& e) {
+                    // Fall back to custom kernel if cuDNN fails
+                    return {cuda::conv2d_forward_kernel(inputs[0], inputs[1], bias_ptr, stride, padding, dilation, groups, stream)};
+                }
+                #else
+                // Use custom kernel
+                return {cuda::conv2d_forward_kernel(inputs[0], inputs[1], bias_ptr, stride, padding, dilation, groups, stream)};
+                #endif
+            }
+            else if (op_name == "conv2d_backward") {
+                // Parse conv2d parameters
+                int64_t stride = 1, padding = 0, dilation = 1, groups = 1;
+                if (attrs.contains("stride")) stride = std::stoll(attrs.at("stride"));
+                if (attrs.contains("padding")) padding = std::stoll(attrs.at("padding"));
+                if (attrs.contains("dilation")) dilation = std::stoll(attrs.at("dilation"));
+                if (attrs.contains("groups")) groups = std::stoll(attrs.at("groups"));
+
+                bool compute_grad_input = true, compute_grad_weight = true, compute_grad_bias = true;
+                if (attrs.contains("compute_grad_input")) compute_grad_input = (attrs.at("compute_grad_input") == "1");
+                if (attrs.contains("compute_grad_weight")) compute_grad_weight = (attrs.at("compute_grad_weight") == "1");
+                if (attrs.contains("compute_grad_bias")) compute_grad_bias = (attrs.at("compute_grad_bias") == "1");
+
+                if (inputs.size() != 3) {
+                    throw std::invalid_argument("conv2d_backward requires 3 inputs (grad_output, input, weight)");
+                }
+
+                #ifdef TENZOR_HAS_CUDNN
+                // Try cuDNN first (10-30% faster)
+                try {
+                    auto [grad_input, grad_weight, grad_bias] = cuda::cudnn_conv2d_backward(
+                        inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups,
+                        compute_grad_input, compute_grad_weight, compute_grad_bias, stream
+                    );
+                    return {grad_input, grad_weight, grad_bias};
+                } catch (const std::exception& e) {
+                    // Fall back to custom kernel if cuDNN fails
+                    auto [grad_input, grad_weight, grad_bias] = cuda::conv2d_backward_kernel(
+                        inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups,
+                        compute_grad_input, compute_grad_weight, compute_grad_bias, stream
+                    );
+                    return {grad_input, grad_weight, grad_bias};
+                }
+                #else
+                // Use custom kernel
+                auto [grad_input, grad_weight, grad_bias] = cuda::conv2d_backward_kernel(
+                    inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups,
+                    compute_grad_input, compute_grad_weight, compute_grad_bias, stream
+                );
+                return {grad_input, grad_weight, grad_bias};
+                #endif
+            }
+            else if (op_name == "lstm_cell_forward") {
+                // Parse LSTM parameters
+                int64_t batch_size = 1, hidden_size = 1;
+                if (attrs.contains("batch_size")) batch_size = std::stoll(attrs.at("batch_size"));
+                if (attrs.contains("hidden_size")) hidden_size = std::stoll(attrs.at("hidden_size"));
+
+                if (inputs.size() != 2) {
+                    throw std::invalid_argument("lstm_cell_forward requires 2 inputs (gates, c_prev)");
+                }
+
+                // For LSTM cell, custom kernel is often competitive with cuDNN for single cells
+                // Use custom kernel for simplicity
+                auto [h_out, c_out] = cuda::lstm_cell_forward_kernel(inputs[0], inputs[1], batch_size, hidden_size, stream);
+                return {h_out, c_out};
+            }
+            else if (op_name == "lstm_cell_backward") {
+                // Parse LSTM parameters
+                int64_t batch_size = 1, hidden_size = 1;
+                if (attrs.contains("batch_size")) batch_size = std::stoll(attrs.at("batch_size"));
+                if (attrs.contains("hidden_size")) hidden_size = std::stoll(attrs.at("hidden_size"));
+
+                if (inputs.size() != 5) {
+                    throw std::invalid_argument("lstm_cell_backward requires 5 inputs (grad_h, grad_c, gates, c_prev, c_out)");
+                }
+
+                // Use custom kernel
+                auto [grad_gates, grad_c_prev] = cuda::lstm_cell_backward_kernel(
+                    inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], batch_size, hidden_size, stream
+                );
+                return {grad_gates, grad_c_prev};
             }
             else {
                 throw std::runtime_error("CUDABackend: Unknown operation '" + op_name + "'");

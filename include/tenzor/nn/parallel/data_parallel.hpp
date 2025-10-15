@@ -130,16 +130,16 @@ public:
     /**
      * @brief Override parameters to return master module params.
      *
-     * @return Vector of parameter pointers from master module
+     * @return Vector of parameter shared_ptrs from master module
      */
-    auto parameters() -> std::vector<Variable*> override;
+    auto parameters() -> std::vector<std::shared_ptr<Variable>> override;
 
     /**
      * @brief Override named_parameters for master module.
      *
-     * @return Vector of (name, parameter) pairs from master module
+     * @return Vector of (name, parameter shared_ptr) pairs from master module
      */
-    auto named_parameters() -> std::vector<std::pair<std::string, Variable*>> override;
+    auto named_parameters() -> std::vector<std::pair<std::string, std::shared_ptr<Variable>>> override;
 
     /**
      * @brief Set module to training mode.
@@ -162,6 +162,9 @@ private:
     // Replicated modules (one per device)
     std::vector<std::shared_ptr<Module>> replicas_;
     bool replicas_initialized_{false};
+
+    // Parameters to synchronize gradients across devices
+    std::vector<std::shared_ptr<Variable>> parameters_to_sync_;
 
     mutable std::mutex replicas_mutex_;        ///< Protect replica creation
 

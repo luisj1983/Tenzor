@@ -3,6 +3,7 @@
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/autograd/function.hpp"
 #include "tenzor/ops/creation.hpp"
+#include <iostream>
 
 namespace tenzor::nn {
 
@@ -15,15 +16,25 @@ public:
 
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
         auto& grad_output = grad_outputs[0];
-        auto& input = saved_tensors()[0];
+        const auto& input = saved_tensors()[0];
+        const auto& output = saved_tensors()[1];  // Use output tensor for dtype reference
 
         // d_relu/dx = 1 if x > 0, else 0
         // grad_input = grad_output * (input > 0)
+
+        // Create zero tensor for comparison
         auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
         auto zero_tensor = zeros(shape_vec, input.dtype(), input.device());
-        auto mask = input > zero_tensor;
+
+        // Perform comparison to get boolean mask
+        auto mask = input > zero_tensor;  // Returns Bool tensor
+
+        // Convert mask to same dtype as grad_output for multiplication
+        auto mask_float = mask.to(grad_output.dtype());
+
+        // Apply mask to gradient
         std::vector<Tensor> result;
-        result.push_back(grad_output * mask);
+        result.push_back(grad_output * mask_float);
         return result;
     }
 };
@@ -110,14 +121,19 @@ auto relu(const Variable& input) -> Variable {
 
     // Set up autograd
     auto grad_fn = std::make_shared<ReLUBackward>();
-    grad_fn->save_for_backward({input.tensor()});
+    // Save BOTH input and output to avoid dtype issues during checkpoint recomputation
+    grad_fn->save_for_backward({input.tensor(), result_tensor});
 
     std::vector<std::shared_ptr<Function>> next_funcs;
     if (input.grad_fn()) {
         next_funcs.push_back(input.grad_fn());
     }
     grad_fn->set_next_functions(next_funcs);
-    grad_fn->set_input_variables({const_cast<Variable*>(&input)});
+
+    // Track input variable for gradient accumulation
+    std::vector<Variable> input_vars;
+    input_vars.push_back(input);
+    grad_fn->set_input_variables(input_vars);
 
     Variable output(result_tensor, true);
     output.set_grad_fn(grad_fn);
@@ -144,7 +160,11 @@ auto sigmoid(const Variable& input) -> Variable {
         next_funcs.push_back(input.grad_fn());
     }
     grad_fn->set_next_functions(next_funcs);
-    grad_fn->set_input_variables({const_cast<Variable*>(&input)});
+
+    // Track input variable for gradient accumulation
+    std::vector<Variable> input_vars;
+    input_vars.push_back(input);
+    grad_fn->set_input_variables(input_vars);
 
     Variable output(result_tensor, true);
     output.set_grad_fn(grad_fn);
@@ -171,7 +191,11 @@ auto tanh(const Variable& input) -> Variable {
         next_funcs.push_back(input.grad_fn());
     }
     grad_fn->set_next_functions(next_funcs);
-    grad_fn->set_input_variables({const_cast<Variable*>(&input)});
+
+    // Track input variable for gradient accumulation
+    std::vector<Variable> input_vars;
+    input_vars.push_back(input);
+    grad_fn->set_input_variables(input_vars);
 
     Variable output(result_tensor, true);
     output.set_grad_fn(grad_fn);

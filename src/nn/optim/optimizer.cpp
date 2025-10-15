@@ -3,16 +3,18 @@
 
 namespace tenzor::optim {
 
-Optimizer::Optimizer(std::vector<Variable*> params)
+Optimizer::Optimizer(std::vector<std::shared_ptr<Variable>> params)
     : parameters_(std::move(params)) {}
 
 auto Optimizer::zero_grad() -> void {
-    for (auto* param : parameters_) {
-        param->zero_grad();
+    for (auto& param : parameters_) {
+        if (param) {
+            param->zero_grad();
+        }
     }
 }
 
-auto Optimizer::parameters() const -> const std::vector<Variable*>& {
+auto Optimizer::parameters() const -> const std::vector<std::shared_ptr<Variable>>& {
     return parameters_;
 }
 

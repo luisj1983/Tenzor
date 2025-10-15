@@ -94,12 +94,22 @@ struct dtype_traits;
 template<> struct dtype_traits<DType::Float32> { using type = float; };
 /// @brief Specialization for Float64
 template<> struct dtype_traits<DType::Float64> { using type = double; };
+/// @brief Specialization for Int8
+template<> struct dtype_traits<DType::Int8> { using type = int8_t; };
+/// @brief Specialization for Int16
+template<> struct dtype_traits<DType::Int16> { using type = int16_t; };
 /// @brief Specialization for Int32
 template<> struct dtype_traits<DType::Int32> { using type = int32_t; };
 /// @brief Specialization for Int64
 template<> struct dtype_traits<DType::Int64> { using type = int64_t; };
 /// @brief Specialization for UInt8
 template<> struct dtype_traits<DType::UInt8> { using type = uint8_t; };
+/// @brief Specialization for UInt16
+template<> struct dtype_traits<DType::UInt16> { using type = uint16_t; };
+/// @brief Specialization for UInt32
+template<> struct dtype_traits<DType::UInt32> { using type = uint32_t; };
+/// @brief Specialization for UInt64
+template<> struct dtype_traits<DType::UInt64> { using type = uint64_t; };
 /// @brief Specialization for Bool
 template<> struct dtype_traits<DType::Bool> { using type = bool; };
 /// @brief Specialization for Complex64

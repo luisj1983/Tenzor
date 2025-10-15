@@ -127,7 +127,9 @@ auto Dropout::forward(const Variable& input) -> Variable {
         auto dropout_fn = std::make_shared<DropoutBackward>(mask_data, scale);
 
         // Track input variable for gradient accumulation
-        dropout_fn->set_input_variables({const_cast<Variable*>(&input)});
+        std::vector<Variable> input_vars;
+        input_vars.push_back(input);
+        dropout_fn->set_input_variables(input_vars);
 
         // Set up backward graph - link to input's grad_fn if it exists
         std::vector<std::shared_ptr<Function>> next_funcs;
@@ -274,7 +276,9 @@ auto Dropout2d::forward(const Variable& input) -> Variable {
         auto dropout_fn = std::make_shared<DropoutBackward>(expanded_mask_final, scale);
 
         // Track input variable for gradient accumulation
-        dropout_fn->set_input_variables({const_cast<Variable*>(&input)});
+        std::vector<Variable> input_vars;
+        input_vars.push_back(input);
+        dropout_fn->set_input_variables(input_vars);
 
         // Set up backward graph - link to input's grad_fn if it exists
         std::vector<std::shared_ptr<Function>> next_funcs;
@@ -426,7 +430,9 @@ auto AlphaDropout::forward(const Variable& input) -> Variable {
         auto alpha_dropout_fn = std::make_shared<AlphaDropoutBackward>(mask_data, a, b);
 
         // Track input variable for gradient accumulation
-        alpha_dropout_fn->set_input_variables({const_cast<Variable*>(&input)});
+        std::vector<Variable> input_vars;
+        input_vars.push_back(input);
+        alpha_dropout_fn->set_input_variables(input_vars);
 
         // Set up backward graph - link to input's grad_fn if it exists
         std::vector<std::shared_ptr<Function>> next_funcs;

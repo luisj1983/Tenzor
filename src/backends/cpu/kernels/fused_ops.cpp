@@ -1,6 +1,7 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/reduction.hpp"
 #include <cmath>
 #include <stdexcept>
 #include <algorithm>
@@ -111,7 +112,8 @@ auto fused_batchnorm_relu_kernel(
     float eps
 ) -> Tensor {
     int64_t num_features = input.shape()[1];
-    Tensor output = zeros(input.shape(), input.dtype(), input.device());
+    std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
+    Tensor output = zeros(shape_vec, input.dtype(), input.device());
 
     if (input.dtype() == DType::Float32) {
         const float* in_data = input.data<float>();
@@ -203,9 +205,9 @@ auto fused_softmax_cross_entropy_kernel(
 
     // Apply reduction
     if (reduction == "mean") {
-        return mean(losses);
+        return tenzor::mean(losses);
     } else if (reduction == "sum") {
-        return sum(losses);
+        return tenzor::sum(losses);
     } else {
         return losses;
     }
@@ -242,7 +244,8 @@ auto fused_add_relu_kernel(const Tensor& a, const Tensor& b) -> Tensor {
  * GELU approximation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
  */
 auto fused_gelu_kernel(const Tensor& input) -> Tensor {
-    Tensor result = zeros(input.shape(), input.dtype(), input.device());
+    std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
+    Tensor result = zeros(shape_vec, input.dtype(), input.device());
 
     constexpr float sqrt_2_over_pi = 0.7978845608f;  // sqrt(2/pi)
     constexpr float coeff = 0.044715f;
@@ -298,7 +301,8 @@ auto fused_layer_norm_kernel(
 
     int64_t batch_size = input.numel() / norm_size;
 
-    Tensor result = zeros(input.shape(), input.dtype(), input.device());
+    std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
+    Tensor result = zeros(shape_vec, input.dtype(), input.device());
 
     if (input.dtype() == DType::Float32) {
         const float* in_data = input.data<float>();

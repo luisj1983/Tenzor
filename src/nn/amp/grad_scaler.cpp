@@ -85,7 +85,7 @@ auto GradScaler::unscale_(optim::Optimizer& optimizer) -> void {
     const float inv_scale = 1.0f / scale_;
 
     // Unscale all parameter gradients
-    for (auto* param : optimizer.parameters()) {
+    for (auto& param : optimizer.parameters()) {
         if (!param->has_grad()) {
             continue;
         }
@@ -111,7 +111,7 @@ auto GradScaler::unscale_(optim::Optimizer& optimizer) -> void {
 
 auto GradScaler::check_inf_nan_(const optim::Optimizer& optimizer) const -> bool {
     // Check if any gradient contains inf or nan
-    for (const auto* param : optimizer.parameters()) {
+    for (const auto& param : optimizer.parameters()) {
         if (!param->has_grad()) {
             continue;
         }

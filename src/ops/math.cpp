@@ -238,4 +238,53 @@ auto cosh(const Tensor& input) -> Tensor {
     return Dispatcher::dispatch("cosh", inputs)[0];
 }
 
+// Comparison operations
+auto eq(const Tensor& a, const Tensor& b) -> Tensor {
+    // Ensure tensors are contiguous before element-wise comparison
+    Tensor a_contiguous = a.is_contiguous() ? a : a.contiguous();
+    Tensor b_contiguous = b.is_contiguous() ? b : b.contiguous();
+    std::vector<Tensor> inputs = {a_contiguous, b_contiguous};
+    return Dispatcher::dispatch("eq", inputs)[0];
+}
+
+auto ne(const Tensor& a, const Tensor& b) -> Tensor {
+    // Ensure tensors are contiguous before element-wise comparison
+    Tensor a_contiguous = a.is_contiguous() ? a : a.contiguous();
+    Tensor b_contiguous = b.is_contiguous() ? b : b.contiguous();
+    std::vector<Tensor> inputs = {a_contiguous, b_contiguous};
+    return Dispatcher::dispatch("ne", inputs)[0];
+}
+
+auto lt(const Tensor& a, const Tensor& b) -> Tensor {
+    // Ensure tensors are contiguous before element-wise comparison
+    Tensor a_contiguous = a.is_contiguous() ? a : a.contiguous();
+    Tensor b_contiguous = b.is_contiguous() ? b : b.contiguous();
+    std::vector<Tensor> inputs = {a_contiguous, b_contiguous};
+    return Dispatcher::dispatch("lt", inputs)[0];
+}
+
+auto le(const Tensor& a, const Tensor& b) -> Tensor {
+    // Ensure tensors are contiguous before element-wise comparison
+    Tensor a_contiguous = a.is_contiguous() ? a : a.contiguous();
+    Tensor b_contiguous = b.is_contiguous() ? b : b.contiguous();
+    std::vector<Tensor> inputs = {a_contiguous, b_contiguous};
+    return Dispatcher::dispatch("le", inputs)[0];
+}
+
+auto gt(const Tensor& a, const Tensor& b) -> Tensor {
+    // Ensure tensors are contiguous before element-wise comparison
+    Tensor a_contiguous = a.is_contiguous() ? a : a.contiguous();
+    Tensor b_contiguous = b.is_contiguous() ? b : b.contiguous();
+    std::vector<Tensor> inputs = {a_contiguous, b_contiguous};
+    return Dispatcher::dispatch("gt", inputs)[0];
+}
+
+auto ge(const Tensor& a, const Tensor& b) -> Tensor {
+    // Ensure tensors are contiguous before element-wise comparison
+    Tensor a_contiguous = a.is_contiguous() ? a : a.contiguous();
+    Tensor b_contiguous = b.is_contiguous() ? b : b.contiguous();
+    std::vector<Tensor> inputs = {a_contiguous, b_contiguous};
+    return Dispatcher::dispatch("ge", inputs)[0];
+}
+
 } // namespace tenzor

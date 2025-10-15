@@ -3,7 +3,7 @@
 
 namespace tenzor::optim {
 
-SGD::SGD(std::vector<Variable*> params, double lr, double momentum,
+SGD::SGD(std::vector<std::shared_ptr<Variable>> params, double lr, double momentum,
         double dampening, double weight_decay, bool nesterov)
     : Optimizer(std::move(params)), lr_(lr), momentum_(momentum),
       dampening_(dampening), weight_decay_(weight_decay), nesterov_(nesterov) {
@@ -12,8 +12,9 @@ SGD::SGD(std::vector<Variable*> params, double lr, double momentum,
 
 auto SGD::step() -> void {
     for (size_t i = 0; i < parameters_.size(); ++i) {
-        auto& param = *parameters_[i];
-        if (!param.has_grad()) continue;
+        auto& param_ptr = parameters_[i];
+        if (!param_ptr || !param_ptr->has_grad()) continue;
+        auto& param = *param_ptr;
 
         auto grad = param.grad()->clone();
 
@@ -50,8 +51,10 @@ auto SGD::get_lr() const -> double {
 
 auto SGD::initialize_buffers() -> void {
     velocity_buffers_.clear();
-    for (auto* param : parameters_) {
-        velocity_buffers_.push_back(zeros_like(param->tensor()));
+    for (auto& param : parameters_) {
+        if (param) {
+            velocity_buffers_.push_back(zeros_like(param->tensor()));
+        }
     }
 }
 

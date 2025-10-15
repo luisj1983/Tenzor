@@ -12,10 +12,10 @@
 namespace tenzor {
 namespace optim {
 
-RMSprop::RMSprop(std::vector<Variable*> params,
+RMSprop::RMSprop(std::vector<std::shared_ptr<Variable>> params,
                  double lr, double alpha, double eps,
                  double weight_decay, double momentum, bool centered)
-    : Optimizer(params),
+    : Optimizer(std::move(params)),
       lr_(lr),
       alpha_(alpha),
       eps_(eps),
@@ -47,7 +47,8 @@ auto RMSprop::initialize_buffers() -> void {
     grad_avg_.clear();
     momentum_buffer_.clear();
 
-    for (auto* param : parameters_) {
+    for (auto& param : parameters_) {
+        if (!param) continue;
         const auto& param_data = param->tensor();
 
         // Initialize square_avg (E[g^2]) to zeros
@@ -67,9 +68,9 @@ auto RMSprop::initialize_buffers() -> void {
 
 auto RMSprop::step() -> void {
     for (size_t i = 0; i < parameters_.size(); ++i) {
-        auto* param = parameters_[i];
+        auto& param = parameters_[i];
 
-        if (!param->has_grad()) {
+        if (!param || !param->has_grad()) {
             continue;  // Skip parameters without gradients
         }
 

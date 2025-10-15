@@ -90,7 +90,8 @@ TEST_F(GradScalerTest, GradientUnscaling) {
     param.grad() = grad_tensor;
 
     // Create optimizer with this parameter
-    std::vector<Variable*> params = {&param};
+    auto param_ptr = std::make_shared<Variable>(param);
+    auto params = std::vector<std::shared_ptr<Variable>>{param_ptr};
     SGD optimizer(params, 0.01);
 
     // Unscale gradients
@@ -114,7 +115,8 @@ TEST_F(GradScalerTest, NoInfNanDetection) {
     auto grad_tensor = full({3, 3}, 1.5f, DType::Float32, device_);
     param.grad() = grad_tensor;
 
-    std::vector<Variable*> params = {&param};
+    auto param_ptr = std::make_shared<Variable>(param);
+    auto params = std::vector<std::shared_ptr<Variable>>{param_ptr};
     SGD optimizer(params, 0.01);
 
     // Step should succeed
@@ -137,7 +139,8 @@ TEST_F(GradScalerTest, InfDetection) {
     grad_data[1] = std::numeric_limits<float>::infinity();
     param.grad() = grad_tensor;
 
-    std::vector<Variable*> params = {&param};
+    auto param_ptr = std::make_shared<Variable>(param);
+    auto params = std::vector<std::shared_ptr<Variable>>{param_ptr};
     SGD optimizer(params, 0.01);
 
     // Step should fail due to inf
@@ -160,7 +163,8 @@ TEST_F(GradScalerTest, NanDetection) {
     grad_data[2] = std::numeric_limits<float>::quiet_NaN();
     param.grad() = grad_tensor;
 
-    std::vector<Variable*> params = {&param};
+    auto param_ptr = std::make_shared<Variable>(param);
+    auto params = std::vector<std::shared_ptr<Variable>>{param_ptr};
     SGD optimizer(params, 0.01);
 
     // Step should fail due to nan
@@ -184,7 +188,8 @@ TEST_F(GradScalerTest, ScaleBackoff) {
                                    DType::Float32, device_);
     param.grad() = grad_tensor;
 
-    std::vector<Variable*> params = {&param};
+    auto param_ptr = std::make_shared<Variable>(param);
+    auto params = std::vector<std::shared_ptr<Variable>>{param_ptr};
     SGD optimizer(params, 0.01);
 
     // Step will fail
@@ -206,7 +211,8 @@ TEST_F(GradScalerTest, ScaleGrowth) {
     auto param_tensor = ones({2, 2}, DType::Float32, device_);
     auto param = Variable(param_tensor, true);
 
-    std::vector<Variable*> params = {&param};
+    auto param_ptr = std::make_shared<Variable>(param);
+    auto params = std::vector<std::shared_ptr<Variable>>{param_ptr};
     SGD optimizer(params, 0.01);
 
     // Perform 3 successful iterations
@@ -232,7 +238,8 @@ TEST_F(GradScalerTest, SGDIntegration) {
     auto param_tensor = full({3, 3}, 1.0f, DType::Float32, device_);
     auto param = Variable(param_tensor, true);
 
-    std::vector<Variable*> params = {&param};
+    auto param_ptr = std::make_shared<Variable>(param);
+    auto params = std::vector<std::shared_ptr<Variable>>{param_ptr};
     SGD optimizer(params, 0.1);
 
     // Create loss and compute scaled gradients
@@ -263,7 +270,8 @@ TEST_F(GradScalerTest, AdamIntegration) {
     auto param_tensor = full({2, 2}, 1.0f, DType::Float32, device_);
     auto param = Variable(param_tensor, true);
 
-    std::vector<Variable*> params = {&param};
+    auto param_ptr = std::make_shared<Variable>(param);
+    auto params = std::vector<std::shared_ptr<Variable>>{param_ptr};
     Adam optimizer(params, 0.01);
 
     // Set gradient
@@ -292,7 +300,8 @@ TEST_F(GradScalerTest, Reset) {
     auto grad_tensor = full({2, 2}, 1.0f, DType::Float32, device_);
     param.grad() = grad_tensor;
 
-    std::vector<Variable*> params = {&param};
+    auto param_ptr = std::make_shared<Variable>(param);
+    auto params = std::vector<std::shared_ptr<Variable>>{param_ptr};
     SGD optimizer(params, 0.01);
 
     // Perform some steps
@@ -320,7 +329,8 @@ TEST_F(GradScalerTest, StateDictSaveLoad) {
     auto grad_tensor = full({2, 2}, 1.0f, DType::Float32, device_);
     param.grad() = grad_tensor;
 
-    std::vector<Variable*> params = {&param};
+    auto param_ptr = std::make_shared<Variable>(param);
+    auto params = std::vector<std::shared_ptr<Variable>>{param_ptr};
     SGD optimizer(params, 0.01);
 
     // Perform steps
@@ -359,7 +369,9 @@ TEST_F(GradScalerTest, MultipleParameters) {
     auto grad2_tensor = full({3, 3}, 200.0f, DType::Float32, device_);
     param2.grad() = grad2_tensor;
 
-    std::vector<Variable*> params = {&param1, &param2};
+    auto param1_ptr = std::make_shared<Variable>(param1);
+    auto param2_ptr = std::make_shared<Variable>(param2);
+    auto params = std::vector<std::shared_ptr<Variable>>{param1_ptr, param2_ptr};
     SGD optimizer(params, 0.1);
 
     // Step
@@ -382,7 +394,8 @@ TEST_F(GradScalerTest, TrainingLoopSimulation) {
     auto param_tensor = ones({10, 10}, DType::Float32, device_);
     auto param = Variable(param_tensor, true);
 
-    std::vector<Variable*> params = {&param};
+    auto param_ptr = std::make_shared<Variable>(param);
+    auto params = std::vector<std::shared_ptr<Variable>>{param_ptr};
     SGD optimizer(params, 0.01);
 
     int successful_steps = 0;
@@ -428,7 +441,8 @@ TEST_F(GradScalerTest, ScaleLimits) {
 
     auto param_tensor = ones({2, 2}, DType::Float32, device_);
     auto param = Variable(param_tensor, true);
-    std::vector<Variable*> params = {&param};
+    auto param_ptr = std::make_shared<Variable>(param);
+    auto params = std::vector<std::shared_ptr<Variable>>{param_ptr};
     SGD optimizer(params, 0.01);
 
     // Cause multiple overflows to reduce scale
@@ -454,7 +468,8 @@ TEST_F(GradScalerTest, DoubleUnscaleProtection) {
     auto grad_tensor = full({2, 2}, 200.0f, DType::Float32, device_);
     param.grad() = grad_tensor;
 
-    std::vector<Variable*> params = {&param};
+    auto param_ptr = std::make_shared<Variable>(param);
+    auto params = std::vector<std::shared_ptr<Variable>>{param_ptr};
     SGD optimizer(params, 0.01);
 
     // Unscale once

@@ -25,6 +25,8 @@ static auto dtype_to_string(DType dtype) -> std::string {
     switch (dtype) {
         case DType::Float32: return "float32";
         case DType::Float64: return "float64";
+        case DType::Float16: return "float16";
+        case DType::BFloat16: return "bfloat16";
         case DType::Int32: return "int32";
         case DType::Int64: return "int64";
         case DType::UInt8: return "uint8";

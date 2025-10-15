@@ -165,27 +165,27 @@ auto BatchNorm2d::forward(const Variable& input) -> Variable {
                                             static_cast<float>(batch_size - 1));
 
             // Get running stats (stay on original device)
-            auto& rm_var = buffers_["running_mean"];
-            auto& rv_var = buffers_["running_var"];
+            auto& rm_var_ptr = buffers_["running_mean"];
+            auto& rv_var_ptr = buffers_["running_var"];
 
             // Use CUDA kernel for running stats update
             OpAttributes update_attrs;
             std::ostringstream momentum_ss;
             momentum_ss << std::scientific << std::setprecision(9) << static_cast<float>(momentum_);
             update_attrs["momentum"] = momentum_ss.str();
-            std::vector<Tensor> update_inputs = {rm_var.tensor(), rv_var.tensor(), batch_mean, unbiased_var};
+            std::vector<Tensor> update_inputs = {rm_var_ptr->tensor(), rv_var_ptr->tensor(), batch_mean, unbiased_var};
             std::vector<Tensor> updated_stats = Dispatcher::dispatch("batchnorm2d_update_running_stats", update_inputs, update_attrs);
 
-            rm_var.tensor() = updated_stats[0];
-            rv_var.tensor() = updated_stats[1];
+            rm_var_ptr->tensor() = updated_stats[0];
+            rv_var_ptr->tensor() = updated_stats[1];
 
             num_batches_tracked_++;
         }
     } else {
         // Inference mode: use running statistics (stay on original device)
         if (track_running_stats_) {
-            batch_mean = buffers_["running_mean"].tensor();
-            batch_var = buffers_["running_var"].tensor();
+            batch_mean = buffers_["running_mean"]->tensor();
+            batch_var = buffers_["running_var"]->tensor();
         } else {
             throw std::runtime_error("BatchNorm2d in eval mode requires track_running_stats=true");
         }
@@ -200,10 +200,10 @@ auto BatchNorm2d::forward(const Variable& input) -> Variable {
 
     if (affine_) {
         // Use affine forward kernel: output = gamma * (x - mean) / sqrt(var + eps) + beta
-        auto& weight = parameters_["weight"];
-        auto& bias = parameters_["bias"];
+        auto& weight_ptr = parameters_["weight"];
+        auto& bias_ptr = parameters_["bias"];
 
-        std::vector<Tensor> forward_inputs = {input_work, batch_mean, batch_var, weight.tensor(), bias.tensor()};
+        std::vector<Tensor> forward_inputs = {input_work, batch_mean, batch_var, weight_ptr->tensor(), bias_ptr->tensor()};
         std::vector<Tensor> forward_results = Dispatcher::dispatch("batchnorm2d_forward_affine", forward_inputs, forward_attrs);
         output = forward_results[0];
     } else {
@@ -216,7 +216,7 @@ auto BatchNorm2d::forward(const Variable& input) -> Variable {
     // Set up autograd if needed
     bool requires_grad = input.requires_grad();
     if (affine_ && parameters_.find("weight") != parameters_.end()) {
-        requires_grad = requires_grad || parameters_["weight"].requires_grad();
+        requires_grad = requires_grad || parameters_["weight"]->requires_grad();
     }
     if (requires_grad) {
         // Create result variable from output
@@ -231,7 +231,7 @@ auto BatchNorm2d::forward(const Variable& input) -> Variable {
         Tensor invstd_final = invstd.contiguous();
 
         // CRITICAL: Access weight from parameters_ map
-        Tensor weight_tensor = affine_ ? parameters_["weight"].tensor() : ones({C}, DType::Float32, original_device);
+        Tensor weight_tensor = affine_ ? parameters_["weight"]->tensor() : ones({C}, DType::Float32, original_device);
         // Ensure all tensors are contiguous before saving
         std::vector<Tensor> tensors_to_save = {
             input.tensor().contiguous(),  // input (original device, made contiguous)
@@ -248,19 +248,19 @@ auto BatchNorm2d::forward(const Variable& input) -> Variable {
         result.set_grad_fn(grad_fn);
 
         // Track input variables for gradient accumulation
-        std::vector<Variable*> input_vars;
+        std::vector<Variable> input_vars;
         if (input.requires_grad()) {
-            input_vars.push_back(const_cast<Variable*>(&input));
+            input_vars.push_back(input);
         }
         if (affine_) {
-            // Use pointers to the Variables in the parameters_ map, not member variables
+            // Use pointers to the Variables in the parameters_ map
             auto weight_it = parameters_.find("weight");
             auto bias_it = parameters_.find("bias");
-            if (weight_it != parameters_.end() && weight_it->second.requires_grad()) {
-                input_vars.push_back(&(weight_it->second));
+            if (weight_it != parameters_.end() && weight_it->second->requires_grad()) {
+                input_vars.push_back(*weight_it->second);
             }
-            if (bias_it != parameters_.end() && bias_it->second.requires_grad()) {
-                input_vars.push_back(&(bias_it->second));
+            if (bias_it != parameters_.end() && bias_it->second->requires_grad()) {
+                input_vars.push_back(*bias_it->second);
             }
         }
         grad_fn->set_input_variables(input_vars);
@@ -282,8 +282,8 @@ auto BatchNorm2d::reset_parameters() -> void {
     // Weight initialized to 1, bias to 0 (already done in constructor)
     if (track_running_stats_) {
         // CRITICAL: Access from buffers_ map
-        buffers_["running_mean"].tensor().zero_();
-        buffers_["running_var"].tensor().fill_(1.0f);
+        buffers_["running_mean"]->tensor().zero_();
+        buffers_["running_var"]->tensor().fill_(1.0f);
         num_batches_tracked_ = 0;
     }
 }
@@ -473,12 +473,12 @@ auto BatchNorm1d::forward(const Variable& input) -> Variable {
             auto unbiased_var = batch_var * (static_cast<float>(batch_size) /
                                             static_cast<float>(batch_size - 1));
 
-            auto& rm_var = buffers_["running_mean"];
-            auto& rv_var = buffers_["running_var"];
+            auto& rm_var_ptr = buffers_["running_mean"];
+            auto& rv_var_ptr = buffers_["running_var"];
 
             // Exponential moving average update
-            auto rm_data = rm_var.tensor().data<float>();
-            auto rv_data = rv_var.tensor().data<float>();
+            auto rm_data = rm_var_ptr->tensor().data<float>();
+            auto rv_data = rv_var_ptr->tensor().data<float>();
             auto mean_data = batch_mean.data<float>();
             auto var_data = unbiased_var.data<float>();
 
@@ -491,8 +491,8 @@ auto BatchNorm1d::forward(const Variable& input) -> Variable {
         }
     } else {
         if (track_running_stats_) {
-            batch_mean = buffers_["running_mean"].tensor();
-            batch_var = buffers_["running_var"].tensor();
+            batch_mean = buffers_["running_mean"]->tensor();
+            batch_var = buffers_["running_var"]->tensor();
         } else {
             throw std::runtime_error("BatchNorm1d in eval mode requires track_running_stats=true");
         }
@@ -507,10 +507,10 @@ auto BatchNorm1d::forward(const Variable& input) -> Variable {
         auto normalized = ((input_work - mean_broadcast) * invstd).contiguous();
 
         if (affine_) {
-            auto& weight = parameters_["weight"];
-            auto& bias = parameters_["bias"];
-            auto weight_broadcast = weight.tensor().unsqueeze(0).unsqueeze(2).contiguous();
-            auto bias_broadcast = bias.tensor().unsqueeze(0).unsqueeze(2).contiguous();
+            auto& weight_ptr = parameters_["weight"];
+            auto& bias_ptr = parameters_["bias"];
+            auto weight_broadcast = weight_ptr->tensor().unsqueeze(0).unsqueeze(2).contiguous();
+            auto bias_broadcast = bias_ptr->tensor().unsqueeze(0).unsqueeze(2).contiguous();
             output = (normalized * weight_broadcast + bias_broadcast).contiguous();
         } else {
             output = normalized;
@@ -522,10 +522,10 @@ auto BatchNorm1d::forward(const Variable& input) -> Variable {
         auto normalized = ((input_work - mean_broadcast) * invstd).contiguous();
 
         if (affine_) {
-            auto& weight = parameters_["weight"];
-            auto& bias = parameters_["bias"];
-            auto weight_broadcast = weight.tensor().unsqueeze(0).contiguous();
-            auto bias_broadcast = bias.tensor().unsqueeze(0).contiguous();
+            auto& weight_ptr = parameters_["weight"];
+            auto& bias_ptr = parameters_["bias"];
+            auto weight_broadcast = weight_ptr->tensor().unsqueeze(0).contiguous();
+            auto bias_broadcast = bias_ptr->tensor().unsqueeze(0).contiguous();
             output = (normalized * weight_broadcast + bias_broadcast).contiguous();
         } else {
             output = normalized;
@@ -535,7 +535,7 @@ auto BatchNorm1d::forward(const Variable& input) -> Variable {
     // Set up autograd if needed
     bool requires_grad = input.requires_grad();
     if (affine_ && parameters_.find("weight") != parameters_.end()) {
-        requires_grad = requires_grad || parameters_["weight"].requires_grad();
+        requires_grad = requires_grad || parameters_["weight"]->requires_grad();
     }
 
     if (requires_grad) {
@@ -547,7 +547,7 @@ auto BatchNorm1d::forward(const Variable& input) -> Variable {
         Tensor batch_mean_final = batch_mean.contiguous();
         Tensor invstd_final = invstd.contiguous();
 
-        Tensor weight_tensor = affine_ ? parameters_["weight"].tensor() : ones({C}, DType::Float32, original_device);
+        Tensor weight_tensor = affine_ ? parameters_["weight"]->tensor() : ones({C}, DType::Float32, original_device);
 
         std::vector<Tensor> tensors_to_save = {
             input.tensor().contiguous(),
@@ -562,18 +562,18 @@ auto BatchNorm1d::forward(const Variable& input) -> Variable {
 
         result.set_grad_fn(grad_fn);
 
-        std::vector<Variable*> input_vars;
+        std::vector<Variable> input_vars;
         if (input.requires_grad()) {
-            input_vars.push_back(const_cast<Variable*>(&input));
+            input_vars.push_back(input);
         }
         if (affine_) {
             auto weight_it = parameters_.find("weight");
             auto bias_it = parameters_.find("bias");
-            if (weight_it != parameters_.end() && weight_it->second.requires_grad()) {
-                input_vars.push_back(&(weight_it->second));
+            if (weight_it != parameters_.end() && weight_it->second->requires_grad()) {
+                input_vars.push_back(*weight_it->second);
             }
-            if (bias_it != parameters_.end() && bias_it->second.requires_grad()) {
-                input_vars.push_back(&(bias_it->second));
+            if (bias_it != parameters_.end() && bias_it->second->requires_grad()) {
+                input_vars.push_back(*bias_it->second);
             }
         }
         grad_fn->set_input_variables(input_vars);
@@ -592,8 +592,8 @@ auto BatchNorm1d::forward(const Variable& input) -> Variable {
 
 auto BatchNorm1d::reset_parameters() -> void {
     if (track_running_stats_) {
-        buffers_["running_mean"].tensor().zero_();
-        buffers_["running_var"].tensor().fill_(1.0f);
+        buffers_["running_mean"]->tensor().zero_();
+        buffers_["running_var"]->tensor().fill_(1.0f);
         num_batches_tracked_ = 0;
     }
 }

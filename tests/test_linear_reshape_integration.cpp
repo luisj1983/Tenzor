@@ -63,7 +63,7 @@ TEST_F(LinearReshapeIntegrationTest, LinearWithReshapeInput) {
     // Check that layer parameters have gradients
     auto params = linear->parameters();
     ASSERT_GE(params.size(), 2);  // At least weight and bias
-    for (auto* param : params) {
+    for (auto& param : params) {
         ASSERT_TRUE(param->grad().has_value());
     }
 }

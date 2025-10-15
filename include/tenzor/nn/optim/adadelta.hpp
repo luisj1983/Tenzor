@@ -115,7 +115,7 @@ public:
      * @param eps Epsilon for numerical stability
      * @param weight_decay L2 regularization coefficient
      */
-    Adadelta(std::vector<Variable*> params,
+    Adadelta(std::vector<std::shared_ptr<Variable>> params,
              double lr = 1.0,
              double rho = 0.9,
              double eps = 1e-6,

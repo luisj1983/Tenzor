@@ -240,5 +240,215 @@ auto unsqueeze_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> 
     return result;
 }
 
+// Concatenation kernel - concatenate multiple tensors along a dimension
+template<typename T>
+__global__ void cat_kernel_impl(T** input_ptrs, T* output,
+                                 const int64_t* input_shapes,
+                                 const int64_t* output_shape,
+                                 const int64_t* output_strides,
+                                 const int64_t* offsets_at_dim,
+                                 int64_t num_tensors, int64_t ndim,
+                                 int64_t concat_dim, int64_t total_elements) {
+    CUDA_GRID_STRIDE_LOOP(idx, total_elements) {
+        // Convert linear output index to multi-dimensional coordinates
+        int64_t temp_idx = idx;
+        int64_t coords[8];  // Support up to 8 dimensions
+
+        for (int64_t d = ndim - 1; d >= 0; --d) {
+            coords[d] = temp_idx % output_shape[d];
+            temp_idx /= output_shape[d];
+        }
+
+        // Determine which input tensor this element comes from
+        int64_t coord_at_concat_dim = coords[concat_dim];
+        int64_t tensor_idx = 0;
+        int64_t local_coord = coord_at_concat_dim;
+
+        for (int64_t t = 0; t < num_tensors; ++t) {
+            int64_t tensor_size_at_dim = input_shapes[t * ndim + concat_dim];
+            if (local_coord < tensor_size_at_dim) {
+                tensor_idx = t;
+                break;
+            }
+            local_coord -= tensor_size_at_dim;
+        }
+
+        // Calculate source index in the selected input tensor
+        coords[concat_dim] = local_coord;
+        int64_t src_idx = 0;
+
+        for (int64_t d = 0; d < ndim; ++d) {
+            int64_t stride = 1;
+            for (int64_t i = d + 1; i < ndim; ++i) {
+                stride *= input_shapes[tensor_idx * ndim + i];
+            }
+            src_idx += coords[d] * stride;
+        }
+
+        output[idx] = input_ptrs[tensor_idx][src_idx];
+    }
+}
+
+auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, cudaStream_t stream) -> Tensor {
+    if (tensors.empty()) {
+        throw std::invalid_argument("Cannot concatenate empty tensor list");
+    }
+
+    if (tensors.size() == 1) {
+        return tensors[0];
+    }
+
+    // Validate inputs and normalize dimension
+    const int64_t ndim = tensors[0].ndim();
+    if (dim < 0) {
+        dim += ndim;
+    }
+    if (dim < 0 || dim >= ndim) {
+        throw std::invalid_argument("Dimension out of range for concatenation");
+    }
+
+    // Make all tensors contiguous
+    std::vector<Tensor> contiguous_tensors;
+    contiguous_tensors.reserve(tensors.size());
+    for (const auto& t : tensors) {
+        if (t.ndim() != ndim) {
+            throw std::invalid_argument("All tensors must have the same number of dimensions");
+        }
+        contiguous_tensors.push_back(t.is_contiguous() ? t : contiguous_kernel(t, stream));
+    }
+
+    // Validate shapes match except at concat dimension
+    auto first_shape = contiguous_tensors[0].shape();
+    int64_t total_size_at_dim = 0;
+
+    for (const auto& t : contiguous_tensors) {
+        auto shape = t.shape();
+        for (int64_t i = 0; i < ndim; ++i) {
+            if (i != dim && shape[i] != first_shape[i]) {
+                throw std::invalid_argument(
+                    "All tensors must have the same shape except in concatenation dimension");
+            }
+        }
+        total_size_at_dim += shape[dim];
+    }
+
+    // Create output shape
+    std::vector<int64_t> output_shape(first_shape.begin(), first_shape.end());
+    output_shape[dim] = total_size_at_dim;
+
+    // Create output tensor
+    Tensor output(output_shape, tensors[0].dtype(), tensors[0].device());
+
+    const int64_t total_elements = output.numel();
+    if (total_elements == 0) {
+        return output;  // Empty output
+    }
+
+    // Allocate device memory for metadata
+    const int64_t num_tensors = contiguous_tensors.size();
+
+    // Prepare input pointers
+    std::vector<void*> host_input_ptrs(num_tensors);
+    for (size_t i = 0; i < num_tensors; ++i) {
+        host_input_ptrs[i] = contiguous_tensors[i].data_ptr();
+    }
+
+    void** d_input_ptrs;
+    CUDA_CHECK(cudaMalloc(&d_input_ptrs, num_tensors * sizeof(void*)));
+    CUDA_CHECK(cudaMemcpy(d_input_ptrs, host_input_ptrs.data(),
+                          num_tensors * sizeof(void*), cudaMemcpyHostToDevice));
+
+    // Prepare shapes
+    std::vector<int64_t> host_input_shapes(num_tensors * ndim);
+    for (size_t t = 0; t < num_tensors; ++t) {
+        auto shape = contiguous_tensors[t].shape();
+        for (int64_t d = 0; d < ndim; ++d) {
+            host_input_shapes[t * ndim + d] = shape[d];
+        }
+    }
+
+    int64_t* d_input_shapes;
+    CUDA_CHECK(cudaMalloc(&d_input_shapes, num_tensors * ndim * sizeof(int64_t)));
+    CUDA_CHECK(cudaMemcpy(d_input_shapes, host_input_shapes.data(),
+                          num_tensors * ndim * sizeof(int64_t), cudaMemcpyHostToDevice));
+
+    // Prepare output shape
+    int64_t* d_output_shape;
+    CUDA_CHECK(cudaMalloc(&d_output_shape, ndim * sizeof(int64_t)));
+    CUDA_CHECK(cudaMemcpy(d_output_shape, output_shape.data(),
+                          ndim * sizeof(int64_t), cudaMemcpyHostToDevice));
+
+    // Prepare output strides
+    std::vector<int64_t> output_strides = compute_strides(output_shape);
+    int64_t* d_output_strides;
+    CUDA_CHECK(cudaMalloc(&d_output_strides, ndim * sizeof(int64_t)));
+    CUDA_CHECK(cudaMemcpy(d_output_strides, output_strides.data(),
+                          ndim * sizeof(int64_t), cudaMemcpyHostToDevice));
+
+    // Prepare offsets at concat dimension (for optimization, not used in current impl)
+    std::vector<int64_t> host_offsets(num_tensors);
+    int64_t offset = 0;
+    for (size_t t = 0; t < num_tensors; ++t) {
+        host_offsets[t] = offset;
+        offset += contiguous_tensors[t].shape()[dim];
+    }
+
+    int64_t* d_offsets;
+    CUDA_CHECK(cudaMalloc(&d_offsets, num_tensors * sizeof(int64_t)));
+    CUDA_CHECK(cudaMemcpy(d_offsets, host_offsets.data(),
+                          num_tensors * sizeof(int64_t), cudaMemcpyHostToDevice));
+
+    // Launch kernel
+    const int num_blocks = get_num_blocks(total_elements);
+
+    if (tensors[0].dtype() == DType::Float32) {
+        cat_kernel_impl<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<float**>(d_input_ptrs), output.data<float>(),
+            d_input_shapes, d_output_shape, d_output_strides, d_offsets,
+            num_tensors, ndim, dim, total_elements);
+    } else if (tensors[0].dtype() == DType::Float64) {
+        cat_kernel_impl<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<double**>(d_input_ptrs), output.data<double>(),
+            d_input_shapes, d_output_shape, d_output_strides, d_offsets,
+            num_tensors, ndim, dim, total_elements);
+    } else if (tensors[0].dtype() == DType::Int32) {
+        cat_kernel_impl<int32_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<int32_t**>(d_input_ptrs), output.data<int32_t>(),
+            d_input_shapes, d_output_shape, d_output_strides, d_offsets,
+            num_tensors, ndim, dim, total_elements);
+    } else if (tensors[0].dtype() == DType::Int64) {
+        cat_kernel_impl<int64_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<int64_t**>(d_input_ptrs), output.data<int64_t>(),
+            d_input_shapes, d_output_shape, d_output_strides, d_offsets,
+            num_tensors, ndim, dim, total_elements);
+    } else {
+        cudaFree(d_input_ptrs);
+        cudaFree(d_input_shapes);
+        cudaFree(d_output_shape);
+        cudaFree(d_output_strides);
+        cudaFree(d_offsets);
+        throw std::runtime_error("Concatenation only supports Float32, Float64, Int32, and Int64 dtypes");
+    }
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        cudaFree(d_input_ptrs);
+        cudaFree(d_input_shapes);
+        cudaFree(d_output_shape);
+        cudaFree(d_output_strides);
+        cudaFree(d_offsets);
+        throw std::runtime_error(std::string("CUDA error in cat_kernel: ") + cudaGetErrorString(err));
+    }
+
+    // Free device memory
+    cudaFree(d_input_ptrs);
+    cudaFree(d_input_shapes);
+    cudaFree(d_output_shape);
+    cudaFree(d_output_strides);
+    cudaFree(d_offsets);
+
+    return output;
+}
+
 } // namespace cuda
 } // namespace tenzor

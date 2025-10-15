@@ -28,8 +28,8 @@ static ::testing::Environment* const tenzor_env =
 //==============================================================================
 
 TEST(AdvancedSchedulerTest, ReduceLROnPlateau_BasicMinMode) {
-    auto param = Variable(ones({2, 2}, DType::Float32), true);
-    std::vector<Variable*> params = {&param};
+    auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32), true);
+    auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = SGD(params, 0.1);
 
     auto scheduler = ReduceLROnPlateau(optimizer, "min", 0.1, 2);  // patience=2
@@ -59,8 +59,8 @@ TEST(AdvancedSchedulerTest, ReduceLROnPlateau_BasicMinMode) {
 }
 
 TEST(AdvancedSchedulerTest, ReduceLROnPlateau_MaxMode) {
-    auto param = Variable(ones({2, 2}, DType::Float32), true);
-    std::vector<Variable*> params = {&param};
+    auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32), true);
+    auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = Adam(params, 0.01);
 
     auto scheduler = ReduceLROnPlateau(optimizer, "max", 0.5, 3);  // mode=max, patience=3
@@ -81,8 +81,8 @@ TEST(AdvancedSchedulerTest, ReduceLROnPlateau_MaxMode) {
 }
 
 TEST(AdvancedSchedulerTest, ReduceLROnPlateau_Cooldown) {
-    auto param = Variable(ones({2, 2}, DType::Float32), true);
-    std::vector<Variable*> params = {&param};
+    auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32), true);
+    auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = SGD(params, 1.0);
 
     auto scheduler = ReduceLROnPlateau(optimizer, "min", 0.1, 2, 1e-4, "rel", 2);  // cooldown=2
@@ -102,8 +102,8 @@ TEST(AdvancedSchedulerTest, ReduceLROnPlateau_Cooldown) {
 }
 
 TEST(AdvancedSchedulerTest, ReduceLROnPlateau_MinLR) {
-    auto param = Variable(ones({2, 2}, DType::Float32), true);
-    std::vector<Variable*> params = {&param};
+    auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32), true);
+    auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = Adam(params, 0.1);
 
     auto scheduler = ReduceLROnPlateau(optimizer, "min", 0.1, 1, 1e-4, "rel", 0, 0.001);  // min_lr=0.001
@@ -119,8 +119,8 @@ TEST(AdvancedSchedulerTest, ReduceLROnPlateau_MinLR) {
 }
 
 TEST(AdvancedSchedulerTest, ReduceLROnPlateau_RelativeThreshold) {
-    auto param = Variable(ones({2, 2}, DType::Float32), true);
-    std::vector<Variable*> params = {&param};
+    auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32), true);
+    auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = SGD(params, 0.1);
 
     auto scheduler = ReduceLROnPlateau(optimizer, "min", 0.1, 2, 0.1, "rel");  // 10% relative threshold
@@ -134,8 +134,8 @@ TEST(AdvancedSchedulerTest, ReduceLROnPlateau_RelativeThreshold) {
 }
 
 TEST(AdvancedSchedulerTest, ReduceLROnPlateau_AbsoluteThreshold) {
-    auto param = Variable(ones({2, 2}, DType::Float32), true);
-    std::vector<Variable*> params = {&param};
+    auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32), true);
+    auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = SGD(params, 0.1);
 
     auto scheduler = ReduceLROnPlateau(optimizer, "min", 0.1, 2, 0.05, "abs");  // absolute threshold
@@ -153,8 +153,8 @@ TEST(AdvancedSchedulerTest, ReduceLROnPlateau_AbsoluteThreshold) {
 //==============================================================================
 
 TEST(AdvancedSchedulerTest, CyclicLR_Triangular) {
-    auto param = Variable(ones({2, 2}, DType::Float32), true);
-    std::vector<Variable*> params = {&param};
+    auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32), true);
+    auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = SGD(params, 0.1);
 
     auto scheduler = CyclicLR(optimizer, 0.001, 0.006, 4, -1, "triangular");
@@ -185,8 +185,8 @@ TEST(AdvancedSchedulerTest, CyclicLR_Triangular) {
 }
 
 TEST(AdvancedSchedulerTest, CyclicLR_Triangular2) {
-    auto param = Variable(ones({2, 2}, DType::Float32), true);
-    std::vector<Variable*> params = {&param};
+    auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32), true);
+    auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = Adam(params, 0.001);
 
     auto scheduler = CyclicLR(optimizer, 0.001, 0.01, 5, -1, "triangular2");
@@ -208,8 +208,8 @@ TEST(AdvancedSchedulerTest, CyclicLR_Triangular2) {
 }
 
 TEST(AdvancedSchedulerTest, CyclicLR_ExpRange) {
-    auto param = Variable(ones({2, 2}, DType::Float32), true);
-    std::vector<Variable*> params = {&param};
+    auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32), true);
+    auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = AdamW(params, 0.001);
 
     auto scheduler = CyclicLR(optimizer, 0.001, 0.006, 4, -1, "exp_range", 0.99);
@@ -229,8 +229,8 @@ TEST(AdvancedSchedulerTest, CyclicLR_ExpRange) {
 }
 
 TEST(AdvancedSchedulerTest, CyclicLR_AsymmetricCycle) {
-    auto param = Variable(ones({2, 2}, DType::Float32), true);
-    std::vector<Variable*> params = {&param};
+    auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32), true);
+    auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = SGD(params, 0.1);
 
     auto scheduler = CyclicLR(optimizer, 0.001, 0.006, 2, 6, "triangular");  // step_up=2, step_down=6
@@ -247,8 +247,8 @@ TEST(AdvancedSchedulerTest, CyclicLR_AsymmetricCycle) {
 //==============================================================================
 
 TEST(AdvancedSchedulerTest, OneCycleLR_BasicCycle) {
-    auto param = Variable(ones({2, 2}, DType::Float32), true);
-    std::vector<Variable*> params = {&param};
+    auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32), true);
+    auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = SGD(params, 0.1);
 
     int total_steps = 100;
@@ -279,8 +279,8 @@ TEST(AdvancedSchedulerTest, OneCycleLR_BasicCycle) {
 }
 
 TEST(AdvancedSchedulerTest, OneCycleLR_LinearAnnealing) {
-    auto param = Variable(ones({2, 2}, DType::Float32), true);
-    std::vector<Variable*> params = {&param};
+    auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32), true);
+    auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = Adam(params, 0.01);
 
     auto scheduler = OneCycleLR(optimizer, 0.01, 50, -1, -1, 0.3, "linear");
@@ -299,8 +299,8 @@ TEST(AdvancedSchedulerTest, OneCycleLR_LinearAnnealing) {
 }
 
 TEST(AdvancedSchedulerTest, OneCycleLR_CustomDivFactors) {
-    auto param = Variable(ones({2, 2}, DType::Float32), true);
-    std::vector<Variable*> params = {&param};
+    auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32), true);
+    auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = AdamW(params, 0.001);
 
     auto scheduler = OneCycleLR(optimizer, 1.0, 100, -1, -1, 0.5, "cos", 10.0, 100.0);
@@ -317,8 +317,8 @@ TEST(AdvancedSchedulerTest, OneCycleLR_CustomDivFactors) {
 }
 
 TEST(AdvancedSchedulerTest, OneCycleLR_PctStartVariation) {
-    auto param = Variable(ones({2, 2}, DType::Float32), true);
-    std::vector<Variable*> params = {&param};
+    auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32), true);
+    auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = SGD(params, 0.1);
 
     // Test with pct_start = 0.5 (equal warmup and annealing)
@@ -340,8 +340,8 @@ TEST(AdvancedSchedulerTest, OneCycleLR_PctStartVariation) {
 //==============================================================================
 
 TEST(AdvancedSchedulerTest, CosineAnnealingWarmRestarts_BasicRestart) {
-    auto param = Variable(ones({2, 2}, DType::Float32), true);
-    std::vector<Variable*> params = {&param};
+    auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32), true);
+    auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = SGD(params, 1.0);
 
     auto scheduler = CosineAnnealingWarmRestarts(optimizer, 10, 1, 0.0);
@@ -370,8 +370,8 @@ TEST(AdvancedSchedulerTest, CosineAnnealingWarmRestarts_BasicRestart) {
 }
 
 TEST(AdvancedSchedulerTest, CosineAnnealingWarmRestarts_TMultiplier) {
-    auto param = Variable(ones({2, 2}, DType::Float32), true);
-    std::vector<Variable*> params = {&param};
+    auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32), true);
+    auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = Adam(params, 0.01);
 
     auto scheduler = CosineAnnealingWarmRestarts(optimizer, 5, 2, 0.0);  // T_mult=2
@@ -394,8 +394,8 @@ TEST(AdvancedSchedulerTest, CosineAnnealingWarmRestarts_TMultiplier) {
 }
 
 TEST(AdvancedSchedulerTest, CosineAnnealingWarmRestarts_EtaMin) {
-    auto param = Variable(ones({2, 2}, DType::Float32), true);
-    std::vector<Variable*> params = {&param};
+    auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32), true);
+    auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = AdamW(params, 1.0);
 
     auto scheduler = CosineAnnealingWarmRestarts(optimizer, 10, 1, 0.1);  // eta_min=0.1
@@ -410,8 +410,8 @@ TEST(AdvancedSchedulerTest, CosineAnnealingWarmRestarts_EtaMin) {
 }
 
 TEST(AdvancedSchedulerTest, CosineAnnealingWarmRestarts_MultipleRestarts) {
-    auto param = Variable(ones({2, 2}, DType::Float32), true);
-    std::vector<Variable*> params = {&param};
+    auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32), true);
+    auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = SGD(params, 1.0);
 
     auto scheduler = CosineAnnealingWarmRestarts(optimizer, 5, 1, 0.0);
@@ -434,8 +434,8 @@ TEST(AdvancedSchedulerTest, CosineAnnealingWarmRestarts_MultipleRestarts) {
 //==============================================================================
 
 TEST(AdvancedSchedulerTest, ReduceLROnPlateau_Training_Simulation) {
-    auto param = Variable(full({2, 2}, 10.0f, DType::Float32), true);
-    std::vector<Variable*> params = {&param};
+    auto param = std::make_shared<Variable>(full({2, 2}, 10.0f, DType::Float32), true);
+    auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = SGD(params, 0.1);
     auto scheduler = ReduceLROnPlateau(optimizer, "min", 0.5, 3);
 
@@ -444,7 +444,7 @@ TEST(AdvancedSchedulerTest, ReduceLROnPlateau_Training_Simulation) {
 
     double last_lr = 0.1;
     for (size_t epoch = 0; epoch < val_losses.size(); epoch++) {
-        param.grad() = ones({2, 2}, DType::Float32);
+        param->grad() = ones({2, 2}, DType::Float32);
         optimizer.step();
         scheduler.step(val_losses[epoch]);
 
@@ -459,14 +459,14 @@ TEST(AdvancedSchedulerTest, ReduceLROnPlateau_Training_Simulation) {
 }
 
 TEST(AdvancedSchedulerTest, CyclicLR_Training_Simulation) {
-    auto param = Variable(full({2, 2}, 10.0f, DType::Float32), true);
-    std::vector<Variable*> params = {&param};
+    auto param = std::make_shared<Variable>(full({2, 2}, 10.0f, DType::Float32), true);
+    auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = Adam(params, 0.001);
     auto scheduler = CyclicLR(optimizer, 0.001, 0.01, 10);
 
     // Simulate 50 batch updates
     for (int batch = 0; batch < 50; batch++) {
-        param.grad() = ones({2, 2}, DType::Float32);
+        param->grad() = ones({2, 2}, DType::Float32);
         optimizer.step();
         scheduler.step();
 
@@ -480,8 +480,8 @@ TEST(AdvancedSchedulerTest, CyclicLR_Training_Simulation) {
 }
 
 TEST(AdvancedSchedulerTest, OneCycleLR_Training_Simulation) {
-    auto param = Variable(full({2, 2}, 10.0f, DType::Float32), true);
-    std::vector<Variable*> params = {&param};
+    auto param = std::make_shared<Variable>(full({2, 2}, 10.0f, DType::Float32), true);
+    auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = SGD(params, 0.1);
 
     int num_epochs = 10;
@@ -492,7 +492,7 @@ TEST(AdvancedSchedulerTest, OneCycleLR_Training_Simulation) {
 
     for (int epoch = 0; epoch < num_epochs; epoch++) {
         for (int batch = 0; batch < batches_per_epoch; batch++) {
-            param.grad() = ones({2, 2}, DType::Float32);
+            param->grad() = ones({2, 2}, DType::Float32);
             optimizer.step();
             scheduler.step();
         }
@@ -503,14 +503,14 @@ TEST(AdvancedSchedulerTest, OneCycleLR_Training_Simulation) {
 }
 
 TEST(AdvancedSchedulerTest, CosineAnnealingWarmRestarts_Training_Simulation) {
-    auto param = Variable(full({2, 2}, 10.0f, DType::Float32), true);
-    std::vector<Variable*> params = {&param};
+    auto param = std::make_shared<Variable>(full({2, 2}, 10.0f, DType::Float32), true);
+    auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = AdamW(params, 0.01);
     auto scheduler = CosineAnnealingWarmRestarts(optimizer, 5, 2);
 
     int total_epochs = 30;
     for (int epoch = 0; epoch < total_epochs; epoch++) {
-        param.grad() = ones({2, 2}, DType::Float32);
+        param->grad() = ones({2, 2}, DType::Float32);
         optimizer.step();
         scheduler.step();
 
@@ -525,8 +525,8 @@ TEST(AdvancedSchedulerTest, CosineAnnealingWarmRestarts_Training_Simulation) {
 //==============================================================================
 
 TEST(AdvancedSchedulerTest, ReduceLROnPlateau_ErrorOnStepWithoutMetric) {
-    auto param = Variable(ones({2, 2}, DType::Float32), true);
-    std::vector<Variable*> params = {&param};
+    auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32), true);
+    auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = SGD(params, 0.1);
     auto scheduler = ReduceLROnPlateau(optimizer, "min");
 
@@ -535,8 +535,8 @@ TEST(AdvancedSchedulerTest, ReduceLROnPlateau_ErrorOnStepWithoutMetric) {
 }
 
 TEST(AdvancedSchedulerTest, CyclicLR_ZeroStepSize) {
-    auto param = Variable(ones({2, 2}, DType::Float32), true);
-    std::vector<Variable*> params = {&param};
+    auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32), true);
+    auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = SGD(params, 0.1);
 
     // step_size_up must be positive
@@ -546,8 +546,8 @@ TEST(AdvancedSchedulerTest, CyclicLR_ZeroStepSize) {
 }
 
 TEST(AdvancedSchedulerTest, OneCycleLR_ZeroTotalSteps) {
-    auto param = Variable(ones({2, 2}, DType::Float32), true);
-    std::vector<Variable*> params = {&param};
+    auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32), true);
+    auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = Adam(params, 0.01);
 
     // Should throw on invalid total_steps
@@ -557,8 +557,8 @@ TEST(AdvancedSchedulerTest, OneCycleLR_ZeroTotalSteps) {
 }
 
 TEST(AdvancedSchedulerTest, CosineAnnealingWarmRestarts_InvalidT0) {
-    auto param = Variable(ones({2, 2}, DType::Float32), true);
-    std::vector<Variable*> params = {&param};
+    auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32), true);
+    auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = SGD(params, 0.1);
 
     // T_0 must be positive
@@ -568,8 +568,8 @@ TEST(AdvancedSchedulerTest, CosineAnnealingWarmRestarts_InvalidT0) {
 }
 
 TEST(AdvancedSchedulerTest, CosineAnnealingWarmRestarts_InvalidTMult) {
-    auto param = Variable(ones({2, 2}, DType::Float32), true);
-    std::vector<Variable*> params = {&param};
+    auto param = std::make_shared<Variable>(ones({2, 2}, DType::Float32), true);
+    auto params = std::vector<std::shared_ptr<Variable>>{param};
     auto optimizer = SGD(params, 0.1);
 
     // T_mult must be >= 1

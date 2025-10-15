@@ -76,7 +76,7 @@ namespace optim {
  */
 class SGD : public Optimizer {
 public:
-    SGD(std::vector<Variable*> params,
+    SGD(std::vector<std::shared_ptr<Variable>> params,
         double lr,
         double momentum = 0.0,
         double dampening = 0.0,

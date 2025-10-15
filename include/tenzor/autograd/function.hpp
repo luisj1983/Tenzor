@@ -101,18 +101,20 @@ public:
     /**
      * @brief Set input variables for gradient accumulation.
      *
-     * Tracks leaf variables where gradients should accumulate.
+     * Stores Variables by value for gradient accumulation during backward pass.
+     * The Variables' shared_ptr<VariableImpl> keeps the data alive even if the
+     * Variable handle (temporary) is destroyed.
      *
-     * @param inputs Vector of input variable pointers
+     * @param inputs Vector of input Variables to track
      */
-    auto set_input_variables(std::vector<Variable*> inputs) -> void;
+    auto set_input_variables(std::vector<Variable> inputs) -> void;
 
     /**
-     * @brief Get input variables.
+     * @brief Get input variables for gradient accumulation.
      *
-     * @return Vector of input variable pointers
+     * @return Vector of tracked Variables
      */
-    auto input_variables() const -> const std::vector<Variable*>&;
+    auto input_variables() const -> const std::vector<Variable>&;
 
     /**
      * @brief Get number of saved tensors.
@@ -141,9 +143,9 @@ public:
     auto saved_tensors() const -> const std::vector<Tensor>&;
 
 protected:
-    std::vector<Tensor> saved_tensors_;                       ///< Tensors saved for backward
-    std::vector<std::shared_ptr<Function>> next_functions_;   ///< Chained gradient functions
-    std::vector<Variable*> input_variables_;                  ///< Leaf variables for gradient accumulation
+    std::vector<Tensor> saved_tensors_;                             ///< Tensors saved for backward
+    std::vector<std::shared_ptr<Function>> next_functions_;         ///< Chained gradient functions
+    std::vector<Variable> input_variables_;                          ///< Input variables for gradient accumulation (stored by value)
 };
 
 // ============================================================================

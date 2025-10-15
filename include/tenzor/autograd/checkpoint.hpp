@@ -87,7 +87,7 @@ public:
      * @param allow_caching Enable caching of recomputed activations (default: true)
      */
     explicit CheckpointFunction(
-        std::function<std::vector<Variable>(std::vector<Variable>)> forward_fn,
+        std::function<std::vector<Variable>(const std::vector<Variable>&)> forward_fn,
         bool allow_caching = true
     );
 
@@ -181,7 +181,7 @@ public:
     }
 
 private:
-    std::function<std::vector<Variable>(std::vector<Variable>)> forward_fn_;
+    std::function<std::vector<Variable>(const std::vector<Variable>&)> forward_fn_;
     bool allow_caching_;
     size_t recompute_count_{0};
     size_t estimated_activation_memory_{0};
@@ -200,6 +200,12 @@ private:
     // Recomputed input Variables - must stay alive during backward pass
     // to prevent dangling pointers in the recomputed graph
     std::vector<Variable> cached_recompute_inputs_;
+
+    // Store copies of all Variables found during graph traversal
+    // This prevents dangling pointers when accessing intermediate Variables
+    // created during recomputation (e.g., temporaries in multi-input checkpoints)
+    // Using Variable copies instead of shared_ptr to avoid no-op deleter issues
+    std::vector<Variable> recomputed_intermediates_;
 
     /**
      * @brief Recompute forward pass with gradient tracking
@@ -252,8 +258,8 @@ private:
  * @endcode
  */
 auto checkpoint(
-    std::function<std::vector<Variable>(std::vector<Variable>)> fn,
-    std::vector<Variable> inputs
+    std::function<std::vector<Variable>(const std::vector<Variable>&)> fn,
+    const std::vector<Variable>& inputs  // Changed to const reference to avoid unnecessary copy
 ) -> std::vector<Variable>;
 
 /**
@@ -268,9 +274,9 @@ auto checkpoint(
  * @return Output variables
  */
 auto checkpoint_with_originals(
-    std::function<std::vector<Variable>(std::vector<Variable>)> fn,
-    std::vector<Variable> inputs,
-    std::vector<Variable*> original_inputs
+    std::function<std::vector<Variable>(const std::vector<Variable>&)> fn,
+    const std::vector<Variable>& inputs,  // Changed to const reference to avoid unnecessary copy
+    const std::vector<Variable*>& original_inputs  // Also const reference for consistency
 ) -> std::vector<Variable>;
 
 /**
@@ -471,7 +477,7 @@ public:
      * @return Output variables
      */
     auto execute(
-        std::function<std::vector<Variable>(std::vector<Variable>)> fn,
+        std::function<std::vector<Variable>(const std::vector<Variable>&)> fn,
         std::vector<Variable> inputs
     ) -> std::vector<Variable>;
 

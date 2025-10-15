@@ -6,7 +6,7 @@
 namespace tenzor::optim {
 
 // Adam::Adam implementation
-Adam::Adam(std::vector<Variable*> params, double lr, double beta1,
+Adam::Adam(std::vector<std::shared_ptr<Variable>> params, double lr, double beta1,
           double beta2, double eps, double weight_decay, bool amsgrad)
     : Optimizer(std::move(params)), lr_(lr), beta1_(beta1), beta2_(beta2),
       eps_(eps), weight_decay_(weight_decay), amsgrad_(amsgrad) {
@@ -17,8 +17,9 @@ auto Adam::step() -> void {
     step_count_++;
 
     for (size_t i = 0; i < parameters_.size(); ++i) {
-        auto& param = *parameters_[i];
-        if (!param.has_grad()) continue;
+        auto& param_ptr = parameters_[i];
+        if (!param_ptr || !param_ptr->has_grad()) continue;
+        auto& param = *param_ptr;
 
         auto grad = param.grad()->clone();
 
@@ -56,9 +57,11 @@ auto Adam::initialize_buffers() -> void {
     exp_avg_.clear();
     exp_avg_sq_.clear();
 
-    for (auto* param : parameters_) {
-        exp_avg_.push_back(zeros_like(param->tensor()));
-        exp_avg_sq_.push_back(zeros_like(param->tensor()));
+    for (auto& param : parameters_) {
+        if (param) {
+            exp_avg_.push_back(zeros_like(param->tensor()));
+            exp_avg_sq_.push_back(zeros_like(param->tensor()));
+        }
     }
 }
 
@@ -143,7 +146,7 @@ auto Adam::load_state_dict(const std::unordered_map<std::string, Tensor>& state)
 }
 
 // AdamW implementation
-AdamW::AdamW(std::vector<Variable*> params, double lr, double beta1,
+AdamW::AdamW(std::vector<std::shared_ptr<Variable>> params, double lr, double beta1,
             double beta2, double eps, double weight_decay, bool amsgrad)
     : Optimizer(std::move(params)), lr_(lr), beta1_(beta1), beta2_(beta2),
       eps_(eps), weight_decay_(weight_decay), amsgrad_(amsgrad) {
@@ -154,8 +157,9 @@ auto AdamW::step() -> void {
     step_count_++;
 
     for (size_t i = 0; i < parameters_.size(); ++i) {
-        auto& param = *parameters_[i];
-        if (!param.has_grad()) continue;
+        auto& param_ptr = parameters_[i];
+        if (!param_ptr || !param_ptr->has_grad()) continue;
+        auto& param = *param_ptr;
 
         auto grad = param.grad()->clone();
 
@@ -201,9 +205,11 @@ auto AdamW::initialize_buffers() -> void {
     exp_avg_.clear();
     exp_avg_sq_.clear();
 
-    for (auto* param : parameters_) {
-        exp_avg_.push_back(zeros_like(param->tensor()));
-        exp_avg_sq_.push_back(zeros_like(param->tensor()));
+    for (auto& param : parameters_) {
+        if (param) {
+            exp_avg_.push_back(zeros_like(param->tensor()));
+            exp_avg_sq_.push_back(zeros_like(param->tensor()));
+        }
     }
 }
 

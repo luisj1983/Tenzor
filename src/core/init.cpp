@@ -217,6 +217,37 @@ auto initialize() -> void {
             return cpu_backend->dispatch("clamp", inputs, attrs);
         });
 
+    // Comparison operations
+    registry.register_kernel("eq", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("eq", inputs, attrs);
+        });
+
+    registry.register_kernel("ne", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("ne", inputs, attrs);
+        });
+
+    registry.register_kernel("lt", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("lt", inputs, attrs);
+        });
+
+    registry.register_kernel("le", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("le", inputs, attrs);
+        });
+
+    registry.register_kernel("gt", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("gt", inputs, attrs);
+        });
+
+    registry.register_kernel("ge", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("ge", inputs, attrs);
+        });
+
     // Transform operations
     registry.register_kernel("contiguous", Device::Type::CPU,
         [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
@@ -282,6 +313,42 @@ auto initialize() -> void {
     registry.register_kernel("batchnorm2d_backward", Device::Type::CPU,
         [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             return cpu_backend->dispatch("batchnorm2d_backward", inputs, attrs);
+        });
+
+    // Fused operations
+    registry.register_kernel("fused_linear_relu", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("fused_linear_relu", inputs, attrs);
+        });
+
+    registry.register_kernel("fused_conv2d_relu", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("fused_conv2d_relu", inputs, attrs);
+        });
+
+    registry.register_kernel("fused_batchnorm_relu", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("fused_batchnorm_relu", inputs, attrs);
+        });
+
+    registry.register_kernel("fused_softmax_cross_entropy", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("fused_softmax_cross_entropy", inputs, attrs);
+        });
+
+    registry.register_kernel("fused_add_relu", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("fused_add_relu", inputs, attrs);
+        });
+
+    registry.register_kernel("fused_gelu", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("fused_gelu", inputs, attrs);
+        });
+
+    registry.register_kernel("fused_layer_norm", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("fused_layer_norm", inputs, attrs);
         });
 
     // Try to load CUDA backend if available
@@ -463,6 +530,37 @@ auto initialize() -> void {
                         return cuda_backend->dispatch("clamp", inputs, attrs);
                     });
 
+                // Comparison operations
+                registry.register_kernel("eq", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("eq", inputs, attrs);
+                    });
+
+                registry.register_kernel("ne", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("ne", inputs, attrs);
+                    });
+
+                registry.register_kernel("lt", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("lt", inputs, attrs);
+                    });
+
+                registry.register_kernel("le", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("le", inputs, attrs);
+                    });
+
+                registry.register_kernel("gt", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("gt", inputs, attrs);
+                    });
+
+                registry.register_kernel("ge", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("ge", inputs, attrs);
+                    });
+
                 // Transform operations
                 registry.register_kernel("expand", Device::Type::CUDA,
                     [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
@@ -572,7 +670,296 @@ auto initialize() -> void {
         std::cout << "CUDA backend not found at: " << cuda_backend_path << std::endl;
     }
 
-    std::cout << "Tenzor initialization complete - 38 CPU operations registered" << std::endl;
+    // Try to load ROCm backend if available
+    std::filesystem::path rocm_backend_path = bin_path / "tenzor_backend_rocm.so";
+
+    if (std::filesystem::exists(rocm_backend_path)) {
+        std::cout << "Loading ROCm backend from: " << rocm_backend_path << std::endl;
+
+        auto rocm_result = loader.load_backend(rocm_backend_path);
+        if (rocm_result) {
+            auto rocm_backend_unique = std::move(rocm_result.value());
+            auto* rocm_backend_ptr = rocm_backend_unique.get();
+
+            // Check if ROCm is actually available
+            if (rocm_backend_ptr->is_available()) {
+                loader.register_backend(rocm_backend_ptr->name(), std::move(rocm_backend_unique));
+                std::cout << "ROCm backend registered: " << rocm_backend_ptr->name() << std::endl;
+                std::cout << "Found " << rocm_backend_ptr->device_count() << " ROCm device(s)" << std::endl;
+
+                auto* rocm_backend = rocm_backend_ptr;
+
+                // Register all ROCm operations
+                std::cout << "Registering ROCm kernels with operation registry" << std::endl;
+
+                // Basic math operations
+                registry.register_kernel("add", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("add", inputs, attrs);
+                    });
+
+                registry.register_kernel("sub", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("sub", inputs, attrs);
+                    });
+
+                registry.register_kernel("mul", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("mul", inputs, attrs);
+                    });
+
+                registry.register_kernel("div", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("div", inputs, attrs);
+                    });
+
+                registry.register_kernel("matmul", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("matmul", inputs, attrs);
+                    });
+
+                registry.register_kernel("sum", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("sum", inputs, attrs);
+                    });
+
+                registry.register_kernel("mean", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("mean", inputs, attrs);
+                    });
+
+                registry.register_kernel("max", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("max", inputs, attrs);
+                    });
+
+                registry.register_kernel("min", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("min", inputs, attrs);
+                    });
+
+                // Activation functions
+                registry.register_kernel("relu", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("relu", inputs, attrs);
+                    });
+
+                registry.register_kernel("relu_backward", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("relu_backward", inputs, attrs);
+                    });
+
+                registry.register_kernel("sigmoid", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("sigmoid", inputs, attrs);
+                    });
+
+                registry.register_kernel("sigmoid_backward", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("sigmoid_backward", inputs, attrs);
+                    });
+
+                registry.register_kernel("tanh", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("tanh", inputs, attrs);
+                    });
+
+                registry.register_kernel("tanh_backward", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("tanh_backward", inputs, attrs);
+                    });
+
+                registry.register_kernel("gelu", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("gelu", inputs, attrs);
+                    });
+
+                registry.register_kernel("gelu_backward", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("gelu_backward", inputs, attrs);
+                    });
+
+                registry.register_kernel("leaky_relu", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("leaky_relu", inputs, attrs);
+                    });
+
+                registry.register_kernel("leaky_relu_backward", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("leaky_relu_backward", inputs, attrs);
+                    });
+
+                registry.register_kernel("softmax", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("softmax", inputs, attrs);
+                    });
+
+                registry.register_kernel("softmax_backward", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("softmax_backward", inputs, attrs);
+                    });
+
+                registry.register_kernel("log_softmax", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("log_softmax", inputs, attrs);
+                    });
+
+                registry.register_kernel("log_softmax_backward", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("log_softmax_backward", inputs, attrs);
+                    });
+
+                registry.register_kernel("neg", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("neg", inputs, attrs);
+                    });
+
+                registry.register_kernel("abs", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("abs", inputs, attrs);
+                    });
+
+                registry.register_kernel("sign", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("sign", inputs, attrs);
+                    });
+
+                // Math operations
+                registry.register_kernel("sqrt", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("sqrt", inputs, attrs);
+                    });
+
+                registry.register_kernel("exp", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("exp", inputs, attrs);
+                    });
+
+                registry.register_kernel("log", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("log", inputs, attrs);
+                    });
+
+                registry.register_kernel("pow", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("pow", inputs, attrs);
+                    });
+
+                registry.register_kernel("clamp", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("clamp", inputs, attrs);
+                    });
+
+                // Comparison operations
+                registry.register_kernel("eq", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("eq", inputs, attrs);
+                    });
+
+                registry.register_kernel("ne", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("ne", inputs, attrs);
+                    });
+
+                registry.register_kernel("lt", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("lt", inputs, attrs);
+                    });
+
+                registry.register_kernel("le", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("le", inputs, attrs);
+                    });
+
+                registry.register_kernel("gt", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("gt", inputs, attrs);
+                    });
+
+                registry.register_kernel("ge", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("ge", inputs, attrs);
+                    });
+
+                // Transform operations
+                registry.register_kernel("contiguous", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("contiguous", inputs, attrs);
+                    });
+
+                registry.register_kernel("fill", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("fill", inputs, attrs);
+                    });
+
+                registry.register_kernel("clone", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("clone", inputs, attrs);
+                    });
+
+                registry.register_kernel("reshape", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("reshape", inputs, attrs);
+                    });
+
+                registry.register_kernel("transpose", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("transpose", inputs, attrs);
+                    });
+
+                registry.register_kernel("permute", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("permute", inputs, attrs);
+                    });
+
+                registry.register_kernel("squeeze", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("squeeze", inputs, attrs);
+                    });
+
+                registry.register_kernel("unsqueeze", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("unsqueeze", inputs, attrs);
+                    });
+
+                // BatchNorm2d operations
+                registry.register_kernel("batchnorm2d_mean_var", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("batchnorm2d_mean_var", inputs, attrs);
+                    });
+
+                registry.register_kernel("batchnorm2d_forward", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("batchnorm2d_forward", inputs, attrs);
+                    });
+
+                registry.register_kernel("batchnorm2d_forward_affine", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("batchnorm2d_forward_affine", inputs, attrs);
+                    });
+
+                registry.register_kernel("batchnorm2d_update_running_stats", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("batchnorm2d_update_running_stats", inputs, attrs);
+                    });
+
+                registry.register_kernel("batchnorm2d_backward", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("batchnorm2d_backward", inputs, attrs);
+                    });
+
+                std::cout << "ROCm operations registered successfully" << std::endl;
+            } else {
+                std::cout << "ROCm backend loaded but no ROCm devices available" << std::endl;
+            }
+        } else {
+            std::cout << "Warning: Failed to load ROCm backend: " << rocm_result.error() << std::endl;
+        }
+    } else {
+        std::cout << "ROCm backend not found at: " << rocm_backend_path << std::endl;
+    }
+
+    std::cout << "Tenzor initialization complete - 51 CPU operations registered" << std::endl;
 
     g_initialized = true;
 }

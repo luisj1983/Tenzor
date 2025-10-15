@@ -91,7 +91,7 @@ public:
      * @brief Get list of parameters being optimized
      * @return Const reference to parameter vector
      */
-    auto parameters() const -> const std::vector<Variable*>&;
+    auto parameters() const -> const std::vector<std::shared_ptr<Variable>>&;
 
     /**
      * @brief Get optimizer state as dictionary
@@ -130,11 +130,11 @@ public:
 protected:
     /**
      * @brief Construct optimizer with parameters to optimize
-     * @param params Vector of pointers to model parameters
+     * @param params Vector of shared pointers to model parameters
      */
-    explicit Optimizer(std::vector<Variable*> params);
+    explicit Optimizer(std::vector<std::shared_ptr<Variable>> params);
 
-    std::vector<Variable*> parameters_;  ///< Parameters being optimized
+    std::vector<std::shared_ptr<Variable>> parameters_;  ///< Parameters being optimized
 };
 
 /**
@@ -150,7 +150,7 @@ protected:
  * @endcode
  */
 struct ParamGroup {
-    std::vector<Variable*> params;  ///< Parameters in this group
+    std::vector<std::shared_ptr<Variable>> params;  ///< Parameters in this group
     double lr;                      ///< Learning rate for this group
     double weight_decay{0.0};       ///< Weight decay (L2 regularization) for this group
 };

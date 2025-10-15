@@ -1,8 +1,13 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <pybind11/numpy.h>
+#include <pybind11/functional.h>
 #include <tenzor/tenzor.hpp>
 #include <tenzor/ops/indexing.hpp>
+#include <tenzor/ops/advanced.hpp>
+#include <tenzor/ops/reduction.hpp>
+#include <tenzor/backend/loader.hpp>
+#include <tenzor/backend/backend.hpp>
 #include <tenzor/nn/optim/scheduler.hpp>
 #include <tenzor/nn/layers/rnn.hpp>
 #include <tenzor/nn/layers/attention.hpp>
@@ -12,6 +17,7 @@
 #include <tenzor/nn/optim/adagrad.hpp>
 #include <tenzor/nn/optim/adadelta.hpp>
 #include <tenzor/nn/loss/losses.hpp>
+#include <tenzor/nn/parallel/distributed_data_parallel.hpp>
 #include "numpy_interop.hpp"
 
 namespace py = pybind11;
@@ -87,6 +93,10 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def("clone", &tenzor::Tensor::clone)
         .def("detach", &tenzor::Tensor::detach)
         .def("contiguous", &tenzor::Tensor::contiguous)
+        .def("fill_", &tenzor::Tensor::fill_, py::arg("value"),
+             "Fill tensor with scalar value in-place")
+        .def("zero_", &tenzor::Tensor::zero_,
+             "Fill tensor with zeros in-place")
         // NumPy interoperability
         .def("numpy", &tenzor::numpy::tensor_to_numpy,
              "Convert tensor to NumPy array (zero-copy when possible)")
@@ -225,8 +235,270 @@ PYBIND11_MODULE(tenzor_core, m) {
             throw std::runtime_error("Unsupported index type");
         }, py::arg("key"), "Get tensor slice or element")
         .def("__setitem__", [](tenzor::Tensor& self, py::object key, py::object value) {
-            // Basic implementation - can be extended for more complex indexing
-            throw std::runtime_error("__setitem__ not fully implemented yet. Use tensor operations instead.");
+            // Helper function to convert Python value to tensor
+            auto value_to_tensor = [&](py::object val) -> tenzor::Tensor {
+                if (py::isinstance<tenzor::Tensor>(val)) {
+                    return py::cast<tenzor::Tensor>(val);
+                } else if (py::isinstance<py::float_>(val) || py::isinstance<py::int_>(val)) {
+                    // Scalar value - create single-element tensor
+                    float scalar = py::cast<float>(val);
+                    auto scalar_tensor = tenzor::empty({1}, self.dtype(), self.device());
+
+                    // Fill with scalar value based on dtype
+                    switch (self.dtype()) {
+                        case tenzor::DType::Float32:
+                            *scalar_tensor.data<float>() = scalar;
+                            break;
+                        case tenzor::DType::Float64:
+                            *scalar_tensor.data<double>() = static_cast<double>(scalar);
+                            break;
+                        case tenzor::DType::Int32:
+                            *scalar_tensor.data<int32_t>() = static_cast<int32_t>(scalar);
+                            break;
+                        case tenzor::DType::Int64:
+                            *scalar_tensor.data<int64_t>() = static_cast<int64_t>(scalar);
+                            break;
+                        case tenzor::DType::UInt8:
+                            *scalar_tensor.data<uint8_t>() = static_cast<uint8_t>(scalar);
+                            break;
+                        case tenzor::DType::Bool:
+                            *scalar_tensor.data<bool>() = static_cast<bool>(scalar);
+                            break;
+                        default:
+                            throw std::runtime_error("Unsupported dtype for scalar assignment");
+                    }
+                    return scalar_tensor;
+                } else {
+                    throw std::runtime_error("Value must be a Tensor or scalar");
+                }
+            };
+
+            // Helper function to copy data from source to destination with broadcasting
+            auto copy_with_broadcast = [](tenzor::Tensor& dst, const tenzor::Tensor& src) {
+                // Check device compatibility
+                if (dst.device().type != src.device().type) {
+                    throw std::runtime_error("Source and destination tensors must be on the same device");
+                }
+
+                auto dst_shape = dst.shape();
+                auto src_shape = src.shape();
+
+                // If source is scalar, broadcast to fill destination
+                if (src.numel() == 1) {
+                    // Get scalar value from source
+                    auto src_cpu = (src.device().type == tenzor::Device::Type::CPU) ? src : src.cpu();
+                    float scalar_value;
+                    switch (src.dtype()) {
+                        case tenzor::DType::Float32:
+                            scalar_value = *src_cpu.data<float>();
+                            break;
+                        case tenzor::DType::Float64:
+                            scalar_value = static_cast<float>(*src_cpu.data<double>());
+                            break;
+                        case tenzor::DType::Int32:
+                            scalar_value = static_cast<float>(*src_cpu.data<int32_t>());
+                            break;
+                        case tenzor::DType::Int64:
+                            scalar_value = static_cast<float>(*src_cpu.data<int64_t>());
+                            break;
+                        default:
+                            scalar_value = 0.0f;
+                    }
+                    dst.fill_(scalar_value);
+                    return;
+                }
+
+                // Check if shapes match exactly
+                if (dst_shape.size() == src_shape.size()) {
+                    bool shapes_match = true;
+                    for (size_t i = 0; i < dst_shape.size(); ++i) {
+                        if (dst_shape[i] != src_shape[i]) {
+                            shapes_match = false;
+                            break;
+                        }
+                    }
+                    if (shapes_match) {
+                        // Direct copy - same shape
+                        if (dst.is_contiguous() && src.is_contiguous()) {
+                            // Fast path: both contiguous
+                            size_t bytes = dst.numel() * dst.dtype_size();
+                            if (dst.device().type == tenzor::Device::Type::CPU) {
+                                std::memcpy(dst.data_ptr(), src.data_ptr(), bytes);
+                            } else {
+                                // Use backend copy for device tensors
+                                auto* backend = tenzor::backend_registry().get_backend(dst.device().type);
+                                if (backend) {
+                                    backend->copy(dst.data_ptr(), src.data_ptr(), bytes,
+                                                tenzor::CopyKind::DeviceToDevice);
+                                }
+                            }
+                        } else {
+                            // Slow path: handle non-contiguous tensors
+                            throw std::runtime_error("Non-contiguous tensor assignment not yet implemented");
+                        }
+                        return;
+                    }
+                }
+
+                // Check if broadcasting is possible
+                bool can_broadcast = true;
+                int64_t dst_ndim = static_cast<int64_t>(dst_shape.size());
+                int64_t src_ndim = static_cast<int64_t>(src_shape.size());
+
+                if (src_ndim > dst_ndim) {
+                    can_broadcast = false;
+                } else {
+                    // Check broadcasting rules
+                    for (int64_t i = 0; i < src_ndim; ++i) {
+                        int64_t dst_dim = dst_shape[dst_ndim - 1 - i];
+                        int64_t src_dim = src_shape[src_ndim - 1 - i];
+                        if (src_dim != 1 && src_dim != dst_dim) {
+                            can_broadcast = false;
+                            break;
+                        }
+                    }
+                }
+
+                if (!can_broadcast) {
+                    throw std::runtime_error("Shape mismatch: cannot broadcast source shape to destination shape");
+                }
+
+                // TODO: Implement proper broadcasting copy
+                throw std::runtime_error("Broadcasting assignment not yet fully implemented");
+            };
+
+            // Handle integer indexing: tensor[0] = value
+            if (py::isinstance<py::int_>(key)) {
+                int64_t idx = py::cast<int64_t>(key);
+                auto shape = self.shape();
+                if (shape.empty()) {
+                    throw std::runtime_error("Cannot index scalar tensor");
+                }
+
+                // Handle negative indexing
+                if (idx < 0) {
+                    idx += shape[0];
+                }
+                if (idx < 0 || idx >= shape[0]) {
+                    throw std::out_of_range("Index out of range");
+                }
+
+                // Get slice along first dimension
+                auto sliced = self.slice(0, idx, idx + 1);
+                // Squeeze to remove the indexed dimension
+                auto target = sliced.squeeze(0);
+
+                // Convert value and copy
+                auto value_tensor = value_to_tensor(value);
+                copy_with_broadcast(target, value_tensor);
+            }
+            // Handle slice objects: tensor[1:5] = value
+            else if (py::isinstance<py::slice>(key)) {
+                py::slice slice_obj = py::cast<py::slice>(key);
+                py::ssize_t start, stop, step, length;
+                auto shape = self.shape();
+                if (shape.empty()) {
+                    throw std::runtime_error("Cannot slice scalar tensor");
+                }
+
+                if (!slice_obj.compute(shape[0], &start, &stop, &step, &length)) {
+                    throw std::runtime_error("Invalid slice");
+                }
+                if (step != 1) {
+                    throw std::runtime_error("Slice step not supported yet for assignment");
+                }
+
+                // Get sliced view
+                auto target = self.slice(0, start, stop);
+
+                // Convert value and copy
+                auto value_tensor = value_to_tensor(value);
+                copy_with_broadcast(target, value_tensor);
+            }
+            // Handle tuple of indices/slices: tensor[0, :, 1:3] = value
+            else if (py::isinstance<py::tuple>(key)) {
+                py::tuple indices = py::cast<py::tuple>(key);
+                tenzor::Tensor target = self;
+                int squeeze_count = 0;  // Track dimensions that need squeezing
+                std::vector<int64_t> squeeze_dims;  // Dimensions to squeeze at the end
+
+                for (size_t i = 0; i < indices.size(); ++i) {
+                    size_t adjusted_dim = i - squeeze_count;
+                    auto target_shape = target.shape();
+
+                    if (adjusted_dim >= target_shape.size()) {
+                        throw std::out_of_range("Too many indices");
+                    }
+
+                    if (py::isinstance<py::int_>(indices[i])) {
+                        int64_t idx = py::cast<int64_t>(indices[i]);
+
+                        // Handle negative indexing
+                        if (idx < 0) {
+                            idx += target_shape[adjusted_dim];
+                        }
+                        if (idx < 0 || idx >= target_shape[adjusted_dim]) {
+                            throw std::out_of_range("Index out of range");
+                        }
+
+                        // Slice along this dimension
+                        target = target.slice(adjusted_dim, idx, idx + 1);
+                        squeeze_dims.push_back(adjusted_dim);
+                        squeeze_count++;
+
+                    } else if (py::isinstance<py::slice>(indices[i])) {
+                        py::slice slice_obj = py::cast<py::slice>(indices[i]);
+                        py::ssize_t start, stop, step, length;
+
+                        if (!slice_obj.compute(target_shape[adjusted_dim], &start, &stop, &step, &length)) {
+                            throw std::runtime_error("Invalid slice");
+                        }
+                        if (step != 1) {
+                            throw std::runtime_error("Slice step not supported yet for assignment");
+                        }
+
+                        target = target.slice(adjusted_dim, start, stop);
+                    } else if (py::isinstance<py::ellipsis>(indices[i])) {
+                        // Ellipsis: skip remaining dimensions until we have room for rest of indices
+                        int64_t remaining_indices = static_cast<int64_t>(indices.size()) - static_cast<int64_t>(i) - 1;
+                        int64_t remaining_dims = static_cast<int64_t>(target_shape.size()) - static_cast<int64_t>(adjusted_dim);
+                        int64_t dims_to_skip = remaining_dims - remaining_indices;
+
+                        if (dims_to_skip < 0) {
+                            throw std::runtime_error("Invalid ellipsis: too many indices");
+                        }
+
+                        // Skip these dimensions (no slicing needed)
+                        squeeze_count += dims_to_skip;
+                    } else {
+                        throw std::runtime_error("Unsupported index type in tuple");
+                    }
+                }
+
+                // Squeeze indexed dimensions (from back to front to maintain indices)
+                for (auto it = squeeze_dims.rbegin(); it != squeeze_dims.rend(); ++it) {
+                    int64_t dim = *it;
+                    // Adjust for previously squeezed dimensions
+                    for (auto prev_it = it + 1; prev_it != squeeze_dims.rend(); ++prev_it) {
+                        if (*prev_it < dim) {
+                            dim--;
+                        }
+                    }
+                    if (dim >= 0 && dim < target.ndim()) {
+                        auto target_shape = target.shape();
+                        if (target_shape[dim] == 1) {
+                            target = target.squeeze(dim);
+                        }
+                    }
+                }
+
+                // Convert value and copy
+                auto value_tensor = value_to_tensor(value);
+                copy_with_broadcast(target, value_tensor);
+            }
+            else {
+                throw std::runtime_error("Unsupported index type for assignment");
+            }
         }, py::arg("key"), py::arg("value"), "Set tensor slice or element");
 
     // Operations
@@ -313,24 +585,80 @@ PYBIND11_MODULE(tenzor_core, m) {
          py::arg("end_dim") = -1);
     m.def("contiguous", &tenzor::contiguous, "Make tensor contiguous");
 
-    // Indexing operations (only bind implemented functions)
+    // Indexing operations
     m.def("slice", &tenzor::slice, "Slice tensor along dimension",
          py::arg("input"), py::arg("dim"), py::arg("start"), py::arg("end"),
          py::arg("step") = 1);
     m.def("index_select", &tenzor::index_select, "Select indices along dimension",
          py::arg("input"), py::arg("dim"), py::arg("index"));
+    m.def("gather", &tenzor::gather, "Gather elements along dimension",
+         py::arg("input"), py::arg("dim"), py::arg("index"));
+    m.def("scatter", &tenzor::scatter, "Scatter elements along dimension",
+         py::arg("input"), py::arg("dim"), py::arg("index"), py::arg("src"));
+    m.def("masked_select", &tenzor::masked_select, "Select elements where mask is true",
+         py::arg("input"), py::arg("mask"));
+    m.def("masked_fill", &tenzor::masked_fill, "Fill elements with value where mask is true",
+         py::arg("input"), py::arg("mask"), py::arg("value"));
+    m.def("where", &tenzor::where, "Conditional element selection",
+         py::arg("condition"), py::arg("x"), py::arg("y"));
+    m.def("take", &tenzor::take, "Take elements from flattened tensor",
+         py::arg("input"), py::arg("index"));
+    m.def("put", &tenzor::put, "Put elements into flattened tensor",
+         py::arg("input"), py::arg("index"), py::arg("source"));
 
-    // Note: The following operations are declared in headers but not yet implemented:
-    // gather, scatter, masked_select, masked_fill, where, take, put
-    // They can be added once the implementations are complete
+    // Advanced operations (Phase 6)
+    // expand is already in transform operations
+    m.def("topk", [](const tenzor::Tensor& input, int64_t k, int64_t dim, bool largest, bool sorted) {
+        return tenzor::topk(input, k, dim, largest, sorted);
+    }, "Find top k elements",
+         py::arg("input"), py::arg("k"), py::arg("dim") = -1,
+         py::arg("largest") = true, py::arg("sorted") = true);
+    m.def("sort", [](const tenzor::Tensor& input, int64_t dim, bool descending) {
+        return tenzor::sort(input, dim, descending);
+    }, "Sort tensor along dimension",
+         py::arg("input"), py::arg("dim") = -1, py::arg("descending") = false);
+    m.def("unique", [](const tenzor::Tensor& input, bool sorted, bool return_inverse, bool return_counts) {
+        return tenzor::unique(input, sorted, return_inverse, return_counts);
+    }, "Find unique elements",
+         py::arg("input"), py::arg("sorted") = true,
+         py::arg("return_inverse") = false, py::arg("return_counts") = false);
+    m.def("cumsum", [](const tenzor::Tensor& input, int64_t dim) {
+        return tenzor::cumsum(input, dim);
+    }, "Cumulative sum",
+         py::arg("input"), py::arg("dim"));
+    m.def("cumprod", [](const tenzor::Tensor& input, int64_t dim) {
+        return tenzor::cumprod(input, dim);
+    }, "Cumulative product",
+         py::arg("input"), py::arg("dim"));
+
+    // argmax and argmin (already declared in reduction.hpp)
+    m.def("argmax", &tenzor::argmax, "Indices of maximum values",
+         py::arg("input"), py::arg("dim") = py::none(), py::arg("keepdim") = false);
+    m.def("argmin", &tenzor::argmin, "Indices of minimum values",
+         py::arg("input"), py::arg("dim") = py::none(), py::arg("keepdim") = false);
 
     // Autograd
-    py::class_<tenzor::Variable>(m, "Variable")
-        .def(py::init<tenzor::Tensor, bool>(),
-             py::arg("data"), py::arg("requires_grad") = false)
-        .def("backward", &tenzor::Variable::backward, py::arg("gradient") = py::none())
+    py::class_<tenzor::Variable, std::shared_ptr<tenzor::Variable>>(m, "Variable")
+        .def(py::init([](tenzor::Tensor data, bool requires_grad) {
+            return std::make_shared<tenzor::Variable>(data, requires_grad);
+        }), py::arg("data"), py::arg("requires_grad") = false)
+        .def("backward", &tenzor::Variable::backward,
+             py::arg("gradient") = py::none(),
+             py::arg("retain_graph") = false,
+             "Compute gradients via backpropagation")
         .def_property_readonly("data", py::overload_cast<>(&tenzor::Variable::tensor, py::const_))
-        .def_property_readonly("grad", py::overload_cast<>(&tenzor::Variable::grad, py::const_));
+        .def_property_readonly("grad", py::overload_cast<>(&tenzor::Variable::grad, py::const_))
+        .def_property_readonly("grad_fn", &tenzor::Variable::grad_fn,
+             "Get gradient function that created this variable")
+        .def_property_readonly("is_leaf", &tenzor::Variable::is_leaf,
+             "Check if variable is a leaf node")
+        .def("register_hook", &tenzor::Variable::register_hook,
+             py::arg("hook"),
+             "Register a backward hook function")
+        .def("retain_grad", &tenzor::Variable::retain_grad,
+             "Enable gradient retention for non-leaf variables")
+        .def_property_readonly("retains_grad", &tenzor::Variable::retains_grad,
+             "Check if variable retains gradient");
 
     // NoGradGuard for RAII-style gradient control
     py::class_<tenzor::NoGradGuard>(m, "NoGradGuard")
@@ -851,7 +1179,7 @@ PYBIND11_MODULE(tenzor_core, m) {
     auto optim = m.def_submodule("optim", "Optimization algorithms");
 
     py::class_<tenzor::optim::SGD>(optim, "SGD")
-        .def(py::init<std::vector<tenzor::Variable*>, double, double, double, double, bool>(),
+        .def(py::init<std::vector<std::shared_ptr<tenzor::Variable>>, double, double, double, double, bool>(),
              py::arg("params"), py::arg("lr"),
              py::arg("momentum") = 0.0, py::arg("dampening") = 0.0,
              py::arg("weight_decay") = 0.0, py::arg("nesterov") = false)
@@ -867,7 +1195,7 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("state"), "Load optimizer state dictionary");
 
     py::class_<tenzor::optim::Adam>(optim, "Adam")
-        .def(py::init<std::vector<tenzor::Variable*>, double, double, double, double, double, bool>(),
+        .def(py::init<std::vector<std::shared_ptr<tenzor::Variable>>, double, double, double, double, double, bool>(),
              py::arg("params"), py::arg("lr") = 1e-3,
              py::arg("beta1") = 0.9, py::arg("beta2") = 0.999,
              py::arg("eps") = 1e-8, py::arg("weight_decay") = 0.0,
@@ -884,7 +1212,7 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("state"), "Load optimizer state dictionary");
 
     py::class_<tenzor::optim::AdamW>(optim, "AdamW")
-        .def(py::init<std::vector<tenzor::Variable*>, double, double, double, double, double, bool>(),
+        .def(py::init<std::vector<std::shared_ptr<tenzor::Variable>>, double, double, double, double, double, bool>(),
              py::arg("params"), py::arg("lr") = 1e-3,
              py::arg("beta1") = 0.9, py::arg("beta2") = 0.999,
              py::arg("eps") = 1e-8, py::arg("weight_decay") = 0.01,
@@ -902,7 +1230,7 @@ PYBIND11_MODULE(tenzor_core, m) {
 
     // Additional optimizers
     py::class_<tenzor::optim::RMSprop>(optim, "RMSprop")
-        .def(py::init<std::vector<tenzor::Variable*>, double, double, double, double, double, bool>(),
+        .def(py::init<std::vector<std::shared_ptr<tenzor::Variable>>, double, double, double, double, double, bool>(),
              py::arg("params"), py::arg("lr") = 0.01, py::arg("alpha") = 0.99,
              py::arg("eps") = 1e-8, py::arg("weight_decay") = 0.0,
              py::arg("momentum") = 0.0, py::arg("centered") = false)
@@ -912,7 +1240,7 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def("load_state_dict", &tenzor::optim::RMSprop::load_state_dict);
 
     py::class_<tenzor::optim::Adagrad>(optim, "Adagrad")
-        .def(py::init<std::vector<tenzor::Variable*>, double, double, double, double, double>(),
+        .def(py::init<std::vector<std::shared_ptr<tenzor::Variable>>, double, double, double, double, double>(),
              py::arg("params"), py::arg("lr") = 0.01, py::arg("lr_decay") = 0.0,
              py::arg("weight_decay") = 0.0, py::arg("initial_accumulator_value") = 0.0,
              py::arg("eps") = 1e-10)
@@ -920,7 +1248,7 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def("zero_grad", &tenzor::optim::Adagrad::zero_grad);
 
     py::class_<tenzor::optim::Adadelta>(optim, "Adadelta")
-        .def(py::init<std::vector<tenzor::Variable*>, double, double, double, double>(),
+        .def(py::init<std::vector<std::shared_ptr<tenzor::Variable>>, double, double, double, double>(),
              py::arg("params"), py::arg("lr") = 1.0, py::arg("rho") = 0.9,
              py::arg("eps") = 1e-6, py::arg("weight_decay") = 0.0)
         .def("step", &tenzor::optim::Adadelta::step)
@@ -1068,4 +1396,60 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("optimizer"), py::arg("T_0"), py::arg("T_mult") = 1,
              py::arg("eta_min") = 0.0)
         .def("step", &tenzor::optim::CosineAnnealingWarmRestarts::step);
+
+    // Distributed training
+    auto distributed = nn.def_submodule("parallel", "Distributed and parallel training");
+
+    // ProcessGroup
+    py::class_<tenzor::nn::ProcessGroup, std::shared_ptr<tenzor::nn::ProcessGroup>>(distributed, "ProcessGroup")
+        .def(py::init<int, int, const std::string&>(),
+             py::arg("rank"), py::arg("world_size"), py::arg("backend") = "nccl",
+             "Create a process group for distributed training")
+        .def_property_readonly("rank", &tenzor::nn::ProcessGroup::rank,
+             "Get process rank")
+        .def_property_readonly("world_size", &tenzor::nn::ProcessGroup::world_size,
+             "Get world size (total number of processes)")
+        .def_property_readonly("backend", &tenzor::nn::ProcessGroup::backend,
+             "Get backend name")
+        .def("barrier", &tenzor::nn::ProcessGroup::barrier,
+             "Synchronize all processes");
+
+    // DistributedDataParallel
+    py::class_<tenzor::nn::DistributedDataParallel, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::DistributedDataParallel>>(distributed, "DistributedDataParallel")
+        .def(py::init<std::shared_ptr<tenzor::nn::Module>,
+                     std::shared_ptr<tenzor::nn::ProcessGroup>,
+                     std::vector<int>, int, bool, bool, bool, size_t>(),
+             py::arg("module"),
+             py::arg("process_group"),
+             py::arg("device_ids") = std::vector<int>{},
+             py::arg("output_device") = -1,
+             py::arg("broadcast_buffers") = true,
+             py::arg("find_unused_parameters") = false,
+             py::arg("gradient_as_bucket_view") = false,
+             py::arg("bucket_size_mb") = 25,
+             "Wrap module for distributed data parallel training")
+        .def("forward", &tenzor::nn::DistributedDataParallel::forward,
+             py::arg("input"),
+             "Forward pass with automatic gradient synchronization")
+        .def_property_readonly("module", &tenzor::nn::DistributedDataParallel::module,
+             "Get underlying module")
+        .def_property_readonly("process_group", &tenzor::nn::DistributedDataParallel::process_group,
+             "Get process group")
+        .def_property_readonly("device_ids", &tenzor::nn::DistributedDataParallel::device_ids,
+             "Get local device IDs")
+        .def_property_readonly("output_device", &tenzor::nn::DistributedDataParallel::output_device,
+             "Get master device ID")
+        .def("join", &tenzor::nn::DistributedDataParallel::join,
+             "Wait for all processes to finish current iteration");
+
+    // Helper functions
+    distributed.def("init_process_group", &tenzor::nn::init_process_group,
+         py::arg("backend") = "nccl",
+         "Initialize distributed training environment from environment variables");
+
+    distributed.def("destroy_process_group", &tenzor::nn::destroy_process_group,
+         py::arg("process_group"),
+         "Destroy process group and cleanup resources");
 }
+

@@ -111,7 +111,7 @@ public:
      * @param momentum Momentum factor (0.0 disables momentum)
      * @param centered Enable centered RMSprop variant
      */
-    RMSprop(std::vector<Variable*> params,
+    RMSprop(std::vector<std::shared_ptr<Variable>> params,
             double lr = 1e-2,
             double alpha = 0.99,
             double eps = 1e-8,

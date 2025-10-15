@@ -180,6 +180,96 @@ python examples/python/06_custom_layer.py
 
 ---
 
+### 07_resnet_cifar10.py (Expert)
+**Duration**: ~5-10 minutes
+**Topics**: ResNet architecture, modern training techniques
+
+Advanced CNN training with state-of-the-art practices:
+- ResNet-18 architecture with skip connections
+- CIFAR-10 dataset (10 classes of 32x32 color images)
+- Batch normalization for training stability
+- Data augmentation (flips, crops)
+- Learning rate scheduling
+- Mixed precision training
+- Model checkpointing
+- Comprehensive evaluation metrics
+
+**Run**:
+```bash
+python examples/python/07_resnet_cifar10.py
+```
+
+**Architecture Highlights**:
+- Residual blocks with skip connections
+- Deeper networks (18 layers) without vanishing gradients
+- Adaptive average pooling
+- SGD with momentum and weight decay
+
+---
+
+### 08_fashion_mnist_cnn.py (Advanced - Production Ready)
+**Duration**: ~3-5 minutes
+**Topics**: Complete training pipeline, best practices
+
+A comprehensive, production-ready example for Fashion-MNIST classification:
+- Modern 5-layer CNN architecture
+- Fashion-MNIST dataset (70,000 images of 10 clothing categories)
+- Data normalization and augmentation
+- Batch normalization + dropout regularization
+- Detailed progress tracking and metrics
+- Per-class accuracy evaluation
+- Model checkpointing (save/load)
+- Educational comments throughout
+
+**Run**:
+```bash
+python examples/python/08_fashion_mnist_cnn.py
+```
+
+**Architecture**:
+```
+Input (1×28×28)
+    ↓
+[Block 1: 2× Conv2d(3×3) + BN + ReLU + MaxPool + Dropout]
+    → (32×14×14)
+    ↓
+[Block 2: 2× Conv2d(3×3) + BN + ReLU + MaxPool + Dropout]
+    → (64×7×7)
+    ↓
+[Block 3: Conv2d(3×3) + BN + ReLU + MaxPool + Dropout]
+    → (128×3×3)
+    ↓
+Flatten → 1152 features
+    ↓
+Linear(1152→256) + BN + ReLU + Dropout(0.5)
+    ↓
+Linear(256→10)
+```
+
+**Key Features**:
+- **Data Augmentation**: Random flips, shifts, noise
+- **Normalization**: Zero mean, unit variance preprocessing
+- **Regularization**: Batch norm + dropout (0.25 conv, 0.5 FC)
+- **Progress Tracking**: Real-time loss, accuracy, speed metrics
+- **Checkpointing**: Save best model and periodic snapshots
+- **Per-Class Metrics**: Detailed accuracy for each clothing category
+- **Best Practices**: Production-ready code structure
+
+**Fashion-MNIST Classes**:
+0. T-shirt/top, 1. Trouser, 2. Pullover, 3. Dress, 4. Coat
+5. Sandal, 6. Shirt, 7. Sneaker, 8. Bag, 9. Ankle boot
+
+**What You'll Learn**:
+- Complete deep learning training pipeline
+- Data preprocessing and augmentation strategies
+- Modern CNN architecture design principles
+- Training loop with comprehensive monitoring
+- Model evaluation with detailed statistics
+- Checkpoint management for model persistence
+- Production-ready code organization
+
+---
+
 ## Learning Path
 
 ### For Beginners:
@@ -190,9 +280,11 @@ python examples/python/06_custom_layer.py
 ### For Intermediate Users:
 4. Explore `04_mnist_mlp.py` to build a real classifier
 5. Study `05_cnn_classification.py` to understand CNNs
+6. Dive into `06_custom_layer.py` to extend Tenzor
 
 ### For Advanced Users:
-6. Dive into `06_custom_layer.py` to extend Tenzor
+7. Master `08_fashion_mnist_cnn.py` for production-ready training pipelines
+8. Challenge yourself with `07_resnet_cifar10.py` for state-of-the-art architectures
 
 ## Key Concepts Covered
 
