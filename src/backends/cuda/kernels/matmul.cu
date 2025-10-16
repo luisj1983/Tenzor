@@ -64,6 +64,7 @@ __device__ __host__ inline BFloat16 from_cuda_bfloat16(const __nv_bfloat16& x) {
 // Optimized for modern GPUs with 48KB+ shared memory per SM
 constexpr int TILE_SIZE = 32;
 constexpr int TILE_SIZE_K = 16;  // K-dimension tile for better memory coalescing
+constexpr int TILE_SIZE_F16 = 16;  // Smaller tile size for FP16 to reduce resource usage
 
 // ============================================================================
 // Float32 Tiled MatMul Kernel
@@ -959,11 +960,12 @@ void matmul_f16(
         matmul_tensor_core_f16_kernel<<<grid, block, 0, stream>>>(A, B, C, M, N, K);
     } else {
         // Fall back to standard tiled kernel for non-aligned dimensions
-        dim3 block(TILE_SIZE, TILE_SIZE);
-        dim3 grid((N + TILE_SIZE - 1) / TILE_SIZE,
-                  (M + TILE_SIZE - 1) / TILE_SIZE);
+        // Use smaller tile size (16x16 block) to reduce resource usage
+        dim3 block(TILE_SIZE_F16, TILE_SIZE_F16);
+        dim3 grid((N + TILE_SIZE_F16 - 1) / TILE_SIZE_F16,
+                  (M + TILE_SIZE_F16 - 1) / TILE_SIZE_F16);
 
-        matmul_tiled_f16_kernel<TILE_SIZE, TILE_SIZE, TILE_SIZE_K>
+        matmul_tiled_f16_kernel<TILE_SIZE_F16, TILE_SIZE_F16, TILE_SIZE_K>
             <<<grid, block, 0, stream>>>(A, B, C, M, N, K, K, N, N);
     }
 

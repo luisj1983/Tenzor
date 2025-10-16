@@ -45,6 +45,8 @@ void* CachingAllocator::allocate(size_t size, int device, cudaStream_t stream) {
     // Try to find a suitable block in cache
     Block* block = try_allocate_from_cache(size, device, stream);
 
+    bool from_cache = (block != nullptr);
+
     if (!block) {
         // No suitable cached block, allocate new one
         block = allocate_new_block(size, device, stream);
@@ -57,7 +59,9 @@ void* CachingAllocator::allocate(size_t size, int device, cudaStream_t stream) {
 
     // Update statistics
     device_alloc.stats.allocated_bytes += block->size;
-    if (device_alloc.stats.cached_bytes >= block->size) {
+
+    // Only subtract from cached_bytes if we got the block from cache
+    if (from_cache && device_alloc.stats.cached_bytes >= block->size) {
         device_alloc.stats.cached_bytes -= block->size;
     }
 
@@ -128,7 +132,12 @@ void CachingAllocator::empty_cache(int device) {
         }
     } else {
         // Empty specific device
-        auto& device_alloc = device_allocators_[device];
+        auto it = device_allocators_.find(device);
+        if (it == device_allocators_.end()) {
+            return;  // Device doesn't exist, nothing to empty
+        }
+
+        auto& device_alloc = it->second;
 
         std::vector<Block*> blocks_to_release;
         for (Block* block : device_alloc.free_blocks) {
@@ -359,8 +368,11 @@ bool CachingAllocator::try_merge_blocks(Block* block) {
             // Merge with next block
             device_alloc.free_blocks.erase(next_block);
 
-            // Update statistics
-            device_alloc.stats.cached_bytes -= next_block->size;
+            // When merging, next_block's size was already in cached_bytes
+            // Subtract it before expanding the current block to avoid double-counting
+            if (device_alloc.stats.cached_bytes >= next_block->size) {
+                device_alloc.stats.cached_bytes -= next_block->size;
+            }
 
             // Expand current block
             block->size += next_block->size;
@@ -369,7 +381,6 @@ bool CachingAllocator::try_merge_blocks(Block* block) {
             device_alloc.all_blocks.erase(next_it);
 
             device_alloc.stats.num_merges++;
-            device_alloc.stats.cached_bytes += block->size;
             merged = true;
         }
     }
