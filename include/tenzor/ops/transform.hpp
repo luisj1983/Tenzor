@@ -51,6 +51,17 @@ auto flatten(const Tensor& input, int64_t start_dim = 0, int64_t end_dim = -1) -
  */
 auto cat(std::span<const Tensor> tensors, int64_t dim = 0) -> Tensor;
 
+/** @brief Concatenate tensors from initializer list. */
+inline auto cat(std::initializer_list<Tensor> tensors, int64_t dim = 0) -> Tensor {
+    std::vector<Tensor> vec(tensors);
+    return cat(std::span<const Tensor>(vec), dim);
+}
+
+/** @brief Concatenate tensors from vector. */
+inline auto cat(const std::vector<Tensor>& tensors, int64_t dim = 0) -> Tensor {
+    return cat(std::span<const Tensor>(tensors), dim);
+}
+
 /** @brief Stack tensors along new dimension. */
 auto stack(std::span<const Tensor> tensors, int64_t dim = 0) -> Tensor;
 
@@ -74,4 +85,18 @@ auto contiguous(const Tensor& input) -> Tensor;
 
 /** @} */ // end of tensor_transform group
 
+} // namespace tenzor
+
+namespace tenzor {
+namespace ops {
+// Convenience namespace alias for common operations
+using tenzor::unsqueeze;
+using tenzor::cat;
+using tenzor::reshape;
+using tenzor::transpose;
+using tenzor::permute;
+using tenzor::squeeze;
+using tenzor::flatten;
+using tenzor::stack;
+} // namespace ops
 } // namespace tenzor

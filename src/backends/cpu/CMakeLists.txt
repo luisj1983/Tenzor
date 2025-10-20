@@ -6,6 +6,7 @@ set(CPU_BACKEND_SOURCES
     kernels/math.cpp
     kernels/reduction.cpp
     kernels/transform.cpp
+    kernels/indexing.cpp
     kernels/activations.cpp
     kernels/batchnorm.cpp
     kernels/creation.cpp

@@ -143,6 +143,23 @@ struct Device {
      * @endcode
      */
     static auto from_string(std::string_view str) -> Device;
+
+    /**
+     * @brief Synchronize all operations on this device.
+     *
+     * Blocks until all pending operations on this device have completed.
+     * Works uniformly across all backend types (CPU, CUDA, ROCm, OneAPI).
+     *
+     * @code
+     * Device device = Device::cuda(0);
+     * // ... perform operations ...
+     * device.synchronize();  // Wait for all operations to complete
+     * @endcode
+     *
+     * @note This is the recommended way to synchronize device operations
+     *       instead of using backend-specific calls like cudaDeviceSynchronize().
+     */
+    auto synchronize() const -> void;
 };
 
 } // namespace tenzor

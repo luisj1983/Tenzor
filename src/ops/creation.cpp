@@ -491,4 +491,22 @@ auto randn_like(const Tensor& tensor) -> Tensor {
     return randn(shape, tensor.dtype(), tensor.device());
 }
 
+auto randperm(int64_t n, Device device) -> Tensor {
+    // Create tensor with sequential integers 0 to n-1
+    auto tensor = arange(0.0f, static_cast<float>(n), 1.0f, DType::Int64, device);
+
+    // For CPU, shuffle in place
+    if (device.type == Device::Type::CPU) {
+        auto data = tensor.data<int64_t>();
+        std::random_device rd;
+        std::mt19937 gen(rd());
+        std::shuffle(data, data + n, gen);
+    } else {
+        // For other devices, would need backend-specific implementation
+        throw std::runtime_error("randperm only supported on CPU currently");
+    }
+
+    return tensor;
+}
+
 } // namespace tenzor

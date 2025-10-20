@@ -261,6 +261,88 @@ auto reshape(const Variable& input, const std::vector<int64_t>& shape) -> Variab
  */
 auto permute(const Variable& input, const std::vector<int64_t>& dims) -> Variable;
 
+/**
+ * @brief Transpose two dimensions with gradient tracking.
+ *
+ * Transposes two dimensions of input variable.
+ * Gradients are transposed back during backpropagation.
+ *
+ * @param input Input variable
+ * @param dim0 First dimension to transpose
+ * @param dim1 Second dimension to transpose
+ * @return Variable containing transposed tensor with gradient function
+ *
+ * @code
+ * Variable x(Tensor({2, 3, 4}, DType::Float32, Device::cpu()), true);
+ * Variable y = transpose(x, 0, 2);  // Shape: {4, 3, 2}
+ * @endcode
+ *
+ * @see TransposeBackward for gradient implementation
+ */
+auto transpose(const Variable& input, int64_t dim0, int64_t dim1) -> Variable;
+
+/**
+ * @brief Remove dimensions of size 1 with gradient tracking.
+ *
+ * Removes a dimension of size 1 from input variable.
+ * Gradients are unsqueezed back during backpropagation.
+ *
+ * @param input Input variable
+ * @param dim Dimension to remove (must have size 1)
+ * @return Variable containing squeezed tensor with gradient function
+ *
+ * @code
+ * Variable x(Tensor({2, 1, 3}, DType::Float32, Device::cpu()), true);
+ * Variable y = squeeze(x, 1);  // Shape: {2, 3}
+ * @endcode
+ *
+ * @see SqueezeBackward for gradient implementation
+ */
+auto squeeze(const Variable& input, int64_t dim) -> Variable;
+
+/**
+ * @brief Concatenate variables along dimension with gradient tracking.
+ *
+ * Concatenates a sequence of variables along the specified dimension.
+ * Gradients are split back to individual tensors during backpropagation.
+ *
+ * @param inputs Vector of input variables to concatenate
+ * @param dim Dimension along which to concatenate
+ * @return Variable containing concatenated tensor with gradient function
+ *
+ * @code
+ * Variable x1(Tensor({2, 3}, DType::Float32, Device::cpu()), true);
+ * Variable x2(Tensor({2, 5}, DType::Float32, Device::cpu()), true);
+ * Variable y = cat({x1, x2}, 1);  // Shape: {2, 8}
+ * @endcode
+ *
+ * @see CatBackward for gradient implementation
+ */
+auto cat(const std::vector<Variable>& inputs, int64_t dim) -> Variable;
+
+/**
+ * @brief Slice variable along dimension with gradient tracking.
+ *
+ * Extracts a slice from the input variable along the specified dimension.
+ * Gradients are scattered back to original positions during backpropagation.
+ *
+ * @param input Input variable to slice
+ * @param dim Dimension along which to slice
+ * @param start Start index (inclusive)
+ * @param end End index (exclusive)
+ * @param step Step size (default: 1)
+ * @return Variable containing sliced tensor with gradient function
+ *
+ * @code
+ * Variable x(Tensor({10, 20}, DType::Float32, Device::cpu()), true);
+ * Variable y = slice(x, 1, 5, 15, 2);  // Shape: {10, 5} - every 2nd element from index 5 to 15
+ * // Backward: gradient scattered back to positions [5, 7, 9, 11, 13] in dimension 1
+ * @endcode
+ *
+ * @see SliceBackward for gradient implementation
+ */
+auto slice(const Variable& input, int64_t dim, int64_t start, int64_t end, int64_t step = 1) -> Variable;
+
 // ============================================================================
 // Matrix Operations
 // ============================================================================
@@ -307,4 +389,12 @@ auto bmm(const Variable& a, const Variable& b) -> Variable;
  */
 auto matmul(const Variable& a, const Variable& b) -> Variable;
 
+} // namespace tenzor
+
+namespace tenzor {
+namespace ops {
+// Convenience namespace alias for autograd operations
+using tenzor::softmax;
+using tenzor::log_softmax;
+} // namespace ops
 } // namespace tenzor

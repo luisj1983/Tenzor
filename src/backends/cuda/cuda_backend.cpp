@@ -97,6 +97,14 @@ namespace cuda {
     // LSTM operations (custom kernels - fallback)
     auto lstm_cell_forward_kernel(const Tensor& gates, const Tensor& c_prev, int64_t batch_size, int64_t hidden_size, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
     auto lstm_cell_backward_kernel(const Tensor& grad_h, const Tensor& grad_c, const Tensor& gates, const Tensor& c_prev, const Tensor& c_out, int64_t batch_size, int64_t hidden_size, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
+
+    // Fused operations (disabled - CUDA kernels not yet implemented)
+    // auto fused_linear_relu_cuda(const Tensor& input, const Tensor& weight, const Tensor* bias) -> Tensor;
+    // auto fused_batchnorm_relu_cuda(const Tensor& input, const Tensor& running_mean, const Tensor& running_var, const Tensor& weight, const Tensor& bias, float eps) -> Tensor;
+    // auto fused_softmax_cross_entropy_cuda(const Tensor& logits, const Tensor& targets, const std::string& reduction) -> Tensor;
+    // auto fused_add_relu_cuda(const Tensor& a, const Tensor& b) -> Tensor;
+    // auto fused_gelu_cuda(const Tensor& input) -> Tensor;
+    // auto fused_layer_norm_cuda(const Tensor& input, const std::vector<int64_t>& normalized_shape, const Tensor& weight, const Tensor& bias, float eps) -> Tensor;
 } // namespace cuda
 
 class CUDABackend : public Backend {
@@ -971,6 +979,13 @@ public:
                     inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], batch_size, hidden_size, stream
                 );
                 return {grad_gates, grad_c_prev};
+            }
+            // Fused operations disabled - CUDA kernels not yet implemented
+            // Fall back to CPU fused operations for now
+            else if (op_name == "fused_linear_relu" || op_name == "fused_batchnorm_relu" ||
+                     op_name == "fused_softmax_cross_entropy" || op_name == "fused_add_relu" ||
+                     op_name == "fused_gelu" || op_name == "fused_layer_norm") {
+                throw std::runtime_error("CUDABackend: Fused operation '" + op_name + "' not yet implemented for CUDA. Use CPU backend for fused ops.");
             }
             else {
                 throw std::runtime_error("CUDABackend: Unknown operation '" + op_name + "'");

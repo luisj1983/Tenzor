@@ -1315,6 +1315,11 @@ public:
         int64_t height_out = grad_shape[2];
         int64_t width_out = grad_shape[3];
 
+        // Debug: Print tensor shapes at the start
+        std::cout << "ConvTranspose2d backward START: input shape=[" << batch << ", " << in_channels
+                  << ", " << height_in << ", " << width_in << "], grad_output shape=["
+                  << batch << ", " << out_channels << ", " << height_out << ", " << width_out << "]" << std::endl;
+
         // Gradient w.r.t input: Apply regular convolution with grad_output and flipped weight
         Tensor grad_input = zeros({batch, in_channels, height_in, width_in});
         int64_t in_channels_per_group = in_channels / groups_;
@@ -1368,37 +1373,61 @@ public:
                 }
             }
 
-            // Apply im2col to grad_output
+            // For ConvTranspose2d backward w.r.t. input, we need to reverse the forward operation:
+            // Forward: input_flat → matmul(weight^T, input_flat) → output_col → col2im → output
+            // Backward: grad_output → im2col_backward → matmul(weight, grad_col) → grad_input_flat → reshape
+
+            // The spatial dimension in forward's output_col is H_in * W_in
+            int64_t spatial_in = height_in * width_in;
+
+            // Reshape grad_output to flat format: [batch, out_channels_per_group, H_out * W_out]
+            auto grad_output_flat = grad_slice.reshape({batch, out_channels_per_group, height_out * width_out});
+
+            // We need to convert grad_output from spatial format back to column format
+            // This is the gradient through col2im, which requires accumulating based on the col2im logic
+            // Instead of implementing a complex col2im gradient, we use im2col which effectively reverses it
             auto grad_col = im2col(grad_slice, kernel_h, kernel_w, stride_, padding_, dilation_);
 
-            // Reshape for matmul
-            auto grad_col_reshaped = grad_col.reshape({batch, out_channels_per_group * kernel_h * kernel_w, height_in * width_in});
-            auto weight_reshaped = weight_slice.reshape({out_channels_per_group, in_channels_per_group * kernel_h * kernel_w});
+            // Get the actual spatial size from im2col output
+            auto grad_col_shape = grad_col.shape();
+            int64_t actual_spatial_size = grad_col_shape[2];
 
-            // Compute grad_input_slice
-            auto grad_input_slice_flat = zeros({batch, in_channels_per_group, height_in * width_in});
-            float* grad_input_slice_data = grad_input_slice_flat.data<float>();
+            // Reshape weight to match forward: [in_channels_per_group, out_channels_per_group * K * K]
+            int64_t kernel_flat = out_channels_per_group * kernel_h * kernel_w;
+            auto weight_reshaped = weight_slice.reshape({in_channels_per_group, kernel_flat});
+
+            // Now compute grad_input by reversing the forward matmul
+            // Forward was: output_col = weight_reshaped^T @ input_flat
+            // So backward is: grad_input_flat = weight_reshaped @ grad_col
+            auto grad_input_flat = zeros({batch, in_channels_per_group, actual_spatial_size});
+            float* grad_input_flat_data = grad_input_flat.data<float>();
 
             for (int64_t b = 0; b < batch; ++b) {
-                auto grad_col_b = zeros({out_channels_per_group * kernel_h * kernel_w, height_in * width_in});
-                const float* grad_col_data = grad_col_reshaped.data<float>();
+                // Extract grad_col for this batch: [out_channels_per_group * K * K, spatial]
+                auto grad_col_b = zeros({kernel_flat, actual_spatial_size});
+                const float* grad_col_ptr = grad_col.data<float>();
                 float* grad_col_b_data = grad_col_b.data<float>();
 
-                int64_t slice_size = out_channels_per_group * kernel_h * kernel_w * height_in * width_in;
-                for (int64_t i = 0; i < slice_size; ++i) {
-                    grad_col_b_data[i] = grad_col_data[b * slice_size + i];
+                int64_t col_size = kernel_flat * actual_spatial_size;
+                for (int64_t i = 0; i < col_size; ++i) {
+                    grad_col_b_data[i] = grad_col_ptr[b * col_size + i];
                 }
 
-                auto weight_t = weight_reshaped.transpose(0, 1).contiguous();
-                auto grad_input_b = matmul(weight_t, grad_col_b);
+                // Matmul: weight_reshaped @ grad_col_b
+                // = [in_channels_per_group, out_channels_per_group * K * K] @ [out_channels_per_group * K * K, spatial]
+                // = [in_channels_per_group, spatial]
+                auto grad_input_b = matmul(weight_reshaped, grad_col_b);
 
+                // Copy to output
                 const float* src = grad_input_b.data<float>();
-                float* dst = grad_input_slice_data + b * in_channels_per_group * height_in * width_in;
-                std::copy_n(src, in_channels_per_group * height_in * width_in, dst);
+                float* dst = grad_input_flat_data + b * in_channels_per_group * actual_spatial_size;
+                std::copy_n(src, in_channels_per_group * actual_spatial_size, dst);
             }
 
-            // Reshape and copy to grad_input
-            auto grad_input_slice = grad_input_slice_flat.reshape({batch, in_channels_per_group, height_in, width_in});
+            // Reshape grad_input_flat to spatial format: [batch, in_channels_per_group, H_in, W_in]
+            auto grad_input_slice = grad_input_flat.reshape({batch, in_channels_per_group, height_in, width_in});
+
+            // Accumulate into grad_input
             const float* grad_input_slice_data_src = grad_input_slice.data<float>();
             float* grad_input_data = grad_input.data<float>();
 
@@ -1448,8 +1477,13 @@ public:
                 }
             }
 
-            // Apply im2col to input
-            auto input_col = im2col(input_slice, kernel_h, kernel_w, stride_, padding_, dilation_);
+            // For weight gradient, we need:
+            // - input in flat format: [batch, in_channels_per_group, H_in * W_in]
+            // - grad_output in column format: [batch, out_channels_per_group * K * K, spatial]
+            // The spatial dimension should match H_in * W_in after im2col with the correct parameters
+
+            // Reshape input to flat format: [batch, in_channels_per_group, H_in * W_in]
+            auto input_flat = input_slice.reshape({batch, in_channels_per_group, height_in * width_in});
 
             // Extract grad_output slice
             auto grad_slice = zeros({batch, out_channels_per_group, height_out, width_out});
@@ -1472,39 +1506,57 @@ public:
                 }
             }
 
-            // Use col2im to get "columns" from grad_output
-            // This effectively reverses the im2col operation
+            // Apply im2col to grad_output to get grad_col
+            // With correct parameters, this should give spatial dimension = H_in * W_in
             auto grad_output_col = im2col(grad_slice, kernel_h, kernel_w, stride_, padding_, dilation_);
+            auto grad_col_shape = grad_output_col.shape();
+            int64_t spatial_weight = grad_col_shape[2];
 
-            // Reshape for matmul
-            auto input_col_reshaped = input_col.reshape({batch, in_channels_per_group * kernel_h * kernel_w, height_in * width_in});
-            auto grad_col_reshaped = grad_output_col.reshape({batch, out_channels_per_group * kernel_h * kernel_w, height_in * width_in});
+            // Verify that spatial dimensions match
+            if (spatial_weight != height_in * width_in) {
+                throw std::runtime_error(
+                    "ConvTranspose2d backward weight gradient: spatial dimension mismatch. "
+                    "im2col(grad_output) gave spatial=" + std::to_string(spatial_weight) +
+                    " but expected H_in*W_in=" + std::to_string(height_in * width_in)
+                );
+            }
 
-            // Compute grad_weight_group
+            // Both tensors now have spatial dimension height_in * width_in
+            auto grad_col_reshaped = grad_output_col.reshape({batch, out_channels_per_group * kernel_h * kernel_w, spatial_weight});
+
+            // Compute grad_weight: input_flat @ grad_col^T
+            // input_flat: [batch, in_channels, spatial]
+            // grad_col: [batch, out_channels * K * K, spatial]
+            // Result: [in_channels, out_channels * K * K]
             auto grad_weight_group = zeros({in_channels_per_group, out_channels_per_group * kernel_h * kernel_w});
             float* grad_weight_group_data = grad_weight_group.data<float>();
 
             for (int64_t b = 0; b < batch; ++b) {
-                auto input_col_b = zeros({in_channels_per_group * kernel_h * kernel_w, height_in * width_in});
-                const float* input_col_data = input_col_reshaped.data<float>();
-                float* input_col_b_data = input_col_b.data<float>();
+                // Extract input for this batch: [in_channels, spatial]
+                auto input_b = zeros({in_channels_per_group, spatial_weight});
+                const float* input_data = input_flat.data<float>();
+                float* input_b_data = input_b.data<float>();
 
-                int64_t input_slice_size = in_channels_per_group * kernel_h * kernel_w * height_in * width_in;
-                for (int64_t i = 0; i < input_slice_size; ++i) {
-                    input_col_b_data[i] = input_col_data[b * input_slice_size + i];
+                int64_t input_size = in_channels_per_group * spatial_weight;
+                for (int64_t i = 0; i < input_size; ++i) {
+                    input_b_data[i] = input_data[b * input_size + i];
                 }
 
-                auto grad_col_b = zeros({out_channels_per_group * kernel_h * kernel_w, height_in * width_in});
+                // Extract grad_col for this batch: [out_channels * K * K, spatial]
+                auto grad_col_b = zeros({out_channels_per_group * kernel_h * kernel_w, spatial_weight});
                 const float* grad_col_data = grad_col_reshaped.data<float>();
                 float* grad_col_b_data = grad_col_b.data<float>();
 
-                int64_t grad_slice_size = out_channels_per_group * kernel_h * kernel_w * height_in * width_in;
-                for (int64_t i = 0; i < grad_slice_size; ++i) {
-                    grad_col_b_data[i] = grad_col_data[b * grad_slice_size + i];
+                int64_t grad_size = out_channels_per_group * kernel_h * kernel_w * spatial_weight;
+                for (int64_t i = 0; i < grad_size; ++i) {
+                    grad_col_b_data[i] = grad_col_data[b * grad_size + i];
                 }
 
+                // Matmul: input_b @ grad_col_b^T
+                // = [in_channels, spatial] @ [spatial, out_channels * K * K]
+                // = [in_channels, out_channels * K * K]
                 auto grad_col_b_t = grad_col_b.transpose(0, 1).contiguous();
-                auto grad_weight_b = matmul(input_col_b, grad_col_b_t);
+                auto grad_weight_b = matmul(input_b, grad_col_b_t);
 
                 const float* src = grad_weight_b.data<float>();
                 for (int64_t i = 0; i < in_channels_per_group * out_channels_per_group * kernel_h * kernel_w; ++i) {

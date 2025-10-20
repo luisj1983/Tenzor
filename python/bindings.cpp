@@ -2,6 +2,7 @@
 #include <pybind11/stl.h>
 #include <pybind11/numpy.h>
 #include <pybind11/functional.h>
+#include <iostream>
 #include <tenzor/tenzor.hpp>
 #include <tenzor/ops/indexing.hpp>
 #include <tenzor/ops/advanced.hpp>
@@ -18,6 +19,7 @@
 #include <tenzor/nn/optim/adadelta.hpp>
 #include <tenzor/nn/loss/losses.hpp>
 #include <tenzor/nn/parallel/distributed_data_parallel.hpp>
+#include <tenzor/models/hub.hpp>
 #include "numpy_interop.hpp"
 
 namespace py = pybind11;
@@ -569,13 +571,15 @@ PYBIND11_MODULE(tenzor_core, m) {
          py::arg("keepdim") = false);
 
     // Transform operations
-    m.def("transpose", &tenzor::transpose, "Transpose two dimensions",
+    m.def("transpose", static_cast<tenzor::Tensor(*)(const tenzor::Tensor&, int64_t, int64_t)>(&tenzor::transpose),
+         "Transpose two dimensions",
          py::arg("input"), py::arg("dim0"), py::arg("dim1"));
     m.def("permute", [](const tenzor::Tensor& input, std::vector<int64_t> dims) {
          return tenzor::permute(input, dims);
          }, "Permute dimensions",
          py::arg("input"), py::arg("dims"));
-    m.def("squeeze", &tenzor::squeeze, "Remove dimensions of size 1",
+    m.def("squeeze", static_cast<tenzor::Tensor(*)(const tenzor::Tensor&, std::optional<int64_t>)>(&tenzor::squeeze),
+         "Remove dimensions of size 1",
          py::arg("input"), py::arg("dim") = py::none());
     m.def("unsqueeze", &tenzor::unsqueeze, "Add dimension of size 1",
          py::arg("input"), py::arg("dim"));
@@ -586,7 +590,9 @@ PYBIND11_MODULE(tenzor_core, m) {
     m.def("contiguous", &tenzor::contiguous, "Make tensor contiguous");
 
     // Indexing operations
-    m.def("slice", &tenzor::slice, "Slice tensor along dimension",
+    // Cast to the tensor-level slice function to avoid ambiguity with autograd::slice
+    m.def("slice", static_cast<tenzor::Tensor(*)(const tenzor::Tensor&, int64_t, int64_t, int64_t, int64_t)>(&tenzor::slice),
+         "Slice tensor along dimension",
          py::arg("input"), py::arg("dim"), py::arg("start"), py::arg("end"),
          py::arg("step") = 1);
     m.def("index_select", &tenzor::index_select, "Select indices along dimension",
@@ -1451,5 +1457,210 @@ PYBIND11_MODULE(tenzor_core, m) {
     distributed.def("destroy_process_group", &tenzor::nn::destroy_process_group,
          py::arg("process_group"),
          "Destroy process group and cleanup resources");
+
+    // ModelHub for pretrained weight management
+    auto models = m.def_submodule("models", "Pretrained model hub");
+
+    // HubConfig
+    py::class_<tenzor::models::HubConfig>(models, "HubConfig")
+        .def(py::init<>())
+        .def_readwrite("cache_dir", &tenzor::models::HubConfig::cache_dir,
+             "Cache directory path")
+        .def_readwrite("max_cache_size", &tenzor::models::HubConfig::max_cache_size,
+             "Maximum cache size in bytes (0 = unlimited)")
+        .def_readwrite("verify_checksums", &tenzor::models::HubConfig::verify_checksums,
+             "Whether to verify SHA256 checksums")
+        .def_readwrite("resume_downloads", &tenzor::models::HubConfig::resume_downloads,
+             "Whether to resume interrupted downloads")
+        .def_readwrite("connection_timeout", &tenzor::models::HubConfig::connection_timeout,
+             "Connection timeout in seconds")
+        .def_readwrite("max_retries", &tenzor::models::HubConfig::max_retries,
+             "Maximum number of download retries")
+        .def_readwrite("show_progress", &tenzor::models::HubConfig::show_progress,
+             "Whether to show progress by default");
+
+    // ModelWeightInfo
+    py::class_<tenzor::models::ModelWeightInfo>(models, "ModelWeightInfo")
+        .def(py::init<>())
+        .def_readwrite("name", &tenzor::models::ModelWeightInfo::name,
+             "Model name")
+        .def_readwrite("url", &tenzor::models::ModelWeightInfo::url,
+             "Download URL")
+        .def_readwrite("sha256", &tenzor::models::ModelWeightInfo::sha256,
+             "Expected SHA256 checksum")
+        .def_readwrite("size", &tenzor::models::ModelWeightInfo::size,
+             "File size in bytes")
+        .def_readwrite("description", &tenzor::models::ModelWeightInfo::description,
+             "Model description");
+
+    // DownloadStats
+    py::class_<tenzor::models::DownloadStats>(models, "DownloadStats")
+        .def_readonly("total_bytes", &tenzor::models::DownloadStats::total_bytes,
+             "Total bytes downloaded")
+        .def_readonly("bytes_downloaded", &tenzor::models::DownloadStats::bytes_downloaded,
+             "Bytes downloaded in this session")
+        .def_readonly("download_time", &tenzor::models::DownloadStats::download_time,
+             "Time taken in seconds")
+        .def_readonly("average_speed", &tenzor::models::DownloadStats::average_speed,
+             "Average speed in bytes/sec")
+        .def_readonly("resumed", &tenzor::models::DownloadStats::resumed,
+             "Whether download was resumed")
+        .def_readonly("verified", &tenzor::models::DownloadStats::verified,
+             "Whether checksum was verified");
+
+    // ModelHub
+    py::class_<tenzor::models::ModelHub>(models, "Hub")
+        .def_static("download_weights",
+             [](const std::string& model_name,
+                const std::string& url,
+                const std::string& expected_sha256,
+                bool show_progress,
+                py::object progress_callback) {
+                 tenzor::models::ProgressCallback callback = nullptr;
+                 if (!progress_callback.is_none()) {
+                     callback = [progress_callback](size_t downloaded, size_t total,
+                                                    double speed, double eta) {
+                         try {
+                             progress_callback(downloaded, total, speed, eta);
+                         } catch (const py::error_already_set& e) {
+                             std::cerr << "Error in progress callback: " << e.what() << std::endl;
+                         }
+                     };
+                 }
+                 return tenzor::models::ModelHub::download_weights(
+                     model_name, url, expected_sha256, show_progress, callback);
+             },
+             py::arg("model_name"),
+             py::arg("url"),
+             py::arg("expected_sha256") = "",
+             py::arg("show_progress") = true,
+             py::arg("progress_callback") = py::none(),
+             "Download pretrained weights from URL")
+        .def_static("download_pretrained",
+             [](const std::string& model_name,
+                bool show_progress,
+                py::object progress_callback) {
+                 tenzor::models::ProgressCallback callback = nullptr;
+                 if (!progress_callback.is_none()) {
+                     callback = [progress_callback](size_t downloaded, size_t total,
+                                                    double speed, double eta) {
+                         try {
+                             progress_callback(downloaded, total, speed, eta);
+                         } catch (const py::error_already_set& e) {
+                             std::cerr << "Error in progress callback: " << e.what() << std::endl;
+                         }
+                     };
+                 }
+                 return tenzor::models::ModelHub::download_pretrained(
+                     model_name, show_progress, callback);
+             },
+             py::arg("model_name"),
+             py::arg("show_progress") = true,
+             py::arg("progress_callback") = py::none(),
+             "Download registered pretrained model")
+        .def_static("load_pretrained_weights",
+             &tenzor::models::ModelHub::load_pretrained_weights,
+             py::arg("model"),
+             py::arg("weights_path"),
+             py::arg("strict") = true,
+             "Load pretrained weights into model")
+        .def_static("set_cache_dir",
+             &tenzor::models::ModelHub::set_cache_dir,
+             py::arg("path"),
+             "Set cache directory")
+        .def_static("get_cache_dir",
+             &tenzor::models::ModelHub::get_cache_dir,
+             "Get cache directory")
+        .def_static("set_config",
+             &tenzor::models::ModelHub::set_config,
+             py::arg("config"),
+             "Set ModelHub configuration")
+        .def_static("get_config",
+             &tenzor::models::ModelHub::get_config,
+             "Get ModelHub configuration")
+        .def_static("clear_cache",
+             &tenzor::models::ModelHub::clear_cache,
+             "Clear all cached weights")
+        .def_static("cache_size",
+             &tenzor::models::ModelHub::cache_size,
+             "Get total cache size in bytes")
+        .def_static("list_cached_models",
+             &tenzor::models::ModelHub::list_cached_models,
+             "List cached model names")
+        .def_static("is_cached",
+             &tenzor::models::ModelHub::is_cached,
+             py::arg("model_name"),
+             "Check if model is cached")
+        .def_static("get_cached_path",
+             &tenzor::models::ModelHub::get_cached_path,
+             py::arg("model_name"),
+             "Get cached weights path")
+        .def_static("register_model",
+             &tenzor::models::ModelHub::register_model,
+             py::arg("info"),
+             "Register a model in the hub")
+        .def_static("register_models",
+             &tenzor::models::ModelHub::register_models,
+             py::arg("models"),
+             "Register multiple models")
+        .def_static("get_model_info",
+             &tenzor::models::ModelHub::get_model_info,
+             py::arg("model_name"),
+             "Get registered model info")
+        .def_static("list_registered_models",
+             &tenzor::models::ModelHub::list_registered_models,
+             "List all registered models")
+        .def_static("is_registered",
+             &tenzor::models::ModelHub::is_registered,
+             py::arg("model_name"),
+             "Check if model is registered")
+        .def_static("remove_from_cache",
+             &tenzor::models::ModelHub::remove_from_cache,
+             py::arg("model_name"),
+             "Remove model from cache")
+        .def_static("get_last_download_stats",
+             &tenzor::models::ModelHub::get_last_download_stats,
+             "Get statistics for last download")
+        .def_static("verify_checksum",
+             &tenzor::models::ModelHub::verify_checksum,
+             py::arg("file_path"),
+             py::arg("expected_sha256"),
+             "Verify file checksum")
+        .def_static("compute_checksum",
+             &tenzor::models::ModelHub::compute_checksum,
+             py::arg("file_path"),
+             "Compute SHA256 checksum of file")
+        .def_static("clean_cache",
+             &tenzor::models::ModelHub::clean_cache,
+             py::arg("max_size"),
+             "Clean cache to fit within size limit");
+
+    // Helper function for loading pretrained models
+    models.def("load_pretrained",
+        [](tenzor::nn::Module& model, const std::string& model_name,
+           bool show_progress, bool strict) {
+            std::string weights_path = tenzor::models::ModelHub::download_pretrained(
+                model_name, show_progress);
+            tenzor::models::ModelHub::load_pretrained_weights(model, weights_path, strict);
+        },
+        py::arg("model"),
+        py::arg("model_name"),
+        py::arg("show_progress") = true,
+        py::arg("strict") = true,
+        "Download and load pretrained weights into model");
+
+    // PyTorch interoperability (optional - requires torch headers)
+    #ifdef TENZOR_HAS_TORCH
+    auto torch_mod = m.def_submodule("torch_interop", "PyTorch tensor interoperability");
+
+    torch_mod.def("can_zero_copy_to_torch", &tenzor::torch_interop::can_zero_copy_to_torch,
+                  "Check if zero-copy conversion to PyTorch is possible");
+    torch_mod.def("tensor_to_torch", &tenzor::torch_interop::tensor_to_torch,
+                  py::arg("tensor"), py::arg("requires_grad") = false,
+                  "Convert Tenzor tensor to PyTorch tensor");
+    torch_mod.def("tensor_from_torch", &tenzor::torch_interop::tensor_from_torch,
+                  py::arg("torch_tensor"), py::arg("device") = py::none(),
+                  "Convert PyTorch tensor to Tenzor tensor");
+    #endif
 }
 

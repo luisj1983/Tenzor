@@ -69,6 +69,42 @@ auto take(const Tensor& input, const Tensor& index) -> Tensor;
 /** @brief Put source elements into flattened tensor at indices. */
 auto put(const Tensor& input, const Tensor& index, const Tensor& source) -> Tensor;
 
+/**
+ * @brief Return indices of non-zero elements.
+ *
+ * Returns a 2D tensor where each row contains the indices of a non-zero element.
+ * For a 1D tensor, returns indices as a (N, 1) tensor.
+ * For a multi-dimensional tensor, each row is [dim0_idx, dim1_idx, ...].
+ *
+ * @param input Input tensor
+ * @return Tensor of indices (num_nonzero, ndim) in Int64 format
+ */
+auto nonzero(const Tensor& input) -> Tensor;
+
+/**
+ * @brief Select single index along dimension.
+ * @param input Input tensor
+ * @param dim Dimension to select from
+ * @param index Index to select
+ * @return Tensor with selected slice (dimension removed)
+ */
+auto select(const Tensor& input, int64_t dim, int64_t index) -> Tensor;
+
 /** @} */ // end of tensor_indexing group
 
+} // namespace tenzor
+
+namespace tenzor {
+namespace ops {
+// Convenience namespace alias for common operations
+using tenzor::nonzero;
+using tenzor::index_select;
+using tenzor::select;
+using tenzor::gather;
+using tenzor::scatter;
+using tenzor::masked_select;
+using tenzor::masked_fill;
+using tenzor::where;
+using tenzor::slice;
+} // namespace ops
 } // namespace tenzor

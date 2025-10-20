@@ -146,6 +146,16 @@ auto initialize() -> void {
             return cpu_backend->dispatch("gelu_backward", inputs, attrs);
         });
 
+    registry.register_kernel("swish", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("swish", inputs, attrs);
+        });
+
+    registry.register_kernel("swish_backward", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("swish_backward", inputs, attrs);
+        });
+
     registry.register_kernel("leaky_relu", Device::Type::CPU,
         [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             return cpu_backend->dispatch("leaky_relu", inputs, attrs);
@@ -315,6 +325,37 @@ auto initialize() -> void {
             return cpu_backend->dispatch("batchnorm2d_backward", inputs, attrs);
         });
 
+    // Conv2d operations
+    registry.register_kernel("conv2d_forward", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("conv2d_forward", inputs, attrs);
+        });
+
+    registry.register_kernel("conv2d_backward_input", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("conv2d_backward_input", inputs, attrs);
+        });
+
+    registry.register_kernel("conv2d_backward_weight", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("conv2d_backward_weight", inputs, attrs);
+        });
+
+    registry.register_kernel("conv2d_backward_bias", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("conv2d_backward_bias", inputs, attrs);
+        });
+
+    registry.register_kernel("im2col", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("im2col", inputs, attrs);
+        });
+
+    registry.register_kernel("col2im", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("col2im", inputs, attrs);
+        });
+
     // Fused operations
     registry.register_kernel("fused_linear_relu", Device::Type::CPU,
         [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
@@ -457,6 +498,16 @@ auto initialize() -> void {
                 registry.register_kernel("gelu_backward", Device::Type::CUDA,
                     [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
                         return cuda_backend->dispatch("gelu_backward", inputs, attrs);
+                    });
+
+                registry.register_kernel("swish", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("swish", inputs, attrs);
+                    });
+
+                registry.register_kernel("swish_backward", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("swish_backward", inputs, attrs);
                     });
 
                 registry.register_kernel("leaky_relu", Device::Type::CUDA,

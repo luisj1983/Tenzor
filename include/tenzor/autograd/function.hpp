@@ -519,6 +519,41 @@ private:
 };
 
 /**
+ * @brief Transpose gradient function.
+ *
+ * Forward: y = transpose(x, dim0, dim1)
+ * Backward: dL/dx = transpose(dL/dy, dim0, dim1)
+ *
+ * @note Transpose is its own inverse, so backward uses same dimensions.
+ */
+class TransposeBackward : public Function {
+public:
+    TransposeBackward(int64_t dim0, int64_t dim1) : dim0_(dim0), dim1_(dim1) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+private:
+    int64_t dim0_;
+    int64_t dim1_;
+};
+
+/**
+ * @brief Squeeze gradient function.
+ *
+ * Forward: y = squeeze(x, dim)
+ * Backward: dL/dx = unsqueeze(dL/dy, dim)
+ *
+ * @note Squeezing dimension is saved for unsqueezing in backward pass.
+ */
+class SqueezeBackward : public Function {
+public:
+    SqueezeBackward(int64_t dim) : dim_(dim) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+private:
+    int64_t dim_;
+};
+
+/**
  * @brief Batch matrix multiplication gradient function.
  *
  * Implements forward and backward for batched matrix multiplication.
@@ -541,6 +576,92 @@ class BmmBackward : public Function {
 public:
     auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+};
+
+/**
+ * @brief Concatenation gradient function.
+ *
+ * Implements forward and backward for tensor concatenation.
+ *
+ * Forward: y = cat([x1, x2, ..., xn], dim)
+ * Backward: Split dL/dy back to [dL/dx1, dL/dx2, ..., dL/dxn] along dim
+ *
+ * @note Split sizes and concatenation dimension are saved for gradient splitting.
+ *
+ * @code
+ * Variable x1(Tensor({2, 3}, DType::Float32, Device::cpu()), true);
+ * Variable x2(Tensor({2, 5}, DType::Float32, Device::cpu()), true);
+ * Variable y = cat({x1, x2}, 1);  // Forward: {2,3} + {2,5} -> {2,8}
+ * // Backward: gradient split from {2,8} back to {2,3} and {2,5}
+ * @endcode
+ */
+class CatBackward : public Function {
+public:
+    CatBackward(std::vector<int64_t> split_sizes, int64_t dim)
+        : split_sizes_(std::move(split_sizes)), dim_(dim) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+private:
+    std::vector<int64_t> split_sizes_;  ///< Size of each input along concat dimension
+    int64_t dim_;                        ///< Concatenation dimension
+};
+
+/**
+ * @brief Slice gradient function.
+ *
+ * Implements forward and backward for tensor slicing.
+ *
+ * Forward: y = slice(x, dim, start, end, step)
+ * Backward: Scatter dL/dy back to positions in dL/dx, zeros elsewhere
+ *
+ * @note Original input shape and slice parameters are saved for gradient scattering.
+ *
+ * @code
+ * Variable x(Tensor({10, 20}, DType::Float32, Device::cpu()), true);
+ * Variable y = slice(x, 1, 5, 15, 2);  // Shape: {10, 5} - every 2nd element from 5 to 15
+ * // Backward: gradient scattered back to original positions in {10, 20}
+ * @endcode
+ */
+class SliceBackward : public Function {
+public:
+    SliceBackward(std::vector<int64_t> input_shape, int64_t dim, int64_t start, int64_t end, int64_t step)
+        : input_shape_(std::move(input_shape)), dim_(dim), start_(start), end_(end), step_(step) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+private:
+    std::vector<int64_t> input_shape_;  ///< Original input shape
+    int64_t dim_;                        ///< Slice dimension
+    int64_t start_;                      ///< Start index
+    int64_t end_;                        ///< End index (exclusive)
+    int64_t step_;                       ///< Step size
+};
+
+/**
+ * @brief Bilinear upsample gradient function.
+ *
+ * Implements forward and backward for bilinear upsampling (currently using nearest neighbor).
+ *
+ * Forward: y = upsample(x, target_h, target_w)
+ * Backward: Distribute dL/dy back to input pixels
+ *
+ * For nearest neighbor upsampling:
+ * - Each output pixel comes from exactly one input pixel
+ * - Gradient at output pixel is added back to corresponding input pixel
+ *
+ * @note Current implementation uses nearest neighbor for both forward and backward.
+ *       True bilinear interpolation would distribute gradients to 4 neighboring pixels.
+ */
+class UpsampleBilinearBackward : public Function {
+public:
+    UpsampleBilinearBackward(int64_t input_h, int64_t input_w, int64_t output_h, int64_t output_w)
+        : input_h_(input_h), input_w_(input_w), output_h_(output_h), output_w_(output_w) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+private:
+    int64_t input_h_;   ///< Input height
+    int64_t input_w_;   ///< Input width
+    int64_t output_h_;  ///< Output height
+    int64_t output_w_;  ///< Output width
 };
 
 } // namespace tenzor

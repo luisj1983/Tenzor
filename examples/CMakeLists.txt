@@ -19,3 +19,19 @@ target_link_libraries(backend_example PRIVATE tenzor_core)
 # Serialization example
 add_executable(serialization_example serialization_example.cpp)
 target_link_libraries(serialization_example PRIVATE tenzor_core)
+
+# TensorBoard example
+add_executable(tensorboard_example tensorboard_example.cpp)
+target_link_libraries(tensorboard_example PRIVATE tenzor_core)
+
+# BERT text classification example
+add_executable(bert_example nlp/bert_example.cpp)
+target_link_libraries(bert_example PRIVATE tenzor_core)
+
+# Classic CNN models example
+add_executable(classic_models_example cv/classic_models_example.cpp)
+target_link_libraries(classic_models_example PRIVATE tenzor_core)
+
+# GPT text generation example
+add_executable(gpt_text_generation nlp/gpt_text_generation.cpp)
+target_link_libraries(gpt_text_generation PRIVATE tenzor_core)

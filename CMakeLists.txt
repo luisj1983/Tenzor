@@ -42,7 +42,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Build options
 option(TENZOR_BUILD_CUDA "Build CUDA backend" ON)
 option(TENZOR_BUILD_ROCM "Build ROCm backend" OFF) #do not enable, causes system crashes
-option(TENZOR_BUILD_ONEAPI "Build OneAPI backend" OFF)
+option(TENZOR_BUILD_ONEAPI "Build OneAPI backend" ON)
 option(TENZOR_BUILD_PYTHON "Build Python bindings" ON)
 option(TENZOR_BUILD_TESTS "Build tests" ON)
 option(TENZOR_BUILD_BENCHMARKS "Build benchmarks" OFF)

@@ -12,6 +12,9 @@
 #include <cublas_v2.h>
 #endif
 
+#include <mutex>
+#include <random>
+
 namespace tenzor {
 namespace cuda {
 
@@ -735,14 +738,20 @@ __global__ void batched_matmul_tensor_core_f16_kernel(
 
 #ifdef TENZOR_HAS_CUBLAS
 
-// Global cuBLAS handle (initialized once)
+// Thread-safe cuBLAS handle management
 static cublasHandle_t cublas_handle = nullptr;
+static std::mutex cublas_mutex;
 
 cublasHandle_t get_cublas_handle() {
+    // Double-checked locking pattern for thread-safe initialization
     if (cublas_handle == nullptr) {
-        cublasStatus_t status = cublasCreate(&cublas_handle);
-        if (status != CUBLAS_STATUS_SUCCESS) {
-            throw std::runtime_error("Failed to create cuBLAS handle");
+        std::lock_guard<std::mutex> lock(cublas_mutex);
+        // Check again after acquiring lock
+        if (cublas_handle == nullptr) {
+            cublasStatus_t status = cublasCreate(&cublas_handle);
+            if (status != CUBLAS_STATUS_SUCCESS) {
+                throw std::runtime_error("Failed to create cuBLAS handle");
+            }
         }
     }
     return cublas_handle;

@@ -373,6 +373,25 @@ public:
     auto device() const -> const Device&;
 
     // ============================================================================
+    // Shape Transformation Methods
+    // ============================================================================
+
+    /** @brief Reshape variable. */
+    auto reshape(std::vector<int64_t> shape) const -> Variable;
+
+    /** @brief Transpose two dimensions. */
+    auto transpose(int64_t dim0, int64_t dim1) const -> Variable;
+
+    /** @brief Permute dimensions. */
+    auto permute(std::vector<int64_t> dims) const -> Variable;
+
+    /** @brief Matrix multiplication. */
+    auto matmul(const Variable& other) const -> Variable;
+
+    /** @brief Remove dimensions of size 1. */
+    auto squeeze(int64_t dim) const -> Variable;
+
+    // ============================================================================
     // Arithmetic Operators
     // ============================================================================
 
@@ -407,6 +426,28 @@ public:
      * @return New variable with gradient function
      */
     auto operator/(const Variable& other) const -> Variable;
+
+    /**
+     * @brief Add scalar to variable with gradient tracking.
+     *
+     * @param scalar Scalar value to add
+     * @return New variable with gradient function
+     */
+    auto operator+(float scalar) const -> Variable;
+    auto operator+(double scalar) const -> Variable;
+
+    /**
+     * @brief Multiply variable by scalar with gradient tracking.
+     *
+     * @param scalar Scalar value to multiply
+     * @return New variable with gradient function
+     */
+    auto operator*(float scalar) const -> Variable;
+    auto operator*(double scalar) const -> Variable;
+
+    /** @brief Divide variable by scalar. */
+    auto operator/(float scalar) const -> Variable;
+    auto operator/(double scalar) const -> Variable;
 
 private:
     std::shared_ptr<VariableImpl> impl_;

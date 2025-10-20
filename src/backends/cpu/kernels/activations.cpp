@@ -388,6 +388,76 @@ auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Ten
 }
 
 // ============================================================================
+// Swish/SiLU Activation
+// ============================================================================
+
+// Forward: x * sigmoid(x)
+// Swish (also known as SiLU - Sigmoid Linear Unit)
+auto swish_kernel(const Tensor& input) -> Tensor {
+    auto output = zeros_like(input);
+
+    if (input.dtype() == DType::Float32) {
+        const float* in_data = input.data<float>();
+        float* out_data = output.data<float>();
+        size_t n = input.numel();
+
+        for (size_t i = 0; i < n; ++i) {
+            float x = in_data[i];
+            float sigmoid_x = 1.0f / (1.0f + std::exp(-x));
+            out_data[i] = x * sigmoid_x;
+        }
+    } else if (input.dtype() == DType::Float64) {
+        const double* in_data = input.data<double>();
+        double* out_data = output.data<double>();
+        size_t n = input.numel();
+
+        for (size_t i = 0; i < n; ++i) {
+            double x = in_data[i];
+            double sigmoid_x = 1.0 / (1.0 + std::exp(-x));
+            out_data[i] = x * sigmoid_x;
+        }
+    } else {
+        throw std::runtime_error("Swish only supports Float32 and Float64");
+    }
+
+    return output;
+}
+
+// Backward: grad_out * (sigmoid(x) + x * sigmoid(x) * (1 - sigmoid(x)))
+// Simplified: grad_out * (sigmoid(x) * (1 + x * (1 - sigmoid(x))))
+auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Tensor {
+    auto grad_input = zeros_like(input);
+
+    if (input.dtype() == DType::Float32) {
+        const float* grad_out_data = grad_output.data<float>();
+        const float* in_data = input.data<float>();
+        float* grad_in_data = grad_input.data<float>();
+        size_t n = input.numel();
+
+        for (size_t i = 0; i < n; ++i) {
+            float x = in_data[i];
+            float sigmoid_x = 1.0f / (1.0f + std::exp(-x));
+            grad_in_data[i] = grad_out_data[i] * (sigmoid_x * (1.0f + x * (1.0f - sigmoid_x)));
+        }
+    } else if (input.dtype() == DType::Float64) {
+        const double* grad_out_data = grad_output.data<double>();
+        const double* in_data = input.data<double>();
+        double* grad_in_data = grad_input.data<double>();
+        size_t n = input.numel();
+
+        for (size_t i = 0; i < n; ++i) {
+            double x = in_data[i];
+            double sigmoid_x = 1.0 / (1.0 + std::exp(-x));
+            grad_in_data[i] = grad_out_data[i] * (sigmoid_x * (1.0 + x * (1.0 - sigmoid_x)));
+        }
+    } else {
+        throw std::runtime_error("Swish backward only supports Float32 and Float64");
+    }
+
+    return grad_input;
+}
+
+// ============================================================================
 // Leaky ReLU Activation
 // ============================================================================
 

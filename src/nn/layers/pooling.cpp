@@ -171,6 +171,13 @@ auto MaxPool2d::forward(const Variable& input) -> Variable {
         std::vector<Variable> input_vars;
         input_vars.push_back(input);
         backward_fn->set_input_variables(input_vars);
+
+        // CRITICAL: Connect to input's grad_fn to continue the backward chain
+        std::vector<std::shared_ptr<Function>> next_funcs;
+        if (input.grad_fn()) {
+            next_funcs.push_back(input.grad_fn());
+        }
+        backward_fn->set_next_functions(next_funcs);
     }
 
     return result;
@@ -335,6 +342,13 @@ auto AvgPool2d::forward(const Variable& input) -> Variable {
         std::vector<Variable> input_vars;
         input_vars.push_back(input);
         backward_fn->set_input_variables(input_vars);
+
+        // CRITICAL: Connect to input's grad_fn to continue the backward chain
+        std::vector<std::shared_ptr<Function>> next_funcs;
+        if (input.grad_fn()) {
+            next_funcs.push_back(input.grad_fn());
+        }
+        backward_fn->set_next_functions(next_funcs);
     }
 
     return result;
@@ -483,6 +497,13 @@ auto AdaptiveAvgPool2d::forward(const Variable& input) -> Variable {
         std::vector<Variable> input_vars;
         input_vars.push_back(input);
         backward_fn->set_input_variables(input_vars);
+
+        // CRITICAL: Connect to input's grad_fn to continue the backward chain
+        std::vector<std::shared_ptr<Function>> next_funcs;
+        if (input.grad_fn()) {
+            next_funcs.push_back(input.grad_fn());
+        }
+        backward_fn->set_next_functions(next_funcs);
     }
 
     return result;

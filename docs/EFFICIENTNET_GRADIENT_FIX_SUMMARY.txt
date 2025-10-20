@@ -1,0 +1,219 @@
+================================================================================
+EfficientNet Gradient Chain Break - Root Cause Analysis Summary
+================================================================================
+
+EXECUTIVE SUMMARY
+================================================================================
+The gradient chain breaks in EfficientNet models because the Swish activation
+function (and several others) are implemented incorrectly in:
+
+  File: /home/lee/Projects/Tenzor/src/nn/activations/activations.cpp
+  Lines: 344-348 (PRIMARY ISSUE - Swish)
+
+The problem is a single line that orphans Variables from the computation graph:
+
+  BROKEN:  return Variable(result, input.requires_grad());
+  CORRECT: output.set_grad_fn(grad_fn); return output;
+
+================================================================================
+CRITICAL ROOT CAUSE
+================================================================================
+
+File: /home/lee/Projects/Tenzor/src/nn/activations/activations.cpp
+Lines: 344-348
+
+BROKEN CODE:
+    auto swish(const Variable& input) -> Variable {
+        std::vector<Tensor> inputs = {input.tensor()};
+        auto result = Dispatcher::dispatch("swish", inputs)[0];
+        return Variable(result, input.requires_grad());  // ❌ BREAKS GRADIENTS
+    }
+
+WHY IT BREAKS:
+1. input.tensor() extracts the raw Tensor (loses gradient info)
+2. Dispatcher::dispatch() returns a Tensor with no grad_fn
+3. Variable(result, true) creates a Variable with:
+   - requires_grad = true (copied from input)
+   - grad_fn = nullptr (ORPHANED - NO GRADIENT FUNCTION)
+4. Backprop cannot find a path through this Variable
+5. Input gradients remain empty (None)
+
+The same issue exists in 4 other functions:
+  - Line 327: ELU (requires fixing)
+  - Line 337: SELU (requires fixing)
+  - Line 347: Mish (requires fixing)
+  - Line 154: Sigmoid (BUT IS ACTUALLY CORRECT - uses full autograd setup)
+
+================================================================================
+IMPACT ON EFFICIENTNET
+================================================================================
+
+EfficientNet heavily uses Swish activation:
+  1. Stem layer: 1x Swish
+  2. Each MBConv block (16 total): 2-3x Swish per block = 32-48x
+  3. Head layer: 1x Swish
+  TOTAL: 34-50 Swish activations per forward pass
+
+Result: Gradient chain is completely severed, preventing any gradient flow.
+
+Test failures in /home/lee/Projects/Tenzor/tests/unit/test_efficientnet.cpp:
+  - Line 41: SqueezeExcitationGradientFlow ✗
+  - Line 86: MBConvBlockGradientFlow ✗
+  - Line 124: EfficientNetB0GradientFlow ✗
+  - Line 172: EfficientNetB1GradientFlow ✗
+  - Line 199: EfficientNetB2GradientFlow ✗
+  - Line 298: EfficientNetB7GradientFlow ✗
+
+All fail with: input.grad().has_value() == false
+
+================================================================================
+COMPARISON: BROKEN vs CORRECT PATTERN
+================================================================================
+
+BROKEN (Lines 344-348):
+    auto swish(const Variable& input) -> Variable {
+        std::vector<Tensor> inputs = {input.tensor()};
+        auto result = Dispatcher::dispatch("swish", inputs)[0];
+        return Variable(result, input.requires_grad());  // ❌
+    }
+    Flow: Variable → extract tensor → dispatch → NEW Variable (orphaned)
+
+CORRECT (See lines 194-223 for sigmoid() or lines 160-192 for relu()):
+    auto swish(const Variable& input) -> Variable {
+        if (!input.requires_grad() || !is_grad_enabled()) {
+            std::vector<Tensor> inputs = {input.tensor()};
+            auto result = Dispatcher::dispatch("swish", inputs)[0];
+            return Variable(result, false);  // ✓ Correct for non-grad path
+        }
+
+        // Compute forward
+        std::vector<Tensor> inputs_vec = {input.tensor()};
+        auto result_tensor = Dispatcher::dispatch("swish", inputs_vec)[0];
+
+        // Create backward function and set up computation graph
+        auto grad_fn = std::make_shared<SwishBackward>();  // ✓ NEW
+        grad_fn->save_for_backward({input.tensor(), result_tensor});  // ✓ NEW
+
+        std::vector<std::shared_ptr<Function>> next_funcs;
+        if (input.grad_fn()) {
+            next_funcs.push_back(input.grad_fn());  // ✓ NEW
+        }
+        grad_fn->set_next_functions(next_funcs);  // ✓ NEW
+
+        std::vector<Variable> input_vars;
+        input_vars.push_back(input);
+        grad_fn->set_input_variables(input_vars);  // ✓ NEW
+
+        Variable output(result_tensor, true);
+        output.set_grad_fn(grad_fn);  // ✓ CRITICAL - ATTACH GRADIENT FUNCTION
+        return output;
+    }
+    Flow: Variable → extract tensor → dispatch → NEW Variable → set grad_fn → return (connected!)
+
+================================================================================
+REQUIRED BACKWARD FUNCTIONS
+================================================================================
+
+For the fixes, need to define backward functions. Reference existing ones:
+
+Existing Backward Functions (lines 10-130):
+  - ReLUBackward
+  - SigmoidBackward
+  - TanhBackward
+  - GeLUBackward
+  - etc.
+
+Need to add (or verify they exist):
+  - SwishBackward (for swish fix)
+  - ELUBackward (for elu fix)
+  - SELUBackward (for selu fix)
+  - MishBackward (for mish fix)
+
+Check lines 10-130 for existing implementations to copy pattern.
+
+================================================================================
+EXACT LOCATIONS FOR FIX
+================================================================================
+
+PRIMARY (CRITICAL):
+  File: src/nn/activations/activations.cpp
+  Function: swish()
+  Lines: 344-348
+  Action: Replace with correct pattern (copy from sigmoid() pattern, lines 194-223)
+
+SECONDARY (HIGH PRIORITY):
+  File: src/nn/activations/activations.cpp
+  Function: elu()
+  Lines: 322-328
+  Action: Replace with correct pattern
+
+  Function: selu()
+  Lines: 334-338
+  Action: Replace with correct pattern
+
+  Function: mish()
+  Lines: 354-358
+  Action: Replace with correct pattern
+
+DO NOT MODIFY (Already correct):
+  - sigmoid() (lines 194-223) ✓
+  - relu() (lines ~160-192) ✓
+  - tanh() (lines ~225-255) ✓
+  - gelu() (lines ~275-305) ✓
+
+================================================================================
+VERIFICATION PLAN
+================================================================================
+
+After fixes, run:
+  cd /home/lee/Projects/Tenzor/build
+  ./bin/test_efficientnet --gtest_filter="*GradientFlow*"
+
+Expected results:
+  - SqueezeExcitationGradientFlow: PASS (input.grad().has_value() == true)
+  - MBConvBlockGradientFlow: PASS
+  - EfficientNetB0GradientFlow: PASS
+  - EfficientNetB1GradientFlow: PASS
+  - EfficientNetB2GradientFlow: PASS
+  - EfficientNetB7GradientFlow: PASS
+  - All other B variant gradient tests: PASS
+
+Total: ~8 tests should change from FAIL to PASS
+
+================================================================================
+KEY FILES INVOLVED
+================================================================================
+
+Problem File:
+  /home/lee/Projects/Tenzor/src/nn/activations/activations.cpp
+
+Reference Implementation (correct patterns):
+  /home/lee/Projects/Tenzor/src/nn/activations/activations.cpp (lines 160-223)
+  /home/lee/Projects/Tenzor/src/autograd/ops.cpp (lines 349-378)
+
+User Code (affected):
+  /home/lee/Projects/Tenzor/src/models/efficientnet.cpp (lines 144-381)
+
+Tests (showing failures):
+  /home/lee/Projects/Tenzor/tests/unit/test_efficientnet.cpp (lines 41-308)
+
+================================================================================
+KNOWN GOOD PATTERNS ELSEWHERE
+================================================================================
+
+Sigmoid function (CORRECT - use as template):
+  /home/lee/Projects/Tenzor/src/nn/activations/activations.cpp
+  Lines: 194-223
+  Status: ✓ Full autograd setup, properly attached to computation graph
+
+ReLU function (CORRECT - use as template):
+  /home/lee/Projects/Tenzor/src/nn/activations/activations.cpp
+  Lines: ~160-192
+  Status: ✓ Full autograd setup, properly attached to computation graph
+
+Reshape operation (CORRECT - use as template):
+  /home/lee/Projects/Tenzor/src/autograd/ops.cpp
+  Lines: 349-378
+  Status: ✓ Full autograd setup with ReshapeBackward
+
+================================================================================

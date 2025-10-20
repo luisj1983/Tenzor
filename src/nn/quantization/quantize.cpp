@@ -1,0 +1,429 @@
+/**
+ * @file quantize.cpp
+ * @brief Implementation of quantization operations
+ */
+
+#include "tenzor/nn/quantization/quantize.hpp"
+#include "tenzor/core/tensor.hpp"
+#include <cmath>
+#include <algorithm>
+#include <stdexcept>
+
+namespace tenzor {
+namespace nn {
+namespace quantization {
+
+namespace {
+
+// Get quantization range for data type
+auto get_quant_range(QuantDType dtype) -> std::pair<int32_t, int32_t> {
+    switch (dtype) {
+        case QuantDType::INT8:
+            return {-128, 127};
+        case QuantDType::UINT8:
+            return {0, 255};
+        default:
+            throw std::runtime_error("Unsupported quantization dtype");
+    }
+}
+
+// Compute scale for symmetric quantization
+auto compute_symmetric_scale(float abs_max, QuantDType dtype) -> float {
+    auto [quant_min, quant_max] = get_quant_range(dtype);
+    float quant_range = static_cast<float>(std::max(std::abs(quant_min), std::abs(quant_max)));
+    return abs_max / quant_range;
+}
+
+// Compute scale and zero_point for asymmetric quantization
+auto compute_asymmetric_params(float min_val, float max_val, QuantDType dtype)
+    -> std::pair<float, int32_t> {
+    auto [quant_min, quant_max] = get_quant_range(dtype);
+    float quant_range = static_cast<float>(quant_max - quant_min);
+    float scale = (max_val - min_val) / quant_range;
+
+    // Avoid division by zero
+    if (scale < 1e-8f) {
+        scale = 1e-8f;
+    }
+
+    int32_t zero_point = static_cast<int32_t>(std::round(quant_min - min_val / scale));
+    zero_point = std::clamp(zero_point, quant_min, quant_max);
+
+    return {scale, zero_point};
+}
+
+} // anonymous namespace
+
+// ============================================================================
+// QuantizedTensor
+// ============================================================================
+
+auto QuantizedTensor::dequantize() const -> Tensor {
+    return dequantize_tensor(*this);
+}
+
+// ============================================================================
+// Quantization Parameter Computation
+// ============================================================================
+
+auto compute_quantization_params(
+    const Tensor& min,
+    const Tensor& max,
+    QuantDType dtype,
+    QuantizationScheme scheme
+) -> QuantizationParams {
+    // Validate inputs
+    if (min.numel() != max.numel()) {
+        throw std::runtime_error("Min and max tensors must have same number of elements");
+    }
+
+    Tensor scale({min.numel()}, DType::Float32, min.device());
+    Tensor zero_point({min.numel()}, DType::Int32, min.device());
+
+    // Get data pointers
+    const float* min_data = min.data<const float>();
+    const float* max_data = max.data<const float>();
+    float* scale_data = scale.data<float>();
+    int32_t* zp_data = zero_point.data<int32_t>();
+
+    int64_t n = min.numel();
+
+    if (scheme == QuantizationScheme::PerTensorSymmetric ||
+        scheme == QuantizationScheme::PerChannelSymmetric) {
+        // Symmetric quantization
+        for (int64_t i = 0; i < n; ++i) {
+            float abs_max = std::max(std::abs(min_data[i]), std::abs(max_data[i]));
+            scale_data[i] = compute_symmetric_scale(abs_max, dtype);
+            zp_data[i] = 0;  // Symmetric uses zero_point = 0
+        }
+    } else {
+        // Asymmetric quantization
+        for (int64_t i = 0; i < n; ++i) {
+            auto [s, zp] = compute_asymmetric_params(min_data[i], max_data[i], dtype);
+            scale_data[i] = s;
+            zp_data[i] = zp;
+        }
+    }
+
+    int64_t axis = (scheme == QuantizationScheme::PerChannelSymmetric ||
+                    scheme == QuantizationScheme::PerChannelAsymmetric) ? 0 : -1;
+
+    return QuantizationParams(scale, zero_point, dtype, scheme, axis);
+}
+
+// ============================================================================
+// Quantization Operations
+// ============================================================================
+
+auto quantize_tensor(const Tensor& input, const QuantizationParams& params)
+    -> QuantizedTensor {
+    auto [quant_min, quant_max] = get_quant_range(params.dtype);
+
+    // Create output tensor with appropriate dtype
+    DType out_dtype = (params.dtype == QuantDType::INT8) ? DType::Int8 : DType::UInt8;
+    auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    Tensor quantized(shape_vec, out_dtype, input.device());
+
+    const float* input_data = input.data<const float>();
+    const float* scale_data = params.scale.data<const float>();
+    const int32_t* zp_data = params.zero_point.data<const int32_t>();
+
+    int64_t n = input.numel();
+
+    if (params.axis == -1) {
+        // Per-tensor quantization
+        float scale = scale_data[0];
+        int32_t zero_point = zp_data[0];
+        float inv_scale = 1.0f / scale;
+
+        if (params.dtype == QuantDType::INT8) {
+            int8_t* out_data = quantized.data<int8_t>();
+            for (int64_t i = 0; i < n; ++i) {
+                int32_t quantized_val = static_cast<int32_t>(std::round(input_data[i] * inv_scale)) + zero_point;
+                out_data[i] = static_cast<int8_t>(std::clamp(quantized_val, quant_min, quant_max));
+            }
+        } else {
+            uint8_t* out_data = quantized.data<uint8_t>();
+            for (int64_t i = 0; i < n; ++i) {
+                int32_t quantized_val = static_cast<int32_t>(std::round(input_data[i] * inv_scale)) + zero_point;
+                out_data[i] = static_cast<uint8_t>(std::clamp(quantized_val, quant_min, quant_max));
+            }
+        }
+    } else {
+        // Per-channel quantization
+        auto shape = input.shape();
+        int64_t num_channels = shape[params.axis];
+        int64_t channel_size = n / num_channels;
+
+        for (int64_t c = 0; c < num_channels; ++c) {
+            float scale = scale_data[c];
+            int32_t zero_point = zp_data[c];
+            float inv_scale = 1.0f / scale;
+
+            if (params.dtype == QuantDType::INT8) {
+                int8_t* out_data = quantized.data<int8_t>();
+                for (int64_t i = 0; i < channel_size; ++i) {
+                    int64_t idx = c * channel_size + i;
+                    int32_t quantized_val = static_cast<int32_t>(std::round(input_data[idx] * inv_scale)) + zero_point;
+                    out_data[idx] = static_cast<int8_t>(std::clamp(quantized_val, quant_min, quant_max));
+                }
+            } else {
+                uint8_t* out_data = quantized.data<uint8_t>();
+                for (int64_t i = 0; i < channel_size; ++i) {
+                    int64_t idx = c * channel_size + i;
+                    int32_t quantized_val = static_cast<int32_t>(std::round(input_data[idx] * inv_scale)) + zero_point;
+                    out_data[idx] = static_cast<uint8_t>(std::clamp(quantized_val, quant_min, quant_max));
+                }
+            }
+        }
+    }
+
+    return QuantizedTensor(quantized, params);
+}
+
+auto quantize_per_tensor_symmetric(const Tensor& input, QuantDType dtype)
+    -> QuantizedTensor {
+    // Compute min and max
+    const float* data = input.data<const float>();
+    int64_t n = input.numel();
+
+    float min_val = data[0];
+    float max_val = data[0];
+    for (int64_t i = 1; i < n; ++i) {
+        min_val = std::min(min_val, data[i]);
+        max_val = std::max(max_val, data[i]);
+    }
+
+    Tensor min({1}, DType::Float32, input.device());
+    Tensor max({1}, DType::Float32, input.device());
+    min.fill_(min_val);
+    max.fill_(max_val);
+
+    auto params = compute_quantization_params(min, max, dtype,
+                                             QuantizationScheme::PerTensorSymmetric);
+    return quantize_tensor(input, params);
+}
+
+auto quantize_per_tensor_asymmetric(const Tensor& input, QuantDType dtype)
+    -> QuantizedTensor {
+    const float* data = input.data<const float>();
+    int64_t n = input.numel();
+
+    float min_val = data[0];
+    float max_val = data[0];
+    for (int64_t i = 1; i < n; ++i) {
+        min_val = std::min(min_val, data[i]);
+        max_val = std::max(max_val, data[i]);
+    }
+
+    Tensor min({1}, DType::Float32, input.device());
+    Tensor max({1}, DType::Float32, input.device());
+    min.fill_(min_val);
+    max.fill_(max_val);
+
+    auto params = compute_quantization_params(min, max, dtype,
+                                             QuantizationScheme::PerTensorAsymmetric);
+    return quantize_tensor(input, params);
+}
+
+auto quantize_per_channel_symmetric(const Tensor& input, int64_t axis, QuantDType dtype)
+    -> QuantizedTensor {
+    auto shape = input.shape();
+    int64_t num_channels = shape[axis];
+    int64_t channel_size = input.numel() / num_channels;
+
+    Tensor min({num_channels}, DType::Float32, input.device());
+    Tensor max({num_channels}, DType::Float32, input.device());
+
+    const float* input_data = input.data<const float>();
+    float* min_data = min.data<float>();
+    float* max_data = max.data<float>();
+
+    // Compute per-channel min/max
+    for (int64_t c = 0; c < num_channels; ++c) {
+        float ch_min = input_data[c * channel_size];
+        float ch_max = input_data[c * channel_size];
+
+        for (int64_t i = 0; i < channel_size; ++i) {
+            float val = input_data[c * channel_size + i];
+            ch_min = std::min(ch_min, val);
+            ch_max = std::max(ch_max, val);
+        }
+
+        min_data[c] = ch_min;
+        max_data[c] = ch_max;
+    }
+
+    auto params = compute_quantization_params(min, max, dtype,
+                                             QuantizationScheme::PerChannelSymmetric);
+    params.axis = axis;
+    return quantize_tensor(input, params);
+}
+
+auto quantize_per_channel_asymmetric(const Tensor& input, int64_t axis, QuantDType dtype)
+    -> QuantizedTensor {
+    auto shape = input.shape();
+    int64_t num_channels = shape[axis];
+    int64_t channel_size = input.numel() / num_channels;
+
+    Tensor min({num_channels}, DType::Float32, input.device());
+    Tensor max({num_channels}, DType::Float32, input.device());
+
+    const float* input_data = input.data<const float>();
+    float* min_data = min.data<float>();
+    float* max_data = max.data<float>();
+
+    for (int64_t c = 0; c < num_channels; ++c) {
+        float ch_min = input_data[c * channel_size];
+        float ch_max = input_data[c * channel_size];
+
+        for (int64_t i = 0; i < channel_size; ++i) {
+            float val = input_data[c * channel_size + i];
+            ch_min = std::min(ch_min, val);
+            ch_max = std::max(ch_max, val);
+        }
+
+        min_data[c] = ch_min;
+        max_data[c] = ch_max;
+    }
+
+    auto params = compute_quantization_params(min, max, dtype,
+                                             QuantizationScheme::PerChannelAsymmetric);
+    params.axis = axis;
+    return quantize_tensor(input, params);
+}
+
+// ============================================================================
+// Dequantization
+// ============================================================================
+
+auto dequantize_tensor(const QuantizedTensor& quantized) -> Tensor {
+    const auto& params = quantized.params();
+    const auto& q_data = quantized.data();
+
+    auto shape_vec = std::vector<int64_t>(q_data.shape().begin(), q_data.shape().end());
+    Tensor output(shape_vec, DType::Float32, q_data.device());
+    float* out_data = output.data<float>();
+
+    const float* scale_data = params.scale.data<const float>();
+    const int32_t* zp_data = params.zero_point.data<const int32_t>();
+
+    int64_t n = q_data.numel();
+
+    if (params.axis == -1) {
+        // Per-tensor dequantization
+        float scale = scale_data[0];
+        int32_t zero_point = zp_data[0];
+
+        if (params.dtype == QuantDType::INT8) {
+            const int8_t* q_ptr = q_data.data<const int8_t>();
+            for (int64_t i = 0; i < n; ++i) {
+                out_data[i] = (static_cast<float>(q_ptr[i]) - zero_point) * scale;
+            }
+        } else {
+            const uint8_t* q_ptr = q_data.data<const uint8_t>();
+            for (int64_t i = 0; i < n; ++i) {
+                out_data[i] = (static_cast<float>(q_ptr[i]) - zero_point) * scale;
+            }
+        }
+    } else {
+        // Per-channel dequantization
+        auto shape = q_data.shape();
+        int64_t num_channels = shape[params.axis];
+        int64_t channel_size = n / num_channels;
+
+        for (int64_t c = 0; c < num_channels; ++c) {
+            float scale = scale_data[c];
+            int32_t zero_point = zp_data[c];
+
+            if (params.dtype == QuantDType::INT8) {
+                const int8_t* q_ptr = q_data.data<const int8_t>();
+                for (int64_t i = 0; i < channel_size; ++i) {
+                    int64_t idx = c * channel_size + i;
+                    out_data[idx] = (static_cast<float>(q_ptr[idx]) - zero_point) * scale;
+                }
+            } else {
+                const uint8_t* q_ptr = q_data.data<const uint8_t>();
+                for (int64_t i = 0; i < channel_size; ++i) {
+                    int64_t idx = c * channel_size + i;
+                    out_data[idx] = (static_cast<float>(q_ptr[idx]) - zero_point) * scale;
+                }
+            }
+        }
+    }
+
+    return output;
+}
+
+// ============================================================================
+// Error Metrics
+// ============================================================================
+
+auto compute_quantization_error(const Tensor& original, const QuantizedTensor& quantized)
+    -> std::tuple<float, float, float> {
+    Tensor dequant = quantized.dequantize();
+
+    const float* orig_data = original.data<const float>();
+    const float* deq_data = dequant.data<const float>();
+    int64_t n = original.numel();
+
+    float mae = 0.0f;
+    float mse = 0.0f;
+    float signal_power = 0.0f;
+
+    for (int64_t i = 0; i < n; ++i) {
+        float error = orig_data[i] - deq_data[i];
+        mae += std::abs(error);
+        mse += error * error;
+        signal_power += orig_data[i] * orig_data[i];
+    }
+
+    mae /= n;
+    mse /= n;
+    signal_power /= n;
+
+    // Signal-to-noise ratio in dB
+    float snr_db = 10.0f * std::log10(signal_power / (mse + 1e-10f));
+
+    return {mae, mse, snr_db};
+}
+
+// ============================================================================
+// Calibration
+// ============================================================================
+
+auto calibrate_quantization_params(
+    const std::vector<Tensor>& samples,
+    QuantDType dtype,
+    QuantizationScheme scheme,
+    int64_t axis
+) -> QuantizationParams {
+    if (samples.empty()) {
+        throw std::runtime_error("Cannot calibrate with empty sample set");
+    }
+
+    // Compute global min/max across all samples
+    float global_min = std::numeric_limits<float>::max();
+    float global_max = std::numeric_limits<float>::lowest();
+
+    for (const auto& sample : samples) {
+        const float* data = sample.data<const float>();
+        int64_t n = sample.numel();
+
+        for (int64_t i = 0; i < n; ++i) {
+            global_min = std::min(global_min, data[i]);
+            global_max = std::max(global_max, data[i]);
+        }
+    }
+
+    Tensor min({1}, DType::Float32, samples[0].device());
+    Tensor max({1}, DType::Float32, samples[0].device());
+    min.fill_(global_min);
+    max.fill_(global_max);
+
+    return compute_quantization_params(min, max, dtype, scheme);
+}
+
+} // namespace quantization
+} // namespace nn
+} // namespace tenzor

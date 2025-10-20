@@ -67,6 +67,20 @@ public:
 };
 
 /**
+ * @brief ReLU6 activation function
+ *
+ * Applies ReLU with maximum value of 6:
+ * ReLU6(x) = min(max(0, x), 6)
+ *
+ * Used in MobileNets for better numerical stability on mobile devices.
+ */
+class ReLU6 : public Module {
+public:
+    ReLU6() = default;
+    auto forward(const Variable& input) -> Variable override;
+};
+
+/**
  * @brief Leaky Rectified Linear Unit (Leaky ReLU) activation
  *
  * Applies the leaky ReLU function element-wise:

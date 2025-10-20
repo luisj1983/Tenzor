@@ -9,6 +9,9 @@
 #include <algorithm>
 #include <vector>
 #include <chrono>
+#include <thread>
+#include <atomic>
+#include <random>
 
 namespace tenzor {
 namespace cuda {
@@ -1739,8 +1742,18 @@ auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
     curandState* d_states;
     CUDA_CHECK(cudaMalloc(&d_states, n * sizeof(curandState)));
 
-    // Initialize states with timestamp-based seed for randomness
-    auto seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    // Thread-safe seed generation with better entropy
+    // Mix: high-res time + thread ID + random_device + atomicincrement counter
+    static std::atomic<uint64_t> seed_counter{0};
+    static std::random_device rd;
+    auto time_seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    auto thread_id = std::hash<std::thread::id>{}(std::this_thread::get_id());
+    auto random_bits = rd();
+    auto counter = seed_counter.fetch_add(1, std::memory_order_relaxed);
+
+    // Mix all entropy sources with XOR and rotation
+    uint64_t seed = time_seed ^ (thread_id << 32) ^ (random_bits << 16) ^ counter;
+
     init_curand_states<<<grid, block, 0, stream>>>(d_states, seed, n);
     CUDA_CHECK(cudaGetLastError());
 
@@ -1796,8 +1809,18 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
     curandState* d_states;
     CUDA_CHECK(cudaMalloc(&d_states, n * sizeof(curandState)));
 
-    // Initialize states with timestamp-based seed
-    auto seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    // Thread-safe seed generation with better entropy
+    // Mix: high-res time + thread ID + random_device + atomic counter
+    static std::atomic<uint64_t> seed_counter{0};
+    static std::random_device rd;
+    auto time_seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    auto thread_id = std::hash<std::thread::id>{}(std::this_thread::get_id());
+    auto random_bits = rd();
+    auto counter = seed_counter.fetch_add(1, std::memory_order_relaxed);
+
+    // Mix all entropy sources with XOR and rotation
+    uint64_t seed = time_seed ^ (thread_id << 32) ^ (random_bits << 16) ^ counter;
+
     init_curand_states<<<grid, block, 0, stream>>>(d_states, seed, n);
     CUDA_CHECK(cudaGetLastError());
 

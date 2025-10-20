@@ -85,8 +85,8 @@ auto fused_linear_relu_kernel(
 /**
  * @brief Fused conv2d + ReLU kernel (CPU implementation)
  *
- * Note: This is a simplified implementation. For production, integrate with
- * existing conv2d kernel and fuse ReLU in the output loop.
+ * Optimized implementation that applies ReLU during convolution output
+ * to reduce memory bandwidth requirements.
  */
 auto fused_conv2d_relu_kernel(
     const Tensor& input,
@@ -95,9 +95,127 @@ auto fused_conv2d_relu_kernel(
     int64_t stride,
     int64_t padding
 ) -> Tensor {
-    // For now, call unfused operations as placeholder
-    // TODO: Implement optimized fused kernel
-    throw std::runtime_error("fused_conv2d_relu_kernel: Not yet implemented for CPU");
+    // Extract dimensions
+    auto input_shape = input.shape();
+    auto weight_shape = weight.shape();
+
+    int64_t batch = input_shape[0];
+    int64_t in_channels = input_shape[1];
+    int64_t in_h = input_shape[2];
+    int64_t in_w = input_shape[3];
+
+    int64_t out_channels = weight_shape[0];
+    int64_t kernel_h = weight_shape[2];
+    int64_t kernel_w = weight_shape[3];
+
+    // Calculate output dimensions
+    int64_t out_h = (in_h + 2 * padding - kernel_h) / stride + 1;
+    int64_t out_w = (in_w + 2 * padding - kernel_w) / stride + 1;
+
+    // Create output tensor
+    std::vector<int64_t> output_shape = {batch, out_channels, out_h, out_w};
+    Tensor output = zeros(output_shape, input.dtype(), input.device());
+
+    if (input.dtype() == DType::Float32) {
+        const float* in_data = input.data<float>();
+        const float* w_data = weight.data<float>();
+        const float* b_data = bias ? bias->data<float>() : nullptr;
+        float* out_data = output.data<float>();
+
+        // Naive convolution with fused ReLU
+        // Parallelize over batch and output channels
+        #pragma omp parallel for collapse(2)
+        for (int64_t n = 0; n < batch; ++n) {
+            for (int64_t oc = 0; oc < out_channels; ++oc) {
+                // Process each output spatial position
+                for (int64_t oh = 0; oh < out_h; ++oh) {
+                    for (int64_t ow = 0; ow < out_w; ++ow) {
+                        float sum = 0.0f;
+
+                        // Convolution computation
+                        for (int64_t ic = 0; ic < in_channels; ++ic) {
+                            for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                                for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                                    int64_t ih = oh * stride - padding + kh;
+                                    int64_t iw = ow * stride - padding + kw;
+
+                                    // Check bounds
+                                    if (ih >= 0 && ih < in_h && iw >= 0 && iw < in_w) {
+                                        int64_t in_idx = n * (in_channels * in_h * in_w) +
+                                                        ic * (in_h * in_w) +
+                                                        ih * in_w + iw;
+                                        int64_t w_idx = oc * (in_channels * kernel_h * kernel_w) +
+                                                       ic * (kernel_h * kernel_w) +
+                                                       kh * kernel_w + kw;
+                                        sum += in_data[in_idx] * w_data[w_idx];
+                                    }
+                                }
+                            }
+                        }
+
+                        // Add bias if present
+                        if (b_data) {
+                            sum += b_data[oc];
+                        }
+
+                        // Apply ReLU immediately (fused operation)
+                        int64_t out_idx = n * (out_channels * out_h * out_w) +
+                                         oc * (out_h * out_w) +
+                                         oh * out_w + ow;
+                        out_data[out_idx] = std::max(0.0f, sum);
+                    }
+                }
+            }
+        }
+    } else if (input.dtype() == DType::Float64) {
+        const double* in_data = input.data<double>();
+        const double* w_data = weight.data<double>();
+        const double* b_data = bias ? bias->data<double>() : nullptr;
+        double* out_data = output.data<double>();
+
+        #pragma omp parallel for collapse(2)
+        for (int64_t n = 0; n < batch; ++n) {
+            for (int64_t oc = 0; oc < out_channels; ++oc) {
+                for (int64_t oh = 0; oh < out_h; ++oh) {
+                    for (int64_t ow = 0; ow < out_w; ++ow) {
+                        double sum = 0.0;
+
+                        for (int64_t ic = 0; ic < in_channels; ++ic) {
+                            for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                                for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                                    int64_t ih = oh * stride - padding + kh;
+                                    int64_t iw = ow * stride - padding + kw;
+
+                                    if (ih >= 0 && ih < in_h && iw >= 0 && iw < in_w) {
+                                        int64_t in_idx = n * (in_channels * in_h * in_w) +
+                                                        ic * (in_h * in_w) +
+                                                        ih * in_w + iw;
+                                        int64_t w_idx = oc * (in_channels * kernel_h * kernel_w) +
+                                                       ic * (kernel_h * kernel_w) +
+                                                       kh * kernel_w + kw;
+                                        sum += in_data[in_idx] * w_data[w_idx];
+                                    }
+                                }
+                            }
+                        }
+
+                        if (b_data) {
+                            sum += b_data[oc];
+                        }
+
+                        int64_t out_idx = n * (out_channels * out_h * out_w) +
+                                         oc * (out_h * out_w) +
+                                         oh * out_w + ow;
+                        out_data[out_idx] = std::max(0.0, sum);
+                    }
+                }
+            }
+        }
+    } else {
+        throw std::runtime_error("fused_conv2d_relu: Unsupported dtype");
+    }
+
+    return output;
 }
 
 /**

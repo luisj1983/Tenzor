@@ -25,9 +25,9 @@ auto sum(const Variable& input, std::optional<int64_t> dim, bool keepdim) -> Var
 
     grad_fn->set_next_functions(next_funcs);
 
-    // Track input variable - only if it requires gradients
+    // Track input variable for gradient accumulation
     std::vector<Variable> input_vars;
-    if (input.requires_grad() && (input.is_leaf() || input.retains_grad())) {
+    if (input.requires_grad()) {
         input_vars.push_back(input);
     }
 
@@ -60,7 +60,7 @@ auto mean(const Variable& input, std::optional<int64_t> dim, bool keepdim) -> Va
     grad_fn->set_next_functions(next_funcs);
 
     std::vector<Variable> input_vars;
-    if (input.requires_grad() && (input.is_leaf() || input.retains_grad())) {
+    if (input.requires_grad()) {
         input_vars.push_back(input);
     }
 
@@ -92,7 +92,7 @@ auto log(const Variable& input) -> Variable {
     grad_fn->set_next_functions(next_funcs);
 
     std::vector<Variable> input_vars;
-    if (input.requires_grad() && (input.is_leaf() || input.retains_grad())) {
+    if (input.requires_grad()) {
         input_vars.push_back(input);
     }
 
@@ -127,7 +127,7 @@ auto exp(const Variable& input) -> Variable {
     grad_fn->set_next_functions(next_funcs);
 
     std::vector<Variable> input_vars;
-    if (input.requires_grad() && (input.is_leaf() || input.retains_grad())) {
+    if (input.requires_grad()) {
         input_vars.push_back(input);
     }
 
@@ -155,7 +155,7 @@ auto neg(const Variable& input) -> Variable {
     grad_fn->set_next_functions(next_funcs);
 
     std::vector<Variable> input_vars;
-    if (input.requires_grad() && (input.is_leaf() || input.retains_grad())) {
+    if (input.requires_grad()) {
         input_vars.push_back(input);
     }
 
@@ -196,7 +196,7 @@ auto softmax(const Variable& input, int64_t dim) -> Variable {
     grad_fn->set_next_functions(next_funcs);
 
     std::vector<Variable> input_vars;
-    if (input.requires_grad() && (input.is_leaf() || input.retains_grad())) {
+    if (input.requires_grad()) {
         input_vars.push_back(input);
     }
 
@@ -236,7 +236,7 @@ auto log_softmax(const Variable& input, int64_t dim) -> Variable {
     grad_fn->set_next_functions(next_funcs);
 
     std::vector<Variable> input_vars;
-    if (input.requires_grad() && (input.is_leaf() || input.retains_grad())) {
+    if (input.requires_grad()) {
         input_vars.push_back(input);
     }
 
@@ -267,7 +267,7 @@ auto abs(const Variable& input) -> Variable {
     grad_fn->set_next_functions(next_funcs);
 
     std::vector<Variable> input_vars;
-    if (input.requires_grad() && (input.is_leaf() || input.retains_grad())) {
+    if (input.requires_grad()) {
         input_vars.push_back(input);
     }
 
@@ -299,7 +299,7 @@ auto clamp(const Variable& input, float min, float max) -> Variable {
     grad_fn->set_next_functions(next_funcs);
 
     std::vector<Variable> input_vars;
-    if (input.requires_grad() && (input.is_leaf() || input.retains_grad())) {
+    if (input.requires_grad()) {
         input_vars.push_back(input);
     }
 
@@ -334,7 +334,7 @@ auto max(const Variable& input, std::optional<int64_t> dim, bool keepdim) -> Var
     grad_fn->set_next_functions(next_funcs);
 
     std::vector<Variable> input_vars;
-    if (input.requires_grad() && (input.is_leaf() || input.retains_grad())) {
+    if (input.requires_grad()) {
         input_vars.push_back(input);
     }
 
@@ -363,9 +363,9 @@ auto reshape(const Variable& input, const std::vector<int64_t>& shape) -> Variab
 
     grad_fn->set_next_functions(next_funcs);
 
-    // Track input variable - only if it requires gradients
+    // Track input variable for gradient accumulation
     std::vector<Variable> input_vars;
-    if (input.requires_grad() && (input.is_leaf() || input.retains_grad())) {
+    if (input.requires_grad()) {
         input_vars.push_back(input);
     }
 
@@ -394,9 +394,9 @@ auto permute(const Variable& input, const std::vector<int64_t>& dims) -> Variabl
 
     grad_fn->set_next_functions(next_funcs);
 
-    // Track input variable - only if it requires gradients
+    // Track input variable for gradient accumulation
     std::vector<Variable> input_vars;
-    if (input.requires_grad() && (input.is_leaf() || input.retains_grad())) {
+    if (input.requires_grad()) {
         input_vars.push_back(input);
     }
 
@@ -404,6 +404,154 @@ auto permute(const Variable& input, const std::vector<int64_t>& dims) -> Variabl
 
     // Compute result
     auto result_tensor = tenzor::permute(input.tensor(), dims);
+    Variable output(result_tensor, true);
+    output.set_grad_fn(grad_fn);
+
+    return output;
+}
+
+auto transpose(const Variable& input, int64_t dim0, int64_t dim1) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::transpose(input.tensor(), dim0, dim1), false);
+    }
+
+    auto grad_fn = std::make_shared<TransposeBackward>(dim0, dim1);
+    std::vector<std::shared_ptr<Function>> next_funcs;
+    next_funcs.push_back(input.grad_fn());
+    grad_fn->set_next_functions(next_funcs);
+
+    std::vector<Variable> input_vars;
+    if (input.requires_grad()) {
+        input_vars.push_back(input);
+    }
+    grad_fn->set_input_variables(input_vars);
+
+    auto result_tensor = tenzor::transpose(input.tensor(), dim0, dim1);
+    Variable output(result_tensor, true);
+    output.set_grad_fn(grad_fn);
+
+    return output;
+}
+
+auto squeeze(const Variable& input, int64_t dim) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::squeeze(input.tensor(), dim), false);
+    }
+
+    auto grad_fn = std::make_shared<SqueezeBackward>(dim);
+    std::vector<std::shared_ptr<Function>> next_funcs;
+    next_funcs.push_back(input.grad_fn());
+    grad_fn->set_next_functions(next_funcs);
+
+    std::vector<Variable> input_vars;
+    if (input.requires_grad()) {
+        input_vars.push_back(input);
+    }
+    grad_fn->set_input_variables(input_vars);
+
+    auto result_tensor = tenzor::squeeze(input.tensor(), dim);
+    Variable output(result_tensor, true);
+    output.set_grad_fn(grad_fn);
+
+    return output;
+}
+
+auto cat(const std::vector<Variable>& inputs, int64_t dim) -> Variable {
+    // Check if any input requires grad
+    bool any_requires_grad = false;
+    for (const auto& input : inputs) {
+        if (input.requires_grad()) {
+            any_requires_grad = true;
+            break;
+        }
+    }
+
+    if (!any_requires_grad || !is_grad_enabled()) {
+        // No gradient needed, just compute
+        std::vector<Tensor> tensors;
+        tensors.reserve(inputs.size());
+        for (const auto& var : inputs) {
+            tensors.push_back(var.tensor());
+        }
+        return Variable(tenzor::cat(tensors, dim), false);
+    }
+
+    // Collect split sizes (size of each input along concatenation dimension)
+    std::vector<int64_t> split_sizes;
+    split_sizes.reserve(inputs.size());
+    for (const auto& input : inputs) {
+        split_sizes.push_back(input.shape()[dim]);
+    }
+
+    auto grad_fn = std::make_shared<CatBackward>(split_sizes, dim);
+
+    // Set up backward graph - one next_func per input
+    std::vector<std::shared_ptr<Function>> next_funcs;
+    next_funcs.reserve(inputs.size());
+    for (const auto& input : inputs) {
+        next_funcs.push_back(input.grad_fn());  // nullptr if input is leaf
+    }
+    grad_fn->set_next_functions(next_funcs);
+
+    // Track input variables that require grad for gradient accumulation
+    std::vector<Variable> input_vars;
+    for (const auto& input : inputs) {
+        if (input.requires_grad()) {
+            input_vars.push_back(input);
+        }
+    }
+    grad_fn->set_input_variables(input_vars);
+
+    // Compute result using tensor-level cat
+    std::vector<Tensor> tensors;
+    tensors.reserve(inputs.size());
+    for (const auto& var : inputs) {
+        tensors.push_back(var.tensor());
+    }
+    auto result_tensor = tenzor::cat(tensors, dim);
+
+    Variable output(result_tensor, true);
+    output.set_grad_fn(grad_fn);
+
+    return output;
+}
+
+auto slice(const Variable& input, int64_t dim, int64_t start, int64_t end, int64_t step) -> Variable {
+    // Use Dispatcher to call tensor-level slice to avoid name collision
+    OpAttributes attrs;
+    attrs["dim"] = std::to_string(dim);
+    attrs["start"] = std::to_string(start);
+    attrs["end"] = std::to_string(end);
+    attrs["step"] = std::to_string(step);
+
+    std::vector<Tensor> input_tensors = {input.tensor()};
+
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        // No gradient needed, just compute using dispatcher
+        auto result = Dispatcher::dispatch("slice", input_tensors, attrs)[0];
+        return Variable(result, false);
+    }
+
+    // Save original input shape for backward pass
+    auto input_shape = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+
+    auto grad_fn = std::make_shared<SliceBackward>(input_shape, dim, start, end, step);
+
+    // Set up backward graph
+    std::vector<std::shared_ptr<Function>> next_funcs;
+    next_funcs.push_back(input.grad_fn());  // nullptr if input is leaf
+    grad_fn->set_next_functions(next_funcs);
+
+    // Track input variable for gradient accumulation
+    std::vector<Variable> input_vars;
+    if (input.requires_grad()) {
+        input_vars.push_back(input);
+    }
+    grad_fn->set_input_variables(input_vars);
+
+    // Compute result using dispatcher to avoid name collision with tensor slice
+    auto result_tensor = Dispatcher::dispatch("slice", input_tensors, attrs)[0];
+
     Variable output(result_tensor, true);
     output.set_grad_fn(grad_fn);
 
@@ -428,12 +576,12 @@ auto bmm(const Variable& a, const Variable& b) -> Variable {
     next_funcs.push_back(b.grad_fn());  // nullptr if b is leaf
     grad_fn->set_next_functions(next_funcs);
 
-    // Track input variables - only if they require gradients
+    // Track input variables for gradient accumulation
     std::vector<Variable> input_vars;
-    if (a.requires_grad() && (a.is_leaf() || a.retains_grad())) {
+    if (a.requires_grad()) {
         input_vars.push_back(a);
     }
-    if (b.requires_grad() && (b.is_leaf() || b.retains_grad())) {
+    if (b.requires_grad()) {
         input_vars.push_back(b);
     }
     grad_fn->set_input_variables(input_vars);
@@ -464,12 +612,12 @@ auto matmul(const Variable& a, const Variable& b) -> Variable {
     next_funcs.push_back(b.grad_fn());  // nullptr if b is leaf
     grad_fn->set_next_functions(next_funcs);
 
-    // Track input variables - only if they require gradients
+    // Track input variables for gradient accumulation
     std::vector<Variable> input_vars;
-    if (a.requires_grad() && (a.is_leaf() || a.retains_grad())) {
+    if (a.requires_grad()) {
         input_vars.push_back(a);
     }
-    if (b.requires_grad() && (b.is_leaf() || b.retains_grad())) {
+    if (b.requires_grad()) {
         input_vars.push_back(b);
     }
     grad_fn->set_input_variables(input_vars);

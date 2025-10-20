@@ -3,7 +3,10 @@
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/reduction.hpp"
+#include "tenzor/ops/indexing.hpp"
 #include "tenzor/backend/dispatch.hpp"
+#include <iostream>
+#include <cmath>
 
 namespace tenzor {
 
@@ -197,14 +200,27 @@ auto SumBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     if (!dim_.has_value()) {
         // Reduced all dimensions - create tensor filled with scalar grad value
         // Use full() which works natively on all devices
+
+        // Handle different dtypes correctly
         if (grad_output.device().type == Device::Type::CUDA) {
             // Transfer scalar to CPU to extract value
             auto grad_cpu = grad_output.to(Device::cpu());
-            float grad_val = grad_cpu.data<float>()[0];
-            return {full(input_shape_vec, grad_val, input.dtype(), input.device())};
+
+            if (grad_cpu.dtype() == DType::Float64) {
+                double grad_val = grad_cpu.data<double>()[0];
+                return {full(input_shape_vec, grad_val, input.dtype(), input.device())};
+            } else {
+                float grad_val = grad_cpu.data<float>()[0];
+                return {full(input_shape_vec, grad_val, input.dtype(), input.device())};
+            }
         } else {
-            float grad_val = grad_output.data<float>()[0];
-            return {full(input_shape_vec, grad_val, input.dtype(), input.device())};
+            if (grad_output.dtype() == DType::Float64) {
+                double grad_val = grad_output.data<double>()[0];
+                return {full(input_shape_vec, grad_val, input.dtype(), input.device())};
+            } else {
+                float grad_val = grad_output.data<float>()[0];
+                return {full(input_shape_vec, grad_val, input.dtype(), input.device())};
+            }
         }
     } else {
         // Dimension-specific reduction backward using unsqueeze + expand
@@ -245,13 +261,26 @@ auto MeanBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
 
     if (!dim_.has_value()) {
         // Reduced all dimensions - use full() which works natively on all devices
+
+        // Handle different dtypes correctly
         if (grad_output.device().type == Device::Type::CUDA) {
             auto grad_cpu = grad_output.to(Device::cpu());
-            float grad_val = grad_cpu.data<float>()[0] * scale;
-            return {full(input_shape_vec, grad_val, input.dtype(), input.device())};
+
+            if (grad_cpu.dtype() == DType::Float64) {
+                double grad_val = grad_cpu.data<double>()[0] * scale;
+                return {full(input_shape_vec, grad_val, input.dtype(), input.device())};
+            } else {
+                float grad_val = grad_cpu.data<float>()[0] * scale;
+                return {full(input_shape_vec, grad_val, input.dtype(), input.device())};
+            }
         } else {
-            float grad_val = grad_output.data<float>()[0] * scale;
-            return {full(input_shape_vec, grad_val, input.dtype(), input.device())};
+            if (grad_output.dtype() == DType::Float64) {
+                double grad_val = grad_output.data<double>()[0] * scale;
+                return {full(input_shape_vec, grad_val, input.dtype(), input.device())};
+            } else {
+                float grad_val = grad_output.data<float>()[0] * scale;
+                return {full(input_shape_vec, grad_val, input.dtype(), input.device())};
+            }
         }
     } else {
         // Dimension-specific reduction backward
@@ -515,6 +544,28 @@ auto PermuteBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<
     return {grad_input};
 }
 
+// TransposeBackward implementation
+auto TransposeBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
+    throw std::runtime_error("TransposeBackward::forward should not be called");
+}
+
+auto TransposeBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    // Transpose is its own inverse, so apply same transpose to gradient
+    auto grad_input = transpose(grad_outputs[0], dim0_, dim1_).contiguous();
+    return {grad_input};
+}
+
+// SqueezeBackward implementation
+auto SqueezeBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
+    throw std::runtime_error("SqueezeBackward::forward should not be called");
+}
+
+auto SqueezeBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    // Unsqueeze gradient back to original shape
+    auto grad_input = unsqueeze(grad_outputs[0], dim_);
+    return {grad_input};
+}
+
 // BmmBackward implementation
 auto BmmBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
     saved_tensors_ = {inputs[0].tensor(), inputs[1].tensor()};
@@ -548,6 +599,205 @@ auto BmmBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     auto grad_b = bmm(a_transposed, grad_output);
 
     return {grad_a, grad_b};
+}
+
+// CatBackward implementation
+auto CatBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
+    // Convert Variables to Tensors for concatenation
+    std::vector<Tensor> tensors;
+    tensors.reserve(inputs.size());
+    for (const auto& var : inputs) {
+        tensors.push_back(var.tensor());
+    }
+
+    auto result = cat(tensors, dim_);
+    return {Variable(result, true)};
+}
+
+auto CatBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    // Split gradient back along concatenation dimension
+    // grad_output shape: [..., sum(split_sizes), ...]
+    // Need to split into gradients of shape [..., split_sizes[i], ...]
+
+    const auto& grad_output = grad_outputs[0];
+    std::vector<Tensor> grad_inputs;
+    grad_inputs.reserve(split_sizes_.size());
+
+    int64_t offset = 0;
+    for (int64_t split_size : split_sizes_) {
+        // Slice grad_output from offset to offset+split_size along dim_
+        auto grad_slice = slice(grad_output, dim_, offset, offset + split_size);
+        grad_inputs.push_back(grad_slice);
+        offset += split_size;
+    }
+
+    return grad_inputs;
+}
+
+// SliceBackward implementation
+auto SliceBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
+    auto result = slice(inputs[0].tensor(), dim_, start_, end_, step_);
+    return {Variable(result, true)};
+}
+
+auto SliceBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    // Create zero gradient tensor with original input shape
+    const auto& grad_output = grad_outputs[0];
+    auto grad_input = zeros(input_shape_, grad_output.dtype(), grad_output.device());
+
+    // We need to scatter grad_output values back to the sliced positions
+    // For now, implement this by copying values element by element
+    // TODO: Optimize with native scatter operation when available
+
+    // Calculate strides for both tensors
+    auto grad_out_shape = grad_output.shape();
+    auto ndim = input_shape_.size();
+
+    std::vector<int64_t> in_strides(ndim);
+    std::vector<int64_t> out_strides(ndim);
+
+    in_strides[ndim - 1] = 1;
+    out_strides[ndim - 1] = 1;
+    for (int64_t i = ndim - 2; i >= 0; --i) {
+        in_strides[i] = in_strides[i + 1] * input_shape_[i + 1];
+        out_strides[i] = out_strides[i + 1] * grad_out_shape[i + 1];
+    }
+
+    // Template lambda to handle different dtypes
+    auto scatter_gradients = [&]<typename T>(const T* grad_out_data, T* grad_in_data) {
+        // Iterate through grad_output and place values in grad_input
+        std::function<void(int64_t, int64_t, std::vector<int64_t>&, std::vector<int64_t>&)> copy_recursive;
+        copy_recursive = [&](int64_t current_dim, int64_t out_offset,
+                             std::vector<int64_t>& in_indices, std::vector<int64_t>& out_indices) {
+            if (current_dim == static_cast<int64_t>(ndim)) {
+                // Calculate linear offsets
+                int64_t in_linear = 0;
+                for (size_t i = 0; i < ndim; ++i) {
+                    in_linear += in_indices[i] * in_strides[i];
+                }
+                grad_in_data[in_linear] = grad_out_data[out_offset];
+                return;
+            }
+
+            if (current_dim == dim_) {
+                // This is the sliced dimension
+                int64_t out_idx = 0;
+                for (int64_t in_idx = start_; in_idx < end_; in_idx += step_) {
+                    in_indices[current_dim] = in_idx;
+                    out_indices[current_dim] = out_idx;
+                    copy_recursive(current_dim + 1, out_offset + out_idx * out_strides[current_dim],
+                                 in_indices, out_indices);
+                    out_idx++;
+                }
+            } else {
+                // Other dimensions: iterate through all indices
+                for (int64_t idx = 0; idx < input_shape_[current_dim]; ++idx) {
+                    in_indices[current_dim] = idx;
+                    out_indices[current_dim] = idx;
+                    copy_recursive(current_dim + 1, out_offset + idx * out_strides[current_dim],
+                                 in_indices, out_indices);
+                }
+            }
+        };
+
+        std::vector<int64_t> in_indices(ndim, 0);
+        std::vector<int64_t> out_indices(ndim, 0);
+        copy_recursive(0, 0, in_indices, out_indices);
+    };
+
+    // Dispatch based on dtype
+    switch (grad_output.dtype()) {
+        case DType::Float32:
+            scatter_gradients(grad_output.data<float>(), grad_input.data<float>());
+            break;
+        case DType::Float64:
+            scatter_gradients(grad_output.data<double>(), grad_input.data<double>());
+            break;
+        case DType::Float16: {
+            // Float16 requires special handling - cast via uint16_t
+            // For now, throw an error and plan for future implementation
+            throw std::runtime_error("SliceBackward: Float16 support requires specialized implementation");
+        }
+        default:
+            throw std::runtime_error("SliceBackward: Unsupported dtype. Supported types: Float32, Float64");
+    }
+
+    return {grad_input};
+}
+
+// UpsampleBilinearBackward implementation
+auto UpsampleBilinearBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
+    // Save input tensor for backward pass
+    saved_tensors_ = {inputs[0].tensor()};
+
+    // Forward computation is done externally in the wrapper function
+    // This method is not typically called directly
+    throw std::runtime_error("UpsampleBilinearBackward::forward should not be called directly");
+}
+
+auto UpsampleBilinearBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    // Distribute gradients from upsampled output back to input size
+    // For nearest neighbor upsampling: each output pixel's gradient goes to its source input pixel
+
+    std::cout << "[DEBUG] UpsampleBilinearBackward::backward() CALLED" << std::endl;
+
+    const auto& grad_output = grad_outputs[0];
+    const auto& shape = grad_output.shape();
+
+    if (shape.size() != 4) {
+        throw std::runtime_error("UpsampleBilinearBackward: Expected 4D gradient tensor (N, C, H, W)");
+    }
+
+    int64_t N = shape[0];
+    int64_t C = shape[1];
+    int64_t H_out = shape[2];
+    int64_t W_out = shape[3];
+
+    std::cout << "[DEBUG] grad_output shape: [" << N << ", " << C << ", " << H_out << ", " << W_out << "]" << std::endl;
+    std::cout << "[DEBUG] target input shape: [" << N << ", " << C << ", " << input_h_ << ", " << input_w_ << "]" << std::endl;
+
+    // Create gradient tensor for input (all zeros initially)
+    auto grad_input = zeros({N, C, input_h_, input_w_}, grad_output.dtype(), grad_output.device());
+
+    // Calculate scaling factors (same as forward pass)
+    float scale_h = static_cast<float>(input_h_) / output_h_;
+    float scale_w = static_cast<float>(input_w_) / output_w_;
+
+    std::cout << "[DEBUG] scale_h=" << scale_h << ", scale_w=" << scale_w << std::endl;
+
+    // Accumulate gradients using nearest neighbor logic
+    auto* grad_in_ptr = grad_input.data<float>();
+    const auto* grad_out_ptr = grad_output.data<float>();
+
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t c = 0; c < C; ++c) {
+            for (int64_t h = 0; h < H_out; ++h) {
+                for (int64_t w = 0; w < W_out; ++w) {
+                    // Find source input pixel (nearest neighbor)
+                    int64_t in_h = static_cast<int64_t>(h * scale_h);
+                    int64_t in_w = static_cast<int64_t>(w * scale_w);
+
+                    in_h = std::min(in_h, input_h_ - 1);
+                    in_w = std::min(in_w, input_w_ - 1);
+
+                    // Accumulate gradient to source pixel
+                    int64_t out_idx = ((n * C + c) * H_out + h) * W_out + w;
+                    int64_t in_idx = ((n * C + c) * input_h_ + in_h) * input_w_ + in_w;
+
+                    grad_in_ptr[in_idx] += grad_out_ptr[out_idx];
+                }
+            }
+        }
+    }
+
+    // Check if gradients are non-zero
+    float grad_sum = 0.0f;
+    for (int64_t i = 0; i < N * C * input_h_ * input_w_; ++i) {
+        grad_sum += std::abs(grad_in_ptr[i]);
+    }
+    std::cout << "[DEBUG] grad_input sum(abs): " << grad_sum << std::endl;
+
+    return {grad_input};
 }
 
 } // namespace tenzor

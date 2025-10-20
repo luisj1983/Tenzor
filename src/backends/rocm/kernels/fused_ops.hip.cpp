@@ -585,6 +585,298 @@ auto fused_conv_batchnorm_relu_hip(
     return output;
 }
 
+// ==============================================================================
+// Fused MatMul + Add (Bias) HIP Kernel
+// ==============================================================================
+
+template<typename T, int TILE_SIZE = 16>
+__global__ void fused_matmul_add_kernel(
+    const T* A,
+    const T* B,
+    const T* bias,
+    T* C,
+    int64_t M,
+    int64_t N,
+    int64_t K,
+    bool has_bias
+) {
+    __shared__ T As[TILE_SIZE][TILE_SIZE];
+    __shared__ T Bs[TILE_SIZE][TILE_SIZE];
+
+    int row = blockIdx.y * TILE_SIZE + threadIdx.y;
+    int col = blockIdx.x * TILE_SIZE + threadIdx.x;
+
+    T sum = 0;
+
+    for (int t = 0; t < (K + TILE_SIZE - 1) / TILE_SIZE; ++t) {
+        if (row < M && t * TILE_SIZE + threadIdx.x < K) {
+            As[threadIdx.y][threadIdx.x] = A[row * K + t * TILE_SIZE + threadIdx.x];
+        } else {
+            As[threadIdx.y][threadIdx.x] = 0;
+        }
+
+        if (col < N && t * TILE_SIZE + threadIdx.y < K) {
+            Bs[threadIdx.y][threadIdx.x] = B[(t * TILE_SIZE + threadIdx.y) * N + col];
+        } else {
+            Bs[threadIdx.y][threadIdx.x] = 0;
+        }
+
+        __syncthreads();
+
+        #pragma unroll
+        for (int k = 0; k < TILE_SIZE; ++k) {
+            sum += As[threadIdx.y][k] * Bs[k][threadIdx.x];
+        }
+
+        __syncthreads();
+    }
+
+    if (row < M && col < N) {
+        if (has_bias) {
+            C[row * N + col] = sum + bias[col];
+        } else {
+            C[row * N + col] = sum;
+        }
+    }
+}
+
+auto fused_matmul_add_hip(
+    const Tensor& A,
+    const Tensor& B,
+    const Tensor* bias
+) -> Tensor {
+    int64_t M = A.shape()[0];
+    int64_t K = A.shape()[1];
+    int64_t N = B.shape()[1];
+
+    Tensor C = zeros({M, N}, A.dtype(), A.device());
+
+    constexpr int TILE_SIZE = 16;
+    dim3 threads(TILE_SIZE, TILE_SIZE);
+    dim3 blocks((N + TILE_SIZE - 1) / TILE_SIZE, (M + TILE_SIZE - 1) / TILE_SIZE);
+
+    if (A.dtype() == DType::Float32) {
+        const float* bias_ptr = bias ? bias->data<float>() : nullptr;
+        hipLaunchKernelGGL(
+            HIP_KERNEL_NAME(fused_matmul_add_kernel<float, TILE_SIZE>),
+            blocks, threads, 0, 0,
+            A.data<float>(),
+            B.data<float>(),
+            bias_ptr,
+            C.data<float>(),
+            M,
+            N,
+            K,
+            bias != nullptr
+        );
+    } else {
+        throw std::runtime_error("fused_matmul_add_hip: Only Float32 supported");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    HIP_CHECK(hipDeviceSynchronize());
+
+    return C;
+}
+
+// ==============================================================================
+// Fused Element-wise Chain HIP Kernel
+// ==============================================================================
+
+template<typename T>
+__global__ void fused_elementwise_chain_kernel(
+    const T* a,
+    const T* b,
+    const T* c,
+    T* output,
+    int64_t n,
+    int op_type
+) {
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t stride = blockDim.x * gridDim.x;
+
+    for (int64_t i = tid; i < n; i += stride) {
+        T result;
+        switch (op_type) {
+            case 0:  // (a + b) * c + relu
+                result = (a[i] + b[i]) * c[i];
+                result = (result > T(0)) ? result : T(0);
+                break;
+            case 1:  // (a * b) + c + relu
+                result = a[i] * b[i] + c[i];
+                result = (result > T(0)) ? result : T(0);
+                break;
+            default:
+                result = a[i];
+        }
+        output[i] = result;
+    }
+}
+
+auto fused_elementwise_chain_hip(
+    const Tensor& a,
+    const Tensor& b,
+    const Tensor& c,
+    int op_type
+) -> Tensor {
+    Tensor output = zeros(a.shape(), a.dtype(), a.device());
+
+    int64_t n = a.numel();
+    int threads = 256;
+    int blocks = (n + threads - 1) / threads;
+    blocks = std::min(blocks, static_cast<int64_t>(65535));
+
+    if (a.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(fused_elementwise_chain_kernel<float>,
+            dim3(blocks), dim3(threads), 0, 0,
+            a.data<float>(),
+            b.data<float>(),
+            c.data<float>(),
+            output.data<float>(),
+            n,
+            op_type
+        );
+    } else {
+        throw std::runtime_error("fused_elementwise_chain_hip: Only Float32 supported");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    HIP_CHECK(hipDeviceSynchronize());
+
+    return output;
+}
+
+// ==============================================================================
+// Fused Attention HIP Kernel
+// ==============================================================================
+
+template<typename T, int BLOCK_SIZE>
+__global__ void fused_attention_kernel(
+    const T* Q,
+    const T* K,
+    const T* V,
+    T* output,
+    int64_t batch_size,
+    int64_t seq_len,
+    int64_t d_k,
+    int64_t d_v,
+    T scale
+) {
+    int64_t batch = blockIdx.z;
+    int64_t row = blockIdx.y;
+
+    if (batch >= batch_size || row >= seq_len) return;
+
+    __shared__ T shared_scores[BLOCK_SIZE];
+    __shared__ T shared_sum[BLOCK_SIZE];
+
+    const T* q_row = Q + (batch * seq_len + row) * d_k;
+
+    // Compute attention scores and find max
+    T max_score = -INFINITY;
+    for (int64_t col = threadIdx.x; col < seq_len; col += blockDim.x) {
+        const T* k_row = K + (batch * seq_len + col) * d_k;
+        T score = 0;
+        for (int64_t i = 0; i < d_k; ++i) {
+            score += q_row[i] * k_row[i];
+        }
+        score *= scale;
+        max_score = fmaxf(max_score, score);
+        shared_scores[threadIdx.x] = score;
+    }
+
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s && threadIdx.x + s < seq_len) {
+            max_score = fmaxf(max_score, shared_scores[threadIdx.x + s]);
+        }
+        __syncthreads();
+    }
+
+    // Compute softmax
+    T sum_exp = 0;
+    for (int64_t col = threadIdx.x; col < seq_len; col += blockDim.x) {
+        const T* k_row = K + (batch * seq_len + col) * d_k;
+        T score = 0;
+        for (int64_t i = 0; i < d_k; ++i) {
+            score += q_row[i] * k_row[i];
+        }
+        score = expf(score * scale - max_score);
+        shared_scores[threadIdx.x] = score;
+        sum_exp += score;
+    }
+
+    shared_sum[threadIdx.x] = sum_exp;
+    __syncthreads();
+
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) {
+            shared_sum[threadIdx.x] += shared_sum[threadIdx.x + s];
+        }
+        __syncthreads();
+    }
+
+    T sum_total = shared_sum[0];
+
+    // Compute attention @ V
+    for (int64_t d = threadIdx.x; d < d_v; d += blockDim.x) {
+        T result = 0;
+        for (int64_t col = 0; col < seq_len; ++col) {
+            const T* k_row = K + (batch * seq_len + col) * d_k;
+            T score = 0;
+            for (int64_t i = 0; i < d_k; ++i) {
+                score += q_row[i] * k_row[i];
+            }
+            T attention_weight = expf(score * scale - max_score) / sum_total;
+
+            const T* v_row = V + (batch * seq_len + col) * d_v;
+            result += attention_weight * v_row[d];
+        }
+        output[(batch * seq_len + row) * d_v + d] = result;
+    }
+}
+
+auto fused_attention_hip(
+    const Tensor& Q,
+    const Tensor& K,
+    const Tensor& V,
+    float scale
+) -> Tensor {
+    int64_t batch_size = Q.shape()[0];
+    int64_t seq_len = Q.shape()[1];
+    int64_t d_k = Q.shape()[2];
+    int64_t d_v = V.shape()[2];
+
+    Tensor output = zeros({batch_size, seq_len, d_v}, Q.dtype(), Q.device());
+
+    constexpr int BLOCK_SIZE = 256;
+    dim3 threads(BLOCK_SIZE);
+    dim3 blocks(1, seq_len, batch_size);
+
+    if (Q.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(
+            HIP_KERNEL_NAME(fused_attention_kernel<float, BLOCK_SIZE>),
+            blocks, threads, 0, 0,
+            Q.data<float>(),
+            K.data<float>(),
+            V.data<float>(),
+            output.data<float>(),
+            batch_size,
+            seq_len,
+            d_k,
+            d_v,
+            scale
+        );
+    } else {
+        throw std::runtime_error("fused_attention_hip: Only Float32 supported");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    HIP_CHECK(hipDeviceSynchronize());
+
+    return output;
+}
+
 } // namespace rocm
 } // namespace tenzor
 

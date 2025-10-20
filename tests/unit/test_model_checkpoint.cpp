@@ -15,6 +15,9 @@
 #include "tenzor/autograd/ops.hpp"
 #include <filesystem>
 #include <fstream>
+#include <sstream>
+#include <thread>
+#include <unistd.h>
 
 using namespace tenzor;
 using namespace tenzor::nn;
@@ -22,7 +25,10 @@ using namespace tenzor::nn;
 class ModelCheckpointTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        test_dir_ = "./test_checkpoints_tmp";
+        // Create unique directory per test instance to avoid parallel test conflicts
+        std::stringstream ss;
+        ss << "./test_checkpoints_tmp_" << getpid() << "_" << std::this_thread::get_id();
+        test_dir_ = ss.str();
         std::filesystem::create_directories(test_dir_);
     }
 

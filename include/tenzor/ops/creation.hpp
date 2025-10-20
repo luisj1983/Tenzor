@@ -110,6 +110,17 @@ auto randn(std::vector<int64_t> shape,
           Device device = Device::cpu()) -> Tensor;
 
 /**
+ * @brief Create random permutation of integers.
+ *
+ * Returns a tensor containing a random permutation of integers from 0 to n-1.
+ *
+ * @param n Upper bound (exclusive)
+ * @param device Target device (default: CPU)
+ * @return Tensor of shape {n} with permuted indices
+ */
+auto randperm(int64_t n, Device device = Device::cpu()) -> Tensor;
+
+/**
  * @brief Create 1D tensor with evenly spaced values.
  *
  * Creates sequence [start, start+step, start+2*step, ..., end).
@@ -245,4 +256,23 @@ auto randn_like(const Tensor& tensor) -> Tensor;
 
 /** @} */ // end of tensor_creation group
 
+} // namespace tenzor
+
+namespace tenzor {
+namespace ops {
+// Convenience namespace alias for common operations
+using tenzor::zeros;
+using tenzor::zeros_like;
+using tenzor::ones;
+using tenzor::ones_like;
+using tenzor::full;
+using tenzor::arange;
+using tenzor::linspace;
+using tenzor::eye;
+using tenzor::rand;
+using tenzor::randn;
+using tenzor::rand_like;
+using tenzor::randn_like;
+using tenzor::randperm;
+} // namespace ops
 } // namespace tenzor

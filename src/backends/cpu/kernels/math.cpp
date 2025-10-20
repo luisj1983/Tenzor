@@ -1074,6 +1074,16 @@ auto mul_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             // No SIMD for int64 multiply
             detail::mul_scalar(a_data, b_data, c_data, n);
 
+        } else if (a.dtype() == DType::Bool) {
+            const bool* a_data = a.data<bool>();
+            const bool* b_data = b.data<bool>();
+            bool* c_data = result.data<bool>();
+
+            // Bool multiply is logical AND
+            for (size_t i = 0; i < n; ++i) {
+                c_data[i] = a_data[i] && b_data[i];
+            }
+
         } else {
             throw std::runtime_error("Unsupported dtype for mul operation");
         }
@@ -1106,6 +1116,13 @@ auto mul_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             int64_t* c_data = result.data<int64_t>();
             detail::broadcast_op(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
                                 [](int64_t x, int64_t y) { return x * y; });
+
+        } else if (a.dtype() == DType::Bool) {
+            const bool* a_data = a.data<bool>();
+            const bool* b_data = b.data<bool>();
+            bool* c_data = result.data<bool>();
+            detail::broadcast_op(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](bool x, bool y) { return x && y; });
 
         } else {
             throw std::runtime_error("Unsupported dtype for mul operation");

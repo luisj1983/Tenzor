@@ -25,10 +25,10 @@
     using ncclUniqueId = ncclUniqueId;
     using ncclDataType_t = ncclDataType_t;
     using ncclRedOp_t = ncclRedOp_t;
-#elif defined(TENZOR_USE_CUDA)
+#elif defined(TENZOR_HAS_NCCL)
     #include <nccl.h>
 #else
-    // Stub definitions for CPU-only builds
+    // Stub definitions for builds without NCCL/RCCL
     typedef void* ncclComm_t;
     typedef struct { char internal[128]; } ncclUniqueId;
     typedef enum { ncclFloat32 = 0, ncclFloat64 = 1 } ncclDataType_t;

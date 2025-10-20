@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cmath>
 #include <memory>
+#include <iostream>
 
 using namespace tenzor;
 using namespace tenzor::nn;
@@ -35,6 +36,24 @@ bool CUDATrainingEnvironment::cuda_available_ = false;
 
 static ::testing::Environment* const cuda_env =
     ::testing::AddGlobalTestEnvironment(new CUDATrainingEnvironment);
+
+//==============================================================================
+// Test Fixture for Device Synchronization
+//==============================================================================
+
+class CUDATrainingTest : public ::testing::Test {
+protected:
+    void TearDown() override {
+        // Critical: Synchronize device to ensure all operations complete
+        // This prevents race conditions between parallel tests
+        // Works uniformly across all backends (CPU, CUDA, ROCm, OneAPI)
+        try {
+            Device::cuda(0).synchronize();  // Synchronize default CUDA device if available
+        } catch (...) {
+            // Ignore if CUDA is not available
+        }
+    }
+};
 
 //==============================================================================
 // Helper Functions
@@ -241,7 +260,7 @@ private:
 // Test 1: Simple CNN on MNIST-like Data
 //==============================================================================
 
-TEST(CUDATrainingTest, SimpleCNN_MNIST) {
+TEST_F(CUDATrainingTest, SimpleCNN_MNIST) {
     if (!CUDATrainingEnvironment::cuda_available_) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -323,7 +342,7 @@ TEST(CUDATrainingTest, SimpleCNN_MNIST) {
 // Test 2: Multi-Layer Perceptron on GPU
 //==============================================================================
 
-TEST(CUDATrainingTest, MLP_GPU) {
+TEST_F(CUDATrainingTest, MLP_GPU) {
     if (!CUDATrainingEnvironment::cuda_available_) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -386,7 +405,7 @@ TEST(CUDATrainingTest, MLP_GPU) {
 // Test 3: Complete Training Loop
 //==============================================================================
 
-TEST(CUDATrainingTest, CompleteTrainingLoop) {
+TEST_F(CUDATrainingTest, CompleteTrainingLoop) {
     if (!CUDATrainingEnvironment::cuda_available_) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -485,7 +504,7 @@ TEST(CUDATrainingTest, CompleteTrainingLoop) {
 // Test 4: CPU vs CUDA Result Comparison
 //==============================================================================
 
-TEST(CUDATrainingTest, CPU_vs_CUDA_Comparison) {
+TEST_F(CUDATrainingTest, CPU_vs_CUDA_Comparison) {
     if (!CUDATrainingEnvironment::cuda_available_) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -533,7 +552,7 @@ TEST(CUDATrainingTest, CPU_vs_CUDA_Comparison) {
 // Test 5: Performance Benchmarks
 //==============================================================================
 
-TEST(CUDATrainingTest, PerformanceBenchmark) {
+TEST_F(CUDATrainingTest, PerformanceBenchmark) {
     if (!CUDATrainingEnvironment::cuda_available_) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -609,13 +628,18 @@ TEST(CUDATrainingTest, PerformanceBenchmark) {
 // Test 6: Gradient Flow Verification
 //==============================================================================
 
-TEST(CUDATrainingTest, GradientFlowVerification) {
+TEST_F(CUDATrainingTest, GradientFlowVerification) {
     if (!CUDATrainingEnvironment::cuda_available_) {
         GTEST_SKIP() << "CUDA not available";
     }
 
     auto device = Device::cuda();
     auto model = std::make_shared<SimpleCNN>();
+
+    // Explicitly set to training mode to ensure dropout and batchnorm work correctly
+    model->train();
+    std::cout << "Model training mode: " << model->is_training() << std::endl;
+
     model->to(device);  // Move model to CUDA
     auto params = model->parameters();
     auto optimizer = SGD(params, 0.01);
@@ -627,6 +651,12 @@ TEST(CUDATrainingTest, GradientFlowVerification) {
     auto output = model->forward(input);
     auto loss = cross_entropy(output, target.tensor(), Reduction::Mean);
 
+    // Check loss value
+    auto loss_cpu = loss.tensor().to(Device::cpu());
+    float loss_val = loss_cpu.data<float>()[0];
+    std::cout << "Loss value: " << loss_val << std::endl;
+    EXPECT_GT(loss_val, 0.0f) << "Loss should be positive";
+
     // Backward pass
     optimizer.zero_grad();
     loss.backward();  // Scalar loss - no gradient argument needed
@@ -634,6 +664,7 @@ TEST(CUDATrainingTest, GradientFlowVerification) {
     // Verify all parameters have gradients
     int params_with_grad = 0;
     int total_params = 0;
+    int params_with_nonzero_grad = 0;
 
     for (const auto& param : params) {
         if (param->requires_grad()) {
@@ -648,29 +679,42 @@ TEST(CUDATrainingTest, GradientFlowVerification) {
                 // Transfer to CPU before accessing data
                 auto grad_cpu = grad_data.to(Device::cpu());
                 const float* grad_ptr = grad_cpu.data<float>();
-                for (size_t i = 0; i < std::min(static_cast<size_t>(10), static_cast<size_t>(grad_cpu.numel())); i++) {
+
+                // Check more values to be thorough (up to 100)
+                size_t check_count = std::min(static_cast<size_t>(100), static_cast<size_t>(grad_cpu.numel()));
+                for (size_t i = 0; i < check_count; i++) {
                     if (std::abs(grad_ptr[i]) > 1e-8) {
                         has_nonzero = true;
                         break;
                     }
                 }
 
-                EXPECT_TRUE(has_nonzero) << "Gradient appears to be all zeros";
+                if (has_nonzero) {
+                    params_with_nonzero_grad++;
+                } else {
+                    // Debug: print info about parameters with zero gradients
+                    std::cout << "WARNING: Parameter " << params_with_grad
+                              << " has all zero gradients (numel=" << grad_cpu.numel() << ")" << std::endl;
+                }
+
+                EXPECT_TRUE(has_nonzero) << "Gradient appears to be all zeros for parameter " << params_with_grad;
             }
         }
     }
 
     std::cout << "Gradient flow: " << params_with_grad << "/" << total_params
               << " parameters have gradients" << std::endl;
+    std::cout << "Non-zero gradients: " << params_with_nonzero_grad << "/" << params_with_grad << std::endl;
 
     EXPECT_EQ(params_with_grad, total_params) << "Not all parameters received gradients";
+    EXPECT_EQ(params_with_nonzero_grad, params_with_grad) << "Some gradients are all zeros";
 }
 
 //==============================================================================
 // Test 7: Mixed CPU/CUDA Tensor Operations
 //==============================================================================
 
-TEST(CUDATrainingTest, MixedCPU_CUDA_Operations) {
+TEST_F(CUDATrainingTest, MixedCPU_CUDA_Operations) {
     if (!CUDATrainingEnvironment::cuda_available_) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -708,7 +752,7 @@ TEST(CUDATrainingTest, MixedCPU_CUDA_Operations) {
 // Test 8: Device-to-Device Tensor Transfers
 //==============================================================================
 
-TEST(CUDATrainingTest, DeviceTransfers) {
+TEST_F(CUDATrainingTest, DeviceTransfers) {
     if (!CUDATrainingEnvironment::cuda_available_) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -750,7 +794,7 @@ TEST(CUDATrainingTest, DeviceTransfers) {
 // Test 9: Batch Size Scaling
 //==============================================================================
 
-TEST(CUDATrainingTest, BatchSizeScaling) {
+TEST_F(CUDATrainingTest, BatchSizeScaling) {
     if (!CUDATrainingEnvironment::cuda_available_) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -819,7 +863,7 @@ TEST(CUDATrainingTest, BatchSizeScaling) {
 // Test 10: Multi-Epoch Training with Validation
 //==============================================================================
 
-TEST(CUDATrainingTest, MultiEpochTrainingWithValidation) {
+TEST_F(CUDATrainingTest, MultiEpochTrainingWithValidation) {
     if (!CUDATrainingEnvironment::cuda_available_) {
         GTEST_SKIP() << "CUDA not available";
     }

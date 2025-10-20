@@ -1,0 +1,32 @@
+# Include C++ headers and sources
+recursive-include include *.hpp *.h
+recursive-include src *.cpp *.cu *.hip.cpp *.hpp *.h
+recursive-include cmake *.cmake *.cmake.in
+
+# Include CMake build files
+include CMakeLists.txt
+recursive-include . CMakeLists.txt
+
+# Include documentation
+include README.md
+include LICENSE
+include CONTRIBUTING.md
+recursive-include docs *.md *.rst
+
+# Include Python files
+recursive-include python *.py *.pyi
+include python/tenzor/py.typed
+
+# Include examples
+recursive-include examples *.py *.cpp
+
+# Exclude build artifacts and caches
+global-exclude *.pyc
+global-exclude *.pyo
+global-exclude __pycache__
+global-exclude .git*
+global-exclude *.so
+global-exclude *.o
+prune build
+prune dist
+prune .eggs

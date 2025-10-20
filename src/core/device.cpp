@@ -1,4 +1,5 @@
 #include "tenzor/core/device.hpp"
+#include "tenzor/backend/loader.hpp"
 #include <stdexcept>
 
 namespace tenzor {
@@ -24,6 +25,17 @@ auto Device::from_string(std::string_view str) -> Device {
     }
 
     throw std::invalid_argument("Invalid device string: " + std::string(str));
+}
+
+auto Device::synchronize() const -> void {
+    // Get the backend for this device type
+    auto* backend = backend_registry().get_backend(type);
+    if (!backend) {
+        throw std::runtime_error("Backend not available for device: " + to_string());
+    }
+
+    // Call the backend's synchronize method
+    backend->synchronize(index);
 }
 
 } // namespace tenzor

@@ -405,6 +405,20 @@ public:
      */
     auto flatten(int64_t start_dim = 0, int64_t end_dim = -1) const -> Tensor;
 
+    /**
+     * @brief Return indices of non-zero elements.
+     *
+     * Returns a 2D tensor where each row contains the indices of a non-zero element.
+     *
+     * @return Tensor of indices (num_nonzero, ndim) in Int64 format
+     *
+     * @code
+     * Tensor t = Tensor::from_data(std::vector<float>{0, 1, 0, 2}, {4});
+     * Tensor idx = t.nonzero(); // Shape: {2, 1}, values: [[1], [3]]
+     * @endcode
+     */
+    auto nonzero() const -> Tensor;
+
     // ============================================================================
     // Indexing
     // ============================================================================

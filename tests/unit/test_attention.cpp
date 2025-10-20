@@ -2,6 +2,7 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/layers/attention.hpp>
 #include <cmath>
+#include <iostream>
 
 using namespace tenzor;
 using namespace tenzor::nn;
@@ -30,7 +31,14 @@ protected:
     }
 
     void TearDown() override {
-        // Clean up after each test
+        // Critical: Synchronize device to ensure all operations complete
+        // This prevents race conditions and memory corruption in parallel test execution
+        // Works uniformly across all backends (CPU, CUDA, ROCm, OneAPI)
+        try {
+            Device::cuda(0).synchronize();  // Synchronize default CUDA device if available
+        } catch (...) {
+            // Ignore if CUDA is not available - CPU tests don't need synchronization
+        }
     }
 };
 

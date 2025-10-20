@@ -1,62 +1,623 @@
 #include "tenzor/backend/backend.hpp"
+#include <CL/sycl.hpp>
+#include <vector>
+#include <unordered_map>
+#include <stdexcept>
+#include <memory>
+#include <cstring>
 
-// OneAPI backend stub implementation
-// TODO: Implement with SYCL when oneAPI is available
+#ifdef TENZOR_HAS_ONEMKL
+#include <oneapi/mkl.hpp>
+#endif
 
 namespace tenzor {
 
-#ifdef SYCL_LANGUAGE_VERSION
+// Forward declarations for OneAPI/SYCL kernels
+namespace oneapi {
+    // Math operations
+    auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
+    auto sub_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
+    auto mul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
+    auto div_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
+    auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
 
+    // Unary operations
+    auto sqrt_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto neg_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto abs_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto log_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto exp_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto pow_kernel(const Tensor& input, float exponent, sycl::queue& queue) -> Tensor;
+
+    // Activation functions
+    auto relu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto sigmoid_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& output, sycl::queue& queue) -> Tensor;
+    auto tanh_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& output, sycl::queue& queue) -> Tensor;
+    auto gelu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto softmax_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Tensor;
+    auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, int64_t dim, sycl::queue& queue) -> Tensor;
+    auto leaky_relu_kernel(const Tensor& input, float alpha, sycl::queue& queue) -> Tensor;
+    auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, float alpha, sycl::queue& queue) -> Tensor;
+
+    // Reduction operations
+    auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor;
+    auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor;
+    auto max_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor;
+    auto min_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor;
+
+    // Transform operations
+    auto reshape_kernel(const Tensor& input, const std::vector<int64_t>& new_shape, sycl::queue& queue) -> Tensor;
+    auto transpose_kernel(const Tensor& input, int64_t dim0, int64_t dim1, sycl::queue& queue) -> Tensor;
+    auto permute_kernel(const Tensor& input, const std::vector<int64_t>& dims, sycl::queue& queue) -> Tensor;
+    auto squeeze_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Tensor;
+    auto unsqueeze_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Tensor;
+    auto contiguous_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto clone_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+
+    // Fill operations
+    auto zeros_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, sycl::queue& queue) -> Tensor;
+    auto ones_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, sycl::queue& queue) -> Tensor;
+    auto full_kernel(const std::vector<int64_t>& shape, float value, DType dtype, Device device, sycl::queue& queue) -> Tensor;
+    auto fill_kernel(const Tensor& tensor, float value, sycl::queue& queue) -> Tensor;
+
+    // Batch normalization
+    auto batchnorm2d_forward(const Tensor& input, const Tensor& mean, const Tensor& variance,
+                            float epsilon, sycl::queue& queue) -> Tensor;
+    auto batchnorm2d_forward_affine(const Tensor& input, const Tensor& mean, const Tensor& variance,
+                                   const Tensor& gamma, const Tensor& beta, float epsilon, sycl::queue& queue) -> Tensor;
+    auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const Tensor& mean,
+                             const Tensor& variance, const Tensor& gamma, float epsilon, sycl::queue& queue)
+                             -> std::tuple<Tensor, Tensor, Tensor>;
+
+    // Conv2d operations
+    auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bias,
+                       int64_t stride, int64_t padding, int64_t dilation, int64_t groups, sycl::queue& queue) -> Tensor;
+    auto conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tensor& weight,
+                        int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
+                        bool compute_grad_input, bool compute_grad_weight, bool compute_grad_bias,
+                        sycl::queue& queue) -> std::tuple<Tensor, Tensor, Tensor>;
+} // namespace oneapi
+
+/**
+ * @brief OneAPI/SYCL backend implementation for Intel GPUs and CPUs.
+ *
+ * Supports Intel Data Center GPU Max Series, Intel Arc graphics, and Intel CPUs.
+ * Uses SYCL for portable acceleration and optionally oneMKL/oneDNN for optimized operations.
+ */
 class OneAPIBackend : public Backend {
 public:
+    OneAPIBackend() {
+        try {
+            // Enumerate all available SYCL devices
+            auto platforms = sycl::platform::get_platforms();
+
+            for (const auto& platform : platforms) {
+                auto devices = platform.get_devices();
+                for (const auto& device : devices) {
+                    // Create queue for each device
+                    try {
+                        auto queue = std::make_shared<sycl::queue>(device,
+                            sycl::property_list{sycl::property::queue::in_order{}});
+
+                        // Store device info
+                        DeviceInfo info;
+                        info.queue = queue;
+                        info.device = device;
+                        info.name = device.get_info<sycl::info::device::name>();
+                        info.type = device.is_gpu() ? "gpu" :
+                                   device.is_cpu() ? "cpu" : "accelerator";
+                        info.max_compute_units = device.get_info<sycl::info::device::max_compute_units>();
+                        info.max_work_group_size = device.get_info<sycl::info::device::max_work_group_size>();
+                        info.global_mem_size = device.get_info<sycl::info::device::global_mem_size>();
+                        info.local_mem_size = device.get_info<sycl::info::device::local_mem_size>();
+
+                        devices_.push_back(info);
+                    } catch (const sycl::exception& e) {
+                        // Skip devices that can't create queues
+                        continue;
+                    }
+                }
+            }
+        } catch (const sycl::exception& e) {
+            // No SYCL devices available
+        }
+    }
+
+    ~OneAPIBackend() override {
+        // Clean up queues
+        devices_.clear();
+    }
+
     auto name() const -> std::string_view override {
         return "oneapi";
     }
 
     auto device_count() const -> int32_t override {
-        // TODO: Implement with SYCL device enumeration
-        return 0;
+        return static_cast<int32_t>(devices_.size());
     }
 
     auto is_available() const -> bool override {
-        return device_count() > 0;
+        return !devices_.empty();
     }
 
     auto allocate(size_t bytes, int32_t device_id) -> void* override {
-        // TODO: Implement with SYCL malloc_device
-        return nullptr;
+        if (bytes == 0) {
+            return nullptr;
+        }
+
+        validate_device_id(device_id);
+
+        try {
+            // Use USM (Unified Shared Memory) device allocation
+            auto& queue = get_queue(device_id);
+            void* ptr = sycl::malloc_device(bytes, queue);
+
+            if (ptr == nullptr) {
+                throw std::runtime_error("SYCL malloc_device failed");
+            }
+
+            // Track allocation for proper deallocation
+            allocations_[ptr] = device_id;
+
+            return ptr;
+        } catch (const sycl::exception& e) {
+            throw std::runtime_error(
+                std::string("OneAPI allocation failed: ") + e.what()
+            );
+        }
     }
 
     auto deallocate(void* ptr) -> void override {
-        // TODO: Implement with SYCL free
+        if (ptr == nullptr) {
+            return;
+        }
+
+        auto it = allocations_.find(ptr);
+        if (it == allocations_.end()) {
+            throw std::runtime_error("Attempt to free untracked pointer");
+        }
+
+        int32_t device_id = it->second;
+        auto& queue = get_queue(device_id);
+
+        sycl::free(ptr, queue);
+        allocations_.erase(it);
     }
 
     auto copy(void* dst, const void* src, size_t bytes, CopyKind kind) -> void override {
-        // TODO: Implement with SYCL queue.memcpy
+        if (bytes == 0) {
+            return;
+        }
+
+        // Determine which queue to use based on copy kind
+        sycl::queue* queue_ptr = nullptr;
+
+        switch (kind) {
+            case CopyKind::HostToHost:
+                // Direct memcpy for host-to-host
+                std::memcpy(dst, src, bytes);
+                return;
+
+            case CopyKind::HostToDevice:
+            case CopyKind::DeviceToHost:
+            case CopyKind::DeviceToDevice: {
+                // Use first available queue (device 0)
+                if (devices_.empty()) {
+                    throw std::runtime_error("No SYCL devices available for copy");
+                }
+                queue_ptr = devices_[0].queue.get();
+                break;
+            }
+        }
+
+        if (queue_ptr) {
+            try {
+                queue_ptr->memcpy(dst, src, bytes).wait();
+            } catch (const sycl::exception& e) {
+                throw std::runtime_error(
+                    std::string("SYCL copy failed: ") + e.what()
+                );
+            }
+        }
     }
 
     auto synchronize(int32_t device_id) -> void override {
-        // TODO: Implement with SYCL queue.wait
+        validate_device_id(device_id);
+        get_queue(device_id).wait_and_throw();
     }
 
     auto create_stream(int32_t device_id) -> StreamHandle override {
-        // TODO: Implement with SYCL queue creation
-        return nullptr;
+        validate_device_id(device_id);
+
+        try {
+            auto& device = devices_[device_id].device;
+            auto* queue = new sycl::queue(device,
+                sycl::property_list{sycl::property::queue::in_order{}});
+            return static_cast<StreamHandle>(queue);
+        } catch (const sycl::exception& e) {
+            throw std::runtime_error(
+                std::string("Failed to create SYCL queue: ") + e.what()
+            );
+        }
     }
 
     auto destroy_stream(StreamHandle stream) -> void override {
-        // TODO: Cleanup SYCL queue
+        if (stream == nullptr) {
+            return;
+        }
+
+        auto* queue = static_cast<sycl::queue*>(stream);
+        try {
+            queue->wait();
+            delete queue;
+        } catch (const sycl::exception& e) {
+            delete queue;
+            throw std::runtime_error(
+                std::string("Failed to destroy SYCL queue: ") + e.what()
+            );
+        }
     }
 
     auto synchronize_stream(StreamHandle stream) -> void override {
-        // TODO: Implement with SYCL queue.wait
+        if (stream == nullptr) {
+            throw std::invalid_argument("Cannot synchronize null stream");
+        }
+
+        auto* queue = static_cast<sycl::queue*>(stream);
+        try {
+            queue->wait_and_throw();
+        } catch (const sycl::exception& e) {
+            throw std::runtime_error(
+                std::string("SYCL stream synchronization failed: ") + e.what()
+            );
+        }
     }
 
     auto dispatch(const std::string& op_name,
                  std::span<const Tensor> inputs,
                  const OpAttributes& attrs) -> std::vector<Tensor> override {
-        // TODO: Implement SYCL kernel dispatch
-        return {};
+        // Validate inputs
+        bool is_creation_op = (op_name == "zeros" || op_name == "ones" ||
+                               op_name == "full" || op_name == "rand" || op_name == "randn");
+
+        if (inputs.empty() && !is_creation_op) {
+            throw std::invalid_argument("dispatch requires at least one input tensor");
+        }
+
+        // Validate device
+        for (const auto& tensor : inputs) {
+            if (tensor.device().type != Device::Type::OneAPI) {
+                throw std::runtime_error(
+                    "OneAPIBackend: All input tensors must be on OneAPI device, got: " +
+                    tensor.device().to_string()
+                );
+            }
+        }
+
+        // Get device and queue
+        int32_t device_id = 0;
+        if (!inputs.empty()) {
+            device_id = inputs[0].device().index;
+        } else if (attrs.contains("device_id")) {
+            device_id = std::stoi(attrs.at("device_id"));
+        }
+
+        validate_device_id(device_id);
+        auto& queue = get_queue(device_id);
+
+        // Dispatch to appropriate kernel
+        try {
+            // Binary operations
+            if (op_name == "add") {
+                if (inputs.size() != 2) throw std::invalid_argument("add requires 2 inputs");
+                return {oneapi::add_kernel(inputs[0], inputs[1], queue)};
+            }
+            else if (op_name == "sub") {
+                if (inputs.size() != 2) throw std::invalid_argument("sub requires 2 inputs");
+                return {oneapi::sub_kernel(inputs[0], inputs[1], queue)};
+            }
+            else if (op_name == "mul") {
+                if (inputs.size() != 2) throw std::invalid_argument("mul requires 2 inputs");
+                return {oneapi::mul_kernel(inputs[0], inputs[1], queue)};
+            }
+            else if (op_name == "div") {
+                if (inputs.size() != 2) throw std::invalid_argument("div requires 2 inputs");
+                return {oneapi::div_kernel(inputs[0], inputs[1], queue)};
+            }
+            else if (op_name == "matmul") {
+                if (inputs.size() != 2) throw std::invalid_argument("matmul requires 2 inputs");
+                return {oneapi::matmul_kernel(inputs[0], inputs[1], queue)};
+            }
+
+            // Unary operations
+            else if (op_name == "sqrt") {
+                if (inputs.size() != 1) throw std::invalid_argument("sqrt requires 1 input");
+                return {oneapi::sqrt_kernel(inputs[0], queue)};
+            }
+            else if (op_name == "neg") {
+                if (inputs.size() != 1) throw std::invalid_argument("neg requires 1 input");
+                return {oneapi::neg_kernel(inputs[0], queue)};
+            }
+            else if (op_name == "abs") {
+                if (inputs.size() != 1) throw std::invalid_argument("abs requires 1 input");
+                return {oneapi::abs_kernel(inputs[0], queue)};
+            }
+            else if (op_name == "log") {
+                if (inputs.size() != 1) throw std::invalid_argument("log requires 1 input");
+                return {oneapi::log_kernel(inputs[0], queue)};
+            }
+            else if (op_name == "exp") {
+                if (inputs.size() != 1) throw std::invalid_argument("exp requires 1 input");
+                return {oneapi::exp_kernel(inputs[0], queue)};
+            }
+            else if (op_name == "pow") {
+                if (inputs.size() != 1) throw std::invalid_argument("pow requires 1 input");
+                float exponent = attrs.contains("exponent") ? std::stof(attrs.at("exponent")) : 2.0f;
+                return {oneapi::pow_kernel(inputs[0], exponent, queue)};
+            }
+
+            // Activation functions
+            else if (op_name == "relu") {
+                if (inputs.size() != 1) throw std::invalid_argument("relu requires 1 input");
+                return {oneapi::relu_kernel(inputs[0], queue)};
+            }
+            else if (op_name == "relu_backward") {
+                if (inputs.size() != 2) throw std::invalid_argument("relu_backward requires 2 inputs");
+                return {oneapi::relu_backward_kernel(inputs[0], inputs[1], queue)};
+            }
+            else if (op_name == "sigmoid") {
+                if (inputs.size() != 1) throw std::invalid_argument("sigmoid requires 1 input");
+                return {oneapi::sigmoid_kernel(inputs[0], queue)};
+            }
+            else if (op_name == "sigmoid_backward") {
+                if (inputs.size() != 2) throw std::invalid_argument("sigmoid_backward requires 2 inputs");
+                return {oneapi::sigmoid_backward_kernel(inputs[0], inputs[1], queue)};
+            }
+            else if (op_name == "tanh") {
+                if (inputs.size() != 1) throw std::invalid_argument("tanh requires 1 input");
+                return {oneapi::tanh_kernel(inputs[0], queue)};
+            }
+            else if (op_name == "tanh_backward") {
+                if (inputs.size() != 2) throw std::invalid_argument("tanh_backward requires 2 inputs");
+                return {oneapi::tanh_backward_kernel(inputs[0], inputs[1], queue)};
+            }
+            else if (op_name == "gelu") {
+                if (inputs.size() != 1) throw std::invalid_argument("gelu requires 1 input");
+                return {oneapi::gelu_kernel(inputs[0], queue)};
+            }
+            else if (op_name == "gelu_backward") {
+                if (inputs.size() != 2) throw std::invalid_argument("gelu_backward requires 2 inputs");
+                return {oneapi::gelu_backward_kernel(inputs[0], inputs[1], queue)};
+            }
+            else if (op_name == "softmax") {
+                if (inputs.size() != 1) throw std::invalid_argument("softmax requires 1 input");
+                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
+                return {oneapi::softmax_kernel(inputs[0], dim, queue)};
+            }
+            else if (op_name == "softmax_backward") {
+                if (inputs.size() != 2) throw std::invalid_argument("softmax_backward requires 2 inputs");
+                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
+                return {oneapi::softmax_backward_kernel(inputs[0], inputs[1], dim, queue)};
+            }
+            else if (op_name == "leaky_relu") {
+                if (inputs.size() != 1) throw std::invalid_argument("leaky_relu requires 1 input");
+                float alpha = attrs.contains("alpha") ? std::stof(attrs.at("alpha")) : 0.01f;
+                return {oneapi::leaky_relu_kernel(inputs[0], alpha, queue)};
+            }
+            else if (op_name == "leaky_relu_backward") {
+                if (inputs.size() != 2) throw std::invalid_argument("leaky_relu_backward requires 2 inputs");
+                float alpha = attrs.contains("alpha") ? std::stof(attrs.at("alpha")) : 0.01f;
+                return {oneapi::leaky_relu_backward_kernel(inputs[0], inputs[1], alpha, queue)};
+            }
+
+            // Reduction operations
+            else if (op_name == "sum") {
+                if (inputs.size() != 1) throw std::invalid_argument("sum requires 1 input");
+                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
+                bool keepdim = attrs.contains("keepdim") && attrs.at("keepdim") == "1";
+                return {oneapi::sum_kernel(inputs[0], dim, keepdim, queue)};
+            }
+            else if (op_name == "mean") {
+                if (inputs.size() != 1) throw std::invalid_argument("mean requires 1 input");
+                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
+                bool keepdim = attrs.contains("keepdim") && attrs.at("keepdim") == "1";
+                return {oneapi::mean_kernel(inputs[0], dim, keepdim, queue)};
+            }
+            else if (op_name == "max") {
+                if (inputs.size() != 1) throw std::invalid_argument("max requires 1 input");
+                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
+                bool keepdim = attrs.contains("keepdim") && attrs.at("keepdim") == "1";
+                return {oneapi::max_kernel(inputs[0], dim, keepdim, queue)};
+            }
+            else if (op_name == "min") {
+                if (inputs.size() != 1) throw std::invalid_argument("min requires 1 input");
+                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
+                bool keepdim = attrs.contains("keepdim") && attrs.at("keepdim") == "1";
+                return {oneapi::min_kernel(inputs[0], dim, keepdim, queue)};
+            }
+
+            // Transform operations
+            else if (op_name == "reshape") {
+                if (inputs.size() != 1) throw std::invalid_argument("reshape requires 1 input");
+                std::vector<int64_t> shape = parse_shape(attrs.at("shape"));
+                return {oneapi::reshape_kernel(inputs[0], shape, queue)};
+            }
+            else if (op_name == "transpose") {
+                if (inputs.size() != 1) throw std::invalid_argument("transpose requires 1 input");
+                int64_t dim0 = attrs.contains("dim0") ? std::stoll(attrs.at("dim0")) : 0;
+                int64_t dim1 = attrs.contains("dim1") ? std::stoll(attrs.at("dim1")) : 1;
+                return {oneapi::transpose_kernel(inputs[0], dim0, dim1, queue)};
+            }
+            else if (op_name == "permute") {
+                if (inputs.size() != 1) throw std::invalid_argument("permute requires 1 input");
+                std::vector<int64_t> dims = parse_shape(attrs.at("dims"));
+                return {oneapi::permute_kernel(inputs[0], dims, queue)};
+            }
+            else if (op_name == "squeeze") {
+                if (inputs.size() != 1) throw std::invalid_argument("squeeze requires 1 input");
+                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
+                return {oneapi::squeeze_kernel(inputs[0], dim, queue)};
+            }
+            else if (op_name == "unsqueeze") {
+                if (inputs.size() != 1) throw std::invalid_argument("unsqueeze requires 1 input");
+                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : 0;
+                return {oneapi::unsqueeze_kernel(inputs[0], dim, queue)};
+            }
+            else if (op_name == "contiguous") {
+                if (inputs.size() != 1) throw std::invalid_argument("contiguous requires 1 input");
+                return {oneapi::contiguous_kernel(inputs[0], queue)};
+            }
+            else if (op_name == "clone") {
+                if (inputs.size() != 1) throw std::invalid_argument("clone requires 1 input");
+                return {oneapi::clone_kernel(inputs[0], queue)};
+            }
+
+            // Fill operations
+            else if (op_name == "zeros") {
+                std::vector<int64_t> shape = parse_shape(attrs.at("shape"));
+                DType dtype = parse_dtype(attrs);
+                Device device = inputs.empty() ? Device::oneapi(device_id) : inputs[0].device();
+                return {oneapi::zeros_kernel(shape, dtype, device, queue)};
+            }
+            else if (op_name == "ones") {
+                std::vector<int64_t> shape = parse_shape(attrs.at("shape"));
+                DType dtype = parse_dtype(attrs);
+                Device device = inputs.empty() ? Device::oneapi(device_id) : inputs[0].device();
+                return {oneapi::ones_kernel(shape, dtype, device, queue)};
+            }
+            else if (op_name == "full") {
+                std::vector<int64_t> shape = parse_shape(attrs.at("shape"));
+                float value = std::stof(attrs.at("value"));
+                DType dtype = parse_dtype(attrs);
+                Device device = inputs.empty() ? Device::oneapi(device_id) : inputs[0].device();
+                return {oneapi::full_kernel(shape, value, dtype, device, queue)};
+            }
+            else if (op_name == "fill") {
+                if (inputs.size() != 1) throw std::invalid_argument("fill requires 1 input");
+                float value = std::stof(attrs.at("value"));
+                return {oneapi::fill_kernel(inputs[0], value, queue)};
+            }
+
+            // Batch normalization
+            else if (op_name == "batchnorm2d_forward") {
+                if (inputs.size() != 3) throw std::invalid_argument("batchnorm2d_forward requires 3 inputs");
+                float epsilon = attrs.contains("epsilon") ? std::stof(attrs.at("epsilon")) : 1e-5f;
+                return {oneapi::batchnorm2d_forward(inputs[0], inputs[1], inputs[2], epsilon, queue)};
+            }
+            else if (op_name == "batchnorm2d_forward_affine") {
+                if (inputs.size() != 5) throw std::invalid_argument("batchnorm2d_forward_affine requires 5 inputs");
+                float epsilon = attrs.contains("epsilon") ? std::stof(attrs.at("epsilon")) : 1e-5f;
+                return {oneapi::batchnorm2d_forward_affine(inputs[0], inputs[1], inputs[2],
+                                                           inputs[3], inputs[4], epsilon, queue)};
+            }
+            else if (op_name == "batchnorm2d_backward") {
+                if (inputs.size() != 5) throw std::invalid_argument("batchnorm2d_backward requires 5 inputs");
+                float epsilon = attrs.contains("epsilon") ? std::stof(attrs.at("epsilon")) : 1e-5f;
+                auto [grad_input, grad_gamma, grad_beta] = oneapi::batchnorm2d_backward(
+                    inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], epsilon, queue);
+                return {grad_input, grad_gamma, grad_beta};
+            }
+
+            // Conv2d operations
+            else if (op_name == "conv2d_forward") {
+                if (inputs.size() < 2 || inputs.size() > 3) {
+                    throw std::invalid_argument("conv2d_forward requires 2 or 3 inputs");
+                }
+                const Tensor* bias = inputs.size() == 3 ? &inputs[2] : nullptr;
+                int64_t stride = attrs.contains("stride") ? std::stoll(attrs.at("stride")) : 1;
+                int64_t padding = attrs.contains("padding") ? std::stoll(attrs.at("padding")) : 0;
+                int64_t dilation = attrs.contains("dilation") ? std::stoll(attrs.at("dilation")) : 1;
+                int64_t groups = attrs.contains("groups") ? std::stoll(attrs.at("groups")) : 1;
+                return {oneapi::conv2d_forward(inputs[0], inputs[1], bias, stride, padding,
+                                               dilation, groups, queue)};
+            }
+            else if (op_name == "conv2d_backward") {
+                if (inputs.size() != 3) throw std::invalid_argument("conv2d_backward requires 3 inputs");
+                int64_t stride = attrs.contains("stride") ? std::stoll(attrs.at("stride")) : 1;
+                int64_t padding = attrs.contains("padding") ? std::stoll(attrs.at("padding")) : 0;
+                int64_t dilation = attrs.contains("dilation") ? std::stoll(attrs.at("dilation")) : 1;
+                int64_t groups = attrs.contains("groups") ? std::stoll(attrs.at("groups")) : 1;
+                bool compute_grad_input = !attrs.contains("compute_grad_input") || attrs.at("compute_grad_input") == "1";
+                bool compute_grad_weight = !attrs.contains("compute_grad_weight") || attrs.at("compute_grad_weight") == "1";
+                bool compute_grad_bias = !attrs.contains("compute_grad_bias") || attrs.at("compute_grad_bias") == "1";
+
+                auto [grad_input, grad_weight, grad_bias] = oneapi::conv2d_backward(
+                    inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups,
+                    compute_grad_input, compute_grad_weight, compute_grad_bias, queue);
+                return {grad_input, grad_weight, grad_bias};
+            }
+
+            else {
+                throw std::runtime_error("OneAPIBackend: Unknown operation '" + op_name + "'");
+            }
+        }
+        catch (const sycl::exception& e) {
+            throw std::runtime_error(
+                "OneAPIBackend: Operation '" + op_name + "' failed with SYCL error: " + e.what()
+            );
+        }
+    }
+
+private:
+    struct DeviceInfo {
+        std::shared_ptr<sycl::queue> queue;
+        sycl::device device;
+        std::string name;
+        std::string type;
+        uint32_t max_compute_units;
+        size_t max_work_group_size;
+        uint64_t global_mem_size;
+        uint64_t local_mem_size;
+    };
+
+    std::vector<DeviceInfo> devices_;
+    std::unordered_map<void*, int32_t> allocations_;
+
+    auto get_queue(int32_t device_id) -> sycl::queue& {
+        return *devices_[device_id].queue;
+    }
+
+    auto validate_device_id(int32_t device_id) const -> void {
+        if (device_id < 0 || device_id >= static_cast<int32_t>(devices_.size())) {
+            throw std::invalid_argument(
+                "Invalid device ID " + std::to_string(device_id) +
+                " (available: 0-" + std::to_string(devices_.size() - 1) + ")"
+            );
+        }
+    }
+
+    auto parse_shape(const std::string& shape_str) const -> std::vector<int64_t> {
+        std::vector<int64_t> shape;
+        std::string str = shape_str;
+        size_t pos = 0;
+        while ((pos = str.find(',')) != std::string::npos) {
+            shape.push_back(std::stoll(str.substr(0, pos)));
+            str.erase(0, pos + 1);
+        }
+        if (!str.empty()) {
+            shape.push_back(std::stoll(str));
+        }
+        return shape;
+    }
+
+    auto parse_dtype(const OpAttributes& attrs) const -> DType {
+        if (!attrs.contains("dtype")) {
+            return DType::Float32;
+        }
+
+        const auto& dtype_str = attrs.at("dtype");
+        if (dtype_str == "float32") return DType::Float32;
+        if (dtype_str == "float64") return DType::Float64;
+        if (dtype_str == "float16") return DType::Float16;
+        if (dtype_str == "bfloat16") return DType::BFloat16;
+        if (dtype_str == "int32") return DType::Int32;
+        if (dtype_str == "int64") return DType::Int64;
+
+        return DType::Float32;
     }
 };
 
@@ -65,7 +626,5 @@ extern "C" {
         return std::make_unique<OneAPIBackend>();
     }
 }
-
-#endif // SYCL_LANGUAGE_VERSION
 
 } // namespace tenzor

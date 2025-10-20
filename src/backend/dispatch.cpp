@@ -13,8 +13,13 @@ auto Dispatcher::dispatch(const std::string& op_name,
         throw DeviceException("All input tensors must be on the same device");
     }
 
-    // Dispatch to registry
-    return operation_registry().dispatch(op_name, inputs, attrs);
+    // Get the appropriate backend and dispatch to it
+    Backend* backend = get_backend(inputs);
+    if (!backend) {
+        throw TenzorException("No backend available for tensors");
+    }
+
+    return backend->dispatch(op_name, inputs, attrs);
 }
 
 auto Dispatcher::get_backend(std::span<const Tensor> tensors) -> Backend* {

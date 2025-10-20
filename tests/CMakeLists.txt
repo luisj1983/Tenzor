@@ -345,6 +345,16 @@ target_link_libraries(test_fused_ops PRIVATE
     GTest::gtest_main
 )
 
+# Backend operations parameterized tests (runs on ALL backends)
+add_executable(test_backend_ops_parameterized
+    unit/test_backend_ops_parameterized.cpp
+)
+
+target_link_libraries(test_backend_ops_parameterized PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
 # CUDA-specific tests
 if(TENZOR_BUILD_CUDA)
     find_package(CUDAToolkit REQUIRED)
@@ -585,6 +595,7 @@ gtest_discover_tests(test_gradient_checkpoint DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_model_checkpoint DISCOVERY_TIMEOUT 30)
 
 gtest_discover_tests(test_fused_ops DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_backend_ops_parameterized DISCOVERY_TIMEOUT 30)
 
 # SIMD operations tests
 add_executable(test_simd_ops
@@ -629,6 +640,7 @@ target_link_libraries(debug_dataloader PRIVATE
 )
 
 if(TENZOR_BUILD_CUDA)
+    # CUDA tests with thread-safe handle management - can run in parallel
     gtest_discover_tests(test_cuda_kernels DISCOVERY_TIMEOUT 30)
     gtest_discover_tests(test_cuda_training DISCOVERY_TIMEOUT 30)
     gtest_discover_tests(test_caching_allocator DISCOVERY_TIMEOUT 30)
@@ -703,3 +715,291 @@ target_link_libraries(test_kldiv_manual PRIVATE tenzor_core GTest::gtest_main)
 add_test(NAME KLDivManual.StepByStepBackward COMMAND test_kldiv_manual --gtest_filter=KLDivManual.StepByStepBackward)
 add_test(NAME KLDivManual.SimpleSubtract COMMAND test_kldiv_manual --gtest_filter=KLDivManual.SimpleSubtract)
 add_test(NAME KLDivManual.SimpleMultiply COMMAND test_kldiv_manual --gtest_filter=KLDivManual.SimpleMultiply)
+
+# ONNX export tests
+add_executable(test_onnx_export
+    unit/test_onnx_export.cpp
+)
+
+target_link_libraries(test_onnx_export PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_onnx_export DISCOVERY_TIMEOUT 30)
+
+# Gradient checking tests
+add_executable(test_gradcheck
+    autograd/test_gradcheck.cpp
+)
+
+target_link_libraries(test_gradcheck PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_gradcheck DISCOVERY_TIMEOUT 30)
+
+# ModelHub tests
+add_executable(test_model_hub
+    unit/test_model_hub.cpp
+)
+
+target_link_libraries(test_model_hub PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_model_hub DISCOVERY_TIMEOUT 30)
+
+# BERT model tests
+add_executable(test_bert
+    unit/test_bert.cpp
+)
+
+target_link_libraries(test_bert PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_bert DISCOVERY_TIMEOUT 30)
+
+# Classic CNN models tests
+add_executable(test_classic_models
+    unit/test_classic_models.cpp
+)
+
+target_link_libraries(test_classic_models PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_classic_models DISCOVERY_TIMEOUT 30)
+
+# GPT model tests
+add_executable(test_gpt
+    unit/test_gpt.cpp
+)
+
+target_link_libraries(test_gpt PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_gpt DISCOVERY_TIMEOUT 30)
+
+# ResNet model tests
+add_executable(test_resnet
+    unit/test_resnet.cpp
+)
+
+target_link_libraries(test_resnet PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_resnet DISCOVERY_TIMEOUT 30)
+
+# RoBERTa model tests
+add_executable(test_roberta
+    unit/test_roberta.cpp
+)
+
+target_link_libraries(test_roberta PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_roberta DISCOVERY_TIMEOUT 30)
+
+# ELECTRA model tests
+add_executable(test_electra
+    unit/test_electra.cpp
+)
+
+target_link_libraries(test_electra PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_electra DISCOVERY_TIMEOUT 30)
+
+# ============================================================================
+# Phase 9 Model Tests - Vision Models
+# ============================================================================
+
+# EfficientNet tests (B0-B7)
+add_executable(test_efficientnet
+    unit/test_efficientnet.cpp
+)
+
+target_link_libraries(test_efficientnet PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_efficientnet DISCOVERY_TIMEOUT 30)
+
+# Vision Transformer tests (Base/Large/Huge)
+add_executable(test_vit
+    unit/test_vit.cpp
+)
+
+target_link_libraries(test_vit PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_vit DISCOVERY_TIMEOUT 30 PROPERTIES TIMEOUT 600)
+
+# Swin Transformer tests (DISABLED - needs API fixes)
+# add_executable(test_swin_transformer
+#     unit/test_swin_transformer.cpp
+# )
+
+# target_link_libraries(test_swin_transformer PRIVATE
+#     tenzor_core
+#     GTest::gtest_main
+# )
+
+# gtest_discover_tests(test_swin_transformer DISCOVERY_TIMEOUT 30)
+
+# ConvNeXt tests
+add_executable(test_convnext
+    unit/test_convnext.cpp
+)
+
+target_link_libraries(test_convnext PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_convnext DISCOVERY_TIMEOUT 30)
+
+# MobileNet V2/V3 tests
+add_executable(test_mobilenet_v2_v3
+    unit/test_mobilenet_v2_v3.cpp
+)
+
+target_link_libraries(test_mobilenet_v2_v3 PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_mobilenet_v2_v3 DISCOVERY_TIMEOUT 30)
+
+# Vision Components tests (PatchEmbedding, SE, MBConv, etc.) (DISABLED - depends on Swin)
+# add_executable(test_vision_components
+#     unit/test_vision_components.cpp
+# )
+
+# target_link_libraries(test_vision_components PRIVATE
+#     tenzor_core
+#     GTest::gtest_main
+# )
+
+# gtest_discover_tests(test_vision_components DISCOVERY_TIMEOUT 30)
+
+# ============================================================================
+# Phase 9 Model Tests - NLP Models
+# ============================================================================
+
+# RoBERTa and ELECTRA tests
+add_executable(test_roberta_electra
+    unit/test_roberta_electra.cpp
+)
+
+target_link_libraries(test_roberta_electra PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_roberta_electra DISCOVERY_TIMEOUT 30)
+
+# ALBERT and T5 tests
+add_executable(test_albert_t5
+    unit/test_albert_t5.cpp
+)
+
+target_link_libraries(test_albert_t5 PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_albert_t5 DISCOVERY_TIMEOUT 30 PROPERTIES TIMEOUT 600)
+
+# ============================================================================
+# Phase 9 Model Tests - Detection and Segmentation Models
+# ============================================================================
+
+# Faster R-CNN tests
+add_executable(test_faster_rcnn
+    unit/test_faster_rcnn.cpp
+)
+
+target_link_libraries(test_faster_rcnn PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_faster_rcnn DISCOVERY_TIMEOUT 30 PROPERTIES TIMEOUT 1200)
+
+# YOLO tests (v3 and v5)
+add_executable(test_yolo
+    unit/test_yolo.cpp
+)
+
+target_link_libraries(test_yolo PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_yolo DISCOVERY_TIMEOUT 30)
+
+# Mask R-CNN tests
+add_executable(test_mask_rcnn
+    unit/test_mask_rcnn.cpp
+)
+
+target_link_libraries(test_mask_rcnn PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_mask_rcnn DISCOVERY_TIMEOUT 30 PROPERTIES TIMEOUT 1200)
+
+# U-Net tests
+add_executable(test_unet
+    unit/test_unet.cpp
+)
+
+target_link_libraries(test_unet PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_unet DISCOVERY_TIMEOUT 30 PROPERTIES TIMEOUT 1200)
+
+# DeepLab v3+ tests
+add_executable(test_deeplabv3plus
+    unit/test_deeplabv3plus.cpp
+)
+
+target_link_libraries(test_deeplabv3plus PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_deeplabv3plus DISCOVERY_TIMEOUT 30 PROPERTIES TIMEOUT 1200)
+
+# Detection Operations tests (ROI, NMS, etc.)
+add_executable(test_detection_ops
+    unit/test_detection_ops.cpp
+)
+
+target_link_libraries(test_detection_ops PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_detection_ops DISCOVERY_TIMEOUT 30)

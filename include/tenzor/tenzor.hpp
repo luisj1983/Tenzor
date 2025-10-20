@@ -90,6 +90,7 @@
 #include "tenzor/autograd/function.hpp"
 #include "tenzor/autograd/engine.hpp"
 #include "tenzor/autograd/ops.hpp"
+#include "tenzor/autograd/gradcheck.hpp"
 
 // Neural network modules
 #include "tenzor/nn/module.hpp"
@@ -112,6 +113,22 @@
 #include "tenzor/nn/optim/adagrad.hpp"
 #include "tenzor/nn/optim/adadelta.hpp"
 #include "tenzor/nn/optim/scheduler.hpp"
+
+// Pre-trained models
+#include "tenzor/models/bert.hpp"
+#include "tenzor/models/gpt.hpp"
+#include "tenzor/models/roberta.hpp"
+#include "tenzor/models/electra.hpp"
+#include "tenzor/models/resnet.hpp"
+#include "tenzor/models/convnext.hpp"
+#include "tenzor/models/mobilenet.hpp"
+
+// Detection and segmentation models
+#include "tenzor/nn/detection/anchors.hpp"
+#include "tenzor/nn/detection/roi_ops.hpp"
+#include "tenzor/nn/detection/rpn.hpp"
+#include "tenzor/nn/detection/roi_head.hpp"
+#include "tenzor/models/faster_rcnn.hpp"
 
 /**
  * @brief Main Tenzor namespace

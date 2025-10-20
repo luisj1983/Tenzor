@@ -6,11 +6,91 @@
 #include "tenzor/nn/layers/embedding.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/autograd/function.hpp"
 #include <stdexcept>
 #include <cmath>
 
 namespace tenzor {
 namespace nn {
+
+// ============================================================================
+// EmbeddingBackward - Gradient function for embedding lookup
+// ============================================================================
+
+class EmbeddingBackward : public Function {
+public:
+    EmbeddingBackward(Tensor indices, int64_t num_embeddings, int64_t embedding_dim)
+        : indices_(std::move(indices)),
+          num_embeddings_(num_embeddings),
+          embedding_dim_(embedding_dim) {}
+
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+        // inputs[0] = weight matrix [num_embeddings, embedding_dim]
+        // Returns embeddings looked up by indices
+
+        if (inputs.empty()) {
+            throw std::runtime_error("EmbeddingBackward: No inputs provided");
+        }
+
+        const auto& weight = inputs[0];
+        const auto& weight_tensor = weight.tensor();
+        auto input_ptr = indices_.data<int64_t>();
+        auto weight_ptr = weight_tensor.data<float>();
+
+        // Calculate output shape: indices.shape() + [embedding_dim]
+        auto indices_shape = indices_.shape();
+        std::vector<int64_t> output_shape(indices_shape.begin(), indices_shape.end());
+        output_shape.push_back(embedding_dim_);
+
+        // Perform lookup
+        auto output = zeros(output_shape);
+        auto output_ptr = output.data<float>();
+
+        int64_t num_indices = indices_.numel();
+        for (int64_t i = 0; i < num_indices; ++i) {
+            auto idx = input_ptr[i];
+            for (int64_t j = 0; j < embedding_dim_; ++j) {
+                output_ptr[i * embedding_dim_ + j] = weight_ptr[idx * embedding_dim_ + j];
+            }
+        }
+
+        return {Variable(output, weight.requires_grad())};
+    }
+
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
+        // Gradient w.r.t. weight matrix
+        // grad_output shape: indices.shape() + [embedding_dim]
+        // weight gradient shape: [num_embeddings, embedding_dim]
+
+        if (grad_outputs.empty()) {
+            throw std::runtime_error("EmbeddingBackward: No gradient outputs");
+        }
+
+        const auto& grad_output = grad_outputs[0];
+        auto grad_output_ptr = grad_output.data<float>();
+        auto input_ptr = indices_.data<int64_t>();
+
+        // Initialize weight gradient to zeros
+        auto grad_weight = zeros({num_embeddings_, embedding_dim_});
+        auto grad_weight_ptr = grad_weight.data<float>();
+
+        // Accumulate gradients for each embedding
+        int64_t num_indices = indices_.numel();
+        for (int64_t i = 0; i < num_indices; ++i) {
+            auto idx = input_ptr[i];
+            for (int64_t j = 0; j < embedding_dim_; ++j) {
+                grad_weight_ptr[idx * embedding_dim_ + j] += grad_output_ptr[i * embedding_dim_ + j];
+            }
+        }
+
+        return {grad_weight};
+    }
+
+private:
+    Tensor indices_;
+    int64_t num_embeddings_;
+    int64_t embedding_dim_;
+};
 
 // ============================================================================
 // Embedding Implementation
@@ -87,28 +167,46 @@ auto Embedding::forward(const Variable& input) -> Variable {
         renorm_embeddings(input_tensor);
     }
 
-    // Create output shape: input_shape + [embedding_dim]
-    std::vector<int64_t> output_shape(input_shape.begin(), input_shape.end());
-    output_shape.push_back(embedding_dim_);
+    // Check if gradient is needed
+    if (!weight_.requires_grad() || !is_grad_enabled()) {
+        // No gradient needed, just compute
+        std::vector<int64_t> output_shape(input_shape.begin(), input_shape.end());
+        output_shape.push_back(embedding_dim_);
 
-    // Perform lookup
-    auto output = zeros(output_shape);
-    auto output_ptr = output.data<float>();
-    auto weight_ptr = weight_.tensor().data<float>();
+        auto output = zeros(output_shape);
+        auto output_ptr = output.data<float>();
+        auto weight_ptr = weight_.tensor().data<float>();
 
-    for (int64_t i = 0; i < num_indices; ++i) {
-        auto idx = input_ptr[i];
-
-        // Copy embedding vector
-        for (int64_t j = 0; j < embedding_dim_; ++j) {
-            output_ptr[i * embedding_dim_ + j] = weight_ptr[idx * embedding_dim_ + j];
+        for (int64_t i = 0; i < num_indices; ++i) {
+            auto idx = input_ptr[i];
+            for (int64_t j = 0; j < embedding_dim_; ++j) {
+                output_ptr[i * embedding_dim_ + j] = weight_ptr[idx * embedding_dim_ + j];
+            }
         }
+
+        return Variable(output, false);
     }
 
-    // Create variable with gradient tracking
-    auto result = Variable(output, input.requires_grad() || weight_.requires_grad());
+    // Use EmbeddingBackward function to preserve gradient graph
+    auto grad_fn = std::make_shared<EmbeddingBackward>(input_tensor, num_embeddings_, embedding_dim_);
 
-    // TODO: Implement backward pass with padding_idx masking and scale_grad_by_freq
+    // Perform forward pass
+    auto outputs = grad_fn->forward({weight_});
+
+    if (outputs.empty()) {
+        throw std::runtime_error("EmbeddingBackward returned no outputs");
+    }
+
+    auto& result = outputs[0];
+
+    // Set up backward graph
+    std::vector<std::shared_ptr<Function>> next_funcs;
+    next_funcs.push_back(weight_.grad_fn());  // nullptr if weight is leaf
+
+    grad_fn->set_next_functions(next_funcs);
+    grad_fn->set_input_variables({weight_});
+
+    result.set_grad_fn(grad_fn);
 
     return result;
 }

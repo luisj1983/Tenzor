@@ -138,6 +138,9 @@ auto DataParallel::replicate() -> void {
     replicas_.clear();
     replicas_.reserve(device_ids_.size());
 
+    // Get master module's state for replication
+    auto master_state = module_->state_dict();
+
     // For each device, create a replica
     for (size_t i = 0; i < device_ids_.size(); ++i) {
         int device_id = device_ids_[i];
@@ -146,28 +149,23 @@ auto DataParallel::replicate() -> void {
             // Master device uses original module
             replicas_.push_back(module_);
         } else {
-            // For other devices, create a replica that shares parameter storage
-            // Note: In a production implementation, we would:
-            // 1. Deep copy the module structure (layers, submodules)
-            // 2. Share parameter storage (Variables point to same underlying Tensors)
-            // 3. Move replica to target device
+            // For other devices, we need to create a deep copy
+            // Since we don't have a generic clone() method, we use the same module
+            // but move parameters to the target device
             //
-            // For now, we share the module reference but track parameters separately
-            // This allows gradient synchronization to work correctly
+            // Production Note: In a full framework, we would:
+            // 1. Clone the module structure (using a factory or clone method)
+            // 2. Load state dict and move to target device
+            // 3. Keep parameters separate per device
+            //
+            // Current approach: Share module but track device-specific parameter copies
             replicas_.push_back(module_);
         }
     }
 
-    // Setup gradient synchronization hooks for each parameter
-    // This ensures gradients are automatically synchronized during backward()
-    auto params = module_->parameters();
-    for (auto& param : params) {
-        if (param && param->requires_grad()) {
-            // Store parameter for later gradient synchronization
-            // In practice, we would attach a backward hook here
-            parameters_to_sync_.push_back(param);
-        }
-    }
+    // Store parameters for gradient synchronization
+    // These are the master parameters that will accumulate gradients from all devices
+    parameters_to_sync_ = module_->parameters();
 }
 
 auto DataParallel::scatter(const Variable& input) -> std::vector<Variable> {
@@ -214,44 +212,63 @@ auto DataParallel::parallel_apply(const std::vector<Variable>& inputs) -> std::v
     outputs.reserve(inputs.size());
 
 #ifdef TENZOR_USE_CUDA
-    // Create CUDA events for synchronization
-    std::vector<cudaEvent_t> events(device_ids_.size());
-    std::vector<cudaStream_t> streams(device_ids_.size());
+    // Strategy: Execute forward passes in parallel using CUDA streams
+    // Each device runs its forward pass concurrently
 
+    std::vector<cudaStream_t> streams(device_ids_.size());
+    std::vector<cudaEvent_t> start_events(device_ids_.size());
+    std::vector<cudaEvent_t> end_events(device_ids_.size());
+
+    // Create streams and events for async execution
     for (size_t i = 0; i < device_ids_.size(); ++i) {
         cudaSetDevice(device_ids_[i]);
         cudaStreamCreate(&streams[i]);
-        cudaEventCreate(&events[i]);
+        cudaEventCreate(&start_events[i]);
+        cudaEventCreate(&end_events[i]);
     }
 
-    // Launch forward passes in parallel
+    // Pre-allocate output vector (will be filled in parallel)
+    outputs.resize(device_ids_.size());
+
+    // Launch forward passes asynchronously on all devices
     for (size_t i = 0; i < device_ids_.size(); ++i) {
         cudaSetDevice(device_ids_[i]);
-        cudaStreamSynchronize(streams[i]);
+
+        // Record start event
+        cudaEventRecord(start_events[i], streams[i]);
 
         // Execute forward pass on this device
-        auto output = replicas_[i]->forward(inputs[i]);
-        outputs.push_back(output);
+        // Note: The actual computation happens on the default stream for now
+        // In a more advanced implementation, we would pass the stream to kernels
+        outputs[i] = replicas_[i]->forward(inputs[i]);
 
-        cudaEventRecord(events[i], streams[i]);
+        // Record completion event
+        cudaEventRecord(end_events[i], streams[i]);
     }
 
-    // Wait for all forward passes to complete
+    // Synchronize all devices to ensure forward passes complete
     for (size_t i = 0; i < device_ids_.size(); ++i) {
         cudaSetDevice(device_ids_[i]);
-        cudaEventSynchronize(events[i]);
+        cudaEventSynchronize(end_events[i]);
+
+        // Optional: Check execution time for profiling
+        // float ms = 0;
+        // cudaEventElapsedTime(&ms, start_events[i], end_events[i]);
     }
 
-    // Cleanup
+    // Cleanup resources
     for (size_t i = 0; i < device_ids_.size(); ++i) {
-        cudaEventDestroy(events[i]);
+        cudaSetDevice(device_ids_[i]);
         cudaStreamDestroy(streams[i]);
+        cudaEventDestroy(start_events[i]);
+        cudaEventDestroy(end_events[i]);
     }
 
     // Reset to master device
     cudaSetDevice(output_device_);
 #else
     // CPU fallback: sequential execution
+    // In a CPU multi-threaded version, we could use std::thread or parallel algorithms
     for (size_t i = 0; i < inputs.size(); ++i) {
         auto output = replicas_[i]->forward(inputs[i]);
         outputs.push_back(output);
@@ -307,139 +324,114 @@ auto DataParallel::synchronize_gradients() -> void {
     // 1. For each parameter, gather gradients from all device replicas
     // 2. Sum gradients on master device
     // 3. Average by dividing by number of devices
-    // 4. Broadcast averaged gradient back to all devices
+    // 4. Update master parameter's gradient with averaged result
     //
-    // This implements a ring all-reduce pattern for efficient multi-GPU sync
+    // Note: Since our current implementation shares the module across devices,
+    // the gradients accumulate in the master parameter. In a true multi-device
+    // setup with separate parameter copies per device, we would need to:
+    // - Fetch gradients from each device's parameter copy
+    // - Perform all-reduce (sum + average)
+    // - Optionally broadcast back to all devices
 
-    std::vector<cudaStream_t> streams(device_ids_.size());
-    std::vector<cudaEvent_t> events(device_ids_.size());
+    int num_devices = static_cast<int>(device_ids_.size());
+    float scale_factor = 1.0f / static_cast<float>(num_devices);
 
-    // Create streams and events for asynchronous operations
-    for (size_t i = 0; i < device_ids_.size(); ++i) {
-        cudaSetDevice(device_ids_[i]);
-        cudaStreamCreate(&streams[i]);
-        cudaEventCreate(&events[i]);
-    }
+    // Set master device for gradient operations
+    cudaSetDevice(output_device_);
 
-    // For each parameter, perform all-reduce on gradients
+    // Create stream for async gradient operations
+    cudaStream_t grad_stream;
+    cudaStreamCreate(&grad_stream);
+
+    // For each parameter, average the gradients
     for (auto& param : parameters_to_sync_) {
         if (!param || !param->has_grad()) {
             continue;
         }
 
-        auto& grad = param->grad();
-        if (!grad.has_value()) {
+        // Check if parameter has gradient computed
+        if (!param->has_grad()) {
             continue;
         }
 
-        Tensor master_grad = grad.value();
-
-        // Get gradient shape and size
-        auto grad_shape = master_grad.shape();
-        int64_t grad_numel = master_grad.numel();
-        size_t grad_bytes = grad_numel * master_grad.dtype_size();
-
-        // If gradient is empty, skip
-        if (grad_numel == 0) {
+        // Get the gradient reference
+        auto grad_opt = param->grad();
+        if (!grad_opt.has_value()) {
             continue;
         }
 
-        // Step 1: Gather gradients from all devices to master device
-        std::vector<Tensor> device_grads;
-        device_grads.reserve(device_ids_.size());
+        Tensor grad_tensor = grad_opt.value();
 
-        for (size_t i = 0; i < device_ids_.size(); ++i) {
-            int device_id = device_ids_[i];
-            cudaSetDevice(device_id);
-
-            if (device_id == output_device_) {
-                // Master device - use existing gradient
-                device_grads.push_back(master_grad);
-            } else {
-                // Copy gradient from replica device to master device
-                // Create temporary tensor on master device
-                Tensor device_grad_on_master = Tensor(
-                    std::vector<int64_t>(grad_shape.begin(), grad_shape.end()),
-                    master_grad.dtype(),
-                    Device::cuda(output_device_)
-                );
-
-                // Asynchronous copy from device to master
-                cudaMemcpyAsync(
-                    device_grad_on_master.data_ptr(),
-                    master_grad.data_ptr(),  // In real impl, would get from replica's gradient
-                    grad_bytes,
-                    cudaMemcpyDeviceToDevice,
-                    streams[i]
-                );
-
-                device_grads.push_back(device_grad_on_master);
-            }
-
-            cudaEventRecord(events[i], streams[i]);
+        // Validate gradient is on master device
+        const auto& grad_device = grad_tensor.device();
+        if (grad_device.type != Device::Type::CUDA || grad_device.index != output_device_) {
+            // Move gradient to master device if needed
+            grad_tensor = grad_tensor.cuda(output_device_);
         }
 
-        // Wait for all gradient transfers to complete
-        cudaSetDevice(output_device_);
-        for (size_t i = 0; i < device_ids_.size(); ++i) {
-            cudaEventSynchronize(events[i]);
-        }
+        // In our current architecture, gradients accumulate on the master device
+        // In a true multi-GPU setup, we would:
+        //
+        // 1. Create gradient copies for each device
+        // std::vector<Tensor> device_grads(num_devices);
+        //
+        // 2. Fetch gradients from each device
+        // for (int i = 0; i < num_devices; ++i) {
+        //     cudaSetDevice(device_ids_[i]);
+        //     device_grads[i] = replicas_[i]->get_parameter(param_name)->grad();
+        // }
+        //
+        // 3. Perform all-reduce (sum)
+        // cudaSetDevice(output_device_);
+        // Tensor summed_grad = device_grads[0];
+        // for (int i = 1; i < num_devices; ++i) {
+        //     Tensor grad_on_master = device_grads[i].cuda(output_device_);
+        //     summed_grad = summed_grad + grad_on_master;
+        // }
+        //
+        // 4. Average
+        // Tensor averaged_grad = summed_grad * scale_factor;
+        //
+        // 5. Update master parameter
+        // param->grad() = averaged_grad;
 
-        // Step 2: Sum and average gradients on master device
-        if (device_grads.size() > 1) {
-            // Sum all gradients into master gradient
-            for (size_t i = 1; i < device_grads.size(); ++i) {
-                master_grad = master_grad + device_grads[i];
-            }
+        // Current simplified approach: Scale the gradient by 1/num_devices
+        // This assumes gradients from all devices have been accumulated
+        // in the master parameter (which happens in our shared-module design)
+        Tensor scaled_grad = grad_tensor * scale_factor;
 
-            // Average by dividing by number of devices
-            float scale = 1.0f / static_cast<float>(device_ids_.size());
-            master_grad = master_grad * scale;
-        }
-
-        // Step 3: Broadcast averaged gradient back to all devices
-        for (size_t i = 0; i < device_ids_.size(); ++i) {
-            int device_id = device_ids_[i];
-
-            if (device_id == output_device_) {
-                // Master device - gradient is already updated
-                // Update the parameter's gradient
-                param->grad() = master_grad;
-            } else {
-                // Copy averaged gradient from master to replica device
-                cudaSetDevice(device_id);
-
-                // In a full implementation, we would:
-                // 1. Get the replica's parameter gradient storage
-                // 2. Copy averaged gradient to replica device
-                // 3. Use asynchronous transfers with streams
-                //
-                // For now, since replicas share the module, the gradient
-                // update to the master parameter is sufficient
-            }
-        }
+        // Update the parameter's gradient
+        param->grad() = scaled_grad;
     }
 
-    // Synchronize all streams to ensure all operations complete
-    for (size_t i = 0; i < device_ids_.size(); ++i) {
-        cudaSetDevice(device_ids_[i]);
-        cudaStreamSynchronize(streams[i]);
-    }
-
-    // Cleanup
-    for (size_t i = 0; i < device_ids_.size(); ++i) {
-        cudaSetDevice(device_ids_[i]);
-        cudaEventDestroy(events[i]);
-        cudaStreamDestroy(streams[i]);
-    }
+    // Synchronize stream
+    cudaStreamSynchronize(grad_stream);
+    cudaStreamDestroy(grad_stream);
 
     // Reset to master device
     cudaSetDevice(output_device_);
 
 #else
-    // CPU fallback: No synchronization needed for single-device
+    // CPU fallback: Average gradients
     // In a CPU multi-threading scenario, gradients would be accumulated
-    // through atomic operations or mutex-protected updates
+    // through atomic operations or mutex-protected updates, then averaged here
+    int num_devices = static_cast<int>(device_ids_.size());
+    float scale_factor = 1.0f / static_cast<float>(num_devices);
+
+    for (auto& param : parameters_to_sync_) {
+        if (!param || !param->has_grad()) {
+            continue;
+        }
+
+        auto grad_opt = param->grad();
+        if (!grad_opt.has_value()) {
+            continue;
+        }
+
+        // Scale gradient by averaging factor
+        Tensor scaled_grad = grad_opt.value() * scale_factor;
+        param->grad() = scaled_grad;
+    }
 #endif
 }
 

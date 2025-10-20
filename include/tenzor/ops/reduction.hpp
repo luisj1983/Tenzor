@@ -63,6 +63,17 @@ auto argmin(const Tensor& input,
            std::optional<int64_t> dim = std::nullopt,
            bool keepdim = false) -> Tensor;
 
+/**
+ * @brief Sort tensor and return indices.
+ * @param input Input tensor
+ * @param dim Dimension to sort along (default: last dimension)
+ * @param descending Sort in descending order (default: false)
+ * @return Tensor of indices that sort the input
+ */
+auto argsort(const Tensor& input,
+            int64_t dim = -1,
+            bool descending = false) -> Tensor;
+
 /** @brief Product of tensor elements. */
 auto prod(const Tensor& input,
          std::optional<int64_t> dim = std::nullopt,
@@ -97,4 +108,19 @@ auto norm(const Tensor& input,
 
 /** @} */ // end of tensor_reduction group
 
+} // namespace tenzor
+
+namespace tenzor {
+namespace ops {
+// Convenience namespace alias for common operations
+using tenzor::sum;
+using tenzor::mean;
+using tenzor::max;
+using tenzor::min;
+using tenzor::argmax;
+using tenzor::argmin;
+using tenzor::argsort;
+using tenzor::prod;
+// Note: cumsum and cumprod not yet implemented
+} // namespace ops
 } // namespace tenzor

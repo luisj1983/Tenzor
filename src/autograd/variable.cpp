@@ -1,6 +1,7 @@
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/autograd/engine.hpp"
 #include "tenzor/autograd/function.hpp"
+#include "tenzor/autograd/ops.hpp"
 #include "tenzor/ops/creation.hpp"
 #include <atomic>
 #include <iostream>
@@ -247,4 +248,91 @@ auto Variable::operator/(const Variable& other) const -> Variable {
     return output;
 }
 
+// Scalar operations
+auto Variable::operator+(float scalar) const -> Variable {
+    // Create scalar tensor with same dtype and device
+    Tensor scalar_tensor(std::vector<int64_t>{}, impl_->data_.dtype(), impl_->data_.device());
+    if (impl_->data_.dtype() == DType::Float64) {
+        scalar_tensor.data<double>()[0] = static_cast<double>(scalar);
+    } else {
+        scalar_tensor.data<float>()[0] = scalar;
+    }
+    Variable scalar_var(scalar_tensor, false);
+    return *this + scalar_var;
+}
+
+auto Variable::operator+(double scalar) const -> Variable {
+    // Create scalar tensor with same dtype and device
+    Tensor scalar_tensor(std::vector<int64_t>{}, impl_->data_.dtype(), impl_->data_.device());
+    if (impl_->data_.dtype() == DType::Float64) {
+        scalar_tensor.data<double>()[0] = scalar;
+    } else {
+        scalar_tensor.data<float>()[0] = static_cast<float>(scalar);
+    }
+    Variable scalar_var(scalar_tensor, false);
+    return *this + scalar_var;
+}
+
+auto Variable::operator*(float scalar) const -> Variable {
+    // Create scalar tensor with same dtype and device
+    Tensor scalar_tensor(std::vector<int64_t>{}, impl_->data_.dtype(), impl_->data_.device());
+    if (impl_->data_.dtype() == DType::Float64) {
+        scalar_tensor.data<double>()[0] = static_cast<double>(scalar);
+    } else {
+        scalar_tensor.data<float>()[0] = scalar;
+    }
+    Variable scalar_var(scalar_tensor, false);
+    return *this * scalar_var;
+}
+
+auto Variable::operator*(double scalar) const -> Variable {
+    // Create scalar tensor with same dtype and device
+    Tensor scalar_tensor(std::vector<int64_t>{}, impl_->data_.dtype(), impl_->data_.device());
+    if (impl_->data_.dtype() == DType::Float64) {
+        scalar_tensor.data<double>()[0] = scalar;
+    } else {
+        scalar_tensor.data<float>()[0] = static_cast<float>(scalar);
+    }
+    Variable scalar_var(scalar_tensor, false);
+    return *this * scalar_var;
+}
+
+// Scalar division operators
+auto Variable::operator/(float scalar) const -> Variable {
+    return *this / static_cast<double>(scalar);
+}
+
+auto Variable::operator/(double scalar) const -> Variable {
+    Tensor scalar_tensor({}, dtype(), device());
+    if (dtype() == DType::Float64) {
+        scalar_tensor.data<double>()[0] = scalar;
+    } else {
+        scalar_tensor.data<float>()[0] = static_cast<float>(scalar);
+    }
+    Variable scalar_var(scalar_tensor, false);
+    return *this / scalar_var;
+}
+
+// Shape transformation methods
+auto Variable::reshape(std::vector<int64_t> shape) const -> Variable {
+    return tenzor::reshape(*this, std::move(shape));
+}
+
+auto Variable::transpose(int64_t dim0, int64_t dim1) const -> Variable {
+    return tenzor::transpose(*this, dim0, dim1);
+}
+
+auto Variable::permute(std::vector<int64_t> dims) const -> Variable {
+    return tenzor::permute(*this, std::move(dims));
+}
+
+auto Variable::matmul(const Variable& other) const -> Variable {
+    return tenzor::matmul(*this, other);
+}
+
+auto Variable::squeeze(int64_t dim) const -> Variable {
+    return tenzor::squeeze(*this, dim);
+}
+
 } // namespace tenzor
+

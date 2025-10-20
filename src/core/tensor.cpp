@@ -3,6 +3,7 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/backend/loader.hpp"
+#include "tenzor/ops/indexing.hpp"
 #include "tenzor/backend/dispatch.hpp"
 #include <numeric>
 #include <algorithm>
@@ -127,6 +128,13 @@ template auto Tensor::data<uint8_t>() -> uint8_t*;
 template auto Tensor::data<uint8_t>() const -> const uint8_t*;
 template auto Tensor::data<bool>() -> bool*;
 template auto Tensor::data<bool>() const -> const bool*;
+
+// Additional instantiations for const-qualified template parameters (used by quantization)
+template auto Tensor::data<const float>() -> const float*;
+template auto Tensor::data<const float>() const -> const float*;
+template auto Tensor::data<const int>() const -> const int*;
+template auto Tensor::data<const unsigned char>() const -> const unsigned char*;
+template auto Tensor::data<const signed char>() const -> const signed char*;
 
 // Template instantiations for item<T>() - extract scalar from single-element tensor
 template<> auto Tensor::item<float>() const -> float {
@@ -585,9 +593,31 @@ auto Tensor::clone() const -> Tensor {
         return *this;
     }
 
-    // Dispatch to backend for clone operation
-    std::vector<Tensor> inputs = {*this};
-    return Dispatcher::dispatch("clone", inputs)[0];
+    // Create new tensor with same shape, dtype, and device
+    Tensor result(impl_->shape, impl_->dtype, impl_->device);
+    result.impl_->requires_grad = impl_->requires_grad;
+
+    // Copy data
+    const size_t size_bytes = numel() * dtype_size();
+
+    if (impl_->device.type == Device::Type::CPU) {
+        // CPU copy
+        std::memcpy(result.impl_->storage->data(),
+                    impl_->storage->data(),
+                    size_bytes);
+    } else {
+        // Device copy
+        auto* backend = backend_registry().get_backend(impl_->device.type);
+        if (!backend) {
+            throw std::runtime_error("Backend not available for device");
+        }
+        backend->copy(result.impl_->storage->data(),
+                      impl_->storage->data(),
+                      size_bytes,
+                      CopyKind::DeviceToDevice);
+    }
+
+    return result;
 }
 
 auto Tensor::detach() const -> Tensor {
@@ -691,13 +721,49 @@ auto Tensor::fill_(float value) -> Tensor& {
         return *this;
     }
 
-    // Build attributes with fill value
-    OpAttributes attrs;
-    attrs["value"] = std::to_string(value);
+    // Direct implementation - fill tensor data with the value
+    const int64_t n = numel();
 
-    // Dispatch to backend for fill operation
-    std::vector<Tensor> inputs = {*this};
-    *this = Dispatcher::dispatch("fill", inputs, attrs)[0];
+    // Handle different dtypes
+    switch (impl_->dtype) {
+        case DType::Float32: {
+            float* ptr = data<float>();
+            for (int64_t i = 0; i < n; ++i) {
+                ptr[i] = value;
+            }
+            break;
+        }
+        case DType::Float64: {
+            double* ptr = data<double>();
+            for (int64_t i = 0; i < n; ++i) {
+                ptr[i] = static_cast<double>(value);
+            }
+            break;
+        }
+        case DType::Int32: {
+            int32_t* ptr = data<int32_t>();
+            for (int64_t i = 0; i < n; ++i) {
+                ptr[i] = static_cast<int32_t>(value);
+            }
+            break;
+        }
+        case DType::Int64: {
+            int64_t* ptr = data<int64_t>();
+            for (int64_t i = 0; i < n; ++i) {
+                ptr[i] = static_cast<int64_t>(value);
+            }
+            break;
+        }
+        case DType::UInt8: {
+            uint8_t* ptr = data<uint8_t>();
+            for (int64_t i = 0; i < n; ++i) {
+                ptr[i] = static_cast<uint8_t>(value);
+            }
+            break;
+        }
+        default:
+            throw std::runtime_error("fill_ not supported for this dtype");
+    }
 
     return *this;
 }
@@ -1016,6 +1082,11 @@ auto Tensor::flatten(int64_t start_dim, int64_t end_dim) const -> Tensor {
     }
 
     return reshape(std::move(new_shape));
+}
+
+auto Tensor::nonzero() const -> Tensor {
+    // Forward to the ops function
+    return tenzor::nonzero(*this);
 }
 
 // Indexing

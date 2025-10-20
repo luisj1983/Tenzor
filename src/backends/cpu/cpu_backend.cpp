@@ -23,6 +23,8 @@ namespace cpu {
     auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
     auto max_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
     auto min_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
+    auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
+    auto argsort_kernel(const Tensor& input, int64_t dim, bool descending) -> Tensor;
 
     // Comparison operations
     auto eq_kernel(const Tensor& a, const Tensor& b) -> Tensor;
@@ -41,6 +43,8 @@ namespace cpu {
     auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Tensor;
     auto gelu_kernel(const Tensor& input) -> Tensor;
     auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Tensor;
+    auto swish_kernel(const Tensor& input) -> Tensor;
+    auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Tensor;
     auto leaky_relu_kernel(const Tensor& input, float alpha) -> Tensor;
     auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, float alpha) -> Tensor;
     auto softmax_kernel(const Tensor& input, int64_t dim) -> Tensor;
@@ -85,6 +89,9 @@ namespace cpu {
     auto fused_add_relu_kernel(const Tensor& a, const Tensor& b) -> Tensor;
     auto fused_gelu_kernel(const Tensor& input) -> Tensor;
     auto fused_layer_norm_kernel(const Tensor& input, const std::vector<int64_t>& normalized_shape, const Tensor& weight, const Tensor& bias, float eps) -> Tensor;
+
+    // Indexing kernels
+    auto index_select_kernel(const Tensor& input, int64_t dim, const Tensor& index) -> Tensor;
 } // namespace cpu
 
 class CPUBackend : public Backend {
@@ -246,6 +253,34 @@ public:
             }
             return {cpu::min_kernel(inputs[0], dim, keepdim)};
         }
+        else if (op_name == "argmax") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("argmax operation requires exactly 1 input");
+            }
+            int64_t dim = -1;
+            bool keepdim = false;
+            if (attrs.contains("dim")) {
+                dim = std::stoll(attrs.at("dim"));
+            }
+            if (attrs.contains("keepdim")) {
+                keepdim = (attrs.at("keepdim") == "1");
+            }
+            return {cpu::argmax_kernel(inputs[0], dim, keepdim)};
+        }
+        else if (op_name == "argsort") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("argsort operation requires exactly 1 input");
+            }
+            int64_t dim = 0;
+            bool descending = false;
+            if (attrs.contains("dim")) {
+                dim = std::stoll(attrs.at("dim"));
+            }
+            if (attrs.contains("descending")) {
+                descending = (attrs.at("descending") == "1");
+            }
+            return {cpu::argsort_kernel(inputs[0], dim, descending)};
+        }
         else if (op_name == "sqrt") {
             if (inputs.size() != 1) {
                 throw std::invalid_argument("sqrt operation requires exactly 1 input");
@@ -354,6 +389,18 @@ public:
                 throw std::invalid_argument("gelu_backward operation requires exactly 2 inputs");
             }
             return {cpu::gelu_backward_kernel(inputs[0], inputs[1])};
+        }
+        else if (op_name == "swish") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("swish operation requires exactly 1 input");
+            }
+            return {cpu::swish_kernel(inputs[0])};
+        }
+        else if (op_name == "swish_backward") {
+            if (inputs.size() != 2) {
+                throw std::invalid_argument("swish_backward operation requires exactly 2 inputs");
+            }
+            return {cpu::swish_backward_kernel(inputs[0], inputs[1])};
         }
         else if (op_name == "leaky_relu") {
             if (inputs.size() != 1) {
@@ -512,6 +559,16 @@ public:
                 dim = std::stoll(attrs.at("dim"));
             }
             return {cpu::unsqueeze_kernel(inputs[0], dim)};
+        }
+        else if (op_name == "index_select") {
+            if (inputs.size() != 2) {
+                throw std::invalid_argument("index_select operation requires exactly 2 inputs");
+            }
+            int64_t dim = 0;
+            if (attrs.contains("dim")) {
+                dim = std::stoll(attrs.at("dim"));
+            }
+            return {cpu::index_select_kernel(inputs[0], dim, inputs[1])};
         }
         else if (op_name == "batchnorm2d_mean_var") {
             if (inputs.size() != 1) {

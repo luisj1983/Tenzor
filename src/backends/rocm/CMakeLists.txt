@@ -40,7 +40,7 @@ set(ROCM_HIP_SOURCES
     kernels/transform.hip.cpp
     kernels/fused_ops.hip.cpp
     kernels/reduction.hip.cpp
-    kernels/matmul_stub.hip.cpp
+    kernels/matmul.hip.cpp
 )
 
 # Mark .hip.cpp files to be compiled as HIP language

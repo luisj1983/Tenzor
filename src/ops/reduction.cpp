@@ -51,6 +51,14 @@ auto argmin(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> Te
     return Dispatcher::dispatch("argmin", inputs, attrs)[0];
 }
 
+auto argsort(const Tensor& input, int64_t dim, bool descending) -> Tensor {
+    OpAttributes attrs;
+    attrs["dim"] = std::to_string(dim);
+    attrs["descending"] = descending ? "1" : "0";
+    std::vector<Tensor> inputs = {input};
+    return Dispatcher::dispatch("argsort", inputs, attrs)[0];
+}
+
 auto prod(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> Tensor {
     OpAttributes attrs;
     if (dim.has_value()) attrs["dim"] = std::to_string(*dim);
