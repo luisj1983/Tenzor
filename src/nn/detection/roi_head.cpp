@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cmath>
 #include <vector>
+#include <iostream>
 
 namespace tenzor {
 namespace nn {
@@ -125,18 +126,37 @@ auto RoIHead::forward(const Variable& input) -> Variable {
 }
 
 auto RoIHead::match_proposals_to_gt(const Tensor& proposals,
-                                     const Tensor& gt_boxes)
+                                     const Tensor& gt_boxes,
+                                     const Tensor& gt_labels)
     -> std::pair<Tensor, Tensor> {
 
+    std::cout << "[DEBUG]         match_proposals_to_gt: proposals.shape() = [" << proposals.shape()[0] << ", " << proposals.shape()[1] << "]" << std::endl;
+    std::cout << "[DEBUG]         match_proposals_to_gt: gt_boxes.shape() = [" << gt_boxes.shape()[0] << ", " << gt_boxes.shape()[1] << "]" << std::endl;
+    std::cout << "[DEBUG]         match_proposals_to_gt: gt_labels.shape() = [" << gt_labels.shape()[0] << "]" << std::endl;
+    std::cout.flush();
+
     // Compute IoU between proposals and ground truth
+    std::cout << "[DEBUG]         About to compute box_iou" << std::endl;
+    std::cout.flush();
+
     auto iou_matrix = ops::box_iou(proposals, gt_boxes);  // (num_proposals, num_gt)
+
+    std::cout << "[DEBUG]         box_iou completed, iou_matrix.shape() = [" << iou_matrix.shape()[0] << ", " << iou_matrix.shape()[1] << "]" << std::endl;
+    std::cout.flush();
 
     // For each proposal, find best matching GT box
     auto max_iou_per_proposal = ops::max(iou_matrix, 1);
+    std::cout << "[DEBUG]         max computed" << std::endl;
+    std::cout.flush();
+
     auto matched_gt_idx = ops::argmax(iou_matrix, 1);
+    std::cout << "[DEBUG]         argmax computed" << std::endl;
+    std::cout.flush();
 
     // Get matched GT boxes
     auto matched_gt_boxes = ops::index_select(gt_boxes, 0, matched_gt_idx);
+    std::cout << "[DEBUG]         matched_gt_boxes computed" << std::endl;
+    std::cout.flush();
 
     // Assign labels based on IoU thresholds
     auto num_proposals = proposals.shape()[0];
@@ -144,16 +164,22 @@ auto RoIHead::match_proposals_to_gt(const Tensor& proposals,
     // Start with all labels as 0 (background)
     std::vector<int64_t> label_data(num_proposals, 0);
 
-    // Get IoU values as CPU tensor
+    // Get IoU values and matched indices as CPU tensors
     auto max_iou_cpu = max_iou_per_proposal.to(Device::cpu());
+    auto matched_idx_cpu = matched_gt_idx.to(Device::cpu());
+    auto gt_labels_cpu = gt_labels.to(Device::cpu());
+
     const float* iou_data = max_iou_cpu.data<float>();
+    const int64_t* matched_idx_data = matched_idx_cpu.data<int64_t>();
+    const int64_t* gt_labels_data = gt_labels_cpu.data<int64_t>();
 
     // Set labels based on IoU thresholds
-    // In practice, we'd get class labels from matched GT boxes
-    // For now, using label 1 for all foreground
+    // Use actual class labels from matched GT boxes
     for (int64_t i = 0; i < num_proposals; ++i) {
         if (iou_data[i] >= fg_iou_thresh_) {
-            label_data[i] = 1;  // foreground
+            // Assign the actual GT class label
+            int64_t matched_idx = matched_idx_data[i];
+            label_data[i] = gt_labels_data[matched_idx];  // Use actual class label
         }
         // else: keep as 0 (background)
     }
@@ -191,14 +217,22 @@ auto RoIHead::sample_rois(const Tensor& labels) -> Tensor {
     auto neg_indices = ops::nonzero(negative_mask).squeeze(-1);
 
     // Randomly sample
-    if (num_pos_samples < num_pos) {
-        auto perm = ops::randperm(num_pos, labels.device());
+    // BUG FIX: Use actual number of indices, not num_pos/num_neg
+    // Same fix as applied to RPN - must use pos_indices.numel() and neg_indices.numel()
+    if (num_pos_samples == 0) {
+        // Create empty tensor when no positive samples needed
+        pos_indices = Tensor({0}, DType::Int64, labels.device());
+    } else if (num_pos_samples < pos_indices.numel()) {
+        auto perm = ops::randperm(pos_indices.numel(), labels.device());
         pos_indices = ops::index_select(pos_indices, 0,
                                         slice(perm, 0, 0, num_pos_samples));
     }
 
-    if (num_neg_samples < num_neg) {
-        auto perm = ops::randperm(num_neg, labels.device());
+    if (num_neg_samples == 0) {
+        // Create empty tensor when no negative samples needed
+        neg_indices = Tensor({0}, DType::Int64, labels.device());
+    } else if (num_neg_samples < neg_indices.numel()) {
+        auto perm = ops::randperm(neg_indices.numel(), labels.device());
         neg_indices = ops::index_select(neg_indices, 0,
                                         slice(perm, 0, 0, num_neg_samples));
     }
@@ -302,37 +336,85 @@ auto RoIHead::forward_detections(
     const Variable& features,
     const std::vector<Tensor>& proposals,
     const std::vector<std::pair<int64_t, int64_t>>& image_shapes,
-    const std::vector<Tensor>* targets)
+    const std::vector<Tensor>* gt_boxes,
+    const std::vector<Tensor>* gt_labels)
     -> std::vector<std::unordered_map<std::string, Tensor>> {
+
+    std::cout << "[DEBUG] ROI head forward_detections called" << std::endl;
+    std::cout << "[DEBUG]   proposals.size() = " << proposals.size() << std::endl;
+    std::cout << "[DEBUG]   is_training() = " << is_training() << std::endl;
+    std::cout.flush();
 
     std::vector<std::unordered_map<std::string, Tensor>> all_detections;
 
     // Process each image in batch
     for (size_t i = 0; i < proposals.size(); ++i) {
+        std::cout << "[DEBUG] Processing image " << i << std::endl;
+        std::cout.flush();
+
         auto img_proposals = proposals[i];
+        std::cout << "[DEBUG]   img_proposals.shape() = [" << img_proposals.shape()[0] << ", " << img_proposals.shape()[1] << "]" << std::endl;
+        std::cout.flush();
 
         // Prepare ROIs in format: (batch_idx, x1, y1, x2, y2)
         auto num_proposals = img_proposals.shape()[0];
+        std::cout << "[DEBUG]   num_proposals = " << num_proposals << std::endl;
+        std::cout.flush();
+
         auto batch_indices = ops::full({num_proposals, 1},
                                         static_cast<float>(i),
                                         img_proposals.dtype(),
                                         img_proposals.device());
+        std::cout << "[DEBUG]   batch_indices created" << std::endl;
+        std::cout.flush();
+
         auto rois = ops::cat({batch_indices, img_proposals}, 1);
+        std::cout << "[DEBUG]   rois.shape() = [" << rois.shape()[0] << ", " << rois.shape()[1] << "]" << std::endl;
+        std::cout.flush();
 
         // Extract ROI features
+        std::cout << "[DEBUG]   About to call roi_align" << std::endl;
+        std::cout.flush();
+
         auto roi_features = roi_align_->forward(features, rois);
 
+        std::cout << "[DEBUG]   roi_align completed, roi_features.shape() = [" << roi_features.shape()[0] << ", " << roi_features.shape()[1] << "]" << std::endl;
+        std::cout.flush();
+
         // Get predictions
+        std::cout << "[DEBUG]   About to call box_head forward_features" << std::endl;
+        std::cout.flush();
+
         auto [class_logits, box_deltas] = box_head_->forward_features(roi_features);
 
+        std::cout << "[DEBUG]   box_head completed" << std::endl;
+        std::cout << "[DEBUG]     class_logits.shape() = [" << class_logits.shape()[0] << ", " << class_logits.shape()[1] << "]" << std::endl;
+        std::cout << "[DEBUG]     box_deltas.shape() = [" << box_deltas.shape()[0] << ", " << box_deltas.shape()[1] << "]" << std::endl;
+        std::cout.flush();
+
         // Training mode: compute losses
-        if (is_training() && targets != nullptr && i < targets->size()) {
-            auto gt_boxes = (*targets)[i];
+        if (is_training() && gt_boxes != nullptr && gt_labels != nullptr &&
+            i < gt_boxes->size() && i < gt_labels->size()) {
+            std::cout << "[DEBUG]   Training mode: computing losses" << std::endl;
+            std::cout.flush();
+
+            auto img_gt_boxes = (*gt_boxes)[i];
+            auto img_gt_labels = (*gt_labels)[i];
+
+            std::cout << "[DEBUG]     img_gt_boxes.shape() = [" << img_gt_boxes.shape()[0] << ", " << img_gt_boxes.shape()[1] << "]" << std::endl;
+            std::cout << "[DEBUG]     img_gt_labels.shape() = [" << img_gt_labels.shape()[0] << "]" << std::endl;
+            std::cout.flush();
 
             // Match proposals to ground truth
+            std::cout << "[DEBUG]     About to match_proposals_to_gt" << std::endl;
+            std::cout.flush();
+
             auto [labels, matched_gt_boxes] = match_proposals_to_gt(
-                img_proposals, gt_boxes
+                img_proposals, img_gt_boxes, img_gt_labels
             );
+
+            std::cout << "[DEBUG]     match_proposals_to_gt completed" << std::endl;
+            std::cout.flush();
 
             // Sample ROIs
             auto sampled_indices = sample_rois(labels);
@@ -353,11 +435,33 @@ auto RoIHead::forward_detections(
             );
 
             // Classification loss
+            std::cout << "[DEBUG]     About to compute CrossEntropyLoss" << std::endl;
+            std::cout << "[DEBUG]       sampled_logits.shape() = [" << sampled_logits.shape()[0] << ", " << sampled_logits.shape()[1] << "]" << std::endl;
+            std::cout << "[DEBUG]       sampled_labels.shape() = [" << sampled_labels.shape()[0] << "]" << std::endl;
+            std::cout.flush();
+
+            // Convert class indices to one-hot encoding
+            // CrossEntropyLoss implementation expects one-hot encoded targets
+            auto num_samples = sampled_labels.shape()[0];
+            auto num_classes = sampled_logits.shape()[1];
+            auto one_hot = ops::zeros({num_samples, num_classes}, sampled_logits.dtype(), sampled_logits.device());
+            auto one_hot_data = one_hot.data<float>();
+            auto labels_data = sampled_labels.data<int64_t>();
+            for (int64_t i = 0; i < num_samples; ++i) {
+                auto label_idx = labels_data[i];
+                if (label_idx >= 0 && label_idx < num_classes) {
+                    one_hot_data[i * num_classes + label_idx] = 1.0f;
+                }
+            }
+
             CrossEntropyLoss ce_loss;
             auto cls_loss = ce_loss.forward(
                 Variable(sampled_logits, true),
-                sampled_labels
+                one_hot
             );
+
+            std::cout << "[DEBUG]     CrossEntropyLoss completed" << std::endl;
+            std::cout.flush();
 
             // Regression loss (only for foreground)
             auto zero_tensor = full(std::vector<int64_t>(sampled_labels.shape().begin(), sampled_labels.shape().end()),
@@ -414,10 +518,17 @@ auto RoIHead::forward_detections(
                     loss_classifier_ = loss_classifier_ + cls_loss;
                     loss_box_reg_ = loss_box_reg_ + reg_loss;
                 }
-            } else if (i == 0) {
-                loss_classifier_ = cls_loss;
-                loss_box_reg_ = Variable(ops::zeros({1}, features.dtype(),
-                                                     features.device()), false);
+            } else {
+                // No foreground samples - create zero regression loss
+                auto zero_reg_loss = Variable(ops::zeros({1}, features.dtype(),
+                                                         features.device()), false);
+                if (i == 0) {
+                    loss_classifier_ = cls_loss;
+                    loss_box_reg_ = zero_reg_loss;
+                } else {
+                    loss_classifier_ = loss_classifier_ + cls_loss;
+                    loss_box_reg_ = loss_box_reg_ + zero_reg_loss;
+                }
             }
         }
 
@@ -433,7 +544,7 @@ auto RoIHead::forward_detections(
     }
 
     // Average losses over batch
-    if (is_training() && targets != nullptr && !proposals.empty()) {
+    if (is_training() && gt_boxes != nullptr && !proposals.empty()) {
         loss_classifier_ = loss_classifier_ / static_cast<double>(proposals.size());
         loss_box_reg_ = loss_box_reg_ / static_cast<double>(proposals.size());
     }

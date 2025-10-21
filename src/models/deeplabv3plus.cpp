@@ -4,6 +4,7 @@
  */
 
 #include "tenzor/models/deeplabv3plus.hpp"
+#include "tenzor/models/mobilenet.hpp"
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/ops/transform.hpp"
@@ -43,8 +44,8 @@ DeepLabV3PlusEncoder::DeepLabV3PlusEncoder(const std::string& backbone_name,
         low_level_channels_ = 64;     // After layer1
         high_level_channels_ = 512;   // After layer4
     } else if (backbone_name == "mobilenetv2") {
-        low_level_channels_ = 24;     // Early layer
-        high_level_channels_ = 320;   // Final layer
+        low_level_channels_ = 24;     // Early layer (after first few inverted residual blocks)
+        high_level_channels_ = 1280;  // Final layer (after last 1x1 conv before classifier)
     } else {
         throw std::invalid_argument("Unsupported backbone: " + backbone_name);
     }
@@ -71,43 +72,55 @@ auto DeepLabV3PlusEncoder::create_resnet_backbone(const std::string& name,
                                                    bool pretrained)
     -> std::shared_ptr<nn::Module>
 {
-    // Create ResNet backbone
-    // Note: We reuse the existing ResNet implementation
+    // Create backbone (ResNet or MobileNet)
+    // Note: We reuse the existing implementations
     // In a full implementation, we would modify layer3 and layer4 to use
     // atrous convolutions when output_stride < 32
 
-    std::shared_ptr<ResNet> resnet;
+    std::shared_ptr<nn::Module> backbone;
 
     if (name == "resnet50") {
-        resnet = resnet50(1000, pretrained);
+        backbone = resnet50(1000, pretrained);
     } else if (name == "resnet101") {
-        resnet = resnet101(1000, pretrained);
+        backbone = resnet101(1000, pretrained);
     } else if (name == "resnet152") {
-        resnet = resnet152(1000, pretrained);
+        backbone = resnet152(1000, pretrained);
     } else if (name == "resnet18") {
-        resnet = resnet18(1000, pretrained);
+        backbone = resnet18(1000, pretrained);
     } else if (name == "resnet34") {
-        resnet = resnet34(1000, pretrained);
+        backbone = resnet34(1000, pretrained);
+    } else if (name == "mobilenetv2") {
+        backbone = mobilenet_v2(1000, pretrained);
     } else {
-        throw std::invalid_argument("Unsupported ResNet variant: " + name);
+        throw std::invalid_argument("Unsupported backbone variant: " + name);
     }
 
-    register_module("backbone", resnet);
-    return resnet;
+    register_module("backbone", backbone);
+    return backbone;
 }
 
 auto DeepLabV3PlusEncoder::forward_impl(const Variable& input)
     -> std::pair<Variable, Variable>
 {
-    // Cast backbone to ResNet to access intermediate layers
-    auto resnet = std::dynamic_pointer_cast<ResNet>(backbone_);
-    if (!resnet) {
-        throw std::runtime_error("Backbone is not a ResNet model");
-    }
+    Variable high_level_features;
 
-    // Extract high-level features using forward_features
-    // This returns features from layer4 before global pooling (2048 channels at 1/32 resolution)
-    auto high_level_features = resnet->forward_features(input);
+    // Try ResNet backbone first
+    auto resnet = std::dynamic_pointer_cast<ResNet>(backbone_);
+    if (resnet) {
+        // Extract high-level features using forward_features
+        // This returns features from layer4 before global pooling (2048 channels at 1/32 resolution)
+        high_level_features = resnet->forward_features(input);
+    } else {
+        // Try MobileNetV2 backbone
+        auto mobilenet = std::dynamic_pointer_cast<MobileNetV2>(backbone_);
+        if (mobilenet) {
+            // For MobileNet, extract features before the classifier
+            // This returns features after all conv layers (320 channels at 1/32 resolution)
+            high_level_features = mobilenet->forward_features(input);
+        } else {
+            throw std::runtime_error("Unsupported backbone type for DeepLabV3+");
+        }
+    }
 
     // Project high-level features to match expected low-level channel count (256 channels)
     auto projected = feature_proj_->forward(high_level_features);

@@ -87,7 +87,16 @@ auto index_select_kernel(const Tensor& input, int64_t dim, const Tensor& index) 
 
                 // Validate index
                 if (src_idx < 0 || src_idx >= in_shape[dim]) {
-                    throw std::out_of_range("index_select: index out of range");
+                    std::string error_msg = "index_select: index out of range. ";
+                    error_msg += "Index: " + std::to_string(src_idx) + ", ";
+                    error_msg += "Valid range: [0, " + std::to_string(in_shape[dim]) + "), ";
+                    error_msg += "Input shape: [";
+                    for (size_t i = 0; i < in_shape.size(); ++i) {
+                        if (i > 0) error_msg += ", ";
+                        error_msg += std::to_string(in_shape[i]);
+                    }
+                    error_msg += "], dim: " + std::to_string(dim);
+                    throw std::out_of_range(error_msg);
                 }
 
                 // Copy elements

@@ -135,7 +135,8 @@ public:
      * @param features Feature maps from backbone (N, C, H, W)
      * @param proposals List of proposal boxes, one per image (K_i, 4)
      * @param image_shapes List of (height, width) for each image
-     * @param targets Optional ground truth boxes for training
+     * @param gt_boxes Optional ground truth boxes for training
+     * @param gt_labels Optional ground truth class labels for training
      * @return Detections: list of dicts with "boxes", "labels", "scores"
      *         If training: also computes and stores losses
      */
@@ -143,7 +144,8 @@ public:
         const Variable& features,
         const std::vector<Tensor>& proposals,
         const std::vector<std::pair<int64_t, int64_t>>& image_shapes,
-        const std::vector<Tensor>* targets = nullptr
+        const std::vector<Tensor>* gt_boxes = nullptr,
+        const std::vector<Tensor>* gt_labels = nullptr
     ) -> std::vector<std::unordered_map<std::string, Tensor>>;
 
     /**
@@ -164,10 +166,12 @@ private:
      *
      * @param proposals Proposal boxes (num_proposals, 4)
      * @param gt_boxes Ground truth boxes (num_gt, 4)
+     * @param gt_labels Ground truth class labels (num_gt,)
      * @return Tuple of (labels, matched_gt_boxes)
      */
     auto match_proposals_to_gt(const Tensor& proposals,
-                                const Tensor& gt_boxes)
+                                const Tensor& gt_boxes,
+                                const Tensor& gt_labels)
         -> std::pair<Tensor, Tensor>;
 
     /**

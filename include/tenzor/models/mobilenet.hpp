@@ -227,6 +227,7 @@ public:
                 double dropout = 0.2);
 
     auto forward(const Variable& input) -> Variable override;
+    auto forward_features(const Variable& input) -> Variable;
     auto load_pretrained(const std::string& path) -> void;
 
 private:

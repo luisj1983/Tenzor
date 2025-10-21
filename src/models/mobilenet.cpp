@@ -263,6 +263,11 @@ auto MobileNetV2::forward(const Variable& input) -> Variable {
     return x;
 }
 
+auto MobileNetV2::forward_features(const Variable& input) -> Variable {
+    // Extract features before global pooling and classification
+    return features_->forward(input);
+}
+
 auto MobileNetV2::load_pretrained(const std::string& path) -> void {
     load(path);
 }
