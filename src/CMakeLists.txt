@@ -104,6 +104,13 @@ set(TENZOR_CORE_SOURCES
     backends/cpu/kernels/quantization/quantized_linear.cpp
     backends/cpu/kernels/quantization/quantized_conv2d.cpp
     onnx/exporter.cpp
+    onnx/importer.cpp
+    jit/tracer.cpp
+    jit/graph.cpp
+    jit/compiler.cpp
+    jit/serialization.cpp
+    nn/compression/pruning.cpp
+    nn/compression/distillation.cpp
 )
 
 # Create core library

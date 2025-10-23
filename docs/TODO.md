@@ -2013,6 +2013,16 @@ auto export_onnx(Module& model,
 
 ---
 
+## 11.4 Vulkan compute Backend (HIGH PRIORITY)
+
+### 11.4.1 Vulkan Kernels (50 hours)
+
+**cross platform Inference:**
+- [ ] Vulkan compute shaders
+- [ ] Cross platform GPU acceleration
+
+---
+
 # SPARC Phase 12: Testing & Quality Assurance
 
 ## 12.1 Expand Test Coverage (ONGOING)
@@ -2025,7 +2035,7 @@ auto export_onnx(Module& model,
 - [ ] Forward pass tests
 - [ ] Backward pass tests (gradient checking)
 - [ ] Edge case tests (empty tensors, broadcasting, etc.)
-- [ ] Device tests (CPU/CUDA/ROCm/OneAPI)
+- [ ] Device tests (CPU/CUDA/ROCm/OneAPI/Vulkan)
 - [ ] Dtype tests (Float32, Float64, Float16)
 
 ---

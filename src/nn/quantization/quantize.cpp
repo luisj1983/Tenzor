@@ -30,7 +30,14 @@ auto get_quant_range(QuantDType dtype) -> std::pair<int32_t, int32_t> {
 // Compute scale for symmetric quantization
 auto compute_symmetric_scale(float abs_max, QuantDType dtype) -> float {
     auto [quant_min, quant_max] = get_quant_range(dtype);
-    float quant_range = static_cast<float>(std::max(std::abs(quant_min), std::abs(quant_max)));
+    // For INT8 symmetric quantization, use [-127, 127] to avoid asymmetry at -128
+    float quant_range = (dtype == QuantDType::INT8) ? 127.0f :
+                        static_cast<float>(std::max(std::abs(quant_min), std::abs(quant_max)));
+
+    // Add epsilon to handle zero-range edge case (all values identical)
+    constexpr float EPSILON = 1e-8f;
+    abs_max = std::max(abs_max, EPSILON);
+
     return abs_max / quant_range;
 }
 
@@ -38,13 +45,21 @@ auto compute_symmetric_scale(float abs_max, QuantDType dtype) -> float {
 auto compute_asymmetric_params(float min_val, float max_val, QuantDType dtype)
     -> std::pair<float, int32_t> {
     auto [quant_min, quant_max] = get_quant_range(dtype);
+
+    // Handle edge case where all values are identical (min == max)
+    constexpr float EPSILON = 1e-8f;
+    if (std::abs(max_val - min_val) < EPSILON) {
+        // When all values are the same, set scale to small value and zero_point to center
+        float scale = EPSILON;
+        int32_t zero_point = (quant_min + quant_max) / 2;
+        return {scale, zero_point};
+    }
+
     float quant_range = static_cast<float>(quant_max - quant_min);
     float scale = (max_val - min_val) / quant_range;
 
-    // Avoid division by zero
-    if (scale < 1e-8f) {
-        scale = 1e-8f;
-    }
+    // Additional safety check for very small scales
+    scale = std::max(scale, EPSILON);
 
     int32_t zero_point = static_cast<int32_t>(std::round(quant_min - min_val / scale));
     zero_point = std::clamp(zero_point, quant_min, quant_max);
@@ -118,6 +133,14 @@ auto compute_quantization_params(
 auto quantize_tensor(const Tensor& input, const QuantizationParams& params)
     -> QuantizedTensor {
     auto [quant_min, quant_max] = get_quant_range(params.dtype);
+
+    // For symmetric INT8 quantization, use [-127, 127] range to maintain true symmetry
+    if (params.dtype == QuantDType::INT8 &&
+        (params.scheme == QuantizationScheme::PerTensorSymmetric ||
+         params.scheme == QuantizationScheme::PerChannelSymmetric)) {
+        quant_min = -127;
+        quant_max = 127;
+    }
 
     // Create output tensor with appropriate dtype
     DType out_dtype = (params.dtype == QuantDType::INT8) ? DType::Int8 : DType::UInt8;
@@ -383,7 +406,21 @@ auto compute_quantization_error(const Tensor& original, const QuantizedTensor& q
     signal_power /= n;
 
     // Signal-to-noise ratio in dB
-    float snr_db = 10.0f * std::log10(signal_power / (mse + 1e-10f));
+    // Handle edge cases: when signal is near zero or when quantization is perfect
+    constexpr float EPSILON = 1e-10f;
+    float snr_db;
+
+    // For near-zero signals, SNR calculation is not meaningful
+    // For perfect quantization (mse ≈ 0), SNR should be very high
+    if (mse < EPSILON) {
+        // Perfect or near-perfect quantization
+        snr_db = 100.0f;  // Arbitrarily high SNR
+    } else if (signal_power < EPSILON) {
+        // Near-zero signal - SNR not meaningful, but return reasonable value
+        snr_db = 0.0f;
+    } else {
+        snr_db = 10.0f * std::log10(signal_power / mse);
+    }
 
     return {mae, mse, snr_db};
 }
@@ -402,26 +439,89 @@ auto calibrate_quantization_params(
         throw std::runtime_error("Cannot calibrate with empty sample set");
     }
 
-    // Compute global min/max across all samples
-    float global_min = std::numeric_limits<float>::max();
-    float global_max = std::numeric_limits<float>::lowest();
+    constexpr float EPSILON = 1e-8f;
 
-    for (const auto& sample : samples) {
-        const float* data = sample.data<const float>();
-        int64_t n = sample.numel();
+    // Check if per-channel quantization
+    bool is_per_channel = (scheme == QuantizationScheme::PerChannelSymmetric ||
+                          scheme == QuantizationScheme::PerChannelAsymmetric);
 
-        for (int64_t i = 0; i < n; ++i) {
-            global_min = std::min(global_min, data[i]);
-            global_max = std::max(global_max, data[i]);
+    if (is_per_channel && axis >= 0) {
+        // Per-channel quantization
+        auto shape = samples[0].shape();
+        int64_t num_channels = shape[axis];
+        int64_t channel_size = samples[0].numel() / num_channels;
+
+        Tensor min({num_channels}, DType::Float32, samples[0].device());
+        Tensor max({num_channels}, DType::Float32, samples[0].device());
+        float* min_data = min.data<float>();
+        float* max_data = max.data<float>();
+
+        // Initialize min/max for each channel
+        for (int64_t c = 0; c < num_channels; ++c) {
+            min_data[c] = std::numeric_limits<float>::max();
+            max_data[c] = std::numeric_limits<float>::lowest();
         }
+
+        // Compute per-channel min/max across all samples
+        for (const auto& sample : samples) {
+            const float* data = sample.data<const float>();
+            for (int64_t c = 0; c < num_channels; ++c) {
+                for (int64_t i = 0; i < channel_size; ++i) {
+                    float val = data[c * channel_size + i];
+                    min_data[c] = std::min(min_data[c], val);
+                    max_data[c] = std::max(max_data[c], val);
+                }
+            }
+        }
+
+        // Handle edge case where all values in a channel are identical
+        for (int64_t c = 0; c < num_channels; ++c) {
+            if (std::abs(max_data[c] - min_data[c]) < EPSILON) {
+                min_data[c] -= EPSILON;
+                max_data[c] += EPSILON;
+            }
+        }
+
+        auto params = compute_quantization_params(min, max, dtype, scheme);
+        params.axis = axis;
+        return params;
+    } else {
+        // Per-tensor quantization
+        float global_min = std::numeric_limits<float>::max();
+        float global_max = std::numeric_limits<float>::lowest();
+
+        bool has_data = false;
+        for (const auto& sample : samples) {
+            const float* data = sample.data<const float>();
+            int64_t n = sample.numel();
+
+            if (n == 0) continue;  // Skip empty tensors
+            has_data = true;
+
+            for (int64_t i = 0; i < n; ++i) {
+                global_min = std::min(global_min, data[i]);
+                global_max = std::max(global_max, data[i]);
+            }
+        }
+
+        if (!has_data) {
+            throw std::runtime_error("Cannot calibrate with all-empty sample tensors");
+        }
+
+        // Handle edge case where all values are identical
+        if (std::abs(global_max - global_min) < EPSILON) {
+            // Expand range slightly to avoid numerical issues
+            global_min -= EPSILON;
+            global_max += EPSILON;
+        }
+
+        Tensor min({1}, DType::Float32, samples[0].device());
+        Tensor max({1}, DType::Float32, samples[0].device());
+        min.fill_(global_min);
+        max.fill_(global_max);
+
+        return compute_quantization_params(min, max, dtype, scheme);
     }
-
-    Tensor min({1}, DType::Float32, samples[0].device());
-    Tensor max({1}, DType::Float32, samples[0].device());
-    min.fill_(global_min);
-    max.fill_(global_max);
-
-    return compute_quantization_params(min, max, dtype, scheme);
 }
 
 } // namespace quantization

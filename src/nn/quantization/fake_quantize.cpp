@@ -55,12 +55,12 @@ auto FakeQuantize::forward(const Variable& input) -> Variable {
         return input;  // Pass through
     }
 
-    // Update observer in training mode
-    if (training_ && observer_enabled_) {
+    // Update observer if enabled (even in eval mode for calibration)
+    if (observer_enabled_) {
         observer_->observe(input.tensor());
 
-        // Update qparams if observer has data
-        if (observer_->has_data() && !learnable_) {
+        // Update qparams if observer has data and in training mode
+        if (observer_->has_data() && !learnable_ && training_) {
             calculate_qparams();
         }
     }

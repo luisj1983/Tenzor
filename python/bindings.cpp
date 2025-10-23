@@ -20,6 +20,7 @@
 #include <tenzor/nn/loss/losses.hpp>
 #include <tenzor/nn/parallel/distributed_data_parallel.hpp>
 #include <tenzor/models/hub.hpp>
+#include <tenzor/onnx/exporter.hpp>
 #include "numpy_interop.hpp"
 
 namespace py = pybind11;
@@ -1662,5 +1663,165 @@ PYBIND11_MODULE(tenzor_core, m) {
                   py::arg("torch_tensor"), py::arg("device") = py::none(),
                   "Convert PyTorch tensor to Tenzor tensor");
     #endif
+
+    // ONNX export/import functionality
+    auto onnx_mod = m.def_submodule("onnx", "ONNX model export and import");
+
+    // ONNX data type enum
+    py::enum_<tenzor::onnx::ONNXDataType>(onnx_mod, "DataType")
+        .value("UNDEFINED", tenzor::onnx::ONNXDataType::UNDEFINED)
+        .value("FLOAT", tenzor::onnx::ONNXDataType::FLOAT)
+        .value("UINT8", tenzor::onnx::ONNXDataType::UINT8)
+        .value("INT8", tenzor::onnx::ONNXDataType::INT8)
+        .value("UINT16", tenzor::onnx::ONNXDataType::UINT16)
+        .value("INT16", tenzor::onnx::ONNXDataType::INT16)
+        .value("INT32", tenzor::onnx::ONNXDataType::INT32)
+        .value("INT64", tenzor::onnx::ONNXDataType::INT64)
+        .value("STRING", tenzor::onnx::ONNXDataType::STRING)
+        .value("BOOL", tenzor::onnx::ONNXDataType::BOOL)
+        .value("FLOAT16", tenzor::onnx::ONNXDataType::FLOAT16)
+        .value("DOUBLE", tenzor::onnx::ONNXDataType::DOUBLE)
+        .value("UINT32", tenzor::onnx::ONNXDataType::UINT32)
+        .value("UINT64", tenzor::onnx::ONNXDataType::UINT64)
+        .value("COMPLEX64", tenzor::onnx::ONNXDataType::COMPLEX64)
+        .value("COMPLEX128", tenzor::onnx::ONNXDataType::COMPLEX128)
+        .value("BFLOAT16", tenzor::onnx::ONNXDataType::BFLOAT16);
+
+    // ONNXTensor class
+    py::class_<tenzor::onnx::ONNXTensor>(onnx_mod, "Tensor")
+        .def(py::init<const tenzor::Tensor&, const std::string&>(),
+             py::arg("tensor"), py::arg("name"))
+        .def_readwrite("name", &tenzor::onnx::ONNXTensor::name)
+        .def_readwrite("dtype", &tenzor::onnx::ONNXTensor::dtype)
+        .def_readwrite("dims", &tenzor::onnx::ONNXTensor::dims)
+        .def_readwrite("raw_data", &tenzor::onnx::ONNXTensor::raw_data)
+        .def("numel", &tenzor::onnx::ONNXTensor::numel,
+             "Get total number of elements")
+        .def("size_bytes", &tenzor::onnx::ONNXTensor::size_bytes,
+             "Get size in bytes");
+
+    // ONNXValueInfo class
+    py::class_<tenzor::onnx::ONNXValueInfo>(onnx_mod, "ValueInfo")
+        .def(py::init<const std::string&, tenzor::onnx::ONNXDataType, const std::vector<int64_t>&>(),
+             py::arg("name"), py::arg("dtype"), py::arg("shape"))
+        .def_readwrite("name", &tenzor::onnx::ONNXValueInfo::name)
+        .def_readwrite("dtype", &tenzor::onnx::ONNXValueInfo::dtype)
+        .def_readwrite("shape", &tenzor::onnx::ONNXValueInfo::shape);
+
+    // ONNXNode class
+    py::class_<tenzor::onnx::ONNXNode>(onnx_mod, "Node")
+        .def(py::init<const std::string&, const std::string&>(),
+             py::arg("op_type"), py::arg("name"))
+        .def_readwrite("op_type", &tenzor::onnx::ONNXNode::op_type)
+        .def_readwrite("name", &tenzor::onnx::ONNXNode::name)
+        .def_readwrite("inputs", &tenzor::onnx::ONNXNode::inputs)
+        .def_readwrite("outputs", &tenzor::onnx::ONNXNode::outputs)
+        .def("add_input", &tenzor::onnx::ONNXNode::add_input, py::arg("input"))
+        .def("add_output", &tenzor::onnx::ONNXNode::add_output, py::arg("output"));
+
+    // ONNXGraph class
+    py::class_<tenzor::onnx::ONNXGraph>(onnx_mod, "Graph")
+        .def(py::init<const std::string&>(), py::arg("name") = "graph")
+        .def_readwrite("name", &tenzor::onnx::ONNXGraph::name)
+        .def_readwrite("nodes", &tenzor::onnx::ONNXGraph::nodes)
+        .def_readwrite("inputs", &tenzor::onnx::ONNXGraph::inputs)
+        .def_readwrite("outputs", &tenzor::onnx::ONNXGraph::outputs)
+        .def_readwrite("initializers", &tenzor::onnx::ONNXGraph::initializers)
+        .def("add_node", &tenzor::onnx::ONNXGraph::add_node, py::arg("node"))
+        .def("add_input", &tenzor::onnx::ONNXGraph::add_input, py::arg("input"))
+        .def("add_output", &tenzor::onnx::ONNXGraph::add_output, py::arg("output"))
+        .def("add_initializer", &tenzor::onnx::ONNXGraph::add_initializer, py::arg("tensor"))
+        .def("add_value_info", &tenzor::onnx::ONNXGraph::add_value_info, py::arg("info"))
+        .def("get_unique_name", &tenzor::onnx::ONNXGraph::get_unique_name, py::arg("prefix"));
+
+    // ONNXExporter class
+    py::class_<tenzor::onnx::ONNXExporter>(onnx_mod, "Exporter")
+        .def(py::init<int64_t>(), py::arg("opset_version") = 13,
+             "Create ONNX exporter with specified opset version")
+        .def("set_model_name", &tenzor::onnx::ONNXExporter::set_model_name,
+             py::arg("name"), "Set model name")
+        .def("set_opset_version", &tenzor::onnx::ONNXExporter::set_opset_version,
+             py::arg("version"), "Set ONNX opset version")
+        .def("set_description", &tenzor::onnx::ONNXExporter::set_description,
+             py::arg("desc"), "Set model description")
+        .def("set_producer_name", &tenzor::onnx::ONNXExporter::set_producer_name,
+             py::arg("name"), "Set producer name")
+        .def("set_model_version", &tenzor::onnx::ONNXExporter::set_model_version,
+             py::arg("version"), "Set model version")
+        .def("add_input", &tenzor::onnx::ONNXExporter::add_input,
+             py::arg("tensor"), py::arg("name"),
+             py::arg("dynamic_axes") = std::unordered_map<int64_t, std::string>(),
+             "Add model input")
+        .def("add_output", &tenzor::onnx::ONNXExporter::add_output,
+             py::arg("tensor"), py::arg("name"),
+             "Add model output")
+        .def("export_to_file", &tenzor::onnx::ONNXExporter::export_to_file,
+             py::arg("filepath"),
+             "Export model to ONNX file")
+        .def("export_to_bytes", &tenzor::onnx::ONNXExporter::export_to_bytes,
+             "Export model to ONNX bytes")
+        .def("get_graph", &tenzor::onnx::ONNXExporter::get_graph,
+             py::return_value_policy::reference_internal,
+             "Get the ONNX graph")
+        .def("clear", &tenzor::onnx::ONNXExporter::clear,
+             "Clear the exporter state");
+
+    // High-level export function
+    onnx_mod.def("export",
+        [](std::shared_ptr<tenzor::nn::Module> module,
+           const tenzor::Tensor& dummy_input,
+           const std::string& filepath,
+           const std::vector<std::string>& input_names,
+           const std::vector<std::string>& output_names,
+           int64_t opset_version,
+           bool verbose) {
+            if (verbose) {
+                std::cout << "Exporting model to ONNX format..." << std::endl;
+                std::cout << "  Output file: " << filepath << std::endl;
+                std::cout << "  Opset version: " << opset_version << std::endl;
+                std::cout << "  Input names: ";
+                for (const auto& name : input_names) std::cout << name << " ";
+                std::cout << std::endl;
+                std::cout << "  Output names: ";
+                for (const auto& name : output_names) std::cout << name << " ";
+                std::cout << std::endl;
+            }
+
+            tenzor::onnx::export_to_onnx(module, dummy_input, filepath,
+                                        input_names, output_names, opset_version);
+
+            if (verbose) {
+                std::cout << "Model exported successfully!" << std::endl;
+            }
+        },
+        py::arg("module"),
+        py::arg("dummy_input"),
+        py::arg("filepath"),
+        py::arg("input_names") = std::vector<std::string>{"input"},
+        py::arg("output_names") = std::vector<std::string>{"output"},
+        py::arg("opset_version") = 13,
+        py::arg("verbose") = false,
+        R"pbdoc(
+            Export a Tenzor module to ONNX format.
+
+            Args:
+                module: The neural network module to export
+                dummy_input: Example input tensor for shape inference
+                filepath: Output ONNX file path
+                input_names: List of input names (default: ["input"])
+                output_names: List of output names (default: ["output"])
+                opset_version: ONNX opset version (default: 13)
+                verbose: Print export progress (default: False)
+
+            Example:
+                >>> model = tenzor.nn.Linear(10, 5)
+                >>> dummy = tenzor.Tensor([1, 10], dtype=tenzor.dtype.float32)
+                >>> tenzor.onnx.export(model, dummy, "model.onnx", verbose=True)
+        )pbdoc");
+
+    // Utility function to convert DType to ONNX DataType
+    onnx_mod.def("dtype_to_onnx", &tenzor::onnx::dtype_to_onnx,
+                 py::arg("dtype"),
+                 "Convert Tenzor DType to ONNX DataType");
 }
 

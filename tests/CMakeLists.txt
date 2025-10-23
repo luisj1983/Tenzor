@@ -728,6 +728,18 @@ target_link_libraries(test_onnx_export PRIVATE
 
 gtest_discover_tests(test_onnx_export DISCOVERY_TIMEOUT 30)
 
+# ONNX import tests
+add_executable(test_onnx_import
+    test_onnx_import.cpp
+)
+
+target_link_libraries(test_onnx_import PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_onnx_import DISCOVERY_TIMEOUT 30)
+
 # Gradient checking tests
 add_executable(test_gradcheck
     autograd/test_gradcheck.cpp
@@ -1003,3 +1015,55 @@ target_link_libraries(test_detection_ops PRIVATE
 )
 
 gtest_discover_tests(test_detection_ops DISCOVERY_TIMEOUT 30)
+
+# ============================================================================
+# Phase 10 Tests - Model Export, Optimization, and Compression
+# ============================================================================
+
+# JIT (Just-In-Time) compilation tests
+add_executable(test_jit
+    unit/test_jit.cpp
+)
+
+target_link_libraries(test_jit PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_jit DISCOVERY_TIMEOUT 30)
+
+# Pruning tests
+add_executable(test_pruning
+    unit/test_pruning.cpp
+)
+
+target_link_libraries(test_pruning PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_pruning DISCOVERY_TIMEOUT 30)
+
+# Knowledge distillation tests
+add_executable(test_distillation
+    unit/test_distillation.cpp
+)
+
+target_link_libraries(test_distillation PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_distillation DISCOVERY_TIMEOUT 30)
+
+# Quantization tests
+add_executable(test_quantization
+    test_quantization.cpp
+)
+
+target_link_libraries(test_quantization PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_quantization DISCOVERY_TIMEOUT 30)
