@@ -1,0 +1,66 @@
+#version 450
+
+// Activation functions: ReLU, Sigmoid, Tanh, GELU
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Input { float input_data[]; };
+layout(binding = 1) buffer Output { float output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;          // Number of elements
+    uint activation; // 0=ReLU, 1=Sigmoid, 2=Tanh, 3=GELU, 4=LeakyReLU
+    float alpha;     // Parameter for LeakyReLU
+} params;
+
+const float PI = 3.14159265359;
+
+float relu(float x) {
+    return max(0.0, x);
+}
+
+float sigmoid(float x) {
+    return 1.0 / (1.0 + exp(-x));
+}
+
+float gelu(float x) {
+    // Approximation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+    float cdf = 0.5 * (1.0 + tanh(sqrt(2.0 / PI) * (x + 0.044715 * x * x * x)));
+    return x * cdf;
+}
+
+float leaky_relu(float x, float alpha) {
+    return x > 0.0 ? x : alpha * x;
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.n) {
+        return;
+    }
+
+    float x = input_data[idx];
+    float result;
+
+    switch (params.activation) {
+        case 0: // ReLU
+            result = relu(x);
+            break;
+        case 1: // Sigmoid
+            result = sigmoid(x);
+            break;
+        case 2: // Tanh
+            result = tanh(x);
+            break;
+        case 3: // GELU
+            result = gelu(x);
+            break;
+        case 4: // LeakyReLU
+            result = leaky_relu(x, params.alpha);
+            break;
+        default:
+            result = x;
+    }
+
+    output_data[idx] = result;
+}

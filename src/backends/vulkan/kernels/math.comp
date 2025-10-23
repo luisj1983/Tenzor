@@ -1,0 +1,39 @@
+#version 450
+
+// Math operations: add, sub, mul, div
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer InputA { float a[]; };
+layout(binding = 1) buffer InputB { float b[]; };
+layout(binding = 2) buffer Output { float result[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;          // Number of elements
+    uint op;         // Operation: 0=add, 1=sub, 2=mul, 3=div
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.n) {
+        return;
+    }
+
+    float val_a = a[idx];
+    float val_b = b[idx];
+
+    switch (params.op) {
+        case 0: // add
+            result[idx] = val_a + val_b;
+            break;
+        case 1: // sub
+            result[idx] = val_a - val_b;
+            break;
+        case 2: // mul
+            result[idx] = val_a * val_b;
+            break;
+        case 3: // div
+            result[idx] = val_a / val_b;
+            break;
+    }
+}

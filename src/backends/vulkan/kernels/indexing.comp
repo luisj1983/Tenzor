@@ -1,0 +1,36 @@
+#version 450
+
+// Indexing operations: slicing, gather, scatter
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Input { float input_data[]; };
+layout(binding = 1) buffer Indices { int indices_data[]; };
+layout(binding = 2) buffer Output { float output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;          // Number of output elements
+    uint op;         // 0=gather, 1=scatter
+    uint dim;        // Dimension to index along
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.n) {
+        return;
+    }
+
+    if (params.op == 0) {
+        // Gather: output[i] = input[indices[i]]
+        int src_idx = indices_data[idx];
+        if (src_idx >= 0 && src_idx < int(params.n)) {
+            output_data[idx] = input_data[src_idx];
+        }
+    } else {
+        // Scatter: output[indices[i]] = input[i]
+        int dst_idx = indices_data[idx];
+        if (dst_idx >= 0 && dst_idx < int(params.n)) {
+            output_data[dst_idx] = input_data[idx];
+        }
+    }
+}

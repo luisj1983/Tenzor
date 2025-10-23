@@ -15,3 +15,15 @@ endif()
 if(TENZOR_BUILD_ONEAPI)
     add_subdirectory(oneapi)
 endif()
+
+if(TENZOR_BUILD_VULKAN)
+    add_subdirectory(vulkan)
+endif()
+
+if(TENZOR_BUILD_METAL)
+    add_subdirectory(metal)
+endif()
+
+if(TENZOR_BUILD_WEBGPU)
+    add_subdirectory(webgpu)
+endif()

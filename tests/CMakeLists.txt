@@ -1067,3 +1067,20 @@ target_link_libraries(test_quantization PRIVATE
 )
 
 gtest_discover_tests(test_quantization DISCOVERY_TIMEOUT 30)
+
+# ============================================================================
+# Phase 11 Tests - Additional Backend Support
+# ============================================================================
+# Tests for OneAPI, Vulkan, Metal, and WebGPU backends
+# ROCm tests intentionally EXCLUDED per user request (system crashes)
+
+add_executable(test_phase11_backends
+    test_phase11_backends.cpp
+)
+
+target_link_libraries(test_phase11_backends PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_phase11_backends DISCOVERY_TIMEOUT 30)

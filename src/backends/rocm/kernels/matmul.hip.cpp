@@ -10,6 +10,12 @@
 #include "tenzor/core/dtype.hpp"
 #include <hip/hip_runtime.h>
 #include <rocblas/rocblas.h>
+
+// Include FP16 headers before namespace declaration to avoid conflicts
+#ifdef __HIP_PLATFORM_AMD__
+#include <hip/hip_fp16.h>
+#endif
+
 #include <stdexcept>
 #include <vector>
 #include <memory>
@@ -211,7 +217,6 @@ __global__ void matmul_tiled_f64_kernel(
 // ============================================================================
 
 #ifdef __HIP_PLATFORM_AMD__
-#include <hip/hip_fp16.h>
 
 /**
  * @brief WMMA-accelerated matrix multiplication for FP16
@@ -674,22 +679,200 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tens
 // Random Operations (Conditional Compilation)
 // ============================================================================
 
-#ifndef TENZOR_HAS_HIPRAND
+#ifdef TENZOR_HAS_HIPRAND
+#include <hiprand/hiprand.h>
+
+#define HIPRAND_CHECK(call) do { \
+    hiprandStatus_t status = call; \
+    if (status != HIPRAND_STATUS_SUCCESS) { \
+        throw std::runtime_error(std::string("hipRAND error: ") + std::to_string(status)); \
+    } \
+} while(0)
+
 /**
- * @brief Uniform random generation stub
- * Requires hipRAND library
+ * @brief Thread-safe hipRAND generator manager using RAII
+ *
+ * Manages hipRAND generator lifecycle with automatic cleanup.
+ * Each generator is associated with a specific HIP stream for async execution.
+ */
+class HiprandGenerator {
+public:
+    HiprandGenerator(hiprandRngType_t rng_type = HIPRAND_RNG_PSEUDO_DEFAULT) {
+        HIPRAND_CHECK(hiprandCreateGenerator(&generator_, rng_type));
+        // Set a default seed (can be changed later)
+        HIPRAND_CHECK(hiprandSetPseudoRandomGeneratorSeed(generator_, 1234ULL));
+    }
+
+    ~HiprandGenerator() {
+        if (generator_) {
+            hiprandDestroyGenerator(generator_);
+        }
+    }
+
+    // No copy
+    HiprandGenerator(const HiprandGenerator&) = delete;
+    HiprandGenerator& operator=(const HiprandGenerator&) = delete;
+
+    // Allow move
+    HiprandGenerator(HiprandGenerator&& other) noexcept : generator_(other.generator_) {
+        other.generator_ = nullptr;
+    }
+
+    HiprandGenerator& operator=(HiprandGenerator&& other) noexcept {
+        if (this != &other) {
+            if (generator_) {
+                hiprandDestroyGenerator(generator_);
+            }
+            generator_ = other.generator_;
+            other.generator_ = nullptr;
+        }
+        return *this;
+    }
+
+    hiprandGenerator_t get() const { return generator_; }
+
+    void set_stream(hipStream_t stream) {
+        HIPRAND_CHECK(hiprandSetStream(generator_, stream));
+    }
+
+    void set_seed(unsigned long long seed) {
+        HIPRAND_CHECK(hiprandSetPseudoRandomGeneratorSeed(generator_, seed));
+    }
+
+private:
+    hiprandGenerator_t generator_ = nullptr;
+};
+
+/**
+ * @brief Uniform random generation using hipRAND
+ * @param shape Tensor shape
+ * @param dtype Data type (Float32 or Float64)
+ * @param device Device to create tensor on
+ * @param stream HIP stream for asynchronous execution
+ * @return Tensor filled with uniform random values in [0, 1)
+ *
+ * Generates random numbers from a uniform distribution.
+ * Uses hipRAND's XORWOW algorithm (default pseudo-random generator).
+ */
+auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, hipStream_t stream) -> Tensor {
+    // Create output tensor
+    Tensor result(shape, dtype, device);
+    int64_t numel = result.numel();
+
+    if (numel == 0) {
+        return result;
+    }
+
+    // Create hipRAND generator
+    HiprandGenerator generator;
+    generator.set_stream(stream);
+
+    // Generate random numbers based on dtype
+    if (dtype == DType::Float32) {
+        float* data = result.data<float>();
+        HIPRAND_CHECK(hiprandGenerateUniform(generator.get(), data, numel));
+    } else if (dtype == DType::Float64) {
+        double* data = result.data<double>();
+        HIPRAND_CHECK(hiprandGenerateUniformDouble(generator.get(), data, numel));
+    } else {
+        throw std::runtime_error("rand_kernel: only Float32 and Float64 dtypes are supported");
+    }
+
+    return result;
+}
+
+/**
+ * @brief Normal (Gaussian) random generation using hipRAND
+ * @param shape Tensor shape
+ * @param dtype Data type (Float32 or Float64)
+ * @param device Device to create tensor on
+ * @param stream HIP stream for asynchronous execution
+ * @return Tensor filled with normal random values (mean=0, stddev=1)
+ *
+ * Generates random numbers from a normal (Gaussian) distribution.
+ * Uses Box-Muller transform for high-quality random numbers.
+ *
+ * Note: hipRAND's normal generation requires even number of elements.
+ * If odd, we generate one extra and discard it.
+ */
+auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, hipStream_t stream) -> Tensor {
+    // Create output tensor
+    Tensor result(shape, dtype, device);
+    int64_t numel = result.numel();
+
+    if (numel == 0) {
+        return result;
+    }
+
+    // Create hipRAND generator
+    HiprandGenerator generator;
+    generator.set_stream(stream);
+
+    // hipRAND normal generation requires even number of elements
+    int64_t gen_count = (numel % 2 == 0) ? numel : (numel + 1);
+
+    // Generate random numbers based on dtype
+    if (dtype == DType::Float32) {
+        float* data = result.data<float>();
+
+        if (gen_count == numel) {
+            // Even number of elements, generate directly
+            HIPRAND_CHECK(hiprandGenerateNormal(generator.get(), data, gen_count, 0.0f, 1.0f));
+        } else {
+            // Odd number of elements, need temporary buffer
+            float* temp_data;
+            HIP_CHECK(hipMalloc(&temp_data, gen_count * sizeof(float)));
+            HIPRAND_CHECK(hiprandGenerateNormal(generator.get(), temp_data, gen_count, 0.0f, 1.0f));
+            // Copy only the needed elements
+            HIP_CHECK(hipMemcpyAsync(data, temp_data, numel * sizeof(float), hipMemcpyDeviceToDevice, stream));
+            HIP_CHECK(hipFree(temp_data));
+        }
+    } else if (dtype == DType::Float64) {
+        double* data = result.data<double>();
+
+        if (gen_count == numel) {
+            // Even number of elements, generate directly
+            HIPRAND_CHECK(hiprandGenerateNormalDouble(generator.get(), data, gen_count, 0.0, 1.0));
+        } else {
+            // Odd number of elements, need temporary buffer
+            double* temp_data;
+            HIP_CHECK(hipMalloc(&temp_data, gen_count * sizeof(double)));
+            HIPRAND_CHECK(hiprandGenerateNormalDouble(generator.get(), temp_data, gen_count, 0.0, 1.0));
+            // Copy only the needed elements
+            HIP_CHECK(hipMemcpyAsync(data, temp_data, numel * sizeof(double), hipMemcpyDeviceToDevice, stream));
+            HIP_CHECK(hipFree(temp_data));
+        }
+    } else {
+        throw std::runtime_error("randn_kernel: only Float32 and Float64 dtypes are supported");
+    }
+
+    return result;
+}
+
+#else
+
+/**
+ * @brief Uniform random generation fallback (when hipRAND unavailable)
+ *
+ * This is an intentional fallback that throws an error when hipRAND is not compiled.
+ * The full implementation is available in the #ifdef TENZOR_HAS_HIPRAND block above.
+ * Requires hipRAND library to be installed and enabled at compile time.
  */
 auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, hipStream_t stream) -> Tensor {
     throw std::runtime_error("rand_kernel requires hipRAND library. Please install ROCm hipRAND.");
 }
 
 /**
- * @brief Normal random generation stub
- * Requires hipRAND library
+ * @brief Normal random generation fallback (when hipRAND unavailable)
+ *
+ * This is an intentional fallback that throws an error when hipRAND is not compiled.
+ * The full implementation is available in the #ifdef TENZOR_HAS_HIPRAND block above.
+ * Requires hipRAND library to be installed and enabled at compile time.
  */
 auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, hipStream_t stream) -> Tensor {
     throw std::runtime_error("randn_kernel requires hipRAND library. Please install ROCm hipRAND.");
 }
+
 #endif
 
 } // namespace rocm

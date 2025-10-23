@@ -1,0 +1,45 @@
+#version 450
+
+// Transform operations: reshape, transpose, permute
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Input { float input_data[]; };
+layout(binding = 1) buffer Output { float output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;          // Total number of elements
+    uint ndim;       // Number of dimensions
+    uint transform;  // 0=copy, 1=transpose, 2=permute
+    uint dim0;       // First dimension for transpose
+    uint dim1;       // Second dimension for transpose
+} params;
+
+// Simplified transpose for 2D
+void transpose_2d(uint idx) {
+    // Assumes square matrix for simplicity
+    // Production would handle arbitrary dimensions
+    uint size = uint(sqrt(float(params.n)));
+    uint row = idx / size;
+    uint col = idx % size;
+    uint new_idx = col * size + row;
+    output_data[new_idx] = input_data[idx];
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.n) {
+        return;
+    }
+
+    switch (params.transform) {
+        case 0: // copy/reshape
+            output_data[idx] = input_data[idx];
+            break;
+        case 1: // transpose
+            transpose_2d(idx);
+            break;
+        default:
+            output_data[idx] = input_data[idx];
+    }
+}

@@ -1,0 +1,68 @@
+#version 450
+
+// Reduction operations: sum, mean, max, min
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Input { float input_data[]; };
+layout(binding = 1) buffer Output { float output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;              // Total number of elements
+    uint reduce_size;    // Size of dimension to reduce
+    uint outer_size;     // Size of outer dimensions
+    uint op;             // 0=sum, 1=mean, 2=max, 3=min
+} params;
+
+shared float shared_data[256];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint gid = gl_GlobalInvocationID.x;
+    uint wid = gl_WorkGroupID.x;
+
+    // Initialize shared memory
+    float value;
+    if (gid < params.n) {
+        value = input_data[gid];
+    } else {
+        // Initialize based on operation
+        if (params.op == 2) { // max
+            value = -1.0 / 0.0; // -infinity
+        } else if (params.op == 3) { // min
+            value = 1.0 / 0.0; // +infinity
+        } else {
+            value = 0.0;
+        }
+    }
+    shared_data[tid] = value;
+
+    barrier();
+
+    // Parallel reduction in shared memory
+    for (uint s = 128; s > 0; s >>= 1) {
+        if (tid < s && (gid + s) < params.n) {
+            switch (params.op) {
+                case 0: // sum
+                case 1: // mean
+                    shared_data[tid] += shared_data[tid + s];
+                    break;
+                case 2: // max
+                    shared_data[tid] = max(shared_data[tid], shared_data[tid + s]);
+                    break;
+                case 3: // min
+                    shared_data[tid] = min(shared_data[tid], shared_data[tid + s]);
+                    break;
+            }
+        }
+        barrier();
+    }
+
+    // Write result
+    if (tid == 0) {
+        float result = shared_data[0];
+        if (params.op == 1) { // mean
+            result /= float(params.reduce_size);
+        }
+        output_data[wid] = result;
+    }
+}

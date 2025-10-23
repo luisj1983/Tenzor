@@ -509,9 +509,186 @@ auto conv2d_forward_miopen(
     int64_t groups,
     hipStream_t stream
 ) -> Tensor {
-    // TODO: Implement MIOpen fast path
-    // This would use miopenConvolutionForward for optimal performance
-    throw std::runtime_error("MIOpen path not yet implemented");
+    // Extract dimensions (assume NCHW layout)
+    auto input_shape = input.shape();
+    auto weight_shape = weight.shape();
+
+    int64_t batch = input_shape[0];
+    int64_t in_channels = input_shape[1];
+    int64_t height = input_shape[2];
+    int64_t width = input_shape[3];
+
+    int64_t out_channels = weight_shape[0];
+    int64_t kernel_h = weight_shape[2];
+    int64_t kernel_w = weight_shape[3];
+
+    // Calculate output dimensions
+    int64_t out_h = calculate_output_size(height, kernel_h, stride, padding, dilation);
+    int64_t out_w = calculate_output_size(width, kernel_w, stride, padding, dilation);
+
+    // Create output tensor
+    Tensor output({batch, out_channels, out_h, out_w}, input.dtype(), input.device());
+
+    // Create MIOpen handle
+    miopenHandle_t miopen_handle;
+    MIOPEN_CHECK(miopenCreate(&miopen_handle));
+    MIOPEN_CHECK(miopenSetStream(miopen_handle, stream));
+
+    // Create tensor descriptors
+    miopenTensorDescriptor_t input_desc, output_desc;
+    MIOPEN_CHECK(miopenCreateTensorDescriptor(&input_desc));
+    MIOPEN_CHECK(miopenCreateTensorDescriptor(&output_desc));
+
+    // Set input tensor descriptor (NCHW format)
+    MIOPEN_CHECK(miopenSet4dTensorDescriptor(
+        input_desc,
+        miopenFloat,  // data type
+        batch, in_channels, height, width
+    ));
+
+    // Set output tensor descriptor
+    MIOPEN_CHECK(miopenSet4dTensorDescriptor(
+        output_desc,
+        miopenFloat,
+        batch, out_channels, out_h, out_w
+    ));
+
+    // Create convolution descriptor
+    miopenConvolutionDescriptor_t conv_desc;
+    MIOPEN_CHECK(miopenCreateConvolutionDescriptor(&conv_desc));
+
+    // Initialize convolution descriptor with parameters
+    MIOPEN_CHECK(miopenInitConvolutionDescriptor(
+        conv_desc,
+        miopenConvolution,  // mode
+        padding, padding,   // pad_h, pad_w
+        stride, stride,     // stride_h, stride_w
+        dilation, dilation  // dilation_h, dilation_w
+    ));
+
+    // Set group count for grouped convolutions
+    if (groups > 1) {
+        MIOPEN_CHECK(miopenSetConvolutionGroupCount(conv_desc, groups));
+    }
+
+    // Create filter descriptor
+    miopenTensorDescriptor_t filter_desc;
+    MIOPEN_CHECK(miopenCreateTensorDescriptor(&filter_desc));
+    MIOPEN_CHECK(miopenSet4dTensorDescriptor(
+        filter_desc,
+        miopenFloat,
+        out_channels, in_channels / groups, kernel_h, kernel_w
+    ));
+
+    // Find best algorithm for this convolution
+    const int algo_request_count = 5;
+    int algo_count = 0;
+    miopenConvAlgoPerf_t perf_results[algo_request_count];
+
+    // Query workspace size needed for algorithm search
+    size_t workspace_size = 0;
+    MIOPEN_CHECK(miopenConvolutionForwardGetWorkSpaceSize(
+        miopen_handle,
+        filter_desc,
+        input_desc,
+        conv_desc,
+        output_desc,
+        &workspace_size
+    ));
+
+    // Allocate workspace
+    void* workspace = nullptr;
+    if (workspace_size > 0) {
+        HIP_CHECK(hipMalloc(&workspace, workspace_size));
+    }
+
+    // Find the best algorithm
+    MIOPEN_CHECK(miopenFindConvolutionForwardAlgorithm(
+        miopen_handle,
+        input_desc,
+        input.data<float>(),
+        filter_desc,
+        weight.data<float>(),
+        conv_desc,
+        output_desc,
+        output.data<float>(),
+        algo_request_count,
+        &algo_count,
+        perf_results,
+        workspace,
+        workspace_size,
+        false  // exhaustive search (false for heuristics, true for benchmarking)
+    ));
+
+    if (algo_count == 0) {
+        // Cleanup
+        if (workspace) HIP_CHECK(hipFree(workspace));
+        MIOPEN_CHECK(miopenDestroyTensorDescriptor(filter_desc));
+        MIOPEN_CHECK(miopenDestroyConvolutionDescriptor(conv_desc));
+        MIOPEN_CHECK(miopenDestroyTensorDescriptor(output_desc));
+        MIOPEN_CHECK(miopenDestroyTensorDescriptor(input_desc));
+        MIOPEN_CHECK(miopenDestroy(miopen_handle));
+        throw std::runtime_error("MIOpen: No suitable convolution algorithm found");
+    }
+
+    // Use the fastest algorithm
+    miopenConvFwdAlgorithm_t algo = perf_results[0].fwd_algo;
+
+    // Execute forward convolution
+    float alpha = 1.0f;
+    float beta = 0.0f;
+
+    MIOPEN_CHECK(miopenConvolutionForward(
+        miopen_handle,
+        &alpha,
+        input_desc,
+        input.data<float>(),
+        filter_desc,
+        weight.data<float>(),
+        conv_desc,
+        algo,
+        &beta,
+        output_desc,
+        output.data<float>(),
+        workspace,
+        workspace_size
+    ));
+
+    // Add bias if present
+    if (bias != nullptr) {
+        miopenTensorDescriptor_t bias_desc;
+        MIOPEN_CHECK(miopenCreateTensorDescriptor(&bias_desc));
+        MIOPEN_CHECK(miopenSet4dTensorDescriptor(
+            bias_desc,
+            miopenFloat,
+            1, out_channels, 1, 1  // Bias shape: (1, C, 1, 1) for broadcasting
+        ));
+
+        float alpha_bias = 1.0f;
+        float beta_bias = 1.0f;  // Add to existing output
+
+        MIOPEN_CHECK(miopenConvolutionForwardBias(
+            miopen_handle,
+            &alpha_bias,
+            bias_desc,
+            bias->data<float>(),
+            &beta_bias,
+            output_desc,
+            output.data<float>()
+        ));
+
+        MIOPEN_CHECK(miopenDestroyTensorDescriptor(bias_desc));
+    }
+
+    // Cleanup
+    if (workspace) HIP_CHECK(hipFree(workspace));
+    MIOPEN_CHECK(miopenDestroyTensorDescriptor(filter_desc));
+    MIOPEN_CHECK(miopenDestroyConvolutionDescriptor(conv_desc));
+    MIOPEN_CHECK(miopenDestroyTensorDescriptor(output_desc));
+    MIOPEN_CHECK(miopenDestroyTensorDescriptor(input_desc));
+    MIOPEN_CHECK(miopenDestroy(miopen_handle));
+
+    return output;
 }
 #endif
 
