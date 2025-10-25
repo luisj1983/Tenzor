@@ -11,6 +11,14 @@
 namespace tenzor {
 namespace oneapi {
 
+// Kernel class declarations for SYCL
+class BatchNorm2dForwardKernelFloat32;
+class BatchNorm2dForwardAffineKernelFloat32;
+class BatchNorm2dBackwardGammaKernelFloat32;
+class BatchNorm2dBackwardInputKernelFloat32;
+class BatchNormScaleShiftKernelFloat32;
+class BatchNormExtractGradKernelFloat32;
+
 // Helper function to get typed pointer from tensor
 template<typename T>
 inline auto get_data_ptr(const Tensor& t) -> T* {
@@ -151,7 +159,7 @@ auto batchnorm2d_forward_affine(const Tensor& input, const Tensor& mean, const T
     const float* gamma_ptr = get_data_ptr<const float>(gamma);
     const float* beta_ptr = get_data_ptr<const float>(beta);
 
-    queue.parallel_for(sycl::range<1>(C), [=](sycl::id<1> i) {
+    queue.parallel_for<BatchNormScaleShiftKernelFloat32>(sycl::range<1>(C), [=](sycl::id<1> i) {
         ss_ptr[i] = gamma_ptr[i];           // Scale
         ss_ptr[C + i] = beta_ptr[i];        // Shift
     }).wait();
@@ -256,7 +264,7 @@ auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const 
     float* ss_ptr = get_data_ptr<float>(scale_shift);
     const float* gamma_ptr = get_data_ptr<const float>(gamma);
 
-    queue.parallel_for(sycl::range<1>(C), [=](sycl::id<1> i) {
+    queue.parallel_for<BatchNormScaleShiftKernelFloat32>(sycl::range<1>(C), [=](sycl::id<1> i) {
         ss_ptr[i] = gamma_ptr[i];
         ss_ptr[C + i] = 0.0f;  // Beta not used in backward
     }).wait();
@@ -296,7 +304,7 @@ auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const 
     float* grad_gamma_ptr = get_data_ptr<float>(grad_gamma);
     float* grad_beta_ptr = get_data_ptr<float>(grad_beta);
 
-    queue.parallel_for(sycl::range<1>(C), [=](sycl::id<1> i) {
+    queue.parallel_for<BatchNormExtractGradKernelFloat32>(sycl::range<1>(C), [=](sycl::id<1> i) {
         grad_gamma_ptr[i] = diff_ss_ptr[i];
         grad_beta_ptr[i] = diff_ss_ptr[C + i];
     }).wait();
@@ -328,7 +336,7 @@ auto batchnorm2d_forward(const Tensor& input, const Tensor& mean, const Tensor& 
         const float* var_ptr = get_data_ptr<const float>(variance);
         float* out_ptr = get_data_ptr<float>(output);
 
-        queue.parallel_for(sycl::range<3>(N, C, H * W), [=](sycl::id<3> idx) {
+        queue.parallel_for<BatchNorm2dForwardKernelFloat32>(sycl::range<3>(N, C, H * W), [=](sycl::id<3> idx) {
             const int64_t n = idx[0];
             const int64_t c = idx[1];
             const int64_t hw = idx[2];
@@ -370,7 +378,7 @@ auto batchnorm2d_forward_affine(const Tensor& input, const Tensor& mean, const T
         const float* beta_ptr = get_data_ptr<const float>(beta);
         float* out_ptr = get_data_ptr<float>(output);
 
-        queue.parallel_for(sycl::range<3>(N, C, H * W), [=](sycl::id<3> idx) {
+        queue.parallel_for<BatchNorm2dForwardAffineKernelFloat32>(sycl::range<3>(N, C, H * W), [=](sycl::id<3> idx) {
             const int64_t n = idx[0];
             const int64_t c = idx[1];
             const int64_t hw = idx[2];
@@ -417,7 +425,7 @@ auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const 
         float* grad_beta_ptr = get_data_ptr<float>(grad_beta);
 
         // Compute grad_gamma and grad_beta
-        queue.parallel_for(sycl::range<1>(C), [=](sycl::id<1> c) {
+        queue.parallel_for<BatchNorm2dBackwardGammaKernelFloat32>(sycl::range<1>(C), [=](sycl::id<1> c) {
             float sum_grad_out = 0.0f;
             float sum_grad_out_norm = 0.0f;
             const float m = mean_ptr[c];
@@ -438,7 +446,7 @@ auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const 
 
         // Compute grad_input
         const float scale = 1.0f / static_cast<float>(N * spatial);
-        queue.parallel_for(sycl::range<3>(N, C, spatial), [=](sycl::id<3> idx) {
+        queue.parallel_for<BatchNorm2dBackwardInputKernelFloat32>(sycl::range<3>(N, C, spatial), [=](sycl::id<3> idx) {
             const int64_t n = idx[0];
             const int64_t c = idx[1];
             const int64_t hw = idx[2];

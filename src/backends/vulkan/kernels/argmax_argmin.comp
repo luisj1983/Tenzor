@@ -1,0 +1,66 @@
+#version 450
+
+// Argmax and Argmin operations
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Input { float input_data[]; };
+layout(binding = 1) buffer Output { int output_indices[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;              // Total number of elements
+    uint reduce_size;    // Size of dimension to reduce
+    uint outer_size;     // Size of outer dimensions
+    uint op;             // 0=argmax, 1=argmin
+} params;
+
+shared float shared_vals[256];
+shared int shared_indices[256];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint gid = gl_GlobalInvocationID.x;
+    uint wid = gl_WorkGroupID.x;
+
+    // Initialize with first element or extreme value
+    float value;
+    int index;
+
+    if (gid < params.n) {
+        value = input_data[gid];
+        index = int(gid % params.reduce_size);
+    } else {
+        if (params.op == 0) { // argmax
+            value = -1.0 / 0.0; // -infinity
+        } else { // argmin
+            value = 1.0 / 0.0; // +infinity
+        }
+        index = -1;
+    }
+
+    shared_vals[tid] = value;
+    shared_indices[tid] = index;
+    barrier();
+
+    // Parallel reduction
+    for (uint s = 128; s > 0; s >>= 1) {
+        if (tid < s && (gid + s) < params.n) {
+            if (params.op == 0) { // argmax
+                if (shared_vals[tid + s] > shared_vals[tid]) {
+                    shared_vals[tid] = shared_vals[tid + s];
+                    shared_indices[tid] = shared_indices[tid + s];
+                }
+            } else { // argmin
+                if (shared_vals[tid + s] < shared_vals[tid]) {
+                    shared_vals[tid] = shared_vals[tid + s];
+                    shared_indices[tid] = shared_indices[tid + s];
+                }
+            }
+        }
+        barrier();
+    }
+
+    // Write result
+    if (tid == 0) {
+        output_indices[wid] = shared_indices[0];
+    }
+}

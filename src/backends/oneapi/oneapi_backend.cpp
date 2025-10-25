@@ -98,6 +98,15 @@ public:
             for (const auto& platform : platforms) {
                 auto devices = platform.get_devices();
                 for (const auto& device : devices) {
+                    // IMPORTANT: Only include devices our kernels were compiled for (spir64 target)
+                    // Skip NVIDIA GPUs since kernels are compiled for CPU/Intel GPU only
+                    std::string vendor = device.get_info<sycl::info::device::vendor>();
+                    if (vendor.find("NVIDIA") != std::string::npos ||
+                        vendor.find("nvidia") != std::string::npos) {
+                        // Skip NVIDIA devices - kernels compiled for spir64, not nvptx64
+                        continue;
+                    }
+
                     // Create queue for each device
                     try {
                         auto queue = std::make_shared<sycl::queue>(device,

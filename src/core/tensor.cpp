@@ -1184,14 +1184,18 @@ auto Tensor::data_ptr() -> void* {
     if (!impl_ || !impl_->storage) {
         return nullptr;
     }
-    return impl_->storage->data();
+    // Account for offset when accessing sliced tensors
+    auto* base_ptr = static_cast<uint8_t*>(impl_->storage->data());
+    return base_ptr + impl_->offset * dtype_size();
 }
 
 auto Tensor::data_ptr() const -> const void* {
     if (!impl_ || !impl_->storage) {
         return nullptr;
     }
-    return impl_->storage->data();
+    // Account for offset when accessing sliced tensors
+    const auto* base_ptr = static_cast<const uint8_t*>(impl_->storage->data());
+    return base_ptr + impl_->offset * dtype_size();
 }
 
 auto Tensor::zeros_like(const Tensor& other) -> Tensor {

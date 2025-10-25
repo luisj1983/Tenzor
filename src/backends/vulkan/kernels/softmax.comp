@@ -1,0 +1,85 @@
+#version 450
+
+// Softmax with numerical stability
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Input { float input_data[]; };
+layout(binding = 1) buffer Output { float output_data[]; };
+layout(binding = 2) buffer MaxVals { float max_vals[]; };    // Pre-computed max per row
+layout(binding = 3) buffer SumVals { float sum_vals[]; };    // Pre-computed sum per row
+
+layout(push_constant) uniform PushConstants {
+    uint batch_size;
+    uint num_classes;
+    uint dim;           // Dimension to apply softmax (usually last)
+    uint mode;          // 0=forward, 1=backward
+} params;
+
+shared float shared_max[256];
+shared float shared_sum[256];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint batch_idx = gl_WorkGroupID.x;
+
+    if (batch_idx >= params.batch_size) {
+        return;
+    }
+
+    uint base_idx = batch_idx * params.num_classes;
+
+    if (params.mode == 0) {
+        // Forward pass
+
+        // Step 1: Find maximum for numerical stability
+        float local_max = -1.0 / 0.0; // -infinity
+        for (uint i = tid; i < params.num_classes; i += 256) {
+            local_max = max(local_max, input_data[base_idx + i]);
+        }
+        shared_max[tid] = local_max;
+        barrier();
+
+        // Parallel reduction for max
+        for (uint s = 128; s > 0; s >>= 1) {
+            if (tid < s) {
+                shared_max[tid] = max(shared_max[tid], shared_max[tid + s]);
+            }
+            barrier();
+        }
+
+        float row_max = shared_max[0];
+        barrier();
+
+        // Step 2: Compute exp(x - max) and sum
+        float local_sum = 0.0;
+        for (uint i = tid; i < params.num_classes; i += 256) {
+            float exp_val = exp(input_data[base_idx + i] - row_max);
+            output_data[base_idx + i] = exp_val;
+            local_sum += exp_val;
+        }
+        shared_sum[tid] = local_sum;
+        barrier();
+
+        // Parallel reduction for sum
+        for (uint s = 128; s > 0; s >>= 1) {
+            if (tid < s) {
+                shared_sum[tid] += shared_sum[tid + s];
+            }
+            barrier();
+        }
+
+        float row_sum = shared_sum[0];
+        barrier();
+
+        // Step 3: Divide by sum
+        for (uint i = tid; i < params.num_classes; i += 256) {
+            output_data[base_idx + i] /= row_sum;
+        }
+
+        // Store max and sum for backward pass
+        if (tid == 0) {
+            max_vals[batch_idx] = row_max;
+            sum_vals[batch_idx] = row_sum;
+        }
+    }
+}

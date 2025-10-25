@@ -1,0 +1,91 @@
+#version 450
+
+// Adaptive pooling: AdaptiveAvgPool2d and AdaptiveMaxPool2d
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0) buffer Input { float input_data[]; };
+layout(binding = 1) buffer Output { float output_data[]; };
+layout(binding = 2) buffer Indices { int max_indices[]; };  // For adaptive max pool
+
+layout(push_constant) uniform PushConstants {
+    uint batch;
+    uint channels;
+    uint in_height;
+    uint in_width;
+    uint out_height;
+    uint out_width;
+    uint pool_type; // 0=max, 1=avg
+} params;
+
+// Helper to compute start index for adaptive pooling
+int start_index(int a, int b, int c) {
+    return int(floor(float(a * c) / float(b)));
+}
+
+// Helper to compute end index for adaptive pooling
+int end_index(int a, int b, int c) {
+    return int(ceil(float((a + 1) * c) / float(b)));
+}
+
+void main() {
+    uint out_x = gl_GlobalInvocationID.x;
+    uint out_y = gl_GlobalInvocationID.y;
+    uint c = gl_GlobalInvocationID.z;
+
+    if (out_x >= params.out_width || out_y >= params.out_height ||
+        c >= params.channels) {
+        return;
+    }
+
+    // Compute input window for this output position
+    int in_start_y = start_index(int(out_y), int(params.out_height), int(params.in_height));
+    int in_end_y = end_index(int(out_y), int(params.out_height), int(params.in_height));
+    int in_start_x = start_index(int(out_x), int(params.out_width), int(params.in_width));
+    int in_end_x = end_index(int(out_x), int(params.out_width), int(params.in_width));
+
+    float result;
+    int max_idx = -1;
+
+    if (params.pool_type == 0) {
+        // Adaptive MaxPool
+        result = -1.0 / 0.0; // -infinity
+    } else {
+        // Adaptive AvgPool
+        result = 0.0;
+    }
+
+    uint count = 0;
+
+    for (int iy = in_start_y; iy < in_end_y; iy++) {
+        for (int ix = in_start_x; ix < in_end_x; ix++) {
+            uint input_idx = c * params.in_height * params.in_width +
+                            uint(iy) * params.in_width + uint(ix);
+            float value = input_data[input_idx];
+
+            if (params.pool_type == 0) {
+                // MaxPool
+                if (value > result) {
+                    result = value;
+                    max_idx = int(input_idx);
+                }
+            } else {
+                // AvgPool
+                result += value;
+                count++;
+            }
+        }
+    }
+
+    if (params.pool_type == 1 && count > 0) {
+        result /= float(count);
+    }
+
+    // Write output
+    uint output_idx = c * params.out_height * params.out_width +
+                     out_y * params.out_width + out_x;
+    output_data[output_idx] = result;
+
+    if (params.pool_type == 0) {
+        max_indices[output_idx] = max_idx;
+    }
+}

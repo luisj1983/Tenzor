@@ -3,6 +3,7 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/indexing.hpp"
 #include "tenzor/autograd/ops.hpp"
 
 namespace tenzor::nn {
@@ -99,17 +100,31 @@ auto BCEWithLogitsLoss::forward(const Variable& input, const Variable& target) -
 CrossEntropyLoss::CrossEntropyLoss(Reduction reduction) : reduction_(reduction) {}
 
 auto CrossEntropyLoss::forward(const Variable& input, const Tensor& target) -> Variable {
-    // Cross entropy with logits: -sum(target * log_softmax(input))
+    // Cross entropy with logits: -log_softmax(input)[target_class]
     // Use the log_softmax function from activations
     auto log_probs = nn::log_softmax(input, 1);  // Compute log_softmax along dim=1
 
-    // Multiply with targets and sum along class dimension
-    auto target_var = Variable(target, false);
-    auto weighted = target_var * log_probs;
-    auto loss_per_sample = sum(weighted, 1, false);
+    // Gather the log probabilities for the target classes
+    // target contains class indices (Int64), log_probs has shape [N, C]
+    auto batch_size = input.tensor().shape()[0];
+    auto num_classes = input.tensor().shape()[1];
 
-    // Negate to get positive loss
-    auto neg_loss = neg(loss_per_sample);
+    // Manual gather: select log_probs[i, target[i]] for each i
+    auto loss_per_sample_tensor = tenzor::zeros({batch_size}, input.tensor().dtype(), input.tensor().device());
+    auto* loss_data = loss_per_sample_tensor.data<float>();
+    const int64_t* target_data = target.data<int64_t>();
+
+    for (int64_t i = 0; i < batch_size; ++i) {
+        int64_t class_idx = target_data[i];
+        auto log_prob_i = tenzor::select(log_probs.tensor(), 0, i);  // Get row i
+        auto log_prob_class = tenzor::select(log_prob_i, 0, class_idx);  // Get element at class_idx
+        loss_data[i] = -log_prob_class.template item<float>();  // Negative log likelihood
+    }
+
+    auto loss_per_sample = Variable(loss_per_sample_tensor, true);
+    loss_per_sample.set_grad_fn(log_probs.grad_fn());
+
+    auto neg_loss = loss_per_sample;
 
     switch (reduction_) {
         case Reduction::None:
@@ -128,7 +143,9 @@ NLLLoss::NLLLoss(Reduction reduction) : reduction_(reduction) {}
 auto NLLLoss::forward(const Variable& input, const Tensor& target) -> Variable {
     // Negative log likelihood
     // Assumes input is already log probabilities
-    auto target_var = Variable(target, false);
+    // Convert target to match input dtype
+    auto target_float = target.to(input.tensor().dtype());
+    auto target_var = Variable(target_float, false);
     auto weighted = target_var * input;
     auto loss_per_sample = sum(weighted, 1, false);
     auto neg_loss = neg(loss_per_sample);

@@ -41,6 +41,11 @@ VulkanBackend::~VulkanBackend() {
 
     // Cleanup device contexts
     for (auto& ctx : devices_) {
+        // IMPORTANT: Destroy descriptor pool BEFORE destroying device
+        // Otherwise descriptor pool destructor will try to use invalid device handle
+        if (ctx.descriptorPool) {
+            ctx.descriptorPool.reset();
+        }
         if (ctx.commandPool != VK_NULL_HANDLE) {
             vkDestroyCommandPool(ctx.device, ctx.commandPool, nullptr);
         }
@@ -128,7 +133,7 @@ void VulkanBackend::selectPhysicalDevices() {
             ctx.physicalDevice = physDevice;
             ctx.queueFamilyIndex = computeQueueFamily;
             vkGetPhysicalDeviceMemoryProperties(physDevice, &ctx.memoryProperties);
-            devices_.push_back(ctx);
+            devices_.push_back(std::move(ctx));
         }
     }
 
@@ -462,21 +467,127 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         return {dispatchMatmul(inputs[0], inputs[1])};
     }
 
+    // Pooling operations
+    if (op_name == "max_pool2d") {
+        int64_t kernel_h = attrs.contains("kernel_h") ? std::stoll(attrs.at("kernel_h")) : 2;
+        int64_t kernel_w = attrs.contains("kernel_w") ? std::stoll(attrs.at("kernel_w")) : kernel_h;
+        int64_t stride_h = attrs.contains("stride_h") ? std::stoll(attrs.at("stride_h")) : kernel_h;
+        int64_t stride_w = attrs.contains("stride_w") ? std::stoll(attrs.at("stride_w")) : kernel_w;
+        int64_t padding_h = attrs.contains("padding_h") ? std::stoll(attrs.at("padding_h")) : 0;
+        int64_t padding_w = attrs.contains("padding_w") ? std::stoll(attrs.at("padding_w")) : 0;
+        auto [output, indices] = dispatchMaxPool2d(inputs[0], kernel_h, kernel_w,
+                                                    stride_h, stride_w, padding_h, padding_w);
+        return {output, indices};
+    }
+
+    if (op_name == "avg_pool2d") {
+        int64_t kernel_h = attrs.contains("kernel_h") ? std::stoll(attrs.at("kernel_h")) : 2;
+        int64_t kernel_w = attrs.contains("kernel_w") ? std::stoll(attrs.at("kernel_w")) : kernel_h;
+        int64_t stride_h = attrs.contains("stride_h") ? std::stoll(attrs.at("stride_h")) : kernel_h;
+        int64_t stride_w = attrs.contains("stride_w") ? std::stoll(attrs.at("stride_w")) : kernel_w;
+        int64_t padding_h = attrs.contains("padding_h") ? std::stoll(attrs.at("padding_h")) : 0;
+        int64_t padding_w = attrs.contains("padding_w") ? std::stoll(attrs.at("padding_w")) : 0;
+        return {dispatchAvgPool2d(inputs[0], kernel_h, kernel_w,
+                                  stride_h, stride_w, padding_h, padding_w)};
+    }
+
+    if (op_name == "adaptive_max_pool2d") {
+        int64_t out_h = std::stoll(attrs.at("output_height"));
+        int64_t out_w = std::stoll(attrs.at("output_width"));
+        auto [output, indices] = dispatchAdaptiveMaxPool2d(inputs[0], out_h, out_w);
+        return {output, indices};
+    }
+
+    if (op_name == "adaptive_avg_pool2d") {
+        int64_t out_h = std::stoll(attrs.at("output_height"));
+        int64_t out_w = std::stoll(attrs.at("output_width"));
+        return {dispatchAdaptiveAvgPool2d(inputs[0], out_h, out_w)};
+    }
+
+    // Normalization
+    if (op_name == "softmax") {
+        int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
+        return {dispatchSoftmax(inputs[0], dim)};
+    }
+
+    if (op_name == "log_softmax") {
+        int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
+        return {dispatchLogSoftmax(inputs[0], dim)};
+    }
+
+    // Advanced reductions
+    if (op_name == "argmax") {
+        int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
+        bool keepdim = attrs.contains("keepdim") && attrs.at("keepdim") == "1";
+        return {dispatchArgmax(inputs[0], dim, keepdim)};
+    }
+
+    if (op_name == "argmin") {
+        int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
+        bool keepdim = attrs.contains("keepdim") && attrs.at("keepdim") == "1";
+        return {dispatchArgmin(inputs[0], dim, keepdim)};
+    }
+
+    if (op_name == "var" || op_name == "variance") {
+        int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
+        bool unbiased = !attrs.contains("unbiased") || attrs.at("unbiased") == "1";
+        bool keepdim = attrs.contains("keepdim") && attrs.at("keepdim") == "1";
+        return {dispatchVariance(inputs[0], dim, unbiased, keepdim)};
+    }
+
+    if (op_name == "std") {
+        int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
+        bool unbiased = !attrs.contains("unbiased") || attrs.at("unbiased") == "1";
+        bool keepdim = attrs.contains("keepdim") && attrs.at("keepdim") == "1";
+        return {dispatchStd(inputs[0], dim, unbiased, keepdim)};
+    }
+
+    if (op_name == "prod") {
+        int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
+        bool keepdim = attrs.contains("keepdim") && attrs.at("keepdim") == "1";
+        return {dispatchProd(inputs[0], dim, keepdim)};
+    }
+
+    // Indexing operations
+    if (op_name == "embedding") {
+        int64_t padding_idx = attrs.contains("padding_idx") ? std::stoll(attrs.at("padding_idx")) : -1;
+        return {dispatchEmbedding(inputs[0], inputs[1], padding_idx)};
+    }
+
+    if (op_name == "gather") {
+        int64_t dim = std::stoll(attrs.at("dim"));
+        return {dispatchGather(inputs[0], dim, inputs[1])};
+    }
+
+    if (op_name == "scatter") {
+        int64_t dim = std::stoll(attrs.at("dim"));
+        int64_t reduction = attrs.contains("reduction") ? std::stoll(attrs.at("reduction")) : 0;
+        return {dispatchScatter(inputs[0], dim, inputs[1], inputs[2], reduction)};
+    }
+
+    if (op_name == "index_select") {
+        int64_t dim = std::stoll(attrs.at("dim"));
+        return {dispatchIndexSelect(inputs[0], dim, inputs[1])};
+    }
+
     throw std::runtime_error("VulkanBackend: Operation '" + op_name + "' not implemented");
 }
 
 auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
                                      const Tensor& a, const Tensor& b) -> Tensor {
     // Simplified implementation - production would handle broadcasting, etc.
-    if (a.shape() != b.shape()) {
+    auto a_shape = a.shape();
+    auto b_shape = b.shape();
+    if (!std::equal(a_shape.begin(), a_shape.end(), b_shape.begin(), b_shape.end())) {
         throw std::invalid_argument("Tensors must have same shape for binary op");
     }
 
     int32_t device_id = a.device().index;
     auto* pipeline = getPipeline(op_name, device_id);
 
-    // Create output tensor
-    Tensor output(a.shape(), a.dtype(), a.device());
+    // Create output tensor (convert span to vector)
+    std::vector<int64_t> output_shape(a_shape.begin(), a_shape.end());
+    Tensor output(output_shape, a.dtype(), a.device());
 
     // Execute compute shader
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
@@ -497,7 +608,10 @@ auto VulkanBackend::dispatchUnaryOp(const std::string& op_name,
     int32_t device_id = input.device().index;
     auto* pipeline = getPipeline(op_name, device_id);
 
-    Tensor output(input.shape(), input.dtype(), input.device());
+    // Create output tensor (convert span to vector)
+    auto input_shape = input.shape();
+    std::vector<int64_t> output_shape(input_shape.begin(), input_shape.end());
+    Tensor output(output_shape, input.dtype(), input.device());
 
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
@@ -522,7 +636,9 @@ auto VulkanBackend::dispatchReduction(const std::string& op_name,
     if (dim < 0) {
         out_shape = {1};
     } else {
-        out_shape = input.shape();
+        // Convert span to vector
+        auto input_shape = input.shape();
+        out_shape = std::vector<int64_t>(input_shape.begin(), input_shape.end());
         if (keepdim) {
             out_shape[dim] = 1;
         } else {

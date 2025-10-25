@@ -1,0 +1,47 @@
+#version 450
+
+// Index select: select specific indices along a dimension
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Input { float input_data[]; };
+layout(binding = 1) buffer Indices { int indices[]; };
+layout(binding = 2) buffer Output { float output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_indices;      // Number of indices to select
+    uint dim;              // Dimension to index along
+    uint dim_size;         // Size of dimension being indexed
+    uint inner_size;       // Product of dimensions after dim
+    uint outer_size;       // Product of dimensions before dim
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total_output = params.outer_size * params.num_indices * params.inner_size;
+
+    if (idx >= total_output) {
+        return;
+    }
+
+    // Decompose output index
+    uint outer_idx = idx / (params.num_indices * params.inner_size);
+    uint remainder = idx % (params.num_indices * params.inner_size);
+    uint index_pos = remainder / params.inner_size;
+    uint inner_idx = remainder % params.inner_size;
+
+    // Get the index to select
+    int select_idx = indices[index_pos];
+
+    // Bounds check
+    if (select_idx < 0 || select_idx >= int(params.dim_size)) {
+        output_data[idx] = 0.0;
+        return;
+    }
+
+    // Compute input index
+    uint in_idx = outer_idx * (params.dim_size * params.inner_size) +
+                  uint(select_idx) * params.inner_size +
+                  inner_idx;
+
+    output_data[idx] = input_data[in_idx];
+}

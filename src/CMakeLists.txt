@@ -70,6 +70,7 @@ set(TENZOR_CORE_SOURCES
     nn/quantization/fake_quantize.cpp
     nn/quantization/qconfig.cpp
     nn/quantization/quantized_layers.cpp
+    quantization/quantize_api.cpp
     parallel/threadpool.cpp
     data/dataloader.cpp
     models/hub.cpp

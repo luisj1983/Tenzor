@@ -13,6 +13,7 @@
 #include <numeric>
 #include <cmath>
 #include <limits>
+#include <iostream>
 
 namespace tenzor {
 namespace ops {
@@ -38,9 +39,34 @@ static auto clamp_min_scalar(const Tensor& a, float min_val) -> Tensor {
 static auto box_area(const Tensor& boxes) -> Tensor {
     // boxes: (N, 4) with (x1, y1, x2, y2)
     // area = (x2 - x1) * (y2 - y1)
-    auto widths = boxes.slice(1, 2, 3) - boxes.slice(1, 0, 1);   // x2 - x1
-    auto heights = boxes.slice(1, 3, 4) - boxes.slice(1, 1, 2);  // y2 - y1
-    return (widths * heights).squeeze(1);
+
+    const int64_t N = boxes.shape()[0];
+
+    // Manual computation to avoid slice bugs
+    auto result = zeros({N}, DType::Float32, boxes.device());
+
+    if (boxes.device() == Device::cpu()) {
+        const float* boxes_data = static_cast<const float*>(boxes.data_ptr());
+        float* result_data = static_cast<float*>(result.data_ptr());
+
+        for (int64_t i = 0; i < N; i++) {
+            float x1 = boxes_data[i * 4 + 0];
+            float y1 = boxes_data[i * 4 + 1];
+            float x2 = boxes_data[i * 4 + 2];
+            float y2 = boxes_data[i * 4 + 3];
+
+            float width = x2 - x1;
+            float height = y2 - y1;
+            result_data[i] = width * height;
+        }
+    } else {
+        // For non-CPU devices, fall back to slice-based approach
+        auto widths = boxes.slice(1, 2, 3) - boxes.slice(1, 0, 1);   // x2 - x1
+        auto heights = boxes.slice(1, 3, 4) - boxes.slice(1, 1, 2);  // y2 - y1
+        result = (widths * heights).squeeze(1);
+    }
+
+    return result;
 }
 
 auto box_iou(const Tensor& boxes1, const Tensor& boxes2, IoUType iou_type) -> Tensor {
@@ -53,6 +79,95 @@ auto box_iou(const Tensor& boxes1, const Tensor& boxes2, IoUType iou_type) -> Te
 
     const int64_t N = boxes1.shape()[0];
     const int64_t M = boxes2.shape()[0];
+
+    // For CPU, use manual implementation to avoid slice bugs
+    if (boxes1.device() == Device::cpu() && boxes2.device() == Device::cpu()) {
+        auto result = zeros({N, M}, DType::Float32, Device::cpu());
+        const float* boxes1_data = static_cast<const float*>(boxes1.data_ptr());
+        const float* boxes2_data = static_cast<const float*>(boxes2.data_ptr());
+        float* result_data = static_cast<float*>(result.data_ptr());
+
+        constexpr float pi = 3.14159265358979323846f;
+        constexpr float four_over_pi_sq = 4.0f / (pi * pi);
+
+        for (int64_t i = 0; i < N; i++) {
+            float x1_1 = boxes1_data[i * 4 + 0];
+            float y1_1 = boxes1_data[i * 4 + 1];
+            float x2_1 = boxes1_data[i * 4 + 2];
+            float y2_1 = boxes1_data[i * 4 + 3];
+            float w1 = x2_1 - x1_1;
+            float h1 = y2_1 - y1_1;
+            float area1 = w1 * h1;
+            float cx1 = (x1_1 + x2_1) * 0.5f;
+            float cy1 = (y1_1 + y2_1) * 0.5f;
+
+            for (int64_t j = 0; j < M; j++) {
+                float x1_2 = boxes2_data[j * 4 + 0];
+                float y1_2 = boxes2_data[j * 4 + 1];
+                float x2_2 = boxes2_data[j * 4 + 2];
+                float y2_2 = boxes2_data[j * 4 + 3];
+                float w2 = x2_2 - x1_2;
+                float h2 = y2_2 - y1_2;
+                float area2 = w2 * h2;
+                float cx2 = (x1_2 + x2_2) * 0.5f;
+                float cy2 = (y1_2 + y2_2) * 0.5f;
+
+                // Intersection
+                float inter_x1 = std::max(x1_1, x1_2);
+                float inter_y1 = std::max(y1_1, y1_2);
+                float inter_x2 = std::min(x2_1, x2_2);
+                float inter_y2 = std::min(y2_1, y2_2);
+                float inter_w = std::max(0.0f, inter_x2 - inter_x1);
+                float inter_h = std::max(0.0f, inter_y2 - inter_y1);
+                float inter_area = inter_w * inter_h;
+
+                // Union
+                float union_area = area1 + area2 - inter_area;
+
+                // IoU
+                float iou = inter_area / (union_area + 1e-7f);
+
+                if (iou_type == IoUType::IoU) {
+                    result_data[i * M + j] = iou;
+                } else if (iou_type == IoUType::GIoU) {
+                    // Enclosing box
+                    float enclose_x1 = std::min(x1_1, x1_2);
+                    float enclose_y1 = std::min(y1_1, y1_2);
+                    float enclose_x2 = std::max(x2_1, x2_2);
+                    float enclose_y2 = std::max(y2_1, y2_2);
+                    float enclose_w = enclose_x2 - enclose_x1;
+                    float enclose_h = enclose_y2 - enclose_y1;
+                    float enclose_area = enclose_w * enclose_h;
+                    result_data[i * M + j] = iou - (enclose_area - union_area) / (enclose_area + 1e-7f);
+                } else if (iou_type == IoUType::DIoU || iou_type == IoUType::CIoU) {
+                    // Enclosing box for diagonal distance
+                    float enclose_x1 = std::min(x1_1, x1_2);
+                    float enclose_y1 = std::min(y1_1, y1_2);
+                    float enclose_x2 = std::max(x2_1, x2_2);
+                    float enclose_y2 = std::max(y2_1, y2_2);
+                    float enclose_w = enclose_x2 - enclose_x1;
+                    float enclose_h = enclose_y2 - enclose_y1;
+
+                    // Center distance squared
+                    float center_dist_sq = (cx1 - cx2) * (cx1 - cx2) + (cy1 - cy2) * (cy1 - cy2);
+
+                    // Diagonal distance squared
+                    float diag_dist_sq = enclose_w * enclose_w + enclose_h * enclose_h;
+
+                    if (iou_type == IoUType::DIoU) {
+                        result_data[i * M + j] = iou - center_dist_sq / (diag_dist_sq + 1e-7f);
+                    } else {  // CIoU
+                        // Aspect ratio consistency
+                        float v = four_over_pi_sq * std::pow(std::atan(w2 / (h2 + 1e-7f)) - std::atan(w1 / (h1 + 1e-7f)), 2.0f);
+                        float alpha = v / (1.0f - iou + v + 1e-7f);
+                        result_data[i * M + j] = iou - center_dist_sq / (diag_dist_sq + 1e-7f) - alpha * v;
+                    }
+                }
+            }
+        }
+
+        return result;
+    }
 
     // Compute areas
     auto area1 = box_area(boxes1);  // (N,)
@@ -91,6 +206,20 @@ auto box_iou(const Tensor& boxes1, const Tensor& boxes2, IoUType iou_type) -> Te
     // Compute IoU
     auto iou = inter_area / (union_area + 1e-7f);
 
+    // DEBUG: Check IoU calculation for single box case
+    if (N == 1 && M == 1) {
+        const float* area1_ptr = static_cast<const float*>(area1.data_ptr());
+        const float* area2_ptr = static_cast<const float*>(area2.data_ptr());
+        const float* inter_ptr = static_cast<const float*>(inter_area.data_ptr());
+        const float* union_ptr = static_cast<const float*>(union_area.data_ptr());
+        const float* iou_ptr = static_cast<const float*>(iou.data_ptr());
+        std::cerr << "[IoU DEBUG] area1=" << area1_ptr[0]
+                  << " area2=" << area2_ptr[0]
+                  << " inter=" << inter_ptr[0]
+                  << " union=" << union_ptr[0]
+                  << " IoU=" << iou_ptr[0] << std::endl;
+    }
+
     if (iou_type == IoUType::IoU) {
         return iou;
     }
@@ -128,8 +257,80 @@ auto box_iou(const Tensor& boxes1, const Tensor& boxes2, IoUType iou_type) -> Te
         return iou - center_dist_sq / (diag_dist_sq + 1e-7f);
     }
 
-    // CIoU: Not implemented yet (requires element-wise atan)
-    throw std::runtime_error("CIoU not yet implemented");
+    // CIoU: Complete IoU with aspect ratio consistency
+    // CIoU = IoU - (center_dist^2 / diag_dist^2) - alpha * v
+    // where v = (4/pi^2) * (atan(w_gt/h_gt) - atan(w/h))^2
+    // and alpha = v / (1 - IoU + v)
+
+    // Compute box widths and heights
+    auto w1 = (x2_1 - x1_1).squeeze(1);  // (N,)
+    auto h1 = (y2_1 - y1_1).squeeze(1);
+    auto w2 = (x2_2 - x1_2).squeeze(1);  // (M,)
+    auto h2 = (y2_2 - y1_2).squeeze(1);
+
+    // For now, use CPU implementation of atan for aspect ratio calculation
+    // Create result tensors on CPU for computation
+    constexpr float pi = 3.14159265358979323846f;
+    constexpr float four_over_pi_sq = 4.0f / (pi * pi);
+
+    // Move tensors to CPU for atan computation
+    auto w1_cpu = w1.to(Device::cpu());
+    auto h1_cpu = h1.to(Device::cpu());
+    auto w2_cpu = w2.to(Device::cpu());
+    auto h2_cpu = h2.to(Device::cpu());
+    auto iou_cpu = iou.to(Device::cpu());
+    auto center_dist_sq_cpu = center_dist_sq.to(Device::cpu());
+    auto diag_dist_sq_cpu = diag_dist_sq.to(Device::cpu());
+
+    const int64_t num_boxes1 = w1_cpu.shape()[0];
+    const int64_t num_boxes2 = w2_cpu.shape()[0];
+
+    // Create output tensor for v (aspect ratio penalty)
+    Tensor v({num_boxes1, num_boxes2}, DType::Float32, Device::cpu());
+    Tensor alpha({num_boxes1, num_boxes2}, DType::Float32, Device::cpu());
+
+    const float* w1_data = static_cast<const float*>(w1_cpu.data_ptr());
+    const float* h1_data = static_cast<const float*>(h1_cpu.data_ptr());
+    const float* w2_data = static_cast<const float*>(w2_cpu.data_ptr());
+    const float* h2_data = static_cast<const float*>(h2_cpu.data_ptr());
+    const float* iou_data = static_cast<const float*>(iou_cpu.data_ptr());
+    float* v_data = static_cast<float*>(v.data_ptr());
+    float* alpha_data = static_cast<float*>(alpha.data_ptr());
+
+    // Compute aspect ratio penalty element-wise
+    for (int64_t i = 0; i < num_boxes1; ++i) {
+        float ar1 = std::atan(w1_data[i] / (h1_data[i] + 1e-7f));
+        for (int64_t j = 0; j < num_boxes2; ++j) {
+            float ar2 = std::atan(w2_data[j] / (h2_data[j] + 1e-7f));
+            float ar_diff = ar1 - ar2;
+            float v_ij = four_over_pi_sq * ar_diff * ar_diff;
+            v_data[i * num_boxes2 + j] = v_ij;
+
+            // Compute alpha weighting factor
+            float iou_ij = iou_data[i * num_boxes2 + j];
+            alpha_data[i * num_boxes2 + j] = v_ij / (1.0f - iou_ij + v_ij + 1e-7f);
+        }
+    }
+
+    // Complete IoU
+    // CIoU = IoU - center_dist^2 / diag_dist^2 - alpha * v
+
+    // DEBUG: Print shapes and first values
+    if (num_boxes1 == 1 && num_boxes2 == 1) {
+        const float* iou_ptr = static_cast<const float*>(iou_cpu.data_ptr());
+        const float* center_ptr = static_cast<const float*>(center_dist_sq_cpu.data_ptr());
+        const float* diag_ptr = static_cast<const float*>(diag_dist_sq_cpu.data_ptr());
+        std::cerr << "[CIoU DEBUG] IoU=" << iou_ptr[0]
+                  << " center_dist²=" << center_ptr[0]
+                  << " diag_dist²=" << diag_ptr[0]
+                  << " v=" << v_data[0]
+                  << " alpha=" << alpha_data[0] << std::endl;
+    }
+
+    auto ciou_cpu = iou_cpu - center_dist_sq_cpu / (diag_dist_sq_cpu + 1e-7f) - alpha * v;
+
+    // Move result back to original device
+    return ciou_cpu.to(boxes1.device());
 }
 
 auto nms(const Tensor& boxes, const Tensor& scores, double iou_threshold) -> Tensor {
@@ -212,9 +413,10 @@ auto nms(const Tensor& boxes, const Tensor& scores, double iou_threshold) -> Ten
         }
     }
 
-    // Create result tensor from vector
-    auto result = tenzor::from_data(keep.data(), {static_cast<int64_t>(keep.size())},
-                                     Device::cpu());
+    // Create result tensor and copy data to avoid dangling pointer
+    auto result = zeros({static_cast<int64_t>(keep.size())}, DType::Int64, Device::cpu());
+    int64_t* result_ptr = result.data<int64_t>();
+    std::copy(keep.begin(), keep.end(), result_ptr);
 
     return result.to(boxes.device());
 }
@@ -287,15 +489,21 @@ auto batched_nms(const Tensor& boxes, const Tensor& scores,
 
     const int64_t total_kept = static_cast<int64_t>(all_labels.size());
 
-    // Create result tensors from vectors
-    auto result_boxes = tenzor::from_data(all_boxes.data(), {total_kept * 4},
-                                           Device::cpu());
-    result_boxes = tenzor::reshape(result_boxes, {total_kept, 4}).to(boxes.device());
+    // Create result tensors and copy data to avoid dangling pointers
+    auto result_boxes = zeros({total_kept, 4}, DType::Float32, Device::cpu());
+    float* boxes_ptr = result_boxes.data<float>();
+    std::copy(all_boxes.begin(), all_boxes.end(), boxes_ptr);
+    result_boxes = result_boxes.to(boxes.device());
 
-    auto result_scores = tenzor::from_data(all_scores.data(), {total_kept},
-                                            Device::cpu()).to(boxes.device());
-    auto result_labels = tenzor::from_data(all_labels.data(), {total_kept},
-                                            Device::cpu()).to(boxes.device());
+    auto result_scores = zeros({total_kept}, DType::Float32, Device::cpu());
+    float* scores_ptr = result_scores.data<float>();
+    std::copy(all_scores.begin(), all_scores.end(), scores_ptr);
+    result_scores = result_scores.to(boxes.device());
+
+    auto result_labels = zeros({total_kept}, DType::Int64, Device::cpu());
+    int64_t* labels_ptr = result_labels.data<int64_t>();
+    std::copy(all_labels.begin(), all_labels.end(), labels_ptr);
+    result_labels = result_labels.to(boxes.device());
 
     return std::make_tuple(result_boxes, result_scores, result_labels);
 }

@@ -206,8 +206,12 @@ auto RegionProposalNetwork::assign_anchors_to_gt(
         // else: keep as -1 (ignore)
     }
 
-    // Create labels tensor
-    auto labels = tenzor::from_data(label_data.data(), {num_anchors}, Device::cpu());
+    // Create labels tensor and copy data to avoid dangling pointer
+    // (label_data vector would be destroyed, leaving tensor pointing to freed memory)
+    auto labels = zeros({num_anchors}, DType::Int64, Device::cpu());
+    int64_t* labels_ptr = labels.data<int64_t>();
+    std::copy(label_data.begin(), label_data.end(), labels_ptr);
+
     if (anchors.device() != Device::cpu()) {
         labels = labels.to(anchors.device());
     }
@@ -217,9 +221,14 @@ auto RegionProposalNetwork::assign_anchors_to_gt(
     std::cout << "[DEBUG]   gt_boxes.shape()[0] = " << gt_boxes.shape()[0] << std::endl;
     std::cout << "[DEBUG]   matched_gt_idx.numel() = " << matched_gt_idx.numel() << std::endl;
 
+    std::cout << "[DEBUG] gt_boxes.dtype()=" << static_cast<int>(gt_boxes.dtype())
+              << " matched_gt_idx.dtype()=" << static_cast<int>(matched_gt_idx.dtype()) << std::endl;
+
     auto matched_gt_boxes = ops::index_select(gt_boxes, 0, matched_gt_idx);
 
     std::cout << "[DEBUG] index_select completed successfully" << std::endl;
+    std::cout << "[DEBUG] labels.dtype()=" << static_cast<int>(labels.dtype())
+              << " matched_gt_boxes.dtype()=" << static_cast<int>(matched_gt_boxes.dtype()) << std::endl;
 
     return {labels, matched_gt_boxes};
 }

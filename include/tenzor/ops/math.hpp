@@ -91,6 +91,15 @@ auto cos(const Tensor& input) -> Tensor;
 /** @brief Element-wise tangent */
 auto tan(const Tensor& input) -> Tensor;
 
+/** @brief Element-wise arctangent (inverse tangent) */
+auto atan(const Tensor& input) -> Tensor;
+
+/** @brief Element-wise arcsine (inverse sine) */
+auto asin(const Tensor& input) -> Tensor;
+
+/** @brief Element-wise arccosine (inverse cosine) */
+auto acos(const Tensor& input) -> Tensor;
+
 /// @}
 /// @name Hyperbolic Functions
 /// @{

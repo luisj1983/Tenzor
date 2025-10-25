@@ -238,6 +238,21 @@ auto cosh(const Tensor& input) -> Tensor {
     return Dispatcher::dispatch("cosh", inputs)[0];
 }
 
+auto atan(const Tensor& input) -> Tensor {
+    std::vector<Tensor> inputs = {input};
+    return Dispatcher::dispatch("atan", inputs)[0];
+}
+
+auto asin(const Tensor& input) -> Tensor {
+    std::vector<Tensor> inputs = {input};
+    return Dispatcher::dispatch("asin", inputs)[0];
+}
+
+auto acos(const Tensor& input) -> Tensor {
+    std::vector<Tensor> inputs = {input};
+    return Dispatcher::dispatch("acos", inputs)[0];
+}
+
 // Comparison operations
 auto eq(const Tensor& a, const Tensor& b) -> Tensor {
     // Ensure tensors are contiguous before element-wise comparison

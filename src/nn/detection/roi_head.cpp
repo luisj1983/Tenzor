@@ -184,8 +184,12 @@ auto RoIHead::match_proposals_to_gt(const Tensor& proposals,
         // else: keep as 0 (background)
     }
 
-    // Create labels tensor
-    auto labels = tenzor::from_data(label_data.data(), {num_proposals}, Device::cpu());
+    // Create labels tensor and copy data to avoid dangling pointer
+    // (label_data vector would be destroyed, leaving tensor pointing to freed memory)
+    auto labels = zeros({num_proposals}, DType::Int64, Device::cpu());
+    int64_t* labels_ptr = labels.data<int64_t>();
+    std::copy(label_data.begin(), label_data.end(), labels_ptr);
+
     if (proposals.device() != Device::cpu()) {
         labels = labels.to(proposals.device());
     }

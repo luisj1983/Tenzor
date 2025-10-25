@@ -94,7 +94,7 @@ private:
     // Pipeline management
     vulkan::ComputePipeline* getPipeline(const std::string& shader_name, int32_t device_id);
 
-    // Kernel dispatch helpers
+    // Kernel dispatch helpers - Basic operations
     auto dispatchBinaryOp(const std::string& op_name, const Tensor& a, const Tensor& b) -> Tensor;
     auto dispatchUnaryOp(const std::string& op_name, const Tensor& input) -> Tensor;
     auto dispatchReduction(const std::string& op_name, const Tensor& input,
@@ -103,6 +103,55 @@ private:
     auto dispatchConv2d(const Tensor& input, const Tensor& weight,
                        const Tensor* bias, int64_t stride, int64_t padding,
                        int64_t dilation, int64_t groups) -> Tensor;
+
+    // Pooling operations
+    auto dispatchMaxPool2d(const Tensor& input, int64_t kernel_h, int64_t kernel_w,
+                          int64_t stride_h, int64_t stride_w,
+                          int64_t padding_h, int64_t padding_w) -> std::pair<Tensor, Tensor>;
+    auto dispatchAvgPool2d(const Tensor& input, int64_t kernel_h, int64_t kernel_w,
+                          int64_t stride_h, int64_t stride_w,
+                          int64_t padding_h, int64_t padding_w) -> Tensor;
+    auto dispatchAdaptiveMaxPool2d(const Tensor& input, int64_t out_h, int64_t out_w) -> std::pair<Tensor, Tensor>;
+    auto dispatchAdaptiveAvgPool2d(const Tensor& input, int64_t out_h, int64_t out_w) -> Tensor;
+    auto dispatchMaxPool2dBackward(const Tensor& grad_out, const Tensor& input,
+                                   const Tensor& indices, int64_t kernel_h, int64_t kernel_w,
+                                   int64_t stride_h, int64_t stride_w,
+                                   int64_t padding_h, int64_t padding_w) -> Tensor;
+
+    // Normalization operations
+    auto dispatchBatchNorm2d(const Tensor& input, const Tensor& mean, const Tensor& var,
+                            const Tensor* gamma, const Tensor* beta, float epsilon) -> Tensor;
+    auto dispatchBatchNorm2dBackward(const Tensor& grad_out, const Tensor& input,
+                                     const Tensor& mean, const Tensor& var,
+                                     const Tensor* gamma, float epsilon)
+                                     -> std::tuple<Tensor, Tensor, Tensor>;
+    auto dispatchLayerNorm(const Tensor& input, int64_t normalized_shape,
+                          const Tensor* gamma, const Tensor* beta, float epsilon) -> Tensor;
+    auto dispatchGroupNorm(const Tensor& input, int64_t num_groups,
+                          const Tensor* gamma, const Tensor* beta, float epsilon) -> Tensor;
+
+    // Softmax and loss operations
+    auto dispatchSoftmax(const Tensor& input, int64_t dim) -> Tensor;
+    auto dispatchLogSoftmax(const Tensor& input, int64_t dim) -> Tensor;
+    auto dispatchCrossEntropy(const Tensor& log_probs, const Tensor& targets,
+                             int64_t reduction) -> Tensor;
+
+    // Advanced reduction operations
+    auto dispatchArgmax(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
+    auto dispatchArgmin(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
+    auto dispatchVariance(const Tensor& input, int64_t dim, bool unbiased, bool keepdim) -> Tensor;
+    auto dispatchStd(const Tensor& input, int64_t dim, bool unbiased, bool keepdim) -> Tensor;
+    auto dispatchProd(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
+    auto dispatchAll(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
+    auto dispatchAny(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
+
+    // Indexing operations
+    auto dispatchEmbedding(const Tensor& weight, const Tensor& indices,
+                          int64_t padding_idx) -> Tensor;
+    auto dispatchGather(const Tensor& input, int64_t dim, const Tensor& indices) -> Tensor;
+    auto dispatchScatter(const Tensor& input, int64_t dim, const Tensor& indices,
+                        const Tensor& values, int64_t reduction) -> Tensor;
+    auto dispatchIndexSelect(const Tensor& input, int64_t dim, const Tensor& indices) -> Tensor;
 
     // Instance and devices
     VkInstance instance_ = VK_NULL_HANDLE;

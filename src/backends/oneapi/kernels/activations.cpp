@@ -6,6 +6,32 @@
 namespace tenzor {
 namespace oneapi {
 
+// Kernel class declarations for SYCL named kernels
+class ReLUKernelFloat32;
+class ReLUKernelFloat64;
+class ReLUBackwardKernelFloat32;
+class ReLUBackwardKernelFloat64;
+class SigmoidKernelFloat32;
+class SigmoidKernelFloat64;
+class SigmoidBackwardKernelFloat32;
+class SigmoidBackwardKernelFloat64;
+class TanhKernelFloat32;
+class TanhKernelFloat64;
+class TanhBackwardKernelFloat32;
+class TanhBackwardKernelFloat64;
+class GeLUKernelFloat32;
+class GeLUKernelFloat64;
+class GeLUBackwardKernelFloat32;
+class GeLUBackwardKernelFloat64;
+class SoftmaxKernelFloat32;
+class SoftmaxKernelFloat64;
+class SoftmaxBackwardKernelFloat32;
+class SoftmaxBackwardKernelFloat64;
+class LeakyReLUKernelFloat32;
+class LeakyReLUKernelFloat64;
+class LeakyReLUBackwardKernelFloat32;
+class LeakyReLUBackwardKernelFloat64;
+
 // Helper function to get typed pointer from tensor
 template<typename T>
 inline auto get_data_ptr(const Tensor& t) -> T* {
@@ -23,7 +49,7 @@ auto relu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         const float* in_ptr = get_data_ptr<const float>(input);
         float* out_ptr = get_data_ptr<float>(output);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<ReLUKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = sycl::fmax(0.0f, in_ptr[idx]);
         }).wait();
     }
@@ -31,7 +57,7 @@ auto relu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         const double* in_ptr = get_data_ptr<const double>(input);
         double* out_ptr = get_data_ptr<double>(output);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<ReLUKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = sycl::fmax(0.0, in_ptr[idx]);
         }).wait();
     }
@@ -54,7 +80,7 @@ auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::
         const float* in_ptr = get_data_ptr<const float>(input);
         float* grad_in_ptr = get_data_ptr<float>(grad_input);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<ReLUBackwardKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             grad_in_ptr[idx] = in_ptr[idx] > 0.0f ? grad_out_ptr[idx] : 0.0f;
         }).wait();
     }
@@ -63,7 +89,7 @@ auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::
         const double* in_ptr = get_data_ptr<const double>(input);
         double* grad_in_ptr = get_data_ptr<double>(grad_input);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<ReLUBackwardKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             grad_in_ptr[idx] = in_ptr[idx] > 0.0 ? grad_out_ptr[idx] : 0.0;
         }).wait();
     }
@@ -85,7 +111,7 @@ auto sigmoid_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         const float* in_ptr = get_data_ptr<const float>(input);
         float* out_ptr = get_data_ptr<float>(output);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<SigmoidKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = 1.0f / (1.0f + sycl::exp(-in_ptr[idx]));
         }).wait();
     }
@@ -93,7 +119,7 @@ auto sigmoid_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         const double* in_ptr = get_data_ptr<const double>(input);
         double* out_ptr = get_data_ptr<double>(output);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<SigmoidKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = 1.0 / (1.0 + sycl::exp(-in_ptr[idx]));
         }).wait();
     }
@@ -116,7 +142,7 @@ auto sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& output, sy
         const float* out_ptr = get_data_ptr<const float>(output);
         float* grad_in_ptr = get_data_ptr<float>(grad_input);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<SigmoidBackwardKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             grad_in_ptr[idx] = grad_out_ptr[idx] * out_ptr[idx] * (1.0f - out_ptr[idx]);
         }).wait();
     }
@@ -125,7 +151,7 @@ auto sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& output, sy
         const double* out_ptr = get_data_ptr<const double>(output);
         double* grad_in_ptr = get_data_ptr<double>(grad_input);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<SigmoidBackwardKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             grad_in_ptr[idx] = grad_out_ptr[idx] * out_ptr[idx] * (1.0 - out_ptr[idx]);
         }).wait();
     }
@@ -147,7 +173,7 @@ auto tanh_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         const float* in_ptr = get_data_ptr<const float>(input);
         float* out_ptr = get_data_ptr<float>(output);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<TanhKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = sycl::tanh(in_ptr[idx]);
         }).wait();
     }
@@ -155,7 +181,7 @@ auto tanh_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         const double* in_ptr = get_data_ptr<const double>(input);
         double* out_ptr = get_data_ptr<double>(output);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<TanhKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = sycl::tanh(in_ptr[idx]);
         }).wait();
     }
@@ -178,7 +204,7 @@ auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& output, sycl:
         const float* out_ptr = get_data_ptr<const float>(output);
         float* grad_in_ptr = get_data_ptr<float>(grad_input);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<TanhBackwardKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             grad_in_ptr[idx] = grad_out_ptr[idx] * (1.0f - out_ptr[idx] * out_ptr[idx]);
         }).wait();
     }
@@ -187,7 +213,7 @@ auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& output, sycl:
         const double* out_ptr = get_data_ptr<const double>(output);
         double* grad_in_ptr = get_data_ptr<double>(grad_input);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<TanhBackwardKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             grad_in_ptr[idx] = grad_out_ptr[idx] * (1.0 - out_ptr[idx] * out_ptr[idx]);
         }).wait();
     }
@@ -212,7 +238,7 @@ auto gelu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         const float sqrt_2_over_pi = 0.7978845608f;
         const float coeff = 0.044715f;
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<GeLUKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float x = in_ptr[idx];
             float x_cubed = x * x * x;
             float inner = sqrt_2_over_pi * (x + coeff * x_cubed);
@@ -226,7 +252,7 @@ auto gelu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         const double sqrt_2_over_pi = 0.7978845608028654;
         const double coeff = 0.044715;
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<GeLUKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             double x = in_ptr[idx];
             double x_cubed = x * x * x;
             double inner = sqrt_2_over_pi * (x + coeff * x_cubed);
@@ -255,7 +281,7 @@ auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::
         const float sqrt_2_over_pi = 0.7978845608f;
         const float coeff = 0.044715f;
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<GeLUBackwardKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float x = in_ptr[idx];
             float x_sq = x * x;
             float x_cubed = x_sq * x;
@@ -278,7 +304,7 @@ auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::
         const double sqrt_2_over_pi = 0.7978845608028654;
         const double coeff = 0.044715;
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<GeLUBackwardKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             double x = in_ptr[idx];
             double x_sq = x * x;
             double x_cubed = x_sq * x;
@@ -318,7 +344,7 @@ auto softmax_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Ten
         const float* in_ptr = get_data_ptr<const float>(input);
         float* out_ptr = get_data_ptr<float>(output);
 
-        queue.parallel_for(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+        queue.parallel_for<SoftmaxKernelFloat32>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
             const int64_t outer_idx = idx[0];
             const int64_t inner_idx = idx[1];
             const int64_t offset = (outer_idx * dim_size * inner_size) + inner_idx;
@@ -348,7 +374,7 @@ auto softmax_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Ten
         const double* in_ptr = get_data_ptr<const double>(input);
         double* out_ptr = get_data_ptr<double>(output);
 
-        queue.parallel_for(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+        queue.parallel_for<SoftmaxKernelFloat64>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
             const int64_t outer_idx = idx[0];
             const int64_t inner_idx = idx[1];
             const int64_t offset = (outer_idx * dim_size * inner_size) + inner_idx;
@@ -397,7 +423,7 @@ auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, in
         const float* out_ptr = get_data_ptr<const float>(output);
         float* grad_in_ptr = get_data_ptr<float>(grad_input);
 
-        queue.parallel_for(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+        queue.parallel_for<SoftmaxBackwardKernelFloat32>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
             const int64_t outer_idx = idx[0];
             const int64_t inner_idx = idx[1];
             const int64_t offset = (outer_idx * dim_size * inner_size) + inner_idx;
@@ -420,7 +446,7 @@ auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, in
         const double* out_ptr = get_data_ptr<const double>(output);
         double* grad_in_ptr = get_data_ptr<double>(grad_input);
 
-        queue.parallel_for(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+        queue.parallel_for<SoftmaxBackwardKernelFloat64>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
             const int64_t outer_idx = idx[0];
             const int64_t inner_idx = idx[1];
             const int64_t offset = (outer_idx * dim_size * inner_size) + inner_idx;
@@ -454,7 +480,7 @@ auto leaky_relu_kernel(const Tensor& input, float alpha, sycl::queue& queue) -> 
         const float* in_ptr = get_data_ptr<const float>(input);
         float* out_ptr = get_data_ptr<float>(output);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<LeakyReLUKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             float x = in_ptr[idx];
             out_ptr[idx] = x > 0.0f ? x : alpha * x;
         }).wait();
@@ -464,7 +490,7 @@ auto leaky_relu_kernel(const Tensor& input, float alpha, sycl::queue& queue) -> 
         double* out_ptr = get_data_ptr<double>(output);
         const double alpha_d = static_cast<double>(alpha);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<LeakyReLUKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             double x = in_ptr[idx];
             out_ptr[idx] = x > 0.0 ? x : alpha_d * x;
         }).wait();
@@ -488,7 +514,7 @@ auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, 
         const float* in_ptr = get_data_ptr<const float>(input);
         float* grad_in_ptr = get_data_ptr<float>(grad_input);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<LeakyReLUBackwardKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             grad_in_ptr[idx] = in_ptr[idx] > 0.0f ? grad_out_ptr[idx] : alpha * grad_out_ptr[idx];
         }).wait();
     }
@@ -498,7 +524,7 @@ auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, 
         double* grad_in_ptr = get_data_ptr<double>(grad_input);
         const double alpha_d = static_cast<double>(alpha);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<LeakyReLUBackwardKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             grad_in_ptr[idx] = in_ptr[idx] > 0.0 ? grad_out_ptr[idx] : alpha_d * grad_out_ptr[idx];
         }).wait();
     }

@@ -8,6 +8,16 @@
 namespace tenzor {
 namespace oneapi {
 
+// Kernel class declarations for SYCL
+class SumKernelFloat32;
+class SumKernelFloat64;
+class MeanKernelFloat32;
+class MeanKernelFloat64;
+class MaxKernelFloat32;
+class MaxKernelFloat64;
+class MinKernelFloat32;
+class MinKernelFloat64;
+
 // Helper function to get typed pointer from tensor
 template<typename T>
 inline auto get_data_ptr(const Tensor& t) -> T* {
@@ -65,7 +75,7 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
         const float* in_ptr = get_data_ptr<const float>(input);
         float* out_ptr = get_data_ptr<float>(output);
 
-        queue.parallel_for(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+        queue.parallel_for<SumKernelFloat32>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
             const int64_t outer_idx = idx[0];
             const int64_t inner_idx = idx[1];
             const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
@@ -82,7 +92,7 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
         const double* in_ptr = get_data_ptr<const double>(input);
         double* out_ptr = get_data_ptr<double>(output);
 
-        queue.parallel_for(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+        queue.parallel_for<SumKernelFloat64>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
             const int64_t outer_idx = idx[0];
             const int64_t inner_idx = idx[1];
             const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
@@ -143,7 +153,7 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& qu
         float* out_ptr = get_data_ptr<float>(output);
         const float scale = 1.0f / static_cast<float>(dim_size);
 
-        queue.parallel_for(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+        queue.parallel_for<MeanKernelFloat32>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
             const int64_t outer_idx = idx[0];
             const int64_t inner_idx = idx[1];
             const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
@@ -161,7 +171,7 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& qu
         double* out_ptr = get_data_ptr<double>(output);
         const double scale = 1.0 / static_cast<double>(dim_size);
 
-        queue.parallel_for(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+        queue.parallel_for<MeanKernelFloat64>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
             const int64_t outer_idx = idx[0];
             const int64_t inner_idx = idx[1];
             const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
@@ -221,7 +231,7 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
         const float* in_ptr = get_data_ptr<const float>(input);
         float* out_ptr = get_data_ptr<float>(output);
 
-        queue.parallel_for(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+        queue.parallel_for<MaxKernelFloat32>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
             const int64_t outer_idx = idx[0];
             const int64_t inner_idx = idx[1];
             const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
@@ -239,7 +249,7 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
         const double* in_ptr = get_data_ptr<const double>(input);
         double* out_ptr = get_data_ptr<double>(output);
 
-        queue.parallel_for(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+        queue.parallel_for<MaxKernelFloat64>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
             const int64_t outer_idx = idx[0];
             const int64_t inner_idx = idx[1];
             const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
@@ -300,7 +310,7 @@ auto min_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
         const float* in_ptr = get_data_ptr<const float>(input);
         float* out_ptr = get_data_ptr<float>(output);
 
-        queue.parallel_for(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+        queue.parallel_for<MinKernelFloat32>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
             const int64_t outer_idx = idx[0];
             const int64_t inner_idx = idx[1];
             const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
@@ -318,7 +328,7 @@ auto min_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
         const double* in_ptr = get_data_ptr<const double>(input);
         double* out_ptr = get_data_ptr<double>(output);
 
-        queue.parallel_for(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+        queue.parallel_for<MinKernelFloat64>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
             const int64_t outer_idx = idx[0];
             const int64_t inner_idx = idx[1];
             const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;

@@ -11,6 +11,14 @@
 namespace tenzor {
 namespace oneapi {
 
+// Kernel class declarations for SYCL
+class MaxPool2dKernelFloat32;
+class MaxPool2dKernelFloat64;
+class AvgPool2dKernelFloat32;
+class AvgPool2dKernelFloat64;
+class AdaptiveAvgPool2dKernelFloat32;
+class AdaptiveAvgPool2dKernelFloat64;
+
 // Helper function to get typed pointer from tensor
 template<typename T>
 inline auto get_data_ptr(const Tensor& t) -> T* {
@@ -183,7 +191,7 @@ auto maxpool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
         float* out_ptr = get_data_ptr<float>(output);
 
         const int64_t total_size = N * C * H_out * W_out;
-        queue.parallel_for(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
+        queue.parallel_for<MaxPool2dKernelFloat32>(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
             int64_t temp = flat_idx;
             const int64_t w_out = temp % W_out;
             temp /= W_out;
@@ -214,7 +222,7 @@ auto maxpool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
         double* out_ptr = get_data_ptr<double>(output);
 
         const int64_t total_size = N * C * H_out * W_out;
-        queue.parallel_for(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
+        queue.parallel_for<MaxPool2dKernelFloat64>(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
             int64_t temp = flat_idx;
             const int64_t w_out = temp % W_out;
             temp /= W_out;
@@ -270,7 +278,7 @@ auto avgpool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
         float* out_ptr = get_data_ptr<float>(output);
 
         const int64_t total_size = N * C * H_out * W_out;
-        queue.parallel_for(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
+        queue.parallel_for<AvgPool2dKernelFloat32>(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
             int64_t temp = flat_idx;
             const int64_t w_out = temp % W_out;
             temp /= W_out;
@@ -305,7 +313,7 @@ auto avgpool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
         double* out_ptr = get_data_ptr<double>(output);
 
         const int64_t total_size = N * C * H_out * W_out;
-        queue.parallel_for(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
+        queue.parallel_for<AvgPool2dKernelFloat64>(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
             int64_t temp = flat_idx;
             const int64_t w_out = temp % W_out;
             temp /= W_out;
@@ -364,7 +372,7 @@ auto adaptive_avgpool2d_forward(const Tensor& input, int64_t output_h, int64_t o
         float* out_ptr = get_data_ptr<float>(output);
 
         const int64_t total_size = N * C * output_h * output_w;
-        queue.parallel_for(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
+        queue.parallel_for<AdaptiveAvgPool2dKernelFloat32>(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
             int64_t temp = flat_idx;
             const int64_t w_out = temp % output_w;
             temp /= output_w;
@@ -398,7 +406,7 @@ auto adaptive_avgpool2d_forward(const Tensor& input, int64_t output_h, int64_t o
         double* out_ptr = get_data_ptr<double>(output);
 
         const int64_t total_size = N * C * output_h * output_w;
-        queue.parallel_for(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
+        queue.parallel_for<AdaptiveAvgPool2dKernelFloat64>(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
             int64_t temp = flat_idx;
             const int64_t w_out = temp % output_w;
             temp /= output_w;

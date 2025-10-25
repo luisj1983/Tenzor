@@ -202,5 +202,43 @@ auto benchmark_quantization(
     int num_iterations = 100
 ) -> std::tuple<float, float, float, float>;
 
+/**
+ * @brief Convert floating-point module to quantized module.
+ *
+ * Standalone function to convert individual modules or complete models
+ * from floating-point to quantized INT8 representation.
+ *
+ * @param module Module to quantize
+ * @param config Quantization configuration
+ * @return Quantized module
+ *
+ * @code
+ * auto linear = std::make_shared<nn::Linear>(128, 64);
+ * auto q_linear = convert_to_quantized(linear, qconfig);
+ * @endcode
+ */
+auto convert_to_quantized(
+    const std::shared_ptr<nn::Module>& module,
+    const nn::quantization::QConfig& config = nn::quantization::DefaultQConfigs::default_qconfig()
+) -> std::shared_ptr<nn::Module>;
+
+/**
+ * @brief Convert quantized module back to floating-point.
+ *
+ * Reverses quantization by dequantizing INT8 weights and biases back
+ * to FP32 representation. Useful for model analysis and debugging.
+ *
+ * @param quantized_module Quantized module to convert
+ * @return Floating-point module
+ *
+ * @code
+ * auto q_model = quantize_dynamic(model);
+ * auto fp_model = convert_from_quantized(q_model);  // Back to float
+ * @endcode
+ */
+auto convert_from_quantized(
+    const std::shared_ptr<nn::Module>& quantized_module
+) -> std::shared_ptr<nn::Module>;
+
 } // namespace quantization
 } // namespace tenzor

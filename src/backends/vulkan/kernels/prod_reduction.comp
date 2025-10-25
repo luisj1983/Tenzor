@@ -1,0 +1,42 @@
+#version 450
+
+// Product reduction
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Input { float input_data[]; };
+layout(binding = 1) buffer Output { float output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;              // Total number of elements
+    uint reduce_size;    // Size of dimension to reduce
+    uint outer_size;     // Size of outer dimensions
+} params;
+
+shared float shared_data[256];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint gid = gl_GlobalInvocationID.x;
+    uint wid = gl_WorkGroupID.x;
+
+    // Initialize
+    float value = 1.0;
+    if (gid < params.n) {
+        value = input_data[gid];
+    }
+    shared_data[tid] = value;
+    barrier();
+
+    // Parallel reduction with multiplication
+    for (uint s = 128; s > 0; s >>= 1) {
+        if (tid < s && (gid + s) < params.n) {
+            shared_data[tid] *= shared_data[tid + s];
+        }
+        barrier();
+    }
+
+    // Write result
+    if (tid == 0) {
+        output_data[wid] = shared_data[0];
+    }
+}

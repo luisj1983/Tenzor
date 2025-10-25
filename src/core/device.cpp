@@ -24,6 +24,21 @@ auto Device::from_string(std::string_view str) -> Device {
         return Device::oneapi(idx);
     }
 
+    if (str.starts_with("vulkan:")) {
+        int idx = std::stoi(std::string(str.substr(7)));
+        return Device::vulkan(idx);
+    }
+
+    if (str.starts_with("metal:")) {
+        int idx = std::stoi(std::string(str.substr(6)));
+        return Device::metal(idx);
+    }
+
+    if (str.starts_with("webgpu:")) {
+        int idx = std::stoi(std::string(str.substr(7)));
+        return Device::webgpu(idx);
+    }
+
     throw std::invalid_argument("Invalid device string: " + std::string(str));
 }
 

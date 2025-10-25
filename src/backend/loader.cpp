@@ -62,6 +62,14 @@ auto BackendLoader::register_backend(std::string_view name,
         device_type = Device::Type::CUDA;
     } else if (backend_name == "rocm") {
         device_type = Device::Type::ROCm;
+    } else if (backend_name == "oneapi") {
+        device_type = Device::Type::OneAPI;
+    } else if (backend_name == "vulkan") {
+        device_type = Device::Type::Vulkan;
+    } else if (backend_name == "metal") {
+        device_type = Device::Type::Metal;
+    } else if (backend_name == "webgpu") {
+        device_type = Device::Type::WebGPU;
     } else {
         device_type = Device::Type::CPU; // Default fallback
     }

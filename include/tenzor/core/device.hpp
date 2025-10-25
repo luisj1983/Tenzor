@@ -35,10 +35,13 @@ struct Device {
      * @brief Device backend type enumeration.
      */
     enum class Type : uint8_t {
-        CPU,     ///< CPU backend
-        CUDA,    ///< NVIDIA CUDA backend
-        ROCm,    ///< AMD ROCm backend
-        OneAPI   ///< Intel OneAPI backend
+        CPU,      ///< CPU backend
+        CUDA,     ///< NVIDIA CUDA backend
+        ROCm,     ///< AMD ROCm backend
+        OneAPI,   ///< Intel OneAPI backend
+        Vulkan,   ///< Vulkan cross-platform backend
+        Metal,    ///< Apple Metal backend (macOS/iOS)
+        WebGPU    ///< WebGPU browser/WASM backend
     };
 
     Type type;         ///< Device backend type
@@ -92,6 +95,36 @@ struct Device {
     }
 
     /**
+     * @brief Create a Vulkan device.
+     *
+     * @param idx Device index (default: 0)
+     * @return Device configured for Vulkan execution
+     */
+    static auto vulkan(int32_t idx = 0) -> Device {
+        return Device{Type::Vulkan, idx};
+    }
+
+    /**
+     * @brief Create a Metal device (macOS/iOS only).
+     *
+     * @param idx Device index (default: 0)
+     * @return Device configured for Metal execution
+     */
+    static auto metal(int32_t idx = 0) -> Device {
+        return Device{Type::Metal, idx};
+    }
+
+    /**
+     * @brief Create a WebGPU device (browser/WASM).
+     *
+     * @param idx Device index (default: 0)
+     * @return Device configured for WebGPU execution
+     */
+    static auto webgpu(int32_t idx = 0) -> Device {
+        return Device{Type::WebGPU, idx};
+    }
+
+    /**
      * @brief Compare devices for equality.
      *
      * @param other Device to compare with
@@ -127,6 +160,9 @@ struct Device {
             case Type::CUDA: return "cuda:" + std::to_string(index);
             case Type::ROCm: return "rocm:" + std::to_string(index);
             case Type::OneAPI: return "oneapi:" + std::to_string(index);
+            case Type::Vulkan: return "vulkan:" + std::to_string(index);
+            case Type::Metal: return "metal:" + std::to_string(index);
+            case Type::WebGPU: return "webgpu:" + std::to_string(index);
         }
         return "unknown";
     }

@@ -10,6 +10,30 @@
 namespace tenzor {
 namespace oneapi {
 
+// SYCL Kernel name classes (using functors for SYCL 2025.2 compatibility)
+struct AddKernelFloat32 {};
+struct AddKernelFloat64 {};
+struct SubKernelFloat32 {};
+struct SubKernelFloat64 {};
+struct MulKernelFloat32 {};
+struct MulKernelFloat64 {};
+struct DivKernelFloat32 {};
+struct DivKernelFloat64 {};
+struct MatMulKernelFloat32 {};
+struct MatMulKernelFloat64 {};
+struct SqrtKernelFloat32 {};
+struct SqrtKernelFloat64 {};
+struct NegKernelFloat32 {};
+struct NegKernelFloat64 {};
+struct AbsKernelFloat32 {};
+struct AbsKernelFloat64 {};
+struct LogKernelFloat32 {};
+struct LogKernelFloat64 {};
+struct ExpKernelFloat32 {};
+struct ExpKernelFloat64 {};
+struct PowKernelFloat32 {};
+struct PowKernelFloat64 {};
+
 // Helper function to get typed pointer from tensor
 template<typename T>
 inline auto get_data_ptr(const Tensor& t) -> T* {
@@ -50,7 +74,7 @@ auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
         const float* b_ptr = get_data_ptr<const float>(b);
         float* out_ptr = get_data_ptr<float>(output);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<AddKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] + b_ptr[idx];
         }).wait();
     }
@@ -59,7 +83,7 @@ auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
         const double* b_ptr = get_data_ptr<const double>(b);
         double* out_ptr = get_data_ptr<double>(output);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<AddKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] + b_ptr[idx];
         }).wait();
     }
@@ -88,7 +112,7 @@ auto sub_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
         const float* b_ptr = get_data_ptr<const float>(b);
         float* out_ptr = get_data_ptr<float>(output);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<SubKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] - b_ptr[idx];
         }).wait();
     }
@@ -97,7 +121,7 @@ auto sub_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
         const double* b_ptr = get_data_ptr<const double>(b);
         double* out_ptr = get_data_ptr<double>(output);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<SubKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] - b_ptr[idx];
         }).wait();
     }
@@ -126,7 +150,7 @@ auto mul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
         const float* b_ptr = get_data_ptr<const float>(b);
         float* out_ptr = get_data_ptr<float>(output);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<MulKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] * b_ptr[idx];
         }).wait();
     }
@@ -135,7 +159,7 @@ auto mul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
         const double* b_ptr = get_data_ptr<const double>(b);
         double* out_ptr = get_data_ptr<double>(output);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<MulKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] * b_ptr[idx];
         }).wait();
     }
@@ -164,7 +188,7 @@ auto div_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
         const float* b_ptr = get_data_ptr<const float>(b);
         float* out_ptr = get_data_ptr<float>(output);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<DivKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] / b_ptr[idx];
         }).wait();
     }
@@ -173,7 +197,7 @@ auto div_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
         const double* b_ptr = get_data_ptr<const double>(b);
         double* out_ptr = get_data_ptr<double>(output);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<DivKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] / b_ptr[idx];
         }).wait();
     }
@@ -256,7 +280,7 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
         float* out_ptr = get_data_ptr<float>(output);
 
         // Simple parallel matrix multiplication
-        queue.parallel_for(sycl::range<2>(m, n), [=](sycl::id<2> idx) {
+        queue.parallel_for<MatMulKernelFloat32>(sycl::range<2>(m, n), [=](sycl::id<2> idx) {
             const int64_t i = idx[0];
             const int64_t j = idx[1];
 
@@ -272,7 +296,7 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
         const double* b_ptr = get_data_ptr<const double>(b);
         double* out_ptr = get_data_ptr<double>(output);
 
-        queue.parallel_for(sycl::range<2>(m, n), [=](sycl::id<2> idx) {
+        queue.parallel_for<MatMulKernelFloat64>(sycl::range<2>(m, n), [=](sycl::id<2> idx) {
             const int64_t i = idx[0];
             const int64_t j = idx[1];
 
@@ -302,7 +326,7 @@ auto sqrt_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         const float* in_ptr = get_data_ptr<const float>(input);
         float* out_ptr = get_data_ptr<float>(output);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<SqrtKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = sycl::sqrt(in_ptr[idx]);
         }).wait();
     }
@@ -310,7 +334,7 @@ auto sqrt_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         const double* in_ptr = get_data_ptr<const double>(input);
         double* out_ptr = get_data_ptr<double>(output);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<SqrtKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = sycl::sqrt(in_ptr[idx]);
         }).wait();
     }
@@ -332,7 +356,7 @@ auto neg_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         const float* in_ptr = get_data_ptr<const float>(input);
         float* out_ptr = get_data_ptr<float>(output);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<NegKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = -in_ptr[idx];
         }).wait();
     }
@@ -340,7 +364,7 @@ auto neg_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         const double* in_ptr = get_data_ptr<const double>(input);
         double* out_ptr = get_data_ptr<double>(output);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<NegKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = -in_ptr[idx];
         }).wait();
     }
@@ -362,7 +386,7 @@ auto abs_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         const float* in_ptr = get_data_ptr<const float>(input);
         float* out_ptr = get_data_ptr<float>(output);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<AbsKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = sycl::fabs(in_ptr[idx]);
         }).wait();
     }
@@ -370,7 +394,7 @@ auto abs_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         const double* in_ptr = get_data_ptr<const double>(input);
         double* out_ptr = get_data_ptr<double>(output);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<AbsKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = sycl::fabs(in_ptr[idx]);
         }).wait();
     }
@@ -392,7 +416,7 @@ auto log_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         const float* in_ptr = get_data_ptr<const float>(input);
         float* out_ptr = get_data_ptr<float>(output);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<LogKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = sycl::log(in_ptr[idx]);
         }).wait();
     }
@@ -400,7 +424,7 @@ auto log_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         const double* in_ptr = get_data_ptr<const double>(input);
         double* out_ptr = get_data_ptr<double>(output);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<LogKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = sycl::log(in_ptr[idx]);
         }).wait();
     }
@@ -422,7 +446,7 @@ auto exp_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         const float* in_ptr = get_data_ptr<const float>(input);
         float* out_ptr = get_data_ptr<float>(output);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<ExpKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = sycl::exp(in_ptr[idx]);
         }).wait();
     }
@@ -430,7 +454,7 @@ auto exp_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
         const double* in_ptr = get_data_ptr<const double>(input);
         double* out_ptr = get_data_ptr<double>(output);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<ExpKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = sycl::exp(in_ptr[idx]);
         }).wait();
     }
@@ -452,7 +476,7 @@ auto pow_kernel(const Tensor& input, float exponent, sycl::queue& queue) -> Tens
         const float* in_ptr = get_data_ptr<const float>(input);
         float* out_ptr = get_data_ptr<float>(output);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<PowKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = sycl::pow(in_ptr[idx], exponent);
         }).wait();
     }
@@ -461,7 +485,7 @@ auto pow_kernel(const Tensor& input, float exponent, sycl::queue& queue) -> Tens
         double* out_ptr = get_data_ptr<double>(output);
         const double exp_d = static_cast<double>(exponent);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<PowKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = sycl::pow(in_ptr[idx], exp_d);
         }).wait();
     }

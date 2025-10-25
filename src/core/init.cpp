@@ -1010,6 +1010,125 @@ auto initialize() -> void {
         std::cout << "ROCm backend not found at: " << rocm_backend_path << std::endl;
     }
 
+    // Try to load OneAPI backend if available
+    std::filesystem::path oneapi_backend_path = bin_path / "tenzor_backend_oneapi.so";
+
+    if (std::filesystem::exists(oneapi_backend_path)) {
+        std::cout << "Loading OneAPI backend from: " << oneapi_backend_path << std::endl;
+
+        auto oneapi_result = loader.load_backend(oneapi_backend_path);
+        if (oneapi_result) {
+            auto oneapi_backend_unique = std::move(oneapi_result.value());
+            auto* oneapi_backend_ptr = oneapi_backend_unique.get();
+
+            // Check if OneAPI is actually available
+            if (oneapi_backend_ptr->is_available()) {
+                loader.register_backend(oneapi_backend_ptr->name(), std::move(oneapi_backend_unique));
+                std::cout << "OneAPI backend registered: " << oneapi_backend_ptr->name() << std::endl;
+                std::cout << "Found " << oneapi_backend_ptr->device_count() << " OneAPI device(s)" << std::endl;
+
+                auto* oneapi_backend = oneapi_backend_ptr;
+
+                // Register essential OneAPI operations
+                std::cout << "Registering OneAPI kernels with operation registry" << std::endl;
+
+                // Tensor creation operations
+                registry.register_kernel("zeros", Device::Type::OneAPI,
+                    [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return oneapi_backend->dispatch("zeros", inputs, attrs);
+                    });
+
+                registry.register_kernel("ones", Device::Type::OneAPI,
+                    [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return oneapi_backend->dispatch("ones", inputs, attrs);
+                    });
+
+                registry.register_kernel("full", Device::Type::OneAPI,
+                    [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return oneapi_backend->dispatch("full", inputs, attrs);
+                    });
+
+                // Basic math operations
+                registry.register_kernel("add", Device::Type::OneAPI,
+                    [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return oneapi_backend->dispatch("add", inputs, attrs);
+                    });
+
+                registry.register_kernel("matmul", Device::Type::OneAPI,
+                    [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return oneapi_backend->dispatch("matmul", inputs, attrs);
+                    });
+
+                registry.register_kernel("conv2d_forward", Device::Type::OneAPI,
+                    [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return oneapi_backend->dispatch("conv2d_forward", inputs, attrs);
+                    });
+
+                registry.register_kernel("conv2d_backward_input", Device::Type::OneAPI,
+                    [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return oneapi_backend->dispatch("conv2d_backward_input", inputs, attrs);
+                    });
+
+                registry.register_kernel("conv2d_backward_weight", Device::Type::OneAPI,
+                    [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return oneapi_backend->dispatch("conv2d_backward_weight", inputs, attrs);
+                    });
+
+                std::cout << "OneAPI operations registered successfully" << std::endl;
+            } else {
+                std::cout << "OneAPI backend loaded but no OneAPI devices available" << std::endl;
+            }
+        } else {
+            std::cout << "Warning: Failed to load OneAPI backend: " << oneapi_result.error() << std::endl;
+        }
+    } else {
+        std::cout << "OneAPI backend not found at: " << oneapi_backend_path << std::endl;
+    }
+
+    // Try to load Vulkan backend if available
+    std::filesystem::path vulkan_backend_path = bin_path / "libtenzor_backend_vulkan.so";
+
+    if (std::filesystem::exists(vulkan_backend_path)) {
+        std::cout << "Loading Vulkan backend from: " << vulkan_backend_path << std::endl;
+
+        auto vulkan_result = loader.load_backend(vulkan_backend_path);
+        if (vulkan_result) {
+            auto vulkan_backend_unique = std::move(vulkan_result.value());
+            auto* vulkan_backend_ptr = vulkan_backend_unique.get();
+
+            // Check if Vulkan is actually available
+            if (vulkan_backend_ptr->is_available()) {
+                loader.register_backend(vulkan_backend_ptr->name(), std::move(vulkan_backend_unique));
+                std::cout << "Vulkan backend registered: " << vulkan_backend_ptr->name() << std::endl;
+                std::cout << "Found " << vulkan_backend_ptr->device_count() << " Vulkan device(s)" << std::endl;
+
+                auto* vulkan_backend = vulkan_backend_ptr;
+
+                // Register essential Vulkan operations
+                std::cout << "Registering Vulkan kernels with operation registry" << std::endl;
+
+                // Basic math operations
+                registry.register_kernel("add", Device::Type::Vulkan,
+                    [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return vulkan_backend->dispatch("add", inputs, attrs);
+                    });
+
+                registry.register_kernel("matmul", Device::Type::Vulkan,
+                    [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return vulkan_backend->dispatch("matmul", inputs, attrs);
+                    });
+
+                std::cout << "Vulkan operations registered successfully" << std::endl;
+            } else {
+                std::cout << "Vulkan backend loaded but no Vulkan devices available" << std::endl;
+            }
+        } else {
+            std::cout << "Warning: Failed to load Vulkan backend: " << vulkan_result.error() << std::endl;
+        }
+    } else {
+        std::cout << "Vulkan backend not found at: " << vulkan_backend_path << std::endl;
+    }
+
     std::cout << "Tenzor initialization complete - 51 CPU operations registered" << std::endl;
 
     g_initialized = true;

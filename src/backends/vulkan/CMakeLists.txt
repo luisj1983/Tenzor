@@ -36,6 +36,7 @@ file(MAKE_DIRECTORY ${SHADER_OUTPUT_DIR})
 
 # List of shaders
 set(SHADERS
+    # Basic operations
     math
     matmul
     activations
@@ -45,6 +46,28 @@ set(SHADERS
     batchnorm
     transform
     indexing
+    # Advanced pooling
+    pooling_backward
+    pooling_forward_with_indices
+    adaptive_pooling
+    # Normalization
+    batchnorm_backward
+    layer_norm
+    group_norm
+    # Softmax and losses
+    softmax
+    log_softmax
+    cross_entropy
+    # Advanced reductions
+    argmax_argmin
+    variance_std
+    prod_reduction
+    boolean_reduction
+    # Indexing operations
+    embedding
+    gather
+    scatter
+    index_select
 )
 
 # Compile each shader
@@ -72,6 +95,7 @@ add_library(tenzor_backend_vulkan SHARED
     vulkan_backend.cpp
     vulkan_backend.hpp
     vulkan_utils.hpp
+    vulkan_ops_impl.cpp
 )
 
 target_include_directories(tenzor_backend_vulkan PRIVATE

@@ -51,11 +51,21 @@ option(TENZOR_BUILD_TESTS "Build tests" ON)
 option(TENZOR_BUILD_BENCHMARKS "Build benchmarks" OFF)
 option(TENZOR_BUILD_EXAMPLES "Build examples" ON)
 
+# Coverage build type
+option(TENZOR_ENABLE_COVERAGE "Enable coverage reporting" OFF)
+
 # Global compiler flags
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-Wall -Wextra -pedantic -march=native)
     # Disable specific warnings for stub implementations
     add_compile_options(-Wno-unused-parameter -Wno-unused-variable)
+
+    # Enable coverage if requested
+    if(TENZOR_ENABLE_COVERAGE)
+        message(STATUS "Coverage reporting enabled")
+        add_compile_options(--coverage -fprofile-arcs -ftest-coverage)
+        add_link_options(--coverage)
+    endif()
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
     add_compile_options(/W4 /arch:AVX2)
 endif()
@@ -153,6 +163,7 @@ install(TARGETS tenzor_core
     LIBRARY DESTINATION lib
     ARCHIVE DESTINATION lib
     RUNTIME DESTINATION bin
+    PUBLIC_HEADER DESTINATION include/tenzor
     INCLUDES DESTINATION include
 )
 

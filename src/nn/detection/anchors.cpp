@@ -66,12 +66,11 @@ auto AnchorGenerator::generate(int64_t feat_height, int64_t feat_width,
         }
     }
 
-    // Create tensor from data
-    auto anchors = tenzor::from_data(
-        anchor_data.data(),
-        {total_anchors, 4},
-        Device::cpu()
-    );
+    // Create tensor and copy data to avoid dangling pointer
+    // (anchor_data vector would be destroyed, leaving tensor pointing to freed memory)
+    auto anchors = zeros({total_anchors, 4}, DType::Float32, Device::cpu());
+    float* anchors_ptr = anchors.data<float>();
+    std::copy(anchor_data.begin(), anchor_data.end(), anchors_ptr);
 
     // Move to target device if needed
     if (device != Device::cpu()) {

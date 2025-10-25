@@ -34,7 +34,7 @@ target_link_libraries(tenzor_unit_tests PRIVATE
     GTest::gtest_main
 )
 
-# Integration tests
+# Legacy integration tests (kept for compatibility)
 add_executable(tenzor_integration_tests
     integration/test_nn.cpp
     integration/test_training.cpp
@@ -44,6 +44,9 @@ target_link_libraries(tenzor_integration_tests PRIVATE
     tenzor_core
     GTest::gtest_main
 )
+
+# Comprehensive integration tests subdirectory
+add_subdirectory(integration)
 
 # Dropout tests
 add_executable(test_dropout
@@ -1084,3 +1087,61 @@ target_link_libraries(test_phase11_backends PRIVATE
 )
 
 gtest_discover_tests(test_phase11_backends DISCOVERY_TIMEOUT 30)
+
+# ============================================================================
+# CIoU Loss Tests - Complete IoU implementation for YOLO
+# ============================================================================
+
+add_executable(test_ciou_loss
+    test_ciou_loss.cpp
+)
+
+target_link_libraries(test_ciou_loss PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_ciou_loss DISCOVERY_TIMEOUT 30)
+
+# ============================================================================
+# Phase 12 Tests - Enhanced Test Coverage and Validation
+# ============================================================================
+
+# Quantization conversion tests
+add_executable(test_quantization_conversion
+    test_quantization_conversion.cpp
+)
+
+target_link_libraries(test_quantization_conversion PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_quantization_conversion DISCOVERY_TIMEOUT 30)
+
+# Mask R-CNN loss tests
+add_executable(test_mask_rcnn_losses
+    test_mask_rcnn_losses.cpp
+)
+
+target_link_libraries(test_mask_rcnn_losses PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_mask_rcnn_losses DISCOVERY_TIMEOUT 30)
+
+# Vulkan complete operations tests
+add_executable(test_vulkan_complete_ops
+    test_vulkan_complete_ops.cpp
+)
+
+target_link_libraries(test_vulkan_complete_ops PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_vulkan_complete_ops DISCOVERY_TIMEOUT 30)
+
+# Utility module tests
+add_subdirectory(utils)

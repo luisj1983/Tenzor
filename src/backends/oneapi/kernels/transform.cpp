@@ -7,6 +7,12 @@
 namespace tenzor {
 namespace oneapi {
 
+// SYCL Kernel name classes
+class TransposeKernelFloat32;
+class TransposeKernelFloat64;
+class PermuteKernelFloat32;
+class PermuteKernelFloat64;
+
 // Helper function to get typed pointer from tensor
 template<typename T>
 inline auto get_data_ptr(const Tensor& t) -> T* {
@@ -112,7 +118,7 @@ auto transpose_kernel(const Tensor& input, int64_t dim0, int64_t dim1, sycl::que
         const float* in_ptr = get_data_ptr<const float>(input);
         float* out_ptr = get_data_ptr<float>(output);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<TransposeKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             // Compute multi-dimensional index in input
             int64_t temp = idx;
             int64_t in_idx = 0;
@@ -136,7 +142,7 @@ auto transpose_kernel(const Tensor& input, int64_t dim0, int64_t dim1, sycl::que
         const double* in_ptr = get_data_ptr<const double>(input);
         double* out_ptr = get_data_ptr<double>(output);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<TransposeKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             int64_t temp = idx;
             int64_t in_idx = 0;
             int64_t out_idx = 0;
@@ -210,7 +216,7 @@ auto permute_kernel(const Tensor& input, const std::vector<int64_t>& dims, sycl:
         const float* in_ptr = get_data_ptr<const float>(input);
         float* out_ptr = get_data_ptr<float>(output);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
+        queue.parallel_for<PermuteKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
             // Compute multi-dimensional coordinates from flat index
             int64_t coords[8];
             int64_t temp = flat_idx;
@@ -238,7 +244,7 @@ auto permute_kernel(const Tensor& input, const std::vector<int64_t>& dims, sycl:
         const double* in_ptr = get_data_ptr<const double>(input);
         double* out_ptr = get_data_ptr<double>(output);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
+        queue.parallel_for<PermuteKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
             int64_t coords[8];
             int64_t temp = flat_idx;
             for (size_t d = 0; d < ndim; ++d) {
@@ -430,22 +436,22 @@ auto zeros_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
     return output;
 }
 
-// Ones kernel
+// Ones kernel - use simpler memcpy approach for compatibility
 auto ones_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, sycl::queue& queue) -> Tensor {
     Tensor output(shape, dtype, device);
     const int64_t numel = output.numel();
 
     if (dtype == DType::Float32) {
-        float* ptr = get_data_ptr<float>(output);
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            ptr[idx] = 1.0f;
-        }).wait();
+        // Create host buffer with ones
+        std::vector<float> host_data(numel, 1.0f);
+        float* device_ptr = get_data_ptr<float>(output);
+        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(float)).wait();
     }
     else if (dtype == DType::Float64) {
-        double* ptr = get_data_ptr<double>(output);
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            ptr[idx] = 1.0;
-        }).wait();
+        // Create host buffer with ones
+        std::vector<double> host_data(numel, 1.0);
+        double* device_ptr = get_data_ptr<double>(output);
+        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(double)).wait();
     }
     else {
         throw std::runtime_error("Unsupported dtype for ones");
@@ -454,23 +460,21 @@ auto ones_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
     return output;
 }
 
-// Full kernel - fill with specific value
+// Full kernel - fill with specific value using memcpy
 auto full_kernel(const std::vector<int64_t>& shape, float value, DType dtype, Device device, sycl::queue& queue) -> Tensor {
     Tensor output(shape, dtype, device);
     const int64_t numel = output.numel();
 
     if (dtype == DType::Float32) {
-        float* ptr = get_data_ptr<float>(output);
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            ptr[idx] = value;
-        }).wait();
+        std::vector<float> host_data(numel, value);
+        float* device_ptr = get_data_ptr<float>(output);
+        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(float)).wait();
     }
     else if (dtype == DType::Float64) {
-        double* ptr = get_data_ptr<double>(output);
         const double value_d = static_cast<double>(value);
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            ptr[idx] = value_d;
-        }).wait();
+        std::vector<double> host_data(numel, value_d);
+        double* device_ptr = get_data_ptr<double>(output);
+        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(double)).wait();
     }
     else {
         throw std::runtime_error("Unsupported dtype for full");
@@ -479,7 +483,7 @@ auto full_kernel(const std::vector<int64_t>& shape, float value, DType dtype, De
     return output;
 }
 
-// Fill kernel - fill existing tensor with value
+// Fill kernel - fill existing tensor with value using memcpy
 auto fill_kernel(const Tensor& tensor, float value, sycl::queue& queue) -> Tensor {
     Tensor output(std::vector<int64_t>(tensor.shape().begin(), tensor.shape().end()),
                   tensor.dtype(), tensor.device());
@@ -487,17 +491,15 @@ auto fill_kernel(const Tensor& tensor, float value, sycl::queue& queue) -> Tenso
     const int64_t numel = tensor.numel();
 
     if (tensor.dtype() == DType::Float32) {
-        float* ptr = get_data_ptr<float>(output);
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            ptr[idx] = value;
-        }).wait();
+        std::vector<float> host_data(numel, value);
+        float* device_ptr = get_data_ptr<float>(output);
+        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(float)).wait();
     }
     else if (tensor.dtype() == DType::Float64) {
-        double* ptr = get_data_ptr<double>(output);
         const double value_d = static_cast<double>(value);
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            ptr[idx] = value_d;
-        }).wait();
+        std::vector<double> host_data(numel, value_d);
+        double* device_ptr = get_data_ptr<double>(output);
+        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(double)).wait();
     }
     else {
         throw std::runtime_error("Unsupported dtype for fill");

@@ -51,7 +51,16 @@ set(ONEAPI_BACKEND_SOURCE
 
 # Stage 1: Compile SYCL kernels into static library using icpx
 # This is built with icpx via custom commands
-set(ICPX_COMPILER "${INTEL_SYCL_COMPILER}")
+#set(ICPX_COMPILER "${INTEL_SYCL_COMPILER}")
+find_program(ICPX_COMPILER NAMES icpx REQUIRED)
+
+# Detect SYCL target architecture BEFORE building kernels
+# Target CPU for better compatibility
+if(NOT DEFINED SYCL_TARGET_ARCH)
+    # Use spir64 for CPU and Intel GPUs (better compatibility)
+    set(SYCL_TARGET_ARCH "spir64")
+    message(STATUS "OneAPI Backend: Target ${SYCL_TARGET_ARCH} (CPU/Intel GPU)")
+endif()
 
 # Build each SYCL kernel file individually
 set(SYCL_OBJECTS "")
@@ -67,7 +76,7 @@ foreach(SRC ${ONEAPI_SYCL_SOURCES})
             -o ${OBJ_FILE}
             -std=c++23 -fPIC
             -fsycl -fsycl-targets=${SYCL_TARGET_ARCH}
-            -O3 -ffast-math
+            -O3
             -I${CMAKE_SOURCE_DIR}/include
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${SRC}
         COMMENT "Compiling SYCL kernel: ${SRC}"
@@ -84,61 +93,69 @@ add_custom_command(
     VERBATIM
 )
 
-# Stage 2: Manually compile oneapi_backend.cpp with g++ (no SYCL flags)
-set(ONEAPI_BACKEND_OBJ "${CMAKE_CURRENT_BINARY_DIR}/oneapi_backend.cpp.o")
-add_custom_command(
-    OUTPUT ${ONEAPI_BACKEND_OBJ}
-    COMMAND ${CMAKE_CXX_COMPILER}
-        -c ${CMAKE_CURRENT_SOURCE_DIR}/${ONEAPI_BACKEND_SOURCE}
-        -o ${ONEAPI_BACKEND_OBJ}
-        -std=c++23 -fPIC
-        -O3 -DNDEBUG
-        -Wall -Wextra -pedantic
-        -march=native
-        -Wno-unused-parameter -Wno-unused-variable
-        -fopenmp
-        -I${CMAKE_SOURCE_DIR}/include
-        -I${SYCL_INCLUDE_DIR}
-        -DTENZOR_ONEAPI_BACKEND
-    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${ONEAPI_BACKEND_SOURCE}
-    COMMENT "Compiling oneapi_backend.cpp (pure C++, no SYCL flags)"
-    VERBATIM
+# Stage 2: Create shared library using proper CMake target
+# This allows us to use target_link_options for SYCL flags
+
+# Override CMAKE link command to use icpx instead of g++ for shared library creation
+# This is necessary because SYCL linking requires icpx
+set(CMAKE_CXX_CREATE_SHARED_LIBRARY
+    "${ICPX_COMPILER} <CMAKE_SHARED_LIBRARY_CXX_FLAGS> <LANGUAGE_COMPILE_FLAGS> <LINK_FLAGS> <CMAKE_SHARED_LIBRARY_CREATE_CXX_FLAGS> -o <TARGET> <OBJECTS> <LINK_LIBRARIES>"
 )
 
-# Final link step: Create shared library using icpx
-# This links the backend object with SYCL kernels library
-set(ONEAPI_SO_OUTPUT "${CMAKE_BINARY_DIR}/../bin/tenzor_backend_oneapi.so")
+# Create the shared library target
+add_library(tenzor_backend_oneapi SHARED
+    ${ONEAPI_BACKEND_SOURCE}
+)
 
-# Build MKL link flags if available
-set(MKL_LINK_FLAGS "")
+# Add dependency on SYCL kernels static library
+add_custom_target(tenzor_oneapi_kernels_lib
+    DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/libtenzor_oneapi_kernels.a
+)
+add_dependencies(tenzor_backend_oneapi tenzor_oneapi_kernels_lib)
+
+# Set output location
+set_target_properties(tenzor_backend_oneapi PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/../bin
+    OUTPUT_NAME tenzor_backend_oneapi
+    PREFIX ""
+)
+
+# Compile options for backend source
+target_compile_options(tenzor_backend_oneapi PRIVATE
+    -std=c++23
+    -O3 -DNDEBUG
+    -Wall -Wextra -pedantic
+    -march=native
+    -Wno-unused-parameter -Wno-unused-variable
+    -fopenmp
+    -DTENZOR_ONEAPI_BACKEND
+)
+
+# Include directories
+target_include_directories(tenzor_backend_oneapi PRIVATE
+    ${CMAKE_SOURCE_DIR}/include
+    ${SYCL_INCLUDE_DIR}
+)
+
+# Link with SYCL kernels static library
+target_link_libraries(tenzor_backend_oneapi PRIVATE
+    ${CMAKE_CURRENT_BINARY_DIR}/libtenzor_oneapi_kernels.a
+    tenzor_core
+    ${SYCL_LIBRARY_DIR}/libsycl.so
+)
+
+# Add SYCL link options (THIS IS WHERE THE MAGIC HAPPENS)
+target_link_options(tenzor_backend_oneapi PRIVATE
+    -fsycl
+    -fsycl-targets=${SYCL_TARGET_ARCH}
+)
+
+# Add MKL link options if available
 if(MKL_FOUND)
-    set(MKL_LINK_FLAGS "-L/opt/intel/oneapi/2025.2/lib -lmkl_sycl -lmkl_intel_ilp64 -lmkl_intel_thread -lmkl_core -liomp5")
-endif()
-
-add_custom_command(
-    OUTPUT ${ONEAPI_SO_OUTPUT}
-    COMMAND ${ICPX_COMPILER}
-        -shared
-        -fsycl -fsycl-targets=${SYCL_TARGET_ARCH}
-        -o ${ONEAPI_SO_OUTPUT}
-        ${ONEAPI_BACKEND_OBJ}
-        ${CMAKE_CURRENT_BINARY_DIR}/libtenzor_oneapi_kernels.a
-        -L${CMAKE_BINARY_DIR}/../bin -ltenzor_core
-        -L${SYCL_LIBRARY_DIR} -lsycl
-        ${MKL_LINK_FLAGS}
-    DEPENDS ${ONEAPI_BACKEND_OBJ} ${CMAKE_CURRENT_BINARY_DIR}/libtenzor_oneapi_kernels.a tenzor_core
-    COMMENT "Linking OneAPI backend shared library with icpx"
-    VERBATIM
-)
-
-# Create custom target for the shared library
-add_custom_target(tenzor_backend_oneapi ALL
-    DEPENDS ${ONEAPI_SO_OUTPUT}
-)
-
-# Note: MKL and oneDNN linking is handled in the custom link command above
-if(MKL_FOUND)
-    message(STATUS "OneAPI Backend: oneMKL support enabled")
+    target_link_options(tenzor_backend_oneapi PRIVATE
+        -L/opt/intel/oneapi/2025.2/lib
+        -lmkl_sycl -lmkl_intel_ilp64 -lmkl_intel_thread -lmkl_core -liomp5
+    )
 endif()
 
 # Find oneDNN (Intel's DNN library)
@@ -147,25 +164,6 @@ if(dnnl_FOUND)
     message(STATUS "OneAPI Backend: oneDNN support enabled")
 else()
     message(STATUS "OneAPI Backend: oneDNN not found, using built-in kernels")
-endif()
-
-# Detect SYCL target architecture
-# For NVIDIA GPUs via CUDA backend: nvidia_gpu_sm_XX (XX = compute capability)
-# For Intel GPUs: spir64_gen or intel_gpu_XX
-# For CPU: spir64_x86_64
-if(NOT DEFINED SYCL_TARGET_ARCH)
-    # Auto-detect from CUDA if available
-    if(CMAKE_CUDA_COMPILER AND CMAKE_CUDA_ARCHITECTURES)
-        # Use first CUDA architecture
-        list(GET CMAKE_CUDA_ARCHITECTURES 0 CUDA_ARCH)
-        set(SYCL_TARGET_ARCH "nvidia_gpu_sm_${CUDA_ARCH}")
-        message(STATUS "OneAPI Backend: Auto-detected NVIDIA GPU target: ${SYCL_TARGET_ARCH}")
-    else()
-        # Default to NVIDIA sm_75 (Turing) or Intel CPU
-        set(SYCL_TARGET_ARCH "nvidia_gpu_sm_75")
-        message(STATUS "OneAPI Backend: Using default target: ${SYCL_TARGET_ARCH}")
-        message(STATUS "  Set SYCL_TARGET_ARCH to override (e.g., nvidia_gpu_sm_80 for Ampere)")
-    endif()
 endif()
 
 # Device selection (CPU, GPU, FPGA)

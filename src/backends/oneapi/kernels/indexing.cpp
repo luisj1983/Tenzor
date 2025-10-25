@@ -5,6 +5,16 @@
 namespace tenzor {
 namespace oneapi {
 
+// Kernel class declarations for SYCL
+class GatherKernelFloat32;
+class GatherKernelFloat64;
+class ScatterKernelFloat32;
+class ScatterKernelFloat64;
+class IndexSelectKernelFloat32;
+class IndexSelectKernelFloat64;
+class MaskedFillKernelFloat32;
+class MaskedFillKernelFloat64;
+
 // Helper function to get typed pointer from tensor
 template<typename T>
 inline auto get_data_ptr(const Tensor& t) -> T* {
@@ -59,7 +69,7 @@ auto gather_kernel(const Tensor& input, int64_t dim, const Tensor& index, sycl::
         const int64_t* index_ptr = get_data_ptr<const int64_t>(index);
         float* output_ptr = get_data_ptr<float>(output);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
+        queue.parallel_for<GatherKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
             // Compute multi-dimensional index in output
             int64_t temp = flat_idx;
             int64_t input_idx = 0;
@@ -86,7 +96,7 @@ auto gather_kernel(const Tensor& input, int64_t dim, const Tensor& index, sycl::
         const int64_t* index_ptr = get_data_ptr<const int64_t>(index);
         double* output_ptr = get_data_ptr<double>(output);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
+        queue.parallel_for<GatherKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
             int64_t temp = flat_idx;
             int64_t input_idx = 0;
 
@@ -161,7 +171,7 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index,
         const int64_t* index_ptr = get_data_ptr<const int64_t>(index);
         const float* src_ptr = get_data_ptr<const float>(src);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
+        queue.parallel_for<ScatterKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
             // Compute multi-dimensional index
             int64_t temp = flat_idx;
             int64_t output_idx = 0;
@@ -188,7 +198,7 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index,
         const int64_t* index_ptr = get_data_ptr<const int64_t>(index);
         const double* src_ptr = get_data_ptr<const double>(src);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
+        queue.parallel_for<ScatterKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
             int64_t temp = flat_idx;
             int64_t output_idx = 0;
 
@@ -251,7 +261,7 @@ auto index_select_kernel(const Tensor& input, int64_t dim, const Tensor& index, 
         const int64_t* index_ptr = get_data_ptr<const int64_t>(index);
         float* output_ptr = get_data_ptr<float>(output);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
+        queue.parallel_for<IndexSelectKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
             // Compute multi-dimensional index in output
             int64_t temp = flat_idx;
             int64_t input_idx = 0;
@@ -278,7 +288,7 @@ auto index_select_kernel(const Tensor& input, int64_t dim, const Tensor& index, 
         const int64_t* index_ptr = get_data_ptr<const int64_t>(index);
         double* output_ptr = get_data_ptr<double>(output);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
+        queue.parallel_for<IndexSelectKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
             int64_t temp = flat_idx;
             int64_t input_idx = 0;
 
@@ -323,7 +333,7 @@ auto masked_fill_kernel(const Tensor& input, const Tensor& mask, float value, sy
         const bool* mask_ptr = get_data_ptr<const bool>(mask);
         float* output_ptr = get_data_ptr<float>(output);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<MaskedFillKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             output_ptr[idx] = mask_ptr[idx] ? value : input_ptr[idx];
         }).wait();
     }
@@ -333,7 +343,7 @@ auto masked_fill_kernel(const Tensor& input, const Tensor& mask, float value, sy
         double* output_ptr = get_data_ptr<double>(output);
         const double value_d = static_cast<double>(value);
 
-        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+        queue.parallel_for<MaskedFillKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             output_ptr[idx] = mask_ptr[idx] ? value_d : input_ptr[idx];
         }).wait();
     }

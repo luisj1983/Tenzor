@@ -280,6 +280,15 @@ auto conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tenso
 
 #else // !TENZOR_HAS_ONEDNN - Fallback implementation using im2col + GEMM
 
+// Kernel class declarations for conv2d operations
+class Conv2dIm2colKernel;
+class Conv2dCol2imKernel;
+class Conv2dForwardGemmFallback;
+class Conv2dForwardBiasAdd;
+class Conv2dBackwardInputGemmFallback;
+class Conv2dBackwardWeightGemmFallback;
+class Conv2dBackwardBiasReduction;
+
 // Im2col transformation for convolution
 template<typename T>
 void im2col_kernel(const T* data_im, int64_t channels, int64_t height, int64_t width,
@@ -289,7 +298,7 @@ void im2col_kernel(const T* data_im, int64_t channels, int64_t height, int64_t w
     const int64_t output_w = (width + 2 * pad - dilation * (kernel_w - 1) - 1) / stride + 1;
     const int64_t col_size = channels * kernel_h * kernel_w * output_h * output_w;
 
-    queue.parallel_for(sycl::range<1>(col_size), [=](sycl::id<1> index) {
+    queue.parallel_for<Conv2dIm2colKernel>(sycl::range<1>(col_size), [=](sycl::id<1> index) {
         int64_t w_out = index % output_w;
         int64_t idx = index / output_w;
         int64_t h_out = idx % output_h;
@@ -320,7 +329,7 @@ void col2im_kernel(const T* data_col, int64_t channels, int64_t height, int64_t 
     queue.fill(data_im, T(0), im_size).wait();
 
     // Accumulate gradients from col buffer
-    queue.parallel_for(sycl::range<1>(channels * kernel_h * kernel_w * output_h * output_w),
+    queue.parallel_for<Conv2dCol2imKernel>(sycl::range<1>(channels * kernel_h * kernel_w * output_h * output_w),
                       [=](sycl::id<1> index) {
         int64_t w_out = index % output_w;
         int64_t idx = index / output_w;
@@ -407,7 +416,7 @@ auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
             queue.wait();
 #else
             // Naive GEMM fallback
-            queue.parallel_for(sycl::range<2>(C_out, H_out * W_out), [=](sycl::id<2> idx) {
+            queue.parallel_for<Conv2dForwardGemmFallback>(sycl::range<2>(C_out, H_out * W_out), [=](sycl::id<2> idx) {
                 const int64_t oc = idx[0];
                 const int64_t hw = idx[1];
 
@@ -422,7 +431,7 @@ auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
             // Add bias if present
             if (bias != nullptr) {
                 const float* bias_ptr = get_data_ptr<const float>(*bias);
-                queue.parallel_for(sycl::range<2>(C_out, H_out * W_out), [=](sycl::id<2> idx) {
+                queue.parallel_for<Conv2dForwardBiasAdd>(sycl::range<2>(C_out, H_out * W_out), [=](sycl::id<2> idx) {
                     const int64_t oc = idx[0];
                     const int64_t hw = idx[1];
                     const int64_t out_idx = n * C_out * H_out * W_out + oc * H_out * W_out + hw;
@@ -510,7 +519,7 @@ auto conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tenso
             queue.wait();
 #else
             // Naive GEMM fallback: col = weight^T * grad_output
-            queue.parallel_for(sycl::range<2>(C_in * K_h * K_w, H_out * W_out),
+            queue.parallel_for<Conv2dBackwardInputGemmFallback>(sycl::range<2>(C_in * K_h * K_w, H_out * W_out),
                              [=](sycl::id<2> idx) {
                 const int64_t k = idx[0];  // weight column
                 const int64_t hw = idx[1]; // spatial position
@@ -580,7 +589,7 @@ auto conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tenso
             queue.wait();
 #else
             // Naive GEMM fallback with atomic accumulation
-            queue.parallel_for(sycl::range<2>(C_out, C_in * K_h * K_w),
+            queue.parallel_for<Conv2dBackwardWeightGemmFallback>(sycl::range<2>(C_out, C_in * K_h * K_w),
                              [=](sycl::id<2> idx) {
                 const int64_t oc = idx[0];  // output channel
                 const int64_t k = idx[1];   // weight position
@@ -610,7 +619,7 @@ auto conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tenso
 
         float* grad_bias_ptr = get_data_ptr<float>(grad_bias);
 
-        queue.parallel_for(sycl::range<1>(C), [=](sycl::id<1> c) {
+        queue.parallel_for<Conv2dBackwardBiasReduction>(sycl::range<1>(C), [=](sycl::id<1> c) {
             float sum = 0.0f;
             for (int64_t n = 0; n < N; ++n) {
                 for (int64_t h = 0; h < H; ++h) {
