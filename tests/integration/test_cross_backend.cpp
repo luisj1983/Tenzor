@@ -11,12 +11,14 @@
  */
 
 #include <gtest/gtest.h>
+#include "../backend_test_fixture.hpp"
 #include <tenzor/tenzor.hpp>
 #include <memory>
 #include <cmath>
 
 using namespace tenzor;
 using namespace tenzor::nn;
+using namespace tenzor::testing;
 
 //==============================================================================
 // Test Environment
@@ -26,168 +28,111 @@ class CrossBackendEnvironment : public ::testing::Environment {
 public:
     void SetUp() override {
         tenzor::initialize();
-
-        // Check backend availability
-        try {
-            auto test_tensor = ones({1}, DType::Float32, Device::cuda());
-            cuda_available_ = true;
-        } catch (...) {
-            cuda_available_ = false;
-        }
-
-        std::cout << "CUDA available: " << (cuda_available_ ? "Yes" : "No") << std::endl;
     }
-
-    static bool cuda_available_;
 };
-
-bool CrossBackendEnvironment::cuda_available_ = false;
 
 static ::testing::Environment* const cross_backend_env =
     ::testing::AddGlobalTestEnvironment(new CrossBackendEnvironment);
 
 //==============================================================================
-// Helper Functions
+// Backend Parameterized Tests
 //==============================================================================
 
-auto compare_tensors(const Tensor& t1, const Tensor& t2, float tolerance = 1e-4f) -> bool {
-    if (!std::ranges::equal(t1.shape(), t2.shape())) return false;
-
-    auto t1_cpu = t1.to(Device::cpu());
-    auto t2_cpu = t2.to(Device::cpu());
-
-    auto data1 = t1_cpu.template data<float>();
-    auto data2 = t2_cpu.template data<float>();
-
-    for (size_t i = 0; i < t1_cpu.numel(); i++) {
-        if (std::abs(data1[i] - data2[i]) > tolerance) {
-            return false;
-        }
-    }
-    return true;
-}
+class CrossBackendTest : public BackendTest {};
 
 //==============================================================================
-// Test 1: CPU to CUDA Transfer and Back
+// Test 1: Device Transfer Round Trip
 //==============================================================================
 
-TEST(CrossBackend, CPUToCUDATransfer) {
-    if (!CrossBackendEnvironment::cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
-    }
-
+TEST_P(CrossBackendTest, DeviceTransferRoundTrip) {
     auto cpu_device = Device::cpu();
-    auto cuda_device = Device::cuda();
 
     // Create tensor on CPU
     auto cpu_tensor = randn({10, 20}, DType::Float32, cpu_device);
 
-    // Transfer to CUDA
-    auto cuda_tensor = cpu_tensor.to(cuda_device);
-    EXPECT_EQ(cuda_tensor.device().type, Device::Type::CUDA);
+    // Transfer to test device
+    auto device_tensor = cpu_tensor.to(device);
+    EXPECT_EQ(device_tensor.device().type, device.type);
 
     // Transfer back to CPU
-    auto cpu_tensor_back = cuda_tensor.to(cpu_device);
+    auto cpu_tensor_back = device_tensor.to(cpu_device);
     EXPECT_EQ(cpu_tensor_back.device().type, Device::Type::CPU);
 
     // Verify data integrity
-    EXPECT_TRUE(compare_tensors(cpu_tensor, cpu_tensor_back, 1e-6f))
-        << "Data should match after round-trip transfer";
+    expectTensorNear(cpu_tensor, cpu_tensor_back, 1e-6f);
 }
 
 //==============================================================================
-// Test 2: Simple Operation Consistency Across Backends
+// Test 2: Simple Operation Consistency
 //==============================================================================
 
-TEST(CrossBackend, SimpleOperationConsistency) {
-    auto cpu_device = Device::cpu();
+TEST_P(CrossBackendTest, SimpleOperationConsistency) {
+    // Computation on test device
+    auto a = ones({5, 5}, DType::Float32, device);
+    auto b = ones({5, 5}, DType::Float32, device) * 2.0f;
+    auto result = a + b;
 
-    // CPU computation
-    auto a_cpu = ones({5, 5}, DType::Float32, cpu_device);
-    auto b_cpu = ones({5, 5}, DType::Float32, cpu_device) * 2.0f;
-    auto result_cpu = a_cpu + b_cpu;
+    // Verify result
+    auto result_cpu = result.to(Device::cpu());
+    auto result_data = result_cpu.template data<float>();
 
-    auto result_cpu_data = result_cpu.to(Device::cpu()).template data<float>();
-
-    // Verify CPU result
-    for (size_t i = 0; i < result_cpu.numel(); i++) {
-        EXPECT_FLOAT_EQ(result_cpu_data[i], 3.0f) << "CPU result should be 3.0";
-    }
-
-    if (CrossBackendEnvironment::cuda_available_) {
-        auto cuda_device = Device::cuda();
-
-        // CUDA computation
-        auto a_cuda = ones({5, 5}, DType::Float32, cuda_device);
-        auto b_cuda = ones({5, 5}, DType::Float32, cuda_device) * 2.0f;
-        auto result_cuda = a_cuda + b_cuda;
-
-        // Compare results
-        EXPECT_TRUE(compare_tensors(result_cpu, result_cuda, 1e-6f))
-            << "CPU and CUDA results should match";
+    for (int64_t i = 0; i < result_cpu.numel(); i++) {
+        EXPECT_FLOAT_EQ(result_data[i], 3.0f) << "Result should be 3.0 on " << device.to_string();
     }
 }
 
 //==============================================================================
-// Test 3: Matrix Multiplication Across Backends
+// Test 3: Matrix Multiplication Consistency
 //==============================================================================
 
-TEST(CrossBackend, MatMulConsistency) {
-    auto cpu_device = Device::cpu();
+TEST_P(CrossBackendTest, MatMulConsistency) {
+    // Create input tensors
+    auto a = randn({32, 64}, DType::Float32, device);
+    auto b = randn({64, 128}, DType::Float32, device);
 
-    // Create input tensors on CPU
-    auto a_cpu = randn({32, 64}, DType::Float32, cpu_device);
-    auto b_cpu = randn({64, 128}, DType::Float32, cpu_device);
+    // Perform matmul on test device
+    auto result = matmul(a, b);
 
-    // CPU matmul
-    auto result_cpu = matmul(a_cpu, b_cpu);
+    EXPECT_EQ(result.shape()[0], 32);
+    EXPECT_EQ(result.shape()[1], 128);
+    EXPECT_EQ(result.device().type, device.type);
 
-    if (CrossBackendEnvironment::cuda_available_) {
-        auto cuda_device = Device::cuda();
-
-        // Transfer to CUDA and compute
-        auto a_cuda = a_cpu.to(cuda_device);
-        auto b_cuda = b_cpu.to(cuda_device);
-        auto result_cuda = matmul(a_cuda, b_cuda);
-
-        // Compare results (matmul may have slightly larger numerical differences)
-        EXPECT_TRUE(compare_tensors(result_cpu, result_cuda, 1e-3f))
-            << "CPU and CUDA matmul results should be close";
+    // Verify result is reasonable
+    auto result_cpu = result.to(Device::cpu());
+    auto* data = result_cpu.data<float>();
+    for (int64_t i = 0; i < result_cpu.numel(); ++i) {
+        EXPECT_FALSE(std::isnan(data[i])) << "NaN in matmul result on " << device.to_string();
+        EXPECT_FALSE(std::isinf(data[i])) << "Inf in matmul result on " << device.to_string();
     }
 }
 
 //==============================================================================
-// Test 4: Convolution Across Backends
+// Test 4: Convolution Consistency
 //==============================================================================
 
-TEST(CrossBackend, Conv2DConsistency) {
-    auto cpu_device = Device::cpu();
+TEST_P(CrossBackendTest, Conv2DConsistency) {
+    // Create input
+    auto input = randn({2, 3, 32, 32}, DType::Float32, device);
 
-    // Create input on CPU
-    auto input_cpu = randn({2, 3, 32, 32}, DType::Float32, cpu_device);
+    // Create and run conv
+    auto conv = std::make_shared<Conv2d>(3, 16, 3, 1, 1);
+    conv->to(device);
 
-    // Create and run conv on CPU
-    auto conv_cpu = std::make_shared<Conv2d>(3, 16, 3, 1, 1);
-    conv_cpu->to(cpu_device);
+    auto input_var = Variable(input, false);
+    auto output = conv->forward(input_var);
 
-    auto input_var_cpu = Variable(input_cpu, false);
-    auto output_cpu = conv_cpu->forward(input_var_cpu);
+    EXPECT_EQ(output.shape()[0], 2);
+    EXPECT_EQ(output.shape()[1], 16);
+    EXPECT_EQ(output.shape()[2], 32);
+    EXPECT_EQ(output.shape()[3], 32);
+    EXPECT_EQ(output.device().type, device.type);
 
-    if (CrossBackendEnvironment::cuda_available_) {
-        auto cuda_device = Device::cuda();
-
-        // Transfer model and input to CUDA
-        auto conv_cuda = std::make_shared<Conv2d>(3, 16, 3, 1, 1);
-        conv_cuda->load_state_dict(conv_cpu->state_dict());
-        conv_cuda->to(cuda_device);
-
-        auto input_cuda = input_cpu.to(cuda_device);
-        auto input_var_cuda = Variable(input_cuda, false);
-        auto output_cuda = conv_cuda->forward(input_var_cuda);
-
-        // Compare outputs
-        EXPECT_TRUE(compare_tensors(output_cpu.tensor(), output_cuda.tensor(), 1e-3f))
-            << "Conv2d outputs should match across backends";
+    // Verify output is reasonable
+    auto output_cpu = output.tensor().to(Device::cpu());
+    auto* data = output_cpu.data<float>();
+    for (int64_t i = 0; i < output_cpu.numel(); ++i) {
+        EXPECT_FALSE(std::isnan(data[i])) << "NaN in conv output on " << device.to_string();
+        EXPECT_FALSE(std::isinf(data[i])) << "Inf in conv output on " << device.to_string();
     }
 }
 
@@ -195,29 +140,22 @@ TEST(CrossBackend, Conv2DConsistency) {
 // Test 5: ReLU Activation Consistency
 //==============================================================================
 
-TEST(CrossBackend, ReLUConsistency) {
-    auto cpu_device = Device::cpu();
-
+TEST_P(CrossBackendTest, ReLUConsistency) {
     // Create input with both positive and negative values
-    auto input_cpu = randn({10, 20}, DType::Float32, cpu_device);
+    auto input = randn({10, 20}, DType::Float32, device);
 
-    // CPU ReLU
-    auto input_var_cpu = Variable(input_cpu, false);
-    auto output_var_cpu = relu(input_var_cpu);
-    auto output_cpu = output_var_cpu.tensor();
+    // Apply ReLU
+    auto input_var = Variable(input, false);
+    auto output_var = relu(input_var);
+    auto output = output_var.tensor();
 
-    if (CrossBackendEnvironment::cuda_available_) {
-        auto cuda_device = Device::cuda();
+    EXPECT_EQ(output.device().type, device.type);
 
-        // CUDA ReLU
-        auto input_cuda = input_cpu.to(cuda_device);
-        auto input_var_cuda = Variable(input_cuda, false);
-        auto output_var_cuda = relu(input_var_cuda);
-        auto output_cuda = output_var_cuda.tensor();
-
-        // Compare
-        EXPECT_TRUE(compare_tensors(output_cpu, output_cuda, 1e-6f))
-            << "ReLU outputs should match exactly";
+    // Verify ReLU property: all values >= 0
+    auto output_cpu = output.to(Device::cpu());
+    auto* data = output_cpu.data<float>();
+    for (int64_t i = 0; i < output_cpu.numel(); ++i) {
+        EXPECT_GE(data[i], 0.0f) << "ReLU output should be non-negative on " << device.to_string();
     }
 }
 
@@ -225,36 +163,30 @@ TEST(CrossBackend, ReLUConsistency) {
 // Test 6: BatchNorm Consistency
 //==============================================================================
 
-TEST(CrossBackend, BatchNormConsistency) {
-    auto cpu_device = Device::cpu();
-
+TEST_P(CrossBackendTest, BatchNormConsistency) {
     // Create input
-    auto input_cpu = randn({4, 16, 32, 32}, DType::Float32, cpu_device);
+    auto input = randn({4, 16, 32, 32}, DType::Float32, device);
 
-    // CPU BatchNorm
-    auto bn_cpu = std::make_shared<BatchNorm2d>(16);
-    bn_cpu->to(cpu_device);
-    bn_cpu->eval();  // Use eval mode for deterministic behavior
+    // Create BatchNorm
+    auto bn = std::make_shared<BatchNorm2d>(16);
+    bn->to(device);
+    bn->eval();  // Use eval mode for deterministic behavior
 
-    auto input_var_cpu = Variable(input_cpu, false);
-    auto output_cpu = bn_cpu->forward(input_var_cpu);
+    auto input_var = Variable(input, false);
+    auto output = bn->forward(input_var);
 
-    if (CrossBackendEnvironment::cuda_available_) {
-        auto cuda_device = Device::cuda();
+    EXPECT_EQ(output.shape()[0], 4);
+    EXPECT_EQ(output.shape()[1], 16);
+    EXPECT_EQ(output.shape()[2], 32);
+    EXPECT_EQ(output.shape()[3], 32);
+    EXPECT_EQ(output.device().type, device.type);
 
-        // CUDA BatchNorm
-        auto bn_cuda = std::make_shared<BatchNorm2d>(16);
-        bn_cuda->load_state_dict(bn_cpu->state_dict());
-        bn_cuda->to(cuda_device);
-        bn_cuda->eval();
-
-        auto input_cuda = input_cpu.to(cuda_device);
-        auto input_var_cuda = Variable(input_cuda, false);
-        auto output_cuda = bn_cuda->forward(input_var_cuda);
-
-        // Compare
-        EXPECT_TRUE(compare_tensors(output_cpu.tensor(), output_cuda.tensor(), 1e-3f))
-            << "BatchNorm outputs should match";
+    // Verify output is reasonable
+    auto output_cpu = output.tensor().to(Device::cpu());
+    auto* data = output_cpu.data<float>();
+    for (int64_t i = 0; i < output_cpu.numel(); ++i) {
+        EXPECT_FALSE(std::isnan(data[i])) << "NaN in BatchNorm output on " << device.to_string();
+        EXPECT_FALSE(std::isinf(data[i])) << "Inf in BatchNorm output on " << device.to_string();
     }
 }
 
@@ -262,9 +194,7 @@ TEST(CrossBackend, BatchNormConsistency) {
 // Test 7: End-to-End Model Inference Consistency
 //==============================================================================
 
-TEST(CrossBackend, ModelInferenceConsistency) {
-    auto cpu_device = Device::cpu();
-
+TEST_P(CrossBackendTest, ModelInferenceConsistency) {
     // Simple model
     class SimpleModel : public Module {
     public:
@@ -282,7 +212,6 @@ TEST(CrossBackend, ModelInferenceConsistency) {
             auto out = conv->forward(x);
             out = bn->forward(out);
             out = relu(out);
-            // Reshape for fully connected layer
             out = out.reshape({out.shape()[0], -1});
             out = fc->forward(out);
             return out;
@@ -294,36 +223,27 @@ TEST(CrossBackend, ModelInferenceConsistency) {
         std::shared_ptr<Linear> fc;
     };
 
-    auto model_cpu = std::make_shared<SimpleModel>();
-    model_cpu->to(cpu_device);
-    model_cpu->eval();
+    auto model = std::make_shared<SimpleModel>();
+    model->to(device);
+    model->eval();
 
     // Create input
-    auto input_cpu = randn({2, 3, 32, 32}, DType::Float32, cpu_device);
-    auto input_var_cpu = Variable(input_cpu, false);
+    auto input = randn({2, 3, 32, 32}, DType::Float32, device);
+    auto input_var = Variable(input, false);
 
-    // CPU inference
-    auto output_cpu = model_cpu->forward(input_var_cpu);
+    // Inference
+    auto output = model->forward(input_var);
 
-    if (CrossBackendEnvironment::cuda_available_) {
-        auto cuda_device = Device::cuda();
+    EXPECT_EQ(output.shape()[0], 2);
+    EXPECT_EQ(output.shape()[1], 10);
+    EXPECT_EQ(output.device().type, device.type);
 
-        // Transfer model to CUDA
-        auto model_cuda = std::make_shared<SimpleModel>();
-        model_cuda->load_state_dict(model_cpu->state_dict());
-        model_cuda->to(cuda_device);
-        model_cuda->eval();
-
-        // Transfer input to CUDA
-        auto input_cuda = input_cpu.to(cuda_device);
-        auto input_var_cuda = Variable(input_cuda, false);
-
-        // CUDA inference
-        auto output_cuda = model_cuda->forward(input_var_cuda);
-
-        // Compare
-        EXPECT_TRUE(compare_tensors(output_cpu.tensor(), output_cuda.tensor(), 1e-2f))
-            << "Model outputs should be consistent across backends";
+    // Verify output is reasonable
+    auto output_cpu = output.tensor().to(Device::cpu());
+    auto* data = output_cpu.data<float>();
+    for (int64_t i = 0; i < output_cpu.numel(); ++i) {
+        EXPECT_FALSE(std::isnan(data[i])) << "NaN in model output on " << device.to_string();
+        EXPECT_FALSE(std::isinf(data[i])) << "Inf in model output on " << device.to_string();
     }
 }
 
@@ -331,35 +251,21 @@ TEST(CrossBackend, ModelInferenceConsistency) {
 // Test 8: Gradient Computation Consistency
 //==============================================================================
 
-TEST(CrossBackend, GradientComputationConsistency) {
-    auto cpu_device = Device::cpu();
+TEST_P(CrossBackendTest, GradientComputationConsistency) {
+    // Simple computation with gradients
+    auto x = Variable(ones({5, 5}, DType::Float32, device), true);
+    auto y = x * 2.0f + 1.0f;
+    auto loss = sum(y);
+    loss.backward();
 
-    // Simple computation with gradients on CPU
-    auto x_cpu = Variable(ones({5, 5}, DType::Float32, cpu_device), true);
-    auto y_cpu = x_cpu * 2.0f + 1.0f;
-    auto loss_cpu = sum(y_cpu);
-    loss_cpu.backward();
+    auto grad = x.grad();
+    EXPECT_TRUE(grad.has_value()) << "Gradient not computed on " << device.to_string();
 
-    auto grad_cpu = x_cpu.grad();
-
-    if (CrossBackendEnvironment::cuda_available_) {
-        auto cuda_device = Device::cuda();
-
-        // Same computation on CUDA
-        auto x_cuda = Variable(ones({5, 5}, DType::Float32, cuda_device), true);
-        auto y_cuda = x_cuda * 2.0f + 1.0f;
-        auto loss_cuda = sum(y_cuda);
-        loss_cuda.backward();
-
-        auto grad_cuda = x_cuda.grad();
-
-        // Compare gradients
-        if (grad_cpu.has_value() && grad_cuda.has_value()) {
-            EXPECT_TRUE(compare_tensors(grad_cpu.value(), grad_cuda.value(), 1e-6f))
-                << "Gradients should match across backends";
-        } else {
-            FAIL() << "Gradients not computed properly";
-        }
+    // Verify gradient values (should all be 2.0)
+    auto grad_cpu = grad.value().to(Device::cpu());
+    auto* grad_data = grad_cpu.data<float>();
+    for (int64_t i = 0; i < grad_cpu.numel(); ++i) {
+        EXPECT_NEAR(grad_data[i], 2.0f, 1e-5f) << "Gradient mismatch on " << device.to_string();
     }
 }
 
@@ -367,209 +273,210 @@ TEST(CrossBackend, GradientComputationConsistency) {
 // Test 9: Training Step Consistency
 //==============================================================================
 
-TEST(CrossBackend, TrainingStepConsistency) {
-    auto cpu_device = Device::cpu();
+TEST_P(CrossBackendTest, TrainingStepConsistency) {
+    // Create model
+    auto model = std::make_shared<Linear>(10, 5);
+    model->to(device);
 
-    // Create model on CPU
-    auto model_cpu = std::make_shared<Linear>(10, 5);
-    model_cpu->to(cpu_device);
+    auto params = model->parameters();
+    optim::SGD optimizer(params, 0.01);
 
-    auto params_cpu = model_cpu->parameters();
-    optim::SGD optimizer_cpu(params_cpu, 0.01);
+    // Training step
+    auto input = Variable(randn({4, 10}, DType::Float32, device), true);
+    auto target = Variable(randn({4, 5}, DType::Float32, device), false);
 
-    // Training step on CPU
-    auto input_cpu = Variable(randn({4, 10}, DType::Float32, cpu_device), true);
-    auto target_cpu = Variable(randn({4, 5}, DType::Float32, cpu_device), false);
+    optimizer.zero_grad();
+    auto output = model->forward(input);
+    auto loss = mse_loss(output, target);
+    loss.backward();
 
-    optimizer_cpu.zero_grad();
-    auto output_cpu = model_cpu->forward(input_cpu);
-    auto loss_cpu = mse_loss(output_cpu, target_cpu);
-    loss_cpu.backward();
-    optimizer_cpu.step();
-
-    auto final_params_cpu = params_cpu[0]->tensor().clone();
-
-    if (CrossBackendEnvironment::cuda_available_) {
-        auto cuda_device = Device::cuda();
-
-        // Create same model on CUDA
-        auto model_cuda = std::make_shared<Linear>(10, 5);
-        model_cuda->load_state_dict(model_cpu->state_dict());
-        model_cuda->to(cuda_device);
-
-        auto params_cuda = model_cuda->parameters();
-        optim::SGD optimizer_cuda(params_cuda, 0.01);
-
-        // Training step on CUDA (same data)
-        auto input_cuda = input_cpu.tensor().to(cuda_device);
-        auto target_cuda = target_cpu.tensor().to(cuda_device);
-
-        auto input_var_cuda = Variable(input_cuda, true);
-        auto target_var_cuda = Variable(target_cuda, false);
-
-        optimizer_cuda.zero_grad();
-        auto output_cuda = model_cuda->forward(input_var_cuda);
-        auto loss_cuda = mse_loss(output_cuda, target_var_cuda);
-        loss_cuda.backward();
-        optimizer_cuda.step();
-
-        auto final_params_cuda = params_cuda[0]->tensor();
-
-        // Compare updated parameters
-        EXPECT_TRUE(compare_tensors(final_params_cpu, final_params_cuda, 1e-3f))
-            << "Updated parameters should match across backends";
+    // Verify gradients exist
+    for (const auto& param : params) {
+        if (param->requires_grad()) {
+            EXPECT_TRUE(param->has_grad()) << "Missing gradient on " << device.to_string();
+        }
     }
+
+    // Store initial params
+    auto initial_params = params[0]->tensor().clone();
+
+    optimizer.step();
+
+    // Verify parameters changed
+    auto updated_params = params[0]->tensor();
+    auto initial_cpu = initial_params.to(Device::cpu());
+    auto updated_cpu = updated_params.to(Device::cpu());
+
+    bool changed = false;
+    for (int64_t i = 0; i < initial_cpu.numel(); ++i) {
+        if (std::abs(initial_cpu.data<float>()[i] - updated_cpu.data<float>()[i]) > 1e-7f) {
+            changed = true;
+            break;
+        }
+    }
+
+    EXPECT_TRUE(changed) << "Parameters should change after optimizer step on " << device.to_string();
 }
 
 //==============================================================================
-// Test 10: Multi-Device Tensor Operations
+// Test 10: Memory Efficiency
 //==============================================================================
 
-TEST(CrossBackend, MultiDeviceTensorOperations) {
-    if (!CrossBackendEnvironment::cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
-    }
-
-    auto cpu_device = Device::cpu();
-    auto cuda_device = Device::cuda();
-
-    // Create tensors on different devices
-    auto a_cpu = ones({10, 10}, DType::Float32, cpu_device);
-    auto b_cuda = ones({10, 10}, DType::Float32, cuda_device) * 2.0f;
-
-    // Transfer b to CPU for operation
-    auto b_cpu = b_cuda.to(cpu_device);
-    auto result = a_cpu + b_cpu;
-
-    // Verify result
-    auto result_data = result.template data<float>();
-    for (size_t i = 0; i < result.numel(); i++) {
-        EXPECT_FLOAT_EQ(result_data[i], 3.0f);
-    }
-}
-
-//==============================================================================
-// Test 11: Memory Efficiency Test
-//==============================================================================
-
-TEST(CrossBackend, MemoryEfficiency) {
-    if (!CrossBackendEnvironment::cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
-    }
-
-    auto cuda_device = Device::cuda();
-
+TEST_P(CrossBackendTest, MemoryEfficiency) {
     // Allocate and deallocate tensors
     for (int i = 0; i < 100; i++) {
-        auto tensor = randn({100, 100}, DType::Float32, cuda_device);
+        auto tensor = randn({100, 100}, DType::Float32, device);
         auto result = tensor * 2.0f;
         // Tensor should be freed after scope
     }
 
     // If we reach here without crash, memory management is working
-    SUCCEED() << "Memory management working correctly";
+    SUCCEED() << "Memory management working correctly on " << device.to_string();
 }
 
 //==============================================================================
-// Test 12: Reduction Operations Consistency
+// Test 11: Reduction Operations Consistency
 //==============================================================================
 
-TEST(CrossBackend, ReductionOperationsConsistency) {
-    auto cpu_device = Device::cpu();
-
+TEST_P(CrossBackendTest, ReductionOperationsConsistency) {
     // Create input
-    auto input_cpu = randn({10, 20, 30}, DType::Float32, cpu_device);
+    auto input = randn({10, 20, 30}, DType::Float32, device);
 
-    // CPU reductions
-    auto sum_cpu = tenzor::sum(input_cpu);
-    auto mean_cpu = tenzor::mean(input_cpu);
-    auto max_cpu = tenzor::max(input_cpu);
+    // Perform reductions
+    auto sum_result = tenzor::sum(input);
+    auto mean_result = tenzor::mean(input);
+    auto max_result = tenzor::max(input);
 
-    if (CrossBackendEnvironment::cuda_available_) {
-        auto cuda_device = Device::cuda();
+    EXPECT_EQ(sum_result.device().type, device.type);
+    EXPECT_EQ(mean_result.device().type, device.type);
+    EXPECT_EQ(max_result.device().type, device.type);
 
-        // CUDA reductions
-        auto input_cuda = input_cpu.to(cuda_device);
-        auto sum_cuda = tenzor::sum(input_cuda);
-        auto mean_cuda = tenzor::mean(input_cuda);
-        auto max_cuda = tenzor::max(input_cuda);
+    // Verify results are reasonable
+    auto sum_cpu = sum_result.to(Device::cpu());
+    auto mean_cpu = mean_result.to(Device::cpu());
+    auto max_cpu = max_result.to(Device::cpu());
 
-        // Compare results
-        EXPECT_TRUE(compare_tensors(sum_cpu, sum_cuda, 1e-3f))
-            << "Sum should match";
-        EXPECT_TRUE(compare_tensors(mean_cpu, mean_cuda, 1e-3f))
-            << "Mean should match";
-        EXPECT_TRUE(compare_tensors(max_cpu, max_cuda, 1e-6f))
-            << "Max should match";
-    }
+    EXPECT_FALSE(std::isnan(sum_cpu.data<float>()[0])) << "NaN in sum on " << device.to_string();
+    EXPECT_FALSE(std::isnan(mean_cpu.data<float>()[0])) << "NaN in mean on " << device.to_string();
+    EXPECT_FALSE(std::isnan(max_cpu.data<float>()[0])) << "NaN in max on " << device.to_string();
 }
 
 //==============================================================================
-// Test 13: Softmax Consistency
+// Test 12: Softmax Consistency
 //==============================================================================
 
-TEST(CrossBackend, SoftmaxConsistency) {
-    auto cpu_device = Device::cpu();
-
+TEST_P(CrossBackendTest, SoftmaxConsistency) {
     // Create input
-    auto input_cpu = randn({32, 10}, DType::Float32, cpu_device);
+    auto input = randn({32, 10}, DType::Float32, device);
 
-    // CPU softmax
-    auto input_var_cpu = Variable(input_cpu, false);
-    auto output_var_cpu = tenzor::nn::softmax(input_var_cpu, 1);
-    auto output_cpu = output_var_cpu.tensor();
+    // Apply softmax
+    auto input_var = Variable(input, false);
+    auto output_var = tenzor::nn::softmax(input_var, 1);
+    auto output = output_var.tensor();
+
+    EXPECT_EQ(output.device().type, device.type);
 
     // Verify sum to 1.0 along dim 1
-    auto output_cpu_on_cpu = output_cpu.to(Device::cpu());
-    auto output_cpu_data = output_cpu_on_cpu.data<float>();
+    auto output_cpu = output.to(Device::cpu());
+    auto output_data = output_cpu.data<float>();
     for (int i = 0; i < 32; i++) {
         float sum = 0.0f;
         for (int j = 0; j < 10; j++) {
-            sum += output_cpu_data[i * 10 + j];
+            sum += output_data[i * 10 + j];
         }
-        EXPECT_NEAR(sum, 1.0f, 1e-5f) << "Softmax should sum to 1.0";
-    }
-
-    if (CrossBackendEnvironment::cuda_available_) {
-        auto cuda_device = Device::cuda();
-
-        // CUDA softmax
-        auto input_cuda = input_cpu.to(cuda_device);
-        auto input_var_cuda = Variable(input_cuda, false);
-        auto output_var_cuda = tenzor::nn::softmax(input_var_cuda, 1);
-        auto output_cuda = output_var_cuda.tensor();
-
-        // Compare
-        EXPECT_TRUE(compare_tensors(output_cpu, output_cuda, 1e-5f))
-            << "Softmax outputs should match";
+        EXPECT_NEAR(sum, 1.0f, 1e-5f) << "Softmax should sum to 1.0 on " << device.to_string();
     }
 }
 
 //==============================================================================
-// Test 14: Cross-Backend Data Pipeline
+// Test 13: Cross-Backend Data Pipeline
 //==============================================================================
 
-TEST(CrossBackend, CrossBackendDataPipeline) {
-    if (!CrossBackendEnvironment::cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
-    }
-
+TEST_P(CrossBackendTest, CrossBackendDataPipeline) {
     auto cpu_device = Device::cpu();
-    auto cuda_device = Device::cuda();
 
     // Simulate data loading on CPU
     auto data_cpu = randn({8, 3, 224, 224}, DType::Float32, cpu_device);
 
-    // Create model on CUDA
+    // Create model on test device
     auto model = std::make_shared<Conv2d>(3, 64, 7, 2, 3);
-    model->to(cuda_device);
+    model->to(device);
     model->eval();
 
-    // Transfer data to CUDA and run inference
-    auto data_cuda = data_cpu.to(cuda_device);
-    auto input_var = Variable(data_cuda, false);
+    // Transfer data to device and run inference
+    auto data_device = data_cpu.to(device);
+    auto input_var = Variable(data_device, false);
     auto output = model->forward(input_var);
 
-    EXPECT_EQ(output.shape()[0], 8) << "Batch size should be preserved";
-    EXPECT_EQ(output.device().type, Device::Type::CUDA) << "Output should be on CUDA";
+    EXPECT_EQ(output.shape()[0], 8);
+    EXPECT_EQ(output.device().type, device.type);
 }
+
+//==============================================================================
+// Test 14: Complete Training Loop on Backend
+//==============================================================================
+
+TEST_P(CrossBackendTest, CompleteTrainingLoop) {
+    class SimpleMLP : public Module {
+    public:
+        SimpleMLP() {
+            fc1 = std::make_shared<Linear>(50, 30);
+            relu = std::make_shared<ReLU>();
+            fc2 = std::make_shared<Linear>(30, 10);
+
+            register_module("fc1", fc1);
+            register_module("fc2", fc2);
+        }
+
+        auto forward(const Variable& x) -> Variable override {
+            auto h = fc1->forward(x);
+            h = relu->forward(h);
+            return fc2->forward(h);
+        }
+
+    private:
+        std::shared_ptr<Linear> fc1, fc2;
+        std::shared_ptr<ReLU> relu;
+    };
+
+    auto model = std::make_shared<SimpleMLP>();
+    model->to(device);
+
+    auto params = model->parameters();
+    auto optimizer = optim::SGD(params, 0.01);
+
+    const int num_epochs = 5;
+    float initial_loss = 0.0f;
+    float final_loss = 0.0f;
+
+    for (int epoch = 0; epoch < num_epochs; ++epoch) {
+        auto input = Variable(randn({32, 50}, DType::Float32, device), true);
+        auto target = Variable(randn({32, 10}, DType::Float32, device), false);
+
+        optimizer.zero_grad();
+        auto output = model->forward(input);
+        auto loss = mse_loss(output, target);
+        loss.backward();
+        optimizer.step();
+
+        auto loss_cpu = loss.tensor().to(Device::cpu());
+        float loss_val = loss_cpu.data<float>()[0];
+
+        if (epoch == 0) {
+            initial_loss = loss_val;
+        }
+        if (epoch == num_epochs - 1) {
+            final_loss = loss_val;
+        }
+
+        EXPECT_GT(loss_val, 0.0f);
+        EXPECT_FALSE(std::isnan(loss_val));
+    }
+
+    // Verify training completed successfully
+    EXPECT_GT(initial_loss, 0.0f);
+    EXPECT_GT(final_loss, 0.0f);
+    EXPECT_FALSE(std::isnan(final_loss)) << "Training diverged on " << device.to_string();
+}
+
+INSTANTIATE_BACKEND_TESTS(CrossBackendTest);

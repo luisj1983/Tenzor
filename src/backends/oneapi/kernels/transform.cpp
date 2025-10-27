@@ -57,22 +57,11 @@ auto reshape_kernel(const Tensor& input, const std::vector<int64_t>& new_shape, 
     // For non-contiguous, we need to copy
     Tensor output(new_shape, input.dtype(), input.device());
 
-    // Simple memory copy since data layout is preserved
+    // Simple memory copy since data layout is preserved - works for all dtypes
     const size_t bytes = input_numel * input.dtype_size();
-
-    if (input.dtype() == DType::Float32) {
-        const float* in_ptr = get_data_ptr<const float>(input);
-        float* out_ptr = get_data_ptr<float>(output);
-        queue.memcpy(out_ptr, in_ptr, bytes).wait();
-    }
-    else if (input.dtype() == DType::Float64) {
-        const double* in_ptr = get_data_ptr<const double>(input);
-        double* out_ptr = get_data_ptr<double>(output);
-        queue.memcpy(out_ptr, in_ptr, bytes).wait();
-    }
-    else {
-        throw std::runtime_error("Unsupported dtype for reshape");
-    }
+    const void* in_ptr = input.data_ptr();
+    void* out_ptr = const_cast<void*>(output.data_ptr());
+    queue.memcpy(out_ptr, in_ptr, bytes).wait();
 
     return output;
 }
@@ -307,23 +296,12 @@ auto squeeze_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Ten
         out_shape.push_back(1);
     }
 
-    // Squeeze is just a view change, copy data
+    // Squeeze is just a view change, copy data - works for all dtypes
     Tensor output(out_shape, input.dtype(), input.device());
     const size_t bytes = input.numel() * input.dtype_size();
-
-    if (input.dtype() == DType::Float32) {
-        const float* in_ptr = get_data_ptr<const float>(input);
-        float* out_ptr = get_data_ptr<float>(output);
-        queue.memcpy(out_ptr, in_ptr, bytes).wait();
-    }
-    else if (input.dtype() == DType::Float64) {
-        const double* in_ptr = get_data_ptr<const double>(input);
-        double* out_ptr = get_data_ptr<double>(output);
-        queue.memcpy(out_ptr, in_ptr, bytes).wait();
-    }
-    else {
-        throw std::runtime_error("Unsupported dtype for squeeze");
-    }
+    const void* in_ptr = input.data_ptr();
+    void* out_ptr = const_cast<void*>(output.data_ptr());
+    queue.memcpy(out_ptr, in_ptr, bytes).wait();
 
     return output;
 }
@@ -353,72 +331,40 @@ auto unsqueeze_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> T
         out_shape.push_back(1);
     }
 
-    // Unsqueeze is just a view change, copy data
+    // Unsqueeze is just a view change, copy data - works for all dtypes
     Tensor output(out_shape, input.dtype(), input.device());
     const size_t bytes = input.numel() * input.dtype_size();
-
-    if (input.dtype() == DType::Float32) {
-        const float* in_ptr = get_data_ptr<const float>(input);
-        float* out_ptr = get_data_ptr<float>(output);
-        queue.memcpy(out_ptr, in_ptr, bytes).wait();
-    }
-    else if (input.dtype() == DType::Float64) {
-        const double* in_ptr = get_data_ptr<const double>(input);
-        double* out_ptr = get_data_ptr<double>(output);
-        queue.memcpy(out_ptr, in_ptr, bytes).wait();
-    }
-    else {
-        throw std::runtime_error("Unsupported dtype for unsqueeze");
-    }
+    const void* in_ptr = input.data_ptr();
+    void* out_ptr = const_cast<void*>(output.data_ptr());
+    queue.memcpy(out_ptr, in_ptr, bytes).wait();
 
     return output;
 }
 
 // Contiguous kernel - ensure tensor data is laid out contiguously
 auto contiguous_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
-    // Always create a new contiguous tensor
+    // Always create a new contiguous tensor - works for all dtypes
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
 
     const size_t bytes = input.numel() * input.dtype_size();
-
-    if (input.dtype() == DType::Float32) {
-        const float* in_ptr = get_data_ptr<const float>(input);
-        float* out_ptr = get_data_ptr<float>(output);
-        queue.memcpy(out_ptr, in_ptr, bytes).wait();
-    }
-    else if (input.dtype() == DType::Float64) {
-        const double* in_ptr = get_data_ptr<const double>(input);
-        double* out_ptr = get_data_ptr<double>(output);
-        queue.memcpy(out_ptr, in_ptr, bytes).wait();
-    }
-    else {
-        throw std::runtime_error("Unsupported dtype for contiguous");
-    }
+    const void* in_ptr = input.data_ptr();
+    void* out_ptr = const_cast<void*>(output.data_ptr());
+    queue.memcpy(out_ptr, in_ptr, bytes).wait();
 
     return output;
 }
 
 // Clone kernel - create a copy of the tensor
 auto clone_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+    // Works for all dtypes
     Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
 
     const size_t bytes = input.numel() * input.dtype_size();
-
-    if (input.dtype() == DType::Float32) {
-        const float* in_ptr = get_data_ptr<const float>(input);
-        float* out_ptr = get_data_ptr<float>(output);
-        queue.memcpy(out_ptr, in_ptr, bytes).wait();
-    }
-    else if (input.dtype() == DType::Float64) {
-        const double* in_ptr = get_data_ptr<const double>(input);
-        double* out_ptr = get_data_ptr<double>(output);
-        queue.memcpy(out_ptr, in_ptr, bytes).wait();
-    }
-    else {
-        throw std::runtime_error("Unsupported dtype for clone");
-    }
+    const void* in_ptr = input.data_ptr();
+    void* out_ptr = const_cast<void*>(output.data_ptr());
+    queue.memcpy(out_ptr, in_ptr, bytes).wait();
 
     return output;
 }
@@ -442,16 +388,54 @@ auto ones_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
     const int64_t numel = output.numel();
 
     if (dtype == DType::Float32) {
-        // Create host buffer with ones
         std::vector<float> host_data(numel, 1.0f);
         float* device_ptr = get_data_ptr<float>(output);
         queue.memcpy(device_ptr, host_data.data(), numel * sizeof(float)).wait();
     }
     else if (dtype == DType::Float64) {
-        // Create host buffer with ones
         std::vector<double> host_data(numel, 1.0);
         double* device_ptr = get_data_ptr<double>(output);
         queue.memcpy(device_ptr, host_data.data(), numel * sizeof(double)).wait();
+    }
+    else if (dtype == DType::Int32) {
+        std::vector<int32_t> host_data(numel, 1);
+        int32_t* device_ptr = get_data_ptr<int32_t>(output);
+        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(int32_t)).wait();
+    }
+    else if (dtype == DType::Int64) {
+        std::vector<int64_t> host_data(numel, 1);
+        int64_t* device_ptr = get_data_ptr<int64_t>(output);
+        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(int64_t)).wait();
+    }
+    else if (dtype == DType::Int8) {
+        std::vector<int8_t> host_data(numel, 1);
+        int8_t* device_ptr = get_data_ptr<int8_t>(output);
+        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(int8_t)).wait();
+    }
+    else if (dtype == DType::Int16) {
+        std::vector<int16_t> host_data(numel, 1);
+        int16_t* device_ptr = get_data_ptr<int16_t>(output);
+        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(int16_t)).wait();
+    }
+    else if (dtype == DType::UInt8) {
+        std::vector<uint8_t> host_data(numel, 1);
+        uint8_t* device_ptr = get_data_ptr<uint8_t>(output);
+        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(uint8_t)).wait();
+    }
+    else if (dtype == DType::UInt16) {
+        std::vector<uint16_t> host_data(numel, 1);
+        uint16_t* device_ptr = get_data_ptr<uint16_t>(output);
+        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(uint16_t)).wait();
+    }
+    else if (dtype == DType::UInt32) {
+        std::vector<uint32_t> host_data(numel, 1);
+        uint32_t* device_ptr = get_data_ptr<uint32_t>(output);
+        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(uint32_t)).wait();
+    }
+    else if (dtype == DType::UInt64) {
+        std::vector<uint64_t> host_data(numel, 1);
+        uint64_t* device_ptr = get_data_ptr<uint64_t>(output);
+        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(uint64_t)).wait();
     }
     else {
         throw std::runtime_error("Unsupported dtype for ones");
@@ -475,6 +459,54 @@ auto full_kernel(const std::vector<int64_t>& shape, float value, DType dtype, De
         std::vector<double> host_data(numel, value_d);
         double* device_ptr = get_data_ptr<double>(output);
         queue.memcpy(device_ptr, host_data.data(), numel * sizeof(double)).wait();
+    }
+    else if (dtype == DType::Int32) {
+        const int32_t value_i = static_cast<int32_t>(value);
+        std::vector<int32_t> host_data(numel, value_i);
+        int32_t* device_ptr = get_data_ptr<int32_t>(output);
+        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(int32_t)).wait();
+    }
+    else if (dtype == DType::Int64) {
+        const int64_t value_i = static_cast<int64_t>(value);
+        std::vector<int64_t> host_data(numel, value_i);
+        int64_t* device_ptr = get_data_ptr<int64_t>(output);
+        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(int64_t)).wait();
+    }
+    else if (dtype == DType::Int8) {
+        const int8_t value_i = static_cast<int8_t>(value);
+        std::vector<int8_t> host_data(numel, value_i);
+        int8_t* device_ptr = get_data_ptr<int8_t>(output);
+        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(int8_t)).wait();
+    }
+    else if (dtype == DType::Int16) {
+        const int16_t value_i = static_cast<int16_t>(value);
+        std::vector<int16_t> host_data(numel, value_i);
+        int16_t* device_ptr = get_data_ptr<int16_t>(output);
+        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(int16_t)).wait();
+    }
+    else if (dtype == DType::UInt8) {
+        const uint8_t value_i = static_cast<uint8_t>(value);
+        std::vector<uint8_t> host_data(numel, value_i);
+        uint8_t* device_ptr = get_data_ptr<uint8_t>(output);
+        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(uint8_t)).wait();
+    }
+    else if (dtype == DType::UInt16) {
+        const uint16_t value_i = static_cast<uint16_t>(value);
+        std::vector<uint16_t> host_data(numel, value_i);
+        uint16_t* device_ptr = get_data_ptr<uint16_t>(output);
+        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(uint16_t)).wait();
+    }
+    else if (dtype == DType::UInt32) {
+        const uint32_t value_i = static_cast<uint32_t>(value);
+        std::vector<uint32_t> host_data(numel, value_i);
+        uint32_t* device_ptr = get_data_ptr<uint32_t>(output);
+        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(uint32_t)).wait();
+    }
+    else if (dtype == DType::UInt64) {
+        const uint64_t value_i = static_cast<uint64_t>(value);
+        std::vector<uint64_t> host_data(numel, value_i);
+        uint64_t* device_ptr = get_data_ptr<uint64_t>(output);
+        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(uint64_t)).wait();
     }
     else {
         throw std::runtime_error("Unsupported dtype for full");
@@ -500,6 +532,54 @@ auto fill_kernel(const Tensor& tensor, float value, sycl::queue& queue) -> Tenso
         std::vector<double> host_data(numel, value_d);
         double* device_ptr = get_data_ptr<double>(output);
         queue.memcpy(device_ptr, host_data.data(), numel * sizeof(double)).wait();
+    }
+    else if (tensor.dtype() == DType::Int32) {
+        const int32_t value_i = static_cast<int32_t>(value);
+        std::vector<int32_t> host_data(numel, value_i);
+        int32_t* device_ptr = get_data_ptr<int32_t>(output);
+        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(int32_t)).wait();
+    }
+    else if (tensor.dtype() == DType::Int64) {
+        const int64_t value_i = static_cast<int64_t>(value);
+        std::vector<int64_t> host_data(numel, value_i);
+        int64_t* device_ptr = get_data_ptr<int64_t>(output);
+        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(int64_t)).wait();
+    }
+    else if (tensor.dtype() == DType::Int8) {
+        const int8_t value_i = static_cast<int8_t>(value);
+        std::vector<int8_t> host_data(numel, value_i);
+        int8_t* device_ptr = get_data_ptr<int8_t>(output);
+        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(int8_t)).wait();
+    }
+    else if (tensor.dtype() == DType::Int16) {
+        const int16_t value_i = static_cast<int16_t>(value);
+        std::vector<int16_t> host_data(numel, value_i);
+        int16_t* device_ptr = get_data_ptr<int16_t>(output);
+        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(int16_t)).wait();
+    }
+    else if (tensor.dtype() == DType::UInt8) {
+        const uint8_t value_i = static_cast<uint8_t>(value);
+        std::vector<uint8_t> host_data(numel, value_i);
+        uint8_t* device_ptr = get_data_ptr<uint8_t>(output);
+        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(uint8_t)).wait();
+    }
+    else if (tensor.dtype() == DType::UInt16) {
+        const uint16_t value_i = static_cast<uint16_t>(value);
+        std::vector<uint16_t> host_data(numel, value_i);
+        uint16_t* device_ptr = get_data_ptr<uint16_t>(output);
+        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(uint16_t)).wait();
+    }
+    else if (tensor.dtype() == DType::UInt32) {
+        const uint32_t value_i = static_cast<uint32_t>(value);
+        std::vector<uint32_t> host_data(numel, value_i);
+        uint32_t* device_ptr = get_data_ptr<uint32_t>(output);
+        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(uint32_t)).wait();
+    }
+    else if (tensor.dtype() == DType::UInt64) {
+        const uint64_t value_i = static_cast<uint64_t>(value);
+        std::vector<uint64_t> host_data(numel, value_i);
+        uint64_t* device_ptr = get_data_ptr<uint64_t>(output);
+        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(uint64_t)).wait();
     }
     else {
         throw std::runtime_error("Unsupported dtype for fill");

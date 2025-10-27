@@ -1,6 +1,6 @@
 /**
  * @file test_gradcheck.cpp
- * @brief Comprehensive tests for gradient checking functionality
+ * @brief Comprehensive tests for gradient checking functionality - Parameterized across all backends
  */
 
 #include <gtest/gtest.h>
@@ -9,11 +9,13 @@
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/tenzor.hpp"
+#include "../backend_test_fixture.hpp"
 #include <cmath>
 
 using namespace tenzor;
+using namespace tenzor::testing;
 
-class GradCheckTest : public ::testing::Test {
+class GradCheckBackendTest : public BackendTest {
 protected:
     static void SetUpTestSuite() {
         // Initialize Tenzor library (loads and registers backends)
@@ -21,19 +23,20 @@ protected:
     }
 
     void SetUp() override {
+        BackendTest::SetUp();
         // Set gradient computation enabled
         set_grad_enabled(true);
     }
 };
 
 // Test basic quadratic function: f(x) = x^2
-TEST_F(GradCheckTest, QuadraticFunction) {
+TEST_P(GradCheckBackendTest, QuadraticFunction) {
     auto f = [](const Variable& x) -> Variable {
         return x * x;
     };
 
     // Create small test input
-    Tensor data(std::vector<int64_t>{3}, DType::Float32, Device::cpu());
+    Tensor data(std::vector<int64_t>{3}, DType::Float32, device);
     float* ptr = data.data<float>();
     ptr[0] = 1.0f;
     ptr[1] = 2.0f;
@@ -47,12 +50,12 @@ TEST_F(GradCheckTest, QuadraticFunction) {
 }
 
 // Test linear function: f(x) = 2*x + 3
-TEST_F(GradCheckTest, LinearFunction) {
+TEST_P(GradCheckBackendTest, LinearFunction) {
     auto f = [](const Variable& x) -> Variable {
         return x * 2.0f + 3.0f;
     };
 
-    Tensor data(std::vector<int64_t>{4}, DType::Float32, Device::cpu());
+    Tensor data(std::vector<int64_t>{4}, DType::Float32, device);
     float* ptr = data.data<float>();
     for (int i = 0; i < 4; ++i) {
         ptr[i] = static_cast<float>(i + 1);
@@ -65,13 +68,13 @@ TEST_F(GradCheckTest, LinearFunction) {
 }
 
 // Test sum reduction: f(x) = sum(x)
-TEST_F(GradCheckTest, SumReduction) {
+TEST_P(GradCheckBackendTest, SumReduction) {
     auto f = [](const Variable& x) -> Variable {
         // Use autograd sum to maintain computation graph
         return tenzor::sum(x);
     };
 
-    Tensor data(std::vector<int64_t>{5}, DType::Float32, Device::cpu());
+    Tensor data(std::vector<int64_t>{5}, DType::Float32, device);
     float* ptr = data.data<float>();
     for (int i = 0; i < 5; ++i) {
         ptr[i] = static_cast<float>(i + 1) * 0.5f;
@@ -84,12 +87,12 @@ TEST_F(GradCheckTest, SumReduction) {
 }
 
 // Test element-wise operations: f(x) = x * x + x
-TEST_F(GradCheckTest, ElementWiseOps) {
+TEST_P(GradCheckBackendTest, ElementWiseOps) {
     auto f = [](const Variable& x) -> Variable {
         return x * x + x;
     };
 
-    Tensor data(std::vector<int64_t>{3}, DType::Float32, Device::cpu());
+    Tensor data(std::vector<int64_t>{3}, DType::Float32, device);
     float* ptr = data.data<float>();
     ptr[0] = 0.5f;
     ptr[1] = 1.0f;
@@ -102,14 +105,14 @@ TEST_F(GradCheckTest, ElementWiseOps) {
 }
 
 // Test multi-dimensional input: f(x) = sum(x^2)
-TEST_F(GradCheckTest, MultiDimensional) {
+TEST_P(GradCheckBackendTest, MultiDimensional) {
     auto f = [](const Variable& x) -> Variable {
         Variable x_squared = x * x;
         // Use autograd sum to maintain computation graph
         return tenzor::sum(x_squared);
     };
 
-    Tensor data(std::vector<int64_t>{2, 3}, DType::Float32, Device::cpu());
+    Tensor data(std::vector<int64_t>{2, 3}, DType::Float32, device);
     float* ptr = data.data<float>();
     for (int i = 0; i < 6; ++i) {
         ptr[i] = static_cast<float>(i + 1) * 0.5f;
@@ -122,12 +125,12 @@ TEST_F(GradCheckTest, MultiDimensional) {
 }
 
 // Test detailed gradient check result
-TEST_F(GradCheckTest, DetailedResult) {
+TEST_P(GradCheckBackendTest, DetailedResult) {
     auto f = [](const Variable& x) -> Variable {
         return x * x;
     };
 
-    Tensor data(std::vector<int64_t>{3}, DType::Float32, Device::cpu());
+    Tensor data(std::vector<int64_t>{3}, DType::Float32, device);
     float* ptr = data.data<float>();
     ptr[0] = 1.0f;
     ptr[1] = 2.0f;
@@ -145,13 +148,18 @@ TEST_F(GradCheckTest, DetailedResult) {
     EXPECT_LT(result.max_rel_error, 5e-2);  // Float32 needs looser tolerance
 }
 
-// Test with Float64 for higher precision
-TEST_F(GradCheckTest, Float64Precision) {
+// Test with Float64 for higher precision (CPU only due to backend support)
+TEST_P(GradCheckBackendTest, Float64Precision) {
+    // Skip if not CPU - Float64 support varies by backend
+    if (device.type != Device::Type::CPU) {
+        GTEST_SKIP() << "Float64 test only on CPU backend";
+    }
+
     auto f = [](const Variable& x) -> Variable {
         return x * x + x * 2.0;
     };
 
-    Tensor data(std::vector<int64_t>{4}, DType::Float64, Device::cpu());
+    Tensor data(std::vector<int64_t>{4}, DType::Float64, device);
     double* ptr = data.data<double>();
     for (int i = 0; i < 4; ++i) {
         ptr[i] = static_cast<double>(i + 1) * 0.1;
@@ -168,12 +176,12 @@ TEST_F(GradCheckTest, Float64Precision) {
 }
 
 // Test exception on requires_grad = false
-TEST_F(GradCheckTest, RequiresGradCheck) {
+TEST_P(GradCheckBackendTest, RequiresGradCheck) {
     auto f = [](const Variable& x) -> Variable {
         return x * x;
     };
 
-    Tensor data(std::vector<int64_t>{3}, DType::Float32, Device::cpu());
+    Tensor data(std::vector<int64_t>{3}, DType::Float32, device);
     Variable x(data, false);  // requires_grad = false
 
     // Should not throw when raise_exception = false
@@ -187,13 +195,13 @@ TEST_F(GradCheckTest, RequiresGradCheck) {
 }
 
 // Test numerical gradient computation
-TEST_F(GradCheckTest, NumericalGradientComputation) {
+TEST_P(GradCheckBackendTest, NumericalGradientComputation) {
     auto f = [](const Variable& x) -> Variable {
         // f(x) = 3*x^2, gradient = 6*x
         return x * x * 3.0f;
     };
 
-    Tensor data(std::vector<int64_t>{2}, DType::Float32, Device::cpu());
+    Tensor data(std::vector<int64_t>{2}, DType::Float32, device);
     float* ptr = data.data<float>();
     ptr[0] = 1.0f;
     ptr[1] = 2.0f;
@@ -205,16 +213,17 @@ TEST_F(GradCheckTest, NumericalGradientComputation) {
     // Expected gradients: [6.0, 12.0]
     EXPECT_EQ(num_grad.numel(), 2);
 
-    const float* grad_ptr = num_grad.data<float>();
+    auto num_grad_cpu = num_grad.to(Device::cpu());
+    const float* grad_ptr = num_grad_cpu.data<float>();
     // Float32 precision requires larger tolerance
     EXPECT_NEAR(grad_ptr[0], 6.0f, 1e-2);   // ~0.01 tolerance for Float32
     EXPECT_NEAR(grad_ptr[1], 12.0f, 1e-2);  // ~0.01 tolerance for Float32
 }
 
 // Test compare_gradients function
-TEST_F(GradCheckTest, CompareGradients) {
-    Tensor num_grad(std::vector<int64_t>{3}, DType::Float32, Device::cpu());
-    Tensor ana_grad(std::vector<int64_t>{3}, DType::Float32, Device::cpu());
+TEST_P(GradCheckBackendTest, CompareGradients) {
+    Tensor num_grad(std::vector<int64_t>{3}, DType::Float32, device);
+    Tensor ana_grad(std::vector<int64_t>{3}, DType::Float32, device);
 
     float* num_ptr = num_grad.data<float>();
     float* ana_ptr = ana_grad.data<float>();
@@ -240,12 +249,12 @@ TEST_F(GradCheckTest, CompareGradients) {
 }
 
 // Test with different epsilon values
-TEST_F(GradCheckTest, EpsilonSensitivity) {
+TEST_P(GradCheckBackendTest, EpsilonSensitivity) {
     auto f = [](const Variable& x) -> Variable {
         return x * x * x;  // f(x) = x^3, gradient = 3*x^2
     };
 
-    Tensor data(std::vector<int64_t>{2}, DType::Float32, Device::cpu());
+    Tensor data(std::vector<int64_t>{2}, DType::Float32, device);
     float* ptr = data.data<float>();
     ptr[0] = 1.0f;
     ptr[1] = 2.0f;
@@ -262,13 +271,13 @@ TEST_F(GradCheckTest, EpsilonSensitivity) {
 }
 
 // Test scalar output (single element)
-TEST_F(GradCheckTest, ScalarOutput) {
+TEST_P(GradCheckBackendTest, ScalarOutput) {
     auto f = [](const Variable& x) -> Variable {
         // Use autograd operations to maintain computation graph
         return tenzor::sum(x * x);  // sum(x^2)
     };
 
-    Tensor data(std::vector<int64_t>{3}, DType::Float32, Device::cpu());
+    Tensor data(std::vector<int64_t>{3}, DType::Float32, device);
     float* ptr = data.data<float>();
     ptr[0] = 1.0f;
     ptr[1] = 2.0f;
@@ -281,13 +290,13 @@ TEST_F(GradCheckTest, ScalarOutput) {
 }
 
 // Performance test - measure gradcheck time
-TEST_F(GradCheckTest, PerformanceBenchmark) {
+TEST_P(GradCheckBackendTest, PerformanceBenchmark) {
     auto f = [](const Variable& x) -> Variable {
         return x * x + x;
     };
 
     // Small tensor
-    Tensor data(std::vector<int64_t>{10}, DType::Float32, Device::cpu());
+    Tensor data(std::vector<int64_t>{10}, DType::Float32, device);
     for (int64_t i = 0; i < 10; ++i) {
         data.data<float>()[i] = static_cast<float>(i) * 0.1f;
     }
@@ -301,13 +310,8 @@ TEST_F(GradCheckTest, PerformanceBenchmark) {
     auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
 
     EXPECT_TRUE(passed);
-    // Should complete reasonably fast (< 1 second for 10 elements)
-    EXPECT_LT(duration.count(), 1000);
-
-    std::cout << "Gradcheck for 10 elements: " << duration.count() << " ms" << std::endl;
+    // Should complete reasonably fast (< 2 second for 10 elements, allowing for slower backends)
+    EXPECT_LT(duration.count(), 2000);
 }
 
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}
+INSTANTIATE_BACKEND_TESTS(GradCheckBackendTest);

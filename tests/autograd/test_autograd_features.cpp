@@ -1,6 +1,6 @@
 /**
  * @file test_autograd_features.cpp
- * @brief Tests for Phase 6 autograd features
+ * @brief Tests for Phase 6 autograd features - Parameterized across all backends
  */
 
 #include <gtest/gtest.h>
@@ -9,21 +9,18 @@
 #include <tenzor/ops/creation.hpp>
 #include <tenzor/ops/math.hpp>
 #include <tenzor/ops/reduction.hpp>
+#include "../backend_test_fixture.hpp"
 #include <cmath>
 
 using namespace tenzor;
-
-class AutogradFeaturesTest : public ::testing::Test {
-protected:
-    Device cpu = Device::cpu();
-};
+using namespace tenzor::testing;
 
 // ============================================================================
 // grad_fn Tests
 // ============================================================================
 
-TEST_F(AutogradFeaturesTest, GradFnLeafVariable) {
-    auto t = ones({3, 4}, DType::Float32, cpu);
+TEST_P(BackendTest, AutogradFeatures_GradFnLeafVariable) {
+    auto t = ones({3, 4}, DType::Float32, device);
     Variable x(t, true);
 
     // Leaf variables have no grad_fn
@@ -31,8 +28,8 @@ TEST_F(AutogradFeaturesTest, GradFnLeafVariable) {
     EXPECT_TRUE(x.is_leaf());
 }
 
-TEST_F(AutogradFeaturesTest, GradFnNonLeafVariable) {
-    auto t = ones({3, 4}, DType::Float32, cpu);
+TEST_P(BackendTest, AutogradFeatures_GradFnNonLeafVariable) {
+    auto t = ones({3, 4}, DType::Float32, device);
     Variable x(t, true);
     Variable y = x * 2.0f;
 
@@ -45,15 +42,15 @@ TEST_F(AutogradFeaturesTest, GradFnNonLeafVariable) {
 // is_leaf Tests
 // ============================================================================
 
-TEST_F(AutogradFeaturesTest, IsLeafCreatedByUser) {
-    auto t = ones({2, 3}, DType::Float32, cpu);
+TEST_P(BackendTest, AutogradFeatures_IsLeafCreatedByUser) {
+    auto t = ones({2, 3}, DType::Float32, device);
     Variable x(t, true);
 
     EXPECT_TRUE(x.is_leaf());
 }
 
-TEST_F(AutogradFeaturesTest, IsLeafFromOperation) {
-    auto t = ones({2, 3}, DType::Float32, cpu);
+TEST_P(BackendTest, AutogradFeatures_IsLeafFromOperation) {
+    auto t = ones({2, 3}, DType::Float32, device);
     Variable x(t, true);
     Variable y = x + x;
 
@@ -64,8 +61,8 @@ TEST_F(AutogradFeaturesTest, IsLeafFromOperation) {
 // register_hook Tests
 // ============================================================================
 
-TEST_F(AutogradFeaturesTest, RegisterHookModifyGradient) {
-    auto t = ones({3}, DType::Float32, cpu);
+TEST_P(BackendTest, AutogradFeatures_RegisterHookModifyGradient) {
+    auto t = ones({3}, DType::Float32, device);
     Variable x(t, true);
 
     // Register hook that doubles the gradient
@@ -79,14 +76,15 @@ TEST_F(AutogradFeaturesTest, RegisterHookModifyGradient) {
 
     // Gradient should be 3.0 (from y = x * 3), then doubled by hook = 6.0
     ASSERT_TRUE(x.has_grad());
-    auto grad_data = x.grad()->data<float>();
+    auto grad = x.grad()->to(Device::cpu());
+    auto grad_data = grad.data<float>();
     for (int i = 0; i < 3; ++i) {
         EXPECT_FLOAT_EQ(grad_data[i], 6.0f);
     }
 }
 
-TEST_F(AutogradFeaturesTest, RegisterMultipleHooks) {
-    auto t = ones({2}, DType::Float32, cpu);
+TEST_P(BackendTest, AutogradFeatures_RegisterMultipleHooks) {
+    auto t = ones({2}, DType::Float32, device);
     Variable x(t, true);
 
     // Register multiple hooks
@@ -103,7 +101,8 @@ TEST_F(AutogradFeaturesTest, RegisterMultipleHooks) {
 
     // Gradient: 5.0 -> *2 = 10.0 -> +1 = 11.0
     ASSERT_TRUE(x.has_grad());
-    auto grad_data = x.grad()->data<float>();
+    auto grad = x.grad()->to(Device::cpu());
+    auto grad_data = grad.data<float>();
     for (int i = 0; i < 2; ++i) {
         EXPECT_FLOAT_EQ(grad_data[i], 11.0f);
     }
@@ -113,8 +112,8 @@ TEST_F(AutogradFeaturesTest, RegisterMultipleHooks) {
 // retain_grad Tests
 // ============================================================================
 
-TEST_F(AutogradFeaturesTest, RetainGradNonLeaf) {
-    auto t = ones({3}, DType::Float32, cpu);
+TEST_P(BackendTest, AutogradFeatures_RetainGradNonLeaf) {
+    auto t = ones({3}, DType::Float32, device);
     Variable x(t, true);
     Variable y = x * 2.0f;
 
@@ -131,20 +130,22 @@ TEST_F(AutogradFeaturesTest, RetainGradNonLeaf) {
     EXPECT_TRUE(y.has_grad());
 
     // y.grad should be 3.0 (from z = y * 3)
-    auto y_grad_data = y.grad()->data<float>();
+    auto y_grad = y.grad()->to(Device::cpu());
+    auto y_grad_data = y_grad.data<float>();
     for (int i = 0; i < 3; ++i) {
         EXPECT_FLOAT_EQ(y_grad_data[i], 3.0f);
     }
 
     // x.grad should be 6.0 (chain rule: 2 * 3)
-    auto x_grad_data = x.grad()->data<float>();
+    auto x_grad = x.grad()->to(Device::cpu());
+    auto x_grad_data = x_grad.data<float>();
     for (int i = 0; i < 3; ++i) {
         EXPECT_FLOAT_EQ(x_grad_data[i], 6.0f);
     }
 }
 
-TEST_F(AutogradFeaturesTest, RetainGradNotSet) {
-    auto t = ones({3}, DType::Float32, cpu);
+TEST_P(BackendTest, AutogradFeatures_RetainGradNotSet) {
+    auto t = ones({3}, DType::Float32, device);
     Variable x(t, true);
     Variable y = x * 2.0f;
 
@@ -166,8 +167,8 @@ TEST_F(AutogradFeaturesTest, RetainGradNotSet) {
 // backward(retain_graph=True) Tests
 // ============================================================================
 
-TEST_F(AutogradFeaturesTest, BackwardRetainGraph) {
-    auto t = ones({2}, DType::Float32, cpu);
+TEST_P(BackendTest, AutogradFeatures_BackwardRetainGraph) {
+    auto t = ones({2}, DType::Float32, device);
     Variable x(t, true);
     Variable y = x * 3.0f;
     auto loss = y.sum();
@@ -176,7 +177,8 @@ TEST_F(AutogradFeaturesTest, BackwardRetainGraph) {
     loss.backward(std::nullopt, true);
 
     ASSERT_TRUE(x.has_grad());
-    auto grad_data = x.grad()->data<float>();
+    auto grad = x.grad()->to(Device::cpu());
+    auto grad_data = grad.data<float>();
     EXPECT_FLOAT_EQ(grad_data[0], 3.0f);
     EXPECT_FLOAT_EQ(grad_data[1], 3.0f);
 
@@ -187,13 +189,14 @@ TEST_F(AutogradFeaturesTest, BackwardRetainGraph) {
     loss.backward(std::nullopt, false);
 
     ASSERT_TRUE(x.has_grad());
-    grad_data = x.grad()->data<float>();
+    grad = x.grad()->to(Device::cpu());
+    grad_data = grad.data<float>();
     EXPECT_FLOAT_EQ(grad_data[0], 3.0f);
     EXPECT_FLOAT_EQ(grad_data[1], 3.0f);
 }
 
-TEST_F(AutogradFeaturesTest, BackwardWithoutRetainGraph) {
-    auto t = ones({2}, DType::Float32, cpu);
+TEST_P(BackendTest, AutogradFeatures_BackwardWithoutRetainGraph) {
+    auto t = ones({2}, DType::Float32, device);
     Variable x(t, true);
     Variable y = x * 3.0f;
     auto loss = y.sum();
@@ -202,13 +205,14 @@ TEST_F(AutogradFeaturesTest, BackwardWithoutRetainGraph) {
     loss.backward();
 
     ASSERT_TRUE(x.has_grad());
-    auto grad_data = x.grad()->data<float>();
+    auto grad = x.grad()->to(Device::cpu());
+    auto grad_data = grad.data<float>();
     EXPECT_FLOAT_EQ(grad_data[0], 3.0f);
     EXPECT_FLOAT_EQ(grad_data[1], 3.0f);
 }
 
-TEST_F(AutogradFeaturesTest, MultipleBackwardPasses) {
-    auto t = ones({3}, DType::Float32, cpu);
+TEST_P(BackendTest, AutogradFeatures_MultipleBackwardPasses) {
+    auto t = ones({3}, DType::Float32, device);
     Variable x(t, true);
 
     // First computation
@@ -225,7 +229,8 @@ TEST_F(AutogradFeaturesTest, MultipleBackwardPasses) {
 
     // Gradients should accumulate: 2.0 + 3.0 = 5.0
     ASSERT_TRUE(x.has_grad());
-    auto grad_data = x.grad()->data<float>();
+    auto grad = x.grad()->to(Device::cpu());
+    auto grad_data = grad.data<float>();
     for (int i = 0; i < 3; ++i) {
         EXPECT_FLOAT_EQ(grad_data[i], 5.0f);
     }
@@ -235,8 +240,8 @@ TEST_F(AutogradFeaturesTest, MultipleBackwardPasses) {
 // Combined Features Tests
 // ============================================================================
 
-TEST_F(AutogradFeaturesTest, HookWithRetainGrad) {
-    auto t = ones({2}, DType::Float32, cpu);
+TEST_P(BackendTest, AutogradFeatures_HookWithRetainGrad) {
+    auto t = ones({2}, DType::Float32, device);
     Variable x(t, true);
     Variable y = x * 2.0f;
 
@@ -252,15 +257,16 @@ TEST_F(AutogradFeaturesTest, HookWithRetainGrad) {
 
     // y.grad should be 3.0 * 10.0 = 30.0 (hook applied)
     ASSERT_TRUE(y.has_grad());
-    auto y_grad_data = y.grad()->data<float>();
+    auto y_grad = y.grad()->to(Device::cpu());
+    auto y_grad_data = y_grad.data<float>();
     for (int i = 0; i < 2; ++i) {
         EXPECT_FLOAT_EQ(y_grad_data[i], 30.0f);
     }
 }
 
-TEST_F(AutogradFeaturesTest, ComplexComputationGraph) {
-    auto t1 = ones({3}, DType::Float32, cpu);
-    auto t2 = ones({3}, DType::Float32, cpu);
+TEST_P(BackendTest, AutogradFeatures_ComplexComputationGraph) {
+    auto t1 = ones({3}, DType::Float32, device);
+    auto t2 = ones({3}, DType::Float32, device);
 
     Variable x(t1, true);
     Variable w(t2, true);
@@ -286,19 +292,18 @@ TEST_F(AutogradFeaturesTest, ComplexComputationGraph) {
 
     // Verify gradient values
     // dy/dw = x * 2.0 = 1.0 * 2.0 = 2.0
-    auto w_grad_data = w.grad()->data<float>();
+    auto w_grad = w.grad()->to(Device::cpu());
+    auto w_grad_data = w_grad.data<float>();
     for (int i = 0; i < 3; ++i) {
         EXPECT_FLOAT_EQ(w_grad_data[i], 2.0f);
     }
 
     // dy/dx = w * 2.0 * 0.9 (hook) = 1.0 * 2.0 * 0.9 = 1.8
-    auto x_grad_data = x.grad()->data<float>();
+    auto x_grad = x.grad()->to(Device::cpu());
+    auto x_grad_data = x_grad.data<float>();
     for (int i = 0; i < 3; ++i) {
         EXPECT_FLOAT_EQ(x_grad_data[i], 1.8f);
     }
 }
 
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}
+INSTANTIATE_BACKEND_TESTS(BackendTest);

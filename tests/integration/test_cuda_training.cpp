@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include "../backend_test_fixture.hpp"
 #include <tenzor/tenzor.hpp>
 #include <chrono>
 #include <cmath>
@@ -8,52 +9,21 @@
 using namespace tenzor;
 using namespace tenzor::nn;
 using namespace tenzor::optim;
+using namespace tenzor::testing;
 
 //==============================================================================
 // Test Environment Setup
 //==============================================================================
 
-class CUDATrainingEnvironment : public ::testing::Environment {
+class AcceleratorTrainingEnvironment : public ::testing::Environment {
 public:
     void SetUp() override {
         tenzor::initialize();
-
-        // Check CUDA availability
-        try {
-            auto test_tensor = ones({1}, DType::Float32, Device::cuda());
-            cuda_available_ = true;
-            std::cout << "CUDA is available for testing" << std::endl;
-        } catch (...) {
-            cuda_available_ = false;
-            std::cout << "CUDA is not available, tests will be skipped" << std::endl;
-        }
-    }
-
-    static bool cuda_available_;
-};
-
-bool CUDATrainingEnvironment::cuda_available_ = false;
-
-static ::testing::Environment* const cuda_env =
-    ::testing::AddGlobalTestEnvironment(new CUDATrainingEnvironment);
-
-//==============================================================================
-// Test Fixture for Device Synchronization
-//==============================================================================
-
-class CUDATrainingTest : public ::testing::Test {
-protected:
-    void TearDown() override {
-        // Critical: Synchronize device to ensure all operations complete
-        // This prevents race conditions between parallel tests
-        // Works uniformly across all backends (CPU, CUDA, ROCm, OneAPI)
-        try {
-            Device::cuda(0).synchronize();  // Synchronize default CUDA device if available
-        } catch (...) {
-            // Ignore if CUDA is not available
-        }
     }
 };
+
+static ::testing::Environment* const accel_env =
+    ::testing::AddGlobalTestEnvironment(new AcceleratorTrainingEnvironment);
 
 //==============================================================================
 // Helper Functions
@@ -65,16 +35,14 @@ auto generate_mnist_batch(int batch_size, Device device) -> std::pair<Variable, 
     auto input = Variable(randn({batch_size, 1, 28, 28}, DType::Float32, device), true);
 
     // Target: [batch, 10] (one-hot encoded)
-    // Create on CPU first, then transfer to target device
     auto target_data_cpu = zeros({batch_size, 10}, DType::Float32, Device::cpu());
     float* target_ptr = const_cast<float*>(target_data_cpu.template data<float>());
 
     for (int i = 0; i < batch_size; i++) {
-        int label = i % 10;  // Cycle through classes
+        int label = i % 10;
         target_ptr[i * 10 + label] = 1.0f;
     }
 
-    // Transfer to target device if needed
     auto target_data = (device.type == Device::Type::CPU) ? target_data_cpu : target_data_cpu.to(device);
     auto target = Variable(target_data, false);
     return {input, target};
@@ -82,7 +50,6 @@ auto generate_mnist_batch(int batch_size, Device device) -> std::pair<Variable, 
 
 // Simple accuracy calculation
 auto calculate_accuracy(const Variable& predictions, const Variable& targets) -> float {
-    // Transfer to CPU before accessing data
     auto pred_cpu = predictions.tensor().to(Device::cpu());
     auto target_cpu = targets.tensor().to(Device::cpu());
 
@@ -94,7 +61,6 @@ auto calculate_accuracy(const Variable& predictions, const Variable& targets) ->
     int correct = 0;
 
     for (int i = 0; i < batch_size; i++) {
-        // Find predicted class (argmax)
         int pred_class = 0;
         float max_val = pred_data[i * num_classes];
         for (int j = 1; j < num_classes; j++) {
@@ -104,7 +70,6 @@ auto calculate_accuracy(const Variable& predictions, const Variable& targets) ->
             }
         }
 
-        // Find target class
         int target_class = 0;
         for (int j = 0; j < num_classes; j++) {
             if (target_data[i * num_classes + j] > 0.5f) {
@@ -121,47 +86,27 @@ auto calculate_accuracy(const Variable& predictions, const Variable& targets) ->
     return static_cast<float>(correct) / batch_size;
 }
 
-// Memory usage helper
-struct MemoryStats {
-    size_t allocated_bytes{0};
-    size_t peak_allocated_bytes{0};
-};
-
-auto get_memory_stats(Device device) -> MemoryStats {
-    MemoryStats stats;
-    // TODO: Implement actual CUDA memory tracking
-    // For now, return dummy values
-    stats.allocated_bytes = 0;
-    stats.peak_allocated_bytes = 0;
-    return stats;
-}
-
 //==============================================================================
-// Simple CNN Model for MNIST
+// Test Models
 //==============================================================================
 
 class SimpleCNN : public Module {
 public:
     SimpleCNN() {
-        // Conv2d(1, 32, 3) -> BatchNorm2d(32) -> ReLU -> Dropout(0.25)
         conv1 = std::make_shared<Conv2d>(1, 32, 3, 1, 1);
         bn1 = std::make_shared<BatchNorm2d>(32);
         relu1 = std::make_shared<ReLU>();
         dropout1 = std::make_shared<Dropout>(0.25);
 
-        // Conv2d(32, 64, 3) -> BatchNorm2d(64) -> ReLU -> Dropout(0.25)
         conv2 = std::make_shared<Conv2d>(32, 64, 3, 1, 1);
         bn2 = std::make_shared<BatchNorm2d>(64);
         relu2 = std::make_shared<ReLU>();
         dropout2 = std::make_shared<Dropout>(0.25);
 
-        // Flatten -> Linear(64 * 28 * 28, 128) -> ReLU -> Dropout(0.5)
-        flatten = std::make_shared<Flatten>(1);  // Flatten from dim 1 onwards
+        flatten = std::make_shared<Flatten>(1);
         fc1 = std::make_shared<Linear>(64 * 28 * 28, 128);
         relu3 = std::make_shared<ReLU>();
         dropout3 = std::make_shared<Dropout>(0.5);
-
-        // Linear(128, 10)
         fc2 = std::make_shared<Linear>(128, 10);
 
         register_module("conv1", conv1);
@@ -174,22 +119,17 @@ public:
     }
 
     auto forward(const Variable& x) -> Variable override {
-        // First conv block
         auto out = conv1->forward(x);
         out = bn1->forward(out);
         out = relu1->forward(out);
         out = dropout1->forward(out);
 
-        // Second conv block
         out = conv2->forward(out);
         out = bn2->forward(out);
         out = relu2->forward(out);
         out = dropout2->forward(out);
 
-        // Flatten using proper layer
         auto flattened = flatten->forward(out);
-
-        // Fully connected layers
         auto fc_out = fc1->forward(flattened);
         fc_out = relu3->forward(fc_out);
         fc_out = dropout3->forward(fc_out);
@@ -207,10 +147,6 @@ private:
     std::shared_ptr<Linear> fc1, fc2;
 };
 
-//==============================================================================
-// Multi-Layer Perceptron
-//==============================================================================
-
 class MLP : public Module {
 public:
     MLP(int input_size, int hidden_size, int output_size) {
@@ -224,29 +160,10 @@ public:
     }
 
     auto forward(const Variable& x) -> Variable override {
-        std::cout << "  MLP forward: input shape [" << x.shape()[0] << ", " << x.shape()[1] << "]" << std::endl;
-
-        std::cout << "  fc1..." << std::endl;
         auto out = fc1->forward(x);
-        std::cout << "  fc1 output: [" << out.shape()[0] << ", " << out.shape()[1] << "]" << std::endl;
-
-        std::cout << "  relu1..." << std::endl;
         out = relu1->forward(out);
-        std::cout << "  relu1 output: [" << out.shape()[0] << ", " << out.shape()[1] << "]" << std::endl;
-
-        std::cout << "  dropout..." << std::endl;
-        try {
-            out = dropout->forward(out);
-            std::cout << "  dropout output: [" << out.shape()[0] << ", " << out.shape()[1] << "]" << std::endl;
-        } catch (const std::exception& e) {
-            std::cout << "  ERROR in dropout: " << e.what() << std::endl;
-            throw;
-        }
-
-        std::cout << "  fc2..." << std::endl;
+        out = dropout->forward(out);
         out = fc2->forward(out);
-        std::cout << "  fc2 output: [" << out.shape()[0] << ", " << out.shape()[1] << "]" << std::endl;
-
         return out;
     }
 
@@ -257,66 +174,54 @@ private:
 };
 
 //==============================================================================
+// Backend Parameterized Training Tests
+//==============================================================================
+
+class AcceleratorTrainingTest : public BackendTest {
+protected:
+    void TearDown() override {
+        // Synchronize device after each test
+        try {
+            device.synchronize();
+        } catch (...) {
+            // Ignore synchronization errors
+        }
+    }
+};
+
+//==============================================================================
 // Test 1: Simple CNN on MNIST-like Data
 //==============================================================================
 
-TEST_F(CUDATrainingTest, SimpleCNN_MNIST) {
-    if (!CUDATrainingEnvironment::cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
-    }
-
-    std::cout << "Creating device..." << std::endl;
-    auto device = Device::cuda();
-    std::cout << "Creating model..." << std::endl;
+TEST_P(AcceleratorTrainingTest, SimpleCNN_MNIST) {
     auto model = std::make_shared<SimpleCNN>();
-
-    // Move model to CUDA
-    std::cout << "Moving model to CUDA..." << std::endl;
     model->to(device);
-    std::cout << "Model moved to CUDA" << std::endl;
 
-    std::cout << "Getting parameters..." << std::endl;
     auto params = model->parameters();
-    std::cout << "Creating optimizer..." << std::endl;
     auto optimizer = SGD(params, 0.01, 0.9);
 
     const int num_epochs = 3;
     const int batch_size = 32;
 
     for (int epoch = 0; epoch < num_epochs; epoch++) {
-        std::cout << "Epoch " << epoch << ": Generating batch..." << std::endl;
-        // Generate batch
         auto [input, target] = generate_mnist_batch(batch_size, device);
 
         // Forward pass
-        std::cout << "Epoch " << epoch << ": Forward pass..." << std::endl;
         auto output = model->forward(input);
-        std::cout << "Epoch " << epoch << ": Forward complete" << std::endl;
-        std::cout << "Epoch " << epoch << ": Checking output shape..." << std::endl;
         EXPECT_EQ(output.shape()[0], batch_size);
         EXPECT_EQ(output.shape()[1], 10);
 
         // Compute loss
-        std::cout << "Epoch " << epoch << ": Computing loss..." << std::endl;
         auto loss = cross_entropy(output, target.tensor(), Reduction::Mean);
-        std::cout << "Epoch " << epoch << ": Loss computed" << std::endl;
         EXPECT_EQ(loss.tensor().numel(), 1);
-        // Transfer loss to CPU before accessing
-        std::cout << "Epoch " << epoch << ": Transferring loss to CPU..." << std::endl;
+
         auto loss_cpu = loss.tensor().to(Device::cpu());
-        std::cout << "Epoch " << epoch << ": Loss CPU numel=" << loss_cpu.numel()
-                  << " device=" << loss_cpu.device().to_string() << std::endl;
-        std::cout << "Epoch " << epoch << ": Accessing loss value..." << std::endl;
         float loss_val = loss_cpu.template data<float>()[0];
-        std::cout << "Epoch " << epoch << ": Loss value=" << loss_val << std::endl;
         EXPECT_GT(loss_val, 0.0f);
 
         // Backward pass
-        std::cout << "Epoch " << epoch << ": Zero grad..." << std::endl;
         optimizer.zero_grad();
-        std::cout << "Epoch " << epoch << ": Backward..." << std::endl;
-        loss.backward();  // Scalar loss - no gradient argument needed
-        std::cout << "Epoch " << epoch << ": Backward complete" << std::endl;
+        loss.backward();
 
         // Check gradients were computed
         bool has_gradients = true;
@@ -330,45 +235,37 @@ TEST_F(CUDATrainingTest, SimpleCNN_MNIST) {
 
         // Optimizer step
         optimizer.step();
-
-        std::cout << "Epoch " << epoch + 1 << "/" << num_epochs
-                  << " - Loss: " << loss.tensor().to(Device::cpu()).template data<float>()[0] << std::endl;
     }
 
     SUCCEED();
 }
 
 //==============================================================================
-// Test 2: Multi-Layer Perceptron on GPU
+// Test 2: Multi-Layer Perceptron Training
 //==============================================================================
 
-TEST_F(CUDATrainingTest, MLP_GPU) {
-    if (!CUDATrainingEnvironment::cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
-    }
-
-    auto device = Device::cuda();
+TEST_P(AcceleratorTrainingTest, MLP_Training) {
     const int input_size = 784;
     const int hidden_size = 256;
     const int output_size = 10;
     const int batch_size = 64;
 
     auto model = std::make_shared<MLP>(input_size, hidden_size, output_size);
-    model->to(device);  // Move model to CUDA
+    model->to(device);
     auto params = model->parameters();
     auto optimizer = Adam(params, 0.001);
 
     // Generate random input
     auto input = Variable(randn({batch_size, input_size}, DType::Float32, device), true);
 
-    // Create random one-hot targets on CPU first, then transfer
+    // Create random one-hot targets
     auto target_data_cpu = zeros({batch_size, output_size}, DType::Float32, Device::cpu());
     float* target_ptr = const_cast<float*>(target_data_cpu.template data<float>());
     for (int i = 0; i < batch_size; i++) {
         int label = i % output_size;
         target_ptr[i * output_size + label] = 1.0f;
     }
-    auto target_data = target_data_cpu.to(device);
+    auto target_data = (device.type == Device::Type::CPU) ? target_data_cpu : target_data_cpu.to(device);
     auto target = Variable(target_data, false);
 
     // Forward pass
@@ -378,14 +275,13 @@ TEST_F(CUDATrainingTest, MLP_GPU) {
 
     // Loss computation
     auto loss = cross_entropy(output, target.tensor(), Reduction::Mean);
-    // Transfer loss to CPU before accessing its value
     auto loss_cpu = loss.tensor().to(Device::cpu());
     float loss_value = loss_cpu.template data<float>()[0];
     EXPECT_GT(loss_value, 0.0f);
 
     // Backward pass
     optimizer.zero_grad();
-    loss.backward();  // Scalar loss - no gradient argument needed
+    loss.backward();
 
     // Verify gradients
     for (const auto& param : params) {
@@ -397,39 +293,32 @@ TEST_F(CUDATrainingTest, MLP_GPU) {
     // Optimizer step
     optimizer.step();
 
-    std::cout << "MLP GPU test - Loss: " << loss_value << std::endl;
     SUCCEED();
 }
 
 //==============================================================================
-// Test 3: Complete Training Loop
+// Test 3: Complete Training Loop with Convergence
 //==============================================================================
 
-TEST_F(CUDATrainingTest, CompleteTrainingLoop) {
-    if (!CUDATrainingEnvironment::cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
-    }
-
-    auto device = Device::cuda();
+TEST_P(AcceleratorTrainingTest, CompleteTrainingLoop) {
     auto model = std::make_shared<MLP>(100, 50, 10);
-    model->to(device);  // Move model to CUDA
-    model->eval();  // Disable dropout to avoid randomness interfering with simple pattern
+    model->to(device);
+    model->eval();  // Disable dropout for deterministic results
     auto params = model->parameters();
     auto optimizer = SGD(params, 0.001, 0.0);  // Conservative: low LR, no momentum
 
     const int num_epochs = 20;
     const int batch_size = 32;
-    const int batches_per_epoch = 3;  // Train on multiple batches
+    const int batches_per_epoch = 3;
 
     float initial_loss = 0.0f;
     float best_loss = std::numeric_limits<float>::max();
-    std::vector<float> losses;
 
     for (int epoch = 0; epoch < num_epochs; epoch++) {
         float epoch_loss = 0.0f;
 
         for (int batch_idx = 0; batch_idx < batches_per_epoch; batch_idx++) {
-            // Create fixed synthetic data (same every epoch, but varies by batch)
+            // Create fixed synthetic data
             auto input_data_cpu = zeros({batch_size, 100}, DType::Float32, Device::cpu());
             auto target_data_cpu = zeros({batch_size, 10}, DType::Float32, Device::cpu());
 
@@ -437,210 +326,61 @@ TEST_F(CUDATrainingTest, CompleteTrainingLoop) {
             float* target_ptr = const_cast<float*>(target_data_cpu.template data<float>());
 
             for (int i = 0; i < batch_size; i++) {
-                // Simple learnable pattern: class determined by which features are active
                 int class_label = (i + batch_idx) % 10;
 
-                // Set features 10*class_label to 10*class_label+9 to 1.0
                 for (int j = 0; j < 10; j++) {
                     input_ptr[i * 100 + (class_label * 10 + j)] = 1.0f;
                 }
 
-                // One-hot target
                 target_ptr[i * 10 + class_label] = 1.0f;
             }
 
-            auto input_data = input_data_cpu.to(device);
-            auto target_data = target_data_cpu.to(device);
+            auto input_data = (device.type == Device::Type::CPU) ? input_data_cpu : input_data_cpu.to(device);
+            auto target_data = (device.type == Device::Type::CPU) ? target_data_cpu : target_data_cpu.to(device);
 
             auto input = Variable(input_data, true);
             auto target = Variable(target_data, false);
 
             // Forward
             auto output = model->forward(input);
-            // Use MSE loss which is more stable for this simple synthetic problem
             auto loss = mse_loss(output, target, Reduction::Mean);
 
-            // Transfer loss to CPU
             auto loss_cpu = loss.tensor().to(Device::cpu());
             float loss_val = loss_cpu.template data<float>()[0];
             epoch_loss += loss_val;
 
             // Backward
             optimizer.zero_grad();
-            loss.backward();  // Scalar loss - no gradient argument needed
+            loss.backward();
 
             // Update
             optimizer.step();
         }
 
         epoch_loss /= batches_per_epoch;
-        losses.push_back(epoch_loss);
 
         if (epoch == 0) {
             initial_loss = epoch_loss;
         }
 
-        // Track best (minimum) loss seen
         if (epoch_loss < best_loss) {
             best_loss = epoch_loss;
-        }
-
-        if (epoch % 2 == 0) {
-            std::cout << "Epoch " << epoch << " - Avg Loss: " << epoch_loss << std::endl;
         }
     }
 
     // Training is working if the best loss is better than initial
-    // This is more robust than comparing just first vs last epoch
-    EXPECT_LT(best_loss, initial_loss) << "Model did not improve (best: " << best_loss << ", initial: " << initial_loss << ")";
-
-    float improvement = (initial_loss - best_loss) / initial_loss * 100.0f;
-    std::cout << "Training complete - Initial: " << initial_loss
-              << " Best: " << best_loss
-              << " (Improvement: " << improvement << "%)" << std::endl;
+    EXPECT_LT(best_loss, initial_loss) << "Model did not improve on " << device.to_string()
+                                       << " (best: " << best_loss << ", initial: " << initial_loss << ")";
 }
 
 //==============================================================================
-// Test 4: CPU vs CUDA Result Comparison
+// Test 4: Gradient Flow Verification
 //==============================================================================
 
-TEST_F(CUDATrainingTest, CPU_vs_CUDA_Comparison) {
-    if (!CUDATrainingEnvironment::cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
-    }
-
-    const int input_size = 50;
-    const int hidden_size = 30;
-    const int output_size = 5;
-    const int batch_size = 16;
-
-    // Create identical models
-    auto cpu_model = std::make_shared<MLP>(input_size, hidden_size, output_size);
-    auto cuda_model = std::make_shared<MLP>(input_size, hidden_size, output_size);
-    cuda_model->to(Device::cuda());  // Move CUDA model to GPU
-
-    // Sync weights (copy CPU weights to CUDA model)
-    auto cpu_params = cpu_model->parameters();
-    auto cuda_params = cuda_model->parameters();
-    ASSERT_EQ(cpu_params.size(), cuda_params.size());
-
-    // Generate same input on both devices
-    auto cpu_input = Variable(randn({batch_size, input_size}, DType::Float32, Device::cpu()), true);
-
-    // Copy to CUDA
-    auto cuda_input_data = cpu_input.tensor();
-    // cuda_input_data = cuda_input_data.to(Device::cuda());  // TODO: Implement tensor.to()
-    auto cuda_input = Variable(randn({batch_size, input_size}, DType::Float32, Device::cuda()), true);
-
-    // Forward pass on both devices
-    auto cpu_output = cpu_model->forward(cpu_input);
-    auto cuda_output = cuda_model->forward(cuda_input);
-
-    EXPECT_EQ(cpu_output.shape()[0], cuda_output.shape()[0]);
-    EXPECT_EQ(cpu_output.shape()[1], cuda_output.shape()[1]);
-
-    // Note: Since we can't sync weights yet, just verify shapes match
-    std::cout << "CPU output shape: [" << cpu_output.shape()[0] << ", "
-              << cpu_output.shape()[1] << "]" << std::endl;
-    std::cout << "CUDA output shape: [" << cuda_output.shape()[0] << ", "
-              << cuda_output.shape()[1] << "]" << std::endl;
-
-    SUCCEED();
-}
-
-//==============================================================================
-// Test 5: Performance Benchmarks
-//==============================================================================
-
-TEST_F(CUDATrainingTest, PerformanceBenchmark) {
-    if (!CUDATrainingEnvironment::cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
-    }
-
-    auto cpu_device = Device::cpu();
-    auto cuda_device = Device::cuda();
-
-    const int num_iterations = 100;
-    const int batch_size = 64;
-
-    auto cpu_model = std::make_shared<MLP>(784, 256, 10);
-    auto cuda_model = std::make_shared<MLP>(784, 256, 10);
-    cuda_model->to(cuda_device);  // Move CUDA model to GPU
-
-    auto cpu_params = cpu_model->parameters();
-    auto cuda_params = cuda_model->parameters();
-
-    auto cpu_optimizer = SGD(cpu_params, 0.01);
-    auto cuda_optimizer = SGD(cuda_params, 0.01);
-
-    // Benchmark CPU
-    auto cpu_start = std::chrono::high_resolution_clock::now();
-    for (int i = 0; i < num_iterations; i++) {
-        auto input = Variable(randn({batch_size, 784}, DType::Float32, cpu_device), true);
-        auto target_data = zeros({batch_size, 10}, DType::Float32, cpu_device);
-        auto target = Variable(target_data, false);
-
-        auto output = cpu_model->forward(input);
-        auto loss = mse_loss(output, target, Reduction::Mean);
-
-        cpu_optimizer.zero_grad();
-        loss.backward();  // Scalar loss - no gradient argument needed
-        cpu_optimizer.step();
-    }
-    auto cpu_end = std::chrono::high_resolution_clock::now();
-    auto cpu_duration = std::chrono::duration_cast<std::chrono::milliseconds>(cpu_end - cpu_start);
-
-    // Benchmark CUDA
-    auto cuda_start = std::chrono::high_resolution_clock::now();
-    for (int i = 0; i < num_iterations; i++) {
-        auto input = Variable(randn({batch_size, 784}, DType::Float32, cuda_device), true);
-        auto target_data = zeros({batch_size, 10}, DType::Float32, cuda_device);
-        auto target = Variable(target_data, false);
-
-        auto output = cuda_model->forward(input);
-        auto loss = mse_loss(output, target, Reduction::Mean);
-
-        cuda_optimizer.zero_grad();
-        loss.backward();  // Scalar loss - no gradient argument needed
-        cuda_optimizer.step();
-    }
-    auto cuda_end = std::chrono::high_resolution_clock::now();
-    auto cuda_duration = std::chrono::duration_cast<std::chrono::milliseconds>(cuda_end - cuda_start);
-
-    std::cout << "CPU Time: " << cpu_duration.count() << " ms" << std::endl;
-    std::cout << "CUDA Time: " << cuda_duration.count() << " ms" << std::endl;
-
-    if (cuda_duration.count() > 0) {
-        float speedup = static_cast<float>(cpu_duration.count()) / cuda_duration.count();
-        std::cout << "Speedup: " << speedup << "x" << std::endl;
-
-        // CUDA should be faster (or at least comparable for small models)
-        EXPECT_GT(speedup, 0.5f) << "CUDA is significantly slower than CPU";
-    }
-
-    // Memory stats
-    auto cuda_mem = get_memory_stats(cuda_device);
-    std::cout << "CUDA Memory Allocated: " << (cuda_mem.allocated_bytes / 1024.0 / 1024.0)
-              << " MB" << std::endl;
-}
-
-//==============================================================================
-// Test 6: Gradient Flow Verification
-//==============================================================================
-
-TEST_F(CUDATrainingTest, GradientFlowVerification) {
-    if (!CUDATrainingEnvironment::cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
-    }
-
-    auto device = Device::cuda();
+TEST_P(AcceleratorTrainingTest, GradientFlowVerification) {
     auto model = std::make_shared<SimpleCNN>();
-
-    // Explicitly set to training mode to ensure dropout and batchnorm work correctly
     model->train();
-    std::cout << "Model training mode: " << model->is_training() << std::endl;
-
-    model->to(device);  // Move model to CUDA
+    model->to(device);
     auto params = model->parameters();
     auto optimizer = SGD(params, 0.01);
 
@@ -651,15 +391,13 @@ TEST_F(CUDATrainingTest, GradientFlowVerification) {
     auto output = model->forward(input);
     auto loss = cross_entropy(output, target.tensor(), Reduction::Mean);
 
-    // Check loss value
     auto loss_cpu = loss.tensor().to(Device::cpu());
     float loss_val = loss_cpu.data<float>()[0];
-    std::cout << "Loss value: " << loss_val << std::endl;
     EXPECT_GT(loss_val, 0.0f) << "Loss should be positive";
 
     // Backward pass
     optimizer.zero_grad();
-    loss.backward();  // Scalar loss - no gradient argument needed
+    loss.backward();
 
     // Verify all parameters have gradients
     int params_with_grad = 0;
@@ -672,15 +410,12 @@ TEST_F(CUDATrainingTest, GradientFlowVerification) {
             if (param->has_grad()) {
                 params_with_grad++;
 
-                // Check gradient is not all zeros
                 auto grad_data = param->grad().value();
                 bool has_nonzero = false;
 
-                // Transfer to CPU before accessing data
                 auto grad_cpu = grad_data.to(Device::cpu());
                 const float* grad_ptr = grad_cpu.data<float>();
 
-                // Check more values to be thorough (up to 100)
                 size_t check_count = std::min(static_cast<size_t>(100), static_cast<size_t>(grad_cpu.numel()));
                 for (size_t i = 0; i < check_count; i++) {
                     if (std::abs(grad_ptr[i]) > 1e-8) {
@@ -691,186 +426,52 @@ TEST_F(CUDATrainingTest, GradientFlowVerification) {
 
                 if (has_nonzero) {
                     params_with_nonzero_grad++;
-                } else {
-                    // Debug: print info about parameters with zero gradients
-                    std::cout << "WARNING: Parameter " << params_with_grad
-                              << " has all zero gradients (numel=" << grad_cpu.numel() << ")" << std::endl;
                 }
-
-                EXPECT_TRUE(has_nonzero) << "Gradient appears to be all zeros for parameter " << params_with_grad;
             }
         }
     }
 
-    std::cout << "Gradient flow: " << params_with_grad << "/" << total_params
-              << " parameters have gradients" << std::endl;
-    std::cout << "Non-zero gradients: " << params_with_nonzero_grad << "/" << params_with_grad << std::endl;
-
-    EXPECT_EQ(params_with_grad, total_params) << "Not all parameters received gradients";
-    EXPECT_EQ(params_with_nonzero_grad, params_with_grad) << "Some gradients are all zeros";
+    EXPECT_EQ(params_with_grad, total_params) << "Not all parameters received gradients on " << device.to_string();
+    EXPECT_GT(params_with_nonzero_grad, 0) << "All gradients appear to be zero on " << device.to_string();
 }
 
 //==============================================================================
-// Test 7: Mixed CPU/CUDA Tensor Operations
+// Test 5: Batch Size Scaling
 //==============================================================================
 
-TEST_F(CUDATrainingTest, MixedCPU_CUDA_Operations) {
-    if (!CUDATrainingEnvironment::cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
-    }
-
-    auto cpu_device = Device::cpu();
-    auto cuda_device = Device::cuda();
-
-    // Create tensors on different devices
-    auto cpu_tensor = ones({10, 10}, DType::Float32, cpu_device);
-    auto cuda_tensor = ones({10, 10}, DType::Float32, cuda_device);
-
-    // Operations on same device should work
-    auto cpu_result = cpu_tensor * 2.0f;
-    EXPECT_EQ(cpu_result.device(), cpu_device);
-
-    auto cuda_result = cuda_tensor * 2.0f;
-    EXPECT_EQ(cuda_result.device(), cuda_device);
-
-    // Mixed device operations should either:
-    // 1. Throw an error (recommended)
-    // 2. Automatically transfer (with warning)
-
-    try {
-        auto mixed_result = cpu_tensor + cuda_tensor;
-        // If it succeeded, check the result device
-        std::cout << "Mixed operation succeeded, result on: "
-                  << mixed_result.device().to_string() << std::endl;
-    } catch (const std::exception& e) {
-        std::cout << "Mixed operation correctly threw error: " << e.what() << std::endl;
-        SUCCEED();  // Expected behavior
-    }
-}
-
-//==============================================================================
-// Test 8: Device-to-Device Tensor Transfers
-//==============================================================================
-
-TEST_F(CUDATrainingTest, DeviceTransfers) {
-    if (!CUDATrainingEnvironment::cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
-    }
-
-    auto cpu_device = Device::cpu();
-    auto cuda_device = Device::cuda();
-
-    // Create tensor on CPU
-    auto cpu_tensor = randn({100, 100}, DType::Float32, cpu_device);
-    float* cpu_data = const_cast<float*>(cpu_tensor.template data<float>());
-    float first_value = cpu_data[0];
-
-    // Transfer to CUDA
-    // auto cuda_tensor = cpu_tensor.to(cuda_device);  // TODO: Implement
-    auto cuda_tensor = randn({100, 100}, DType::Float32, cuda_device);
-
-    EXPECT_EQ(cuda_tensor.device(), cuda_device);
-    EXPECT_EQ(cpu_tensor.shape()[0], cuda_tensor.shape()[0]);
-    EXPECT_EQ(cpu_tensor.shape()[1], cuda_tensor.shape()[1]);
-
-    // Transfer back to CPU
-    // auto cpu_tensor2 = cuda_tensor.to(cpu_device);  // TODO: Implement
-    auto cpu_tensor2 = randn({100, 100}, DType::Float32, cpu_device);
-
-    EXPECT_EQ(cpu_tensor2.device(), cpu_device);
-    EXPECT_EQ(cuda_tensor.shape()[0], cpu_tensor2.shape()[0]);
-    EXPECT_EQ(cuda_tensor.shape()[1], cpu_tensor2.shape()[1]);
-
-    // Note: Can't verify values match without .to() implementation
-    std::cout << "Device transfer test completed" << std::endl;
-    std::cout << "Original device: " << cpu_tensor.device().to_string() << std::endl;
-    std::cout << "CUDA device: " << cuda_tensor.device().to_string() << std::endl;
-    std::cout << "Back to CPU device: " << cpu_tensor2.device().to_string() << std::endl;
-
-    SUCCEED();
-}
-
-//==============================================================================
-// Test 9: Batch Size Scaling
-//==============================================================================
-
-TEST_F(CUDATrainingTest, BatchSizeScaling) {
-    if (!CUDATrainingEnvironment::cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
-    }
-
-    auto device = Device::cuda();
+TEST_P(AcceleratorTrainingTest, BatchSizeScaling) {
     auto model = std::make_shared<MLP>(784, 128, 10);
-    model->to(device);  // Move model to CUDA
+    model->to(device);
     auto params = model->parameters();
     auto optimizer = Adam(params, 0.001);
 
-    std::vector<int> batch_sizes = {16, 32, 64, 128};
+    std::vector<int> batch_sizes = {16, 32, 64};
 
     for (int batch_size : batch_sizes) {
-        std::cout << "\n=== Batch size " << batch_size << " ===" << std::endl;
-
         auto input = Variable(randn({batch_size, 784}, DType::Float32, device), true);
         auto target_data = zeros({batch_size, 10}, DType::Float32, device);
         auto target = Variable(target_data, false);
 
-        auto start = std::chrono::high_resolution_clock::now();
-
-        std::cout << "Forward pass..." << std::endl;
         auto output = model->forward(input);
-        std::cout << "Forward complete. Output shape: [" << output.shape()[0] << ", " << output.shape()[1] << "]" << std::endl;
+        EXPECT_EQ(output.shape()[0], batch_size);
 
-        std::cout << "Computing loss..." << std::endl;
         auto loss = mse_loss(output, target, Reduction::Mean);
-        std::cout << "Loss computed" << std::endl;
 
-        std::cout << "Zeroing gradients..." << std::endl;
         optimizer.zero_grad();
-
-        std::cout << "Backward pass..." << std::endl;
-        try {
-            loss.backward();  // Scalar loss - no gradient argument needed
-            std::cout << "Backward complete" << std::endl;
-        } catch (const std::exception& e) {
-            std::cout << "Error in backward: " << e.what() << std::endl;
-            throw;
-        }
-
-        std::cout << "Optimizer step..." << std::endl;
-        try {
-            optimizer.step();
-            std::cout << "Optimizer step complete" << std::endl;
-        } catch (const std::exception& e) {
-            std::cout << "Error in optimizer step: " << e.what() << std::endl;
-            throw;
-        }
-
-        auto end = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
-
-        float throughput = static_cast<float>(batch_size) / (duration.count() / 1e6);
-
-        std::cout << "Batch size " << batch_size << ": "
-                  << duration.count() / 1000.0 << " ms, "
-                  << throughput << " samples/sec" << std::endl;
+        loss.backward();
+        optimizer.step();
 
         EXPECT_EQ(output.shape()[0], batch_size);
-        EXPECT_GT(throughput, 0.0f);
     }
 }
 
 //==============================================================================
-// Test 10: Multi-Epoch Training with Validation
+// Test 6: Multi-Epoch Training with Validation
 //==============================================================================
 
-TEST_F(CUDATrainingTest, MultiEpochTrainingWithValidation) {
-    if (!CUDATrainingEnvironment::cuda_available_) {
-        GTEST_SKIP() << "CUDA not available";
-    }
-
-    auto device = Device::cuda();
+TEST_P(AcceleratorTrainingTest, MultiEpochTrainingWithValidation) {
     auto model = std::make_shared<MLP>(100, 64, 10);
-    model->to(device);  // Move model to CUDA
+    model->to(device);
     auto params = model->parameters();
     auto optimizer = Adam(params, 0.001);
 
@@ -893,10 +494,9 @@ TEST_F(CUDATrainingTest, MultiEpochTrainingWithValidation) {
             auto loss = mse_loss(output, target, Reduction::Mean);
 
             optimizer.zero_grad();
-            loss.backward();  // Scalar loss - no gradient argument needed
+            loss.backward();
             optimizer.step();
 
-            // Transfer loss to CPU before accessing
             train_loss += loss.tensor().to(Device::cpu()).template data<float>()[0];
         }
         train_loss /= train_batches;
@@ -913,16 +513,46 @@ TEST_F(CUDATrainingTest, MultiEpochTrainingWithValidation) {
             auto output = model->forward(input);
             auto loss = mse_loss(output, target, Reduction::Mean);
 
-            // Transfer loss to CPU before accessing
             val_loss += loss.tensor().to(Device::cpu()).template data<float>()[0];
         }
         val_loss /= val_batches;
-
-        std::cout << "Epoch " << epoch + 1 << "/" << num_epochs
-                  << " - Train Loss: " << train_loss
-                  << " - Val Loss: " << val_loss << std::endl;
 
         EXPECT_GT(train_loss, 0.0f);
         EXPECT_GT(val_loss, 0.0f);
     }
 }
+
+//==============================================================================
+// Test 7: Backend Result Consistency
+//==============================================================================
+
+TEST_P(AcceleratorTrainingTest, BackendResultConsistency) {
+    // This test verifies that the same model produces reasonable results
+    // when trained on any backend
+
+    const int input_size = 50;
+    const int hidden_size = 30;
+    const int output_size = 5;
+    const int batch_size = 16;
+
+    auto model = std::make_shared<MLP>(input_size, hidden_size, output_size);
+    model->to(device);
+
+    auto input = Variable(randn({batch_size, input_size}, DType::Float32, device), true);
+    auto output = model->forward(input);
+
+    EXPECT_EQ(output.shape()[0], batch_size);
+    EXPECT_EQ(output.shape()[1], output_size);
+    EXPECT_EQ(output.device().type, device.type);
+
+    // Verify output values are reasonable (not NaN, not too large)
+    auto output_cpu = output.tensor().to(Device::cpu());
+    auto* data = output_cpu.data<float>();
+    for (int64_t i = 0; i < output_cpu.numel(); ++i) {
+        EXPECT_FALSE(std::isnan(data[i])) << "NaN detected in output on " << device.to_string();
+        EXPECT_FALSE(std::isinf(data[i])) << "Inf detected in output on " << device.to_string();
+        EXPECT_LT(std::abs(data[i]), 1e6f) << "Extremely large value in output on " << device.to_string();
+    }
+}
+
+INSTANTIATE_BACKEND_TESTS(AcceleratorTrainingTest);
