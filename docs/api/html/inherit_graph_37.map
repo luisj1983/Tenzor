@@ -1,7 +1,13 @@
 <map id="Graphical Class Hierarchy" name="Graphical Class Hierarchy">
-<area shape="rect" id="Node000000" href="$classtenzor_1_1Storage.html" title="Abstract base class for tensor memory storage." alt="" coords="5,32,126,60"/>
-<area shape="rect" id="Node000001" href="$classtenzor_1_1CPUStorage.html" title="CPU memory storage with aligned allocation." alt="" coords="183,5,330,33"/>
-<area shape="poly" id="edge58_Node000000_Node000001" title=" " alt="" coords="141,33,182,27,183,32,141,38"/>
-<area shape="rect" id="Node000002" href="$classtenzor_1_1DeviceStorage.html" title="Device (GPU) memory storage managed by backend." alt="" coords="174,57,339,85"/>
-<area shape="poly" id="edge59_Node000000_Node000002" title=" " alt="" coords="141,53,173,57,173,63,141,58"/>
+<area shape="rect" id="Node000000" href="$classtenzor_1_1data_1_1Dataset.html" title="Abstract base class for datasets." alt="" coords="5,84,164,112"/>
+<area shape="rect" id="Node000001" href="$classtenzor_1_1data_1_1ConcatDataset.html" title="Dataset that concatenates multiple datasets." alt="" coords="214,5,418,33"/>
+<area shape="poly" id="edge38_Node000000_Node000001" title=" " alt="" coords="130,75,211,43,252,31,254,36,213,48,132,80"/>
+<area shape="rect" id="Node000002" href="$classtenzor_1_1data_1_1IterableDataset.html" title="Iterable&#45;style dataset for streaming data." alt="" coords="212,57,420,85"/>
+<area shape="poly" id="edge39_Node000000_Node000002" title=" " alt="" coords="179,84,211,81,212,86,179,90"/>
+<area shape="rect" id="Node000003" href="$classtenzor_1_1data_1_1MapDataset.html" title="Map&#45;style dataset that supports random access." alt="" coords="223,109,409,137"/>
+<area shape="poly" id="edge40_Node000000_Node000003" title=" " alt="" coords="179,106,222,110,222,116,179,111"/>
+<area shape="rect" id="Node000005" href="$classtenzor_1_1data_1_1TransformedDataset.html" title="Dataset wrapper that applies transforms to samples." alt="" coords="222,161,410,206"/>
+<area shape="poly" id="edge42_Node000000_Node000005" title=" " alt="" coords="135,115,213,146,246,158,244,163,211,151,133,120"/>
+<area shape="rect" id="Node000004" href="$classtenzor_1_1data_1_1TensorDataset.html" title="Simple tensor dataset holding data in memory." alt="" coords="468,109,668,137"/>
+<area shape="poly" id="edge41_Node000003_Node000004" title=" " alt="" coords="425,120,467,120,467,126,425,126"/>
 </map>

@@ -2,6 +2,7 @@ var group__tensor__reduction =
 [
     [ "tenzor::argmax", "group__tensor__reduction.html#gad6dc25b1e3a616a700a4eb13eb494736", null ],
     [ "tenzor::argmin", "group__tensor__reduction.html#ga0b3151ed819cab605f1fe2ef8a76603a", null ],
+    [ "tenzor::argsort", "group__tensor__reduction.html#ga6cf753152626512881e4d2b1a0a8e764", null ],
     [ "tenzor::max", "group__tensor__reduction.html#gaf74ba06b2ff284564f2f3c92021b2747", null ],
     [ "tenzor::mean", "group__tensor__reduction.html#gaf71412314ce6c6555bb96d965c8ce5ac", null ],
     [ "tenzor::min", "group__tensor__reduction.html#ga2b4afb17e2e6cfb7b5dadb0198259061", null ],

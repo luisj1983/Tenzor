@@ -1,8 +1,7 @@
 var searchData=
 [
-  ['info_0',['Info',['../namespacetenzor.html#a73a4f7deebe32a56e7bf28bd1723a4bea4059b0251f66a18cb56f544728796875',1,'tenzor']]],
-  ['int16_1',['Int16',['../namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea39bc2ae44b184207f560ff8619823208',1,'tenzor']]],
-  ['int32_2',['Int32',['../namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feeac06129f6e6e15c09328365e553f1dc31',1,'tenzor']]],
-  ['int64_3',['Int64',['../namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feeafbde23b11d7e59af7828e81144c8b487',1,'tenzor']]],
-  ['int8_4',['Int8',['../namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea7d839b2c12bfd40ac121b4cc9e81c539',1,'tenzor']]]
+  ['giou_0',['GIoU',['../detection_8hpp.html#a5052b4fd0e008309c8f4c8d39c5cc439a28a9fed50988e678d8c046f0269630bf',1,'tenzor::ops']]],
+  ['gloo_1',['GLOO',['../distributed_8hpp.html#a5cc5eb442d299a3fadcf8b23151f6bd9aee883e67e470043533f4dab59392a250',1,'tenzor::distributed']]],
+  ['greedy_2',['Greedy',['../gpt_8hpp.html#adee494c7b9892981a0ea0edeed955bf1abb6c5ecbef13e567544e5a0068237b25',1,'tenzor::models']]],
+  ['gzip_3',['Gzip',['../nn_2checkpoint_8hpp.html#a6805f7d3b09203c174697ebf04354a05a2548e50da66f41afea53de1cbbf3b30c',1,'tenzor::nn']]]
 ];

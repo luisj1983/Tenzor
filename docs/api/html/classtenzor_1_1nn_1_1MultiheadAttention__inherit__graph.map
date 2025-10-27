@@ -1,0 +1,5 @@
+<map id="tenzor::nn::MultiheadAttention" name="tenzor::nn::MultiheadAttention">
+<area shape="rect" id="Node000001" title="Multi&#45;Head Attention layer." alt="" coords="5,81,225,109"/>
+<area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="44,5,186,33"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="118,49,118,81,112,81,112,49"/>
+</map>

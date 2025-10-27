@@ -582,26 +582,94 @@ auto GlooBackend::apply_reduce_op(Tensor& result, const Tensor& operand, ReduceO
             result = result * operand;
             break;
         case ReduceOp::MIN:
-            // Element-wise minimum: min(result, operand)
-            // For now, use a simple comparison loop
-            // TODO: Replace with proper element-wise minimum operation
+            // Element-wise minimum operation with proper dtype support
             {
                 size_t numel = result.numel();
-                auto* result_ptr = static_cast<float*>(result.data_ptr());
-                const auto* operand_ptr = static_cast<const float*>(operand.data_ptr());
-                for (size_t i = 0; i < numel; ++i) {
-                    result_ptr[i] = std::min(result_ptr[i], operand_ptr[i]);
+
+                switch (result.dtype()) {
+                    case DType::Float32: {
+                        auto* result_ptr = static_cast<float*>(result.data_ptr());
+                        const auto* operand_ptr = static_cast<const float*>(operand.data_ptr());
+                        for (size_t i = 0; i < numel; ++i) {
+                            result_ptr[i] = std::min(result_ptr[i], operand_ptr[i]);
+                        }
+                        break;
+                    }
+                    case DType::Float64: {
+                        auto* result_ptr = static_cast<double*>(result.data_ptr());
+                        const auto* operand_ptr = static_cast<const double*>(operand.data_ptr());
+                        for (size_t i = 0; i < numel; ++i) {
+                            result_ptr[i] = std::min(result_ptr[i], operand_ptr[i]);
+                        }
+                        break;
+                    }
+                    case DType::Int32: {
+                        auto* result_ptr = static_cast<int32_t*>(result.data_ptr());
+                        const auto* operand_ptr = static_cast<const int32_t*>(operand.data_ptr());
+                        for (size_t i = 0; i < numel; ++i) {
+                            result_ptr[i] = std::min(result_ptr[i], operand_ptr[i]);
+                        }
+                        break;
+                    }
+                    case DType::Int64: {
+                        auto* result_ptr = static_cast<int64_t*>(result.data_ptr());
+                        const auto* operand_ptr = static_cast<const int64_t*>(operand.data_ptr());
+                        for (size_t i = 0; i < numel; ++i) {
+                            result_ptr[i] = std::min(result_ptr[i], operand_ptr[i]);
+                        }
+                        break;
+                    }
+                    default:
+                        throw std::invalid_argument(
+                            "MIN reduction not supported for dtype: " +
+                            std::to_string(static_cast<int>(result.dtype()))
+                        );
                 }
             }
             break;
         case ReduceOp::MAX:
-            // Element-wise maximum: max(result, operand)
+            // Element-wise maximum operation with proper dtype support
             {
                 size_t numel = result.numel();
-                auto* result_ptr = static_cast<float*>(result.data_ptr());
-                const auto* operand_ptr = static_cast<const float*>(operand.data_ptr());
-                for (size_t i = 0; i < numel; ++i) {
-                    result_ptr[i] = std::max(result_ptr[i], operand_ptr[i]);
+
+                switch (result.dtype()) {
+                    case DType::Float32: {
+                        auto* result_ptr = static_cast<float*>(result.data_ptr());
+                        const auto* operand_ptr = static_cast<const float*>(operand.data_ptr());
+                        for (size_t i = 0; i < numel; ++i) {
+                            result_ptr[i] = std::max(result_ptr[i], operand_ptr[i]);
+                        }
+                        break;
+                    }
+                    case DType::Float64: {
+                        auto* result_ptr = static_cast<double*>(result.data_ptr());
+                        const auto* operand_ptr = static_cast<const double*>(operand.data_ptr());
+                        for (size_t i = 0; i < numel; ++i) {
+                            result_ptr[i] = std::max(result_ptr[i], operand_ptr[i]);
+                        }
+                        break;
+                    }
+                    case DType::Int32: {
+                        auto* result_ptr = static_cast<int32_t*>(result.data_ptr());
+                        const auto* operand_ptr = static_cast<const int32_t*>(operand.data_ptr());
+                        for (size_t i = 0; i < numel; ++i) {
+                            result_ptr[i] = std::max(result_ptr[i], operand_ptr[i]);
+                        }
+                        break;
+                    }
+                    case DType::Int64: {
+                        auto* result_ptr = static_cast<int64_t*>(result.data_ptr());
+                        const auto* operand_ptr = static_cast<const int64_t*>(operand.data_ptr());
+                        for (size_t i = 0; i < numel; ++i) {
+                            result_ptr[i] = std::max(result_ptr[i], operand_ptr[i]);
+                        }
+                        break;
+                    }
+                    default:
+                        throw std::invalid_argument(
+                            "MAX reduction not supported for dtype: " +
+                            std::to_string(static_cast<int>(result.dtype()))
+                        );
                 }
             }
             break;

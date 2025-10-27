@@ -5,6 +5,7 @@
 
 #include "tenzor/models/swin_transformer.hpp"
 #include "tenzor/autograd/ops.hpp"
+#include "tenzor/nn/checkpoint.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/transform.hpp"
@@ -524,8 +525,22 @@ auto SwinTransformer::forward_features(const Variable& input) -> std::vector<Var
 }
 
 auto SwinTransformer::load_pretrained(const std::string& path) -> void {
-    // TODO: Implement weight loading
-    throw std::runtime_error("Pretrained weight loading not yet implemented");
+    // Load checkpoint from file
+    nn::ModelCheckpoint checkpoint_manager;
+    try {
+        auto checkpoint = checkpoint_manager.load(path);
+
+        // Validate checkpoint has model state
+        if (checkpoint.model_state.empty()) {
+            throw std::runtime_error("Checkpoint file contains no model state");
+        }
+
+        // Load state dictionary into the model
+        load_state_dict(checkpoint.model_state);
+
+    } catch (const std::exception& e) {
+        throw std::runtime_error("Failed to load pretrained weights from '" + path + "': " + e.what());
+    }
 }
 
 // ============================================================================
@@ -554,8 +569,14 @@ auto swin_tiny(int64_t num_classes, int64_t img_size, bool pretrained)
     );
 
     if (pretrained) {
-        // TODO: Load pretrained weights
-        throw std::runtime_error("Pretrained weights not yet available");
+        throw std::runtime_error(
+            "Pretrained Swin Transformer weights not available. "
+            "To use pretrained weights:\n"
+            "  1. Download weights from a pretrained source\n"
+            "  2. Convert to Tenzor checkpoint format if needed\n"
+            "  3. Load using: model->load_pretrained(\"path/to/weights.pt\")\n"
+            "For training from scratch, set pretrained=false"
+        );
     }
 
     return model;

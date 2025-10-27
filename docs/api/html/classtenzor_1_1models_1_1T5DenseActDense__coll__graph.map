@@ -1,0 +1,21 @@
+<map id="tenzor::models::T5DenseActDense" name="tenzor::models::T5DenseActDense">
+<area shape="rect" id="Node000001" title="T5 Feed&#45;forward network." alt="" coords="1101,5,1305,50"/>
+<area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="884,87,1027,115"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="1011,79,1050,66,1114,48,1115,53,1051,72,1013,84"/>
+<area shape="rect" id="Node000009" title=" " alt="" coords="1116,75,1290,119"/>
+<area shape="poly" id="edge10_Node000009_Node000002" title=" " alt="" coords="1042,97,1115,96,1115,101,1042,102"/>
+<area shape="rect" id="Node000003" title=" " alt="" coords="509,76,746,137"/>
+<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="762,101,884,99,884,105,762,107"/>
+<area shape="rect" id="Node000004" title=" " alt="" coords="262,172,348,200"/>
+<area shape="poly" id="edge3_Node000003_Node000004" title=" " alt="" coords="362,170,508,133,509,138,363,175"/>
+<area shape="rect" id="Node000008" title=" " alt="" coords="1422,130,1592,208"/>
+<area shape="poly" id="edge8_Node000008_Node000004" title=" " alt="" coords="364,196,484,217,555,225,626,228,1204,228,1261,225,1318,217,1421,193,1422,198,1319,222,1261,230,1204,233,626,233,555,230,484,222,363,202"/>
+<area shape="rect" id="Node000005" title=" " alt="" coords="5,164,144,209"/>
+<area shape="poly" id="edge4_Node000004_Node000005" title=" " alt="" coords="159,184,261,184,261,189,159,189"/>
+<area shape="rect" id="Node000006" title=" " alt="" coords="218,84,392,129"/>
+<area shape="poly" id="edge5_Node000003_Node000006" title=" " alt="" coords="407,104,509,104,509,109,407,109"/>
+<area shape="rect" id="Node000007" href="$classtenzor_1_1Variable.html" title="Gradient&#45;enabled tensor wrapper for automatic differentiation." alt="" coords="13,92,136,120"/>
+<area shape="poly" id="edge6_Node000006_Node000007" title=" " alt="" coords="151,104,217,104,217,109,151,109"/>
+<area shape="poly" id="edge7_Node000002_Node000008" title=" " alt="" coords="1406,178,1261,178,1180,171,1100,159,1037,140,984,118,986,113,1039,135,1101,154,1180,166,1261,172,1406,173"/>
+<area shape="poly" id="edge9_Node000008_Node000009" title=" " alt="" coords="1306,119,1422,146,1421,151,1305,124"/>
+</map>

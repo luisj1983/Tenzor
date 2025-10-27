@@ -1,0 +1,5 @@
+<map id="tenzor::nn::quantization::QuantizationParams" name="tenzor::nn::quantization::QuantizationParams">
+<area shape="rect" id="Node000001" title="Quantization parameters." alt="" coords="5,128,181,173"/>
+<area shape="rect" id="Node000002" href="$classtenzor_1_1Tensor.html" title="Multi&#45;dimensional array with automatic differentiation support." alt="" coords="37,5,149,33"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="96,49,96,128,90,128,90,49"/>
+</map>

@@ -157,7 +157,22 @@ auto ProcessGroup::create_process_group(
             comm_backend = std::make_unique<GlooBackend>();
             break;
         case Backend::MPI:
-            throw std::runtime_error("MPI backend not implemented");
+            throw std::runtime_error(
+                "MPI backend is not implemented. "
+                "MPI support requires additional dependencies (OpenMPI or MPICH). "
+                "Please use NCCL backend for GPU communication or Gloo backend for CPU communication. "
+                "\n\n"
+                "Supported backends:\n"
+                "  - NCCL: High-performance GPU-to-GPU communication (requires CUDA/ROCm)\n"
+                "  - Gloo: CPU-based communication using TCP/IP sockets\n"
+                "\n"
+                "To use MPI backend in the future:\n"
+                "  1. Install MPI library (OpenMPI or MPICH)\n"
+                "  2. Rebuild Tenzor with -DTENZOR_BUILD_MPI=ON\n"
+                "  3. Launch with mpirun/mpiexec: mpirun -n 4 ./your_program\n"
+                "\n"
+                "For now, please use: init_process_group(\"nccl\") or init_process_group(\"gloo\")"
+            );
         default:
             throw std::invalid_argument("Unknown backend");
     }

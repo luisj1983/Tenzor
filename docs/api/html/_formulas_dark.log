@@ -1,4 +1,4 @@
-This is pdfTeX, Version 3.141592653-2.6-1.40.27 (TeX Live 2026/dev/Arch Linux) (preloaded format=latex 2025.8.25)  11 OCT 2025 08:00
+This is pdfTeX, Version 3.141592653-2.6-1.40.27 (TeX Live 2026/dev/Arch Linux) (preloaded format=latex 2025.8.25)  27 OCT 2025 09:45
 entering extended mode
  restricted \write18 enabled.
  %&-line parsing enabled.
@@ -413,7 +413,7 @@ and I'll forget about whatever was undefined.
 [15]
 ! Undefined control sequence.
 l.101 \[\text
-             {MSE}(x, y) = \frac{1}{n}\sum_{i=1}^{n}(x_i - y_i)^2
+             {softmax}_T(x_i) = \frac{e^{x_i/T}}{\sum_j e^{x_j/T}}
 The control sequence at the end of the top line
 of your error message was never \def'ed. If you have
 misspelled it (e.g., `\hobx'), type `I' and the correct
@@ -423,47 +423,17 @@ and I'll forget about whatever was undefined.
 
 
 [16]
-! Undefined control sequence.
-l.105 \[\text
-             {CrossEntropy}(x, y) = -\log\left(\frac{e^{x_y}}{\sum_j e^{x_j}...
-The control sequence at the end of the top line
-of your error message was never \def'ed. If you have
-misspelled it (e.g., `\hobx'), type `I' and the correct
-spelling (e.g., `I\hbox'). Otherwise just continue,
-and I'll forget about whatever was undefined.
-
-
 
 [17]
-! Undefined control sequence.
-l.109 \[\text
-             {BCE}(x, y) = -\frac{1}{n}\sum_{i=1}^{n}\left[y_i\log(x_i) + (1...
-The control sequence at the end of the top line
-of your error message was never \def'ed. If you have
-misspelled it (e.g., `\hobx'), type `I' and the correct
-spelling (e.g., `I\hbox'). Otherwise just continue,
-and I'll forget about whatever was undefined.
-
-
 
 [18]
-! Undefined control sequence.
-l.113 \[\text
-             {BCEWithLogits}(x, y) = -\frac{1}{n}\sum_{i=1}^{n}\left[y_i\log...
-The control sequence at the end of the top line
-of your error message was never \def'ed. If you have
-misspelled it (e.g., `\hobx'), type `I' and the correct
-spelling (e.g., `I\hbox'). Otherwise just continue,
-and I'll forget about whatever was undefined.
-
-
 
 [19]
 
 [20]
 ! Undefined control sequence.
-l.120 \[\text
-             {NLL}(x, y) = -\frac{1}{n}\sum_{i=1}^{n} x_{i,y_i}
+l.118 $0 \le i_j < \text
+                        {num\_embeddings}$
 The control sequence at the end of the top line
 of your error message was never \def'ed. If you have
 misspelled it (e.g., `\hobx'), type `I' and the correct
@@ -474,8 +444,26 @@ and I'll forget about whatever was undefined.
 
 [21]
 ! Undefined control sequence.
-l.124 \[\text
-             {L1}(x, y) = \frac{1}{n}\sum_{i=1}^{n}|x_i - y_i|
+l.121 \[   \text
+                {Output}[j] = W[i_j, :] \quad \text{(lookup row } i_j \text{...
+The control sequence at the end of the top line
+of your error message was never \def'ed. If you have
+misspelled it (e.g., `\hobx'), type `I' and the correct
+spelling (e.g., `I\hbox'). Otherwise just continue,
+and I'll forget about whatever was undefined.
+
+! Undefined control sequence.
+l.121 ... \text{Output}[j] = W[i_j, :] \quad \text
+                                                  {(lookup row } i_j \text{ ...
+The control sequence at the end of the top line
+of your error message was never \def'ed. If you have
+misspelled it (e.g., `\hobx'), type `I' and the correct
+spelling (e.g., `I\hbox'). Otherwise just continue,
+and I'll forget about whatever was undefined.
+
+! Undefined control sequence.
+l.121 ...j, :] \quad \text{(lookup row } i_j \text
+                                                  { from weight matrix)}
 The control sequence at the end of the top line
 of your error message was never \def'ed. If you have
 misspelled it (e.g., `\hobx'), type `I' and the correct
@@ -485,8 +473,105 @@ and I'll forget about whatever was undefined.
 
 
 [22]
+
+[23]
 ! Undefined control sequence.
 l.128 \[\text
+             {Output} = \text{aggregate}(W[i_1], W[i_2], ..., W[i_k])
+The control sequence at the end of the top line
+of your error message was never \def'ed. If you have
+misspelled it (e.g., `\hobx'), type `I' and the correct
+spelling (e.g., `I\hbox'). Otherwise just continue,
+and I'll forget about whatever was undefined.
+
+! Undefined control sequence.
+l.128 \[\text{Output} = \text
+                             {aggregate}(W[i_1], W[i_2], ..., W[i_k])
+The control sequence at the end of the top line
+of your error message was never \def'ed. If you have
+misspelled it (e.g., `\hobx'), type `I' and the correct
+spelling (e.g., `I\hbox'). Otherwise just continue,
+and I'll forget about whatever was undefined.
+
+
+
+[24]
+! Undefined control sequence.
+l.132 \[\text
+             {MSE}(x, y) = \frac{1}{n}\sum_{i=1}^{n}(x_i - y_i)^2
+The control sequence at the end of the top line
+of your error message was never \def'ed. If you have
+misspelled it (e.g., `\hobx'), type `I' and the correct
+spelling (e.g., `I\hbox'). Otherwise just continue,
+and I'll forget about whatever was undefined.
+
+
+
+[25]
+! Undefined control sequence.
+l.136 \[\text
+             {CrossEntropy}(x, y) = -\log\left(\frac{e^{x_y}}{\sum_j e^{x_j}...
+The control sequence at the end of the top line
+of your error message was never \def'ed. If you have
+misspelled it (e.g., `\hobx'), type `I' and the correct
+spelling (e.g., `I\hbox'). Otherwise just continue,
+and I'll forget about whatever was undefined.
+
+
+
+[26]
+! Undefined control sequence.
+l.140 \[\text
+             {BCE}(x, y) = -\frac{1}{n}\sum_{i=1}^{n}\left[y_i\log(x_i) + (1...
+The control sequence at the end of the top line
+of your error message was never \def'ed. If you have
+misspelled it (e.g., `\hobx'), type `I' and the correct
+spelling (e.g., `I\hbox'). Otherwise just continue,
+and I'll forget about whatever was undefined.
+
+
+
+[27]
+! Undefined control sequence.
+l.144 \[\text
+             {BCEWithLogits}(x, y) = -\frac{1}{n}\sum_{i=1}^{n}\left[y_i\log...
+The control sequence at the end of the top line
+of your error message was never \def'ed. If you have
+misspelled it (e.g., `\hobx'), type `I' and the correct
+spelling (e.g., `I\hbox'). Otherwise just continue,
+and I'll forget about whatever was undefined.
+
+
+
+[28]
+
+[29]
+! Undefined control sequence.
+l.151 \[\text
+             {NLL}(x, y) = -\frac{1}{n}\sum_{i=1}^{n} x_{i,y_i}
+The control sequence at the end of the top line
+of your error message was never \def'ed. If you have
+misspelled it (e.g., `\hobx'), type `I' and the correct
+spelling (e.g., `I\hbox'). Otherwise just continue,
+and I'll forget about whatever was undefined.
+
+
+
+[30]
+! Undefined control sequence.
+l.155 \[\text
+             {L1}(x, y) = \frac{1}{n}\sum_{i=1}^{n}|x_i - y_i|
+The control sequence at the end of the top line
+of your error message was never \def'ed. If you have
+misspelled it (e.g., `\hobx'), type `I' and the correct
+spelling (e.g., `I\hbox'). Otherwise just continue,
+and I'll forget about whatever was undefined.
+
+
+
+[31]
+! Undefined control sequence.
+l.159 \[\text
              {SmoothL1}(x, y) = \frac{1}{n}\sum_{i=1}^{n} z_i, \quad \text{w...
 The control sequence at the end of the top line
 of your error message was never \def'ed. If you have
@@ -495,7 +580,7 @@ spelling (e.g., `I\hbox'). Otherwise just continue,
 and I'll forget about whatever was undefined.
 
 ! Undefined control sequence.
-l.128 ...frac{1}{n}\sum_{i=1}^{n} z_i, \quad \text
+l.159 ...frac{1}{n}\sum_{i=1}^{n} z_i, \quad \text
                                                   {where} \quad
 The control sequence at the end of the top line
 of your error message was never \def'ed. If you have
@@ -504,7 +589,7 @@ spelling (e.g., `I\hbox'). Otherwise just continue,
 and I'll forget about whatever was undefined.
 
 ! Misplaced alignment tab character &.
-l.130   0.5(x_i - y_i)^2 / \beta &
+l.161   0.5(x_i - y_i)^2 / \beta &
                                    \text{if } |x_i - y_i| < \beta \\
 I can't figure out why you would want to use a tab mark
 here. If you just want an ampersand, the remedy is
@@ -514,7 +599,7 @@ you're probably due for more error messages, and you
 might try typing `S' now just to see what is salvageable.
 
 ! Undefined control sequence.
-l.130   0.5(x_i - y_i)^2 / \beta & \text
+l.161   0.5(x_i - y_i)^2 / \beta & \text
                                         {if } |x_i - y_i| < \beta \\
 The control sequence at the end of the top line
 of your error message was never \def'ed. If you have
@@ -523,7 +608,7 @@ spelling (e.g., `I\hbox'). Otherwise just continue,
 and I'll forget about whatever was undefined.
 
 ! Misplaced alignment tab character &.
-l.131   |x_i - y_i| - 0.5\beta &
+l.162   |x_i - y_i| - 0.5\beta &
                                  \text{otherwise}
 I can't figure out why you would want to use a tab mark
 here. If you just want an ampersand, the remedy is
@@ -533,7 +618,7 @@ you're probably due for more error messages, and you
 might try typing `S' now just to see what is salvageable.
 
 ! Undefined control sequence.
-l.131   |x_i - y_i| - 0.5\beta & \text
+l.162   |x_i - y_i| - 0.5\beta & \text
                                       {otherwise}
 The control sequence at the end of the top line
 of your error message was never \def'ed. If you have
@@ -542,7 +627,7 @@ spelling (e.g., `I\hbox'). Otherwise just continue,
 and I'll forget about whatever was undefined.
 
 
-Overfull \hbox (76.69307pt too wide) detected at line 133
+Overfull \hbox (76.69307pt too wide) detected at line 164
 []\OT1/cmr/m/n/10 (\OML/cmm/m/it/10 x; y\OT1/cmr/m/n/10 ) = [] [] \OML/cmm/m/it
 /10 z[];  [] z[] \OT1/cmr/m/n/10 = [] \OML/cmm/m/it/10 :\OT1/cmr/m/n/10 5(\OML/
 cmm/m/it/10 x[] \OMS/cmsy/m/n/10 ^^@ \OML/cmm/m/it/10 y[]\OT1/cmr/m/n/10 )[]\OM
@@ -555,71 +640,973 @@ L/cmm/m/it/10 =^^L[]\OMS/cmsy/m/n/10 j\OML/cmm/m/it/10 x[] \OMS/cmsy/m/n/10 ^^@
 
 
 
-[23]
-Overfull \hbox (60.94418pt too wide) detected at line 141
-\OML/cmm/m/it/10 m[] \OT1/cmr/m/n/10 = \OML/cmm/m/it/10 ^^L[]m[] \OT1/cmr/m/n/1
-0 + (1 \OMS/cmsy/m/n/10 ^^@ \OML/cmm/m/it/10 ^^L[]\OT1/cmr/m/n/10 )\OML/cmm/m/i
-t/10 g[][] v[] \OT1/cmr/m/n/10 = \OML/cmm/m/it/10 ^^L[]v[] \OT1/cmr/m/n/10 + (1
- \OMS/cmsy/m/n/10 ^^@ \OML/cmm/m/it/10 ^^L[]\OT1/cmr/m/n/10 )\OML/cmm/m/it/10 g
-[][] [] \OT1/cmr/m/n/10 = [][] [] = [][] \OML/cmm/m/it/10 ^^R[] \OT1/cmr/m/n/10
- = \OML/cmm/m/it/10 ^^R[] \OMS/cmsy/m/n/10 ^^@ [][]
- []
-
-
-
-[24]
-
-[25]
-
-[26]
-
-[27]
-
-[28]
-
-[29]
-
-[30]
-
-[31]
-
 [32]
+! Undefined control sequence.
+l.167 \[\text
+             {KL}(P||Q) = \sum_i P_i \cdot \log\left(\frac{P_i}{Q_i}\right) ...
+The control sequence at the end of the top line
+of your error message was never \def'ed. If you have
+misspelled it (e.g., `\hobx'), type `I' and the correct
+spelling (e.g., `I\hbox'). Otherwise just continue,
+and I'll forget about whatever was undefined.
+
+
 
 [33]
+! Undefined control sequence.
+l.171 \[\text
+             {FL}(p_t) = -\alpha_t (1 - p_t)^\gamma \log(p_t)
+The control sequence at the end of the top line
+of your error message was never \def'ed. If you have
+misspelled it (e.g., `\hobx'), type `I' and the correct
+spelling (e.g., `I\hbox'). Otherwise just continue,
+and I'll forget about whatever was undefined.
+
+
 
 [34]
 
 [35]
+! Undefined control sequence.
+l.178 \[\text
+             {Dice} = 1 - \frac{2|X \cap Y| + \text{smooth}}{|X| + |Y| + \te...
+The control sequence at the end of the top line
+of your error message was never \def'ed. If you have
+misspelled it (e.g., `\hobx'), type `I' and the correct
+spelling (e.g., `I\hbox'). Otherwise just continue,
+and I'll forget about whatever was undefined.
+
+! Undefined control sequence.
+<argument> 2|X \cap Y| + \text 
+                               {smooth}
+l.178 ...\text{smooth}}{|X| + |Y| + \text{smooth}}
+                                                  
+The control sequence at the end of the top line
+of your error message was never \def'ed. If you have
+misspelled it (e.g., `\hobx'), type `I' and the correct
+spelling (e.g., `I\hbox'). Otherwise just continue,
+and I'll forget about whatever was undefined.
+
+! Undefined control sequence.
+<argument> |X| + |Y| + \text 
+                             {smooth}
+l.178 ...\text{smooth}}{|X| + |Y| + \text{smooth}}
+                                                  
+The control sequence at the end of the top line
+of your error message was never \def'ed. If you have
+misspelled it (e.g., `\hobx'), type `I' and the correct
+spelling (e.g., `I\hbox'). Otherwise just continue,
+and I'll forget about whatever was undefined.
+
+
 
 [36]
+! Missing } inserted.
+<inserted text> 
+                }
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I've inserted something that you may have forgotten.
+(See the <inserted text> above.)
+With luck, this will get me unwedged. But if you
+really didn't forget anything, try typing `2' now; then
+my insertion and my current dilemma will both disappear.
 
-[37]
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
 
-[38]
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
 
-[39]
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
 
-[40]
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
 
-[41]
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
 
-[42]
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
 
-[43]
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
 
-[44] (./_formulas_dark.aux)
- ***********
-LaTeX2e <2024-11-01> patch level 2
-L3 programming layer <2025-01-18>
- ***********
- ) 
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I'm guessing that you meant to end an alignment here.
+
+! Misplaced \cr.
+<inserted text> \cr 
+                    
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+I can't figure out why you would want to use a tab mark
+or \cr or \span just now. If something like a right brace
+up above has ended a previous alignment prematurely,
+you're probably due for more error messages, and you
+might try typing `S' now just to see what is salvageable.
+
+! Missing \cr inserted.
+<inserted text> 
+                \cr 
+l.183   \frac
+             {1}{2}(x - y)^2 & \text{if } |x - y| < \delta \\
+(That makes 100 errors; please try again.) 
 Here is how much of TeX's memory you used:
- 1580 strings out of 475172
- 25441 string characters out of 5767121
- 416112 words of memory out of 5000000
- 24613 multiletter control sequences out of 15000+600000
+ 1577 strings out of 475172
+ 25361 string characters out of 5767121
+ 415106 words of memory out of 5000000
+ 24612 multiletter control sequences out of 15000+600000
  558837 words of font info for 36 fonts, out of 8000000 for 9000
  14 hyphenation exceptions out of 8191
- 72i,6n,79p,229b,103s stack positions out of 10000i,1000n,20000p,200000b,200000s
+ 72i,7n,79p,229b,103s stack positions out of 10000i,1000n,20000p,200000b,200000s
 
-Output written on _formulas_dark.dvi (44 pages, 12928 bytes).
+Output written on _formulas_dark.dvi (36 pages, 11340 bytes).

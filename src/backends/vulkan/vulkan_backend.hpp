@@ -153,6 +153,15 @@ private:
                         const Tensor& values, int64_t reduction) -> Tensor;
     auto dispatchIndexSelect(const Tensor& input, int64_t dim, const Tensor& indices) -> Tensor;
 
+    // Shape operations
+    auto dispatchReshape(const Tensor& input, const std::vector<int64_t>& new_shape) -> Tensor;
+    auto dispatchTranspose(const Tensor& input, int64_t dim0, int64_t dim1) -> Tensor;
+    auto dispatchPermute(const Tensor& input, const std::vector<int64_t>& dims) -> Tensor;
+
+    // Memory operations
+    auto dispatchFill(const Tensor& input, float value) -> Tensor;
+    auto dispatchCopy(const Tensor& input) -> Tensor;
+
     // Instance and devices
     VkInstance instance_ = VK_NULL_HANDLE;
     std::vector<DeviceContext> devices_;

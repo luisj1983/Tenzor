@@ -28,6 +28,7 @@ set(CUDA_BACKEND_SOURCES
     kernels/quantization/quantized_conv2d.cu
     kernels/nms.cu
     kernels/roi_align.cu
+    kernels/vision.cu
     cudnn_ops.cu
 )
 

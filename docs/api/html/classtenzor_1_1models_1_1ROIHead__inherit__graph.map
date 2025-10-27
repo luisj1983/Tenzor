@@ -1,0 +1,5 @@
+<map id="tenzor::models::ROIHead" name="tenzor::models::ROIHead">
+<area shape="rect" id="Node000001" title="ROI Head for box classification and regression." alt="" coords="5,81,189,109"/>
+<area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="26,5,168,33"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="100,49,100,81,94,81,94,49"/>
+</map>

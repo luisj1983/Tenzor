@@ -1,0 +1,11 @@
+<map id="tenzor::nn::Callback" name="tenzor::nn::Callback">
+<area shape="rect" id="Node000001" title="Base callback interface for training loop hooks." alt="" coords="5,104,156,132"/>
+<area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1EarlyStoppingCallback.html" title="Callback for early stopping based on validation loss." alt="" coords="227,5,411,50"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="123,95,203,60,237,48,238,53,205,65,125,100"/>
+<area shape="rect" id="Node000003" href="$classtenzor_1_1nn_1_1LRSchedulerCallback.html" title="Callback for adjusting learning rate during training." alt="" coords="204,74,434,102"/>
+<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="170,104,206,99,207,105,171,109"/>
+<area shape="rect" id="Node000004" href="$classtenzor_1_1nn_1_1ModelCheckpointCallback.html" title="Callback for saving model checkpoints during training." alt="" coords="215,125,422,170"/>
+<area shape="poly" id="edge3_Node000001_Node000004" title=" " alt="" coords="171,127,215,132,215,138,170,132"/>
+<area shape="rect" id="Node000005" href="$classtenzor_1_1nn_1_1ProgressCallback.html" title="Callback for printing training progress." alt="" coords="216,194,422,222"/>
+<area shape="poly" id="edge4_Node000001_Node000005" title=" " alt="" coords="119,138,159,160,205,180,240,191,239,196,203,185,157,165,116,143"/>
+</map>

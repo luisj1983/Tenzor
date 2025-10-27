@@ -1,0 +1,9 @@
+<map id="tenzor::nn::compression::PruningMask" name="tenzor::nn::compression::PruningMask">
+<area shape="rect" id="Node000001" title="Binary mask for weight pruning." alt="" coords="10,200,188,245"/>
+<area shape="rect" id="Node000002" href="$classtenzor_1_1Tensor.html" title="Multi&#45;dimensional array with automatic differentiation support." alt="" coords="5,99,118,127"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="74,141,94,198,89,200,69,143"/>
+<area shape="rect" id="Node000003" title=" " alt="" coords="142,99,229,127"/>
+<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="168,141,119,201,114,198,164,137"/>
+<area shape="rect" id="Node000004" title=" " alt="" coords="116,5,255,50"/>
+<area shape="poly" id="edge3_Node000003_Node000004" title=" " alt="" coords="188,65,188,99,183,99,183,65"/>
+</map>

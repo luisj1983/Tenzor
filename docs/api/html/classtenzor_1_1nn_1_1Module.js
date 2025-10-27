@@ -1,6 +1,6 @@
 var classtenzor_1_1nn_1_1Module =
 [
-    [ "buffers", "classtenzor_1_1nn_1_1Module.html#a1215241c57dd0f2b17b65d8d985a9279", null ],
+    [ "buffers", "classtenzor_1_1nn_1_1Module.html#a5615a1404c1f3c66ca72270a77fff571", null ],
     [ "cpu", "classtenzor_1_1nn_1_1Module.html#a225964899ba8f40295a53cb089d096aa", null ],
     [ "cuda", "classtenzor_1_1nn_1_1Module.html#aef180bb39aba065beec4fec2d3ea48ad", null ],
     [ "eval", "classtenzor_1_1nn_1_1Module.html#ae994a85d44f631332d9add7da717b266", null ],
@@ -8,10 +8,10 @@ var classtenzor_1_1nn_1_1Module =
     [ "is_training", "classtenzor_1_1nn_1_1Module.html#a1e1a912e3b943a5b9b38afcaa42677e8", null ],
     [ "load", "classtenzor_1_1nn_1_1Module.html#a6a8fa069d1bd693dcd753d4e1789d150", null ],
     [ "load_state_dict", "classtenzor_1_1nn_1_1Module.html#ad163ee359ef19d31a6f8d813a7ef8448", null ],
-    [ "named_buffers", "classtenzor_1_1nn_1_1Module.html#a2a562e913ea8ae087829053c38563bd8", null ],
-    [ "named_parameters", "classtenzor_1_1nn_1_1Module.html#a80f62d4f2185cd760fb8620faed1c87d", null ],
+    [ "named_buffers", "classtenzor_1_1nn_1_1Module.html#adbc4180c1861dedfb6b69238be6b4221", null ],
+    [ "named_parameters", "classtenzor_1_1nn_1_1Module.html#a0d2725b8766212769ddb6abd7232711e", null ],
     [ "operator()", "classtenzor_1_1nn_1_1Module.html#a875ff098390db49e49465127ac03eadb", null ],
-    [ "parameters", "classtenzor_1_1nn_1_1Module.html#a9f6e7e89a8712a4d8642e0984ae4c180", null ],
+    [ "parameters", "classtenzor_1_1nn_1_1Module.html#aed54eacc58bd929d5a48c9a130ec110b", null ],
     [ "register_buffer", "classtenzor_1_1nn_1_1Module.html#a5b89236ed9d1ce5163a11a2a1af966d8", null ],
     [ "register_module", "classtenzor_1_1nn_1_1Module.html#aea86ee5319d5a824640a22af07713b59", null ],
     [ "register_parameter", "classtenzor_1_1nn_1_1Module.html#a30060ffd0dcd993038feb2afdbfd9291", null ],
@@ -20,8 +20,8 @@ var classtenzor_1_1nn_1_1Module =
     [ "to", "classtenzor_1_1nn_1_1Module.html#ae02670d255acc19c0ea5ea395bf26c23", null ],
     [ "train", "classtenzor_1_1nn_1_1Module.html#a70ce93ed53f4fc047fefe2899ea38cba", null ],
     [ "zero_grad", "classtenzor_1_1nn_1_1Module.html#a6431d1bc44c9d89b0be6495c0995cb78", null ],
-    [ "buffers_", "classtenzor_1_1nn_1_1Module.html#aed969927473ba095ad312f9f0587258c", null ],
-    [ "parameters_", "classtenzor_1_1nn_1_1Module.html#a12d47f0ad557ed9b58b2713486122d78", null ],
+    [ "buffers_", "classtenzor_1_1nn_1_1Module.html#a13dfc90755bfeaf3d4f075f6efe551f0", null ],
+    [ "parameters_", "classtenzor_1_1nn_1_1Module.html#a5543892356bc14909bf036a1f16e4033", null ],
     [ "submodules_", "classtenzor_1_1nn_1_1Module.html#a9d9d2355bff1b6c5bfe300aa14e477a2", null ],
     [ "training_", "classtenzor_1_1nn_1_1Module.html#a2a865cc9749b143213de18b778dd3707", null ]
 ];

@@ -1,0 +1,5 @@
+<map id="tenzor::models::GPTDecoderLayer" name="tenzor::models::GPTDecoderLayer">
+<area shape="rect" id="Node000001" title="GPT decoder layer (transformer block)." alt="" coords="5,81,212,126"/>
+<area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="37,5,180,33"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="111,49,111,80,106,80,106,49"/>
+</map>

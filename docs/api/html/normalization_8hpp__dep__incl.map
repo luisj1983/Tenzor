@@ -1,5 +1,45 @@
 <map id="include/tenzor/nn/layers/normalization.hpp" name="include/tenzor/nn/layers/normalization.hpp">
-<area shape="rect" id="Node000001" title="Layer and group normalization layers." alt="" coords="9,5,187,50"/>
-<area shape="rect" id="Node000002" href="$tenzor_8hpp.html" title="Main header &#45; includes all public Tenzor APIs." alt="" coords="5,98,191,126"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="101,66,101,97,95,97,95,66"/>
+<area shape="rect" id="Node000001" title="Layer and group normalization layers." alt="" coords="571,5,748,50"/>
+<area shape="rect" id="Node000002" href="$albert_8hpp.html" title="ALBERT (A Lite BERT) model implementation." alt="" coords="54,191,220,235"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="556,44,444,65,384,81,326,100,281,121,237,146,167,192,164,188,234,141,278,116,324,96,382,76,442,60,555,39"/>
+<area shape="rect" id="Node000003" href="$bert_8hpp.html" title="BERT (Bidirectional Encoder Representations from Transformers) model family." alt="" coords="244,191,409,235"/>
+<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="556,43,436,65,387,81,355,100,341,120,332,144,328,190,322,190,327,143,336,118,351,96,385,76,435,60,555,38"/>
+<area shape="rect" id="Node000005" href="$tenzor_8hpp.html" title="Main header &#45; includes all public Tenzor APIs." alt="" coords="234,376,419,404"/>
+<area shape="poly" id="edge26_Node000001_Node000005" title=" " alt="" coords="556,40,403,61,318,78,235,101,127,129,105,138,85,150,65,168,44,192,22,227,9,261,8,277,11,293,18,309,30,326,42,337,61,346,111,362,172,372,233,380,233,385,171,378,110,367,59,351,39,341,26,330,13,312,6,294,3,277,4,259,17,225,40,189,61,164,82,146,103,133,125,124,234,95,317,73,402,56,555,35"/>
+<area shape="rect" id="Node000011" href="$convnext_8hpp.html" title="ConvNeXt &#45; A modernized ConvNet for the 2020s." alt="" coords="484,283,649,328"/>
+<area shape="poly" id="edge12_Node000001_Node000011" title=" " alt="" coords="672,64,679,102,682,146,678,192,663,237,642,264,614,285,611,281,638,260,659,234,673,191,676,146,673,102,667,65"/>
+<area shape="rect" id="Node000012" href="$gpt_8hpp.html" title="GPT (Generative Pre&#45;trained Transformer) models for language modeling." alt="" coords="673,283,838,328"/>
+<area shape="poly" id="edge14_Node000001_Node000012" title=" " alt="" coords="682,62,698,97,732,200,753,282,748,283,727,201,693,99,677,65"/>
+<area shape="rect" id="Node000013" href="$swin__transformer_8hpp.html" title="Swin Transformer hierarchical vision transformer." alt="" coords="803,191,970,235"/>
+<area shape="poly" id="edge16_Node000001_Node000013" title=" " alt="" coords="705,57,757,96,865,188,861,192,754,100,702,61"/>
+<area shape="rect" id="Node000014" href="$t5_8hpp.html" title="T5 (Text&#45;to&#45;Text Transfer Transformer) model implementation." alt="" coords="1028,98,1193,143"/>
+<area shape="poly" id="edge17_Node000001_Node000014" title=" " alt="" coords="764,46,1016,95,1028,98,1027,103,1015,101,763,51"/>
+<area shape="rect" id="Node000015" href="$vit_8hpp.html" title="Vision Transformer (ViT) model family." alt="" coords="484,191,649,235"/>
+<area shape="poly" id="edge18_Node000001_Node000015" title=" " alt="" coords="644,65,580,192,575,189,640,62"/>
+<area shape="rect" id="Node000016" href="$transformer_8hpp.html" title="Transformer encoder and decoder layers." alt="" coords="364,98,542,143"/>
+<area shape="poly" id="edge19_Node000001_Node000016" title=" " alt="" coords="597,59,504,100,501,95,595,54"/>
+<area shape="rect" id="Node000017" href="$nn_2layers_2vision_8hpp.html" title="Vision&#45;specific layers for computer vision models." alt="" coords="826,98,1003,143"/>
+<area shape="poly" id="edge24_Node000001_Node000017" title=" " alt="" coords="736,53,854,95,853,100,734,58"/>
+<area shape="rect" id="Node000004" href="$electra_8hpp.html" title="ELECTRA (Efficiently Learning an Encoder that Classifies Token Replacements Accurately)." alt="" coords="54,283,220,328"/>
+<area shape="poly" id="edge3_Node000003_Node000004" title=" " alt="" coords="269,245,183,285,181,281,266,240"/>
+<area shape="poly" id="edge11_Node000003_Node000005" title=" " alt="" coords="229,239,107,268,44,285,38,296,36,306,38,316,44,326,56,336,73,345,120,360,176,371,234,378,233,384,175,376,119,365,71,350,53,341,40,330,33,318,30,306,33,294,41,281,105,263,228,234"/>
+<area shape="rect" id="Node000010" href="$roberta_8hpp.html" title="RoBERTa (Robustly Optimized BERT) model family." alt="" coords="244,283,409,328"/>
+<area shape="poly" id="edge9_Node000003_Node000010" title=" " alt="" coords="329,251,329,283,324,283,324,251"/>
+<area shape="poly" id="edge4_Node000004_Node000005" title=" " alt="" coords="202,332,297,373,295,378,200,337"/>
+<area shape="rect" id="Node000006" href="$dataset_8hpp_source.html" title=" " alt="" coords="168,452,314,496"/>
+<area shape="poly" id="edge5_Node000005_Node000006" title=" " alt="" coords="303,417,266,453,262,449,300,413"/>
+<area shape="rect" id="Node000009" href="$transforms_8hpp_source.html" title=" " alt="" coords="339,452,485,496"/>
+<area shape="poly" id="edge8_Node000005_Node000009" title=" " alt="" coords="353,413,391,449,387,453,349,417"/>
+<area shape="rect" id="Node000007" href="$dataloader_8hpp_source.html" title=" " alt="" coords="168,544,314,589"/>
+<area shape="poly" id="edge6_Node000006_Node000007" title=" " alt="" coords="244,512,244,544,238,544,238,512"/>
+<area shape="rect" id="Node000008" href="$quantize__api_8hpp.html" title="High&#45;level quantization API for model conversion." alt="" coords="142,637,340,682"/>
+<area shape="poly" id="edge7_Node000007_Node000008" title=" " alt="" coords="244,605,244,637,238,637,238,605"/>
+<area shape="poly" id="edge10_Node000010_Node000005" title=" " alt="" coords="329,344,329,375,324,375,324,344"/>
+<area shape="poly" id="edge13_Node000011_Node000005" title=" " alt="" coords="489,336,366,378,364,373,488,331"/>
+<area shape="poly" id="edge15_Node000012_Node000005" title=" " alt="" coords="659,331,404,378,403,373,658,326"/>
+<area shape="poly" id="edge20_Node000016_Node000002" title=" " alt="" coords="364,150,213,193,212,188,362,145"/>
+<area shape="poly" id="edge21_Node000016_Node000003" title=" " alt="" coords="412,154,358,192,355,188,409,150"/>
+<area shape="poly" id="edge23_Node000016_Node000005" title=" " alt="" coords="459,158,459,196,454,241,443,287,423,330,395,358,362,378,359,373,391,354,419,326,438,285,449,240,453,196,453,158"/>
+<area shape="poly" id="edge22_Node000016_Node000015" title=" " alt="" coords="494,150,541,188,538,192,490,155"/>
+<area shape="poly" id="edge25_Node000017_Node000013" title=" " alt="" coords="906,158,895,191,890,190,901,157"/>
 </map>

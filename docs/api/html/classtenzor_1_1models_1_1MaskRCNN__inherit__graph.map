@@ -1,0 +1,5 @@
+<map id="tenzor::models::MaskRCNN" name="tenzor::models::MaskRCNN">
+<area shape="rect" id="Node000001" title="Mask R&#45;CNN model for instance segmentation." alt="" coords="5,81,205,109"/>
+<area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="34,5,176,33"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="108,49,108,81,102,81,102,49"/>
+</map>

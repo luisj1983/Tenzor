@@ -4,6 +4,12 @@
  */
 
 #include "vulkan_backend.hpp"
+
+// Undefine Vulkan Bool macro that conflicts with DType::Bool
+#ifdef Bool
+#undef Bool
+#endif
+
 #include <algorithm>
 #include <cstring>
 #include <iostream>
@@ -766,6 +772,684 @@ auto VulkanBackend::dispatchConv2d(const Tensor& input, const Tensor& weight,
     vkCmdDispatch(cmdBuffer, workgroups_x, workgroups_y, workgroups_z);
 
     endSingleTimeCommands(cmdBuffer, device_id);
+
+    return output;
+}
+
+// Pooling operations implementation
+auto VulkanBackend::dispatchMaxPool2d(const Tensor& input, int64_t kernel_h, int64_t kernel_w,
+                                      int64_t stride_h, int64_t stride_w,
+                                      int64_t padding_h, int64_t padding_w) -> std::pair<Tensor, Tensor> {
+    auto input_shape = input.shape();
+    int64_t batch = input_shape[0];
+    int64_t channels = input_shape[1];
+    int64_t in_height = input_shape[2];
+    int64_t in_width = input_shape[3];
+
+    int64_t out_height = (in_height + 2*padding_h - kernel_h) / stride_h + 1;
+    int64_t out_width = (in_width + 2*padding_w - kernel_w) / stride_w + 1;
+
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline("max_pool2d", device_id);
+
+    std::vector<int64_t> out_shape = {batch, channels, out_height, out_width};
+    Tensor output(out_shape, input.dtype(), input.device());
+    Tensor indices(out_shape, DType::Int64, input.device());
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+
+    uint32_t workgroups_x = (out_width + 15) / 16;
+    uint32_t workgroups_y = (out_height + 15) / 16;
+    uint32_t workgroups_z = channels;
+    vkCmdDispatch(cmdBuffer, workgroups_x, workgroups_y, workgroups_z);
+
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return {output, indices};
+}
+
+auto VulkanBackend::dispatchAvgPool2d(const Tensor& input, int64_t kernel_h, int64_t kernel_w,
+                                      int64_t stride_h, int64_t stride_w,
+                                      int64_t padding_h, int64_t padding_w) -> Tensor {
+    auto input_shape = input.shape();
+    int64_t batch = input_shape[0];
+    int64_t channels = input_shape[1];
+    int64_t in_height = input_shape[2];
+    int64_t in_width = input_shape[3];
+
+    int64_t out_height = (in_height + 2*padding_h - kernel_h) / stride_h + 1;
+    int64_t out_width = (in_width + 2*padding_w - kernel_w) / stride_w + 1;
+
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline("avg_pool2d", device_id);
+
+    std::vector<int64_t> out_shape = {batch, channels, out_height, out_width};
+    Tensor output(out_shape, input.dtype(), input.device());
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+
+    uint32_t workgroups_x = (out_width + 15) / 16;
+    uint32_t workgroups_y = (out_height + 15) / 16;
+    uint32_t workgroups_z = channels;
+    vkCmdDispatch(cmdBuffer, workgroups_x, workgroups_y, workgroups_z);
+
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return output;
+}
+
+auto VulkanBackend::dispatchAdaptiveMaxPool2d(const Tensor& input, int64_t out_h, int64_t out_w) -> std::pair<Tensor, Tensor> {
+    auto input_shape = input.shape();
+    int64_t batch = input_shape[0];
+    int64_t channels = input_shape[1];
+
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline("adaptive_max_pool2d", device_id);
+
+    std::vector<int64_t> out_shape = {batch, channels, out_h, out_w};
+    Tensor output(out_shape, input.dtype(), input.device());
+    Tensor indices(out_shape, DType::Int64, input.device());
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+
+    uint32_t workgroups_x = (out_w + 15) / 16;
+    uint32_t workgroups_y = (out_h + 15) / 16;
+    uint32_t workgroups_z = channels;
+    vkCmdDispatch(cmdBuffer, workgroups_x, workgroups_y, workgroups_z);
+
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return {output, indices};
+}
+
+auto VulkanBackend::dispatchAdaptiveAvgPool2d(const Tensor& input, int64_t out_h, int64_t out_w) -> Tensor {
+    auto input_shape = input.shape();
+    int64_t batch = input_shape[0];
+    int64_t channels = input_shape[1];
+
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline("adaptive_avg_pool2d", device_id);
+
+    std::vector<int64_t> out_shape = {batch, channels, out_h, out_w};
+    Tensor output(out_shape, input.dtype(), input.device());
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+
+    uint32_t workgroups_x = (out_w + 15) / 16;
+    uint32_t workgroups_y = (out_h + 15) / 16;
+    uint32_t workgroups_z = channels;
+    vkCmdDispatch(cmdBuffer, workgroups_x, workgroups_y, workgroups_z);
+
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return output;
+}
+
+auto VulkanBackend::dispatchMaxPool2dBackward(const Tensor& grad_out, const Tensor& input,
+                                               const Tensor& indices, int64_t kernel_h, int64_t kernel_w,
+                                               int64_t stride_h, int64_t stride_w,
+                                               int64_t padding_h, int64_t padding_w) -> Tensor {
+    auto input_shape = input.shape();
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline("max_pool2d_backward", device_id);
+
+    std::vector<int64_t> grad_in_shape(input_shape.begin(), input_shape.end());
+    Tensor grad_input(grad_in_shape, input.dtype(), input.device());
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+
+    uint32_t workgroups = (input.numel() + 255) / 256;
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return grad_input;
+}
+
+// Normalization operations implementation
+auto VulkanBackend::dispatchBatchNorm2d(const Tensor& input, const Tensor& mean, const Tensor& var,
+                                        const Tensor* gamma, const Tensor* beta, float epsilon) -> Tensor {
+    auto input_shape = input.shape();
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline("batch_norm2d", device_id);
+
+    std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end());
+    Tensor output(out_shape, input.dtype(), input.device());
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+
+    uint32_t workgroups = (input.numel() + 255) / 256;
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return output;
+}
+
+auto VulkanBackend::dispatchBatchNorm2dBackward(const Tensor& grad_out, const Tensor& input,
+                                                 const Tensor& mean, const Tensor& var,
+                                                 const Tensor* gamma, float epsilon)
+                                                 -> std::tuple<Tensor, Tensor, Tensor> {
+    auto input_shape = input.shape();
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline("batch_norm2d_backward", device_id);
+
+    std::vector<int64_t> grad_in_shape(input_shape.begin(), input_shape.end());
+    Tensor grad_input(grad_in_shape, input.dtype(), input.device());
+
+    int64_t num_channels = input_shape[1];
+    std::vector<int64_t> param_shape = {num_channels};
+    Tensor grad_gamma(param_shape, input.dtype(), input.device());
+    Tensor grad_beta(param_shape, input.dtype(), input.device());
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+
+    uint32_t workgroups = (input.numel() + 255) / 256;
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return {grad_input, grad_gamma, grad_beta};
+}
+
+auto VulkanBackend::dispatchLayerNorm(const Tensor& input, int64_t normalized_shape,
+                                      const Tensor* gamma, const Tensor* beta, float epsilon) -> Tensor {
+    auto input_shape = input.shape();
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline("layer_norm", device_id);
+
+    std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end());
+    Tensor output(out_shape, input.dtype(), input.device());
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+
+    uint32_t workgroups = (input.numel() / normalized_shape + 255) / 256;
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return output;
+}
+
+auto VulkanBackend::dispatchGroupNorm(const Tensor& input, int64_t num_groups,
+                                      const Tensor* gamma, const Tensor* beta, float epsilon) -> Tensor {
+    auto input_shape = input.shape();
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline("group_norm", device_id);
+
+    std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end());
+    Tensor output(out_shape, input.dtype(), input.device());
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+
+    uint32_t workgroups = (num_groups + 255) / 256;
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return output;
+}
+
+// Softmax and loss operations implementation
+auto VulkanBackend::dispatchSoftmax(const Tensor& input, int64_t dim) -> Tensor {
+    auto input_shape = input.shape();
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline("softmax", device_id);
+
+    std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end());
+    Tensor output(out_shape, input.dtype(), input.device());
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+
+    // Calculate size before and after the dimension
+    int64_t outer_size = 1;
+    for (int64_t i = 0; i < dim; i++) {
+        outer_size *= input_shape[i];
+    }
+    int64_t inner_size = 1;
+    for (size_t i = dim + 1; i < input_shape.size(); i++) {
+        inner_size *= input_shape[i];
+    }
+
+    uint32_t workgroups = (outer_size * inner_size + 255) / 256;
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return output;
+}
+
+auto VulkanBackend::dispatchLogSoftmax(const Tensor& input, int64_t dim) -> Tensor {
+    auto input_shape = input.shape();
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline("log_softmax", device_id);
+
+    std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end());
+    Tensor output(out_shape, input.dtype(), input.device());
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+
+    // Calculate size before and after the dimension
+    int64_t outer_size = 1;
+    for (int64_t i = 0; i < dim; i++) {
+        outer_size *= input_shape[i];
+    }
+    int64_t inner_size = 1;
+    for (size_t i = dim + 1; i < input_shape.size(); i++) {
+        inner_size *= input_shape[i];
+    }
+
+    uint32_t workgroups = (outer_size * inner_size + 255) / 256;
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return output;
+}
+
+auto VulkanBackend::dispatchCrossEntropy(const Tensor& log_probs, const Tensor& targets,
+                                         int64_t reduction) -> Tensor {
+    int32_t device_id = log_probs.device().index;
+    auto* pipeline = getPipeline("cross_entropy", device_id);
+
+    std::vector<int64_t> out_shape;
+    if (reduction == 0) { // none
+        auto target_shape = targets.shape();
+        out_shape = std::vector<int64_t>(target_shape.begin(), target_shape.end());
+    } else { // mean or sum
+        out_shape = {1};
+    }
+
+    Tensor output(out_shape, log_probs.dtype(), log_probs.device());
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+
+    uint32_t workgroups = (targets.numel() + 255) / 256;
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return output;
+}
+
+// Advanced reduction operations implementation
+auto VulkanBackend::dispatchArgmax(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline("argmax", device_id);
+
+    std::vector<int64_t> out_shape;
+    auto input_shape = input.shape();
+
+    if (dim < 0) {
+        out_shape = {1};
+    } else {
+        out_shape = std::vector<int64_t>(input_shape.begin(), input_shape.end());
+        if (keepdim) {
+            out_shape[dim] = 1;
+        } else {
+            out_shape.erase(out_shape.begin() + dim);
+        }
+    }
+
+    Tensor output(out_shape, DType::Int64, input.device());
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+
+    uint32_t workgroups = (output.numel() + 255) / 256;
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return output;
+}
+
+auto VulkanBackend::dispatchArgmin(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline("argmin", device_id);
+
+    std::vector<int64_t> out_shape;
+    auto input_shape = input.shape();
+
+    if (dim < 0) {
+        out_shape = {1};
+    } else {
+        out_shape = std::vector<int64_t>(input_shape.begin(), input_shape.end());
+        if (keepdim) {
+            out_shape[dim] = 1;
+        } else {
+            out_shape.erase(out_shape.begin() + dim);
+        }
+    }
+
+    Tensor output(out_shape, DType::Int64, input.device());
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+
+    uint32_t workgroups = (output.numel() + 255) / 256;
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return output;
+}
+
+auto VulkanBackend::dispatchVariance(const Tensor& input, int64_t dim, bool unbiased, bool keepdim) -> Tensor {
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline("variance", device_id);
+
+    std::vector<int64_t> out_shape;
+    auto input_shape = input.shape();
+
+    if (dim < 0) {
+        out_shape = {1};
+    } else {
+        out_shape = std::vector<int64_t>(input_shape.begin(), input_shape.end());
+        if (keepdim) {
+            out_shape[dim] = 1;
+        } else {
+            out_shape.erase(out_shape.begin() + dim);
+        }
+    }
+
+    Tensor output(out_shape, input.dtype(), input.device());
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+
+    uint32_t workgroups = (output.numel() + 255) / 256;
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return output;
+}
+
+auto VulkanBackend::dispatchStd(const Tensor& input, int64_t dim, bool unbiased, bool keepdim) -> Tensor {
+    // Standard deviation is just sqrt of variance
+    Tensor variance = dispatchVariance(input, dim, unbiased, keepdim);
+    return dispatchUnaryOp("sqrt", variance);
+}
+
+auto VulkanBackend::dispatchProd(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline("prod", device_id);
+
+    std::vector<int64_t> out_shape;
+    auto input_shape = input.shape();
+
+    if (dim < 0) {
+        out_shape = {1};
+    } else {
+        out_shape = std::vector<int64_t>(input_shape.begin(), input_shape.end());
+        if (keepdim) {
+            out_shape[dim] = 1;
+        } else {
+            out_shape.erase(out_shape.begin() + dim);
+        }
+    }
+
+    Tensor output(out_shape, input.dtype(), input.device());
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+
+    uint32_t workgroups = (output.numel() + 255) / 256;
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return output;
+}
+
+auto VulkanBackend::dispatchAll(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline("all", device_id);
+
+    std::vector<int64_t> out_shape;
+    auto input_shape = input.shape();
+
+    if (dim < 0) {
+        out_shape = {1};
+    } else {
+        out_shape = std::vector<int64_t>(input_shape.begin(), input_shape.end());
+        if (keepdim) {
+            out_shape[dim] = 1;
+        } else {
+            out_shape.erase(out_shape.begin() + dim);
+        }
+    }
+
+    Tensor output(out_shape, tenzor::DType::Bool, input.device());
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+
+    uint32_t workgroups = (output.numel() + 255) / 256;
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return output;
+}
+
+auto VulkanBackend::dispatchAny(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline("any", device_id);
+
+    std::vector<int64_t> out_shape;
+    auto input_shape = input.shape();
+
+    if (dim < 0) {
+        out_shape = {1};
+    } else {
+        out_shape = std::vector<int64_t>(input_shape.begin(), input_shape.end());
+        if (keepdim) {
+            out_shape[dim] = 1;
+        } else {
+            out_shape.erase(out_shape.begin() + dim);
+        }
+    }
+
+    Tensor output(out_shape, tenzor::DType::Bool, input.device());
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+
+    uint32_t workgroups = (output.numel() + 255) / 256;
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return output;
+}
+
+// Indexing operations implementation
+auto VulkanBackend::dispatchEmbedding(const Tensor& weight, const Tensor& indices,
+                                      int64_t padding_idx) -> Tensor {
+    auto weight_shape = weight.shape();
+    auto indices_shape = indices.shape();
+
+    int32_t device_id = weight.device().index;
+    auto* pipeline = getPipeline("embedding", device_id);
+
+    // Output shape: indices_shape + [embedding_dim]
+    std::vector<int64_t> out_shape(indices_shape.begin(), indices_shape.end());
+    out_shape.push_back(weight_shape[1]);
+
+    Tensor output(out_shape, weight.dtype(), weight.device());
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+
+    uint32_t workgroups = (output.numel() + 255) / 256;
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return output;
+}
+
+auto VulkanBackend::dispatchGather(const Tensor& input, int64_t dim, const Tensor& indices) -> Tensor {
+    auto indices_shape = indices.shape();
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline("gather", device_id);
+
+    std::vector<int64_t> out_shape(indices_shape.begin(), indices_shape.end());
+    Tensor output(out_shape, input.dtype(), input.device());
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+
+    uint32_t workgroups = (output.numel() + 255) / 256;
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return output;
+}
+
+auto VulkanBackend::dispatchScatter(const Tensor& input, int64_t dim, const Tensor& indices,
+                                    const Tensor& values, int64_t reduction) -> Tensor {
+    auto input_shape = input.shape();
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline("scatter", device_id);
+
+    std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end());
+    Tensor output(out_shape, input.dtype(), input.device());
+
+    // First copy input to output
+    size_t bytes = input.numel() * input.dtype_size();
+    copy(output.data_ptr(), input.data_ptr(), bytes, CopyKind::DeviceToDevice);
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+
+    uint32_t workgroups = (indices.numel() + 255) / 256;
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return output;
+}
+
+auto VulkanBackend::dispatchIndexSelect(const Tensor& input, int64_t dim, const Tensor& indices) -> Tensor {
+    auto input_shape = input.shape();
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline("index_select", device_id);
+
+    std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end());
+    out_shape[dim] = indices.numel();
+
+    Tensor output(out_shape, input.dtype(), input.device());
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+
+    uint32_t workgroups = (output.numel() + 255) / 256;
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return output;
+}
+
+// Shape operations implementation
+auto VulkanBackend::dispatchReshape(const Tensor& input, const std::vector<int64_t>& new_shape) -> Tensor {
+    // Reshape is typically a view operation, but for Vulkan we create a new tensor
+    // and copy the data
+    Tensor output(new_shape, input.dtype(), input.device());
+
+    size_t bytes = input.numel() * input.dtype_size();
+    copy(output.data_ptr(), input.data_ptr(), bytes, CopyKind::DeviceToDevice);
+
+    return output;
+}
+
+auto VulkanBackend::dispatchTranspose(const Tensor& input, int64_t dim0, int64_t dim1) -> Tensor {
+    auto input_shape = input.shape();
+    std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end());
+    std::swap(out_shape[dim0], out_shape[dim1]);
+
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline("transpose", device_id);
+
+    Tensor output(out_shape, input.dtype(), input.device());
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+
+    uint32_t workgroups = (input.numel() + 255) / 256;
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return output;
+}
+
+auto VulkanBackend::dispatchPermute(const Tensor& input, const std::vector<int64_t>& dims) -> Tensor {
+    auto input_shape = input.shape();
+    std::vector<int64_t> out_shape;
+    for (int64_t dim : dims) {
+        out_shape.push_back(input_shape[dim]);
+    }
+
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline("permute", device_id);
+
+    Tensor output(out_shape, input.dtype(), input.device());
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+
+    uint32_t workgroups = (input.numel() + 255) / 256;
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return output;
+}
+
+// Memory operations implementation
+auto VulkanBackend::dispatchFill(const Tensor& input, float value) -> Tensor {
+    auto input_shape = input.shape();
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline("fill", device_id);
+
+    std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end());
+    Tensor output(out_shape, input.dtype(), input.device());
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+
+    uint32_t workgroups = (input.numel() + 255) / 256;
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return output;
+}
+
+auto VulkanBackend::dispatchCopy(const Tensor& input) -> Tensor {
+    auto input_shape = input.shape();
+    std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end());
+    Tensor output(out_shape, input.dtype(), input.device());
+
+    size_t bytes = input.numel() * input.dtype_size();
+    copy(output.data_ptr(), input.data_ptr(), bytes, CopyKind::DeviceToDevice);
 
     return output;
 }

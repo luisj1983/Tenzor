@@ -1,0 +1,7 @@
+<map id="tenzor::models::BertEmbeddings" name="tenzor::models::BertEmbeddings">
+<area shape="rect" id="Node000001" title="BERT embeddings layer." alt="" coords="17,81,251,109"/>
+<area shape="rect" id="Node000003" href="$classtenzor_1_1models_1_1RobertaEmbeddings.html" title="RoBERTa embeddings layer." alt="" coords="5,157,263,184"/>
+<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="137,124,137,156,131,156,131,124"/>
+<area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="63,5,205,33"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="137,49,137,81,131,81,131,49"/>
+</map>

@@ -197,10 +197,8 @@ auto upsample_bilinear(const Variable& input, int64_t target_h, int64_t target_w
     int64_t H_in = shape[2];
     int64_t W_in = shape[3];
 
-    // For now, implement nearest neighbor upsampling
-    // TODO: Replace with true bilinear interpolation when available in core ops
-
-    // Calculate scale factors
+    // Implement true bilinear interpolation
+    // scale = input_size / output_size (coordinate mapping)
     float scale_h = static_cast<float>(H_in) / target_h;
     float scale_w = static_cast<float>(W_in) / target_w;
 
@@ -208,7 +206,7 @@ auto upsample_bilinear(const Variable& input, int64_t target_h, int64_t target_w
     Tensor output(std::vector<int64_t>{N, C, target_h, target_w}, input.tensor().dtype(), input.tensor().device());
     const Tensor& in_data = input.tensor();
 
-    // Simple nearest neighbor for now - use data() pointer access
+    // Bilinear interpolation implementation
     auto* out_ptr = output.data<float>();
     const auto* in_ptr = in_data.data<float>();
 
@@ -216,18 +214,42 @@ auto upsample_bilinear(const Variable& input, int64_t target_h, int64_t target_w
         for (int64_t c = 0; c < C; ++c) {
             for (int64_t h = 0; h < target_h; ++h) {
                 for (int64_t w = 0; w < target_w; ++w) {
-                    // Map output coordinates to input coordinates
-                    int64_t in_h = static_cast<int64_t>(h * scale_h);
-                    int64_t in_w = static_cast<int64_t>(w * scale_w);
+                    // Map output coordinates to input space (center-aligned)
+                    float src_h = (h + 0.5f) * scale_h - 0.5f;
+                    float src_w = (w + 0.5f) * scale_w - 0.5f;
 
                     // Clamp to valid range
-                    in_h = std::min(in_h, H_in - 1);
-                    in_w = std::min(in_w, W_in - 1);
+                    src_h = std::max(0.0f, std::min(src_h, static_cast<float>(H_in - 1)));
+                    src_w = std::max(0.0f, std::min(src_w, static_cast<float>(W_in - 1)));
 
-                    // Copy value using flat indexing
+                    // Get integer parts and fractional parts
+                    int64_t h0 = static_cast<int64_t>(std::floor(src_h));
+                    int64_t w0 = static_cast<int64_t>(std::floor(src_w));
+                    int64_t h1 = std::min(h0 + 1, H_in - 1);
+                    int64_t w1 = std::min(w0 + 1, W_in - 1);
+
+                    float fh = src_h - h0;
+                    float fw = src_w - w0;
+
+                    // Get four neighboring pixels
+                    int64_t idx00 = ((n * C + c) * H_in + h0) * W_in + w0;
+                    int64_t idx01 = ((n * C + c) * H_in + h0) * W_in + w1;
+                    int64_t idx10 = ((n * C + c) * H_in + h1) * W_in + w0;
+                    int64_t idx11 = ((n * C + c) * H_in + h1) * W_in + w1;
+
+                    float v00 = in_ptr[idx00];
+                    float v01 = in_ptr[idx01];
+                    float v10 = in_ptr[idx10];
+                    float v11 = in_ptr[idx11];
+
+                    // Bilinear interpolation formula
+                    float v0 = v00 * (1.0f - fw) + v01 * fw;
+                    float v1 = v10 * (1.0f - fw) + v11 * fw;
+                    float interpolated = v0 * (1.0f - fh) + v1 * fh;
+
+                    // Write result
                     int64_t out_idx = ((n * C + c) * target_h + h) * target_w + w;
-                    int64_t in_idx = ((n * C + c) * H_in + in_h) * W_in + in_w;
-                    out_ptr[out_idx] = in_ptr[in_idx];
+                    out_ptr[out_idx] = interpolated;
                 }
             }
         }

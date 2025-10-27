@@ -1,4 +1,4 @@
 var searchData=
 [
-  ['quick_20start_0',['Quick Start',['../tenzor_8hpp.html#autotoc_md0',1,'']]]
+  ['documentation_20structure_0',['Documentation Structure',['../tenzor_8hpp.html#autotoc_md1',1,'']]]
 ];

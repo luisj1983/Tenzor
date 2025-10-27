@@ -1,5 +1,0 @@
-if(EXISTS "/home/lee/Projects/Tenzor/build_checkpoint/tests/test_cuda_kernels[1]_tests.cmake")
-  include("/home/lee/Projects/Tenzor/build_checkpoint/tests/test_cuda_kernels[1]_tests.cmake")
-else()
-  add_test(test_cuda_kernels_NOT_BUILT test_cuda_kernels_NOT_BUILT)
-endif()

@@ -272,17 +272,62 @@ auto YOLOv3::forward(const Variable& input) -> Variable {
     if (is_training()) {
         // Concatenate predictions from all scales
         // This would be used with YOLO loss function
-        return predictions[0];  // Placeholder
+        return predictions[0];  // Return raw predictions for loss computation
     }
 
     // For inference, decode and post-process
     auto img_size = input.tensor().shape()[2];
     auto boxes = decode_predictions(predictions, img_size);
 
-    // Create scores tensor (objectness * class_probs)
-    // This is a simplified version - full implementation would extract
-    // objectness and class scores from predictions
-    auto scores = boxes;  // Placeholder
+    // Extract scores (objectness * max class probability)
+    // Predictions format: [tx, ty, tw, th, objectness, class_probs...]
+    std::vector<Tensor> all_scores;
+
+    for (const auto& pred_var : predictions) {
+        auto pred = pred_var.tensor();
+        auto shape = pred.shape();
+        int64_t N = shape[0];
+        int64_t num_anchors = shape[1];
+        int64_t grid_h = shape[2];
+        int64_t grid_w = shape[3];
+
+        int64_t num_boxes = grid_h * grid_w * num_anchors;
+        Tensor scores = Tensor({N, num_boxes}, DType::Float32, pred.device());
+
+        const float* pred_data = pred.data<const float>();
+        float* scores_data = scores.data<float>();
+
+        // Extract objectness * max_class_prob for each box
+        for (int64_t b = 0; b < N; ++b) {
+            int64_t box_idx = 0;
+            for (int64_t gy = 0; gy < grid_h; ++gy) {
+                for (int64_t gx = 0; gx < grid_w; ++gx) {
+                    for (int64_t a = 0; a < num_anchors; ++a) {
+                        int64_t pred_idx = ((b * num_anchors + a) * grid_h + gy) * grid_w + gx;
+                        int64_t pred_offset = pred_idx * (5 + num_classes_);
+
+                        // Get objectness
+                        float objectness = 1.0f / (1.0f + std::exp(-pred_data[pred_offset + 4]));
+
+                        // Find max class probability
+                        float max_class_prob = 0.0f;
+                        for (int64_t c = 0; c < num_classes_; ++c) {
+                            float class_prob = 1.0f / (1.0f + std::exp(-pred_data[pred_offset + 5 + c]));
+                            max_class_prob = std::max(max_class_prob, class_prob);
+                        }
+
+                        // Combined score
+                        scores_data[b * num_boxes + box_idx] = objectness * max_class_prob;
+                        box_idx++;
+                    }
+                }
+            }
+        }
+
+        all_scores.push_back(scores);
+    }
+
+    auto scores = tenzor::cat(all_scores, 1);
 
     // Apply post-processing
     auto detections = postprocess(boxes, scores);
@@ -351,18 +396,77 @@ auto YOLOv3::decode_predictions(const std::vector<Variable>& predictions, int64_
         const auto& anchors = (i == 0) ? anchors_large_ :
                              (i == 1) ? anchors_medium_ : anchors_small_;
 
-        // Decode boxes for each grid cell
-        // This would involve:
-        // 1. Applying sigmoid to tx, ty, objectness, class_probs
-        // 2. Computing box centers: bx = (cx + sigmoid(tx)) * stride
-        // 3. Computing box sizes: bw = anchor_w * exp(tw)
-        // 4. Converting to (x1, y1, x2, y2) format
+        // Create output tensor for decoded boxes: [N, grid_h * grid_w * num_anchors, 4]
+        int64_t num_boxes = grid_h * grid_w * num_anchors;
+        Tensor boxes = Tensor({N, num_boxes, 4}, DType::Float32, pred.device());
 
-        // Placeholder: return empty tensor
-        all_boxes.push_back(Tensor({N, grid_h * grid_w * num_anchors, 4}, DType::Float32, Device::cpu()));
+        // Get raw prediction data
+        const float* pred_data = pred.data<const float>();
+        float* boxes_data = boxes.data<float>();
+
+        // Decode boxes for each batch
+        for (int64_t b = 0; b < N; ++b) {
+            int64_t box_idx = 0;
+
+            // Iterate over grid cells
+            for (int64_t gy = 0; gy < grid_h; ++gy) {
+                for (int64_t gx = 0; gx < grid_w; ++gx) {
+                    // Iterate over anchors at this grid cell
+                    for (int64_t a = 0; a < num_anchors; ++a) {
+                        // Prediction format: [tx, ty, tw, th, objectness, class_probs...]
+                        // Index into prediction tensor
+                        int64_t pred_idx = ((b * num_anchors + a) * grid_h + gy) * grid_w + gx;
+                        int64_t pred_offset = pred_idx * (5 + num_classes_);
+
+                        // Extract box parameters
+                        float tx = pred_data[pred_offset + 0];
+                        float ty = pred_data[pred_offset + 1];
+                        float tw = pred_data[pred_offset + 2];
+                        float th = pred_data[pred_offset + 3];
+
+                        // Apply sigmoid to tx, ty
+                        float sigmoid_tx = 1.0f / (1.0f + std::exp(-tx));
+                        float sigmoid_ty = 1.0f / (1.0f + std::exp(-ty));
+
+                        // Compute box center
+                        float bx = (gx + sigmoid_tx) * stride;
+                        float by = (gy + sigmoid_ty) * stride;
+
+                        // Compute box size using anchor dimensions
+                        float anchor_w = anchors[a].first;
+                        float anchor_h = anchors[a].second;
+                        float bw = anchor_w * std::exp(tw);
+                        float bh = anchor_h * std::exp(th);
+
+                        // Convert to (x1, y1, x2, y2) format
+                        float x1 = bx - bw / 2.0f;
+                        float y1 = by - bh / 2.0f;
+                        float x2 = bx + bw / 2.0f;
+                        float y2 = by + bh / 2.0f;
+
+                        // Clamp to image boundaries
+                        x1 = std::max(0.0f, std::min(x1, static_cast<float>(img_size)));
+                        y1 = std::max(0.0f, std::min(y1, static_cast<float>(img_size)));
+                        x2 = std::max(0.0f, std::min(x2, static_cast<float>(img_size)));
+                        y2 = std::max(0.0f, std::min(y2, static_cast<float>(img_size)));
+
+                        // Write to output
+                        int64_t out_offset = (b * num_boxes + box_idx) * 4;
+                        boxes_data[out_offset + 0] = x1;
+                        boxes_data[out_offset + 1] = y1;
+                        boxes_data[out_offset + 2] = x2;
+                        boxes_data[out_offset + 3] = y2;
+
+                        box_idx++;
+                    }
+                }
+            }
+        }
+
+        all_boxes.push_back(boxes);
     }
 
-    // Concatenate all boxes
+    // Concatenate all boxes from different scales
     return tenzor::cat(all_boxes, 1);
 }
 
@@ -627,8 +731,12 @@ PANet::PANet(const std::vector<int64_t>& channels) {
 }
 
 auto PANet::forward(const Variable& input) -> Variable {
-    // Placeholder - PANet operates on multiple inputs
-    return input;
+    // PANet is designed for multi-scale feature fusion
+    // Single input forward is not the typical use case
+    // This forwards to forward_multi with single feature
+    std::vector<Variable> features = {input};
+    auto fused = forward_multi(features);
+    return fused.empty() ? input : fused[0];
 }
 
 auto PANet::forward_multi(const std::vector<Variable>& features) -> std::vector<Variable> {
@@ -777,7 +885,49 @@ auto YOLOv5::forward(const Variable& input) -> Variable {
 
     auto img_size = input.tensor().shape()[2];
     auto boxes = decode_predictions(predictions, img_size);
-    auto scores = boxes;  // Placeholder
+
+    // Extract scores (same as YOLOv3)
+    std::vector<Tensor> all_scores;
+    for (const auto& pred_var : predictions) {
+        auto pred = pred_var.tensor();
+        auto shape = pred.shape();
+        int64_t N = shape[0];
+        int64_t num_anchors = shape[1];
+        int64_t grid_h = shape[2];
+        int64_t grid_w = shape[3];
+
+        int64_t num_boxes = grid_h * grid_w * num_anchors;
+        Tensor scores = Tensor({N, num_boxes}, DType::Float32, pred.device());
+
+        const float* pred_data = pred.data<const float>();
+        float* scores_data = scores.data<float>();
+
+        for (int64_t b = 0; b < N; ++b) {
+            int64_t box_idx = 0;
+            for (int64_t gy = 0; gy < grid_h; ++gy) {
+                for (int64_t gx = 0; gx < grid_w; ++gx) {
+                    for (int64_t a = 0; a < num_anchors; ++a) {
+                        int64_t pred_idx = ((b * num_anchors + a) * grid_h + gy) * grid_w + gx;
+                        int64_t pred_offset = pred_idx * (5 + num_classes_);
+
+                        float objectness = 1.0f / (1.0f + std::exp(-pred_data[pred_offset + 4]));
+                        float max_class_prob = 0.0f;
+                        for (int64_t c = 0; c < num_classes_; ++c) {
+                            float class_prob = 1.0f / (1.0f + std::exp(-pred_data[pred_offset + 5 + c]));
+                            max_class_prob = std::max(max_class_prob, class_prob);
+                        }
+
+                        scores_data[b * num_boxes + box_idx] = objectness * max_class_prob;
+                        box_idx++;
+                    }
+                }
+            }
+        }
+
+        all_scores.push_back(scores);
+    }
+
+    auto scores = tenzor::cat(all_scores, 1);
 
     auto detections = postprocess(boxes, scores);
     return Variable(std::get<0>(detections[0]));

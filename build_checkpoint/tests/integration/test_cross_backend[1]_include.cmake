@@ -1,5 +1,0 @@
-if(EXISTS "/home/lee/Projects/Tenzor/build_checkpoint/tests/integration/test_cross_backend[1]_tests.cmake")
-  include("/home/lee/Projects/Tenzor/build_checkpoint/tests/integration/test_cross_backend[1]_tests.cmake")
-else()
-  add_test(test_cross_backend_NOT_BUILT test_cross_backend_NOT_BUILT)
-endif()

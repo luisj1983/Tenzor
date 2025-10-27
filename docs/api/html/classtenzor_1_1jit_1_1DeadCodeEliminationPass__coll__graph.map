@@ -1,0 +1,5 @@
+<map id="tenzor::jit::DeadCodeEliminationPass" name="tenzor::jit::DeadCodeEliminationPass">
+<area shape="rect" id="Node000001" title="Dead code elimination pass." alt="" coords="5,81,267,109"/>
+<area shape="rect" id="Node000002" href="$classtenzor_1_1jit_1_1Pass.html" title="Base class for optimization passes." alt="" coords="76,5,196,33"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="139,49,139,81,133,81,133,49"/>
+</map>

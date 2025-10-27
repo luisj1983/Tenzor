@@ -1,5 +1,0 @@
-if(EXISTS "/home/lee/Projects/Tenzor/build_fresh/tests/tenzor_integration_tests[1]_tests.cmake")
-  include("/home/lee/Projects/Tenzor/build_fresh/tests/tenzor_integration_tests[1]_tests.cmake")
-else()
-  add_test(tenzor_integration_tests_NOT_BUILT tenzor_integration_tests_NOT_BUILT)
-endif()

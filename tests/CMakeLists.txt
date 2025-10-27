@@ -681,6 +681,24 @@ if(TENZOR_BUILD_CUDA)
     gtest_discover_tests(test_fp16_kernels DISCOVERY_TIMEOUT 30)
 endif()
 
+# OneAPI-specific tests
+if(TENZOR_BUILD_ONEAPI)
+    find_package(IntelSYCL QUIET)
+
+    # OneAPI backend tests (comprehensive)
+    add_executable(test_oneapi_backend
+        backend/test_oneapi_backend.cpp
+    )
+
+    target_link_libraries(test_oneapi_backend PRIVATE
+        tenzor_core
+        GTest::gtest_main
+    )
+
+    # OneAPI device initialization can be slow, use 60 second timeout
+    gtest_discover_tests(test_oneapi_backend DISCOVERY_TIMEOUT 60)
+endif()
+
 # ROCm-specific tests
 if(TENZOR_BUILD_ROCM)
     find_package(hip REQUIRED)
@@ -1192,6 +1210,18 @@ target_link_libraries(test_backend_parity_example PRIVATE
 
 gtest_discover_tests(test_backend_parity_example DISCOVERY_TIMEOUT 30)
 
+# Tensor indexing operator test
+add_executable(test_indexing_operator
+    test_indexing_operator.cpp
+)
+
+target_link_libraries(test_indexing_operator PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_indexing_operator DISCOVERY_TIMEOUT 30)
+
 # ============================================================================
 # Phase 12 Tests - Enhanced Test Coverage and Validation
 # ============================================================================
@@ -1243,6 +1273,18 @@ target_link_libraries(test_async_ops PRIVATE
 )
 
 gtest_discover_tests(test_async_ops DISCOVERY_TIMEOUT 30)
+
+# Repeat and Tile tests
+add_executable(test_repeat_tile
+    test_repeat_tile.cpp
+)
+
+target_link_libraries(test_repeat_tile PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_repeat_tile DISCOVERY_TIMEOUT 30)
 
 # Utility module tests
 add_subdirectory(utils)

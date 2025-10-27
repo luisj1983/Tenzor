@@ -1,0 +1,23 @@
+var searchData=
+[
+  ['save_5foptimizer_0',['save_optimizer',['../structtenzor_1_1nn_1_1CheckpointConfig.html#a5cedf2e2e8f28b862a307627173a0fe4',1,'tenzor::nn::CheckpointConfig']]],
+  ['save_5fscheduler_1',['save_scheduler',['../structtenzor_1_1nn_1_1CheckpointConfig.html#a830014970aefa8a3c2a335bb7193d682',1,'tenzor::nn::CheckpointConfig']]],
+  ['saved_5fmemory_5fbytes_2',['saved_memory_bytes',['../structtenzor_1_1autograd_1_1CheckpointStats.html#a0f6b533a401ac04994865d79c47257d6',1,'tenzor::autograd::CheckpointStats']]],
+  ['saved_5ftensors_5f_3',['saved_tensors_',['../classtenzor_1_1Function.html#a24b5b2b155ef98051570b2b9e71bfc16',1,'tenzor::Function']]],
+  ['scale_4',['scale',['../structtenzor_1_1nn_1_1quantization_1_1QuantizationParams.html#a42eba4f7b15f51d22864837155c0bce8',1,'tenzor::nn::quantization::QuantizationParams']]],
+  ['schedule_5',['schedule',['../structtenzor_1_1nn_1_1compression_1_1PruningConfig.html#ac388f74304758467525e0c537d670e9b',1,'tenzor::nn::compression::PruningConfig']]],
+  ['scheduler_5fstate_6',['scheduler_state',['../structtenzor_1_1nn_1_1Checkpoint.html#ad72b20a29c9f4e598efd428b6ad168cf',1,'tenzor::nn::Checkpoint']]],
+  ['scheme_7',['scheme',['../structtenzor_1_1nn_1_1quantization_1_1QuantizationParams.html#aa13a14769675e1c76893e53ad18c82b3',1,'tenzor::nn::quantization::QuantizationParams']]],
+  ['se_5fratio_8',['se_ratio',['../structtenzor_1_1models_1_1MBConvConfig.html#a506c23cc0717d2098288f61cfb18f281',1,'tenzor::models::MBConvConfig']]],
+  ['seed_9',['seed',['../structtenzor_1_1models_1_1GenerationConfig.html#a0e176e48ccb33779879cacde984db909',1,'tenzor::models::GenerationConfig']]],
+  ['sequence_5foutput_10',['sequence_output',['../structtenzor_1_1models_1_1AlbertOutput.html#a92a33b33f0cd6b21e35a4756682c075f',1,'tenzor::models::AlbertOutput::sequence_output'],['../structtenzor_1_1models_1_1BertOutput.html#a110cf534ec2a53fc155f2157508dd551',1,'tenzor::models::BertOutput::sequence_output'],['../structtenzor_1_1models_1_1RobertaOutput.html#a81e7fa6b186edba53e9bcd14ce68beb8',1,'tenzor::models::RobertaOutput::sequence_output']]],
+  ['serialization_5fversion_11',['SERIALIZATION_VERSION',['../serialization_8hpp.html#a032f73ea74149023319399800fdcdaa1',1,'tenzor::jit']]],
+  ['shape_12',['shape',['../classtenzor_1_1TensorImpl.html#aa44e6463472104d2d4d4a5542f70def4',1,'tenzor::TensorImpl::shape'],['../structtenzor_1_1jit_1_1TensorInfo.html#a92af79977547941a590d16719ff555f7',1,'tenzor::jit::TensorInfo::shape'],['../classtenzor_1_1onnx_1_1ONNXValueInfo.html#aad10de6998f094f5c07489ca135a72a2',1,'tenzor::onnx::ONNXValueInfo::shape']]],
+  ['shuffle_13',['shuffle',['../structtenzor_1_1data_1_1DataLoaderConfig.html#ac4606e590e84eb8836f13e8ee8b2b303',1,'tenzor::data::DataLoaderConfig']]],
+  ['start_5flogits_14',['start_logits',['../structtenzor_1_1models_1_1BertQAOutput.html#a763f2f6509a034949b483cc1336b0d14',1,'tenzor::models::BertQAOutput::start_logits'],['../structtenzor_1_1models_1_1ElectraQAOutput.html#a758e49017207f67394c5c664e313c189',1,'tenzor::models::ElectraQAOutput::start_logits'],['../structtenzor_1_1models_1_1RobertaQAOutput.html#a79f1924863d3493ab933f808b8f79527',1,'tenzor::models::RobertaQAOutput::start_logits']]],
+  ['storage_15',['storage',['../classtenzor_1_1TensorImpl.html#ac0c6a74268d0b33ab995a3a31347e5b4',1,'tenzor::TensorImpl']]],
+  ['stride_16',['stride',['../structtenzor_1_1models_1_1MBConvConfig.html#af62c8ca1fcc513e7671c373c942ced95',1,'tenzor::models::MBConvConfig']]],
+  ['strides_17',['strides',['../classtenzor_1_1TensorImpl.html#af0ea8390de6c7575cacefabacd5be298',1,'tenzor::TensorImpl']]],
+  ['string_5fattrs_18',['string_attrs',['../classtenzor_1_1onnx_1_1ONNXNode.html#a0125ea8b4fb321c242078d35a96c1ca7',1,'tenzor::onnx::ONNXNode']]],
+  ['submodules_5f_19',['submodules_',['../classtenzor_1_1nn_1_1Module.html#a9d9d2355bff1b6c5bfe300aa14e477a2',1,'tenzor::nn::Module']]]
+];

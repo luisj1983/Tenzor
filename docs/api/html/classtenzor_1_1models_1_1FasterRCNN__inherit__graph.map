@@ -1,0 +1,5 @@
+<map id="tenzor::models::FasterRCNN" name="tenzor::models::FasterRCNN">
+<area shape="rect" id="Node000001" title="Faster R&#45;CNN object detection model." alt="" coords="5,81,209,109"/>
+<area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="36,5,178,33"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="110,49,110,81,104,81,104,49"/>
+</map>

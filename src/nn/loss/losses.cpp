@@ -187,19 +187,42 @@ auto SmoothL1Loss::forward(const Variable& input, const Variable& target) -> Var
     auto diff = input - target;
     auto abs_diff = abs(diff);
 
-    // For now, implement a simple version
-    // TODO: Properly implement smooth L1 with beta parameter
-    auto squared = diff * diff;
+    // Smooth L1 Loss (Huber Loss):
+    // loss = 0.5 * (diff^2) / beta,           if |diff| < beta
+    // loss = |diff| - 0.5 * beta,             otherwise
+
+    auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    auto beta_tensor = full(shape_vec, beta_, input.dtype(), input.device());
+    auto beta_var = Variable(beta_tensor, false);
+
+    auto half_tensor = full(shape_vec, 0.5, input.dtype(), input.device());
+    auto half_var = Variable(half_tensor, false);
+
+    // Compute squared term: 0.5 * (diff^2) / beta
+    auto squared_term = (half_var * diff * diff) / beta_var;
+
+    // Compute linear term: |diff| - 0.5 * beta
+    auto linear_term = abs_diff - (half_var * beta_var);
+
+    // Select based on condition: |diff| < beta
+    // mask = (abs_diff < beta) ? squared_term : linear_term
+    // Approximate using: smooth transition with clamping
+    auto beta_clamped_diff = clamp(abs_diff, 0.0f, static_cast<float>(beta_));
+    auto is_quadratic = Variable(full(shape_vec, 1.0f, input.dtype(), input.device()), false) -
+                        (abs_diff - beta_clamped_diff) / beta_var;
+
+    // Weighted sum: quadratic region * squared_term + linear region * linear_term
+    auto loss_unreduced = is_quadratic * squared_term + (Variable(full(shape_vec, 1.0f, input.dtype(), input.device()), false) - is_quadratic) * linear_term;
 
     switch (reduction_) {
         case Reduction::None:
-            return squared;
+            return loss_unreduced;
         case Reduction::Mean:
-            return mean(squared);
+            return mean(loss_unreduced);
         case Reduction::Sum:
-            return sum(squared);
+            return sum(loss_unreduced);
     }
-    return squared;
+    return loss_unreduced;
 }
 
 // Functional implementations

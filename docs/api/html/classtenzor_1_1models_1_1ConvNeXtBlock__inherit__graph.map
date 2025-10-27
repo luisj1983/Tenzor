@@ -1,0 +1,5 @@
+<map id="tenzor::models::ConvNeXtBlock" name="tenzor::models::ConvNeXtBlock">
+<area shape="rect" id="Node000001" title="ConvNeXt building block." alt="" coords="5,81,197,126"/>
+<area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="30,5,172,33"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="104,49,104,80,98,80,98,49"/>
+</map>

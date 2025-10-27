@@ -1,19 +1,21 @@
 <map id="tenzor::nn::AdaptiveAvgPool2d" name="tenzor::nn::AdaptiveAvgPool2d">
-<area shape="rect" id="Node000001" title="2D adaptive average pooling layer." alt="" coords="939,5,1159,33"/>
-<area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="723,69,865,97"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="847,61,888,49,965,31,966,36,890,54,849,66"/>
-<area shape="rect" id="Node000008" title=" " alt="" coords="962,57,1136,102"/>
-<area shape="poly" id="edge9_Node000008_Node000002" title=" " alt="" coords="881,79,962,78,962,83,881,84"/>
-<area shape="rect" id="Node000003" title=" " alt="" coords="433,58,585,119"/>
-<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="600,84,722,82,722,87,601,89"/>
-<area shape="rect" id="Node000004" title=" " alt="" coords="212,160,298,188"/>
-<area shape="poly" id="edge3_Node000003_Node000004" title=" " alt="" coords="312,152,432,111,434,116,313,157"/>
-<area shape="rect" id="Node000007" title=" " alt="" coords="1276,112,1447,190"/>
-<area shape="poly" id="edge7_Node000007_Node000004" title=" " alt="" coords="314,185,405,202,456,208,508,210,1280,190,1303,194,1265,200,1053,212,1110,207,1169,198,1276,174,1277,180,1170,204,1110,212,1048,213,1265,195,1298,194,1280,195,508,215,456,213,404,207,313,190"/>
-<area shape="rect" id="Node000005" title=" " alt="" coords="5,152,144,196"/>
-<area shape="poly" id="edge4_Node000004_Node000005" title=" " alt="" coords="159,171,211,171,211,176,159,176"/>
-<area shape="rect" id="Node000006" href="$classtenzor_1_1Variable.html" title="Gradient&#45;enabled tensor wrapper for automatic differentiation." alt="" coords="193,75,316,102"/>
-<area shape="poly" id="edge5_Node000003_Node000006" title=" " alt="" coords="332,86,433,86,433,91,332,91"/>
-<area shape="poly" id="edge6_Node000002_Node000007" title=" " alt="" coords="1261,160,1108,160,1023,154,938,141,875,123,822,100,825,95,877,118,940,136,1023,149,1108,155,1261,155"/>
-<area shape="poly" id="edge8_Node000007_Node000008" title=" " alt="" coords="1152,100,1277,129,1275,134,1151,105"/>
+<area shape="rect" id="Node000001" title="2D adaptive average pooling layer." alt="" coords="1101,5,1321,33"/>
+<area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="884,69,1027,97"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="1009,61,1050,49,1127,31,1128,36,1051,54,1011,66"/>
+<area shape="rect" id="Node000009" title=" " alt="" coords="1124,57,1298,102"/>
+<area shape="poly" id="edge10_Node000009_Node000002" title=" " alt="" coords="1042,79,1123,78,1123,83,1042,84"/>
+<area shape="rect" id="Node000003" title=" " alt="" coords="509,58,746,119"/>
+<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="762,84,884,82,884,87,762,89"/>
+<area shape="rect" id="Node000004" title=" " alt="" coords="262,155,348,182"/>
+<area shape="poly" id="edge3_Node000003_Node000004" title=" " alt="" coords="362,152,508,115,509,121,363,157"/>
+<area shape="rect" id="Node000008" title=" " alt="" coords="1438,112,1608,190"/>
+<area shape="poly" id="edge8_Node000008_Node000004" title=" " alt="" coords="364,179,484,199,555,207,626,210,1212,210,1271,207,1330,198,1437,174,1439,180,1331,204,1272,212,1212,215,626,215,555,212,484,204,363,184"/>
+<area shape="rect" id="Node000005" title=" " alt="" coords="5,146,144,191"/>
+<area shape="poly" id="edge4_Node000004_Node000005" title=" " alt="" coords="159,166,261,166,261,171,159,171"/>
+<area shape="rect" id="Node000006" title=" " alt="" coords="218,66,392,111"/>
+<area shape="poly" id="edge5_Node000003_Node000006" title=" " alt="" coords="407,86,509,86,509,91,407,91"/>
+<area shape="rect" id="Node000007" href="$classtenzor_1_1Variable.html" title="Gradient&#45;enabled tensor wrapper for automatic differentiation." alt="" coords="13,75,136,102"/>
+<area shape="poly" id="edge6_Node000006_Node000007" title=" " alt="" coords="151,86,217,86,217,91,151,91"/>
+<area shape="poly" id="edge7_Node000002_Node000008" title=" " alt="" coords="1422,160,1270,160,1184,154,1100,141,1037,123,984,100,986,95,1039,118,1101,136,1185,149,1270,155,1422,155"/>
+<area shape="poly" id="edge9_Node000008_Node000009" title=" " alt="" coords="1314,100,1438,129,1437,134,1312,105"/>
 </map>

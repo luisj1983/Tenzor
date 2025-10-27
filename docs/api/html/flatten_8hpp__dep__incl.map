@@ -1,5 +1,15 @@
 <map id="include/tenzor/nn/layers/flatten.hpp" name="include/tenzor/nn/layers/flatten.hpp">
-<area shape="rect" id="Node000001" title="Flatten layer for reshaping tensors." alt="" coords="9,5,187,50"/>
-<area shape="rect" id="Node000002" href="$tenzor_8hpp.html" title="Main header &#45; includes all public Tenzor APIs." alt="" coords="5,98,191,126"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="101,66,101,97,95,97,95,66"/>
+<area shape="rect" id="Node000001" title="Flatten layer for reshaping tensors." alt="" coords="99,5,277,50"/>
+<area shape="rect" id="Node000002" href="$googlenet_8hpp.html" title="GoogLeNet (Inception v1) convolutional neural network." alt="" coords="5,98,171,143"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="155,63,114,99,110,96,151,59"/>
+<area shape="rect" id="Node000003" href="$tenzor_8hpp.html" title="Main header &#45; includes all public Tenzor APIs." alt="" coords="195,106,381,134"/>
+<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="224,58,275,104,272,108,221,62"/>
+<area shape="rect" id="Node000004" href="$dataset_8hpp_source.html" title=" " alt="" coords="130,191,276,235"/>
+<area shape="poly" id="edge3_Node000003_Node000004" title=" " alt="" coords="267,147,225,192,221,188,263,144"/>
+<area shape="rect" id="Node000007" href="$transforms_8hpp_source.html" title=" " alt="" coords="300,191,446,235"/>
+<area shape="poly" id="edge6_Node000003_Node000007" title=" " alt="" coords="313,144,355,188,351,192,309,147"/>
+<area shape="rect" id="Node000005" href="$dataloader_8hpp_source.html" title=" " alt="" coords="130,283,276,328"/>
+<area shape="poly" id="edge4_Node000004_Node000005" title=" " alt="" coords="205,251,205,283,200,283,200,251"/>
+<area shape="rect" id="Node000006" href="$quantize__api_8hpp.html" title="High&#45;level quantization API for model conversion." alt="" coords="104,376,302,421"/>
+<area shape="poly" id="edge5_Node000005_Node000006" title=" " alt="" coords="205,344,205,376,200,376,200,344"/>
 </map>

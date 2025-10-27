@@ -16,6 +16,9 @@
 
 namespace tenzor {
 
+// Forward declaration for friend
+class GraphOptimizer;
+
 /**
  * @brief Node in the computation graph.
  *
@@ -74,6 +77,9 @@ public:
      * @brief Default constructor.
      */
     ComputationGraph() = default;
+
+    // Friend declaration to allow GraphOptimizer to access private nodes
+    friend class GraphOptimizer;
 
     /**
      * @brief Add a function node to the graph.

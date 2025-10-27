@@ -1,5 +1,0 @@
-if(EXISTS "/home/lee/Projects/Tenzor/build_checkpoint/tests/test_roberta[1]_tests.cmake")
-  include("/home/lee/Projects/Tenzor/build_checkpoint/tests/test_roberta[1]_tests.cmake")
-else()
-  add_test(test_roberta_NOT_BUILT test_roberta_NOT_BUILT)
-endif()

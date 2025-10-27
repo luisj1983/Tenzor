@@ -1,5 +1,0 @@
-if(EXISTS "/home/lee/Projects/Tenzor/build_checkpoint/tests/integration/test_model_zoo[1]_tests.cmake")
-  include("/home/lee/Projects/Tenzor/build_checkpoint/tests/integration/test_model_zoo[1]_tests.cmake")
-else()
-  add_test(test_model_zoo_NOT_BUILT test_model_zoo_NOT_BUILT)
-endif()

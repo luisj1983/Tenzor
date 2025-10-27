@@ -1,5 +1,13 @@
 <map id="include/tenzor/ops/creation.hpp" name="include/tenzor/ops/creation.hpp">
-<area shape="rect" id="Node000001" title="Tensor creation and initialization operations." alt="" coords="28,5,168,50"/>
-<area shape="rect" id="Node000002" href="$tenzor_8hpp.html" title="Main header &#45; includes all public Tenzor APIs." alt="" coords="5,98,191,126"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="101,66,101,97,95,97,95,66"/>
+<area shape="rect" id="Node000001" title="Tensor creation and initialization operations." alt="" coords="120,5,260,50"/>
+<area shape="rect" id="Node000002" href="$tenzor_8hpp.html" title="Main header &#45; includes all public Tenzor APIs." alt="" coords="97,98,282,126"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="192,66,192,97,187,97,187,66"/>
+<area shape="rect" id="Node000003" href="$dataset_8hpp_source.html" title=" " alt="" coords="31,174,178,218"/>
+<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="167,139,129,175,125,171,163,135"/>
+<area shape="rect" id="Node000006" href="$transforms_8hpp_source.html" title=" " alt="" coords="202,174,348,218"/>
+<area shape="poly" id="edge5_Node000002_Node000006" title=" " alt="" coords="216,135,254,171,251,175,213,139"/>
+<area shape="rect" id="Node000004" href="$dataloader_8hpp_source.html" title=" " alt="" coords="31,266,178,311"/>
+<area shape="poly" id="edge3_Node000003_Node000004" title=" " alt="" coords="107,234,107,266,102,266,102,234"/>
+<area shape="rect" id="Node000005" href="$quantize__api_8hpp.html" title="High&#45;level quantization API for model conversion." alt="" coords="5,359,204,404"/>
+<area shape="poly" id="edge4_Node000004_Node000005" title=" " alt="" coords="107,327,107,359,102,359,102,327"/>
 </map>

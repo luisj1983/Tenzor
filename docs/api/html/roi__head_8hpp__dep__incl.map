@@ -1,0 +1,16 @@
+<map id="include/tenzor/nn/detection/roi_head.hpp" name="include/tenzor/nn/detection/roi_head.hpp">
+<area shape="rect" id="Node000001" title="ROI Head for object detection (classification and box regression)." alt="" coords="91,5,289,50"/>
+<area shape="rect" id="Node000002" href="$faster__rcnn_8hpp.html" title="Faster R&#45;CNN object detection model." alt="" coords="47,98,212,143"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="169,64,146,99,142,96,165,61"/>
+<area shape="rect" id="Node000003" href="$tenzor_8hpp.html" title="Main header &#45; includes all public Tenzor APIs." alt="" coords="97,191,282,218"/>
+<area shape="poly" id="edge7_Node000001_Node000003" title=" " alt="" coords="214,62,227,97,231,120,227,143,216,170,202,192,198,189,211,167,222,142,225,120,222,99,209,64"/>
+<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="157,154,182,188,178,192,152,157"/>
+<area shape="rect" id="Node000004" href="$dataset_8hpp_source.html" title=" " alt="" coords="31,266,178,311"/>
+<area shape="poly" id="edge3_Node000003_Node000004" title=" " alt="" coords="167,231,129,268,125,264,163,228"/>
+<area shape="rect" id="Node000007" href="$transforms_8hpp_source.html" title=" " alt="" coords="202,266,348,311"/>
+<area shape="poly" id="edge6_Node000003_Node000007" title=" " alt="" coords="216,228,254,264,251,268,213,231"/>
+<area shape="rect" id="Node000005" href="$dataloader_8hpp_source.html" title=" " alt="" coords="31,359,178,404"/>
+<area shape="poly" id="edge4_Node000004_Node000005" title=" " alt="" coords="107,327,107,359,102,359,102,327"/>
+<area shape="rect" id="Node000006" href="$quantize__api_8hpp.html" title="High&#45;level quantization API for model conversion." alt="" coords="5,452,204,496"/>
+<area shape="poly" id="edge5_Node000005_Node000006" title=" " alt="" coords="107,419,107,451,102,451,102,419"/>
+</map>

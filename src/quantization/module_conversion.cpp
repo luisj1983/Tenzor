@@ -64,15 +64,88 @@ public:
 
         // Try to cast to quantized types and convert back
         if (auto q_linear = std::dynamic_pointer_cast<QuantizedLinear>(module)) {
-            // Extract parameters and create float Linear
-            // This is a simplified version - full implementation would properly
-            // dequantize weights and reconstruct
-            return module; // Placeholder
+            // Dequantize weights and bias, reconstruct float Linear
+            auto weight_params = q_linear->named_parameters();
+
+            // Find quantized weight and bias
+            Tensor weight_dequant;
+            Tensor bias_dequant;
+
+            for (const auto& [name, param] : weight_params) {
+                if (name.find("weight") != std::string::npos) {
+                    // Dequantize weight: scale from int8 to float
+                    weight_dequant = param.to(DType::Float32);
+                } else if (name.find("bias") != std::string::npos) {
+                    bias_dequant = param.to(DType::Float32);
+                }
+            }
+
+            // Create float Linear with dequantized weights
+            // Note: We lose exact in/out features information, but weights contain this
+            auto shape = weight_dequant.shape();
+            if (shape.size() >= 2) {
+                int64_t out_features = shape[0];
+                int64_t in_features = shape[1];
+                auto linear = std::make_shared<Linear>(in_features, out_features);
+
+                // Load dequantized state
+                std::unordered_map<std::string, Tensor> state;
+                state["weight"] = weight_dequant;
+                if (bias_dequant.defined()) {
+                    state["bias"] = bias_dequant;
+                }
+                linear->load_state_dict(state);
+
+                return linear;
+            }
+
+            // Fallback: return as-is if shape extraction fails
+            return module;
         }
 
         if (auto q_conv = std::dynamic_pointer_cast<QuantizedConv2d>(module)) {
-            // Dequantize and create float Conv2d
-            return module; // Placeholder
+            // Dequantize Conv2d weights and bias
+            auto params = q_conv->named_parameters();
+
+            Tensor weight_dequant;
+            Tensor bias_dequant;
+
+            for (const auto& [name, param] : params) {
+                if (name.find("weight") != std::string::npos) {
+                    weight_dequant = param.to(DType::Float32);
+                } else if (name.find("bias") != std::string::npos) {
+                    bias_dequant = param.to(DType::Float32);
+                }
+            }
+
+            // Reconstruct Conv2d with dequantized weights
+            // Extract dimensions from weight shape: [out_channels, in_channels, kH, kW]
+            auto shape = weight_dequant.shape();
+            if (shape.size() >= 4) {
+                int64_t out_channels = shape[0];
+                int64_t in_channels = shape[1];
+                int64_t kernel_h = shape[2];
+                int64_t kernel_w = shape[3];
+
+                // Create Conv2d (using default stride=1, padding=0)
+                auto conv = std::make_shared<Conv2d>(
+                    in_channels,
+                    out_channels,
+                    std::vector<int64_t>{kernel_h, kernel_w}
+                );
+
+                // Load dequantized state
+                std::unordered_map<std::string, Tensor> state;
+                state["weight"] = weight_dequant;
+                if (bias_dequant.defined()) {
+                    state["bias"] = bias_dequant;
+                }
+                conv->load_state_dict(state);
+
+                return conv;
+            }
+
+            return module;
         }
 
         // Try Sequential

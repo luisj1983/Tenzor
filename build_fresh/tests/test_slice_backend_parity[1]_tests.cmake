@@ -1,5 +1,0 @@
-add_test([=[SliceBackendParityTest.SliceSubtraction]=]  /home/lee/Projects/Tenzor/bin/test_slice_backend_parity [==[--gtest_filter=SliceBackendParityTest.SliceSubtraction]==] --gtest_also_run_disabled_tests)
-set_tests_properties([=[SliceBackendParityTest.SliceSubtraction]=]  PROPERTIES WORKING_DIRECTORY /home/lee/Projects/Tenzor/build_fresh/tests SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
-add_test([=[SliceBackendParityTest.BoxAreaComputation]=]  /home/lee/Projects/Tenzor/bin/test_slice_backend_parity [==[--gtest_filter=SliceBackendParityTest.BoxAreaComputation]==] --gtest_also_run_disabled_tests)
-set_tests_properties([=[SliceBackendParityTest.BoxAreaComputation]=]  PROPERTIES WORKING_DIRECTORY /home/lee/Projects/Tenzor/build_fresh/tests SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
-set(  test_slice_backend_parity_TESTS SliceBackendParityTest.SliceSubtraction SliceBackendParityTest.BoxAreaComputation)

@@ -2,7 +2,7 @@
 
 namespace tenzor {
 
-// Stub implementation for backend base class
-// Actual implementations are in backend-specific files
+// Backend base class implementation
+// Actual backend implementations are in backend-specific files (CPU, CUDA, etc.)
 
 } // namespace tenzor

@@ -1,0 +1,5 @@
+<map id="tenzor::models::GPT2Config" name="tenzor::models::GPT2Config">
+<area shape="rect" id="Node000001" title="Configuration for GPT&#45;2 model." alt="" coords="5,5,207,33"/>
+<area shape="rect" id="Node000002" href="$structtenzor_1_1models_1_1GPT3Config.html" title="Configuration for GPT&#45;3 model." alt="" coords="5,81,207,109"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="109,49,109,81,103,81,103,49"/>
+</map>

@@ -1,7 +1,26 @@
 var searchData=
 [
-  ['var_0',['var',['../group__tensor__reduction.html#ga2896a98734268430fbbac454cd47d024',1,'tenzor']]],
-  ['variable_1',['Variable',['../classtenzor_1_1Variable.html',1,'tenzor::Variable'],['../classtenzor_1_1Variable.html#a7b065622735a5528043e6477230259e5',1,'tenzor::Variable::Variable()=default'],['../classtenzor_1_1Variable.html#ada5687a3538d8b242feb52e8160d9bff',1,'tenzor::Variable::Variable(Tensor data, bool requires_grad=false)']]],
-  ['variable_2ehpp_2',['variable.hpp',['../variable_8hpp.html',1,'']]],
-  ['view_3',['view',['../classtenzor_1_1Tensor.html#aec356e2655c4b7ef788768613d1aabd9',1,'tenzor::Tensor::view()'],['../group__tensor__transform.html#gac630e592d88c956e52790891f76d7e27',1,'tenzor::view()']]]
+  ['uint16_0',['UInt16',['../namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea8bd950a9d7779b83f5c30046c9aaf1cf',1,'tenzor']]],
+  ['uint32_1',['UInt32',['../namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feeae7956ed7be1c5025a27ed3cb42a396bd',1,'tenzor']]],
+  ['uint64_2',['UInt64',['../namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feeaaf71234725f0470ccf993e263a8b820a',1,'tenzor']]],
+  ['uint8_3',['UINT8',['../namespacetenzor_1_1nn_1_1quantization.html#a54bd139db7b10aa2979a2e98052abe7eaecfc091ed2a607335524c8389cfa41b5',1,'tenzor::nn::quantization']]],
+  ['uint8_4',['UInt8',['../namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feeab31df9c476d20e85ff898121efe11b5a',1,'tenzor']]],
+  ['uint8_5factivation_5fqconfig_5',['uint8_activation_qconfig',['../classtenzor_1_1nn_1_1quantization_1_1DefaultQConfigs.html#ab1696262f97fc5f88af1c771a98a828c',1,'tenzor::nn::quantization::DefaultQConfigs']]],
+  ['unet_6',['UNet',['../classtenzor_1_1models_1_1UNet.html',1,'tenzor::models::UNet'],['../classtenzor_1_1models_1_1UNet.html#a74c39a7bc8e9d8b483ec4ba012188851',1,'tenzor::models::UNet::UNet()']]],
+  ['unet_2ehpp_7',['unet.hpp',['../unet_8hpp.html',1,'']]],
+  ['unfold_8',['unfold',['../ops_2vision_8hpp.html#a171acc99274b18f6fd278abf175e33c6',1,'tenzor::ops']]],
+  ['unique_9',['unique',['../group__tensor__advanced.html#gaddc2fbc0185c59c1787f6dfa201f576c',1,'tenzor']]],
+  ['unload_5fbackend_10',['unload_backend',['../classtenzor_1_1BackendLoader.html#a5dd69da6db4baad092714a781c6a7cb5',1,'tenzor::BackendLoader']]],
+  ['unlock_11',['unlock',['../classtenzor_1_1SpinLock.html#a9b95afa5f9ab91cf29f6d8aadd096346',1,'tenzor::SpinLock']]],
+  ['unscale_5f_12',['unscale_',['../classtenzor_1_1nn_1_1amp_1_1GradScaler.html#ac712f6c09155297c3196319231c72e25',1,'tenzor::nn::amp::GradScaler']]],
+  ['unsqueeze_13',['unsqueeze',['../classtenzor_1_1Tensor.html#a8689d8ea1bb52cb2e641d519244c73ee',1,'tenzor::Tensor::unsqueeze()'],['../group__tensor__transform.html#gac1babde4945f36b2fe2800a39d4e44da',1,'tenzor::unsqueeze()'],['../transform_8hpp.html#ac1babde4945f36b2fe2800a39d4e44da',1,'tenzor::ops::unsqueeze()']]],
+  ['up_14',['Up',['../classtenzor_1_1models_1_1Up.html',1,'tenzor::models::Up'],['../classtenzor_1_1models_1_1Up.html#a78e382fe9142a6ec33ba5b89dd9cd727',1,'tenzor::models::Up::Up()']]],
+  ['update_15',['update',['../classtenzor_1_1nn_1_1amp_1_1GradScaler.html#abe584120a07c1ecdc9e68fbf16046f00',1,'tenzor::nn::amp::GradScaler']]],
+  ['upsample_5fbilinear_16',['upsample_bilinear',['../segmentation_8hpp.html#a11a776cef8b4baf3ee6a11681fcb5c07',1,'tenzor::nn']]],
+  ['upsamplebilinearbackward_17',['UpsampleBilinearBackward',['../classtenzor_1_1UpsampleBilinearBackward.html',1,'tenzor']]],
+  ['usage_18',['Usage',['../namespacetenzor_1_1nn_1_1quantization.html#usage',1,'']]],
+  ['use_5fhard_5ftargets_19',['use_hard_targets',['../structtenzor_1_1nn_1_1compression_1_1DistillationConfig.html#a8e242e699e3b02a7f15a34072dd665dd',1,'tenzor::nn::compression::DistillationConfig']]],
+  ['use_5fint8_5fops_20',['use_int8_ops',['../structtenzor_1_1nn_1_1quantization_1_1BackendConfig.html#af1d581907b32786efa28813472b9cf49',1,'tenzor::nn::quantization::BackendConfig']]],
+  ['use_5fse_21',['use_se',['../structtenzor_1_1models_1_1MBConvConfig.html#a8b121745f6e54a064725cc82ba472b5e',1,'tenzor::models::MBConvConfig']]],
+  ['uses_22',['uses',['../classtenzor_1_1jit_1_1Value.html#a42e679f21b2b1a296d6fe6a44bb12e4d',1,'tenzor::jit::Value']]]
 ];

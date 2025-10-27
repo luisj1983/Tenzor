@@ -1,0 +1,5 @@
+<map id="include/tenzor/nn/training.hpp" name="include/tenzor/nn/training.hpp">
+<area shape="rect" id="Node000001" title="High&#45;level training API for neural networks." alt="" coords="5,5,221,33"/>
+<area shape="rect" id="Node000002" href="$mixed__precision_8hpp.html" title="Mixed precision training utilities for FP16/BF16 training." alt="" coords="24,81,202,126"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="116,49,116,80,110,80,110,49"/>
+</map>

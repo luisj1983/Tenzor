@@ -62,7 +62,7 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient, boo
             // Get reference to Variable (stored by value)
             Variable& var = const_cast<Variable&>(input_vars[i]);
 
-            // Skip placeholder Variables (default-constructed with requires_grad=false)
+            // Skip Variables without gradients (default-constructed with requires_grad=false)
             if (!var.requires_grad()) {
                 continue;
             }

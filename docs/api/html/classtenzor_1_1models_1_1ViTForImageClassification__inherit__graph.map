@@ -1,0 +1,5 @@
+<map id="tenzor::models::ViTForImageClassification" name="tenzor::models::ViTForImageClassification">
+<area shape="rect" id="Node000001" title="Vision Transformer for image classification." alt="" coords="5,81,214,126"/>
+<area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="38,5,181,33"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="112,49,112,80,107,80,107,49"/>
+</map>

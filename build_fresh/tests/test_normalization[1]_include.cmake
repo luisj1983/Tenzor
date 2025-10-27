@@ -1,5 +1,0 @@
-if(EXISTS "/home/lee/Projects/Tenzor/build_fresh/tests/test_normalization[1]_tests.cmake")
-  include("/home/lee/Projects/Tenzor/build_fresh/tests/test_normalization[1]_tests.cmake")
-else()
-  add_test(test_normalization_NOT_BUILT test_normalization_NOT_BUILT)
-endif()

@@ -1,0 +1,25 @@
+var classtenzor_1_1models_1_1ModelHub =
+[
+    [ "cache_size", "classtenzor_1_1models_1_1ModelHub.html#a244494f3b68cd09d508a22ecb1859c80", null ],
+    [ "clean_cache", "classtenzor_1_1models_1_1ModelHub.html#a5ea0afcbdc836c02bd1bc15dd42d7fed", null ],
+    [ "clear_cache", "classtenzor_1_1models_1_1ModelHub.html#a9b43cbdebdc0525758948f3478fc8cfa", null ],
+    [ "compute_checksum", "classtenzor_1_1models_1_1ModelHub.html#a79cfb6641b4a815fd29cefcc0d459d89", null ],
+    [ "download_pretrained", "classtenzor_1_1models_1_1ModelHub.html#a5e537af80b69f615607e7c4897505265", null ],
+    [ "download_weights", "classtenzor_1_1models_1_1ModelHub.html#af320745a5b5c82923d293b4c172f7305", null ],
+    [ "get_cache_dir", "classtenzor_1_1models_1_1ModelHub.html#a87574feb4ae747f920fe961a83268635", null ],
+    [ "get_cached_path", "classtenzor_1_1models_1_1ModelHub.html#a572353bdd750854ac4af5952702298bb", null ],
+    [ "get_config", "classtenzor_1_1models_1_1ModelHub.html#a3cdef8d29577de6dbab5bfb36f928130", null ],
+    [ "get_last_download_stats", "classtenzor_1_1models_1_1ModelHub.html#ab12068f97ba4f80fc9535cf8e2939f5e", null ],
+    [ "get_model_info", "classtenzor_1_1models_1_1ModelHub.html#ad0e36cebb3888e284fe2bd7091f2f748", null ],
+    [ "is_cached", "classtenzor_1_1models_1_1ModelHub.html#a0afd57631b12717cc45385e13ec32299", null ],
+    [ "is_registered", "classtenzor_1_1models_1_1ModelHub.html#a9c138562a67d09f9d72fc0aec0bf53a0", null ],
+    [ "list_cached_models", "classtenzor_1_1models_1_1ModelHub.html#a8f1a5cc7329b44cfe47d761f893ebd14", null ],
+    [ "list_registered_models", "classtenzor_1_1models_1_1ModelHub.html#a80d7c90c48882b8f75f0cc74fef6bbb8", null ],
+    [ "load_pretrained_weights", "classtenzor_1_1models_1_1ModelHub.html#ae1edc258523448ee9c3efacb6a7176cb", null ],
+    [ "register_model", "classtenzor_1_1models_1_1ModelHub.html#a984edf2162580e63f74570bf70fe6ea8", null ],
+    [ "register_models", "classtenzor_1_1models_1_1ModelHub.html#ac6f3fcbbb208d0044d8e18fcac81d58c", null ],
+    [ "remove_from_cache", "classtenzor_1_1models_1_1ModelHub.html#a83441e7cc9f88c00d6a2c605feedfd7b", null ],
+    [ "set_cache_dir", "classtenzor_1_1models_1_1ModelHub.html#afc0eed4db1ac00d5cf03332fe45e9e77", null ],
+    [ "set_config", "classtenzor_1_1models_1_1ModelHub.html#adcda77984df677ddb9566d066e37fe14", null ],
+    [ "verify_checksum", "classtenzor_1_1models_1_1ModelHub.html#a1aba3034de31c138814c2999ee2d26ad", null ]
+];

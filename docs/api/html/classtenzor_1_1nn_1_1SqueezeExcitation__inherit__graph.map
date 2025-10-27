@@ -1,0 +1,5 @@
+<map id="tenzor::nn::SqueezeExcitation" name="tenzor::nn::SqueezeExcitation">
+<area shape="rect" id="Node000001" title="Squeeze&#45;and&#45;Excitation block for channel attention." alt="" coords="5,81,220,109"/>
+<area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="41,5,184,33"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="115,49,115,81,110,81,110,49"/>
+</map>

@@ -1,0 +1,7 @@
+<map id="tenzor::jit::TensorInfo" name="tenzor::jit::TensorInfo">
+<area shape="rect" id="Node000001" title="Tensor metadata tracked during tracing." alt="" coords="90,106,248,134"/>
+<area shape="rect" id="Node000002" title=" " alt="" coords="5,5,171,33"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="110,43,160,104,156,107,106,46"/>
+<area shape="rect" id="Node000003" href="$structtenzor_1_1Device.html" title="Device specification for tensor placement." alt="" coords="194,5,310,33"/>
+<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="234,46,182,107,178,104,230,43"/>
+</map>

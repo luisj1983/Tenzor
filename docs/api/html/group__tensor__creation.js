@@ -12,6 +12,7 @@ var group__tensor__creation =
     [ "tenzor::rand_like", "group__tensor__creation.html#ga5f82d208679b8558089aa16229bc171b", null ],
     [ "tenzor::randn", "group__tensor__creation.html#ga4974d521aa5af113df9abef79baa79d9", null ],
     [ "tenzor::randn_like", "group__tensor__creation.html#gaab1ee393d9b3fd4a77935ebf4f6ce6fe", null ],
+    [ "tenzor::randperm", "group__tensor__creation.html#gabbe6c17f55980a977d975787d12ff877", null ],
     [ "tenzor::zeros", "group__tensor__creation.html#ga280a2dbed0ffe44cfc9bdfe1f172a1bb", null ],
     [ "tenzor::zeros_like", "group__tensor__creation.html#ga7cc2f693db94b734e01662a503f33e7d", null ]
 ];

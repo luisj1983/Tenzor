@@ -1,92 +1,155 @@
 <map id="include/tenzor/core/storage.hpp" name="include/tenzor/core/storage.hpp">
-<area shape="rect" id="Node000001" title="Memory storage abstraction for tensor data." alt="" coords="2906,5,3051,50"/>
-<area shape="rect" id="Node000002" href="$tensor_8hpp.html" title="Core tensor class for multi&#45;dimensional array operations." alt="" coords="2906,98,3051,143"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="2981,66,2981,98,2976,98,2976,66"/>
-<area shape="rect" id="Node000003" href="$engine_8hpp.html" title="Backward pass execution engine for automatic differentiation." alt="" coords="37,469,213,513"/>
-<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="2890,125,2342,129,1537,141,1128,150,764,161,481,176,381,184,315,193,209,214,164,226,124,241,89,262,59,290,34,327,14,377,8,399,14,419,37,446,68,466,65,471,34,450,9,422,3,399,9,375,29,325,55,286,86,257,121,236,162,221,208,209,314,188,381,179,481,170,764,156,1128,144,1536,135,2341,124,2890,119"/>
-<area shape="rect" id="Node000004" href="$tenzor_8hpp.html" title="Main header &#45; includes all public Tenzor APIs." alt="" coords="1462,561,1647,589"/>
-<area shape="poly" id="edge58_Node000002_Node000004" title=" " alt="" coords="3027,150,3047,168,3063,189,3079,219,3086,244,3089,306,2739,468,2652,512,2624,529,2629,529,2650,525,2737,502,3088,398,3082,442,3063,472,3033,495,2993,516,2961,526,2912,536,2773,551,2593,562,2387,569,1967,576,1648,577,1648,572,1967,571,2387,564,2593,556,2773,545,2911,530,2959,521,2991,511,3030,490,3059,468,3077,440,3085,402,2738,507,2651,530,2629,534,2619,530,2649,507,2736,464,3084,303,3081,245,3074,221,3059,192,3043,172,3024,154"/>
-<area shape="rect" id="Node000005" href="$function_8hpp.html" title="Autograd function interface and built&#45;in operations." alt="" coords="88,283,263,328"/>
-<area shape="poly" id="edge4_Node000002_Node000005" title=" " alt="" coords="2891,125,2368,129,1605,141,1220,150,876,161,609,176,515,184,452,193,386,212,321,236,216,285,214,280,319,231,384,207,451,188,514,179,609,170,876,156,1220,144,1605,136,2368,124,2891,120"/>
-<area shape="rect" id="Node000008" href="$variable_8hpp.html" title="Automatic differentiation wrapper for tensors." alt="" coords="464,191,639,235"/>
-<area shape="poly" id="edge11_Node000002_Node000008" title=" " alt="" coords="2890,128,639,211,639,206,2890,122"/>
-<area shape="rect" id="Node000023" href="$backend_8hpp.html" title="Abstract backend interface for device&#45;specific implementations." alt="" coords="3174,191,3345,235"/>
-<area shape="poly" id="edge42_Node000002_Node000023" title=" " alt="" coords="3061,145,3193,188,3192,193,3059,150"/>
-<area shape="rect" id="Node000024" href="$dispatch_8hpp.html" title="Central dispatcher for routing operations to appropriate backends." alt="" coords="3123,283,3295,328"/>
-<area shape="poly" id="edge46_Node000002_Node000024" title=" " alt="" coords="3041,147,3074,166,3107,189,3157,236,3195,281,3191,285,3153,240,3103,193,3071,171,3038,152"/>
-<area shape="rect" id="Node000026" href="$registry_8hpp.html" title="Operation kernel registration and dispatch system." alt="" coords="3515,283,3687,328"/>
-<area shape="poly" id="edge47_Node000002_Node000026" title=" " alt="" coords="3066,122,3132,128,3207,140,3284,160,3358,188,3374,199,3385,210,3394,222,3409,233,3464,260,3520,280,3519,285,3462,265,3406,238,3391,226,3381,214,3371,203,3356,193,3283,165,3206,145,3132,133,3066,127"/>
-<area shape="rect" id="Node000027" href="$serialize_8hpp.html" title="Model serialization and deserialization." alt="" coords="3420,199,3641,227"/>
-<area shape="poly" id="edge48_Node000002_Node000027" title=" " alt="" coords="3067,133,3450,196,3450,201,3066,139"/>
-<area shape="rect" id="Node000028" href="$creation_8hpp.html" title="Tensor creation and initialization operations." alt="" coords="2642,283,2782,328"/>
-<area shape="poly" id="edge49_Node000002_Node000028" title=" " alt="" coords="2892,148,2846,167,2803,193,2778,214,2757,239,2726,285,2721,282,2753,235,2775,210,2799,189,2843,162,2890,143"/>
-<area shape="rect" id="Node000029" href="$indexing_8hpp.html" title="Tensor indexing and selection operations." alt="" coords="3664,191,3805,235"/>
-<area shape="poly" id="edge51_Node000002_Node000029" title=" " alt="" coords="3067,124,3330,145,3492,163,3653,188,3664,190,3663,195,3653,193,3491,169,3330,150,3066,129"/>
-<area shape="rect" id="Node000030" href="$math_8hpp.html" title="Mathematical operations for tensors." alt="" coords="2807,376,2947,421"/>
-<area shape="poly" id="edge52_Node000002_Node000030" title=" " alt="" coords="2930,154,2907,172,2887,192,2860,235,2848,284,2845,306,2848,327,2856,352,2866,374,2862,377,2851,354,2842,329,2839,306,2842,283,2856,233,2883,189,2903,168,2926,149"/>
-<area shape="rect" id="Node000031" href="$reduction_8hpp.html" title="Tensor reduction operations." alt="" coords="2858,283,2998,328"/>
-<area shape="poly" id="edge54_Node000002_Node000031" title=" " alt="" coords="2930,154,2912,171,2898,192,2893,215,2896,239,2905,262,2915,282,2911,284,2900,264,2891,240,2888,215,2893,190,2908,168,2926,150"/>
-<area shape="rect" id="Node000032" href="$transform_8hpp.html" title="Tensor shape transformation operations." alt="" coords="2908,191,3049,235"/>
-<area shape="poly" id="edge56_Node000002_Node000032" title=" " alt="" coords="2981,158,2981,190,2976,190,2976,158"/>
-<area shape="poly" id="edge3_Node000003_Node000004" title=" " alt="" coords="229,510,232,511,408,529,587,544,938,562,1242,570,1461,572,1461,577,1242,575,937,567,587,549,407,535,231,516,228,516"/>
-<area shape="poly" id="edge5_Node000005_Node000003" title=" " alt="" coords="75,337,48,354,27,377,20,398,27,419,49,446,77,466,74,470,45,450,23,422,15,398,23,375,45,350,72,332"/>
-<area shape="poly" id="edge10_Node000005_Node000004" title=" " alt="" coords="202,339,227,375,251,417,266,453,285,483,299,497,320,511,345,521,385,529,501,544,652,554,826,562,1183,570,1461,571,1461,577,1183,575,825,567,652,560,500,549,384,534,344,526,317,516,296,502,280,487,261,455,246,419,223,377,198,343"/>
-<area shape="rect" id="Node000006" href="$graph_8hpp.html" title="Computation graph structure for automatic differentiation." alt="" coords="37,376,213,421"/>
-<area shape="poly" id="edge6_Node000005_Node000006" title=" " alt="" coords="158,343,139,377,135,375,154,340"/>
-<area shape="rect" id="Node000007" href="$ops_8hpp.html" title="Gradient&#45;aware tensor operations for automatic differentiation." alt="" coords="339,376,514,421"/>
-<area shape="poly" id="edge8_Node000005_Node000007" title=" " alt="" coords="251,331,367,373,365,378,249,336"/>
-<area shape="poly" id="edge7_Node000006_Node000003" title=" " alt="" coords="128,436,128,468,122,468,122,436"/>
-<area shape="poly" id="edge9_Node000007_Node000004" title=" " alt="" coords="377,431,353,451,334,471,327,492,329,502,335,511,350,518,382,525,487,537,807,554,1173,565,1461,570,1461,575,1173,570,807,559,486,542,381,530,348,523,331,515,324,504,321,492,330,469,349,447,374,427"/>
-<area shape="poly" id="edge12_Node000008_Node000003" title=" " alt="" coords="507,246,160,470,157,466,504,242"/>
-<area shape="poly" id="edge41_Node000008_Node000004" title=" " alt="" coords="561,251,564,290,562,335,551,381,542,403,528,422,510,438,491,446,450,446,412,448,395,455,379,470,370,492,372,502,379,511,393,518,424,524,524,536,831,553,1183,564,1461,570,1461,575,1183,570,831,559,524,541,423,530,391,523,375,515,367,504,365,491,375,467,392,450,411,442,450,441,490,440,507,434,524,419,537,400,546,380,557,335,558,290,555,251"/>
-<area shape="poly" id="edge13_Node000008_Node000005" title=" " alt="" coords="449,242,265,286,263,281,448,236"/>
-<area shape="poly" id="edge14_Node000008_Node000007" title=" " alt="" coords="531,249,443,377,439,374,526,246"/>
-<area shape="rect" id="Node000009" href="$module_8hpp.html" title="Neural network module base class." alt="" coords="1087,384,1302,412"/>
-<area shape="poly" id="edge15_Node000008_Node000009" title=" " alt="" coords="643,237,1149,381,1148,387,641,243"/>
-<area shape="rect" id="Node000019" href="$optimizer_8hpp.html" title="Base class for all optimizers." alt="" coords="2371,376,2546,421"/>
-<area shape="poly" id="edge35_Node000008_Node000019" title=" " alt="" coords="655,222,2370,386,2370,391,655,227"/>
-<area shape="poly" id="edge34_Node000009_Node000004" title=" " alt="" coords="1195,428,1200,471,1208,493,1222,511,1237,522,1260,532,1321,548,1392,559,1461,566,1461,571,1391,564,1320,553,1259,537,1235,527,1218,515,1203,496,1195,473,1190,428"/>
-<area shape="rect" id="Node000010" href="$activations_8hpp.html" title="Neural network activation functions and layers." alt="" coords="1232,469,1442,513"/>
-<area shape="poly" id="edge16_Node000009_Node000010" title=" " alt="" coords="1229,418,1304,466,1301,470,1226,423"/>
-<area shape="rect" id="Node000011" href="$batchnorm_8hpp.html" title="Batch normalization layers for neural networks." alt="" coords="1466,469,1643,513"/>
-<area shape="poly" id="edge18_Node000009_Node000011" title=" " alt="" coords="1262,414,1468,465,1467,471,1261,419"/>
-<area shape="rect" id="Node000012" href="$conv_8hpp.html" title="Convolutional neural network layers (1D, 2D, transposed)" alt="" coords="1667,469,1844,513"/>
-<area shape="poly" id="edge20_Node000009_Node000012" title=" " alt="" coords="1308,412,1472,436,1655,466,1667,468,1666,474,1654,471,1472,441,1308,418"/>
-<area shape="rect" id="Node000013" href="$dropout_8hpp.html" title="Dropout regularization layers." alt="" coords="1868,469,2046,513"/>
-<area shape="poly" id="edge22_Node000009_Node000013" title=" " alt="" coords="1317,406,1566,429,1856,466,1869,468,1868,473,1855,471,1566,434,1317,411"/>
-<area shape="rect" id="Node000014" href="$flatten_8hpp.html" title="Flatten layer for reshaping tensors." alt="" coords="2070,469,2247,513"/>
-<area shape="poly" id="edge24_Node000009_Node000014" title=" " alt="" coords="1318,402,1652,423,1855,441,2057,466,2070,468,2069,473,2057,471,1854,447,1652,428,1317,407"/>
-<area shape="rect" id="Node000015" href="$linear_8hpp.html" title="Fully connected (linear) neural network layer." alt="" coords="390,469,567,513"/>
-<area shape="poly" id="edge26_Node000009_Node000015" title=" " alt="" coords="1072,413,842,436,579,471,568,473,567,468,578,466,842,431,1071,407"/>
-<area shape="rect" id="Node000016" href="$normalization_8hpp.html" title="Layer and group normalization layers." alt="" coords="591,469,768,513"/>
-<area shape="poly" id="edge28_Node000009_Node000016" title=" " alt="" coords="1095,418,780,471,769,473,768,468,779,466,1094,413"/>
-<area shape="rect" id="Node000017" href="$pooling_8hpp.html" title="Pooling layers for spatial downsampling." alt="" coords="792,469,970,513"/>
-<area shape="poly" id="edge30_Node000009_Node000017" title=" " alt="" coords="1135,419,957,471,956,465,1134,414"/>
-<area shape="rect" id="Node000018" href="$losses_8hpp.html" title="Loss functions for neural network training." alt="" coords="994,469,1157,513"/>
-<area shape="poly" id="edge32_Node000009_Node000018" title=" " alt="" coords="1167,424,1106,470,1102,466,1164,419"/>
-<area shape="poly" id="edge17_Node000010_Node000004" title=" " alt="" coords="1410,517,1520,558,1519,563,1408,522"/>
-<area shape="poly" id="edge19_Node000011_Node000004" title=" " alt="" coords="1557,529,1557,561,1552,561,1552,529"/>
-<area shape="poly" id="edge21_Node000012_Node000004" title=" " alt="" coords="1689,522,1588,563,1586,558,1687,517"/>
-<area shape="poly" id="edge23_Node000013_Node000004" title=" " alt="" coords="1854,516,1621,563,1620,558,1853,511"/>
-<area shape="poly" id="edge25_Node000014_Node000004" title=" " alt="" coords="2055,516,1832,547,1648,568,1647,562,1831,542,2054,511"/>
-<area shape="poly" id="edge27_Node000015_Node000004" title=" " alt="" coords="583,511,835,538,1081,556,1298,565,1461,570,1461,575,1298,571,1081,561,835,544,583,516"/>
-<area shape="poly" id="edge29_Node000016_Node000004" title=" " alt="" coords="784,511,976,534,1164,550,1462,568,1461,573,1163,556,976,539,784,516"/>
-<area shape="poly" id="edge31_Node000017_Node000004" title=" " alt="" coords="985,511,1248,544,1462,564,1461,569,1247,550,984,516"/>
-<area shape="poly" id="edge33_Node000018_Node000004" title=" " alt="" coords="1173,510,1176,511,1465,558,1464,563,1175,516,1172,515"/>
-<area shape="rect" id="Node000020" href="$adam_8hpp.html" title="Adam and AdamW optimizers." alt="" coords="2471,469,2646,513"/>
-<area shape="poly" id="edge36_Node000019_Node000020" title=" " alt="" coords="2495,429,2536,466,2533,470,2492,433"/>
-<area shape="rect" id="Node000021" href="$scheduler_8hpp.html" title="Learning rate scheduling strategies." alt="" coords="2671,469,2846,513"/>
-<area shape="poly" id="edge38_Node000019_Node000021" title=" " alt="" coords="2545,423,2687,466,2686,471,2544,428"/>
-<area shape="rect" id="Node000022" href="$sgd_8hpp.html" title="Stochastic Gradient Descent optimizer." alt="" coords="2271,469,2446,513"/>
-<area shape="poly" id="edge39_Node000019_Node000022" title=" " alt="" coords="2425,433,2384,470,2380,466,2421,429"/>
-<area shape="poly" id="edge37_Node000020_Node000004" title=" " alt="" coords="2456,516,2224,542,1998,559,1647,575,1647,569,1998,554,2224,537,2455,511"/>
-<area shape="poly" id="edge40_Node000022_Node000004" title=" " alt="" coords="2255,516,2084,538,1917,554,1648,572,1647,567,1916,548,2083,532,2255,511"/>
-<area shape="poly" id="edge43_Node000023_Node000024" title=" " alt="" coords="3242,250,3223,284,3219,282,3238,248"/>
-<area shape="rect" id="Node000025" href="$loader_8hpp.html" title="Dynamic backend loading and management system." alt="" coords="3319,283,3491,328"/>
-<area shape="poly" id="edge44_Node000023_Node000025" title=" " alt="" coords="3309,242,3372,281,3369,285,3306,246"/>
-<area shape="poly" id="edge45_Node000023_Node000026" title=" " alt="" coords="3356,237,3520,280,3519,285,3355,242"/>
-<area shape="poly" id="edge50_Node000028_Node000004" title=" " alt="" coords="2735,340,2763,379,2796,419,2814,432,2831,440,2847,449,2861,467,2869,492,2868,504,2860,515,2842,524,2807,531,2693,543,2346,561,1954,571,1647,576,1647,570,1953,566,2346,556,2692,538,2806,526,2840,519,2857,511,2863,502,2864,493,2856,470,2843,453,2829,445,2811,437,2793,423,2758,383,2731,343"/>
-<area shape="poly" id="edge53_Node000030_Node000004" title=" " alt="" coords="2902,433,2910,454,2916,475,2915,496,2904,515,2885,524,2849,531,2730,544,2565,554,2370,562,1963,572,1647,576,1647,570,1963,566,2370,557,2565,549,2730,539,2848,526,2884,519,2901,511,2910,495,2910,476,2905,455,2897,436"/>
-<area shape="poly" id="edge55_Node000031_Node000004" title=" " alt="" coords="2950,341,2962,375,2970,418,2970,454,2957,486,2928,516,2907,523,2869,529,2747,541,2380,558,1967,569,1647,575,1647,570,1966,564,2380,553,2747,535,2869,524,2906,518,2925,511,2953,483,2964,453,2965,418,2957,377,2945,343"/>
-<area shape="poly" id="edge57_Node000032_Node000004" title=" " alt="" coords="3001,248,3013,283,3016,316,3014,353,3000,426,2980,487,2965,515,2945,523,2905,530,2780,542,2401,560,1975,571,1647,576,1647,570,1975,565,2401,555,2779,537,2905,525,2943,518,2962,511,2975,485,2994,425,3009,352,3011,316,3008,284,2996,250"/>
+<area shape="rect" id="Node000001" title="Memory storage abstraction for tensor data." alt="" coords="3232,5,3378,50"/>
+<area shape="rect" id="Node000002" href="$tensor_8hpp.html" title="Core tensor class for multi&#45;dimensional array operations." alt="" coords="3232,98,3378,143"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="3308,66,3308,98,3302,98,3302,66"/>
+<area shape="rect" id="Node000003" href="$autograd_2checkpoint_8hpp.html" title="Gradient checkpointing for memory&#45;efficient training." alt="" coords="237,376,413,421"/>
+<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="3217,125,2679,131,1893,144,1139,164,863,178,700,193,618,207,555,221,495,244,425,286,399,307,376,331,341,377,336,374,372,327,395,303,422,281,493,239,553,216,617,202,699,188,862,172,1139,159,1893,139,2679,126,3217,120"/>
+<area shape="rect" id="Node000004" href="$engine_8hpp.html" title="Backward pass execution engine for automatic differentiation." alt="" coords="924,469,1099,513"/>
+<area shape="poly" id="edge3_Node000002_Node000004" title=" " alt="" coords="3216,125,2708,133,1988,147,1339,167,1128,180,1067,186,1041,193,1017,223,1002,258,993,297,990,336,996,412,1008,468,1003,469,991,412,985,336,988,296,997,256,1013,220,1038,188,1066,181,1128,174,1339,162,1988,142,2707,128,3216,120"/>
+<area shape="rect" id="Node000005" href="$tenzor_8hpp.html" title="Main header &#45; includes all public Tenzor APIs." alt="" coords="2170,561,2355,589"/>
+<area shape="poly" id="edge102_Node000002_Node000005" title=" " alt="" coords="3393,119,3856,123,4504,134,4822,142,5096,154,5295,169,5357,178,5390,188,5419,212,5436,237,5443,267,5445,304,5445,399,5451,412,5470,422,5497,428,5530,431,5599,432,5651,432,5580,445,5107,516,4928,531,4625,543,3800,561,2940,572,2356,576,2356,571,2940,566,3800,556,4624,538,4927,526,5106,511,5579,440,5646,432,5599,437,5530,437,5496,433,5468,427,5448,416,5440,400,5440,304,5438,268,5431,239,5415,215,5388,193,5356,183,5295,174,5096,159,4822,148,4504,139,3856,128,3393,125"/>
+<area shape="rect" id="Node000010" href="$function_8hpp.html" title="Autograd function interface and built&#45;in operations." alt="" coords="539,283,714,328"/>
+<area shape="poly" id="edge5_Node000002_Node000010" title=" " alt="" coords="3217,125,2671,132,1883,146,1153,167,904,179,826,186,784,193,744,212,706,236,649,285,645,281,703,232,741,207,783,188,825,181,904,174,1153,161,1883,141,2671,127,3217,120"/>
+<area shape="rect" id="Node000013" href="$fusion__optimizer_8hpp.html" title="Graph&#45;level kernel fusion optimization for Tenzor." alt="" coords="488,469,650,513"/>
+<area shape="poly" id="edge93_Node000002_Node000013" title=" " alt="" coords="3217,125,2617,132,1738,145,920,166,641,179,552,186,506,193,412,223,374,237,339,253,309,273,280,300,254,334,227,377,219,399,221,409,227,419,238,426,260,434,327,450,488,476,488,481,326,455,259,439,236,431,223,423,216,411,214,399,223,375,249,331,277,296,305,269,337,249,371,232,410,218,504,188,552,180,640,173,920,160,1737,140,2617,126,3217,120"/>
+<area shape="rect" id="Node000015" href="$roi__ops_8hpp.html" title="ROI (Region of Interest) operations for detection models." alt="" coords="2163,376,2362,421"/>
+<area shape="poly" id="edge80_Node000002_Node000015" title=" " alt="" coords="3217,126,3078,132,2914,143,2762,163,2701,177,2656,193,2626,219,2592,260,2558,302,2528,330,2499,343,2458,356,2363,380,2361,374,2456,351,2497,338,2525,326,2554,298,2588,257,2622,215,2653,188,2699,172,2761,158,2914,138,3077,126,3217,121"/>
+<area shape="rect" id="Node000016" href="$mask__rcnn_8hpp.html" title="Mask R&#45;CNN for instance segmentation." alt="" coords="1957,469,2122,513"/>
+<area shape="poly" id="edge69_Node000002_Node000016" title=" " alt="" coords="3217,124,2746,126,2422,132,2080,144,1750,164,1598,177,1461,193,1343,211,1246,233,1175,258,1150,271,1134,285,1127,296,1124,306,1127,316,1134,326,1150,340,1172,351,1229,366,1298,372,1375,373,1528,369,1594,369,1645,373,1738,394,1829,418,1979,466,1978,471,1827,423,1736,399,1645,379,1594,374,1528,374,1375,378,1298,377,1228,371,1170,356,1147,344,1130,330,1122,318,1119,306,1122,294,1130,282,1147,267,1173,253,1244,228,1342,206,1461,188,1598,172,1749,159,2080,139,2422,127,2746,121,3217,118"/>
+<area shape="rect" id="Node000019" href="$gradcheck_8hpp.html" title="Numerical gradient checking for automatic differentiation verification." alt="" coords="5,283,181,328"/>
+<area shape="poly" id="edge19_Node000002_Node000019" title=" " alt="" coords="3217,124,2558,126,1577,135,1087,144,662,156,350,172,252,182,201,193,171,211,145,235,108,284,103,281,141,232,168,207,199,188,251,177,349,167,661,151,1087,139,1577,130,2558,121,3217,119"/>
+<area shape="rect" id="Node000020" href="$variable_8hpp.html" title="Automatic differentiation wrapper for tensors." alt="" coords="1791,191,1966,235"/>
+<area shape="poly" id="edge21_Node000002_Node000020" title=" " alt="" coords="3217,130,1967,209,1966,203,3217,125"/>
+<area shape="rect" id="Node000024" href="$jit_2graph_8hpp.html" title="Intermediate representation (IR) graph for JIT compilation." alt="" coords="2194,283,2325,328"/>
+<area shape="poly" id="edge64_Node000002_Node000024" title=" " alt="" coords="3217,127,3043,135,2828,148,2622,167,2537,179,2474,193,2422,212,2372,237,2292,285,2289,280,2369,232,2420,207,2472,188,2536,174,2621,162,2827,142,3042,129,3217,122"/>
+<area shape="rect" id="Node000027" href="$tracer_8hpp.html" title="JIT operation tracing system for recording computation graphs." alt="" coords="2385,376,2516,421"/>
+<area shape="poly" id="edge65_Node000002_Node000027" title=" " alt="" coords="3217,128,3093,136,2950,149,2818,168,2764,180,2725,193,2698,207,2677,222,2646,255,2616,291,2572,330,2494,378,2491,373,2569,326,2612,287,2642,252,2673,218,2695,203,2723,188,2763,174,2817,163,2949,144,3092,131,3216,123"/>
+<area shape="rect" id="Node000028" href="$albert_8hpp.html" title="ALBERT (A Lite BERT) model implementation." alt="" coords="2552,376,2717,421"/>
+<area shape="poly" id="edge66_Node000002_Node000028" title=" " alt="" coords="3217,126,3133,132,3035,144,2931,164,2830,193,2783,210,2747,227,2716,249,2682,285,2667,307,2655,332,2641,376,2636,375,2650,330,2662,305,2678,282,2712,245,2744,222,2781,206,2828,188,2930,158,3034,139,3133,127,3216,121"/>
+<area shape="rect" id="Node000029" href="$bert_8hpp.html" title="BERT (Bidirectional Encoder Representations from Transformers) model family." alt="" coords="1468,376,1633,421"/>
+<area shape="poly" id="edge67_Node000002_Node000029" title=" " alt="" coords="3217,125,2718,133,2014,147,1379,167,1173,179,1114,186,1089,193,1082,205,1080,223,1087,264,1103,303,1119,326,1143,341,1178,354,1270,373,1373,385,1467,391,1467,397,1373,390,1269,378,1177,359,1141,346,1115,330,1098,305,1082,265,1075,223,1077,204,1086,189,1113,181,1173,174,1379,162,2014,141,2718,127,3217,120"/>
+<area shape="rect" id="Node000030" href="$electra_8hpp.html" title="ELECTRA (Efficiently Learning an Encoder that Classifies Token Replacements Accurately)." alt="" coords="1744,469,1909,513"/>
+<area shape="poly" id="edge68_Node000002_Node000030" title=" " alt="" coords="3217,126,3168,132,3117,144,3066,164,3021,193,2997,220,2983,249,2977,279,2974,309,2971,339,2963,369,2948,397,2920,423,2895,434,2856,442,2744,455,2600,462,2439,466,2130,467,1945,471,1909,476,1909,471,1945,466,2130,462,2439,460,2599,457,2744,450,2855,437,2893,429,2917,418,2944,394,2958,367,2966,339,2969,309,2972,278,2978,247,2992,217,3018,189,3064,159,3115,139,3167,127,3216,120"/>
+<area shape="rect" id="Node000031" href="$roberta_8hpp.html" title="RoBERTa (Robustly Optimized BERT) model family." alt="" coords="1312,469,1477,513"/>
+<area shape="poly" id="edge70_Node000002_Node000031" title=" " alt="" coords="3217,125,2714,133,2005,147,1365,167,1158,179,1098,186,1073,193,1052,223,1044,253,1048,283,1062,313,1084,342,1113,369,1181,418,1246,449,1312,470,1311,475,1244,454,1178,423,1109,373,1080,345,1058,315,1043,284,1039,252,1047,220,1070,188,1097,181,1158,174,1365,162,2005,141,2714,127,3217,120"/>
+<area shape="rect" id="Node000032" href="$t5_8hpp.html" title="T5 (Text&#45;to&#45;Text Transfer Transformer) model implementation." alt="" coords="2741,376,2906,421"/>
+<area shape="poly" id="edge71_Node000002_Node000032" title=" " alt="" coords="3217,131,3140,140,3058,153,2987,171,2960,181,2940,193,2925,208,2915,223,2906,254,2900,289,2883,329,2846,378,2842,374,2879,327,2895,288,2901,253,2910,221,2920,205,2937,189,2957,176,2985,165,3057,148,3139,135,3217,126"/>
+<area shape="rect" id="Node000033" href="$vit_8hpp.html" title="Vision Transformer (ViT) model family." alt="" coords="2349,283,2514,328"/>
+<area shape="poly" id="edge72_Node000002_Node000033" title=" " alt="" coords="3217,124,3053,127,2853,137,2755,146,2665,158,2590,173,2534,193,2506,212,2481,236,2446,284,2442,281,2477,233,2502,208,2532,188,2588,168,2664,152,2754,140,2853,132,3052,122,3217,119"/>
+<area shape="rect" id="Node000039" href="$embedding_8hpp.html" title="Embedding layers for discrete input representations." alt="" coords="2691,283,2868,328"/>
+<area shape="poly" id="edge81_Node000002_Node000039" title=" " alt="" coords="3217,132,3034,156,2949,173,2889,193,2860,213,2834,237,2796,284,2791,281,2830,233,2856,209,2886,188,2947,168,3033,150,3217,127"/>
+<area shape="rect" id="Node000087" href="$quantize_8hpp.html" title="Quantization operations and schemes for neural network inference." alt="" coords="2994,283,3213,328"/>
+<area shape="poly" id="edge83_Node000002_Node000087" title=" " alt="" coords="3217,135,3108,157,3062,173,3046,182,3035,192,3029,203,3028,214,3036,238,3054,261,3076,281,3072,285,3050,265,3032,241,3023,215,3024,202,3031,189,3043,178,3060,168,3106,152,3216,130"/>
+<area shape="rect" id="Node000088" href="$observer_8hpp.html" title="Statistical observers for quantization calibration." alt="" coords="3574,376,3793,421"/>
+<area shape="poly" id="edge82_Node000002_Node000088" title=" " alt="" coords="3314,157,3328,198,3340,217,3356,233,3379,248,3402,257,3447,264,3493,258,3537,248,3581,238,3624,237,3646,240,3667,249,3687,262,3707,282,3718,304,3717,330,3710,355,3700,377,3695,374,3705,353,3712,329,3713,306,3703,285,3684,266,3664,254,3644,246,3624,242,3582,244,3538,253,3494,264,3447,269,3400,262,3377,253,3353,237,3336,221,3324,201,3309,159"/>
+<area shape="rect" id="Node000089" href="$backend_8hpp.html" title="Abstract backend interface for device&#45;specific implementations." alt="" coords="3469,191,3640,235"/>
+<area shape="poly" id="edge58_Node000002_Node000089" title=" " alt="" coords="3380,146,3496,188,3494,193,3378,151"/>
+<area shape="rect" id="Node000090" href="$dispatch_8hpp.html" title="Central dispatcher for routing operations to appropriate backends." alt="" coords="3767,283,3939,328"/>
+<area shape="poly" id="edge62_Node000002_Node000090" title=" " alt="" coords="3329,154,3366,196,3389,217,3414,233,3461,254,3502,266,3539,272,3576,273,3653,272,3698,274,3749,281,3767,284,3766,289,3749,286,3697,279,3653,277,3575,278,3539,277,3501,271,3459,259,3412,238,3386,221,3362,200,3325,157"/>
+<area shape="rect" id="Node000092" href="$registry_8hpp.html" title="Operation kernel registration and dispatch system." alt="" coords="3963,283,4135,328"/>
+<area shape="poly" id="edge63_Node000002_Node000092" title=" " alt="" coords="3352,150,3407,189,3431,214,3442,224,3458,233,3528,258,3589,272,3645,277,3698,276,3810,271,3875,272,3951,281,3963,283,3963,288,3950,286,3875,278,3810,276,3698,282,3645,282,3589,277,3527,263,3456,238,3439,228,3428,217,3403,193,3349,154"/>
+<area shape="rect" id="Node000093" href="$async__ops_8hpp.html" title="Asynchronous tensor operations using Future pattern." alt="" coords="4159,283,4299,328"/>
+<area shape="poly" id="edge88_Node000002_Node000093" title=" " alt="" coords="3394,124,3453,131,3520,143,3588,162,3653,188,3669,200,3679,212,3688,223,3704,233,3766,256,3821,269,3871,274,3919,273,4020,270,4079,272,4147,281,4159,283,4158,288,4146,286,4078,277,4020,275,3919,279,3871,279,3820,274,3765,261,3701,238,3685,227,3675,215,3665,204,3650,193,3586,167,3518,149,3452,136,3393,129"/>
+<area shape="rect" id="Node000052" href="$yolo_8hpp.html" title="YOLO (You Only Look Once) single&#45;stage object detection models." alt="" coords="3528,283,3693,328"/>
+<area shape="poly" id="edge73_Node000002_Node000052" title=" " alt="" coords="3299,158,3299,198,3304,217,3313,233,3389,253,3528,284,3527,289,3387,258,3310,237,3299,219,3294,198,3294,158"/>
+<area shape="rect" id="Node000057" href="$nn_2checkpoint_8hpp.html" title="Model checkpointing for saving and loading trained models." alt="" coords="3715,199,3951,227"/>
+<area shape="poly" id="edge74_Node000002_Node000057" title=" " alt="" coords="3393,134,3757,196,3756,201,3393,139"/>
+<area shape="rect" id="Node000094" href="$anchors_8hpp.html" title="Anchor box generation for object detection." alt="" coords="3044,191,3243,235"/>
+<area shape="poly" id="edge75_Node000002_Node000094" title=" " alt="" coords="3255,153,3183,193,3181,188,3252,148"/>
+<area shape="rect" id="Node000095" href="$serialize_8hpp.html" title="Model serialization and deserialization." alt="" coords="4027,199,4247,227"/>
+<area shape="poly" id="edge84_Node000002_Node000095" title=" " alt="" coords="3393,126,3668,150,4008,188,4062,196,4061,201,4007,193,3668,156,3393,131"/>
+<area shape="rect" id="Node000078" href="$exporter_8hpp.html" title="ONNX model export functionality for Tenzor." alt="" coords="4272,191,4421,235"/>
+<area shape="poly" id="edge85_Node000002_Node000078" title=" " alt="" coords="3393,121,3555,126,3771,137,4015,157,4260,188,4272,190,4271,195,4259,193,4014,162,3771,143,3555,131,3393,126"/>
+<area shape="rect" id="Node000079" href="$importer_8hpp.html" title="ONNX model import functionality." alt="" coords="4445,191,4594,235"/>
+<area shape="poly" id="edge86_Node000002_Node000079" title=" " alt="" coords="3393,119,3582,122,3840,132,4135,153,4286,169,4433,188,4445,190,4444,195,4433,193,4285,174,4135,158,3840,138,3582,128,3393,124"/>
+<area shape="rect" id="Node000096" href="$advanced_8hpp.html" title="Advanced tensor operations (Phase 6 additions)." alt="" coords="4619,191,4759,235"/>
+<area shape="poly" id="edge87_Node000002_Node000096" title=" " alt="" coords="3393,121,4007,144,4354,164,4497,175,4607,188,4619,190,4618,195,4606,193,4497,181,4353,169,4007,149,3393,127"/>
+<area shape="rect" id="Node000097" href="$creation_8hpp.html" title="Tensor creation and initialization operations." alt="" coords="3898,469,4038,513"/>
+<area shape="poly" id="edge89_Node000002_Node000097" title=" " alt="" coords="3393,122,3534,128,3699,140,3854,160,3917,173,3965,188,3981,199,3991,211,4001,223,4016,233,4059,247,4100,250,4138,246,4175,240,4211,236,4246,238,4280,252,4314,282,4327,301,4332,319,4332,337,4325,354,4298,384,4255,411,4203,433,4146,452,4039,479,4038,474,4145,447,4201,428,4253,406,4294,380,4321,351,4327,336,4327,320,4322,303,4310,285,4278,257,4245,243,4211,241,4176,245,4139,251,4100,255,4058,252,4013,238,3997,227,3987,214,3978,203,3963,193,3916,178,3854,165,3699,146,3533,134,3393,127"/>
+<area shape="rect" id="Node000098" href="$detection_8hpp.html" title="Object detection operations (IoU, NMS, box encoding)." alt="" coords="4835,191,4975,235"/>
+<area shape="poly" id="edge91_Node000002_Node000098" title=" " alt="" coords="3393,121,4105,142,4516,162,4687,174,4816,188,4835,191,4834,196,4815,193,4686,180,4516,167,4105,148,3393,126"/>
+<area shape="rect" id="Node000099" href="$fused__ops_8hpp.html" title="Fused kernel operations for reduced kernel launch overhead." alt="" coords="4999,191,5139,235"/>
+<area shape="poly" id="edge92_Node000002_Node000099" title=" " alt="" coords="3393,120,3725,126,4186,138,4649,159,4842,172,4988,188,4999,190,4998,195,4987,193,4842,177,4649,164,4186,144,3725,131,3393,125"/>
+<area shape="rect" id="Node000100" href="$indexing_8hpp.html" title="Tensor indexing and selection operations." alt="" coords="5163,191,5303,235"/>
+<area shape="poly" id="edge94_Node000002_Node000100" title=" " alt="" coords="3393,120,3754,125,4262,136,4776,156,4990,171,5152,188,5163,190,5162,195,5151,193,4990,176,4776,162,4262,141,3754,130,3393,125"/>
+<area shape="rect" id="Node000101" href="$math_8hpp.html" title="Mathematical operations for tensors." alt="" coords="4395,469,4535,513"/>
+<area shape="poly" id="edge95_Node000002_Node000101" title=" " alt="" coords="3393,120,3732,125,4181,136,4396,145,4580,157,4712,171,4753,179,4773,189,4789,210,4797,231,4799,252,4794,273,4783,294,4768,315,4727,354,4676,390,4621,422,4519,470,4517,466,4618,417,4673,385,4724,349,4764,311,4779,291,4789,272,4793,252,4792,232,4785,212,4770,193,4751,184,4711,176,4579,162,4396,151,4180,142,3732,130,3393,125"/>
+<area shape="rect" id="Node000102" href="$reduction_8hpp.html" title="Tensor reduction operations." alt="" coords="4858,469,4998,513"/>
+<area shape="poly" id="edge97_Node000002_Node000102" title=" " alt="" coords="3393,119,3844,119,4471,127,4778,135,5040,147,5230,165,5288,176,5317,189,5335,212,5344,235,5344,258,5337,280,5324,301,5305,322,5255,360,5192,395,5124,426,4999,471,4997,466,5122,421,5190,390,5252,356,5302,318,5320,298,5333,278,5339,257,5339,236,5331,214,5314,193,5286,181,5229,170,5040,153,4777,140,4471,132,3844,125,3393,124"/>
+<area shape="rect" id="Node000103" href="$transform_8hpp.html" title="Tensor shape transformation operations." alt="" coords="5264,376,5404,421"/>
+<area shape="poly" id="edge99_Node000002_Node000103" title=" " alt="" coords="3393,119,3853,119,4495,126,4808,134,5077,147,5271,164,5331,176,5361,189,5376,210,5384,234,5385,260,5382,287,5367,337,5349,377,5344,374,5362,335,5377,286,5380,260,5379,235,5372,213,5358,193,5330,181,5271,170,5077,152,4808,140,4494,131,3853,124,3393,124"/>
+<area shape="rect" id="Node000104" href="$ops_2vision_8hpp.html" title="Vision&#45;specific tensor operations." alt="" coords="5480,191,5620,235"/>
+<area shape="poly" id="edge101_Node000002_Node000104" title=" " alt="" coords="3393,119,3807,124,4406,134,5015,155,5269,170,5461,188,5480,191,5479,196,5461,193,5269,175,5014,160,4405,140,3807,129,3393,125"/>
+<area shape="rect" id="Node000105" href="$tensorboard_8hpp.html" title="TensorBoard integration for real&#45;time training visualization." alt="" coords="5644,191,5790,235"/>
+<area shape="poly" id="edge103_Node000002_Node000105" title=" " alt="" coords="3393,119,3837,122,4485,131,4827,139,5148,151,5424,167,5633,188,5644,190,5643,195,5633,193,5424,173,5147,157,4826,145,4485,136,3837,127,3393,124"/>
+<area shape="poly" id="edge4_Node000004_Node000005" title=" " alt="" coords="1115,508,1136,511,1431,537,1723,555,1980,565,2169,570,2169,575,1980,570,1723,560,1431,543,1135,516,1114,513"/>
+<area shape="poly" id="edge6_Node000010_Node000003" title=" " alt="" coords="541,335,398,378,396,373,539,330"/>
+<area shape="poly" id="edge7_Node000010_Node000004" title=" " alt="" coords="674,335,728,374,752,398,778,418,851,450,924,471,923,476,849,455,776,423,749,402,725,378,671,339"/>
+<area shape="poly" id="edge18_Node000010_Node000005" title=" " alt="" coords="565,338,538,356,515,378,486,413,465,447,460,463,460,479,465,495,477,511,501,522,551,531,715,546,943,557,1210,565,1762,571,2169,572,2169,577,1762,576,1210,570,943,562,715,552,550,536,500,527,474,515,461,498,455,480,455,462,460,445,482,410,511,374,535,352,562,334"/>
+<area shape="rect" id="Node000011" href="$autograd_2graph_8hpp.html" title="Computation graph structure for automatic differentiation." alt="" coords="539,376,714,421"/>
+<area shape="poly" id="edge8_Node000010_Node000011" title=" " alt="" coords="629,344,629,376,624,376,624,344"/>
+<area shape="rect" id="Node000012" href="$graph__optimizer_8hpp.html" title="Computation graph optimization for automatic differentiation." alt="" coords="673,469,849,513"/>
+<area shape="poly" id="edge12_Node000010_Node000012" title=" " alt="" coords="566,338,545,356,529,377,521,399,523,409,528,419,545,429,580,441,673,467,672,472,579,446,543,434,524,423,517,410,516,399,524,375,541,352,562,334"/>
+<area shape="rect" id="Node000014" href="$ops_8hpp.html" title="Gradient&#45;aware tensor operations for automatic differentiation." alt="" coords="789,376,965,421"/>
+<area shape="poly" id="edge13_Node000010_Node000014" title=" " alt="" coords="702,331,818,373,816,378,700,336"/>
+<area shape="poly" id="edge15_Node000010_Node000015" title=" " alt="" coords="730,309,1538,343,2151,373,2163,375,2163,380,2150,379,1538,348,730,314"/>
+<area shape="poly" id="edge9_Node000011_Node000004" title=" " alt="" coords="730,421,924,466,923,472,728,426"/>
+<area shape="poly" id="edge10_Node000011_Node000012" title=" " alt="" coords="673,427,730,466,728,471,670,432"/>
+<area shape="poly" id="edge11_Node000011_Node000013" title=" " alt="" coords="607,435,585,470,580,467,602,432"/>
+<area shape="poly" id="edge14_Node000014_Node000005" title=" " alt="" coords="880,436,889,477,899,496,913,511,931,518,968,524,1087,536,1448,553,1854,564,2169,570,2169,575,1854,570,1447,558,1087,541,967,529,930,523,910,516,895,499,884,479,875,437"/>
+<area shape="poly" id="edge17_Node000015_Node000005" title=" " alt="" coords="2265,436,2265,561,2260,561,2260,436"/>
+<area shape="poly" id="edge16_Node000015_Node000016" title=" " alt="" coords="2196,429,2094,471,2092,466,2194,424"/>
+<area shape="poly" id="edge20_Node000019_Node000005" title=" " alt="" coords="114,340,144,381,183,419,251,461,309,484,372,497,452,511,609,531,816,546,1057,557,1315,565,1812,571,2169,572,2169,577,1812,577,1315,570,1057,563,816,552,608,536,451,516,371,502,307,489,248,466,179,423,140,384,110,343"/>
+<area shape="poly" id="edge22_Node000020_Node000003" title=" " alt="" coords="1775,216,1497,217,1136,225,952,234,782,246,636,263,527,286,477,305,430,329,355,378,352,373,427,324,475,300,526,281,635,258,781,241,952,228,1136,220,1497,212,1775,211"/>
+<area shape="poly" id="edge23_Node000020_Node000004" title=" " alt="" coords="1777,233,1697,253,1657,268,1618,286,1603,296,1594,307,1583,319,1568,330,1479,367,1354,405,1101,472,1099,466,1353,400,1477,362,1565,326,1580,315,1590,304,1600,292,1616,281,1655,263,1695,248,1775,227"/>
+<area shape="poly" id="edge57_Node000020_Node000005" title=" " alt="" coords="1775,219,1591,224,1380,236,1282,244,1198,255,1137,269,1116,277,1104,285,1098,295,1097,304,1105,327,1137,397,1155,423,1176,445,1200,464,1228,480,1301,511,1374,530,1473,545,1589,557,1715,564,1967,571,2169,572,2169,578,1967,577,1715,569,1588,562,1472,551,1373,536,1299,516,1226,485,1197,468,1172,449,1151,427,1132,400,1100,329,1092,304,1093,293,1100,281,1114,272,1135,264,1197,250,1281,239,1380,230,1591,219,1775,213"/>
+<area shape="poly" id="edge24_Node000020_Node000010" title=" " alt="" coords="1775,219,1581,224,1322,235,1029,255,733,286,715,289,714,283,733,281,1029,250,1322,230,1581,219,1775,213"/>
+<area shape="poly" id="edge26_Node000020_Node000014" title=" " alt="" coords="1775,217,1543,219,1263,228,1130,237,1017,249,932,265,904,275,887,285,874,305,870,329,874,375,868,376,864,329,869,303,883,281,901,270,930,260,1016,244,1130,232,1262,223,1543,214,1775,211"/>
+<area shape="poly" id="edge49_Node000020_Node000015" title=" " alt="" coords="1924,242,1979,281,2008,305,2038,326,2102,353,2167,373,2166,378,2101,358,2036,330,2004,309,1975,285,1921,247"/>
+<area shape="poly" id="edge41_Node000020_Node000016" title=" " alt="" coords="1882,250,1885,288,1894,332,1908,378,1931,419,1958,446,1990,466,1987,470,1955,450,1927,422,1904,380,1889,334,1880,289,1876,251"/>
+<area shape="poly" id="edge25_Node000020_Node000019" title=" " alt="" coords="1775,221,1199,247,420,286,181,301,181,296,420,281,1198,241,1775,216"/>
+<area shape="rect" id="Node000021" href="$distributed_8hpp.html" title="Distributed training API and process group management." alt="" coords="1629,283,1816,328"/>
+<area shape="poly" id="edge27_Node000020_Node000021" title=" " alt="" coords="1830,246,1761,285,1758,281,1827,241"/>
+<area shape="poly" id="edge28_Node000020_Node000024" title=" " alt="" coords="1981,235,2176,281,2195,285,2193,290,2175,286,1980,240"/>
+<area shape="poly" id="edge30_Node000020_Node000027" title=" " alt="" coords="1946,240,2028,281,2058,305,2071,316,2089,326,2130,341,2165,350,2228,358,2292,361,2373,373,2385,376,2384,381,2373,379,2292,367,2227,363,2164,355,2128,346,2087,330,2068,320,2055,309,2025,286,1944,244"/>
+<area shape="poly" id="edge31_Node000020_Node000028" title=" " alt="" coords="1971,238,2024,257,2077,281,2095,293,2108,305,2121,316,2139,326,2195,345,2244,356,2288,361,2329,363,2417,363,2468,366,2528,373,2552,377,2551,383,2527,379,2468,371,2417,368,2329,368,2287,366,2243,361,2194,350,2137,330,2118,320,2105,309,2092,297,2074,286,2022,262,1969,243"/>
+<area shape="poly" id="edge32_Node000020_Node000029" title=" " alt="" coords="1776,219,1599,225,1397,237,1303,246,1223,256,1164,270,1145,277,1134,285,1127,295,1125,305,1127,316,1134,326,1155,343,1187,356,1275,376,1375,388,1468,393,1467,398,1374,393,1274,382,1186,362,1152,347,1130,330,1122,318,1119,306,1122,293,1130,281,1143,273,1163,265,1222,251,1302,240,1396,231,1599,220,1775,214"/>
+<area shape="poly" id="edge38_Node000020_Node000030" title=" " alt="" coords="1874,251,1833,469,1828,468,1869,250"/>
+<area shape="poly" id="edge42_Node000020_Node000031" title=" " alt="" coords="1775,219,1595,224,1389,236,1293,245,1211,256,1150,269,1131,277,1119,285,1112,295,1111,304,1119,326,1150,352,1213,390,1354,466,1351,471,1210,395,1147,356,1115,330,1106,305,1107,293,1115,281,1128,272,1149,264,1210,251,1292,240,1388,231,1595,219,1775,213"/>
+<area shape="rect" id="Node000018" href="$faster__rcnn_8hpp.html" title="Faster R&#45;CNN object detection model." alt="" coords="3237,283,3402,328"/>
+<area shape="poly" id="edge39_Node000020_Node000018" title=" " alt="" coords="1982,211,2207,213,2516,222,2868,243,3049,260,3225,281,3237,282,3236,288,3225,286,3048,265,2868,249,2515,228,2207,219,1982,216"/>
+<area shape="poly" id="edge43_Node000020_Node000032" title=" " alt="" coords="1982,231,2055,251,2128,281,2145,293,2156,305,2167,316,2183,326,2262,352,2330,366,2391,371,2450,369,2574,363,2646,364,2729,373,2741,375,2740,381,2729,379,2645,370,2574,368,2450,375,2391,376,2329,371,2260,357,2181,330,2163,320,2152,309,2141,297,2125,286,2053,256,1980,236"/>
+<area shape="poly" id="edge44_Node000020_Node000033" title=" " alt="" coords="1982,225,2149,249,2337,281,2349,283,2348,288,2337,286,2148,254,1981,230"/>
+<area shape="rect" id="Node000034" href="$grad__scaler_8hpp.html" title="Automatic Mixed Precision (AMP) gradient scaler for loss scaling." alt="" coords="1143,283,1310,328"/>
+<area shape="poly" id="edge45_Node000020_Node000034" title=" " alt="" coords="1775,227,1565,250,1321,286,1310,288,1309,283,1321,281,1565,245,1775,221"/>
+<area shape="rect" id="Node000036" href="$distillation_8hpp.html" title="Knowledge distillation for model compression and transfer learning." alt="" coords="1334,283,1554,328"/>
+<area shape="poly" id="edge46_Node000020_Node000036" title=" " alt="" coords="1776,238,1548,285,1547,280,1775,233"/>
+<area shape="rect" id="Node000037" href="$mask__head_8hpp.html" title="Mask prediction head for Mask R&#45;CNN." alt="" coords="1940,376,2139,421"/>
+<area shape="poly" id="edge47_Node000020_Node000037" title=" " alt="" coords="1909,245,2023,374,2019,378,1905,249"/>
+<area shape="poly" id="edge50_Node000020_Node000039" title=" " alt="" coords="1982,222,2691,293,2690,298,1981,227"/>
+<area shape="poly" id="edge55_Node000020_Node000087" title=" " alt="" coords="1982,218,2376,243,2881,281,2994,291,2994,296,2881,286,2376,249,1981,223"/>
+<area shape="poly" id="edge29_Node000024_Node000027" title=" " alt="" coords="2320,333,2406,373,2404,378,2318,337"/>
+<area shape="poly" id="edge37_Node000029_Node000005" title=" " alt="" coords="1589,428,1654,473,1693,494,1732,511,1815,530,1932,545,2170,566,2169,571,1931,550,1814,535,1731,516,1690,499,1651,477,1586,433"/>
+<area shape="poly" id="edge33_Node000029_Node000030" title=" " alt="" coords="1631,423,1761,466,1759,471,1630,428"/>
+<area shape="poly" id="edge35_Node000029_Node000031" title=" " alt="" coords="1502,431,1433,471,1430,466,1499,426"/>
+<area shape="poly" id="edge34_Node000030_Node000005" title=" " alt="" coords="1925,508,2193,558,2192,563,1924,513"/>
+<area shape="poly" id="edge36_Node000031_Node000005" title=" " alt="" coords="1493,499,2170,562,2169,568,1492,504"/>
+<area shape="poly" id="edge40_Node000018_Node000005" title=" " alt="" coords="3264,338,3176,378,3061,427,2931,476,2796,516,2679,540,2560,557,2356,573,2355,568,2559,551,2678,535,2795,511,2929,471,3059,422,3174,374,3262,333"/>
+<area shape="poly" id="edge48_Node000037_Node000016" title=" " alt="" coords="2042,436,2042,468,2037,468,2037,436"/>
+<area shape="poly" id="edge54_Node000039_Node000005" title=" " alt="" coords="2874,333,2900,351,2921,375,2930,399,2928,410,2920,422,2904,439,2882,454,2825,480,2754,503,2673,523,2503,552,2356,569,2355,563,2503,546,2672,517,2752,498,2823,475,2880,449,2901,434,2916,419,2923,409,2924,399,2916,377,2896,355,2871,337"/>
+<area shape="poly" id="edge51_Node000039_Node000028" title=" " alt="" coords="2733,339,2670,378,2667,373,2730,334"/>
+<area shape="poly" id="edge52_Node000039_Node000029" title=" " alt="" coords="2676,319,2527,331,1633,394,1633,389,2526,325,2675,313"/>
+<area shape="poly" id="edge53_Node000039_Node000032" title=" " alt="" coords="2799,341,2816,375,2811,377,2794,343"/>
+<area shape="poly" id="edge56_Node000087_Node000088" title=" " alt="" coords="3229,326,3575,379,3574,384,3228,331"/>
+<area shape="poly" id="edge59_Node000089_Node000090" title=" " alt="" coords="3641,238,3782,280,3781,285,3639,243"/>
+<area shape="poly" id="edge60_Node000089_Node000092" title=" " alt="" coords="3656,232,3659,233,3805,256,3951,281,3963,283,3962,288,3950,286,3804,262,3658,238,3655,237"/>
+<area shape="poly" id="edge61_Node000089_Node000093" title=" " alt="" coords="3656,232,3659,233,3796,249,3903,255,4010,262,4147,281,4159,283,4158,288,4146,286,4010,267,3902,260,3795,254,3658,238,3655,238"/>
+<area shape="poly" id="edge79_Node000094_Node000005" title=" " alt="" coords="3259,232,3373,256,3416,269,3439,281,3446,294,3449,306,3439,329,3408,362,3366,391,3313,417,3251,441,3107,481,2945,513,2777,537,2615,554,2356,572,2355,567,2614,549,2776,531,2944,507,3106,476,3250,436,3311,412,3363,386,3405,358,3435,327,3443,305,3441,296,3435,285,3414,274,3372,261,3258,237"/>
+<area shape="poly" id="edge77_Node000094_Node000016" title=" " alt="" coords="3258,234,3359,258,3396,270,3416,281,3424,294,3426,306,3424,318,3416,330,3391,349,3348,366,3290,382,3219,396,3045,422,2845,443,2434,474,2123,489,2123,484,2433,468,2845,438,3045,417,3218,391,3289,376,3346,361,3388,344,3412,326,3419,316,3421,306,3419,296,3412,285,3394,275,3357,263,3257,239"/>
+<area shape="poly" id="edge76_Node000094_Node000018" title=" " alt="" coords="3201,240,3279,281,3277,285,3198,245"/>
+<area shape="poly" id="edge78_Node000094_Node000052" title=" " alt="" coords="3259,233,3510,281,3528,284,3527,290,3508,286,3258,238"/>
+<area shape="poly" id="edge90_Node000097_Node000005" title=" " alt="" coords="3882,499,2356,572,2355,567,3882,494"/>
+<area shape="poly" id="edge96_Node000101_Node000005" title=" " alt="" coords="4379,500,4050,516,3059,552,2356,574,2355,569,3059,547,4050,511,4379,494"/>
+<area shape="poly" id="edge98_Node000102_Node000005" title=" " alt="" coords="4842,500,4548,516,3890,539,3249,557,2355,575,2355,570,3249,551,3890,534,4548,511,4842,495"/>
+<area shape="poly" id="edge100_Node000103_Node000005" title=" " alt="" coords="5275,430,5155,477,5083,499,5011,516,4942,525,4839,532,4547,545,3752,564,2923,573,2355,576,2355,571,2923,567,3752,558,4547,540,4838,527,4941,519,5010,511,5082,494,5153,472,5273,425"/>
 </map>

@@ -416,7 +416,54 @@ PYBIND11_MODULE(tenzor_core, m) {
                             }
                         } else {
                             // Slow path: handle non-contiguous tensors
-                            throw std::runtime_error("Non-contiguous tensor assignment not yet implemented");
+                            // Make both tensors contiguous, then copy
+                            auto dst_cont = dst.contiguous();
+                            auto src_cont = src.contiguous();
+
+                            size_t bytes = dst_cont.numel() * dst_cont.dtype_size();
+                            if (dst_cont.device().type == tenzor::Device::Type::CPU &&
+                                src_cont.device().type == tenzor::Device::Type::CPU) {
+                                std::memcpy(dst_cont.data_ptr(), src_cont.data_ptr(), bytes);
+                            } else {
+                                // Use backend copy for device tensors
+                                auto* backend = tenzor::backend_registry().get_backend(dst_cont.device().type);
+                                if (backend) {
+                                    backend->copy(dst_cont.data_ptr(), src_cont.data_ptr(), bytes,
+                                                tenzor::CopyKind::DeviceToDevice);
+                                }
+                            }
+
+                            // Copy back to original destination if it was non-contiguous
+                            if (!dst.is_contiguous()) {
+                                // Element-wise copy from contiguous to non-contiguous
+                                auto dst_shape_vec = dst.shape();
+                                std::vector<int64_t> indices(dst_shape_vec.size(), 0);
+                                size_t total_elements = dst.numel();
+
+                                for (size_t i = 0; i < total_elements; ++i) {
+                                    // Calculate linear index in contiguous tensor
+                                    size_t linear_idx = i;
+
+                                    // Calculate multi-dimensional index
+                                    size_t temp = linear_idx;
+                                    for (int64_t dim = static_cast<int64_t>(dst_shape_vec.size()) - 1; dim >= 0; --dim) {
+                                        indices[dim] = temp % dst_shape_vec[dim];
+                                        temp /= dst_shape_vec[dim];
+                                    }
+
+                                    // Calculate offset in non-contiguous tensor using strides
+                                    auto strides = dst.strides();
+                                    size_t offset = 0;
+                                    for (size_t dim = 0; dim < indices.size(); ++dim) {
+                                        offset += indices[dim] * strides[dim];
+                                    }
+
+                                    // Copy single element based on dtype
+                                    void* dst_ptr = static_cast<char*>(dst.data_ptr()) + offset * dst.dtype_size();
+                                    void* src_ptr = static_cast<char*>(dst_cont.data_ptr()) + i * dst_cont.dtype_size();
+                                    std::memcpy(dst_ptr, src_ptr, dst.dtype_size());
+                                }
+                            }
                         }
                         return;
                     }
@@ -445,8 +492,57 @@ PYBIND11_MODULE(tenzor_core, m) {
                     throw std::runtime_error("Shape mismatch: cannot broadcast source shape to destination shape");
                 }
 
-                // TODO: Implement proper broadcasting copy
-                throw std::runtime_error("Broadcasting assignment not yet fully implemented");
+                // Implement proper broadcasting copy
+                // Make source contiguous for easier access
+                auto src_cont = src.contiguous();
+
+                // Element-wise copy with broadcasting
+                auto dst_shape_vec = dst.shape();
+                auto src_shape_vec = src_cont.shape();
+                std::vector<int64_t> dst_indices(dst_shape_vec.size(), 0);
+                size_t total_elements = dst.numel();
+
+                for (size_t i = 0; i < total_elements; ++i) {
+                    // Calculate multi-dimensional index for destination
+                    size_t temp = i;
+                    for (int64_t dim = static_cast<int64_t>(dst_shape_vec.size()) - 1; dim >= 0; --dim) {
+                        dst_indices[dim] = temp % dst_shape_vec[dim];
+                        temp /= dst_shape_vec[dim];
+                    }
+
+                    // Calculate corresponding source index with broadcasting
+                    std::vector<int64_t> src_indices(src_shape_vec.size());
+                    for (int64_t i = 0; i < src_ndim; ++i) {
+                        int64_t dst_dim = dst_ndim - 1 - i;
+                        int64_t src_dim = src_ndim - 1 - i;
+
+                        // Apply broadcasting rule: dimension is either 1 (broadcast) or matches dst
+                        if (src_shape_vec[src_dim] == 1) {
+                            src_indices[src_dim] = 0;  // Broadcast this dimension
+                        } else {
+                            src_indices[src_dim] = dst_indices[dst_dim];
+                        }
+                    }
+
+                    // Calculate linear offset in source tensor
+                    size_t src_offset = 0;
+                    auto src_strides = src_cont.strides();
+                    for (size_t dim = 0; dim < src_indices.size(); ++dim) {
+                        src_offset += src_indices[dim] * src_strides[dim];
+                    }
+
+                    // Calculate offset in destination tensor
+                    size_t dst_offset = 0;
+                    auto dst_strides = dst.strides();
+                    for (size_t dim = 0; dim < dst_indices.size(); ++dim) {
+                        dst_offset += dst_indices[dim] * dst_strides[dim];
+                    }
+
+                    // Copy single element based on dtype
+                    void* dst_ptr = static_cast<char*>(dst.data_ptr()) + dst_offset * dst.dtype_size();
+                    void* src_ptr = static_cast<char*>(src_cont.data_ptr()) + src_offset * src_cont.dtype_size();
+                    std::memcpy(dst_ptr, src_ptr, dst.dtype_size());
+                }
             };
 
             // Handle integer indexing: tensor[0] = value

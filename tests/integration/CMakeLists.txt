@@ -99,6 +99,32 @@ target_link_libraries(test_distributed PRIVATE
 # Tests will automatically skip if RANK/WORLD_SIZE environment variables are not set
 gtest_discover_tests(test_distributed DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 600)
 
+# Multi-GPU integration tests (CUDA required)
+if(TENZOR_BUILD_CUDA)
+    find_package(CUDAToolkit REQUIRED)
+
+    add_executable(test_multi_gpu
+        test_multi_gpu.cpp
+    )
+
+    target_link_libraries(test_multi_gpu PRIVATE
+        tenzor_core
+        GTest::gtest_main
+        CUDA::cudart
+    )
+
+    target_include_directories(test_multi_gpu PRIVATE
+        ${CUDAToolkit_INCLUDE_DIRS}
+    )
+
+    target_compile_definitions(test_multi_gpu PRIVATE
+        TENZOR_USE_CUDA
+    )
+
+    # Multi-GPU tests require longer timeout for device synchronization
+    gtest_discover_tests(test_multi_gpu DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 900)
+endif()
+
 # Note: Existing integration tests
 # - test_nn.cpp
 # - test_training.cpp

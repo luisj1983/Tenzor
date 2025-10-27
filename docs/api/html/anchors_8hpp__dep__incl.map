@@ -1,0 +1,24 @@
+<map id="include/tenzor/nn/detection/anchors.hpp" name="include/tenzor/nn/detection/anchors.hpp">
+<area shape="rect" id="Node000001" title="Anchor box generation for object detection." alt="" coords="21,5,220,50"/>
+<area shape="rect" id="Node000002" href="$faster__rcnn_8hpp.html" title="Faster R&#45;CNN object detection model." alt="" coords="150,191,315,235"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="63,61,43,78,28,99,21,121,22,131,28,141,52,166,82,184,116,196,150,204,149,209,114,201,80,189,49,170,24,144,17,132,15,121,23,97,39,75,60,57"/>
+<area shape="rect" id="Node000003" href="$tenzor_8hpp.html" title="Main header &#45; includes all public Tenzor APIs." alt="" coords="140,283,325,311"/>
+<area shape="poly" id="edge12_Node000001_Node000003" title=" " alt="" coords="54,60,32,77,15,99,8,120,15,142,31,168,51,191,100,231,151,260,196,280,194,285,148,265,96,235,47,195,27,171,10,144,3,120,10,97,28,74,51,56"/>
+<area shape="rect" id="Node000008" href="$mask__rcnn_8hpp.html" title="Mask R&#45;CNN for instance segmentation." alt="" coords="38,98,203,143"/>
+<area shape="poly" id="edge7_Node000001_Node000008" title=" " alt="" coords="123,66,123,98,118,98,118,66"/>
+<area shape="rect" id="Node000009" href="$yolo_8hpp.html" title="YOLO (You Only Look Once) single&#45;stage object detection models." alt="" coords="227,98,392,143"/>
+<area shape="poly" id="edge8_Node000001_Node000009" title=" " alt="" coords="180,55,266,95,264,100,178,59"/>
+<area shape="rect" id="Node000010" href="$rpn_8hpp.html" title="Region Proposal Network for Faster R&#45;CNN." alt="" coords="416,98,614,143"/>
+<area shape="poly" id="edge9_Node000001_Node000010" title=" " alt="" coords="230,51,421,95,420,100,229,57"/>
+<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="235,251,235,283,230,283,230,251"/>
+<area shape="rect" id="Node000004" href="$dataset_8hpp_source.html" title=" " alt="" coords="74,359,220,404"/>
+<area shape="poly" id="edge3_Node000003_Node000004" title=" " alt="" coords="209,324,172,360,168,356,206,320"/>
+<area shape="rect" id="Node000007" href="$transforms_8hpp_source.html" title=" " alt="" coords="245,359,391,404"/>
+<area shape="poly" id="edge6_Node000003_Node000007" title=" " alt="" coords="259,320,297,356,293,360,255,324"/>
+<area shape="rect" id="Node000005" href="$dataloader_8hpp_source.html" title=" " alt="" coords="74,452,220,496"/>
+<area shape="poly" id="edge4_Node000004_Node000005" title=" " alt="" coords="150,419,150,451,144,451,144,419"/>
+<area shape="rect" id="Node000006" href="$quantize__api_8hpp.html" title="High&#45;level quantization API for model conversion." alt="" coords="48,544,246,589"/>
+<area shape="poly" id="edge5_Node000005_Node000006" title=" " alt="" coords="150,512,150,544,144,544,144,512"/>
+<area shape="poly" id="edge10_Node000010_Node000002" title=" " alt="" coords="434,150,301,193,299,188,432,145"/>
+<area shape="poly" id="edge11_Node000010_Node000003" title=" " alt="" coords="469,153,255,285,252,280,466,149"/>
+</map>

@@ -49,8 +49,14 @@ auto Linear::forward(const Variable& input) -> Variable {
         auto& weight_ptr = parameters_["weight"];
         auto& weight = *weight_ptr;
 
-        // TODO: Handle device mismatch properly with device transfer op
-        // For now, assume weight and input are on same device
+        // Handle device mismatch: transfer input to weight's device if needed
+        Variable input_2d_device = input_2d;
+        if (input_2d.tensor().device() != weight.tensor().device()) {
+            // Transfer input to weight's device
+            auto input_transferred = input_2d.tensor().to(weight.tensor().device());
+            input_2d_device = Variable(input_transferred, input_2d.requires_grad());
+            input_2d_device.set_grad_fn(input_2d.grad_fn());
+        }
 
         // Compute output = input_2d @ weight.T
         // input_2d: (batch_total, in_features)
@@ -61,8 +67,8 @@ auto Linear::forward(const Variable& input) -> Variable {
         // Transpose weight
         auto weight_t = autograd::permute(weight, {1, 0});  // (in_features, out_features)
 
-        // Matrix multiplication
-        auto output_2d = autograd::matmul(input_2d, weight_t);  // (batch_total, out_features)
+        // Matrix multiplication (use device-matched input)
+        auto output_2d = autograd::matmul(input_2d_device, weight_t);  // (batch_total, out_features)
 
         // Reshape output back to original dimensions: [*, out_features]
         std::vector<int64_t> output_shape = original_shape;

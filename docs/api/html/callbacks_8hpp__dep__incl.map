@@ -1,0 +1,7 @@
+<map id="include/tenzor/nn/callbacks.hpp" name="include/tenzor/nn/callbacks.hpp">
+<area shape="rect" id="Node000001" title="Training callback system for monitoring and controlling training loops." alt="" coords="5,5,232,33"/>
+<area shape="rect" id="Node000002" href="$training_8hpp.html" title="High&#45;level training API for neural networks." alt="" coords="11,81,226,109"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="121,49,121,81,116,81,116,49"/>
+<area shape="rect" id="Node000003" href="$mixed__precision_8hpp.html" title="Mixed precision training utilities for FP16/BF16 training." alt="" coords="30,157,207,201"/>
+<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="121,125,121,156,116,156,116,125"/>
+</map>

@@ -32,7 +32,7 @@ auto OperationRegistry::dispatch(const std::string& op_name,
 
     auto kernel_it = op_it->second.find(device_type);
     if (kernel_it == op_it->second.end()) {
-        throw TenzorException("Operation not implemented for device: " + op_name);
+        throw TenzorException("Operation '" + op_name + "' not registered for this device type");
     }
 
     // Execute kernel

@@ -300,25 +300,15 @@ auto GraphOptimizer::get_all_nodes(const ComputationGraph& graph) const
     -> std::vector<std::shared_ptr<GraphNode>> {
 
     std::vector<std::shared_ptr<GraphNode>> nodes;
+    nodes.reserve(graph.nodes_.size());
 
-    // The ComputationGraph stores nodes in a private map
-    // We need to traverse the graph to collect all nodes
-    // Since we don't have direct access to the map, we use the public API
-
-    // For this implementation, we create a minimal traversal
-    // In a real implementation, we might add a public method to ComputationGraph
-    // to retrieve all nodes, or make GraphOptimizer a friend class
-
-    // For now, we return an empty vector as a placeholder
-    // In practice, we would need ComputationGraph to expose its nodes
-    // or make GraphOptimizer a friend class
-
-    // Since the graph API doesn't expose all nodes directly, and we need to
-    // maintain const-correctness, we'll note that a full implementation
-    // would require either:
-    // 1. Adding a get_all_nodes() method to ComputationGraph
-    // 2. Making GraphOptimizer a friend of ComputationGraph
-    // 3. Tracking nodes externally during graph construction
+    // Access the private nodes_ map via friend declaration
+    // Extract all shared_ptr<GraphNode> values from the map
+    for (const auto& [func_ptr, node_ptr] : graph.nodes_) {
+        if (node_ptr) {
+            nodes.push_back(node_ptr);
+        }
+    }
 
     return nodes;
 }

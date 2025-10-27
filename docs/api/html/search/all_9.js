@@ -1,4 +1,4 @@
 var searchData=
 [
-  ['kernelfunction_0',['KernelFunction',['../namespacetenzor.html#a829391672bef2f5df6ec94a9aafa7230',1,'tenzor']]]
+  ['join_0',['join',['../classtenzor_1_1nn_1_1DistributedDataParallel.html#a73fdd7a07538aa296e007264432f9989',1,'tenzor::nn::DistributedDataParallel']]]
 ];

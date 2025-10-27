@@ -1,5 +1,7 @@
 var group__tensor__transform =
 [
+    [ "tenzor::cat", "group__tensor__transform.html#gac26396c428d94e98b55f9824376019cc", null ],
+    [ "tenzor::cat", "group__tensor__transform.html#ga06dfcf93d4f8a86341227b5a27d31a4f", null ],
     [ "tenzor::cat", "group__tensor__transform.html#ga5a4b634413b9997585a5e9662b47adcb", null ],
     [ "tenzor::chunk", "group__tensor__transform.html#ga14af04be99141ad1efb3162404fe89e1", null ],
     [ "tenzor::contiguous", "group__tensor__transform.html#gad035589f7e788dbe2768d75bb4d6f77b", null ],
@@ -8,6 +10,7 @@ var group__tensor__transform =
     [ "tenzor::permute", "group__tensor__transform.html#ga662859da2490a82a7e2b8e7006ca8fd5", null ],
     [ "tenzor::repeat", "group__tensor__transform.html#ga4263647f9075dd8c29d30e50602a9b57", null ],
     [ "tenzor::reshape", "group__tensor__transform.html#gada1b02734260e1a25d879751633ad857", null ],
+    [ "tenzor::roll", "group__tensor__transform.html#ga0659d0452a043d009c886f34ef2617f7", null ],
     [ "tenzor::split", "group__tensor__transform.html#ga88c1c72106c9fb8afea7df0915e0be76", null ],
     [ "tenzor::squeeze", "group__tensor__transform.html#ga5cb5fde30ee7971d75bde173c7d4c1bd", null ],
     [ "tenzor::stack", "group__tensor__transform.html#gafefa82b8c11b2c0d63408ad648d04660", null ],

@@ -597,10 +597,67 @@ auto ModelCheckpoint::compress_data(
     size_t input_size,
     std::vector<uint8_t>& output
 ) -> bool {
-    // Compression not implemented yet
-    // Would require linking with zlib, lz4, or zstd
-    output.resize(input_size);
-    std::memcpy(output.data(), input, input_size);
+    // Implement simple RLE (Run-Length Encoding) compression for tensor data
+    // This is a lightweight compression suitable for neural network weights
+    // which often contain repeated patterns and zeros
+
+    const uint8_t* input_bytes = static_cast<const uint8_t*>(input);
+    output.clear();
+    output.reserve(input_size);  // Reserve at least input size
+
+    if (input_size == 0) {
+        return true;
+    }
+
+    // RLE: Store byte followed by count if repeated, or raw bytes for non-repeated sequences
+    size_t i = 0;
+    while (i < input_size) {
+        uint8_t current = input_bytes[i];
+        size_t run_length = 1;
+
+        // Count consecutive identical bytes (max 255 for uint8_t counter)
+        while (i + run_length < input_size &&
+               input_bytes[i + run_length] == current &&
+               run_length < 255) {
+            run_length++;
+        }
+
+        if (run_length >= 3) {
+            // Use RLE encoding for runs of 3 or more
+            output.push_back(0xFF);  // RLE marker
+            output.push_back(static_cast<uint8_t>(run_length));
+            output.push_back(current);
+            i += run_length;
+        } else {
+            // Store raw bytes for short sequences
+            // Count non-repeated bytes
+            size_t raw_count = 0;
+            size_t start = i;
+            while (i < input_size && raw_count < 255) {
+                // Look ahead to see if we have a long run coming
+                size_t lookahead = 1;
+                while (i + lookahead < input_size &&
+                       input_bytes[i + lookahead] == input_bytes[i] &&
+                       lookahead < 3) {
+                    lookahead++;
+                }
+
+                if (lookahead >= 3) {
+                    break;  // Stop before a compressible run
+                }
+
+                raw_count++;
+                i++;
+            }
+
+            // Write raw sequence: count followed by bytes
+            output.push_back(static_cast<uint8_t>(raw_count));
+            for (size_t j = 0; j < raw_count; ++j) {
+                output.push_back(input_bytes[start + j]);
+            }
+        }
+    }
+
     return true;
 }
 
@@ -610,9 +667,45 @@ auto ModelCheckpoint::decompress_data(
     std::vector<uint8_t>& output,
     size_t expected_size
 ) -> bool {
-    // Decompression not implemented yet
-    output.resize(input_size);
-    std::memcpy(output.data(), input, input_size);
+    // Decompress RLE-encoded data
+    const uint8_t* input_bytes = static_cast<const uint8_t*>(input);
+    output.clear();
+    output.reserve(expected_size);
+
+    size_t i = 0;
+    while (i < input_size) {
+        if (input_bytes[i] == 0xFF && i + 2 < input_size) {
+            // RLE encoded run
+            uint8_t run_length = input_bytes[i + 1];
+            uint8_t value = input_bytes[i + 2];
+
+            for (uint8_t j = 0; j < run_length; ++j) {
+                output.push_back(value);
+            }
+
+            i += 3;
+        } else {
+            // Raw sequence
+            uint8_t raw_count = input_bytes[i];
+            i++;
+
+            if (i + raw_count > input_size) {
+                return false;  // Corrupted data
+            }
+
+            for (uint8_t j = 0; j < raw_count; ++j) {
+                output.push_back(input_bytes[i + j]);
+            }
+
+            i += raw_count;
+        }
+    }
+
+    // Verify expected size if provided
+    if (expected_size > 0 && output.size() != expected_size) {
+        return false;  // Size mismatch
+    }
+
     return true;
 }
 

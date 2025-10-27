@@ -95,7 +95,6 @@ add_library(tenzor_backend_vulkan SHARED
     vulkan_backend.cpp
     vulkan_backend.hpp
     vulkan_utils.hpp
-    vulkan_ops_impl.cpp
 )
 
 target_include_directories(tenzor_backend_vulkan PRIVATE

@@ -1,35 +1,55 @@
 <map id="tenzor::Function" name="tenzor::Function">
-<area shape="rect" id="Node000001" title="Base class for autograd differentiable functions." alt="" coords="229,369,354,397"/>
+<area shape="rect" id="Node000001" title="Base class for autograd differentiable functions." alt="" coords="229,629,354,657"/>
 <area shape="rect" id="Node000003" href="$classtenzor_1_1AbsBackward.html" title="Absolute value gradient function." alt="" coords="428,5,587,33"/>
-<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="291,353,296,289,312,206,326,162,345,119,370,79,400,44,427,27,430,32,404,48,374,82,350,121,331,164,318,207,301,290,296,354"/>
+<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="291,613,299,491,318,320,332,233,350,154,373,89,386,63,400,44,426,26,429,31,404,48,390,66,377,91,355,156,337,234,323,321,305,491,297,614"/>
 <area shape="rect" id="Node000004" href="$classtenzor_1_1AddBackward.html" title="Addition gradient function." alt="" coords="428,57,587,85"/>
-<area shape="poly" id="edge3_Node000001_Node000004" title=" " alt="" coords="293,353,301,298,320,229,334,193,351,157,373,125,400,96,426,80,429,85,404,100,378,128,356,160,338,195,325,231,306,300,298,354"/>
-<area shape="rect" id="Node000005" href="$classtenzor_1_1ClampBackward.html" title="Clamp gradient function." alt="" coords="420,109,596,137"/>
-<area shape="poly" id="edge4_Node000001_Node000005" title=" " alt="" coords="295,354,307,308,327,253,358,196,377,170,400,148,420,135,423,140,404,152,381,174,362,199,332,255,312,310,300,355"/>
-<area shape="rect" id="Node000006" href="$classtenzor_1_1DivBackward.html" title="Division gradient function." alt="" coords="430,161,586,189"/>
-<area shape="poly" id="edge5_Node000001_Node000006" title=" " alt="" coords="300,354,314,318,335,276,364,235,400,200,428,185,430,190,404,204,368,238,340,279,319,320,304,356"/>
-<area shape="rect" id="Node000007" href="$classtenzor_1_1ExpBackward.html" title="Exponential gradient function." alt="" coords="428,213,587,241"/>
-<area shape="poly" id="edge6_Node000001_Node000007" title=" " alt="" coords="306,354,345,302,371,275,401,252,427,239,429,244,403,256,374,279,349,305,311,358"/>
-<area shape="rect" id="Node000008" href="$classtenzor_1_1LogBackward.html" title="Natural logarithm gradient function." alt="" coords="429,265,586,293"/>
-<area shape="poly" id="edge7_Node000001_Node000008" title=" " alt="" coords="319,357,356,329,401,303,435,291,436,296,403,308,359,334,322,362"/>
-<area shape="rect" id="Node000009" href="$classtenzor_1_1LogSoftmaxBackward.html" title="Log&#45;softmax gradient function." alt="" coords="402,317,613,345"/>
-<area shape="poly" id="edge8_Node000001_Node000009" title=" " alt="" coords="366,363,446,343,447,348,367,368"/>
-<area shape="rect" id="Node000010" href="$classtenzor_1_1MatMulBackward.html" title="Matrix multiplication gradient function." alt="" coords="416,369,599,397"/>
-<area shape="poly" id="edge9_Node000001_Node000010" title=" " alt="" coords="370,380,416,380,416,386,370,386"/>
-<area shape="rect" id="Node000011" href="$classtenzor_1_1MaxBackward.html" title="Max reduction gradient function." alt="" coords="426,421,589,449"/>
-<area shape="poly" id="edge10_Node000001_Node000011" title=" " alt="" coords="367,399,447,418,446,423,366,404"/>
-<area shape="rect" id="Node000012" href="$classtenzor_1_1MeanBackward.html" title="Mean reduction gradient function." alt="" coords="422,473,593,501"/>
-<area shape="poly" id="edge11_Node000001_Node000012" title=" " alt="" coords="322,405,359,433,403,458,436,470,435,475,401,463,356,437,319,409"/>
-<area shape="rect" id="Node000013" href="$classtenzor_1_1MulBackward.html" title="Multiplication gradient function." alt="" coords="428,525,587,553"/>
-<area shape="poly" id="edge12_Node000001_Node000013" title=" " alt="" coords="311,409,349,461,374,488,403,510,429,523,427,527,401,515,371,492,345,465,306,412"/>
-<area shape="rect" id="Node000014" href="$classtenzor_1_1NegBackward.html" title="Negation gradient function." alt="" coords="428,577,588,605"/>
-<area shape="poly" id="edge13_Node000001_Node000014" title=" " alt="" coords="304,411,319,446,340,487,368,528,404,562,428,576,426,580,400,567,364,531,335,490,314,448,300,413"/>
-<area shape="rect" id="Node000015" href="$classtenzor_1_1ReLUBackward.html" title="ReLU activation gradient function." alt="" coords="424,629,592,657"/>
-<area shape="poly" id="edge14_Node000001_Node000015" title=" " alt="" coords="300,411,312,456,332,512,362,567,381,593,404,614,425,627,422,632,400,619,377,596,358,570,327,514,307,458,295,413"/>
-<area shape="rect" id="Node000016" href="$classtenzor_1_1SubBackward.html" title="Subtraction gradient function." alt="" coords="428,681,587,709"/>
-<area shape="poly" id="edge15_Node000001_Node000016" title=" " alt="" coords="298,412,306,467,325,536,338,572,356,606,378,638,404,666,429,682,427,686,400,671,373,642,351,609,334,574,320,537,301,468,293,413"/>
-<area shape="rect" id="Node000017" href="$classtenzor_1_1SumBackward.html" title="Sum reduction gradient function." alt="" coords="426,733,589,761"/>
-<area shape="poly" id="edge16_Node000001_Node000017" title=" " alt="" coords="296,413,301,476,318,559,331,602,350,645,374,684,404,718,427,733,424,738,400,723,370,687,345,647,326,604,312,560,296,477,291,413"/>
-<area shape="rect" id="Node000002" title=" " alt="" coords="5,361,181,406"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="196,380,229,380,229,386,196,386"/>
+<area shape="poly" id="edge3_Node000001_Node000004" title=" " alt="" coords="292,614,301,501,321,346,336,267,353,196,375,136,400,96,426,79,429,83,404,100,379,139,358,197,341,268,326,347,307,502,297,614"/>
+<area shape="rect" id="Node000005" href="$classtenzor_1_1BmmBackward.html" title="Batch matrix multiplication gradient function." alt="" coords="423,109,592,137"/>
+<area shape="poly" id="edge4_Node000001_Node000005" title=" " alt="" coords="293,614,304,510,325,371,339,301,356,237,377,184,400,148,421,133,424,138,404,152,381,186,361,238,344,302,330,372,309,511,298,614"/>
+<area shape="rect" id="Node000006" href="$classtenzor_1_1CatBackward.html" title="Concatenation gradient function." alt="" coords="430,161,586,189"/>
+<area shape="poly" id="edge5_Node000001_Node000006" title=" " alt="" coords="293,614,306,520,328,397,343,334,360,278,379,232,400,200,428,182,431,187,404,204,383,234,365,280,348,336,333,398,311,521,299,615"/>
+<area shape="rect" id="Node000007" href="$classtenzor_1_1ClampBackward.html" title="Clamp gradient function." alt="" coords="420,213,596,241"/>
+<area shape="poly" id="edge6_Node000001_Node000007" title=" " alt="" coords="289,614,292,541,306,444,319,392,339,341,366,294,400,252,418,239,421,244,404,256,370,297,344,343,324,394,311,445,297,542,294,614"/>
+<area shape="rect" id="Node000008" href="$classtenzor_1_1DivBackward.html" title="Division gradient function." alt="" coords="430,265,586,293"/>
+<area shape="poly" id="edge7_Node000001_Node000008" title=" " alt="" coords="291,613,296,549,312,466,326,422,345,379,370,339,400,304,428,287,431,292,404,308,374,342,350,381,331,424,318,467,301,550,296,614"/>
+<area shape="rect" id="Node000009" href="$classtenzor_1_1ExpBackward.html" title="Exponential gradient function." alt="" coords="428,317,587,345"/>
+<area shape="poly" id="edge8_Node000001_Node000009" title=" " alt="" coords="293,613,301,558,320,489,334,453,351,417,373,385,400,356,427,340,429,345,404,360,378,388,356,420,338,455,325,491,306,560,298,614"/>
+<area shape="rect" id="Node000010" href="$classtenzor_1_1LogBackward.html" title="Natural logarithm gradient function." alt="" coords="429,369,586,397"/>
+<area shape="poly" id="edge9_Node000001_Node000010" title=" " alt="" coords="295,614,307,568,327,513,358,456,377,430,400,408,427,392,430,397,404,412,381,434,362,459,332,515,312,570,300,615"/>
+<area shape="rect" id="Node000011" href="$classtenzor_1_1LogSoftmaxBackward.html" title="Log&#45;softmax gradient function." alt="" coords="402,421,613,449"/>
+<area shape="poly" id="edge10_Node000001_Node000011" title=" " alt="" coords="300,614,314,578,335,536,364,495,400,460,422,447,425,452,404,464,368,498,340,539,319,580,304,616"/>
+<area shape="rect" id="Node000012" href="$classtenzor_1_1MatMulBackward.html" title="Matrix multiplication gradient function." alt="" coords="416,473,599,501"/>
+<area shape="poly" id="edge11_Node000001_Node000012" title=" " alt="" coords="306,614,345,562,371,535,401,512,427,499,429,504,403,516,374,539,349,565,311,618"/>
+<area shape="rect" id="Node000013" href="$classtenzor_1_1MaxBackward.html" title="Max reduction gradient function." alt="" coords="426,525,589,553"/>
+<area shape="poly" id="edge12_Node000001_Node000013" title=" " alt="" coords="319,617,356,589,401,563,435,551,436,556,403,568,359,594,322,622"/>
+<area shape="rect" id="Node000014" href="$classtenzor_1_1MeanBackward.html" title="Mean reduction gradient function." alt="" coords="422,577,593,605"/>
+<area shape="poly" id="edge13_Node000001_Node000014" title=" " alt="" coords="366,623,446,603,447,608,367,628"/>
+<area shape="rect" id="Node000015" href="$classtenzor_1_1MulBackward.html" title="Multiplication gradient function." alt="" coords="428,629,587,657"/>
+<area shape="poly" id="edge14_Node000001_Node000015" title=" " alt="" coords="369,640,428,640,428,646,369,646"/>
+<area shape="rect" id="Node000016" href="$classtenzor_1_1NegBackward.html" title="Negation gradient function." alt="" coords="428,681,588,709"/>
+<area shape="poly" id="edge15_Node000001_Node000016" title=" " alt="" coords="367,659,447,678,446,683,366,664"/>
+<area shape="rect" id="Node000017" href="$classtenzor_1_1PermuteBackward.html" title="Permute gradient function." alt="" coords="413,733,602,761"/>
+<area shape="poly" id="edge16_Node000001_Node000017" title=" " alt="" coords="322,665,359,693,403,718,436,730,435,735,401,723,356,697,319,669"/>
+<area shape="rect" id="Node000018" href="$classtenzor_1_1ReLUBackward.html" title="ReLU activation gradient function." alt="" coords="424,785,592,813"/>
+<area shape="poly" id="edge17_Node000001_Node000018" title=" " alt="" coords="311,669,349,721,374,748,403,770,429,782,427,787,401,775,371,752,345,725,306,672"/>
+<area shape="rect" id="Node000019" href="$classtenzor_1_1ReshapeBackward.html" title="Reshape gradient function." alt="" coords="412,837,603,865"/>
+<area shape="poly" id="edge18_Node000001_Node000019" title=" " alt="" coords="304,671,319,706,340,747,368,788,404,822,425,834,422,839,400,827,364,791,335,750,314,708,300,673"/>
+<area shape="rect" id="Node000020" href="$classtenzor_1_1SliceBackward.html" title="Slice gradient function." alt="" coords="425,889,590,917"/>
+<area shape="poly" id="edge19_Node000001_Node000020" title=" " alt="" coords="300,671,312,716,332,772,362,827,381,853,404,874,426,888,423,892,400,879,377,856,358,830,327,774,307,718,295,673"/>
+<area shape="rect" id="Node000021" href="$classtenzor_1_1SoftmaxBackward.html" title="Softmax gradient function." alt="" coords="414,941,602,969"/>
+<area shape="poly" id="edge20_Node000001_Node000021" title=" " alt="" coords="298,672,306,727,325,796,338,832,356,866,378,898,404,926,422,939,419,943,400,931,373,902,351,869,334,834,320,797,301,728,293,673"/>
+<area shape="rect" id="Node000022" href="$classtenzor_1_1SqueezeBackward.html" title="Squeeze gradient function." alt="" coords="413,993,602,1021"/>
+<area shape="poly" id="edge21_Node000001_Node000022" title=" " alt="" coords="296,673,301,736,318,819,331,862,350,905,374,944,404,979,422,991,418,995,400,982,370,947,345,907,326,864,312,820,296,737,291,673"/>
+<area shape="rect" id="Node000023" href="$classtenzor_1_1SubBackward.html" title="Subtraction gradient function." alt="" coords="428,1045,587,1073"/>
+<area shape="poly" id="edge22_Node000001_Node000023" title=" " alt="" coords="294,672,297,745,311,841,324,893,344,943,370,990,404,1030,429,1047,427,1051,400,1035,366,993,339,945,319,894,306,842,292,745,289,672"/>
+<area shape="rect" id="Node000024" href="$classtenzor_1_1SumBackward.html" title="Sum reduction gradient function." alt="" coords="426,1097,589,1125"/>
+<area shape="poly" id="edge23_Node000001_Node000024" title=" " alt="" coords="299,672,311,765,333,889,348,951,365,1007,383,1052,404,1083,427,1098,424,1102,400,1086,379,1055,360,1008,343,952,328,890,306,766,293,672"/>
+<area shape="rect" id="Node000025" href="$classtenzor_1_1TransposeBackward.html" title="Transpose gradient function." alt="" coords="408,1149,607,1177"/>
+<area shape="poly" id="edge24_Node000001_Node000025" title=" " alt="" coords="298,672,309,775,330,914,344,985,361,1048,381,1100,404,1135,420,1147,417,1151,400,1138,377,1102,356,1050,339,986,325,915,304,776,293,673"/>
+<area shape="rect" id="Node000026" href="$classtenzor_1_1UpsampleBilinearBackward.html" title="Bilinear upsample gradient function." alt="" coords="414,1201,601,1246"/>
+<area shape="poly" id="edge25_Node000001_Node000026" title=" " alt="" coords="297,672,308,785,328,939,342,1017,360,1088,380,1147,404,1187,417,1198,414,1202,400,1190,375,1149,355,1090,337,1018,323,940,302,785,292,673"/>
+<area shape="rect" id="Node000027" href="$classtenzor_1_1autograd_1_1CheckpointFunction.html" title="Checkpointed function wrapper." alt="" coords="403,1270,612,1315"/>
+<area shape="poly" id="edge26_Node000001_Node000027" title=" " alt="" coords="297,672,305,798,324,973,338,1062,356,1143,378,1210,390,1236,404,1256,417,1268,413,1272,400,1260,386,1239,373,1212,351,1145,333,1063,318,973,300,798,291,673"/>
+<area shape="rect" id="Node000002" title=" " alt="" coords="5,621,181,666"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="196,640,229,640,229,646,196,646"/>
 </map>

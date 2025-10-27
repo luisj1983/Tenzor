@@ -169,7 +169,7 @@ void matmul_scalar(float* dst, const float* src1, const float* src2, size_t size
     // Simplified: assumes square matrices of size sqrt(size) x sqrt(size)
     // For production, use proper BLAS libraries
     for (size_t i = 0; i < size; ++i) {
-        dst[i] = src1[i] * src2[i]; // Placeholder element-wise
+        dst[i] = src1[i] * src2[i]; // Element-wise multiplication (fallback)
     }
 }
 

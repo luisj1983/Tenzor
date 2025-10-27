@@ -49,7 +49,7 @@ auto contiguous(const Tensor& input) -> Tensor {
     return input.contiguous();
 }
 
-// Additional stub implementations
+// Additional transform operations
 auto cat(std::span<const Tensor> tensors, int64_t dim) -> Tensor {
     if (tensors.empty()) {
         throw std::invalid_argument("Cannot concatenate empty tensor list");
@@ -285,13 +285,165 @@ auto chunk(const Tensor& input, int64_t chunks, int64_t dim) -> std::vector<Tens
 }
 
 auto repeat(const Tensor& input, std::vector<int64_t> repeats) -> Tensor {
-    // TODO: Implement repeat
-    return input;
+    auto shape = input.shape();
+    int64_t ndim = shape.size();
+
+    // Validate repeats size
+    if (repeats.size() > static_cast<size_t>(ndim)) {
+        throw std::invalid_argument("Number of repeat dimensions cannot exceed input dimensions");
+    }
+
+    // Pad repeats with 1s at the front if needed
+    while (repeats.size() < static_cast<size_t>(ndim)) {
+        repeats.insert(repeats.begin(), 1);
+    }
+
+    // Calculate output shape
+    std::vector<int64_t> out_shape(ndim);
+    for (int64_t i = 0; i < ndim; ++i) {
+        out_shape[i] = shape[i] * repeats[i];
+    }
+
+    // For non-CPU devices, use dispatcher
+    if (input.device().type != Device::Type::CPU) {
+        OpAttributes attrs;
+        attrs["repeats"] = shape_to_string(repeats);
+        std::vector<Tensor> inputs = {input};
+        return Dispatcher::dispatch("repeat", inputs, attrs)[0];
+    }
+
+    // CPU implementation: repeat elements along each dimension
+    // Make input contiguous for easier indexing
+    auto input_cont = input.is_contiguous() ? input : input.contiguous();
+    const float* input_data = input_cont.data<float>();
+
+    // Create output tensor
+    auto output = empty(out_shape, input.dtype(), Device::cpu());
+    float* output_data = output.data<float>();
+
+    // Calculate total elements
+    int64_t total_out = 1;
+    for (auto s : out_shape) {
+        total_out *= s;
+    }
+
+    // Calculate input strides (contiguous)
+    std::vector<int64_t> in_strides(ndim);
+    int64_t in_stride = 1;
+    for (int64_t i = ndim - 1; i >= 0; --i) {
+        in_strides[i] = in_stride;
+        in_stride *= shape[i];
+    }
+
+    // Fill output by repeating each element
+    for (int64_t out_idx = 0; out_idx < total_out; ++out_idx) {
+        // Calculate output coordinates
+        int64_t temp = out_idx;
+        std::vector<int64_t> out_coords(ndim);
+        for (int64_t i = ndim - 1; i >= 0; --i) {
+            out_coords[i] = temp % out_shape[i];
+            temp /= out_shape[i];
+        }
+
+        // Map to input coordinates (divide by repeat factor)
+        int64_t in_idx = 0;
+        for (int64_t i = 0; i < ndim; ++i) {
+            int64_t in_coord = out_coords[i] / repeats[i];
+            in_idx += in_coord * in_strides[i];
+        }
+
+        output_data[out_idx] = input_data[in_idx];
+    }
+
+    return output;
 }
 
 auto tile(const Tensor& input, std::vector<int64_t> reps) -> Tensor {
-    // TODO: Implement tile
-    return input;
+    auto shape = input.shape();
+    int64_t ndim = shape.size();
+
+    // Validate reps
+    if (reps.empty()) {
+        throw std::invalid_argument("Tile repetitions cannot be empty");
+    }
+
+    // Determine output dimensions
+    int64_t out_ndim = std::max(ndim, static_cast<int64_t>(reps.size()));
+
+    // Pad shape and reps with 1s to match dimensions
+    std::vector<int64_t> padded_shape(out_ndim, 1);
+    std::vector<int64_t> padded_reps(out_ndim, 1);
+
+    // Copy shape (right-aligned)
+    int64_t shape_offset = out_ndim - ndim;
+    for (int64_t i = 0; i < ndim; ++i) {
+        padded_shape[shape_offset + i] = shape[i];
+    }
+
+    // Copy reps (right-aligned)
+    int64_t reps_offset = out_ndim - static_cast<int64_t>(reps.size());
+    for (size_t i = 0; i < reps.size(); ++i) {
+        padded_reps[reps_offset + i] = reps[i];
+    }
+
+    // Calculate output shape
+    std::vector<int64_t> out_shape(out_ndim);
+    for (int64_t i = 0; i < out_ndim; ++i) {
+        out_shape[i] = padded_shape[i] * padded_reps[i];
+    }
+
+    // For non-CPU devices, use dispatcher
+    if (input.device().type != Device::Type::CPU) {
+        OpAttributes attrs;
+        attrs["reps"] = shape_to_string(reps);
+        std::vector<Tensor> inputs = {input};
+        return Dispatcher::dispatch("tile", inputs, attrs)[0];
+    }
+
+    // CPU implementation: tile entire tensor along each dimension
+    // Make contiguous for easier indexing
+    auto input_cont = input.is_contiguous() ? input : input.contiguous();
+    const float* input_data = input_cont.data<float>();
+
+    // Create output tensor
+    auto output = empty(out_shape, input.dtype(), Device::cpu());
+    float* output_data = output.data<float>();
+
+    // Calculate total elements
+    int64_t total_out = 1;
+    for (auto s : out_shape) {
+        total_out *= s;
+    }
+
+    // Calculate input strides (contiguous)
+    std::vector<int64_t> in_strides(out_ndim);
+    int64_t in_stride = 1;
+    for (int64_t i = out_ndim - 1; i >= 0; --i) {
+        in_strides[i] = in_stride;
+        in_stride *= padded_shape[i];
+    }
+
+    // Fill output by tiling the input
+    for (int64_t out_idx = 0; out_idx < total_out; ++out_idx) {
+        // Calculate output coordinates
+        int64_t temp = out_idx;
+        std::vector<int64_t> out_coords(out_ndim);
+        for (int64_t i = out_ndim - 1; i >= 0; --i) {
+            out_coords[i] = temp % out_shape[i];
+            temp /= out_shape[i];
+        }
+
+        // Map to input coordinates (modulo by input shape)
+        int64_t in_idx = 0;
+        for (int64_t i = 0; i < out_ndim; ++i) {
+            int64_t in_coord = out_coords[i] % padded_shape[i];
+            in_idx += in_coord * in_strides[i];
+        }
+
+        output_data[out_idx] = input_data[in_idx];
+    }
+
+    return output;
 }
 
 auto expand(const Tensor& input, std::vector<int64_t> shape) -> Tensor {

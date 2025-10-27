@@ -320,7 +320,7 @@ template<> auto Tensor::item<std::complex<double>>() const -> std::complex<doubl
     return *reinterpret_cast<const std::complex<double>*>(impl_->storage->data());
 }
 
-// Stub implementations for operations
+// Core tensor operation implementations
 auto Tensor::to(Device device) const -> Tensor {
     if (!impl_) {
         return *this;
@@ -1091,8 +1091,39 @@ auto Tensor::nonzero() const -> Tensor {
 
 // Indexing
 auto Tensor::operator[](int64_t idx) const -> Tensor {
-    // TODO: Implement indexing
-    return *this;
+    if (!impl_) {
+        throw std::runtime_error("Cannot index null tensor");
+    }
+
+    const int64_t ndims = ndim();
+    if (ndims == 0) {
+        throw std::runtime_error("Cannot index 0D scalar tensor");
+    }
+
+    const int64_t dim0_size = impl_->shape[0];
+
+    // Handle negative indices (e.g., tensor[-1] is the last element)
+    int64_t normalized_idx = idx;
+    if (normalized_idx < 0) {
+        normalized_idx += dim0_size;
+    }
+
+    // Validate index is in bounds
+    if (normalized_idx < 0 || normalized_idx >= dim0_size) {
+        throw std::out_of_range("Index " + std::to_string(idx) +
+                                " is out of bounds for dimension 0 with size " +
+                                std::to_string(dim0_size));
+    }
+
+    // Use slice to get a single element along dimension 0
+    // slice(dim, start, end, step) - end is exclusive
+    Tensor result = slice(0, normalized_idx, normalized_idx + 1, 1);
+
+    // For 1D tensors: squeeze to get a 0D scalar tensor
+    // For multi-dimensional tensors: squeeze only dimension 0 to get a view
+    result = result.squeeze(0);
+
+    return result;
 }
 
 auto Tensor::slice(int64_t dim, int64_t start, int64_t end, int64_t step) const -> Tensor {

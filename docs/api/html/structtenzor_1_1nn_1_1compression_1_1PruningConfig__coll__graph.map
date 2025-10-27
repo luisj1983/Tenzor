@@ -1,0 +1,14 @@
+<map id="tenzor::nn::compression::PruningConfig" name="tenzor::nn::compression::PruningConfig">
+<area shape="rect" id="Node000001" title="Pruning configuration and state." alt="" coords="84,452,261,497"/>
+<area shape="rect" id="Node000002" title=" " alt="" coords="50,318,294,379"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="175,395,175,452,170,452,170,395"/>
+<area shape="rect" id="Node000003" title=" " alt="" coords="170,99,257,127"/>
+<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="224,142,225,151,230,223,227,261,219,295,205,318,200,316,214,293,222,260,225,223,220,151,219,143"/>
+<area shape="rect" id="Node000005" href="$structtenzor_1_1nn_1_1compression_1_1PruningMask.html" title="Binary mask for weight pruning." alt="" coords="16,200,193,245"/>
+<area shape="poly" id="edge6_Node000005_Node000003" title=" " alt="" coords="162,137,140,153,123,176,113,201,108,199,119,173,136,149,158,132"/>
+<area shape="rect" id="Node000004" title=" " alt="" coords="144,5,283,50"/>
+<area shape="poly" id="edge3_Node000003_Node000004" title=" " alt="" coords="216,65,216,99,211,99,211,65"/>
+<area shape="poly" id="edge4_Node000002_Node000005" title=" " alt="" coords="126,257,158,316,153,318,121,260"/>
+<area shape="rect" id="Node000006" href="$classtenzor_1_1Tensor.html" title="Multi&#45;dimensional array with automatic differentiation support." alt="" coords="5,99,118,127"/>
+<area shape="poly" id="edge5_Node000005_Node000006" title=" " alt="" coords="61,142,61,159,65,175,81,198,76,201,60,177,56,160,55,142"/>
+</map>

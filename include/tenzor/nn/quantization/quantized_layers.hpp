@@ -311,59 +311,168 @@ private:
 };
 
 /**
- * @brief Quantization stub for model input.
+ * @brief Quantization layer for model input.
  *
- * Quantizes floating-point input at the model entrance.
- * Should be the first layer in a quantized model.
+ * Quantizes floating-point input tensors to INT8/UINT8 at model entrance.
+ * Converts FP32 values to quantized integers using:
+ *   q = clamp(round(x / scale) + zero_point, qmin, qmax)
+ *
+ * Supports both symmetric and asymmetric quantization:
+ * - Symmetric (zero_point = 0): Uses INT8 range [-128, 127]
+ * - Asymmetric (zero_point != 0): Uses full INT8 or UINT8 range
+ *
+ * Should be the first layer in a quantized model to prepare inputs
+ * for quantized operations downstream.
+ *
+ * @code
+ * // Symmetric INT8 quantization
+ * auto qparams = compute_quantization_params(
+ *     min_val, max_val,
+ *     QuantDType::INT8,
+ *     QuantizationScheme::PerTensorSymmetric
+ * );
+ * auto quant_stub = std::make_shared<QuantStub>(qparams);
+ *
+ * // Quantize input
+ * Tensor fp_input({1, 3, 224, 224}, DType::Float32);
+ * QuantizedTensor q_input = quant_stub->forward_to_quantized(fp_input);
+ * @endcode
  */
-class QuantizationStub : public Module {
+class QuantStub : public Module {
 public:
     /**
-     * @brief Construct quantization stub.
+     * @brief Construct quantization layer.
      *
-     * @param qparams Input quantization parameters
+     * @param qparams Quantization parameters (scale, zero_point, dtype, scheme)
      */
-    explicit QuantizationStub(QuantizationParams qparams);
+    explicit QuantStub(QuantizationParams qparams);
 
     /**
-     * @brief Forward pass: quantize input.
+     * @brief Forward pass: quantize floating-point input.
      *
-     * @param input Floating-point input
-     * @return Quantized output (as QuantizedTensor wrapped in Variable)
+     * Converts FP32 input to quantized representation. The output Variable
+     * contains metadata about quantization parameters for downstream layers.
+     *
+     * @param input Floating-point input variable
+     * @return Variable containing quantized tensor data
      */
     auto forward(const Variable& input) -> Variable override;
 
     /**
-     * @brief Get quantized output directly.
+     * @brief Quantize tensor directly.
+     *
+     * Performs quantization without Variable wrapper:
+     * 1. Scale input: x_scaled = x / scale
+     * 2. Add zero point: x_shifted = x_scaled + zero_point
+     * 3. Round to nearest integer: x_rounded = round(x_shifted)
+     * 4. Clamp to valid range: q = clamp(x_rounded, qmin, qmax)
+     *
+     * @param input Floating-point tensor
+     * @return QuantizedTensor with INT8/UINT8 data and parameters
      */
     auto forward_to_quantized(const Tensor& input) -> QuantizedTensor;
 
+    /**
+     * @brief Get quantization parameters.
+     */
+    auto qparams() const -> const QuantizationParams& { return qparams_; }
+
+    /**
+     * @brief Update quantization parameters.
+     *
+     * Useful for calibration or adapting to new data distributions.
+     *
+     * @param qparams New quantization parameters
+     */
+    auto set_qparams(QuantizationParams qparams) -> void {
+        qparams_ = std::move(qparams);
+    }
+
+    /**
+     * @brief Check if using symmetric quantization.
+     */
+    auto is_symmetric() const -> bool {
+        return qparams_.scheme == QuantizationScheme::PerTensorSymmetric ||
+               qparams_.scheme == QuantizationScheme::PerChannelSymmetric;
+    }
+
+    /**
+     * @brief Check if using per-channel quantization.
+     */
+    auto is_per_channel() const -> bool {
+        return qparams_.scheme == QuantizationScheme::PerChannelSymmetric ||
+               qparams_.scheme == QuantizationScheme::PerChannelAsymmetric;
+    }
+
 private:
-    QuantizationParams qparams_;
+    QuantizationParams qparams_;  ///< Quantization parameters (scale, zero_point)
 };
 
 /**
- * @brief Dequantization stub for model output.
+ * @brief Dequantization layer for model output.
  *
- * Dequantizes quantized tensor back to floating-point at model exit.
- * Should be the last layer in a quantized model.
+ * Dequantizes INT8/UINT8 tensors back to floating-point at model exit.
+ * Converts quantized integers back to FP32 values using:
+ *   x = (q - zero_point) * scale
+ *
+ * This is the inverse operation of QuantStub. Should be the last layer
+ * in a quantized model to convert outputs back to floating-point for
+ * compatibility with loss functions and metrics.
+ *
+ * The dequantization process:
+ * 1. Subtract zero point: x_shifted = q - zero_point
+ * 2. Scale to float range: x = x_shifted * scale
+ *
+ * @code
+ * auto dequant_stub = std::make_shared<DeQuantStub>();
+ *
+ * // Dequantize output from quantized model
+ * QuantizedTensor q_output = quantized_model->forward_quantized(q_input);
+ * Tensor fp_output = dequant_stub->forward_from_quantized(q_output);
+ * @endcode
  */
-class DequantizationStub : public Module {
+class DeQuantStub : public Module {
 public:
-    DequantizationStub() = default;
+    DeQuantStub() = default;
 
     /**
      * @brief Forward pass: dequantize input.
      *
-     * @param input Quantized input (wrapped as Variable)
-     * @return Floating-point output
+     * Takes a Variable that should contain quantized tensor data and
+     * dequantizes it back to floating-point. The input Variable must
+     * have quantization metadata attached.
+     *
+     * @param input Variable containing quantized tensor
+     * @return Floating-point output variable
      */
     auto forward(const Variable& input) -> Variable override;
 
     /**
-     * @brief Dequantize directly from QuantizedTensor.
+     * @brief Dequantize QuantizedTensor directly.
+     *
+     * Performs dequantization without Variable wrapper:
+     * 1. Cast INT8/UINT8 to float: x_float = float(q)
+     * 2. Subtract zero point: x_shifted = x_float - zero_point
+     * 3. Scale to original range: x = x_shifted * scale
+     *
+     * Handles both per-tensor and per-channel quantization:
+     * - Per-tensor: Single scale and zero_point for entire tensor
+     * - Per-channel: Different scale/zero_point per channel
+     *
+     * @param input QuantizedTensor with quantization parameters
+     * @return Dequantized floating-point tensor
      */
     auto forward_from_quantized(const QuantizedTensor& input) -> Tensor;
+
+    /**
+     * @brief Check if last dequantization was per-channel.
+     *
+     * Useful for debugging and validation.
+     */
+    auto last_was_per_channel() const -> bool { return last_per_channel_; }
+
+private:
+    bool last_per_channel_{false};  ///< Track if last operation was per-channel
 };
 
 } // namespace quantization

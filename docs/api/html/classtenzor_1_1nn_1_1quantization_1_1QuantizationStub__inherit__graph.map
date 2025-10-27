@@ -1,0 +1,5 @@
+<map id="tenzor::nn::quantization::QuantizationStub" name="tenzor::nn::quantization::QuantizationStub">
+<area shape="rect" id="Node000001" title="Quantization stub for model input." alt="" coords="5,81,181,126"/>
+<area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="22,5,164,33"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="96,49,96,80,90,80,90,49"/>
+</map>

@@ -1,7 +1,0 @@
-add_test([=[NNTest.LinearLayer]=]  /home/lee/Projects/Tenzor/bin/tenzor_integration_tests [==[--gtest_filter=NNTest.LinearLayer]==] --gtest_also_run_disabled_tests)
-set_tests_properties([=[NNTest.LinearLayer]=]  PROPERTIES WORKING_DIRECTORY /home/lee/Projects/Tenzor/build_fresh/tests SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
-add_test([=[NNTest.Sequential]=]  /home/lee/Projects/Tenzor/bin/tenzor_integration_tests [==[--gtest_filter=NNTest.Sequential]==] --gtest_also_run_disabled_tests)
-set_tests_properties([=[NNTest.Sequential]=]  PROPERTIES WORKING_DIRECTORY /home/lee/Projects/Tenzor/build_fresh/tests SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
-add_test([=[TrainingTest.SimpleOptimization]=]  /home/lee/Projects/Tenzor/bin/tenzor_integration_tests [==[--gtest_filter=TrainingTest.SimpleOptimization]==] --gtest_also_run_disabled_tests)
-set_tests_properties([=[TrainingTest.SimpleOptimization]=]  PROPERTIES WORKING_DIRECTORY /home/lee/Projects/Tenzor/build_fresh/tests SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
-set(  tenzor_integration_tests_TESTS NNTest.LinearLayer NNTest.Sequential TrainingTest.SimpleOptimization)

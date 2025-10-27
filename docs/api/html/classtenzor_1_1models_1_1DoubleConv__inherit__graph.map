@@ -1,0 +1,5 @@
+<map id="tenzor::models::DoubleConv" name="tenzor::models::DoubleConv">
+<area shape="rect" id="Node000001" title="Double convolution block &#45; fundamental building block of U&#45;Net." alt="" coords="5,81,211,109"/>
+<area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="37,5,179,33"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="111,49,111,81,105,81,105,49"/>
+</map>

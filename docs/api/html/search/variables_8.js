@@ -1,5 +1,20 @@
 var searchData=
 [
-  ['ref_5fcount_0',['ref_count',['../structtenzor_1_1GraphNode.html#a0e77dc0bf74ab5f25a544eea1c70ed13',1,'tenzor::GraphNode']]],
-  ['requires_5fgrad_1',['requires_grad',['../classtenzor_1_1TensorImpl.html#af389dddf8256d92c80bd99737dc1879c',1,'tenzor::TensorImpl']]]
+  ['id_0',['id',['../structtenzor_1_1ops_1_1FusionNode.html#a9717c89bd693b1fa8e8ecd2063a7b539',1,'tenzor::ops::FusionNode']]],
+  ['image_5fsize_1',['image_size',['../structtenzor_1_1models_1_1ViTConfig.html#a7bf3201cec88d8fe6d35442921cbcc66',1,'tenzor::models::ViTConfig']]],
+  ['in_5fchannels_2',['in_channels',['../structtenzor_1_1models_1_1MBConvConfig.html#a9d5261606a52574f8e055463ab75329a',1,'tenzor::models::MBConvConfig']]],
+  ['index_3',['index',['../structtenzor_1_1Device.html#a28ba6c85e6d1ac5bb05b885582110301',1,'tenzor::Device']]],
+  ['init_5fscale_4',['init_scale',['../structtenzor_1_1nn_1_1MixedPrecisionConfig.html#a4f3fc621826789d2b077c5e89d6fd2c3',1,'tenzor::nn::MixedPrecisionConfig']]],
+  ['initializers_5',['initializers',['../classtenzor_1_1onnx_1_1ONNXGraph.html#a97ca8856bd674bfd5a0b24060363918a',1,'tenzor::onnx::ONNXGraph']]],
+  ['input_5fids_6',['input_ids',['../structtenzor_1_1ops_1_1FusedOp.html#afaffec43c1603f5d85dcc839c0b9875c',1,'tenzor::ops::FusedOp']]],
+  ['input_5fvariables_5f_7',['input_variables_',['../classtenzor_1_1Function.html#a2869ca1d8d8fd434c40b1a4cceaf2c68',1,'tenzor::Function']]],
+  ['inputs_8',['inputs',['../structtenzor_1_1data_1_1Batch.html#a73f461b00a3679e0e1e2cde9d6513de5',1,'tenzor::data::Batch::inputs'],['../structtenzor_1_1jit_1_1TracedOp.html#aa8310e9363d68bbe32f9c9984fa3dfef',1,'tenzor::jit::TracedOp::inputs'],['../classtenzor_1_1onnx_1_1ONNXNode.html#aea06f1fba63d7ca06bcb05a2b0b4ede0',1,'tenzor::onnx::ONNXNode::inputs'],['../classtenzor_1_1onnx_1_1ONNXGraph.html#a48ca805ddaf1606253afa4158813b4a9',1,'tenzor::onnx::ONNXGraph::inputs'],['../structtenzor_1_1ops_1_1FusionNode.html#ae0f49a0016f18e3fb8f9a1a4d022906e',1,'tenzor::ops::FusionNode::inputs']]],
+  ['int_5fattrs_9',['int_attrs',['../structtenzor_1_1jit_1_1TracedOp.html#a15183a8267b6be5665bcd8cfd5bb7ae5',1,'tenzor::jit::TracedOp::int_attrs'],['../classtenzor_1_1onnx_1_1ONNXNode.html#af1edf37e2c25a08d1b97b25600f72f1f',1,'tenzor::onnx::ONNXNode::int_attrs']]],
+  ['intermediate_5fsize_10',['intermediate_size',['../structtenzor_1_1models_1_1AlbertConfig.html#a7374bbb399e8d948a3467542a6e4f052',1,'tenzor::models::AlbertConfig::intermediate_size'],['../structtenzor_1_1models_1_1BertConfig.html#a3c43914144a68cf98af46ac6e0c2520c',1,'tenzor::models::BertConfig::intermediate_size'],['../structtenzor_1_1models_1_1RobertaConfig.html#a87ece1d61cbcb3b0d9c5f15dc561c60a',1,'tenzor::models::RobertaConfig::intermediate_size'],['../structtenzor_1_1models_1_1ViTConfig.html#a4a465e3e9f0e349777f5f6b37fa17664',1,'tenzor::models::ViTConfig::intermediate_size']]],
+  ['ints_5fattrs_11',['ints_attrs',['../classtenzor_1_1onnx_1_1ONNXNode.html#a0a363d32de47d8b6001e76d51ce96b35',1,'tenzor::onnx::ONNXNode']]],
+  ['is_5ffused_12',['is_fused',['../structtenzor_1_1ops_1_1FusionNode.html#a86d1073d94dd581ee3a3431e24e25714',1,'tenzor::ops::FusionNode']]],
+  ['is_5ffusible_13',['is_fusible',['../structtenzor_1_1ops_1_1FusionNode.html#afd31535200627b057d1337fe0759ecc0',1,'tenzor::ops::FusionNode']]],
+  ['is_5fgated_5fact_14',['is_gated_act',['../structtenzor_1_1models_1_1T5Config.html#a1e3390045be27fb61d42b534949b2538',1,'tenzor::models::T5Config']]],
+  ['is_5fparam_15',['is_param',['../structtenzor_1_1jit_1_1TensorInfo.html#ae6d290c6ee309b17b041fffa5dadc17d',1,'tenzor::jit::TensorInfo']]],
+  ['is_5freplaced_16',['is_replaced',['../structtenzor_1_1models_1_1ElectraPreTrainingOutput.html#ab9bb861031188a9f0be0fde264eeab6a',1,'tenzor::models::ElectraPreTrainingOutput']]]
 ];

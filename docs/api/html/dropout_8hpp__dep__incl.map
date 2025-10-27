@@ -1,5 +1,69 @@
 <map id="include/tenzor/nn/layers/dropout.hpp" name="include/tenzor/nn/layers/dropout.hpp">
-<area shape="rect" id="Node000001" title="Dropout regularization layers." alt="" coords="9,5,187,50"/>
-<area shape="rect" id="Node000002" href="$tenzor_8hpp.html" title="Main header &#45; includes all public Tenzor APIs." alt="" coords="5,98,191,126"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="101,66,101,97,95,97,95,66"/>
+<area shape="rect" id="Node000001" title="Dropout regularization layers." alt="" coords="925,5,1102,50"/>
+<area shape="rect" id="Node000002" href="$albert_8hpp.html" title="ALBERT (A Lite BERT) model implementation." alt="" coords="43,283,208,328"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="909,33,759,38,586,49,426,69,362,83,314,100,284,119,255,141,205,192,166,244,139,285,135,282,161,241,201,189,252,137,281,114,312,96,361,78,425,64,586,44,759,32,909,28"/>
+<area shape="rect" id="Node000003" href="$alexnet_8hpp.html" title="AlexNet convolutional neural network." alt="" coords="1276,98,1441,143"/>
+<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="1111,52,1277,95,1275,100,1110,57"/>
+<area shape="rect" id="Node000004" href="$bert_8hpp.html" title="BERT (Bidirectional Encoder Representations from Transformers) model family." alt="" coords="232,283,397,328"/>
+<area shape="poly" id="edge3_Node000001_Node000004" title=" " alt="" coords="909,36,752,44,577,57,427,76,376,87,348,100,332,120,321,142,309,193,309,243,313,283,308,283,303,243,304,193,316,141,328,117,345,96,374,82,426,70,576,51,752,38,909,30"/>
+<area shape="rect" id="Node000006" href="$tenzor_8hpp.html" title="Main header &#45; includes all public Tenzor APIs." alt="" coords="522,469,707,496"/>
+<area shape="poly" id="edge41_Node000001_Node000006" title=" " alt="" coords="909,36,556,60,376,78,302,89,246,101,203,110,160,115,83,125,52,134,29,150,13,175,8,212,8,307,11,344,20,372,39,396,68,418,102,435,150,448,270,466,403,475,522,478,522,484,403,480,270,471,149,453,100,440,65,423,35,399,16,375,6,345,3,307,3,211,8,173,25,147,50,130,82,120,159,110,202,104,245,95,301,83,375,73,555,54,909,31"/>
+<area shape="rect" id="Node000012" href="$convnext_8hpp.html" title="ConvNeXt &#45; A modernized ConvNet for the 2020s." alt="" coords="472,376,637,421"/>
+<area shape="poly" id="edge13_Node000001_Node000012" title=" " alt="" coords="910,38,680,60,571,78,527,89,494,100,445,125,407,154,394,171,387,189,386,210,393,234,418,278,452,317,488,349,522,373,519,378,485,353,448,321,414,281,388,236,381,211,382,188,390,168,403,150,443,121,492,96,526,84,570,73,679,55,909,33"/>
+<area shape="rect" id="Node000013" href="$efficientnet_8hpp.html" title="EfficientNet family of compound&#45;scaled CNNs (B0&#45;B7)." alt="" coords="1465,98,1631,143"/>
+<area shape="poly" id="edge15_Node000001_Node000013" title=" " alt="" coords="1118,41,1277,65,1454,95,1465,98,1464,103,1453,101,1276,70,1117,46"/>
+<area shape="rect" id="Node000014" href="$googlenet_8hpp.html" title="GoogLeNet (Inception v1) convolutional neural network." alt="" coords="1655,98,1820,143"/>
+<area shape="poly" id="edge16_Node000001_Node000014" title=" " alt="" coords="1118,34,1358,57,1501,74,1643,95,1655,97,1654,103,1642,101,1500,80,1358,63,1117,40"/>
+<area shape="rect" id="Node000015" href="$gpt_8hpp.html" title="GPT (Generative Pre&#45;trained Transformer) models for language modeling." alt="" coords="713,191,879,235"/>
+<area shape="poly" id="edge17_Node000001_Node000015" title=" " alt="" coords="911,48,863,68,842,82,823,100,810,121,802,145,798,190,792,190,797,144,805,119,819,96,839,78,861,64,909,43"/>
+<area shape="rect" id="Node000016" href="$models_2mobilenet_8hpp.html" title="MobileNet V2 and V3 &#45; Efficient mobile architectures." alt="" coords="833,98,999,143"/>
+<area shape="poly" id="edge19_Node000001_Node000016" title=" " alt="" coords="981,63,941,99,937,96,977,59"/>
+<area shape="rect" id="Node000018" href="$swin__transformer_8hpp.html" title="Swin Transformer hierarchical vision transformer." alt="" coords="1837,191,2003,235"/>
+<area shape="poly" id="edge22_Node000001_Node000018" title=" " alt="" coords="1118,30,1308,40,1529,54,1724,72,1793,83,1833,96,1860,115,1882,140,1912,189,1908,191,1878,143,1857,119,1831,100,1792,89,1723,78,1529,59,1308,45,1117,36"/>
+<area shape="rect" id="Node000019" href="$t5_8hpp.html" title="T5 (Text&#45;to&#45;Text Transfer Transformer) model implementation." alt="" coords="2097,98,2263,143"/>
+<area shape="poly" id="edge23_Node000001_Node000019" title=" " alt="" coords="1118,28,1300,33,1541,44,1813,64,2086,95,2097,97,2097,102,2085,101,1812,69,1541,49,1300,38,1117,33"/>
+<area shape="rect" id="Node000020" href="$vgg_8hpp.html" title="VGG (Visual Geometry Group) convolutional neural networks." alt="" coords="2287,98,2452,143"/>
+<area shape="poly" id="edge24_Node000001_Node000020" title=" " alt="" coords="1118,26,1330,29,1618,39,1945,60,2112,76,2275,95,2287,97,2286,102,2274,101,2111,81,1944,65,1617,45,1330,35,1118,32"/>
+<area shape="rect" id="Node000021" href="$vit_8hpp.html" title="Vision Transformer (ViT) model family." alt="" coords="527,283,692,328"/>
+<area shape="poly" id="edge25_Node000001_Node000021" title=" " alt="" coords="909,33,812,38,711,49,664,58,624,69,592,83,570,100,564,109,564,118,571,142,582,166,595,190,606,239,611,283,605,283,600,240,589,192,577,168,565,144,559,119,559,108,566,96,589,79,622,64,663,53,710,44,812,33,909,27"/>
+<area shape="rect" id="Node000022" href="$attention_8hpp.html" title="Multi&#45;head attention mechanisms for transformer models." alt="" coords="581,98,758,143"/>
+<area shape="poly" id="edge26_Node000001_Node000022" title=" " alt="" coords="917,57,752,100,751,95,916,52"/>
+<area shape="rect" id="Node000023" href="$transformer_8hpp.html" title="Transformer encoder and decoder layers." alt="" coords="403,191,581,235"/>
+<area shape="poly" id="edge38_Node000001_Node000023" title=" " alt="" coords="910,33,804,39,691,50,591,70,553,84,526,100,510,120,501,144,494,190,489,190,496,142,506,117,522,96,550,79,589,65,690,45,804,33,909,28"/>
+<area shape="rect" id="Node000024" href="$rnn_8hpp.html" title="Recurrent Neural Network (RNN) layers." alt="" coords="1082,283,1259,328"/>
+<area shape="poly" id="edge34_Node000001_Node000024" title=" " alt="" coords="1118,38,1146,46,1172,59,1196,75,1216,96,1227,120,1232,145,1231,171,1226,198,1208,246,1187,284,1183,282,1203,244,1221,196,1226,171,1227,146,1222,122,1211,100,1192,79,1169,63,1144,51,1117,43"/>
+<area shape="rect" id="Node000025" href="$segmentation_8hpp.html" title="Specialized layers for semantic segmentation." alt="" coords="1023,98,1201,143"/>
+<area shape="poly" id="edge36_Node000001_Node000025" title=" " alt="" coords="1050,59,1090,96,1087,99,1046,63"/>
+<area shape="rect" id="Node000026" href="$nn_2layers_2vision_8hpp.html" title="Vision&#45;specific layers for computer vision models." alt="" coords="1895,98,2073,143"/>
+<area shape="poly" id="edge39_Node000001_Node000026" title=" " alt="" coords="1118,31,1456,52,1666,71,1876,95,1896,98,1895,104,1876,101,1665,76,1456,57,1118,36"/>
+<area shape="rect" id="Node000005" href="$electra_8hpp.html" title="ELECTRA (Efficiently Learning an Encoder that Classifies Token Replacements Accurately)." alt="" coords="93,376,259,421"/>
+<area shape="poly" id="edge4_Node000004_Node000005" title=" " alt="" coords="270,339,210,378,207,373,268,334"/>
+<area shape="poly" id="edge12_Node000004_Node000006" title=" " alt="" coords="217,333,131,357,99,368,83,378,75,399,77,409,83,419,104,430,142,439,258,456,396,467,522,475,521,480,395,473,258,461,141,445,102,435,80,423,72,411,69,398,79,374,97,364,129,352,216,328"/>
+<area shape="rect" id="Node000011" href="$roberta_8hpp.html" title="RoBERTa (Robustly Optimized BERT) model family." alt="" coords="283,376,448,421"/>
+<area shape="poly" id="edge10_Node000004_Node000011" title=" " alt="" coords="337,340,356,375,351,377,332,343"/>
+<area shape="poly" id="edge5_Node000005_Node000006" title=" " alt="" coords="274,419,535,465,534,471,273,424"/>
+<area shape="rect" id="Node000007" href="$dataset_8hpp_source.html" title=" " alt="" coords="456,544,602,589"/>
+<area shape="poly" id="edge6_Node000006_Node000007" title=" " alt="" coords="592,509,554,546,550,542,588,506"/>
+<area shape="rect" id="Node000010" href="$transforms_8hpp_source.html" title=" " alt="" coords="627,544,773,589"/>
+<area shape="poly" id="edge9_Node000006_Node000010" title=" " alt="" coords="641,506,679,542,675,546,638,509"/>
+<area shape="rect" id="Node000008" href="$dataloader_8hpp_source.html" title=" " alt="" coords="456,637,602,682"/>
+<area shape="poly" id="edge7_Node000007_Node000008" title=" " alt="" coords="532,605,532,637,527,637,527,605"/>
+<area shape="rect" id="Node000009" href="$quantize__api_8hpp.html" title="High&#45;level quantization API for model conversion." alt="" coords="430,730,628,774"/>
+<area shape="poly" id="edge8_Node000008_Node000009" title=" " alt="" coords="532,697,532,729,527,729,527,697"/>
+<area shape="poly" id="edge11_Node000011_Node000006" title=" " alt="" coords="447,423,576,466,574,471,445,428"/>
+<area shape="poly" id="edge14_Node000012_Node000006" title=" " alt="" coords="582,432,607,466,603,470,577,435"/>
+<area shape="poly" id="edge18_Node000015_Node000006" title=" " alt="" coords="800,251,797,290,790,335,775,381,750,422,733,439,714,452,672,470,670,466,711,447,730,435,746,419,770,379,785,334,792,289,794,251"/>
+<area shape="poly" id="edge21_Node000016_Node000006" title=" " alt="" coords="914,158,906,196,893,236,871,294,851,340,824,380,780,423,757,439,732,452,680,471,678,466,729,447,754,434,777,419,820,377,847,337,866,292,888,234,901,195,908,157"/>
+<area shape="rect" id="Node000017" href="$deeplabv3plus_8hpp.html" title="DeepLab v3+ &#45; State&#45;of&#45;the&#45;art semantic segmentation." alt="" coords="992,191,1157,235"/>
+<area shape="poly" id="edge20_Node000016_Node000017" title=" " alt="" coords="968,148,1038,188,1036,193,966,153"/>
+<area shape="poly" id="edge33_Node000022_Node000006" title=" " alt="" coords="682,157,696,216,707,283,709,306,707,328,696,377,674,422,654,449,632,470,628,466,650,445,670,419,691,376,701,328,703,306,701,284,690,217,677,158"/>
+<area shape="poly" id="edge27_Node000022_Node000015" title=" " alt="" coords="713,150,767,188,764,192,710,154"/>
+<area shape="poly" id="edge28_Node000022_Node000023" title=" " alt="" coords="615,152,535,193,533,188,612,148"/>
+<area shape="poly" id="edge29_Node000023_Node000002" title=" " alt="" coords="390,242,209,286,208,281,389,237"/>
+<area shape="poly" id="edge30_Node000023_Node000004" title=" " alt="" coords="437,245,358,285,356,281,435,240"/>
+<area shape="poly" id="edge32_Node000023_Node000006" title=" " alt="" coords="493,251,499,290,506,309,517,326,532,339,549,346,584,348,619,351,636,359,652,374,657,387,659,400,654,426,642,450,628,470,624,467,637,448,649,424,654,400,652,388,647,378,633,363,618,356,584,353,548,351,530,344,513,330,501,312,493,292,488,252"/>
+<area shape="poly" id="edge31_Node000023_Node000021" title=" " alt="" coords="533,243,583,281,580,285,530,247"/>
+<area shape="poly" id="edge35_Node000024_Node000006" title=" " alt="" coords="1122,338,1037,382,936,423,818,454,708,473,707,468,817,449,934,418,1034,377,1120,333"/>
+<area shape="poly" id="edge37_Node000025_Node000017" title=" " alt="" coords="1100,158,1086,192,1081,189,1095,156"/>
+<area shape="poly" id="edge40_Node000026_Node000018" title=" " alt="" coords="1962,157,1937,192,1933,189,1958,154"/>
 </map>

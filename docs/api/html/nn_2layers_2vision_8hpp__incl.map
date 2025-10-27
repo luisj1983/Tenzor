@@ -1,0 +1,64 @@
+<map id="include/tenzor/nn/layers/vision.hpp" name="include/tenzor/nn/layers/vision.hpp">
+<area shape="rect" id="Node000001" title="Vision&#45;specific layers for computer vision models." alt="" coords="265,5,442,50"/>
+<area shape="rect" id="Node000002" title=" " alt="" coords="134,476,210,504"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="265,35,181,46,138,57,97,72,62,92,33,117,15,148,8,186,8,340,11,362,19,383,32,401,47,418,85,446,124,467,121,472,82,451,44,422,27,405,14,385,6,364,3,340,3,186,10,146,29,114,58,88,95,67,136,52,180,41,264,29"/>
+<area shape="rect" id="Node000003" title=" " alt="" coords="94,401,168,428"/>
+<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="265,50,211,69,161,98,140,116,124,136,113,160,109,186,109,264,115,329,126,385,121,386,110,330,104,265,104,186,108,158,119,133,136,112,157,93,209,65,263,45"/>
+<area shape="rect" id="Node000004" href="$module_8hpp.html" title="Neural network module base class." alt="" coords="489,174,599,201"/>
+<area shape="poly" id="edge3_Node000001_Node000004" title=" " alt="" coords="366,49,388,87,420,124,455,147,491,165,489,170,452,152,417,128,384,90,361,52"/>
+<area shape="rect" id="Node000021" href="$linear_8hpp.html" title="Fully connected (linear) neural network layer." alt="" coords="271,98,356,126"/>
+<area shape="poly" id="edge32_Node000001_Node000021" title=" " alt="" coords="345,52,329,85,324,83,340,49"/>
+<area shape="rect" id="Node000022" href="$dropout_8hpp.html" title="Dropout regularization layers." alt="" coords="430,98,530,126"/>
+<area shape="poly" id="edge35_Node000001_Node000022" title=" " alt="" coords="388,48,448,87,446,92,385,53"/>
+<area shape="rect" id="Node000023" href="$normalization_8hpp.html" title="Layer and group normalization layers." alt="" coords="554,98,694,126"/>
+<area shape="poly" id="edge37_Node000001_Node000023" title=" " alt="" coords="426,48,567,91,565,96,424,53"/>
+<area shape="poly" id="edge4_Node000004_Node000002" title=" " alt="" coords="489,193,434,198,370,208,303,226,240,252,185,282,144,310,112,347,84,402,80,415,84,427,102,450,126,467,123,471,98,453,79,430,75,415,79,400,108,344,140,306,182,277,238,247,302,221,369,203,434,193,488,188"/>
+<area shape="rect" id="Node000005" title=" " alt="" coords="624,552,682,580"/>
+<area shape="poly" id="edge5_Node000004_Node000005" title=" " alt="" coords="566,200,594,222,626,254,651,293,659,314,661,337,661,416,658,536,652,536,656,416,656,338,653,316,646,295,622,257,591,226,562,204"/>
+<area shape="rect" id="Node000006" title=" " alt="" coords="825,401,887,428"/>
+<area shape="poly" id="edge6_Node000004_Node000006" title=" " alt="" coords="600,191,663,198,732,209,793,225,816,235,833,248,853,280,863,317,865,354,863,385,858,385,860,354,857,318,848,282,829,251,814,240,791,230,731,214,662,203,599,196"/>
+<area shape="rect" id="Node000007" title=" " alt="" coords="696,249,819,277"/>
+<area shape="poly" id="edge7_Node000004_Node000007" title=" " alt="" coords="583,199,706,241,704,246,581,204"/>
+<area shape="rect" id="Node000008" href="$variable_8hpp.html" title="Automatic differentiation wrapper for tensors." alt="" coords="250,249,427,277"/>
+<area shape="poly" id="edge8_Node000004_Node000008" title=" " alt="" coords="508,204,391,246,389,241,506,199"/>
+<area shape="rect" id="Node000017" href="$device_8hpp.html" title="Device specification and management for tensors." alt="" coords="528,476,621,504"/>
+<area shape="poly" id="edge31_Node000004_Node000017" title=" " alt="" coords="548,201,574,461,569,461,543,202"/>
+<area shape="poly" id="edge9_Node000008_Node000002" title=" " alt="" coords="328,279,286,327,232,401,190,464,186,461,228,398,282,323,324,276"/>
+<area shape="poly" id="edge10_Node000008_Node000003" title=" " alt="" coords="317,280,242,327,159,393,155,388,238,323,314,275"/>
+<area shape="rect" id="Node000009" title=" " alt="" coords="296,325,382,353"/>
+<area shape="poly" id="edge11_Node000008_Node000009" title=" " alt="" coords="341,278,341,309,336,309,336,278"/>
+<area shape="rect" id="Node000010" href="$tensor_8hpp.html" title="Core tensor class for multi&#45;dimensional array operations." alt="" coords="405,325,539,353"/>
+<area shape="poly" id="edge12_Node000008_Node000010" title=" " alt="" coords="364,275,437,315,434,320,361,280"/>
+<area shape="poly" id="edge13_Node000010_Node000002" title=" " alt="" coords="427,356,367,376,304,403,249,436,202,469,199,464,246,431,301,398,365,371,425,351"/>
+<area shape="poly" id="edge16_Node000010_Node000003" title=" " alt="" coords="411,356,184,405,182,399,410,351"/>
+<area shape="poly" id="edge14_Node000010_Node000006" title=" " alt="" coords="540,350,810,402,809,407,539,356"/>
+<area shape="rect" id="Node000011" title=" " alt="" coords="467,401,520,428"/>
+<area shape="poly" id="edge15_Node000010_Node000011" title=" " alt="" coords="478,352,488,385,483,386,473,354"/>
+<area shape="rect" id="Node000012" href="$dtype_8hpp.html" title="Data type system for Tenzor tensors." alt="" coords="234,476,320,504"/>
+<area shape="poly" id="edge17_Node000010_Node000012" title=" " alt="" coords="424,356,378,374,334,403,309,432,291,463,286,461,304,429,330,399,375,370,422,351"/>
+<area shape="poly" id="edge22_Node000010_Node000017" title=" " alt="" coords="489,351,512,372,534,399,553,430,567,461,562,463,548,433,530,402,508,376,485,355"/>
+<area shape="rect" id="Node000018" href="$storage_8hpp.html" title="Memory storage abstraction for tensor data." alt="" coords="344,401,442,428"/>
+<area shape="poly" id="edge26_Node000010_Node000018" title=" " alt="" coords="460,355,420,392,417,388,456,351"/>
+<area shape="rect" id="Node000013" title=" " alt="" coords="385,552,450,580"/>
+<area shape="poly" id="edge18_Node000012_Node000013" title=" " alt="" coords="304,502,380,542,378,547,301,507"/>
+<area shape="rect" id="Node000014" title=" " alt="" coords="494,552,591,580"/>
+<area shape="poly" id="edge19_Node000012_Node000014" title=" " alt="" coords="322,501,481,545,480,550,320,506"/>
+<area shape="rect" id="Node000015" title=" " alt="" coords="129,552,220,580"/>
+<area shape="poly" id="edge20_Node000012_Node000015" title=" " alt="" coords="261,507,207,545,204,541,257,502"/>
+<area shape="rect" id="Node000016" title=" " alt="" coords="244,552,321,580"/>
+<area shape="poly" id="edge21_Node000012_Node000016" title=" " alt="" coords="281,504,283,536,278,537,276,505"/>
+<area shape="poly" id="edge24_Node000017_Node000005" title=" " alt="" coords="591,503,630,539,626,543,587,507"/>
+<area shape="poly" id="edge23_Node000017_Node000013" title=" " alt="" coords="548,507,460,548,458,543,545,502"/>
+<area shape="poly" id="edge25_Node000017_Node000014" title=" " alt="" coords="571,506,557,539,552,537,567,503"/>
+<area shape="poly" id="edge27_Node000018_Node000002" title=" " alt="" coords="355,431,226,474,224,469,353,426"/>
+<area shape="poly" id="edge30_Node000018_Node000017" title=" " alt="" coords="427,426,530,468,528,473,425,431"/>
+<area shape="rect" id="Node000019" title=" " alt="" coords="344,476,413,504"/>
+<area shape="poly" id="edge28_Node000018_Node000019" title=" " alt="" coords="393,429,387,462,382,461,388,428"/>
+<area shape="rect" id="Node000020" title=" " alt="" coords="438,476,504,504"/>
+<area shape="poly" id="edge29_Node000018_Node000020" title=" " alt="" coords="409,427,448,464,444,468,405,431"/>
+<area shape="poly" id="edge33_Node000021_Node000003" title=" " alt="" coords="308,127,149,389,144,386,303,125"/>
+<area shape="poly" id="edge34_Node000021_Node000004" title=" " alt="" coords="355,124,489,166,487,171,354,129"/>
+<area shape="poly" id="edge36_Node000022_Node000004" title=" " alt="" coords="493,124,525,160,521,164,489,128"/>
+<area shape="poly" id="edge38_Node000023_Node000004" title=" " alt="" coords="611,128,571,165,568,161,608,124"/>
+<area shape="poly" id="edge39_Node000023_Node000006" title=" " alt="" coords="666,124,712,142,764,168,816,203,861,248,878,273,886,297,887,322,883,353,872,387,867,385,877,352,882,322,881,298,873,276,857,251,813,207,762,173,710,147,664,129"/>
+</map>

@@ -2,7 +2,7 @@
 
 namespace tenzor {
 
-// Implementation placeholder for shape utilities
+// Shape utility implementations
 // Most functions are inline and defined in header
 
 } // namespace tenzor

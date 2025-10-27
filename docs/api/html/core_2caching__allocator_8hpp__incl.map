@@ -1,0 +1,23 @@
+<map id="include/tenzor/core/caching_allocator.hpp" name="include/tenzor/core/caching_allocator.hpp">
+<area shape="rect" id="Node000001" title="Memory pooling allocator with block caching and reuse." alt="" coords="269,5,435,50"/>
+<area shape="rect" id="Node000002" title=" " alt="" coords="5,98,56,126"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="269,50,71,100,70,95,267,45"/>
+<area shape="rect" id="Node000003" title=" " alt="" coords="80,98,203,126"/>
+<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="297,53,190,94,188,89,295,48"/>
+<area shape="rect" id="Node000004" title=" " alt="" coords="227,98,290,126"/>
+<area shape="poly" id="edge3_Node000001_Node000004" title=" " alt="" coords="329,52,287,90,283,85,326,48"/>
+<area shape="rect" id="Node000005" title=" " alt="" coords="314,98,390,126"/>
+<area shape="poly" id="edge4_Node000001_Node000005" title=" " alt="" coords="354,50,354,82,349,82,349,50"/>
+<area shape="rect" id="Node000006" title=" " alt="" coords="414,98,484,126"/>
+<area shape="poly" id="edge5_Node000001_Node000006" title=" " alt="" coords="379,48,424,86,420,90,376,52"/>
+<area shape="rect" id="Node000007" title=" " alt="" coords="508,98,593,126"/>
+<area shape="poly" id="edge6_Node000001_Node000007" title=" " alt="" coords="406,48,506,89,504,94,404,53"/>
+<area shape="rect" id="Node000008" href="$device_8hpp.html" title="Device specification and management for tensors." alt="" coords="618,98,710,126"/>
+<area shape="poly" id="edge7_Node000001_Node000008" title=" " alt="" coords="435,48,603,92,602,97,434,53"/>
+<area shape="rect" id="Node000009" title=" " alt="" coords="546,174,611,201"/>
+<area shape="poly" id="edge8_Node000008_Node000009" title=" " alt="" coords="650,128,607,165,604,161,647,124"/>
+<area shape="rect" id="Node000010" title=" " alt="" coords="635,174,693,201"/>
+<area shape="poly" id="edge9_Node000008_Node000010" title=" " alt="" coords="666,126,666,158,661,158,661,126"/>
+<area shape="rect" id="Node000011" title=" " alt="" coords="717,174,813,201"/>
+<area shape="poly" id="edge10_Node000008_Node000011" title=" " alt="" coords="684,124,736,162,733,167,680,128"/>
+</map>

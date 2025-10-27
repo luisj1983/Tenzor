@@ -1,0 +1,5 @@
+<map id="tenzor::nn::quantization::QuantizedLinear" name="tenzor::nn::quantization::QuantizedLinear">
+<area shape="rect" id="Node000001" title="Quantized linear (fully connected) layer." alt="" coords="5,81,181,126"/>
+<area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="22,5,164,33"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="96,49,96,80,90,80,90,49"/>
+</map>

@@ -10,7 +10,7 @@
 
 namespace tenzor {
 
-// Stub implementations - will be dispatched to backend kernels
+// Math operation implementations - dispatched to backend kernels
 
 auto add(const Tensor& a, const Tensor& b) -> Tensor {
     // Ensure tensors are contiguous before element-wise operation

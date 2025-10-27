@@ -1,4 +1,4 @@
 var searchData=
 [
-  ['loglevel_0',['LogLevel',['../namespacetenzor.html#a73a4f7deebe32a56e7bf28bd1723a4be',1,'tenzor']]]
+  ['dtype_0',['DType',['../namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14fee',1,'tenzor']]]
 ];

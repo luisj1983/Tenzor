@@ -1,18 +1,18 @@
 var searchData=
 [
-  ['selu_0',['SELU',['../classtenzor_1_1nn_1_1SELU.html',1,'tenzor::nn']]],
-  ['sequential_1',['Sequential',['../classtenzor_1_1nn_1_1Sequential.html',1,'tenzor::nn']]],
-  ['serializer_2',['Serializer',['../classtenzor_1_1nn_1_1Serializer.html',1,'tenzor::nn']]],
-  ['sgd_3',['SGD',['../classtenzor_1_1optim_1_1SGD.html',1,'tenzor::optim']]],
-  ['shape_4',['Shape',['../classtenzor_1_1Shape.html',1,'tenzor']]],
-  ['shapeexception_5',['ShapeException',['../classtenzor_1_1ShapeException.html',1,'tenzor']]],
-  ['sigmoid_6',['Sigmoid',['../classtenzor_1_1nn_1_1Sigmoid.html',1,'tenzor::nn']]],
-  ['smoothl1loss_7',['SmoothL1Loss',['../classtenzor_1_1nn_1_1SmoothL1Loss.html',1,'tenzor::nn']]],
-  ['softmax_8',['Softmax',['../classtenzor_1_1nn_1_1Softmax.html',1,'tenzor::nn']]],
-  ['spinlock_9',['SpinLock',['../classtenzor_1_1SpinLock.html',1,'tenzor']]],
-  ['steplr_10',['StepLR',['../classtenzor_1_1optim_1_1StepLR.html',1,'tenzor::optim']]],
-  ['storage_11',['Storage',['../classtenzor_1_1Storage.html',1,'tenzor']]],
-  ['subbackward_12',['SubBackward',['../classtenzor_1_1SubBackward.html',1,'tenzor']]],
-  ['sumbackward_13',['SumBackward',['../classtenzor_1_1SumBackward.html',1,'tenzor']]],
-  ['swish_14',['Swish',['../classtenzor_1_1nn_1_1Swish.html',1,'tenzor::nn']]]
+  ['panet_0',['PANet',['../classtenzor_1_1models_1_1PANet.html',1,'tenzor::models']]],
+  ['paramgroup_1',['ParamGroup',['../structtenzor_1_1optim_1_1ParamGroup.html',1,'tenzor::optim']]],
+  ['pass_2',['Pass',['../classtenzor_1_1jit_1_1Pass.html',1,'tenzor::jit']]],
+  ['patchembed_3',['PatchEmbed',['../classtenzor_1_1models_1_1PatchEmbed.html',1,'tenzor::models']]],
+  ['patchembedding_4',['PatchEmbedding',['../classtenzor_1_1models_1_1PatchEmbedding.html',1,'tenzor::models::PatchEmbedding'],['../classtenzor_1_1nn_1_1PatchEmbedding.html',1,'tenzor::nn::PatchEmbedding']]],
+  ['patchmerging_5',['PatchMerging',['../classtenzor_1_1models_1_1PatchMerging.html',1,'tenzor::models']]],
+  ['perchannelhistogramobserver_6',['PerChannelHistogramObserver',['../classtenzor_1_1nn_1_1quantization_1_1PerChannelHistogramObserver.html',1,'tenzor::nn::quantization']]],
+  ['permutebackward_7',['PermuteBackward',['../classtenzor_1_1PermuteBackward.html',1,'tenzor']]],
+  ['positionalencoding_8',['PositionalEncoding',['../classtenzor_1_1nn_1_1PositionalEncoding.html',1,'tenzor::nn']]],
+  ['processgroup_9',['ProcessGroup',['../classtenzor_1_1distributed_1_1ProcessGroup.html',1,'tenzor::distributed::ProcessGroup'],['../classtenzor_1_1nn_1_1ProcessGroup.html',1,'tenzor::nn::ProcessGroup']]],
+  ['progresscallback_10',['ProgressCallback',['../classtenzor_1_1nn_1_1ProgressCallback.html',1,'tenzor::nn']]],
+  ['promise_11',['Promise',['../classtenzor_1_1Promise.html',1,'tenzor']]],
+  ['promise_3c_20void_20_3e_12',['Promise&lt; void &gt;',['../classtenzor_1_1Promise_3_01void_01_4.html',1,'tenzor']]],
+  ['pruningconfig_13',['PruningConfig',['../structtenzor_1_1nn_1_1compression_1_1PruningConfig.html',1,'tenzor::nn::compression']]],
+  ['pruningmask_14',['PruningMask',['../structtenzor_1_1nn_1_1compression_1_1PruningMask.html',1,'tenzor::nn::compression']]]
 ];

@@ -1,4 +1,4 @@
 var searchData=
 [
-  ['documentation_20structure_0',['Documentation Structure',['../tenzor_8hpp.html#autotoc_md1',1,'']]]
+  ['backends_0',['Backends',['../namespacetenzor_1_1nn_1_1quantization.html#backends',1,'']]]
 ];

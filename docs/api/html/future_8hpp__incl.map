@@ -1,0 +1,19 @@
+<map id="include/tenzor/parallel/future.hpp" name="include/tenzor/parallel/future.hpp">
+<area shape="rect" id="Node000001" title="Future/Promise pattern for asynchronous tensor operations." alt="" coords="308,5,475,50"/>
+<area shape="rect" id="Node000002" title=" " alt="" coords="5,98,66,126"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="309,48,81,100,80,95,308,43"/>
+<area shape="rect" id="Node000003" title=" " alt="" coords="89,98,166,126"/>
+<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="322,53,181,97,179,92,321,48"/>
+<area shape="rect" id="Node000004" title=" " alt="" coords="190,98,276,126"/>
+<area shape="poly" id="edge3_Node000001_Node000004" title=" " alt="" coords="351,53,273,93,270,88,348,48"/>
+<area shape="rect" id="Node000005" title=" " alt="" coords="300,98,385,126"/>
+<area shape="poly" id="edge4_Node000001_Node000005" title=" " alt="" coords="381,52,360,86,356,83,376,49"/>
+<area shape="rect" id="Node000006" title=" " alt="" coords="409,98,475,126"/>
+<area shape="poly" id="edge5_Node000001_Node000006" title=" " alt="" coords="407,49,428,83,424,86,403,52"/>
+<area shape="rect" id="Node000007" title=" " alt="" coords="500,98,563,126"/>
+<area shape="poly" id="edge6_Node000001_Node000007" title=" " alt="" coords="430,48,498,88,495,92,427,53"/>
+<area shape="rect" id="Node000008" title=" " alt="" coords="588,98,729,126"/>
+<area shape="poly" id="edge7_Node000001_Node000008" title=" " alt="" coords="463,48,602,91,600,96,461,53"/>
+<area shape="rect" id="Node000009" title=" " alt="" coords="753,98,838,126"/>
+<area shape="poly" id="edge8_Node000001_Node000009" title=" " alt="" coords="476,42,738,95,737,100,475,47"/>
+</map>

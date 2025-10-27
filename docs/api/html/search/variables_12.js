@@ -1,0 +1,21 @@
+var searchData=
+[
+  ['target_5fsparsity_0',['target_sparsity',['../structtenzor_1_1nn_1_1compression_1_1PruningConfig.html#a9171be38d0b0a883378a81b42ef5f03f',1,'tenzor::nn::compression::PruningConfig']]],
+  ['targets_1',['targets',['../structtenzor_1_1data_1_1Batch.html#a8009df7252582c0053c87f1953989a3c',1,'tenzor::data::Batch']]],
+  ['temperature_2',['temperature',['../structtenzor_1_1models_1_1GenerationConfig.html#a2a24c683c6accbe793ae1381653ae51e',1,'tenzor::models::GenerationConfig::temperature'],['../structtenzor_1_1nn_1_1compression_1_1DistillationConfig.html#a371d3fa0d2379edf4465fe5521f9323d',1,'tenzor::nn::compression::DistillationConfig::temperature']]],
+  ['tensor_5fattrs_3',['tensor_attrs',['../structtenzor_1_1jit_1_1TracedOp.html#adfbb71eb746980c7f314a8bee8cff0a7',1,'tenzor::jit::TracedOp::tensor_attrs'],['../classtenzor_1_1onnx_1_1ONNXNode.html#a645bc6a841253453b3239191054d21a5',1,'tenzor::onnx::ONNXNode::tensor_attrs']]],
+  ['tenzor_5fmagic_4',['TENZOR_MAGIC',['../serialize_8hpp.html#aeb7ea415f61699d33020d957644ab22d',1,'tenzor::nn']]],
+  ['tenzor_5fserialize_5fversion_5',['TENZOR_SERIALIZE_VERSION',['../serialize_8hpp.html#a57616c84ada19e34ed8c4c088e5c0d52',1,'tenzor::nn']]],
+  ['tie_5fembeddings_6',['tie_embeddings',['../structtenzor_1_1models_1_1ElectraConfig.html#a1c957d5d3a6b1ecf51e2bc86926346a9',1,'tenzor::models::ElectraConfig']]],
+  ['timestamp_7',['timestamp',['../structtenzor_1_1nn_1_1TrainingMetadata.html#a88e83826944750703b6f8db5be5be6db',1,'tenzor::nn::TrainingMetadata']]],
+  ['top_5fk_8',['top_k',['../structtenzor_1_1models_1_1GenerationConfig.html#ae06ca288491a804af35b6db4faa6c294',1,'tenzor::models::GenerationConfig']]],
+  ['top_5fp_9',['top_p',['../structtenzor_1_1models_1_1GenerationConfig.html#a374d1ce0050780e7dc19e311fa4424a6',1,'tenzor::models::GenerationConfig']]],
+  ['total_5felements_10',['total_elements',['../structtenzor_1_1GradCheckResult.html#a2ece10f0719a5da1b8e03f61a4ea99ce',1,'tenzor::GradCheckResult']]],
+  ['total_5foptimizations_11',['total_optimizations',['../structtenzor_1_1OptimizationStats.html#ac9f2c3bafd7b0ea745fb4019ac001f49',1,'tenzor::OptimizationStats']]],
+  ['total_5frecompute_5ftime_5fms_12',['total_recompute_time_ms',['../structtenzor_1_1autograd_1_1CheckpointStats.html#a2bd8c503187f0c5d53234009c3110f84',1,'tenzor::autograd::CheckpointStats']]],
+  ['train_5faccuracy_13',['train_accuracy',['../structtenzor_1_1nn_1_1TrainingMetadata.html#ad35aaba42100258e5ea2c6a2c81059b9',1,'tenzor::nn::TrainingMetadata']]],
+  ['train_5floss_14',['train_loss',['../structtenzor_1_1nn_1_1TrainingMetadata.html#aafc6917d2b9a1c545f8ffc2017a0aae8',1,'tenzor::nn::TrainingMetadata']]],
+  ['training_5f_15',['training_',['../classtenzor_1_1nn_1_1Module.html#a2a865cc9749b143213de18b778dd3707',1,'tenzor::nn::Module']]],
+  ['type_16',['type',['../structtenzor_1_1Device.html#aa2efe8f5ebb726c35f037761dd425aed',1,'tenzor::Device::type'],['../structtenzor_1_1jit_1_1TracedOp.html#a7d34be74990ec6d29bad97e26deae539',1,'tenzor::jit::TracedOp::type']]],
+  ['type_5fvocab_5fsize_17',['type_vocab_size',['../structtenzor_1_1models_1_1AlbertConfig.html#a61b401530980f741a7e1f15865d50206',1,'tenzor::models::AlbertConfig::type_vocab_size'],['../structtenzor_1_1models_1_1BertConfig.html#a40b33bd39c519f543ef8db72be8aa840',1,'tenzor::models::BertConfig::type_vocab_size'],['../structtenzor_1_1models_1_1RobertaConfig.html#aad2027af0e00039a7ab80182c2dc82ed',1,'tenzor::models::RobertaConfig::type_vocab_size']]]
+];

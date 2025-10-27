@@ -8,6 +8,11 @@
 #include <stdexcept>
 #include <algorithm>
 
+// Include CUDA kernel headers when available
+#ifdef TENZOR_HAS_CUDA
+#include "tenzor/backends/cuda/vision_kernels.hpp"
+#endif
+
 namespace tenzor::ops {
 
 namespace {
@@ -43,18 +48,20 @@ auto unfold(const Tensor& input,
     int64_t num_blocks = out_h * out_w;
 
     // Output shape: (N, C*K*K, L) where L = out_h * out_w
+
+    // Use CUDA kernel if available
+#ifdef TENZOR_HAS_CUDA
+    if (input.device().type == Device::Type::CUDA) {
+        return cuda::unfold_cuda(input, kernel_size, stride, padding, dilation);
+    }
+#endif
+
+    // CPU implementation
     auto output = zeros({batch, channels * kernel_size * kernel_size, num_blocks},
                        input.dtype(), input.device());
 
-    // Transfer to CPU for processing if needed
-    // TODO: Implement CUDA kernel for unfold operation
-    Tensor input_cpu = (input.device().type == Device::Type::CUDA) ?
-                       input.to(Device::cpu()) : input;
-    Tensor output_cpu = (output.device().type == Device::Type::CUDA) ?
-                        output.to(Device::cpu()) : output;
-
-    const float* input_data = input_cpu.data<float>();
-    float* output_data = output_cpu.data<float>();
+    const float* input_data = input.data<float>();
+    float* output_data = output.data<float>();
 
     // Extract sliding blocks
     for (int64_t b = 0; b < batch; ++b) {
@@ -90,9 +97,7 @@ auto unfold(const Tensor& input,
         }
     }
 
-    // Transfer back to original device if needed
-    return (input.device().type == Device::Type::CUDA) ?
-           output_cpu.to(input.device()) : output_cpu;
+    return output;
 }
 
 auto fold(const Tensor& input,
@@ -141,17 +146,19 @@ auto fold(const Tensor& input,
     }
 
     // Output shape: (N, C, H, W)
+
+    // Use CUDA kernel if available
+#ifdef TENZOR_HAS_CUDA
+    if (input.device().type == Device::Type::CUDA) {
+        return cuda::fold_cuda(input, output_size, kernel_size, stride, padding, dilation);
+    }
+#endif
+
+    // CPU implementation
     auto output = zeros({batch, channels, height, width}, input.dtype(), input.device());
 
-    // Transfer to CPU for processing if needed
-    // TODO: Implement CUDA kernel for fold operation
-    Tensor input_cpu = (input.device().type == Device::Type::CUDA) ?
-                       input.to(Device::cpu()) : input;
-    Tensor output_cpu = (output.device().type == Device::Type::CUDA) ?
-                        output.to(Device::cpu()) : output;
-
-    const float* input_data = input_cpu.data<float>();
-    float* output_data = output_cpu.data<float>();
+    const float* input_data = input.data<float>();
+    float* output_data = output.data<float>();
 
     // Accumulate overlapping blocks
     for (int64_t b = 0; b < batch; ++b) {
@@ -187,9 +194,7 @@ auto fold(const Tensor& input,
         }
     }
 
-    // Transfer back to original device if needed
-    return (input.device().type == Device::Type::CUDA) ?
-           output_cpu.to(input.device()) : output_cpu;
+    return output;
 }
 
 auto interpolate(const Tensor& input,
@@ -221,18 +226,19 @@ auto interpolate(const Tensor& input,
         return input;
     }
 
+    // Use CUDA kernel if available
+#ifdef TENZOR_HAS_CUDA
+    if (input.device().type == Device::Type::CUDA) {
+        return cuda::interpolate_cuda(input, size, mode, align_corners);
+    }
+#endif
+
+    // CPU implementation
     // Create output tensor
     auto output = zeros({batch, channels, out_h, out_w}, input.dtype(), input.device());
 
-    // Transfer to CPU for processing
-    // TODO: Implement CUDA kernels for interpolation
-    Tensor input_cpu = (input.device().type == Device::Type::CUDA) ?
-                       input.to(Device::cpu()) : input;
-    Tensor output_cpu = (output.device().type == Device::Type::CUDA) ?
-                        output.to(Device::cpu()) : output;
-
-    const float* input_data = input_cpu.data<float>();
-    float* output_data = output_cpu.data<float>();
+    const float* input_data = input.data<float>();
+    float* output_data = output.data<float>();
 
     if (mode == "nearest") {
         // Nearest neighbor interpolation
@@ -329,12 +335,10 @@ auto interpolate(const Tensor& input,
     } else {
         throw std::invalid_argument(
             "Unsupported interpolation mode: " + mode +
-            ". Supported modes: 'nearest', 'bilinear'");
+            ". Supported modes: 'nearest', 'bilinear', 'bicubic'");
     }
 
-    // Transfer back to original device if needed
-    return (input.device().type == Device::Type::CUDA) ?
-           output_cpu.to(input.device()) : output_cpu;
+    return output;
 }
 
 } // namespace tenzor::ops

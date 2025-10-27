@@ -12,6 +12,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <sstream>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <netdb.h>
 
 #ifdef TENZOR_USE_ROCM
     #include <hip/hip_runtime.h>
@@ -468,15 +473,107 @@ auto DistributedDataParallel::initialize_distributed() -> void {
         NCCL_CHECK(ncclGetUniqueId(&id));
     }
 
-    // Broadcast unique ID to all processes (simplified - in production use MPI/TCP)
-    // For now, we assume a single-node setup where all processes can access shared memory
-    // or use environment variables
+    // Broadcast unique ID to all processes using TCP sockets
+    // This implements proper inter-process communication for multi-node setups
 
-    // TODO: Implement proper inter-process communication for multi-node
-    // In production, this would use:
-    // - MPI_Bcast for MPI backend
-    // - TCP socket communication for NCCL backend
-    // - Shared memory for single-node setups
+    if (process_group_->rank() == 0) {
+        // Master rank: Create TCP server to broadcast unique ID
+        int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (server_fd < 0) {
+            throw std::runtime_error("DistributedDataParallel: Failed to create broadcast socket");
+        }
+
+        int opt = 1;
+        setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+
+        const char* master_port_env = std::getenv("MASTER_PORT");
+        int broadcast_port = master_port_env ? std::atoi(master_port_env) : 29501;
+
+        struct sockaddr_in addr;
+        std::memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = INADDR_ANY;
+        addr.sin_port = htons(broadcast_port);
+
+        if (bind(server_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+            ::close(server_fd);
+            throw std::runtime_error("DistributedDataParallel: Failed to bind broadcast socket");
+        }
+
+        if (listen(server_fd, process_group_->world_size()) < 0) {
+            ::close(server_fd);
+            throw std::runtime_error("DistributedDataParallel: Failed to listen on broadcast socket");
+        }
+
+        // Accept connections and send unique ID to all workers
+        for (int i = 1; i < process_group_->world_size(); ++i) {
+            int client_fd = accept(server_fd, nullptr, nullptr);
+            if (client_fd < 0) {
+                ::close(server_fd);
+                throw std::runtime_error("DistributedDataParallel: Failed to accept connection from rank " + std::to_string(i));
+            }
+
+            ssize_t sent = send(client_fd, &id, sizeof(id), 0);
+            if (sent != sizeof(id)) {
+                ::close(client_fd);
+                ::close(server_fd);
+                throw std::runtime_error("DistributedDataParallel: Failed to send unique ID to rank " + std::to_string(i));
+            }
+
+            ::close(client_fd);
+        }
+
+        ::close(server_fd);
+
+    } else {
+        // Worker ranks: Connect to master and receive unique ID
+        const char* master_addr_env = std::getenv("MASTER_ADDR");
+        const char* master_port_env = std::getenv("MASTER_PORT");
+
+        std::string master_addr = master_addr_env ? std::string(master_addr_env) : "localhost";
+        int broadcast_port = master_port_env ? std::atoi(master_port_env) : 29501;
+
+        int client_fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (client_fd < 0) {
+            throw std::runtime_error("DistributedDataParallel: Failed to create client socket");
+        }
+
+        struct sockaddr_in addr;
+        std::memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(broadcast_port);
+
+        struct hostent* server = gethostbyname(master_addr.c_str());
+        if (!server) {
+            ::close(client_fd);
+            throw std::runtime_error("DistributedDataParallel: Failed to resolve master address: " + master_addr);
+        }
+
+        std::memcpy(&addr.sin_addr.s_addr, server->h_addr, server->h_length);
+
+        // Retry connection with exponential backoff
+        bool connected = false;
+        for (int retry = 0; retry < 10; ++retry) {
+            if (connect(client_fd, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
+                connected = true;
+                break;
+            }
+            usleep(100000 * (1 << retry));  // 100ms, 200ms, 400ms, ...
+        }
+
+        if (!connected) {
+            ::close(client_fd);
+            throw std::runtime_error("DistributedDataParallel: Failed to connect to master after retries");
+        }
+
+        ssize_t received = recv(client_fd, &id, sizeof(id), MSG_WAITALL);
+        if (received != sizeof(id)) {
+            ::close(client_fd);
+            throw std::runtime_error("DistributedDataParallel: Failed to receive unique ID from master");
+        }
+
+        ::close(client_fd);
+    }
 
     // Initialize communicator for each local device
     for (int device_id : device_ids_) {
@@ -731,17 +828,40 @@ auto init_process_group(const std::string& backend) -> std::shared_ptr<ProcessGr
     const char* master_port = std::getenv("MASTER_PORT");
 
     if (master_addr) {
-        // Multi-node setup (would need TCP/MPI communication)
-        // For now, we support single-node multi-GPU
+        // Multi-node setup with TCP-based initialization
         std::string addr(master_addr);
-        std::string port = master_port ? std::string(master_port) : "29500";
+        std::string port_str = master_port ? std::string(master_port) : "29500";
+        int port = std::atoi(port_str.c_str());
 
-        // TODO: Implement TCP-based initialization for multi-node
-        // This would involve:
-        // 1. Rank 0 creates a socket server on MASTER_ADDR:MASTER_PORT
-        // 2. Other ranks connect to the server
-        // 3. Rank 0 generates NCCL unique ID and sends to all ranks
-        // 4. All ranks initialize NCCL communicators with the unique ID
+        // TCP-based initialization for multi-node distributed training
+        // This implements a rendezvous mechanism for NCCL unique ID exchange
+
+        // The actual NCCL unique ID exchange happens inside initialize_distributed()
+        // which is called by the DistributedDataParallel constructor.
+        //
+        // Multi-node setup requirements:
+        // 1. MASTER_ADDR: IP/hostname of rank 0 node
+        // 2. MASTER_PORT: Port for coordination (default: 29500)
+        // 3. RANK: Process rank (0 to WORLD_SIZE-1)
+        // 4. WORLD_SIZE: Total number of processes
+        //
+        // Network requirements:
+        // - All nodes must be able to reach MASTER_ADDR:MASTER_PORT
+        // - Firewall rules must allow TCP connections
+        // - For GPU Direct RDMA: Configure NCCL_SOCKET_IFNAME to network interface
+        //
+        // Example environment setup:
+        // Rank 0 (master node):
+        //   export MASTER_ADDR=192.168.1.100
+        //   export MASTER_PORT=29500
+        //   export RANK=0
+        //   export WORLD_SIZE=4
+        //
+        // Rank 1-3 (worker nodes):
+        //   export MASTER_ADDR=192.168.1.100
+        //   export MASTER_PORT=29500
+        //   export RANK=<rank_id>
+        //   export WORLD_SIZE=4
     }
 
     return std::make_shared<ProcessGroup>(rank, world_size, backend);

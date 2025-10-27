@@ -1,5 +1,0 @@
-if(EXISTS "/home/lee/Projects/Tenzor/build_fresh/tests/test_pooling[1]_tests.cmake")
-  include("/home/lee/Projects/Tenzor/build_fresh/tests/test_pooling[1]_tests.cmake")
-else()
-  add_test(test_pooling_NOT_BUILT test_pooling_NOT_BUILT)
-endif()

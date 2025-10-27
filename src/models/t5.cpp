@@ -475,7 +475,7 @@ auto T5Decoder::forward(const Variable& decoder_input_ids,
 }
 
 auto T5Decoder::forward(const Variable& input) -> Variable {
-    // Decoder requires encoder outputs, so this is just a placeholder
+    // Decoder requires encoder outputs - use forward_with_encoder() instead
     throw std::runtime_error("T5Decoder::forward(input) requires encoder_hidden_states");
 }
 

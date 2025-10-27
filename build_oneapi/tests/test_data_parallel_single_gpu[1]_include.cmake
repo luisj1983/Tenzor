@@ -1,5 +1,0 @@
-if(EXISTS "/home/lee/Projects/Tenzor/build_oneapi/tests/test_data_parallel_single_gpu[1]_tests.cmake")
-  include("/home/lee/Projects/Tenzor/build_oneapi/tests/test_data_parallel_single_gpu[1]_tests.cmake")
-else()
-  add_test(test_data_parallel_single_gpu_NOT_BUILT test_data_parallel_single_gpu_NOT_BUILT)
-endif()

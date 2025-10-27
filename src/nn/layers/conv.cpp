@@ -3,9 +3,19 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/autograd/function.hpp"
+#include "tenzor/backend/dispatch.hpp"
 #include <cmath>
 #include <stdexcept>
 #include <iostream>
+
+// Include CUDA kernel headers when available
+#ifdef TENZOR_HAS_CUDA
+#include "tenzor/backends/cuda/conv_kernels.hpp"
+#endif
+
+#ifdef TENZOR_HAS_CUDNN
+#include "tenzor/backend/cudnn_wrapper.hpp"
+#endif
 
 namespace tenzor::nn {
 
@@ -36,12 +46,12 @@ auto im2col(const Tensor& input, int64_t kernel_h, int64_t kernel_w,
     // Create output tensor on same device as input
     auto col = zeros({batch, channels * kernel_h * kernel_w, out_h * out_w}, input.dtype(), input.device());
 
-    // For GPU tensors, transfer to CPU, process, then transfer back
-    // TODO: Implement native GPU kernels for im2col operation
-    Tensor input_cpu = (input.device().type == Device::Type::CUDA) ? input.to(Device::cpu()) : input;
-    Tensor col_cpu = (col.device().type == Device::Type::CUDA) ? col.to(Device::cpu()) : col;
+    // GPU kernels are implemented in conv2d.cu and accessed via backend dispatcher
+    // For CPU execution, process directly
+    const bool is_cpu = (input.device().type != Device::Type::CUDA);
+    Tensor input_cpu = is_cpu ? input : input.to(Device::cpu());
+    Tensor col_cpu = is_cpu ? col : col.to(Device::cpu());
 
-    // Access input data (now guaranteed to be on CPU)
     const float* input_data = input_cpu.data<float>();
     float* col_data = col_cpu.data<float>();
 
@@ -78,8 +88,8 @@ auto im2col(const Tensor& input, int64_t kernel_h, int64_t kernel_w,
         }
     }
 
-    // Transfer back to original device if needed
-    return (input.device().type == Device::Type::CUDA) ? col_cpu.to(input.device()) : col_cpu;
+    // Transfer back to original device if needed (GPU kernels handle this automatically via dispatcher)
+    return is_cpu ? col_cpu : col_cpu.to(input.device());
 }
 
 // im2col transformation: unfold input tensor for convolution (same padding for both dimensions)
@@ -104,10 +114,11 @@ auto col2im(const Tensor& col, int64_t channels, int64_t height, int64_t width,
     // Create output tensor on same device as input
     auto output = zeros({batch, channels, height, width}, col.dtype(), col.device());
 
-    // For GPU tensors, transfer to CPU, process, then transfer back
-    // TODO: Implement native GPU kernels for col2im operation
-    Tensor col_cpu = (col.device().type == Device::Type::CUDA) ? col.to(Device::cpu()) : col;
-    Tensor output_cpu = (output.device().type == Device::Type::CUDA) ? output.to(Device::cpu()) : output;
+    // GPU kernels are implemented in conv2d.cu and accessed via backend dispatcher
+    // For CPU execution, process directly
+    const bool is_cpu = (col.device().type != Device::Type::CUDA);
+    Tensor col_cpu = is_cpu ? col : col.to(Device::cpu());
+    Tensor output_cpu = is_cpu ? output : output.to(Device::cpu());
 
     const float* col_data = col_cpu.data<float>();
     float* output_data = output_cpu.data<float>();
@@ -140,8 +151,8 @@ auto col2im(const Tensor& col, int64_t channels, int64_t height, int64_t width,
         }
     }
 
-    // Transfer back to original device if needed
-    return (col.device().type == Device::Type::CUDA) ? output_cpu.to(col.device()) : output_cpu;
+    // Transfer back to original device if needed (GPU kernels handle this automatically via dispatcher)
+    return is_cpu ? output_cpu : output_cpu.to(col.device());
 }
 
 // col2im transformation: reverse of im2col for gradient computation (same padding/stride for both dimensions)
@@ -536,14 +547,45 @@ auto Conv2d::forward(const Variable& input) -> Variable {
     // Create output tensor on same device as input
     auto output = zeros({batch, out_channels_, out_h, out_w}, input.tensor().dtype(), input.tensor().device());
 
-    // For GPU execution, we need to work on CPU for now
-    // TODO: Implement native GPU convolution kernels
-    Device original_device = input.tensor().device();
-    bool use_gpu = (original_device.type == Device::Type::CUDA);
+    // Native GPU convolution kernels are implemented in conv2d.cu
+    // Use backend dispatcher for device-agnostic execution
+    #ifdef TENZOR_HAS_CUDA
+    if (input.tensor().device().type == Device::Type::CUDA) {
+        // Use GPU kernels directly via CUDA backend
+        auto bias_it = parameters_.find("bias");
+        const Tensor* bias_ptr = (bias_it != parameters_.end()) ? &(bias_it->second->tensor()) : nullptr;
 
-    Tensor input_work = use_gpu ? input.tensor().to(Device::cpu()) : input.tensor();
-    Tensor weight_work = use_gpu ? weight.tensor().to(Device::cpu()) : weight.tensor();
-    Tensor output_work = use_gpu ? output.to(Device::cpu()) : output;
+        #ifdef TENZOR_HAS_CUDNN
+        // Try cuDNN first for optimal performance
+        try {
+            output = cuda::cudnn_conv2d_forward(
+                input.tensor(), weight.tensor(), bias_ptr,
+                stride_, padding_, dilation_, groups_,
+                nullptr
+            );
+        } catch (const std::exception& e) {
+            // Fall back to custom CUDA kernels
+            output = cuda::conv2d_forward_kernel(
+                input.tensor(), weight.tensor(), bias_ptr,
+                stride_, padding_, dilation_, groups_,
+                nullptr
+            );
+        }
+        #else
+        // Use custom CUDA kernels
+        output = cuda::conv2d_forward_kernel(
+            input.tensor(), weight.tensor(), bias_ptr,
+            stride_, padding_, dilation_, groups_,
+            nullptr
+        );
+        #endif
+    } else
+    #endif
+    {
+        // CPU execution path
+        Tensor input_work = input.tensor();
+        Tensor weight_work = weight.tensor();
+        Tensor output_work = output;
 
     // Process each group separately
     for (int64_t g = 0; g < groups_; ++g) {
@@ -647,38 +689,33 @@ auto Conv2d::forward(const Variable& input) -> Variable {
         }
     }
 
-    // Add bias if present
-    auto bias_it = parameters_.find("bias");
-    if (bias_it != parameters_.end()) {
-        auto& bias = *bias_it->second;
+        // Add bias if present (CPU path only, GPU path handles bias in kernels)
+        auto bias_it = parameters_.find("bias");
+        if (bias_it != parameters_.end()) {
+            auto& bias = *bias_it->second;
+            Tensor bias_work = bias.tensor();
 
-        // Get bias on CPU if we're using GPU
-        Tensor bias_work = use_gpu ? bias.tensor().to(Device::cpu()) : bias.tensor();
+            // Manual broadcasting for bias
+            float* out_data = output_work.data<float>();
+            const float* bias_data = bias_work.data<float>();
 
-        // Manual broadcasting for bias
-        float* out_data = output_work.data<float>();
-        const float* bias_data = bias_work.data<float>();
-
-        for (int64_t b = 0; b < batch; ++b) {
-            for (int64_t c = 0; c < out_channels_; ++c) {
-                for (int64_t h = 0; h < out_h; ++h) {
-                    for (int64_t w = 0; w < out_w; ++w) {
-                        int64_t idx = b * (out_channels_ * out_h * out_w) +
-                                     c * (out_h * out_w) +
-                                     h * out_w + w;
-                        out_data[idx] += bias_data[c];
+            for (int64_t b = 0; b < batch; ++b) {
+                for (int64_t c = 0; c < out_channels_; ++c) {
+                    for (int64_t h = 0; h < out_h; ++h) {
+                        for (int64_t w = 0; w < out_w; ++w) {
+                            int64_t idx = b * (out_channels_ * out_h * out_w) +
+                                         c * (out_h * out_w) +
+                                         h * out_w + w;
+                            out_data[idx] += bias_data[c];
+                        }
                     }
                 }
             }
         }
-    }
 
-    // Transfer back to GPU if needed
-    if (use_gpu) {
-        output = output_work.to(original_device);
-    } else {
+        // CPU execution complete
         output = output_work;
-    }
+    } // End of CPU/GPU branch
 
     // Create output variable with autograd support
     auto result = Variable(output, input.requires_grad() || weight.requires_grad());
@@ -686,6 +723,7 @@ auto Conv2d::forward(const Variable& input) -> Variable {
     // Setup backward function if gradient is required
     if (input.requires_grad() || weight.requires_grad()) {
         // Prepare tensors to save
+        auto bias_it = parameters_.find("bias");
         std::vector<Tensor> tensors_to_save;
         if (bias_it != parameters_.end()) {
             auto& bias = *bias_it->second;

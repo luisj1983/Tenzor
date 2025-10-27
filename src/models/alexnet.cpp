@@ -109,8 +109,15 @@ auto alexnet(int64_t num_classes, bool pretrained) -> std::shared_ptr<AlexNet> {
     auto model = std::make_shared<AlexNet>(num_classes);
 
     if (pretrained) {
-        // TODO: Load pretrained weights
-        throw std::runtime_error("Pretrained weights not yet implemented");
+        throw std::runtime_error(
+            "Pretrained AlexNet weights not available. "
+            "To use pretrained weights:\n"
+            "  1. Download ImageNet pretrained weights\n"
+            "  2. Convert to Tenzor checkpoint format using model serialization\n"
+            "  3. Load using: nn::ModelCheckpoint().load_model(\"path/to/weights.pt\")\n"
+            "     and model->load_state_dict(state_dict)\n"
+            "For training from scratch, set pretrained=false"
+        );
     }
 
     return model;

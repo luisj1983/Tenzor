@@ -6,6 +6,7 @@ set(BENCHMARK_TARGETS
     benchmark_ops
     benchmark_convolutions
     benchmark_memory
+    benchmark_training
     bench_fused_ops
 )
 
@@ -23,6 +24,11 @@ target_include_directories(benchmark_convolutions PRIVATE ${CMAKE_SOURCE_DIR}/in
 add_executable(benchmark_memory benchmark_memory.cpp)
 target_link_libraries(benchmark_memory PRIVATE tenzor_core)
 target_include_directories(benchmark_memory PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+# benchmark_training - Full training loops
+add_executable(benchmark_training benchmark_training.cpp)
+target_link_libraries(benchmark_training PRIVATE tenzor_core)
+target_include_directories(benchmark_training PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
 # bench_fused_ops - Fused operations (existing)
 add_executable(bench_fused_ops bench_fused_ops.cpp)
@@ -57,7 +63,10 @@ add_custom_target(run_benchmarks
     COMMAND echo "3. Running Memory Operations Benchmark..."
     COMMAND $<TARGET_FILE:benchmark_memory> || true
     COMMAND echo ""
-    COMMAND echo "4. Running Fused Operations Benchmark..."
+    COMMAND echo "4. Running Training Benchmark..."
+    COMMAND $<TARGET_FILE:benchmark_training> || true
+    COMMAND echo ""
+    COMMAND echo "5. Running Fused Operations Benchmark..."
     COMMAND $<TARGET_FILE:bench_fused_ops> || true
     COMMAND echo ""
     COMMAND echo "=================================="
@@ -87,6 +96,13 @@ add_custom_target(run_memory_benchmark
     DEPENDS benchmark_memory
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     COMMENT "Running memory operations benchmark"
+)
+
+add_custom_target(run_training_benchmark
+    COMMAND $<TARGET_FILE:benchmark_training>
+    DEPENDS benchmark_training
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    COMMENT "Running training benchmark"
 )
 
 add_custom_target(run_fused_benchmark

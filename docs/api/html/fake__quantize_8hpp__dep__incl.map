@@ -1,0 +1,13 @@
+<map id="include/tenzor/nn/quantization/fake_quantize.hpp" name="include/tenzor/nn/quantization/fake_quantize.hpp">
+<area shape="rect" id="Node000001" title="Fake quantization for quantization&#45;aware training (QAT)." alt="" coords="42,5,260,50"/>
+<area shape="rect" id="Node000002" href="$quantization_8hpp.html" title="Main header for quantization support." alt="" coords="5,283,252,311"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="124,63,106,99,100,124,98,151,103,203,114,249,126,282,121,284,109,251,98,204,93,151,95,124,101,97,120,61"/>
+<area shape="rect" id="Node000004" href="$qconfig_8hpp.html" title="Quantization configuration for neural network layers." alt="" coords="115,98,334,143"/>
+<area shape="poly" id="edge3_Node000001_Node000004" title=" " alt="" coords="180,60,209,96,205,100,176,64"/>
+<area shape="rect" id="Node000003" href="$quantize__api_8hpp.html" title="High&#45;level quantization API for model conversion." alt="" coords="29,359,228,404"/>
+<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="131,327,131,358,126,358,126,327"/>
+<area shape="poly" id="edge4_Node000004_Node000002" title=" " alt="" coords="187,155,170,172,156,192,146,216,138,241,132,283,127,282,133,240,141,214,152,189,166,169,183,151"/>
+<area shape="rect" id="Node000005" href="$quantized__layers_8hpp.html" title="Quantized neural network layers for efficient inference." alt="" coords="166,191,384,235"/>
+<area shape="poly" id="edge5_Node000004_Node000005" title=" " alt="" coords="246,155,266,189,261,192,242,158"/>
+<area shape="poly" id="edge6_Node000005_Node000002" title=" " alt="" coords="224,246,153,285,151,280,222,241"/>
+</map>

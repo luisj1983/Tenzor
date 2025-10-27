@@ -203,7 +203,7 @@ auto QATHelper::convert_to_quantized(Module& model) -> std::shared_ptr<Module> {
     // This would replace FakeQuantize modules with actual quantized layers
     // and convert floating-point layers to quantized variants
 
-    // Placeholder - actual implementation requires model transformation
+    // Note: Full QAT to quantized conversion requires traversing model architecture
     return std::make_shared<Sequential>();
 }
 

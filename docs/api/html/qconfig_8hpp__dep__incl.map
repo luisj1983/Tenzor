@@ -1,0 +1,10 @@
+<map id="include/tenzor/nn/quantization/qconfig.hpp" name="include/tenzor/nn/quantization/qconfig.hpp">
+<area shape="rect" id="Node000001" title="Quantization configuration for neural network layers." alt="" coords="19,5,238,50"/>
+<area shape="rect" id="Node000002" href="$quantization_8hpp.html" title="Main header for quantization support." alt="" coords="5,191,252,218"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="102,63,83,99,78,120,83,142,98,168,116,189,112,192,93,171,78,144,73,120,78,97,97,61"/>
+<area shape="rect" id="Node000004" href="$quantized__layers_8hpp.html" title="Quantized neural network layers for efficient inference." alt="" coords="93,98,311,143"/>
+<area shape="poly" id="edge3_Node000001_Node000004" title=" " alt="" coords="158,60,187,96,183,100,153,64"/>
+<area shape="rect" id="Node000003" href="$quantize__api_8hpp.html" title="High&#45;level quantization API for model conversion." alt="" coords="29,266,228,311"/>
+<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="131,234,131,266,126,266,126,234"/>
+<area shape="poly" id="edge4_Node000004_Node000002" title=" " alt="" coords="175,156,142,192,138,188,171,152"/>
+</map>

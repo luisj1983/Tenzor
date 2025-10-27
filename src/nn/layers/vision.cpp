@@ -13,6 +13,7 @@
 #include "tenzor/ops/transform.hpp"
 #include <stdexcept>
 #include <cmath>
+#include <random>
 
 namespace tenzor::nn {
 
@@ -139,12 +140,21 @@ WindowAttention::WindowAttention(int64_t dim,
     // Table size: (2*window_size-1, 2*window_size-1, num_heads)
     int64_t table_size = 2 * window_size - 1;
     auto bias_table = zeros({table_size, table_size, num_heads}, DType::Float32, Device::cpu());
-    // Initialize with small random values
-    // TODO: Use proper truncated normal initialization
+
+    // Initialize with truncated normal distribution (mean=0, std=0.02, range=[-2*std, 2*std])
     auto bias_data = bias_table.data<float>();
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::normal_distribution<float> dist(0.0f, 0.02f);
+
     for (int64_t i = 0; i < table_size * table_size * num_heads; ++i) {
-        bias_data[i] = (static_cast<float>(std::rand()) / RAND_MAX - 0.5f) * 0.02f;
+        float value;
+        do {
+            value = dist(gen);
+        } while (std::abs(value) > 2.0f * 0.02f);  // Truncate to [-2*std, 2*std]
+        bias_data[i] = value;
     }
+
     relative_position_bias_table_ = std::make_shared<Variable>(bias_table, true);
     register_parameter("relative_position_bias_table", *relative_position_bias_table_);
 

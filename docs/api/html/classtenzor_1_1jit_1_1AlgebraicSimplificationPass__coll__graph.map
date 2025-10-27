@@ -1,0 +1,5 @@
+<map id="tenzor::jit::AlgebraicSimplificationPass" name="tenzor::jit::AlgebraicSimplificationPass">
+<area shape="rect" id="Node000001" title="Algebraic simplification pass." alt="" coords="5,81,276,109"/>
+<area shape="rect" id="Node000002" href="$classtenzor_1_1jit_1_1Pass.html" title="Base class for optimization passes." alt="" coords="80,5,201,33"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="143,49,143,81,138,81,138,49"/>
+</map>

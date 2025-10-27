@@ -13,7 +13,16 @@ var function_8hpp =
     [ "tenzor::ExpBackward", "classtenzor_1_1ExpBackward.html", "classtenzor_1_1ExpBackward" ],
     [ "tenzor::NegBackward", "classtenzor_1_1NegBackward.html", "classtenzor_1_1NegBackward" ],
     [ "tenzor::LogSoftmaxBackward", "classtenzor_1_1LogSoftmaxBackward.html", "classtenzor_1_1LogSoftmaxBackward" ],
+    [ "tenzor::SoftmaxBackward", "classtenzor_1_1SoftmaxBackward.html", "classtenzor_1_1SoftmaxBackward" ],
     [ "tenzor::AbsBackward", "classtenzor_1_1AbsBackward.html", "classtenzor_1_1AbsBackward" ],
     [ "tenzor::ClampBackward", "classtenzor_1_1ClampBackward.html", "classtenzor_1_1ClampBackward" ],
-    [ "tenzor::MaxBackward", "classtenzor_1_1MaxBackward.html", "classtenzor_1_1MaxBackward" ]
+    [ "tenzor::MaxBackward", "classtenzor_1_1MaxBackward.html", "classtenzor_1_1MaxBackward" ],
+    [ "tenzor::ReshapeBackward", "classtenzor_1_1ReshapeBackward.html", "classtenzor_1_1ReshapeBackward" ],
+    [ "tenzor::PermuteBackward", "classtenzor_1_1PermuteBackward.html", "classtenzor_1_1PermuteBackward" ],
+    [ "tenzor::TransposeBackward", "classtenzor_1_1TransposeBackward.html", "classtenzor_1_1TransposeBackward" ],
+    [ "tenzor::SqueezeBackward", "classtenzor_1_1SqueezeBackward.html", "classtenzor_1_1SqueezeBackward" ],
+    [ "tenzor::BmmBackward", "classtenzor_1_1BmmBackward.html", "classtenzor_1_1BmmBackward" ],
+    [ "tenzor::CatBackward", "classtenzor_1_1CatBackward.html", "classtenzor_1_1CatBackward" ],
+    [ "tenzor::SliceBackward", "classtenzor_1_1SliceBackward.html", "classtenzor_1_1SliceBackward" ],
+    [ "tenzor::UpsampleBilinearBackward", "classtenzor_1_1UpsampleBilinearBackward.html", "classtenzor_1_1UpsampleBilinearBackward" ]
 ];

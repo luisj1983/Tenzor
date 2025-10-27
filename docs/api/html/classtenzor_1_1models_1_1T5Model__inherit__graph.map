@@ -1,0 +1,5 @@
+<map id="tenzor::models::T5Model" name="tenzor::models::T5Model">
+<area shape="rect" id="Node000001" title="Base T5 model (encoder + decoder)." alt="" coords="5,81,188,109"/>
+<area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="25,5,168,33"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="99,49,99,81,94,81,94,49"/>
+</map>

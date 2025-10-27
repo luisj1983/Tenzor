@@ -6,6 +6,7 @@
 #include "tenzor/nn/quantization/quantized_layers.hpp"
 #include "tenzor/nn/layers/linear.hpp"
 #include "tenzor/nn/layers/conv.hpp"
+#include "tenzor/ops/math.hpp"
 #include <stdexcept>
 
 namespace tenzor {
@@ -216,9 +217,53 @@ auto QuantizedConv2d::set_bias(const Tensor& bias) -> void {
 
 auto QuantizedConv2d::from_float(const Conv2d& fp_conv, const QConfig& qconfig)
     -> std::shared_ptr<QuantizedConv2d> {
-    // Similar to Linear - quantize weights and create quantized layer
-    // Implementation details omitted for brevity
-    throw std::runtime_error("Not implemented - would quantize Conv2d weights");
+    // Extract weight and bias from float Conv2d
+    auto state_dict = fp_conv.state_dict();
+
+    Tensor fp_weight = state_dict.at("weight");
+    std::optional<Tensor> fp_bias;
+    if (state_dict.find("bias") != state_dict.end()) {
+        fp_bias = state_dict.at("bias");
+    }
+
+    // Quantize weights using the weight observer from qconfig
+    auto weight_observer = qconfig.create_weight_observer();
+    weight_observer->observe(fp_weight);
+    auto weight_qparams = weight_observer->calculate_qparams(
+        qconfig.weight_dtype(),
+        qconfig.weight_scheme()
+    );
+
+    // Extract Conv2d parameters from weight shape
+    auto weight_shape = fp_weight.shape();
+    int64_t out_channels = weight_shape[0];
+    int64_t in_channels = weight_shape[1];
+    int64_t kernel_h = weight_shape[2];
+    int64_t kernel_w = weight_shape[3];
+
+    // Create quantized Conv2d with quantization parameters
+    auto q_conv = std::make_shared<QuantizedConv2d>(
+        in_channels,
+        out_channels,
+        kernel_h,  // kernel_size (assuming square)
+        1,         // stride (default)
+        0,         // padding (default)
+        1,         // dilation (default)
+        1,         // groups (default)
+        weight_qparams,
+        1.0f       // bias_scale (default)
+    );
+
+    // Quantize and set the weights
+    QuantizedTensor q_weight = quantize_tensor(fp_weight, weight_qparams);
+    q_conv->set_weight(q_weight);
+
+    // Set bias if available
+    if (fp_bias.has_value()) {
+        q_conv->set_bias(fp_bias.value());
+    }
+
+    return q_conv;
 }
 
 // ============================================================================
@@ -250,36 +295,100 @@ auto QuantizedBatchNorm2d::forward_quantized(const QuantizedTensor& input) -> Qu
 
 auto QuantizedBatchNorm2d::from_float(const Module& fp_bn, const QConfig& qconfig)
     -> std::shared_ptr<QuantizedBatchNorm2d> {
-    // Extract BN parameters and fold
-    // Implementation would extract gamma, beta, running_mean, running_var
-    // and compute folded scale = gamma / sqrt(var + eps), bias = beta - scale * mean
-    throw std::runtime_error("Not implemented - would fold BN parameters");
+    // Extract BatchNorm parameters from state_dict
+    auto state_dict = fp_bn.state_dict();
+
+    // BatchNorm parameters: weight (gamma), bias (beta), running_mean, running_var
+    Tensor gamma = state_dict.at("weight");
+    Tensor beta = state_dict.at("bias");
+    Tensor running_mean = state_dict.at("running_mean");
+    Tensor running_var = state_dict.at("running_var");
+
+    // Fold BatchNorm parameters into scale and bias
+    // Formula:
+    //   scale = gamma / sqrt(running_var + eps)
+    //   bias = beta - scale * running_mean
+    // This allows BN to be applied as: y = scale * x + bias
+
+    constexpr float eps = 1e-5f;  // Standard BatchNorm epsilon
+
+    // Compute scale = gamma / sqrt(var + eps)
+    Tensor sqrt_var = sqrt(running_var + eps);
+    Tensor scale = gamma / sqrt_var;
+
+    // Compute bias = beta - scale * mean
+    Tensor bias = beta - scale * running_mean;
+
+    // Get number of features from gamma shape
+    int64_t num_features = gamma.shape()[0];
+
+    // Create quantized BatchNorm with folded parameters
+    auto q_bn = std::make_shared<QuantizedBatchNorm2d>(
+        num_features,
+        scale,
+        bias
+    );
+
+    return q_bn;
 }
 
 // ============================================================================
-// QuantizationStub / DequantizationStub
+// QuantStub / DeQuantStub - Full Quantization/Dequantization Implementation
 // ============================================================================
 
-QuantizationStub::QuantizationStub(QuantizationParams qparams)
+QuantStub::QuantStub(QuantizationParams qparams)
     : qparams_(std::move(qparams)) {}
 
-auto QuantizationStub::forward(const Variable& input) -> Variable {
+auto QuantStub::forward(const Variable& input) -> Variable {
+    // Quantize input tensor and immediately dequantize for Variable compatibility
+    // This maintains the computational graph while simulating quantization
     auto q_tensor = forward_to_quantized(input.tensor());
-    // Wrap quantized tensor (implementation-specific)
-    return Variable(q_tensor.dequantize(), false);
+    Tensor dequantized = q_tensor.dequantize();
+    return Variable(dequantized, input.requires_grad());
 }
 
-auto QuantizationStub::forward_to_quantized(const Tensor& input) -> QuantizedTensor {
-    return quantize_tensor(input, qparams_);
+auto QuantStub::forward_to_quantized(const Tensor& input) -> QuantizedTensor {
+    // Perform full quantization:
+    // 1. Validate input is floating-point
+    if (input.dtype() != DType::Float32 && input.dtype() != DType::Float64) {
+        throw std::runtime_error("QuantStub: Input must be floating-point type");
+    }
+
+    // 2. Convert to Float32 if needed
+    Tensor fp_input = (input.dtype() == DType::Float32) ? input : input.to(DType::Float32);
+
+    // 3. Apply quantization using stored parameters
+    // This handles both per-tensor and per-channel quantization
+    // Formula: q = clamp(round(x / scale) + zero_point, qmin, qmax)
+    return quantize_tensor(fp_input, qparams_);
 }
 
-auto DequantizationStub::forward(const Variable& input) -> Variable {
-    // Assume input contains quantized data (implementation-specific unwrapping)
-    return input;  // Simplified
+auto DeQuantStub::forward(const Variable& input) -> Variable {
+    // For Variable input, we assume it contains quantized data that needs dequantization
+    // In a real implementation, the Variable would have metadata indicating it's quantized
+    // For now, we pass through assuming the tensor is already in FP32 format
+    // This is a limitation of the Variable wrapper not having quantization metadata
+
+    // Direct passthrough since Variable doesn't have QuantizedTensor metadata
+    // In production, this would extract quantization params from Variable metadata
+    return Variable(input.tensor(), input.requires_grad());
 }
 
-auto DequantizationStub::forward_from_quantized(const QuantizedTensor& input) -> Tensor {
-    return input.dequantize();
+auto DeQuantStub::forward_from_quantized(const QuantizedTensor& input) -> Tensor {
+    // Perform full dequantization:
+    // 1. Extract quantization parameters
+    const auto& params = input.params();
+
+    // 2. Track if this was per-channel for debugging
+    last_per_channel_ = (params.axis != -1);
+
+    // 3. Apply dequantization based on scheme
+    // Formula: x = (q - zero_point) * scale
+    // This handles both:
+    //   - Per-tensor: Single scale and zero_point for entire tensor
+    //   - Per-channel: Different scale/zero_point per channel along specified axis
+
+    return dequantize_tensor(input);
 }
 
 // ============================================================================
@@ -309,8 +418,54 @@ auto QuantizedConv2dReLU::forward_quantized_output(
 
 auto QuantizedConv2dReLU::from_float(const Conv2d& fp_conv, const QConfig& qconfig)
     -> std::shared_ptr<QuantizedConv2dReLU> {
-    // Similar to QuantizedConv2d::from_float
-    throw std::runtime_error("Not implemented");
+    // Extract weight and bias from float Conv2d
+    auto state_dict = fp_conv.state_dict();
+
+    Tensor fp_weight = state_dict.at("weight");
+    std::optional<Tensor> fp_bias;
+    if (state_dict.find("bias") != state_dict.end()) {
+        fp_bias = state_dict.at("bias");
+    }
+
+    // Quantize weights using the weight observer from qconfig
+    auto weight_observer = qconfig.create_weight_observer();
+    weight_observer->observe(fp_weight);
+    auto weight_qparams = weight_observer->calculate_qparams(
+        qconfig.weight_dtype(),
+        qconfig.weight_scheme()
+    );
+
+    // Extract Conv2d parameters from weight shape
+    auto weight_shape = fp_weight.shape();
+    int64_t out_channels = weight_shape[0];
+    int64_t in_channels = weight_shape[1];
+    int64_t kernel_h = weight_shape[2];
+
+    // Create QuantizedConv2dReLU using inherited constructor
+    auto q_conv_relu = std::shared_ptr<QuantizedConv2dReLU>(
+        new QuantizedConv2dReLU(
+            in_channels,
+            out_channels,
+            kernel_h,  // kernel_size
+            1,         // stride
+            0,         // padding
+            1,         // dilation
+            1,         // groups
+            weight_qparams,
+            1.0f       // bias_scale
+        )
+    );
+
+    // Quantize and set the weights
+    QuantizedTensor q_weight = quantize_tensor(fp_weight, weight_qparams);
+    q_conv_relu->set_weight(q_weight);
+
+    // Set bias if available
+    if (fp_bias.has_value()) {
+        q_conv_relu->set_bias(fp_bias.value());
+    }
+
+    return q_conv_relu;
 }
 
 } // namespace quantization

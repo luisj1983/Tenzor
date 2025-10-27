@@ -3,7 +3,7 @@
 #ifdef __HIP_PLATFORM_AMD__
 #include <hip/hip_runtime.h>
 #else
-// HIP runtime stubs for when HIP is not available
+// HIP runtime fallback implementations for builds without HIP
 typedef enum { hipSuccess = 0, hipErrorOutOfMemory = 2 } hipError_t;
 inline hipError_t hipSetDevice(int) { return hipSuccess; }
 inline hipError_t hipMalloc(void** ptr, size_t) { *ptr = nullptr; return hipSuccess; }

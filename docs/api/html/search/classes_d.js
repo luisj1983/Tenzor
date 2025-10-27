@@ -1,5 +1,20 @@
 var searchData=
 [
-  ['relu_0',['ReLU',['../classtenzor_1_1nn_1_1ReLU.html',1,'tenzor::nn']]],
-  ['relubackward_1',['ReLUBackward',['../classtenzor_1_1ReLUBackward.html',1,'tenzor']]]
+  ['observer_0',['Observer',['../classtenzor_1_1nn_1_1quantization_1_1Observer.html',1,'tenzor::nn::quantization']]],
+  ['onecyclelr_1',['OneCycleLR',['../classtenzor_1_1optim_1_1OneCycleLR.html',1,'tenzor::optim']]],
+  ['onnxattribute_2',['ONNXAttribute',['../structtenzor_1_1onnx_1_1ONNXAttribute.html',1,'tenzor::onnx']]],
+  ['onnxexporter_3',['ONNXExporter',['../classtenzor_1_1onnx_1_1ONNXExporter.html',1,'tenzor::onnx']]],
+  ['onnxgraph_4',['ONNXGraph',['../classtenzor_1_1onnx_1_1ONNXGraph.html',1,'tenzor::onnx']]],
+  ['onnxgraphdata_5',['ONNXGraphData',['../structtenzor_1_1onnx_1_1ONNXGraphData.html',1,'tenzor::onnx']]],
+  ['onnximportcontext_6',['ONNXImportContext',['../classtenzor_1_1onnx_1_1ONNXImportContext.html',1,'tenzor::onnx']]],
+  ['onnximporter_7',['ONNXImporter',['../classtenzor_1_1onnx_1_1ONNXImporter.html',1,'tenzor::onnx']]],
+  ['onnxmodeldata_8',['ONNXModelData',['../structtenzor_1_1onnx_1_1ONNXModelData.html',1,'tenzor::onnx']]],
+  ['onnxnode_9',['ONNXNode',['../classtenzor_1_1onnx_1_1ONNXNode.html',1,'tenzor::onnx']]],
+  ['onnxtensor_10',['ONNXTensor',['../classtenzor_1_1onnx_1_1ONNXTensor.html',1,'tenzor::onnx']]],
+  ['onnxtensordata_11',['ONNXTensorData',['../structtenzor_1_1onnx_1_1ONNXTensorData.html',1,'tenzor::onnx']]],
+  ['onnxvalueinfo_12',['ONNXValueInfo',['../classtenzor_1_1onnx_1_1ONNXValueInfo.html',1,'tenzor::onnx']]],
+  ['operationregistry_13',['OperationRegistry',['../classtenzor_1_1OperationRegistry.html',1,'tenzor']]],
+  ['oppattern_14',['OpPattern',['../structtenzor_1_1OpPattern.html',1,'tenzor']]],
+  ['optimizationstats_15',['OptimizationStats',['../structtenzor_1_1OptimizationStats.html',1,'tenzor']]],
+  ['optimizer_16',['Optimizer',['../classtenzor_1_1optim_1_1Optimizer.html',1,'tenzor::optim']]]
 ];

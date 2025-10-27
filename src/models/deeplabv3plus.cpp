@@ -7,6 +7,7 @@
 #include "tenzor/models/mobilenet.hpp"
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/autograd/ops.hpp"
+#include "tenzor/nn/checkpoint.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
@@ -267,9 +268,29 @@ auto DeepLabV3Plus::predict(const Variable& input) -> Tensor {
 }
 
 auto DeepLabV3Plus::load_pretrained(const std::string& path) -> void {
-    // TODO: Implement weight loading
-    // This would load the complete model weights from a checkpoint
-    throw std::runtime_error("Pretrained weight loading not yet implemented");
+    // Load checkpoint from file using the checkpoint infrastructure
+    nn::ModelCheckpoint checkpoint_manager;
+    try {
+        auto checkpoint = checkpoint_manager.load(path);
+
+        // Validate checkpoint has model state
+        if (checkpoint.model_state.empty()) {
+            throw std::runtime_error("Checkpoint file contains no model state");
+        }
+
+        // Load state dictionary into the model
+        load_state_dict(checkpoint.model_state);
+
+    } catch (const std::exception& e) {
+        throw std::runtime_error(
+            "Failed to load pretrained DeepLabV3+ weights from '" + path + "': " + e.what() +
+            "\n\nTo use pretrained weights:\n"
+            "  1. Download pretrained weights (e.g., from PyTorch model zoo)\n"
+            "  2. Convert to Tenzor checkpoint format\n"
+            "  3. Ensure architecture matches (ResNet50/ResNet101 backbone, output_stride=16)\n"
+            "For training from scratch, do not call load_pretrained()"
+        );
+    }
 }
 
 // ============================================================================

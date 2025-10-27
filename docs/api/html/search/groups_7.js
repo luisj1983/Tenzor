@@ -1,4 +1,4 @@
 var searchData=
 [
-  ['reduction_20operations_0',['Reduction Operations',['../group__tensor__reduction.html',1,'']]]
+  ['place_20activation_20functions_0',['In-Place Activation Functions',['../group__inplace__activations.html',1,'']]]
 ];
