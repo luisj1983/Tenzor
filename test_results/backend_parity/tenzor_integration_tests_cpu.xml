@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites tests="3" failures="0" disabled="0" errors="0" time="0.363" timestamp="2025-10-25T09:37:44.582" name="AllTests">
+  <testsuite name="NNTest" tests="2" failures="0" disabled="0" skipped="0" errors="0" time="0.002" timestamp="2025-10-25T09:37:44.921">
+    <testcase name="LinearLayer" file="/home/lee/Projects/Tenzor/tests/integration/test_nn.cpp" line="18" status="run" result="completed" time="0.001" timestamp="2025-10-25T09:37:44.921" classname="NNTest" />
+    <testcase name="Sequential" file="/home/lee/Projects/Tenzor/tests/integration/test_nn.cpp" line="28" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:44.923" classname="NNTest" />
+  </testsuite>
+  <testsuite name="TrainingTest" tests="1" failures="0" disabled="0" skipped="0" errors="0" time="0.021" timestamp="2025-10-25T09:37:44.924">
+    <testcase name="SimpleOptimization" file="/home/lee/Projects/Tenzor/tests/integration/test_training.cpp" line="6" status="run" result="completed" time="0.021" timestamp="2025-10-25T09:37:44.924" classname="TrainingTest" />
+  </testsuite>
+</testsuites>

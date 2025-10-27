@@ -1,0 +1,5 @@
+if(EXISTS "/home/lee/Projects/Tenzor/build_checkpoint/tests/test_autocast[1]_tests.cmake")
+  include("/home/lee/Projects/Tenzor/build_checkpoint/tests/test_autocast[1]_tests.cmake")
+else()
+  add_test(test_autocast_NOT_BUILT test_autocast_NOT_BUILT)
+endif()

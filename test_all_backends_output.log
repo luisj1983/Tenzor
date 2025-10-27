@@ -1,0 +1,110 @@
+================================================
+Backend Parity Test Suite
+================================================
+Testing 5 test suites on 4 backends
+Results will be saved to: /home/lee/Projects/Tenzor/test_results/backend_parity
+
+[1;33m[RUN][0m tenzor_unit_tests on cpu backend
+[0;31m[FAIL][0m tenzor_unit_tests on cpu
+       Last 5 lines:
+       [  FAILED  ] LossTest.CrossEntropyBasic
+       [  FAILED  ] LossTest.CrossEntropyUniformLogits
+       [  FAILED  ] LossTest.CrossEntropyLossClass
+       
+        3 FAILED TESTS
+
+[1;33m[RUN][0m tenzor_unit_tests on cuda backend
+[0;31m[FAIL][0m tenzor_unit_tests on cuda
+       Last 5 lines:
+       [  FAILED  ] LossTest.CrossEntropyBasic
+       [  FAILED  ] LossTest.CrossEntropyUniformLogits
+       [  FAILED  ] LossTest.CrossEntropyLossClass
+       
+        3 FAILED TESTS
+
+[1;33m[RUN][0m tenzor_unit_tests on vulkan backend
+[0;31m[FAIL][0m tenzor_unit_tests on vulkan
+       Last 5 lines:
+       [  FAILED  ] LossTest.CrossEntropyBasic
+       [  FAILED  ] LossTest.CrossEntropyUniformLogits
+       [  FAILED  ] LossTest.CrossEntropyLossClass
+       
+        3 FAILED TESTS
+
+[1;33m[RUN][0m tenzor_unit_tests on oneapi backend
+[0;31m[FAIL][0m tenzor_unit_tests on oneapi
+       Last 5 lines:
+       [  FAILED  ] LossTest.CrossEntropyBasic
+       [  FAILED  ] LossTest.CrossEntropyUniformLogits
+       [  FAILED  ] LossTest.CrossEntropyLossClass
+       
+        3 FAILED TESTS
+
+[1;33m[RUN][0m tenzor_integration_tests on cpu backend
+[0;32m[PASS][0m tenzor_integration_tests on cpu
+       Tests passed: 3
+
+[1;33m[RUN][0m tenzor_integration_tests on cuda backend
+[0;32m[PASS][0m tenzor_integration_tests on cuda
+       Tests passed: 3
+
+[1;33m[RUN][0m tenzor_integration_tests on vulkan backend
+[0;32m[PASS][0m tenzor_integration_tests on vulkan
+       Tests passed: 3
+
+[1;33m[RUN][0m tenzor_integration_tests on oneapi backend
+[0;32m[PASS][0m tenzor_integration_tests on oneapi
+       Tests passed: 3
+
+[1;33m[RUN][0m test_ciou_loss on cpu backend
+[0;32m[PASS][0m test_ciou_loss on cpu
+       Tests passed: 15
+
+[1;33m[RUN][0m test_ciou_loss on cuda backend
+[0;32m[PASS][0m test_ciou_loss on cuda
+       Tests passed: 15
+
+[1;33m[RUN][0m test_ciou_loss on vulkan backend
+[0;32m[PASS][0m test_ciou_loss on vulkan
+       Tests passed: 15
+
+[1;33m[RUN][0m test_ciou_loss on oneapi backend
+[0;32m[PASS][0m test_ciou_loss on oneapi
+       Tests passed: 15
+
+[1;33m[RUN][0m test_slice_backend_parity on cpu backend
+[0;32m[PASS][0m test_slice_backend_parity on cpu
+       Tests passed: 2
+
+[1;33m[RUN][0m test_slice_backend_parity on cuda backend
+[0;32m[PASS][0m test_slice_backend_parity on cuda
+       Tests passed: 2
+
+[1;33m[RUN][0m test_slice_backend_parity on vulkan backend
+[0;32m[PASS][0m test_slice_backend_parity on vulkan
+       Tests passed: 2
+
+[1;33m[RUN][0m test_slice_backend_parity on oneapi backend
+[0;32m[PASS][0m test_slice_backend_parity on oneapi
+       Tests passed: 2
+
+[1;33m[RUN][0m test_phase11_backends on cpu backend
+[0;32m[PASS][0m test_phase11_backends on cpu
+       Tests passed: 2
+
+[1;33m[RUN][0m test_phase11_backends on cuda backend
+[0;32m[PASS][0m test_phase11_backends on cuda
+       Tests passed: 2
+
+[1;33m[RUN][0m test_phase11_backends on vulkan backend
+[0;32m[PASS][0m test_phase11_backends on vulkan
+       Tests passed: 2
+
+[1;33m[RUN][0m test_phase11_backends on oneapi backend
+[0;32m[PASS][0m test_phase11_backends on oneapi
+       Tests passed: 2
+
+================================================
+SUMMARY REPORT
+================================================
+

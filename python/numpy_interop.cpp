@@ -12,6 +12,8 @@ auto dtype_to_numpy_format(DType dtype) -> std::string {
     switch (dtype) {
         case DType::Float32: return py::format_descriptor<float>::format();
         case DType::Float64: return py::format_descriptor<double>::format();
+        case DType::Float16: return "e";  // NumPy native float16 format string
+        case DType::BFloat16: return py::format_descriptor<uint16_t>::format(); // Store as uint16 bits
         case DType::Int8: return py::format_descriptor<int8_t>::format();
         case DType::Int16: return py::format_descriptor<int16_t>::format();
         case DType::Int32: return py::format_descriptor<int32_t>::format();
@@ -23,10 +25,9 @@ auto dtype_to_numpy_format(DType dtype) -> std::string {
         case DType::Bool: return py::format_descriptor<bool>::format();
         case DType::Complex64: return py::format_descriptor<std::complex<float>>::format();
         case DType::Complex128: return py::format_descriptor<std::complex<double>>::format();
-        default:
-            throw std::runtime_error("Unsupported dtype for NumPy conversion: " +
-                                   std::string(dtype_name(dtype)));
     }
+    throw std::runtime_error("Unsupported dtype for NumPy conversion: " +
+                           std::string(dtype_name(dtype)));
 }
 
 // NumPy dtype to Tenzor DType mapping
@@ -34,6 +35,12 @@ auto numpy_dtype_to_tenzor(const py::array& arr) -> DType {
     auto dtype = arr.dtype();
     auto kind = dtype.kind();
     auto itemsize = dtype.itemsize();
+
+    // Check for BFloat16 by name (ml_dtypes.bfloat16 shows as kind='V', itemsize=2)
+    std::string dtype_name = py::str(dtype);
+    if (dtype_name.find("bfloat16") != std::string::npos) {
+        return DType::BFloat16;
+    }
 
     // Floating-point types
     if (kind == 'f') {
@@ -64,9 +71,15 @@ auto numpy_dtype_to_tenzor(const py::array& arr) -> DType {
         if (itemsize == 8) return DType::Complex64;
         if (itemsize == 16) return DType::Complex128;
     }
+    // Void types (used for structured/custom dtypes like bfloat16)
+    else if (kind == 'V' && itemsize == 2) {
+        // This is likely bfloat16 from ml_dtypes
+        return DType::BFloat16;
+    }
 
     std::ostringstream oss;
-    oss << "Unsupported NumPy dtype: kind=" << kind << ", itemsize=" << itemsize;
+    oss << "Unsupported NumPy dtype: kind=" << kind << ", itemsize=" << itemsize
+        << ", name=" << dtype_name;
     throw std::runtime_error(oss.str());
 }
 

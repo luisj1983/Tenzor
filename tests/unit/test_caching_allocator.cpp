@@ -1,508 +1,586 @@
-#include <gtest/gtest.h>
-#include "tenzor/backend/caching_allocator.hpp"
-#include <cuda_runtime.h>
-#include <thread>
-#include <vector>
-#include <chrono>
-#include <random>
+/**
+ * @file test_caching_allocator.cpp
+ * @brief Unit tests for CachingAllocator memory pooling
+ */
 
-using namespace tenzor::backend;
+#include <gtest/gtest.h>
+#include "tenzor/core/caching_allocator.hpp"
+#include "tenzor/backend/backend.hpp"
+#include <cstring>
+#include "tenzor/core/device.hpp"
+#include <memory>
+#include <vector>
+#include <unordered_set>
+#include <thread>
+
+namespace tenzor {
+namespace test {
+
+/**
+ * @brief Mock backend for testing CachingAllocator
+ *
+ * Tracks allocation/deallocation calls and simulates memory operations
+ * without requiring actual GPU hardware.
+ */
+class MockBackend : public Backend {
+public:
+    // Track allocations and deallocations
+    size_t allocation_count{0};
+    size_t deallocation_count{0};
+    std::unordered_set<void*> active_allocations;
+
+    auto name() const -> std::string_view override {
+        return "mock";
+    }
+
+    auto device_count() const -> int32_t override {
+        return 1;
+    }
+
+    auto is_available() const -> bool override {
+        return true;
+    }
+
+    auto allocate(size_t bytes, int32_t device_id) -> void* override {
+        (void)device_id;  // Unused
+        void* ptr = ::operator new(bytes);  // Use standard new
+        active_allocations.insert(ptr);
+        ++allocation_count;
+        return ptr;
+    }
+
+    auto deallocate(void* ptr) -> void override {
+        auto it = active_allocations.find(ptr);
+        if (it != active_allocations.end()) {
+            ::operator delete(ptr);  // Use standard delete
+            active_allocations.erase(it);
+            ++deallocation_count;
+        }
+    }
+
+    auto copy(void* dst, const void* src, size_t bytes, CopyKind kind) -> void override {
+        (void)kind;  // Unused
+        memcpy(dst, src, bytes);
+    }
+
+    auto synchronize(int32_t device_id) -> void override {
+        (void)device_id;  // Unused
+    }
+
+    auto create_stream(int32_t device_id) -> StreamHandle override {
+        (void)device_id;  // Unused
+        return nullptr;
+    }
+
+    auto destroy_stream(StreamHandle stream) -> void override {
+        (void)stream;  // Unused
+    }
+
+    auto synchronize_stream(StreamHandle stream) -> void override {
+        (void)stream;  // Unused
+    }
+
+    auto dispatch(const std::string& op_name,
+                 std::span<const Tensor> inputs,
+                 const OpAttributes& attrs) -> std::vector<Tensor> override {
+        (void)op_name;
+        (void)inputs;
+        (void)attrs;
+        return {};
+    }
+};
 
 class CachingAllocatorTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        // Check if CUDA is available
-        int device_count = 0;
-        cudaGetDeviceCount(&device_count);
-        if (device_count == 0) {
-            GTEST_SKIP() << "No CUDA devices available";
-        }
-
-        // Reset allocator state
-        CachingAllocator::get().empty_cache();
-        CachingAllocator::get().reset_stats();
+        backend_ = std::make_unique<MockBackend>();
+        device_ = Device::cpu();
     }
 
     void TearDown() override {
-        // Clean up
-        CachingAllocator::get().empty_cache();
+        allocator_.reset();
+        backend_.reset();
     }
+
+    std::unique_ptr<MockBackend> backend_;
+    Device device_;
+    std::unique_ptr<CachingAllocator> allocator_;
 };
 
-TEST_F(CachingAllocatorTest, BasicAllocationDeallocation) {
-    auto& allocator = CachingAllocator::get();
+// ============================================================================
+// Basic Functionality Tests
+// ============================================================================
 
-    // Allocate memory
-    void* ptr = allocator.allocate(1024, 0);
-    ASSERT_NE(ptr, nullptr);
-
-    // Check statistics
-    EXPECT_EQ(allocator.memory_allocated(0), 1024);
-    EXPECT_GE(allocator.memory_reserved(0), 1024);
-
-    // Free memory
-    allocator.free(ptr, 0);
-
-    // After free, allocated should be 0, but reserved might still be > 0 (cached)
-    EXPECT_EQ(allocator.memory_allocated(0), 0);
-    EXPECT_GT(allocator.memory_cached(0), 0);
+TEST_F(CachingAllocatorTest, ConstructorValidBackend) {
+    EXPECT_NO_THROW({
+        allocator_ = std::make_unique<CachingAllocator>(backend_.get(), device_);
+    });
+    EXPECT_EQ(allocator_->device(), device_);
 }
 
-TEST_F(CachingAllocatorTest, MemoryReuse) {
-    auto& allocator = CachingAllocator::get();
-
-    // Allocate and free
-    void* ptr1 = allocator.allocate(1024, 0);
-    allocator.free(ptr1, 0);
-
-    // Get initial stats
-    auto stats1 = allocator.get_stats(0);
-
-    // Allocate again with same size - should reuse
-    void* ptr2 = allocator.allocate(1024, 0);
-
-    auto stats2 = allocator.get_stats(0);
-
-    // Check that we got a cache hit
-    EXPECT_GT(stats2.num_cache_hits, stats1.num_cache_hits);
-
-    // Reserved memory should not have increased
-    EXPECT_EQ(allocator.memory_reserved(0), stats1.reserved_bytes);
-
-    allocator.free(ptr2, 0);
+TEST_F(CachingAllocatorTest, ConstructorNullBackend) {
+    EXPECT_THROW(
+        CachingAllocator(nullptr, device_),
+        std::invalid_argument
+    );
 }
 
-TEST_F(CachingAllocatorTest, MultipleAllocations) {
-    auto& allocator = CachingAllocator::get();
-    std::vector<void*> ptrs;
+TEST_F(CachingAllocatorTest, AllocateBasic) {
+    allocator_ = std::make_unique<CachingAllocator>(backend_.get(), device_);
 
-    // Allocate multiple blocks
-    for (int i = 0; i < 10; i++) {
-        void* ptr = allocator.allocate(1024 * (i + 1), 0);
-        ASSERT_NE(ptr, nullptr);
-        ptrs.push_back(ptr);
-    }
-
-    // Check that all are allocated
-    size_t expected_min = 0;
-    for (int i = 0; i < 10; i++) {
-        expected_min += 1024 * (i + 1);
-    }
-    EXPECT_GE(allocator.memory_allocated(0), expected_min);
-
-    // Free all
-    for (void* ptr : ptrs) {
-        allocator.free(ptr, 0);
-    }
-
-    // All should be cached now
-    EXPECT_EQ(allocator.memory_allocated(0), 0);
-    EXPECT_GT(allocator.memory_cached(0), 0);
+    void* ptr = allocator_->allocate(1024);
+    EXPECT_NE(ptr, nullptr);
+    EXPECT_EQ(backend_->allocation_count, 1);
+    EXPECT_EQ(allocator_->allocated_block_count(), 1);
+    EXPECT_EQ(allocator_->total_allocated_bytes(), 1024);
 }
 
-TEST_F(CachingAllocatorTest, BlockSplitting) {
-    auto& allocator = CachingAllocator::get();
+TEST_F(CachingAllocatorTest, AllocateZeroBytes) {
+    allocator_ = std::make_unique<CachingAllocator>(backend_.get(), device_);
 
-    // Allocate large block and free it
-    void* large = allocator.allocate(8192, 0);
-    allocator.free(large, 0);
-
-    auto stats1 = allocator.get_stats(0);
-
-    // Allocate smaller block - should split the large one
-    void* small = allocator.allocate(1024, 0);
-
-    auto stats2 = allocator.get_stats(0);
-
-    // Should have performed a split if min_split_size was met
-    if (stats2.num_splits > stats1.num_splits) {
-        EXPECT_GT(stats2.num_splits, stats1.num_splits);
-        EXPECT_GT(stats2.num_cache_hits, stats1.num_cache_hits);
-    }
-
-    allocator.free(small, 0);
+    EXPECT_THROW(
+        allocator_->allocate(0),
+        std::invalid_argument
+    );
 }
 
-TEST_F(CachingAllocatorTest, BlockMerging) {
-    auto& allocator = CachingAllocator::get();
-    allocator.set_merge_enabled(true);
+TEST_F(CachingAllocatorTest, DeallocateBasic) {
+    allocator_ = std::make_unique<CachingAllocator>(backend_.get(), device_);
 
-    // Allocate adjacent blocks
-    void* ptr1 = allocator.allocate(1024, 0);
-    void* ptr2 = allocator.allocate(1024, 0);
+    void* ptr = allocator_->allocate(1024);
+    EXPECT_NO_THROW(allocator_->deallocate(ptr));
 
-    // Free them in sequence - might trigger merging
-    allocator.free(ptr1, 0);
-
-    auto stats1 = allocator.get_stats(0);
-
-    allocator.free(ptr2, 0);
-
-    auto stats2 = allocator.get_stats(0);
-
-    // Note: Merging might not always happen depending on memory layout
-    // Just check that the mechanism doesn't crash
-    EXPECT_TRUE(true);
+    // Should be cached, not freed
+    EXPECT_EQ(backend_->deallocation_count, 0);
+    EXPECT_EQ(allocator_->cached_block_count(), 1);
+    EXPECT_EQ(allocator_->total_cached_bytes(), 1024);
 }
 
-TEST_F(CachingAllocatorTest, EmptyCache) {
-    auto& allocator = CachingAllocator::get();
+TEST_F(CachingAllocatorTest, DeallocateNull) {
+    allocator_ = std::make_unique<CachingAllocator>(backend_.get(), device_);
 
-    // Allocate and free several blocks
-    for (int i = 0; i < 5; i++) {
-        void* ptr = allocator.allocate(1024 * (i + 1), 0);
-        allocator.free(ptr, 0);
-    }
-
-    EXPECT_GT(allocator.memory_cached(0), 0);
-
-    // Empty cache
-    allocator.empty_cache(0);
-
-    // Cached memory should be 0
-    EXPECT_EQ(allocator.memory_cached(0), 0);
-    EXPECT_EQ(allocator.memory_reserved(0), 0);
+    // Deallocating null should be a no-op
+    EXPECT_NO_THROW(allocator_->deallocate(nullptr));
 }
 
-TEST_F(CachingAllocatorTest, Statistics) {
-    auto& allocator = CachingAllocator::get();
-    allocator.reset_stats();
+TEST_F(CachingAllocatorTest, DeallocateInvalidPointer) {
+    allocator_ = std::make_unique<CachingAllocator>(backend_.get(), device_);
 
-    // Perform various operations
-    void* ptr1 = allocator.allocate(1024, 0);
-    void* ptr2 = allocator.allocate(2048, 0);
-    allocator.free(ptr1, 0);
-    void* ptr3 = allocator.allocate(1024, 0); // Should be cache hit
-    allocator.free(ptr2, 0);
-    allocator.free(ptr3, 0);
+    int dummy;
+    void* invalid_ptr = &dummy;
 
-    auto stats = allocator.get_stats(0);
-
-    EXPECT_EQ(stats.num_allocations, 3);
-    EXPECT_EQ(stats.num_frees, 3);
-    EXPECT_GT(stats.num_cache_hits, 0);
-    EXPECT_EQ(stats.allocated_bytes, 0);
-    EXPECT_GT(stats.reserved_bytes, 0);
-    EXPECT_GT(stats.cached_bytes, 0);
+    EXPECT_THROW(
+        allocator_->deallocate(invalid_ptr),
+        std::runtime_error
+    );
 }
 
-TEST_F(CachingAllocatorTest, Alignment) {
-    auto& allocator = CachingAllocator::get();
+// ============================================================================
+// Memory Reuse Tests
+// ============================================================================
 
-    // Set alignment
-    allocator.set_alignment(1024);
+TEST_F(CachingAllocatorTest, ReuseExactSize) {
+    allocator_ = std::make_unique<CachingAllocator>(backend_.get(), device_);
 
-    // Allocate odd size - should be rounded up
-    void* ptr = allocator.allocate(1500, 0);
-    ASSERT_NE(ptr, nullptr);
+    // Allocate and deallocate
+    void* ptr1 = allocator_->allocate(1024);
+    allocator_->deallocate(ptr1);
 
-    // Check that allocated size is aligned
-    auto stats = allocator.get_stats(0);
-    EXPECT_EQ(stats.allocated_bytes % 1024, 0);
+    EXPECT_EQ(backend_->allocation_count, 1);
 
-    allocator.free(ptr, 0);
+    // Second allocation should reuse cached block
+    void* ptr2 = allocator_->allocate(1024);
+    EXPECT_EQ(ptr2, ptr1);  // Should be the same pointer
+    EXPECT_EQ(backend_->allocation_count, 1);  // No new allocation
+    EXPECT_EQ(allocator_->cached_block_count(), 0);  // Cache consumed
 }
 
-TEST_F(CachingAllocatorTest, MaxCachedMemory) {
-    auto& allocator = CachingAllocator::get();
+TEST_F(CachingAllocatorTest, ReuseLargerCachedBlock) {
+    allocator_ = std::make_unique<CachingAllocator>(backend_.get(), device_);
 
-    // Set max cached memory to 8KB
-    allocator.set_max_cached_memory(8192);
+    // Allocate and deallocate larger block
+    void* ptr1 = allocator_->allocate(2048);
+    allocator_->deallocate(ptr1);
 
-    // Allocate and free multiple blocks totaling more than limit
-    for (int i = 0; i < 10; i++) {
-        void* ptr = allocator.allocate(2048, 0);
-        allocator.free(ptr, 0);
-    }
-
-    // Cached memory should not exceed limit
-    EXPECT_LE(allocator.memory_cached(0), 8192);
-
-    // Reset limit
-    allocator.set_max_cached_memory(0);
+    // Request smaller size - should reuse larger block
+    void* ptr2 = allocator_->allocate(1024);
+    EXPECT_EQ(ptr2, ptr1);
+    EXPECT_EQ(backend_->allocation_count, 1);
 }
 
-TEST_F(CachingAllocatorTest, ThreadSafety) {
-    auto& allocator = CachingAllocator::get();
+TEST_F(CachingAllocatorTest, NoReuseWhenSizeTooSmall) {
+    allocator_ = std::make_unique<CachingAllocator>(backend_.get(), device_);
 
-    const int num_threads = 4;
-    const int allocs_per_thread = 100;
+    // Allocate and deallocate small block
+    void* ptr1 = allocator_->allocate(512);
+    allocator_->deallocate(ptr1);
 
-    auto worker = [&allocator](int thread_id) {
-        std::vector<void*> ptrs;
-        std::mt19937 rng(thread_id);
-        std::uniform_int_distribution<size_t> dist(512, 4096);
+    // Request larger size - cannot reuse
+    void* ptr2 = allocator_->allocate(1024);
+    EXPECT_NE(ptr2, ptr1);
+    EXPECT_EQ(backend_->allocation_count, 2);
+    EXPECT_EQ(allocator_->cached_block_count(), 1);  // Original still cached
+}
 
-        for (int i = 0; i < allocs_per_thread; i++) {
-            size_t size = dist(rng);
-            void* ptr = allocator.allocate(size, 0);
-            EXPECT_NE(ptr, nullptr);
-            ptrs.push_back(ptr);
+TEST_F(CachingAllocatorTest, BestFitStrategy) {
+    allocator_ = std::make_unique<CachingAllocator>(backend_.get(), device_);
 
-            // Randomly free some allocations
-            if (i % 3 == 0 && !ptrs.empty()) {
-                size_t idx = rng() % ptrs.size();
-                allocator.free(ptrs[idx], 0);
-                ptrs.erase(ptrs.begin() + idx);
-            }
-        }
+    // Create blocks of different sizes
+    void* ptr512 = allocator_->allocate(512);
+    void* ptr1024 = allocator_->allocate(1024);
+    void* ptr2048 = allocator_->allocate(2048);
 
-        // Free remaining
-        for (void* ptr : ptrs) {
-            allocator.free(ptr, 0);
-        }
-    };
+    // Deallocate all
+    allocator_->deallocate(ptr512);
+    allocator_->deallocate(ptr1024);
+    allocator_->deallocate(ptr2048);
+
+    EXPECT_EQ(allocator_->cached_block_count(), 3);
+
+    // Request 1024 - should get exact match (best fit)
+    void* reused = allocator_->allocate(1024);
+    EXPECT_EQ(reused, ptr1024);
+
+    // Should still have 512 and 2048 cached
+    EXPECT_EQ(allocator_->cached_block_count(), 2);
+}
+
+// ============================================================================
+// Statistics Tests
+// ============================================================================
+
+TEST_F(CachingAllocatorTest, CacheHitRate) {
+    allocator_ = std::make_unique<CachingAllocator>(backend_.get(), device_);
+
+    // Initially 0.0
+    EXPECT_DOUBLE_EQ(allocator_->cache_hit_rate(), 0.0);
+
+    // First allocation - miss
+    void* ptr1 = allocator_->allocate(1024);
+    EXPECT_DOUBLE_EQ(allocator_->cache_hit_rate(), 0.0);
+
+    // Deallocate and reallocate - hit
+    allocator_->deallocate(ptr1);
+    void* ptr2 = allocator_->allocate(1024);
+    EXPECT_DOUBLE_EQ(allocator_->cache_hit_rate(), 50.0);  // 1 hit out of 2
+
+    // Another miss
+    void* ptr3 = allocator_->allocate(2048);
+    EXPECT_DOUBLE_EQ(allocator_->cache_hit_rate(), 100.0 / 3.0);  // 1 hit out of 3
+
+    (void)ptr2;
+    (void)ptr3;
+}
+
+TEST_F(CachingAllocatorTest, TotalAllocatedBytes) {
+    allocator_ = std::make_unique<CachingAllocator>(backend_.get(), device_);
+
+    allocator_->allocate(1024);
+    EXPECT_EQ(allocator_->total_allocated_bytes(), 1024);
+
+    allocator_->allocate(2048);
+    EXPECT_EQ(allocator_->total_allocated_bytes(), 3072);
+
+    allocator_->allocate(512);
+    EXPECT_EQ(allocator_->total_allocated_bytes(), 3584);
+}
+
+TEST_F(CachingAllocatorTest, TotalCachedBytes) {
+    allocator_ = std::make_unique<CachingAllocator>(backend_.get(), device_);
+
+    void* ptr1 = allocator_->allocate(1024);
+    void* ptr2 = allocator_->allocate(2048);
+
+    EXPECT_EQ(allocator_->total_cached_bytes(), 0);
+
+    allocator_->deallocate(ptr1);
+    EXPECT_EQ(allocator_->total_cached_bytes(), 1024);
+
+    allocator_->deallocate(ptr2);
+    EXPECT_EQ(allocator_->total_cached_bytes(), 3072);
+}
+
+TEST_F(CachingAllocatorTest, BlockCounts) {
+    allocator_ = std::make_unique<CachingAllocator>(backend_.get(), device_);
+
+    void* ptr1 = allocator_->allocate(1024);
+    void* ptr2 = allocator_->allocate(2048);
+    void* ptr3 = allocator_->allocate(512);
+
+    EXPECT_EQ(allocator_->allocated_block_count(), 3);
+    EXPECT_EQ(allocator_->cached_block_count(), 0);
+
+    allocator_->deallocate(ptr1);
+    EXPECT_EQ(allocator_->allocated_block_count(), 3);
+    EXPECT_EQ(allocator_->cached_block_count(), 1);
+
+    allocator_->deallocate(ptr2);
+    allocator_->deallocate(ptr3);
+    EXPECT_EQ(allocator_->allocated_block_count(), 3);
+    EXPECT_EQ(allocator_->cached_block_count(), 3);
+}
+
+// ============================================================================
+// Defragmentation Tests
+// ============================================================================
+
+TEST_F(CachingAllocatorTest, DefragmentBasic) {
+    allocator_ = std::make_unique<CachingAllocator>(backend_.get(), device_);
+
+    void* ptr1 = allocator_->allocate(1024);
+    void* ptr2 = allocator_->allocate(2048);
+
+    allocator_->deallocate(ptr1);
+    allocator_->deallocate(ptr2);
+
+    EXPECT_EQ(allocator_->cached_block_count(), 2);
+    EXPECT_EQ(backend_->deallocation_count, 0);
+
+    // Defragment should free all cached blocks
+    allocator_->defragment();
+
+    EXPECT_EQ(allocator_->cached_block_count(), 0);
+    EXPECT_EQ(allocator_->total_cached_bytes(), 0);
+    EXPECT_EQ(backend_->deallocation_count, 2);
+}
+
+TEST_F(CachingAllocatorTest, DefragmentDoesNotFreeActiveBlocks) {
+    allocator_ = std::make_unique<CachingAllocator>(backend_.get(), device_);
+
+    void* ptr1 = allocator_->allocate(1024);
+    void* ptr2 = allocator_->allocate(2048);
+
+    allocator_->deallocate(ptr1);  // Only deallocate one
+
+    allocator_->defragment();
+
+    // Only the deallocated block should be freed
+    EXPECT_EQ(backend_->deallocation_count, 1);
+    EXPECT_EQ(allocator_->allocated_block_count(), 1);  // ptr2 still allocated
+
+    (void)ptr2;
+}
+
+// ============================================================================
+// Move Semantics Tests
+// ============================================================================
+
+TEST_F(CachingAllocatorTest, MoveConstructor) {
+    auto alloc1 = std::make_unique<CachingAllocator>(backend_.get(), device_);
+    void* ptr = alloc1->allocate(1024);
+
+    size_t initial_allocs = backend_->allocation_count;
+
+    // Move construct
+    auto alloc2 = std::make_unique<CachingAllocator>(std::move(*alloc1));
+
+    EXPECT_EQ(alloc2->allocated_block_count(), 1);
+    EXPECT_EQ(backend_->allocation_count, initial_allocs);
+
+    // Original should be in moved-from state
+    EXPECT_EQ(alloc1->allocated_block_count(), 0);
+
+    (void)ptr;
+}
+
+TEST_F(CachingAllocatorTest, MoveAssignment) {
+    auto alloc1 = std::make_unique<CachingAllocator>(backend_.get(), device_);
+    void* ptr1 = alloc1->allocate(1024);
+
+    auto alloc2 = std::make_unique<CachingAllocator>(backend_.get(), device_);
+    void* ptr2 = alloc2->allocate(2048);
+
+    // Move assign
+    *alloc2 = std::move(*alloc1);
+
+    EXPECT_EQ(alloc2->allocated_block_count(), 1);
+
+    (void)ptr1;
+    (void)ptr2;
+}
+
+// ============================================================================
+// Destructor Tests
+// ============================================================================
+
+TEST_F(CachingAllocatorTest, DestructorFreesAllMemory) {
+    auto alloc = std::make_unique<CachingAllocator>(backend_.get(), device_);
+
+    alloc->allocate(1024);
+    alloc->allocate(2048);
+    alloc->allocate(512);
+
+    size_t initial_allocs = backend_->allocation_count;
+    EXPECT_EQ(initial_allocs, 3);
+
+    // Destructor should free all memory
+    alloc.reset();
+
+    EXPECT_EQ(backend_->deallocation_count, 3);
+    EXPECT_EQ(backend_->active_allocations.size(), 0);
+}
+
+// ============================================================================
+// Thread Safety Tests
+// ============================================================================
+
+TEST_F(CachingAllocatorTest, ConcurrentAllocations) {
+    allocator_ = std::make_unique<CachingAllocator>(backend_.get(), device_);
+
+    constexpr int num_threads = 4;
+    constexpr int allocs_per_thread = 100;
 
     std::vector<std::thread> threads;
-    for (int i = 0; i < num_threads; i++) {
-        threads.emplace_back(worker, i);
+    std::vector<std::vector<void*>> thread_ptrs(num_threads);
+
+    for (int t = 0; t < num_threads; ++t) {
+        threads.emplace_back([&, t]() {
+            for (int i = 0; i < allocs_per_thread; ++i) {
+                void* ptr = allocator_->allocate(1024 + i * 16);
+                thread_ptrs[t].push_back(ptr);
+            }
+        });
     }
 
     for (auto& thread : threads) {
         thread.join();
     }
 
-    // All memory should be freed
-    EXPECT_EQ(allocator.memory_allocated(0), 0);
+    EXPECT_EQ(allocator_->allocated_block_count(), num_threads * allocs_per_thread);
 }
 
-TEST_F(CachingAllocatorTest, ZeroSizeAllocation) {
-    auto& allocator = CachingAllocator::get();
+TEST_F(CachingAllocatorTest, ConcurrentDeallocations) {
+    allocator_ = std::make_unique<CachingAllocator>(backend_.get(), device_);
 
-    // Allocating zero size should return nullptr
-    void* ptr = allocator.allocate(0, 0);
-    EXPECT_EQ(ptr, nullptr);
+    constexpr int num_threads = 4;
+    constexpr int allocs_per_thread = 100;
 
-    // Freeing nullptr should not crash
-    allocator.free(nullptr, 0);
-}
-
-TEST_F(CachingAllocatorTest, LargeAllocations) {
-    auto& allocator = CachingAllocator::get();
-
-    // Allocate 1GB
-    size_t large_size = 1024 * 1024 * 1024;
-    void* ptr = nullptr;
-
-    try {
-        ptr = allocator.allocate(large_size, 0);
-
-        if (ptr != nullptr) {
-            EXPECT_GE(allocator.memory_allocated(0), large_size);
-            allocator.free(ptr, 0);
+    // Pre-allocate pointers
+    std::vector<std::vector<void*>> thread_ptrs(num_threads);
+    for (int t = 0; t < num_threads; ++t) {
+        for (int i = 0; i < allocs_per_thread; ++i) {
+            thread_ptrs[t].push_back(allocator_->allocate(1024));
         }
-    } catch (const std::runtime_error&) {
-        // Out of memory is acceptable for large allocations
-        GTEST_SKIP() << "Not enough GPU memory for large allocation test";
     }
+
+    // Deallocate concurrently
+    std::vector<std::thread> threads;
+    for (int t = 0; t < num_threads; ++t) {
+        threads.emplace_back([&, t]() {
+            for (void* ptr : thread_ptrs[t]) {
+                allocator_->deallocate(ptr);
+            }
+        });
+    }
+
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    EXPECT_EQ(allocator_->cached_block_count(), num_threads * allocs_per_thread);
 }
 
-TEST_F(CachingAllocatorTest, FragmentationReduction) {
-    auto& allocator = CachingAllocator::get();
-    allocator.set_merge_enabled(true);
+TEST_F(CachingAllocatorTest, ConcurrentMixedOperations) {
+    allocator_ = std::make_unique<CachingAllocator>(backend_.get(), device_);
 
+    constexpr int num_threads = 4;
+    constexpr int ops_per_thread = 50;
+
+    std::vector<std::thread> threads;
+
+    for (int t = 0; t < num_threads; ++t) {
+        threads.emplace_back([&]() {
+            std::vector<void*> local_ptrs;
+            for (int i = 0; i < ops_per_thread; ++i) {
+                // Allocate
+                void* ptr = allocator_->allocate(512 + i * 32);
+                local_ptrs.push_back(ptr);
+
+                // Deallocate half
+                if (i % 2 == 0 && !local_ptrs.empty()) {
+                    allocator_->deallocate(local_ptrs.back());
+                    local_ptrs.pop_back();
+                }
+            }
+            // Cleanup
+            for (void* ptr : local_ptrs) {
+                allocator_->deallocate(ptr);
+            }
+        });
+    }
+
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    // All allocations should be tracked
+    EXPECT_GT(allocator_->allocated_block_count(), 0);
+}
+
+// ============================================================================
+// Edge Cases and Stress Tests
+// ============================================================================
+
+TEST_F(CachingAllocatorTest, LargeAllocation) {
+    allocator_ = std::make_unique<CachingAllocator>(backend_.get(), device_);
+
+    constexpr size_t large_size = 1024 * 1024 * 100;  // 100 MB
+
+    void* ptr = allocator_->allocate(large_size);
+    EXPECT_NE(ptr, nullptr);
+    EXPECT_EQ(allocator_->total_allocated_bytes(), large_size);
+
+    allocator_->deallocate(ptr);
+    EXPECT_EQ(allocator_->total_cached_bytes(), large_size);
+}
+
+TEST_F(CachingAllocatorTest, ManySmallAllocations) {
+    allocator_ = std::make_unique<CachingAllocator>(backend_.get(), device_);
+
+    constexpr int count = 10000;
     std::vector<void*> ptrs;
 
-    // Allocate many small blocks
-    for (int i = 0; i < 100; i++) {
-        void* ptr = allocator.allocate(1024, 0);
-        ptrs.push_back(ptr);
+    for (int i = 0; i < count; ++i) {
+        ptrs.push_back(allocator_->allocate(64));
     }
 
-    // Free every other block
+    EXPECT_EQ(allocator_->allocated_block_count(), count);
+    EXPECT_EQ(backend_->allocation_count, static_cast<size_t>(count));
+
+    // Deallocate all
+    for (void* ptr : ptrs) {
+        allocator_->deallocate(ptr);
+    }
+
+    EXPECT_EQ(allocator_->cached_block_count(), count);
+}
+
+TEST_F(CachingAllocatorTest, FragmentationScenario) {
+    allocator_ = std::make_unique<CachingAllocator>(backend_.get(), device_);
+
+    // Create fragmented memory pattern
+    std::vector<void*> ptrs;
+    for (int i = 0; i < 10; ++i) {
+        ptrs.push_back(allocator_->allocate(1024 * (i + 1)));
+    }
+
+    // Deallocate every other block
     for (size_t i = 0; i < ptrs.size(); i += 2) {
-        allocator.free(ptrs[i], 0);
-        ptrs[i] = nullptr;
+        allocator_->deallocate(ptrs[i]);
     }
 
-    size_t cached_before = allocator.memory_cached(0);
+    EXPECT_EQ(allocator_->cached_block_count(), 5);
 
-    // Free remaining blocks - should trigger merging
-    for (size_t i = 1; i < ptrs.size(); i += 2) {
-        if (ptrs[i]) {
-            allocator.free(ptrs[i], 0);
-        }
-    }
+    // Allocate sizes that could fit in cached blocks
+    void* new_ptr1 = allocator_->allocate(1024);  // Should reuse best fit (1024 bytes)
+    EXPECT_EQ(new_ptr1, ptrs[0]);
 
-    // Cached memory should increase
-    EXPECT_GT(allocator.memory_cached(0), cached_before);
+    // Allocate 3072 - should find best fit block >= 3072
+    void* new_ptr2 = allocator_->allocate(3072);
+    EXPECT_NE(new_ptr2, nullptr);  // Just verify it succeeded
+
+    EXPECT_EQ(allocator_->cached_block_count(), 3);
 }
 
-TEST_F(CachingAllocatorTest, ReusePattern) {
-    auto& allocator = CachingAllocator::get();
-
-    // Simulate typical training loop pattern
-    const int iterations = 10;
-    const int tensors_per_iter = 5;
-
-    for (int iter = 0; iter < iterations; iter++) {
-        std::vector<void*> ptrs;
-
-        // Allocate tensors
-        for (int i = 0; i < tensors_per_iter; i++) {
-            void* ptr = allocator.allocate(4096, 0);
-            ptrs.push_back(ptr);
-        }
-
-        // Free tensors
-        for (void* ptr : ptrs) {
-            allocator.free(ptr, 0);
-        }
-    }
-
-    auto stats = allocator.get_stats(0);
-
-    // After first iteration, most allocations should be cache hits
-    float hit_rate = static_cast<float>(stats.num_cache_hits) / stats.num_allocations;
-    EXPECT_GT(hit_rate, 0.7f); // At least 70% hit rate
-}
-
-TEST_F(CachingAllocatorTest, CachedMemoryGuard) {
-    // Test RAII wrapper
-    {
-        CachedMemoryGuard guard(1024, 0);
-        EXPECT_NE(guard.get(), nullptr);
-        EXPECT_EQ(guard.size(), 1024);
-
-        // Memory should be allocated
-        EXPECT_GT(CachingAllocator::get().memory_allocated(0), 0);
-    }
-
-    // After scope, memory should be freed
-    EXPECT_EQ(CachingAllocator::get().memory_allocated(0), 0);
-}
-
-TEST_F(CachingAllocatorTest, GuardMoveSemantics) {
-    CachedMemoryGuard guard1(2048, 0);
-    void* ptr = guard1.get();
-
-    // Move construct
-    CachedMemoryGuard guard2(std::move(guard1));
-    EXPECT_EQ(guard2.get(), ptr);
-    EXPECT_EQ(guard1.get(), nullptr);
-
-    // Move assign
-    CachedMemoryGuard guard3(1024, 0);
-    void* ptr3 = guard3.get();
-    guard3 = std::move(guard2);
-    EXPECT_EQ(guard3.get(), ptr);
-    EXPECT_EQ(guard2.get(), nullptr);
-}
-
-// Benchmark test comparing standard vs caching allocator
-class CachingAllocatorBenchmark : public ::testing::Test {
-protected:
-    void SetUp() override {
-        int device_count = 0;
-        cudaGetDeviceCount(&device_count);
-        if (device_count == 0) {
-            GTEST_SKIP() << "No CUDA devices available";
-        }
-    }
-};
-
-TEST_F(CachingAllocatorBenchmark, StandardVsCaching) {
-    const int iterations = 1000;
-    const size_t alloc_size = 4096;
-
-    // Standard cudaMalloc/cudaFree
-    auto start_standard = std::chrono::high_resolution_clock::now();
-    for (int i = 0; i < iterations; i++) {
-        void* ptr = nullptr;
-        cudaMalloc(&ptr, alloc_size);
-        cudaFree(ptr);
-    }
-    auto end_standard = std::chrono::high_resolution_clock::now();
-    auto duration_standard = std::chrono::duration_cast<std::chrono::microseconds>(
-        end_standard - start_standard).count();
-
-    // CachingAllocator
-    auto& allocator = CachingAllocator::get();
-    allocator.empty_cache();
-    allocator.reset_stats();
-
-    auto start_caching = std::chrono::high_resolution_clock::now();
-    for (int i = 0; i < iterations; i++) {
-        void* ptr = allocator.allocate(alloc_size, 0);
-        allocator.free(ptr, 0);
-    }
-    auto end_caching = std::chrono::high_resolution_clock::now();
-    auto duration_caching = std::chrono::duration_cast<std::chrono::microseconds>(
-        end_caching - start_caching).count();
-
-    std::cout << "\nBenchmark Results (" << iterations << " iterations, " << alloc_size << " bytes):\n";
-    std::cout << "  Standard cudaMalloc/cudaFree: " << duration_standard << " us\n";
-    std::cout << "  CachingAllocator:             " << duration_caching << " us\n";
-    std::cout << "  Speedup:                      "
-              << (static_cast<double>(duration_standard) / duration_caching) << "x\n";
-
-    auto stats = allocator.get_stats(0);
-    std::cout << "  Cache hit rate:               "
-              << (100.0 * stats.num_cache_hits / stats.num_allocations) << "%\n";
-
-    // Caching allocator should be significantly faster
-    EXPECT_LT(duration_caching, duration_standard);
-
-    allocator.empty_cache();
-}
-
-TEST_F(CachingAllocatorBenchmark, VariableSizePattern) {
-    const int iterations = 500;
-    std::vector<size_t> sizes = {1024, 2048, 4096, 8192, 16384};
-
-    auto& allocator = CachingAllocator::get();
-    allocator.empty_cache();
-    allocator.reset_stats();
-
-    auto start = std::chrono::high_resolution_clock::now();
-
-    for (int i = 0; i < iterations; i++) {
-        for (size_t size : sizes) {
-            void* ptr = allocator.allocate(size, 0);
-            allocator.free(ptr, 0);
-        }
-    }
-
-    auto end = std::chrono::high_resolution_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
-
-    auto stats = allocator.get_stats(0);
-
-    std::cout << "\nVariable Size Pattern (" << iterations << " iterations):\n";
-    std::cout << "  Duration:        " << duration << " us\n";
-    std::cout << "  Allocations:     " << stats.num_allocations << "\n";
-    std::cout << "  Cache hits:      " << stats.num_cache_hits << "\n";
-    std::cout << "  Hit rate:        "
-              << (100.0 * stats.num_cache_hits / stats.num_allocations) << "%\n";
-    std::cout << "  Splits:          " << stats.num_splits << "\n";
-    std::cout << "  Merges:          " << stats.num_merges << "\n";
-    std::cout << "  Reserved memory: " << (stats.reserved_bytes / 1024.0 / 1024.0) << " MB\n";
-    std::cout << "  Cached memory:   " << (stats.cached_bytes / 1024.0 / 1024.0) << " MB\n";
-
-    allocator.empty_cache();
-}
-
-TEST_F(CachingAllocatorBenchmark, MemoryLeakDetection) {
-    auto& allocator = CachingAllocator::get();
-    allocator.empty_cache();
-
-    size_t initial_reserved = allocator.memory_reserved(0);
-
-    // Allocate and properly free
-    for (int i = 0; i < 100; i++) {
-        void* ptr = allocator.allocate(4096, 0);
-        allocator.free(ptr, 0);
-    }
-
-    // Empty cache and check
-    allocator.empty_cache();
-    size_t final_reserved = allocator.memory_reserved(0);
-
-    // Should return to initial state (no leaks)
-    EXPECT_EQ(final_reserved, initial_reserved);
-}
-
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}
+} // namespace test
+} // namespace tenzor

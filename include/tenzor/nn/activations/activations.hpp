@@ -516,5 +516,65 @@ auto mish(const Variable& input) -> Variable;
 
 /** @} */ // end of functional_activations group
 
+/**
+ * @defgroup inplace_activations In-Place Activation Functions
+ * @brief Memory-efficient in-place activation functions
+ *
+ * These in-place versions modify tensors without allocating new memory,
+ * which is more efficient for large tensors and reduces memory fragmentation.
+ * Use when the original tensor is no longer needed.
+ *
+ * @{
+ */
+
+/**
+ * @brief In-place ReLU: modifies input to max(0, x).
+ * @param input Tensor to modify in-place
+ * @return Reference to modified input tensor
+ * @note More memory-efficient than relu() - no new allocation
+ * @warning Original values are lost - use only when input is no longer needed
+ *
+ * @code
+ * Tensor x({1000, 1000}, DType::Float32, Device::cpu());
+ * relu_(x);  // Modifies x in-place, saves ~4MB allocation
+ * @endcode
+ */
+auto relu_(Tensor& input) -> Tensor&;
+
+/**
+ * @brief In-place sigmoid: modifies input to 1 / (1 + exp(-x)).
+ * @param input Tensor to modify in-place
+ * @return Reference to modified input tensor
+ * @note More memory-efficient than sigmoid() - no new allocation
+ * @warning Original values are lost - use only when input is no longer needed
+ */
+auto sigmoid_(Tensor& input) -> Tensor&;
+
+/**
+ * @brief In-place tanh: modifies input to tanh(x).
+ * @param input Tensor to modify in-place
+ * @return Reference to modified input tensor
+ * @note More memory-efficient than tanh() - no new allocation
+ * @warning Original values are lost - use only when input is no longer needed
+ */
+auto tanh_(Tensor& input) -> Tensor&;
+
+/**
+ * @brief In-place leaky ReLU with configurable slope.
+ * @param input Tensor to modify in-place
+ * @param negative_slope Slope for negative values (default: 0.01)
+ * @return Reference to modified input tensor
+ */
+auto leaky_relu_(Tensor& input, double negative_slope = 0.01) -> Tensor&;
+
+/**
+ * @brief In-place GELU activation.
+ * @param input Tensor to modify in-place
+ * @return Reference to modified input tensor
+ */
+auto gelu_(Tensor& input) -> Tensor&;
+
+/** @} */ // end of inplace_activations group
+
 } // namespace nn
 } // namespace tenzor

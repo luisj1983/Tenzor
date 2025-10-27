@@ -214,6 +214,46 @@ auto gt(const Tensor& a, const Tensor& b) -> Tensor;
 auto ge(const Tensor& a, const Tensor& b) -> Tensor;
 
 /// @}
+/// @name In-Place Operations
+/// @{
+
+/**
+ * @brief In-place element-wise addition with broadcasting.
+ * @param self Tensor to modify in-place
+ * @param other Tensor to add
+ * @return Reference to modified tensor
+ * @note More efficient than out-of-place version - modifies tensor without allocation
+ */
+auto add_(Tensor& self, const Tensor& other) -> Tensor&;
+
+/**
+ * @brief In-place element-wise multiplication with broadcasting.
+ * @param self Tensor to modify in-place
+ * @param other Tensor to multiply
+ * @return Reference to modified tensor
+ * @note More efficient than out-of-place version - modifies tensor without allocation
+ */
+auto mul_(Tensor& self, const Tensor& other) -> Tensor&;
+
+/**
+ * @brief In-place element-wise subtraction with broadcasting.
+ * @param self Tensor to modify in-place
+ * @param other Tensor to subtract
+ * @return Reference to modified tensor
+ * @note More efficient than out-of-place version - modifies tensor without allocation
+ */
+auto sub_(Tensor& self, const Tensor& other) -> Tensor&;
+
+/**
+ * @brief In-place element-wise division with broadcasting.
+ * @param self Tensor to modify in-place
+ * @param other Tensor to divide by
+ * @return Reference to modified tensor
+ * @note More efficient than out-of-place version - modifies tensor without allocation
+ */
+auto div_(Tensor& self, const Tensor& other) -> Tensor&;
+
+/// @}
 /** @} */ // end of tensor_math group
 
 } // namespace tenzor

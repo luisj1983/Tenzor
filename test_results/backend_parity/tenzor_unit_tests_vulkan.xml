@@ -1,0 +1,208 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites tests="169" failures="3" disabled="0" errors="0" time="0.671" timestamp="2025-10-25T09:37:43.077" name="AllTests">
+  <testsuite name="TensorTest" tests="3" failures="0" disabled="0" skipped="0" errors="0" time="0." timestamp="2025-10-25T09:37:43.443">
+    <testcase name="Creation" file="/home/lee/Projects/Tenzor/tests/unit/test_tensor.cpp" line="6" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.443" classname="TensorTest" />
+    <testcase name="Ones" file="/home/lee/Projects/Tenzor/tests/unit/test_tensor.cpp" line="14" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.443" classname="TensorTest" />
+    <testcase name="DeviceProperty" file="/home/lee/Projects/Tenzor/tests/unit/test_tensor.cpp" line="20" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.443" classname="TensorTest" />
+  </testsuite>
+  <testsuite name="DeviceTest" tests="3" failures="0" disabled="0" skipped="0" errors="0" time="0." timestamp="2025-10-25T09:37:43.443">
+    <testcase name="CPUDevice" file="/home/lee/Projects/Tenzor/tests/unit/test_device.cpp" line="6" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.443" classname="DeviceTest" />
+    <testcase name="ToString" file="/home/lee/Projects/Tenzor/tests/unit/test_device.cpp" line="12" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.443" classname="DeviceTest" />
+    <testcase name="Comparison" file="/home/lee/Projects/Tenzor/tests/unit/test_device.cpp" line="20" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.443" classname="DeviceTest" />
+  </testsuite>
+  <testsuite name="OpsTest" tests="13" failures="0" disabled="0" skipped="0" errors="0" time="0." timestamp="2025-10-25T09:37:43.443">
+    <testcase name="Zeros" file="/home/lee/Projects/Tenzor/tests/unit/test_ops.cpp" line="6" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.443" classname="OpsTest" />
+    <testcase name="Ones" file="/home/lee/Projects/Tenzor/tests/unit/test_ops.cpp" line="12" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.443" classname="OpsTest" />
+    <testcase name="Full" file="/home/lee/Projects/Tenzor/tests/unit/test_ops.cpp" line="17" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.443" classname="OpsTest" />
+    <testcase name="FullInt32" file="/home/lee/Projects/Tenzor/tests/unit/test_ops.cpp" line="29" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.443" classname="OpsTest" />
+    <testcase name="Arange" file="/home/lee/Projects/Tenzor/tests/unit/test_ops.cpp" line="39" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.443" classname="OpsTest" />
+    <testcase name="ArangeStep" file="/home/lee/Projects/Tenzor/tests/unit/test_ops.cpp" line="49" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.443" classname="OpsTest" />
+    <testcase name="ArangeFloat" file="/home/lee/Projects/Tenzor/tests/unit/test_ops.cpp" line="61" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.443" classname="OpsTest" />
+    <testcase name="Linspace" file="/home/lee/Projects/Tenzor/tests/unit/test_ops.cpp" line="72" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.443" classname="OpsTest" />
+    <testcase name="LinspaceNegative" file="/home/lee/Projects/Tenzor/tests/unit/test_ops.cpp" line="84" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.443" classname="OpsTest" />
+    <testcase name="Eye" file="/home/lee/Projects/Tenzor/tests/unit/test_ops.cpp" line="94" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.443" classname="OpsTest" />
+    <testcase name="EyeRectangular" file="/home/lee/Projects/Tenzor/tests/unit/test_ops.cpp" line="110" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.443" classname="OpsTest" />
+    <testcase name="Rand" file="/home/lee/Projects/Tenzor/tests/unit/test_ops.cpp" line="124" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.443" classname="OpsTest" />
+    <testcase name="Randn" file="/home/lee/Projects/Tenzor/tests/unit/test_ops.cpp" line="136" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.444" classname="OpsTest" />
+  </testsuite>
+  <testsuite name="AutogradTest" tests="7" failures="0" disabled="0" skipped="0" errors="0" time="0.001" timestamp="2025-10-25T09:37:43.444">
+    <testcase name="VariableCreation" file="/home/lee/Projects/Tenzor/tests/unit/test_autograd.cpp" line="6" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.444" classname="AutogradTest" />
+    <testcase name="Detach" file="/home/lee/Projects/Tenzor/tests/unit/test_autograd.cpp" line="14" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.444" classname="AutogradTest" />
+    <testcase name="SimpleAddBackward" file="/home/lee/Projects/Tenzor/tests/unit/test_autograd.cpp" line="21" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.444" classname="AutogradTest" />
+    <testcase name="SimpleSubBackward" file="/home/lee/Projects/Tenzor/tests/unit/test_autograd.cpp" line="45" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.445" classname="AutogradTest" />
+    <testcase name="SimpleMulBackward" file="/home/lee/Projects/Tenzor/tests/unit/test_autograd.cpp" line="66" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.445" classname="AutogradTest" />
+    <testcase name="SimpleDivBackward" file="/home/lee/Projects/Tenzor/tests/unit/test_autograd.cpp" line="90" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.445" classname="AutogradTest" />
+    <testcase name="ChainedOperations" file="/home/lee/Projects/Tenzor/tests/unit/test_autograd.cpp" line="115" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.445" classname="AutogradTest" />
+  </testsuite>
+  <testsuite name="AutogradTransformTest" tests="10" failures="0" disabled="0" skipped="0" errors="0" time="0.026" timestamp="2025-10-25T09:37:43.445">
+    <testcase name="ReshapeForwardPass" file="/home/lee/Projects/Tenzor/tests/test_autograd_transform.cpp" line="23" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.445" classname="AutogradTransformTest" />
+    <testcase name="ReshapeBackwardPass" file="/home/lee/Projects/Tenzor/tests/test_autograd_transform.cpp" line="38" status="run" result="completed" time="0.025" timestamp="2025-10-25T09:37:43.446" classname="AutogradTransformTest" />
+    <testcase name="ReshapeChainedOperations" file="/home/lee/Projects/Tenzor/tests/test_autograd_transform.cpp" line="64" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.472" classname="AutogradTransformTest" />
+    <testcase name="PermuteForwardPass" file="/home/lee/Projects/Tenzor/tests/test_autograd_transform.cpp" line="87" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.472" classname="AutogradTransformTest" />
+    <testcase name="PermuteBackwardPass" file="/home/lee/Projects/Tenzor/tests/test_autograd_transform.cpp" line="103" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.472" classname="AutogradTransformTest" />
+    <testcase name="PermuteTranspose" file="/home/lee/Projects/Tenzor/tests/test_autograd_transform.cpp" line="130" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.472" classname="AutogradTransformTest" />
+    <testcase name="PermuteWithSum" file="/home/lee/Projects/Tenzor/tests/test_autograd_transform.cpp" line="149" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.472" classname="AutogradTransformTest" />
+    <testcase name="ReshapeAndPermuteCombined" file="/home/lee/Projects/Tenzor/tests/test_autograd_transform.cpp" line="174" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.472" classname="AutogradTransformTest" />
+    <testcase name="ReshapeNoGrad" file="/home/lee/Projects/Tenzor/tests/test_autograd_transform.cpp" line="200" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.472" classname="AutogradTransformTest" />
+    <testcase name="PermuteNoGrad" file="/home/lee/Projects/Tenzor/tests/test_autograd_transform.cpp" line="212" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.472" classname="AutogradTransformTest" />
+  </testsuite>
+  <testsuite name="CPUKernelsTest" tests="36" failures="0" disabled="0" skipped="0" errors="0" time="0.001" timestamp="2025-10-25T09:37:43.472">
+    <testcase name="AddFloat32_Basic" file="/home/lee/Projects/Tenzor/tests/unit/test_cpu_kernels.cpp" line="30" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.472" classname="CPUKernelsTest" />
+    <testcase name="AddFloat32_DifferentValues" file="/home/lee/Projects/Tenzor/tests/unit/test_cpu_kernels.cpp" line="47" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.473" classname="CPUKernelsTest" />
+    <testcase name="AddFloat64_Basic" file="/home/lee/Projects/Tenzor/tests/unit/test_cpu_kernels.cpp" line="71" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.473" classname="CPUKernelsTest" />
+    <testcase name="AddInt32_Basic" file="/home/lee/Projects/Tenzor/tests/unit/test_cpu_kernels.cpp" line="83" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.473" classname="CPUKernelsTest" />
+    <testcase name="AddFloat32_WithZeros" file="/home/lee/Projects/Tenzor/tests/unit/test_cpu_kernels.cpp" line="95" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.473" classname="CPUKernelsTest" />
+    <testcase name="AddFloat32_Negative" file="/home/lee/Projects/Tenzor/tests/unit/test_cpu_kernels.cpp" line="106" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.473" classname="CPUKernelsTest" />
+    <testcase name="AddFloat32_LargeValues" file="/home/lee/Projects/Tenzor/tests/unit/test_cpu_kernels.cpp" line="124" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.473" classname="CPUKernelsTest" />
+    <testcase name="SubFloat32_Basic" file="/home/lee/Projects/Tenzor/tests/unit/test_cpu_kernels.cpp" line="147" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.473" classname="CPUKernelsTest" />
+    <testcase name="SubFloat64_Basic" file="/home/lee/Projects/Tenzor/tests/unit/test_cpu_kernels.cpp" line="164" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.473" classname="CPUKernelsTest" />
+    <testcase name="SubInt32_Basic" file="/home/lee/Projects/Tenzor/tests/unit/test_cpu_kernels.cpp" line="181" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.473" classname="CPUKernelsTest" />
+    <testcase name="SubFloat32_ResultNegative" file="/home/lee/Projects/Tenzor/tests/unit/test_cpu_kernels.cpp" line="198" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.473" classname="CPUKernelsTest" />
+    <testcase name="SubFloat32_WithZeros" file="/home/lee/Projects/Tenzor/tests/unit/test_cpu_kernels.cpp" line="217" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.473" classname="CPUKernelsTest" />
+    <testcase name="MulFloat32_Basic" file="/home/lee/Projects/Tenzor/tests/unit/test_cpu_kernels.cpp" line="233" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.473" classname="CPUKernelsTest" />
+    <testcase name="MulFloat64_Basic" file="/home/lee/Projects/Tenzor/tests/unit/test_cpu_kernels.cpp" line="252" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.473" classname="CPUKernelsTest" />
+    <testcase name="MulInt32_Basic" file="/home/lee/Projects/Tenzor/tests/unit/test_cpu_kernels.cpp" line="271" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.473" classname="CPUKernelsTest" />
+    <testcase name="MulFloat32_WithZero" file="/home/lee/Projects/Tenzor/tests/unit/test_cpu_kernels.cpp" line="290" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.473" classname="CPUKernelsTest" />
+    <testcase name="MulFloat32_Negative" file="/home/lee/Projects/Tenzor/tests/unit/test_cpu_kernels.cpp" line="307" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.473" classname="CPUKernelsTest" />
+    <testcase name="MulFloat32_LargeValues" file="/home/lee/Projects/Tenzor/tests/unit/test_cpu_kernels.cpp" line="326" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.473" classname="CPUKernelsTest" />
+    <testcase name="DivFloat32_Basic" file="/home/lee/Projects/Tenzor/tests/unit/test_cpu_kernels.cpp" line="349" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.473" classname="CPUKernelsTest" />
+    <testcase name="DivFloat64_Basic" file="/home/lee/Projects/Tenzor/tests/unit/test_cpu_kernels.cpp" line="368" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.473" classname="CPUKernelsTest" />
+    <testcase name="DivInt32_Basic" file="/home/lee/Projects/Tenzor/tests/unit/test_cpu_kernels.cpp" line="387" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.473" classname="CPUKernelsTest" />
+    <testcase name="DivFloat32_Fractional" file="/home/lee/Projects/Tenzor/tests/unit/test_cpu_kernels.cpp" line="406" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.473" classname="CPUKernelsTest" />
+    <testcase name="DivFloat32_Negative" file="/home/lee/Projects/Tenzor/tests/unit/test_cpu_kernels.cpp" line="425" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.473" classname="CPUKernelsTest" />
+    <testcase name="DivFloat32_SmallValues" file="/home/lee/Projects/Tenzor/tests/unit/test_cpu_kernels.cpp" line="444" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.473" classname="CPUKernelsTest" />
+    <testcase name="MatMulFloat32_2x3_3x2" file="/home/lee/Projects/Tenzor/tests/unit/test_cpu_kernels.cpp" line="467" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.473" classname="CPUKernelsTest" />
+    <testcase name="MatMulFloat32_Identity" file="/home/lee/Projects/Tenzor/tests/unit/test_cpu_kernels.cpp" line="498" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.473" classname="CPUKernelsTest" />
+    <testcase name="MatMulFloat64_Basic" file="/home/lee/Projects/Tenzor/tests/unit/test_cpu_kernels.cpp" line="521" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.473" classname="CPUKernelsTest" />
+    <testcase name="MatMulInt32_Basic" file="/home/lee/Projects/Tenzor/tests/unit/test_cpu_kernels.cpp" line="545" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.473" classname="CPUKernelsTest" />
+    <testcase name="MatMulFloat32_WithZeros" file="/home/lee/Projects/Tenzor/tests/unit/test_cpu_kernels.cpp" line="569" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.473" classname="CPUKernelsTest" />
+    <testcase name="MatMulFloat32_SingleElement" file="/home/lee/Projects/Tenzor/tests/unit/test_cpu_kernels.cpp" line="587" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.473" classname="CPUKernelsTest" />
+    <testcase name="MatMulFloat32_VectorVector" file="/home/lee/Projects/Tenzor/tests/unit/test_cpu_kernels.cpp" line="606" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.473" classname="CPUKernelsTest" />
+    <testcase name="MatMulFloat32_LargerMatrix" file="/home/lee/Projects/Tenzor/tests/unit/test_cpu_kernels.cpp" line="626" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.474" classname="CPUKernelsTest" />
+    <testcase name="AddFloat32_VerySmallValues" file="/home/lee/Projects/Tenzor/tests/unit/test_cpu_kernels.cpp" line="658" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.474" classname="CPUKernelsTest" />
+    <testcase name="MulFloat32_Overflow" file="/home/lee/Projects/Tenzor/tests/unit/test_cpu_kernels.cpp" line="677" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.474" classname="CPUKernelsTest" />
+    <testcase name="AllOperations_SingleElement" file="/home/lee/Projects/Tenzor/tests/unit/test_cpu_kernels.cpp" line="697" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.474" classname="CPUKernelsTest" />
+    <testcase name="ShapePreservation" file="/home/lee/Projects/Tenzor/tests/unit/test_cpu_kernels.cpp" line="720" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.474" classname="CPUKernelsTest" />
+  </testsuite>
+  <testsuite name="BroadcastingTest" tests="7" failures="0" disabled="0" skipped="0" errors="0" time="0." timestamp="2025-10-25T09:37:43.474">
+    <testcase name="AddBroadcast_ScalarToVector" file="/home/lee/Projects/Tenzor/tests/unit/test_broadcasting.cpp" line="22" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.474" classname="BroadcastingTest" />
+    <testcase name="AddBroadcast_RowToMatrix" file="/home/lee/Projects/Tenzor/tests/unit/test_broadcasting.cpp" line="43" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.474" classname="BroadcastingTest" />
+    <testcase name="AddBroadcast_ColumnToMatrix" file="/home/lee/Projects/Tenzor/tests/unit/test_broadcasting.cpp" line="75" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.474" classname="BroadcastingTest" />
+    <testcase name="AddBroadcast_ScalarToMatrix" file="/home/lee/Projects/Tenzor/tests/unit/test_broadcasting.cpp" line="108" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.474" classname="BroadcastingTest" />
+    <testcase name="AddBroadcast_DifferentDimensions" file="/home/lee/Projects/Tenzor/tests/unit/test_broadcasting.cpp" line="135" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.474" classname="BroadcastingTest" />
+    <testcase name="AddBroadcast_Int32" file="/home/lee/Projects/Tenzor/tests/unit/test_broadcasting.cpp" line="168" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.474" classname="BroadcastingTest" />
+    <testcase name="AddNoBroadcast_SameShape" file="/home/lee/Projects/Tenzor/tests/unit/test_broadcasting.cpp" line="198" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.474" classname="BroadcastingTest" />
+  </testsuite>
+  <testsuite name="TransformTest" tests="33" failures="0" disabled="0" skipped="0" errors="0" time="0.001" timestamp="2025-10-25T09:37:43.474">
+    <testcase name="Reshape_Basic" file="/home/lee/Projects/Tenzor/tests/unit/test_transforms.cpp" line="21" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.474" classname="TransformTest" />
+    <testcase name="Reshape_InferDimension" file="/home/lee/Projects/Tenzor/tests/unit/test_transforms.cpp" line="31" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.474" classname="TransformTest" />
+    <testcase name="Reshape_MultiDimensional" file="/home/lee/Projects/Tenzor/tests/unit/test_transforms.cpp" line="39" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.474" classname="TransformTest" />
+    <testcase name="Reshape_InvalidShape" file="/home/lee/Projects/Tenzor/tests/unit/test_transforms.cpp" line="48" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.474" classname="TransformTest" />
+    <testcase name="View_Basic" file="/home/lee/Projects/Tenzor/tests/unit/test_transforms.cpp" line="54" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.474" classname="TransformTest" />
+    <testcase name="View_SharesStorage" file="/home/lee/Projects/Tenzor/tests/unit/test_transforms.cpp" line="63" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.474" classname="TransformTest" />
+    <testcase name="Transpose_2D" file="/home/lee/Projects/Tenzor/tests/unit/test_transforms.cpp" line="72" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.474" classname="TransformTest" />
+    <testcase name="Transpose_NegativeDims" file="/home/lee/Projects/Tenzor/tests/unit/test_transforms.cpp" line="79" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.474" classname="TransformTest" />
+    <testcase name="Transpose_3D" file="/home/lee/Projects/Tenzor/tests/unit/test_transforms.cpp" line="86" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.475" classname="TransformTest" />
+    <testcase name="Transpose_InvalidDim" file="/home/lee/Projects/Tenzor/tests/unit/test_transforms.cpp" line="94" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.475" classname="TransformTest" />
+    <testcase name="Permute_3D" file="/home/lee/Projects/Tenzor/tests/unit/test_transforms.cpp" line="99" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.475" classname="TransformTest" />
+    <testcase name="Permute_Reverse" file="/home/lee/Projects/Tenzor/tests/unit/test_transforms.cpp" line="107" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.475" classname="TransformTest" />
+    <testcase name="Permute_NegativeIndices" file="/home/lee/Projects/Tenzor/tests/unit/test_transforms.cpp" line="115" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.475" classname="TransformTest" />
+    <testcase name="Permute_InvalidDims" file="/home/lee/Projects/Tenzor/tests/unit/test_transforms.cpp" line="123" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.475" classname="TransformTest" />
+    <testcase name="Permute_DuplicateDims" file="/home/lee/Projects/Tenzor/tests/unit/test_transforms.cpp" line="127" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.475" classname="TransformTest" />
+    <testcase name="Squeeze_SingleDim" file="/home/lee/Projects/Tenzor/tests/unit/test_transforms.cpp" line="132" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.475" classname="TransformTest" />
+    <testcase name="Squeeze_All" file="/home/lee/Projects/Tenzor/tests/unit/test_transforms.cpp" line="141" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.475" classname="TransformTest" />
+    <testcase name="Squeeze_AllOnes" file="/home/lee/Projects/Tenzor/tests/unit/test_transforms.cpp" line="150" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.475" classname="TransformTest" />
+    <testcase name="Squeeze_InvalidDim" file="/home/lee/Projects/Tenzor/tests/unit/test_transforms.cpp" line="159" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.475" classname="TransformTest" />
+    <testcase name="Squeeze_NegativeIndex" file="/home/lee/Projects/Tenzor/tests/unit/test_transforms.cpp" line="164" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.475" classname="TransformTest" />
+    <testcase name="Unsqueeze_Front" file="/home/lee/Projects/Tenzor/tests/unit/test_transforms.cpp" line="174" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.475" classname="TransformTest" />
+    <testcase name="Unsqueeze_Middle" file="/home/lee/Projects/Tenzor/tests/unit/test_transforms.cpp" line="184" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.475" classname="TransformTest" />
+    <testcase name="Unsqueeze_End" file="/home/lee/Projects/Tenzor/tests/unit/test_transforms.cpp" line="194" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.475" classname="TransformTest" />
+    <testcase name="Unsqueeze_NegativeIndex" file="/home/lee/Projects/Tenzor/tests/unit/test_transforms.cpp" line="204" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.475" classname="TransformTest" />
+    <testcase name="Unsqueeze_InvalidDim" file="/home/lee/Projects/Tenzor/tests/unit/test_transforms.cpp" line="214" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.475" classname="TransformTest" />
+    <testcase name="Flatten_All" file="/home/lee/Projects/Tenzor/tests/unit/test_transforms.cpp" line="220" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.475" classname="TransformTest" />
+    <testcase name="Flatten_Partial" file="/home/lee/Projects/Tenzor/tests/unit/test_transforms.cpp" line="228" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.475" classname="TransformTest" />
+    <testcase name="Flatten_FirstTwoDims" file="/home/lee/Projects/Tenzor/tests/unit/test_transforms.cpp" line="238" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.475" classname="TransformTest" />
+    <testcase name="Flatten_NegativeIndices" file="/home/lee/Projects/Tenzor/tests/unit/test_transforms.cpp" line="247" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.475" classname="TransformTest" />
+    <testcase name="Flatten_InvalidRange" file="/home/lee/Projects/Tenzor/tests/unit/test_transforms.cpp" line="256" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.475" classname="TransformTest" />
+    <testcase name="Combined_TransposeReshape" file="/home/lee/Projects/Tenzor/tests/unit/test_transforms.cpp" line="262" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.475" classname="TransformTest" />
+    <testcase name="Combined_UnsqueezeSqueeze" file="/home/lee/Projects/Tenzor/tests/unit/test_transforms.cpp" line="274" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.475" classname="TransformTest" />
+    <testcase name="Combined_PermuteTranspose" file="/home/lee/Projects/Tenzor/tests/unit/test_transforms.cpp" line="283" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.475" classname="TransformTest" />
+  </testsuite>
+  <testsuite name="TransformAPITest" tests="6" failures="0" disabled="0" skipped="0" errors="0" time="0." timestamp="2025-10-25T09:37:43.475">
+    <testcase name="ReshapeAPI" file="/home/lee/Projects/Tenzor/tests/unit/test_transforms.cpp" line="294" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.475" classname="TransformAPITest" />
+    <testcase name="ViewAPI" file="/home/lee/Projects/Tenzor/tests/unit/test_transforms.cpp" line="302" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.475" classname="TransformAPITest" />
+    <testcase name="TransposeAPI" file="/home/lee/Projects/Tenzor/tests/unit/test_transforms.cpp" line="310" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.475" classname="TransformAPITest" />
+    <testcase name="SqueezeAPI" file="/home/lee/Projects/Tenzor/tests/unit/test_transforms.cpp" line="318" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.475" classname="TransformAPITest" />
+    <testcase name="UnsqueezeAPI" file="/home/lee/Projects/Tenzor/tests/unit/test_transforms.cpp" line="327" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.475" classname="TransformAPITest" />
+    <testcase name="FlattenAPI" file="/home/lee/Projects/Tenzor/tests/unit/test_transforms.cpp" line="335" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.476" classname="TransformAPITest" />
+  </testsuite>
+  <testsuite name="LinearTest" tests="12" failures="0" disabled="0" skipped="0" errors="0" time="0.245" timestamp="2025-10-25T09:37:43.476">
+    <testcase name="ForwardShapeSingleBatch" file="/home/lee/Projects/Tenzor/tests/unit/test_linear.cpp" line="18" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.476" classname="LinearTest" />
+    <testcase name="ForwardShapeMultiBatch" file="/home/lee/Projects/Tenzor/tests/unit/test_linear.cpp" line="28" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.476" classname="LinearTest" />
+    <testcase name="WithBias" file="/home/lee/Projects/Tenzor/tests/unit/test_linear.cpp" line="38" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.476" classname="LinearTest" />
+    <testcase name="NoBias" file="/home/lee/Projects/Tenzor/tests/unit/test_linear.cpp" line="61" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.476" classname="LinearTest" />
+    <testcase name="WeightShape" file="/home/lee/Projects/Tenzor/tests/unit/test_linear.cpp" line="78" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.476" classname="LinearTest" />
+    <testcase name="ParameterCount" file="/home/lee/Projects/Tenzor/tests/unit/test_linear.cpp" line="89" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.477" classname="LinearTest" />
+    <testcase name="DifferentInputShapes" file="/home/lee/Projects/Tenzor/tests/unit/test_linear.cpp" line="101" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.477" classname="LinearTest" />
+    <testcase name="ContiguityAfterTranspose" file="/home/lee/Projects/Tenzor/tests/unit/test_linear.cpp" line="124" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.477" classname="LinearTest" />
+    <testcase name="ZeroInput" file="/home/lee/Projects/Tenzor/tests/unit/test_linear.cpp" line="140" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.478" classname="LinearTest" />
+    <testcase name="ConsistentOutput" file="/home/lee/Projects/Tenzor/tests/unit/test_linear.cpp" line="150" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.478" classname="LinearTest" />
+    <testcase name="LargeFeatures" file="/home/lee/Projects/Tenzor/tests/unit/test_linear.cpp" line="176" status="run" result="completed" time="0.242" timestamp="2025-10-25T09:37:43.478" classname="LinearTest" />
+    <testcase name="SingleFeature" file="/home/lee/Projects/Tenzor/tests/unit/test_linear.cpp" line="186" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.721" classname="LinearTest" />
+  </testsuite>
+  <testsuite name="LossTest" tests="21" failures="3" disabled="0" skipped="0" errors="0" time="0.003" timestamp="2025-10-25T09:37:43.721">
+    <testcase name="MSELossBasic" file="/home/lee/Projects/Tenzor/tests/unit/test_losses.cpp" line="16" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.721" classname="LossTest" />
+    <testcase name="MSELossZero" file="/home/lee/Projects/Tenzor/tests/unit/test_losses.cpp" line="29" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.722" classname="LossTest" />
+    <testcase name="MSELossSum" file="/home/lee/Projects/Tenzor/tests/unit/test_losses.cpp" line="40" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.722" classname="LossTest" />
+    <testcase name="MSELossNone" file="/home/lee/Projects/Tenzor/tests/unit/test_losses.cpp" line="51" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.722" classname="LossTest" />
+    <testcase name="BCELossBasic" file="/home/lee/Projects/Tenzor/tests/unit/test_losses.cpp" line="66" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.722" classname="LossTest" />
+    <testcase name="BCELossPerfectPrediction" file="/home/lee/Projects/Tenzor/tests/unit/test_losses.cpp" line="78" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.722" classname="LossTest" />
+    <testcase name="BCELossMixedTargets" file="/home/lee/Projects/Tenzor/tests/unit/test_losses.cpp" line="89" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.722" classname="LossTest" />
+    <testcase name="L1LossBasic" file="/home/lee/Projects/Tenzor/tests/unit/test_losses.cpp" line="102" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.723" classname="LossTest" />
+    <testcase name="L1LossNegativeDiff" file="/home/lee/Projects/Tenzor/tests/unit/test_losses.cpp" line="113" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.723" classname="LossTest" />
+    <testcase name="L1LossSum" file="/home/lee/Projects/Tenzor/tests/unit/test_losses.cpp" line="124" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.723" classname="LossTest" />
+    <testcase name="L1LossZero" file="/home/lee/Projects/Tenzor/tests/unit/test_losses.cpp" line="135" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.724" classname="LossTest" />
+    <testcase name="CrossEntropyBasic" file="/home/lee/Projects/Tenzor/tests/unit/test_losses.cpp" line="146" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.724" classname="LossTest">
+      <failure message="unknown file&#x0A;C++ exception with description &quot;Cannot squeeze dimension with size != 1&quot; thrown in the test body.&#x0A;" type=""><![CDATA[unknown file
+C++ exception with description "Cannot squeeze dimension with size != 1" thrown in the test body.
+]]></failure>
+    </testcase>
+    <testcase name="CrossEntropyUniformLogits" file="/home/lee/Projects/Tenzor/tests/unit/test_losses.cpp" line="163" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.724" classname="LossTest">
+      <failure message="unknown file&#x0A;C++ exception with description &quot;Cannot squeeze dimension with size != 1&quot; thrown in the test body.&#x0A;" type=""><![CDATA[unknown file
+C++ exception with description "Cannot squeeze dimension with size != 1" thrown in the test body.
+]]></failure>
+    </testcase>
+    <testcase name="NLLLossBasic" file="/home/lee/Projects/Tenzor/tests/unit/test_losses.cpp" line="182" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.724" classname="LossTest" />
+    <testcase name="MSELossClass" file="/home/lee/Projects/Tenzor/tests/unit/test_losses.cpp" line="198" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.724" classname="LossTest" />
+    <testcase name="BCELossClass" file="/home/lee/Projects/Tenzor/tests/unit/test_losses.cpp" line="210" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.724" classname="LossTest" />
+    <testcase name="L1LossClass" file="/home/lee/Projects/Tenzor/tests/unit/test_losses.cpp" line="222" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.724" classname="LossTest" />
+    <testcase name="CrossEntropyLossClass" file="/home/lee/Projects/Tenzor/tests/unit/test_losses.cpp" line="234" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.724" classname="LossTest">
+      <failure message="unknown file&#x0A;C++ exception with description &quot;Cannot squeeze dimension with size != 1&quot; thrown in the test body.&#x0A;" type=""><![CDATA[unknown file
+C++ exception with description "Cannot squeeze dimension with size != 1" thrown in the test body.
+]]></failure>
+    </testcase>
+    <testcase name="MSELossGradientRequired" file="/home/lee/Projects/Tenzor/tests/unit/test_losses.cpp" line="251" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.725" classname="LossTest" />
+    <testcase name="BCELossGradientRequired" file="/home/lee/Projects/Tenzor/tests/unit/test_losses.cpp" line="261" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.725" classname="LossTest" />
+    <testcase name="L1LossGradientRequired" file="/home/lee/Projects/Tenzor/tests/unit/test_losses.cpp" line="270" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.725" classname="LossTest" />
+  </testsuite>
+  <testsuite name="OptimizerTest" tests="18" failures="0" disabled="0" skipped="0" errors="0" time="0.024" timestamp="2025-10-25T09:37:43.725">
+    <testcase name="SGD_BasicStep" file="/home/lee/Projects/Tenzor/tests/unit/test_optimizers.cpp" line="23" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.725" classname="OptimizerTest" />
+    <testcase name="SGD_MultipleSteps" file="/home/lee/Projects/Tenzor/tests/unit/test_optimizers.cpp" line="42" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.725" classname="OptimizerTest" />
+    <testcase name="SGD_WithMomentum" file="/home/lee/Projects/Tenzor/tests/unit/test_optimizers.cpp" line="61" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.725" classname="OptimizerTest" />
+    <testcase name="SGD_WithWeightDecay" file="/home/lee/Projects/Tenzor/tests/unit/test_optimizers.cpp" line="86" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.725" classname="OptimizerTest" />
+    <testcase name="SGD_MultipleParameters" file="/home/lee/Projects/Tenzor/tests/unit/test_optimizers.cpp" line="102" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.726" classname="OptimizerTest" />
+    <testcase name="SGD_ZeroGrad" file="/home/lee/Projects/Tenzor/tests/unit/test_optimizers.cpp" line="127" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.726" classname="OptimizerTest" />
+    <testcase name="SGD_NoGradient" file="/home/lee/Projects/Tenzor/tests/unit/test_optimizers.cpp" line="145" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.726" classname="OptimizerTest" />
+    <testcase name="Adam_BasicStep" file="/home/lee/Projects/Tenzor/tests/unit/test_optimizers.cpp" line="165" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.726" classname="OptimizerTest" />
+    <testcase name="Adam_BiasCorrection" file="/home/lee/Projects/Tenzor/tests/unit/test_optimizers.cpp" line="182" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.726" classname="OptimizerTest" />
+    <testcase name="Adam_MultipleSteps" file="/home/lee/Projects/Tenzor/tests/unit/test_optimizers.cpp" line="205" status="run" result="completed" time="0.001" timestamp="2025-10-25T09:37:43.726" classname="OptimizerTest" />
+    <testcase name="Adam_WithWeightDecay" file="/home/lee/Projects/Tenzor/tests/unit/test_optimizers.cpp" line="225" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.728" classname="OptimizerTest" />
+    <testcase name="Adam_ConvergenceTest" file="/home/lee/Projects/Tenzor/tests/unit/test_optimizers.cpp" line="241" status="run" result="completed" time="0.016" timestamp="2025-10-25T09:37:43.728" classname="OptimizerTest" />
+    <testcase name="Adam_MultipleParameters" file="/home/lee/Projects/Tenzor/tests/unit/test_optimizers.cpp" line="263" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.745" classname="OptimizerTest" />
+    <testcase name="Adam_ZeroGrad" file="/home/lee/Projects/Tenzor/tests/unit/test_optimizers.cpp" line="285" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.746" classname="OptimizerTest" />
+    <testcase name="Adam_NoGradient" file="/home/lee/Projects/Tenzor/tests/unit/test_optimizers.cpp" line="301" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.746" classname="OptimizerTest" />
+    <testcase name="SGD_LearningRateChange" file="/home/lee/Projects/Tenzor/tests/unit/test_optimizers.cpp" line="320" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.746" classname="OptimizerTest" />
+    <testcase name="Adam_LearningRateChange" file="/home/lee/Projects/Tenzor/tests/unit/test_optimizers.cpp" line="340" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:43.746" classname="OptimizerTest" />
+    <testcase name="SGD_SimpleLinearRegression" file="/home/lee/Projects/Tenzor/tests/unit/test_optimizers.cpp" line="357" status="run" result="completed" time="0.003" timestamp="2025-10-25T09:37:43.746" classname="OptimizerTest" />
+  </testsuite>
+</testsuites>

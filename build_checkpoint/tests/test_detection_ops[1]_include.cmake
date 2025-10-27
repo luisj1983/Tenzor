@@ -1,0 +1,5 @@
+if(EXISTS "/home/lee/Projects/Tenzor/build_checkpoint/tests/test_detection_ops[1]_tests.cmake")
+  include("/home/lee/Projects/Tenzor/build_checkpoint/tests/test_detection_ops[1]_tests.cmake")
+else()
+  add_test(test_detection_ops_NOT_BUILT test_detection_ops_NOT_BUILT)
+endif()

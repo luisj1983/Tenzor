@@ -83,6 +83,15 @@ auto expand(const Tensor& input, std::vector<int64_t> shape) -> Tensor;
 /** @brief Return contiguous copy if needed. */
 auto contiguous(const Tensor& input) -> Tensor;
 
+/**
+ * @brief Roll tensor elements along a dimension (circular shift).
+ * @param input Input tensor
+ * @param shifts Number of positions to roll (positive = right, negative = left)
+ * @param dim Dimension to roll along
+ * @return Rolled tensor
+ */
+auto roll(const Tensor& input, int64_t shifts, int64_t dim) -> Tensor;
+
 /** @} */ // end of tensor_transform group
 
 } // namespace tenzor
@@ -98,5 +107,6 @@ using tenzor::permute;
 using tenzor::squeeze;
 using tenzor::flatten;
 using tenzor::stack;
+using tenzor::roll;
 } // namespace ops
 } // namespace tenzor

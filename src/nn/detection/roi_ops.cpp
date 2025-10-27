@@ -52,10 +52,10 @@ static inline float bilinear_interpolate(const float* data, int64_t height,
 }
 
 // CPU forward implementation
-auto ROIAlignFunction::forward(const Tensor& features, const Tensor& rois,
-                                int64_t output_h, int64_t output_w,
-                                double spatial_scale, int64_t sampling_ratio,
-                                bool aligned) -> Tensor {
+auto ROIAlignOp::apply(const Tensor& features, const Tensor& rois,
+                       int64_t output_h, int64_t output_w,
+                       double spatial_scale, int64_t sampling_ratio,
+                       bool aligned) -> Tensor {
     if (features.ndim() != 4) {
         throw std::invalid_argument("Features must be 4D tensor (N, C, H, W)");
     }
@@ -163,9 +163,9 @@ auto ROIAlignFunction::forward(const Tensor& features, const Tensor& rois,
 }
 
 // CPU backward implementation
-auto ROIAlignFunction::backward(const Tensor& grad_output, const Tensor& features,
-                                 const Tensor& rois, double spatial_scale,
-                                 int64_t sampling_ratio, bool aligned) -> Tensor {
+auto ROIAlignOp::apply_backward(const Tensor& grad_output, const Tensor& features,
+                                const Tensor& rois, double spatial_scale,
+                                int64_t sampling_ratio, bool aligned) -> Tensor {
     const int64_t num_rois = rois.shape()[0];
     const int64_t channels = features.shape()[1];
     const int64_t feat_height = features.shape()[2];
@@ -288,8 +288,8 @@ ROIAlign::ROIAlign(int64_t output_h, int64_t output_w, double spatial_scale,
       aligned_(aligned) {}
 
 auto ROIAlign::forward(const Variable& features, const Tensor& rois) -> Variable {
-    // Forward pass through ROIAlignFunction
-    auto output_tensor = ROIAlignFunction::forward(
+    // Forward pass through ROIAlignOp utility
+    auto output_tensor = ROIAlignOp::apply(
         features.tensor(), rois, output_h_, output_w_, spatial_scale_,
         sampling_ratio_, aligned_);
 
@@ -313,13 +313,13 @@ auto ROIAlign::forward(const Variable& features, const Tensor& rois) -> Variable
                   sampling_ratio_(sampling_ratio),
                   aligned_(aligned) {}
 
-            auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+            auto forward(std::vector<Variable> /* inputs */) -> std::vector<Variable> override {
                 throw std::runtime_error("ROIAlignBackward::forward should not be called");
             }
 
             auto backward(std::vector<Tensor> grad_outputs)
                 -> std::vector<Tensor> override {
-                auto grad_features = ROIAlignFunction::backward(
+                auto grad_features = ROIAlignOp::apply_backward(
                     grad_outputs[0], features_, rois_, spatial_scale_,
                     sampling_ratio_, aligned_);
                 return {grad_features};

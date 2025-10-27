@@ -6,10 +6,12 @@ set(TENZOR_CORE_SOURCES
     core/dtype.cpp
     core/shape.cpp
     core/init.cpp
+    core/caching_allocator.cpp
     backend/backend.cpp
     backend/loader.cpp
     backend/registry.cpp
     backend/dispatch.cpp
+    backend/simd_dispatch.cpp
     ops/creation.cpp
     ops/math.cpp
     ops/indexing.cpp
@@ -19,6 +21,7 @@ set(TENZOR_CORE_SOURCES
     ops/advanced.cpp
     ops/vision.cpp
     ops/detection.cpp
+    ops/async_ops.cpp
     autograd/variable.cpp
     autograd/graph.cpp
     autograd/function.cpp
@@ -26,6 +29,7 @@ set(TENZOR_CORE_SOURCES
     autograd/ops.cpp
     autograd/checkpoint.cpp
     autograd/gradcheck.cpp
+    autograd/graph_optimizer.cpp
     nn/module.cpp
     nn/serialize.cpp
     nn/checkpoint.cpp
@@ -61,10 +65,13 @@ set(TENZOR_CORE_SOURCES
     nn/optim/adadelta.cpp
     nn/optim/scheduler.cpp
     nn/optim/scheduler_advanced.cpp
+    nn/callbacks.cpp
+    nn/training.cpp
+    nn/mixed_precision.cpp
     nn/amp/grad_scaler.cpp
     nn/amp/autocast.cpp
     nn/parallel/data_parallel.cpp
-    # nn/parallel/distributed_data_parallel.cpp  # Requires NCCL - disabled for now
+    # nn/parallel/distributed_data_parallel.cpp  # Disabled - use new distributed API from distributed/ instead
     nn/quantization/quantize.cpp
     nn/quantization/observer.cpp
     nn/quantization/fake_quantize.cpp
@@ -88,7 +95,7 @@ set(TENZOR_CORE_SOURCES
     models/vit.cpp
     models/mobilenet.cpp
     models/convnext.cpp
-    # models/swin_transformer.cpp  # TODO: Fix API compatibility issues
+    models/swin_transformer.cpp
     models/unet.cpp
     models/deeplabv3plus.cpp
     models/yolo.cpp
@@ -112,6 +119,9 @@ set(TENZOR_CORE_SOURCES
     jit/serialization.cpp
     nn/compression/pruning.cpp
     nn/compression/distillation.cpp
+    distributed/distributed.cpp
+    distributed/nccl_backend.cpp
+    distributed/gloo_backend.cpp
 )
 
 # Create core library
@@ -164,6 +174,14 @@ if(TENZOR_BUILD_CUDA)
     target_link_libraries(tenzor_core PRIVATE
         CUDA::cudart
     )
+    # Link NCCL if available
+    find_library(NCCL_LIBRARY nccl PATHS /usr/lib /usr/local/lib)
+    if(NCCL_LIBRARY)
+        message(STATUS "Found NCCL library: ${NCCL_LIBRARY}")
+        target_link_libraries(tenzor_core PRIVATE ${NCCL_LIBRARY})
+    else()
+        message(WARNING "NCCL library not found, distributed GPU training will not be available")
+    endif()
 endif()
 
 # Build backends

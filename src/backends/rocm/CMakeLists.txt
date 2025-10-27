@@ -41,6 +41,10 @@ set(ROCM_HIP_SOURCES
     kernels/fused_ops.hip.cpp
     kernels/reduction.hip.cpp
     kernels/matmul.hip.cpp
+    kernels/lstm.hip.cpp
+    kernels/gru.hip.cpp
+    kernels/nms.hip.cpp
+    kernels/roi_align.hip.cpp
 )
 
 # Mark .hip.cpp files to be compiled as HIP language
@@ -223,7 +227,12 @@ message(STATUS "    - indexing.hip.cpp (gather, scatter, masked ops)")
 message(STATUS "    - transform.hip.cpp (reshape, transpose, permute, cat)")
 message(STATUS "    - fused_ops.hip.cpp (fused operations for optimization)")
 message(STATUS "    - reduction.hip.cpp (sum, mean, max, min reductions)")
-message(STATUS "  Note: Matmul/GEMM operations use rocBLAS library")
+message(STATUS "    - matmul.hip.cpp (matrix multiplication with rocBLAS)")
+message(STATUS "    - lstm.hip.cpp (LSTM cell forward/backward)")
+message(STATUS "    - gru.hip.cpp (GRU cell forward/backward)")
+message(STATUS "    - nms.hip.cpp (Non-Maximum Suppression for object detection)")
+message(STATUS "    - roi_align.hip.cpp (ROI Align for region-based detection)")
+message(STATUS "  Note: GEMM operations use rocBLAS library for optimal performance")
 if(rocblas_FOUND)
     message(STATUS "  rocBLAS: Enabled")
 else()

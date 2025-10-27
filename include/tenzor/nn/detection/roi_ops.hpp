@@ -72,7 +72,7 @@ public:
     /**
      * @brief Module forward (not used, ROIAlign requires both features and ROIs).
      */
-    auto forward(const Variable& input) -> Variable override {
+    auto forward(const Variable& /* input */) -> Variable override {
         throw std::runtime_error("ROIAlign requires both features and rois. "
                                  "Use forward(features, rois) instead.");
     }
@@ -86,45 +86,53 @@ private:
 };
 
 /**
- * @brief Autograd function for ROI Align.
+ * @brief Utility class for ROI Align operations.
  *
- * Implements forward and backward passes for ROI Align with bilinear
- * interpolation. Backward pass uses bilinear weights to distribute
- * gradients back to the feature map.
+ * Provides static methods for ROI Align computation with bilinear interpolation.
+ * This is a pure utility class (not an autograd::Function). The ROIAlign module
+ * class handles autograd integration through its own backward function.
+ *
+ * Design Note: Named "Op" instead of "Function" to avoid confusion with
+ * autograd::Function base class and prevent any virtual function hiding concerns.
  */
-class ROIAlignFunction : public Function {
+class ROIAlignOp {
 public:
     /**
-     * @brief Forward pass implementation.
+     * @brief Compute ROI Align forward pass.
      *
-     * @param features Input feature maps
-     * @param rois ROI coordinates
-     * @param output_h Output height
-     * @param output_w Output width
-     * @param spatial_scale Feature map scale
-     * @param sampling_ratio Number of samples per bin
-     * @param aligned Use aligned coordinates
-     * @return Aligned features
+     * Extracts fixed-size feature maps from ROIs using bilinear interpolation.
+     *
+     * @param features Input feature maps (N, C, H, W)
+     * @param rois ROI coordinates (num_rois, 5) - format: (batch_idx, x1, y1, x2, y2)
+     * @param output_h Output height for each ROI
+     * @param output_w Output width for each ROI
+     * @param spatial_scale Scale factor from input image to feature map
+     * @param sampling_ratio Number of samples per output bin (0=adaptive)
+     * @param aligned Use aligned coordinates (matches PyTorch aligned=True)
+     * @return Aligned features (num_rois, C, output_h, output_w)
      */
-    static auto forward(const Tensor& features, const Tensor& rois,
-                        int64_t output_h, int64_t output_w,
-                        double spatial_scale, int64_t sampling_ratio,
-                        bool aligned) -> Tensor;
+    static auto apply(const Tensor& features, const Tensor& rois,
+                      int64_t output_h, int64_t output_w,
+                      double spatial_scale, int64_t sampling_ratio,
+                      bool aligned) -> Tensor;
 
     /**
-     * @brief Backward pass implementation.
+     * @brief Compute ROI Align gradient with respect to input features.
+     *
+     * Distributes output gradients back to input feature map using bilinear
+     * interpolation weights.
      *
      * @param grad_output Gradient w.r.t output (num_rois, C, output_h, output_w)
-     * @param features Original input features (for shape)
-     * @param rois Original ROIs
-     * @param spatial_scale Feature map scale
-     * @param sampling_ratio Number of samples per bin
+     * @param features Original input features (for shape information)
+     * @param rois Original ROI coordinates
+     * @param spatial_scale Scale factor from input image to feature map
+     * @param sampling_ratio Number of samples per output bin
      * @param aligned Use aligned coordinates
      * @return Gradient w.r.t features (N, C, H, W)
      */
-    static auto backward(const Tensor& grad_output, const Tensor& features,
-                         const Tensor& rois, double spatial_scale,
-                         int64_t sampling_ratio, bool aligned) -> Tensor;
+    static auto apply_backward(const Tensor& grad_output, const Tensor& features,
+                               const Tensor& rois, double spatial_scale,
+                               int64_t sampling_ratio, bool aligned) -> Tensor;
 };
 
 } // namespace detection

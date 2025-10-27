@@ -1,0 +1,5 @@
+if(EXISTS "/home/lee/Projects/Tenzor/build_fresh/tests/test_electra[1]_tests.cmake")
+  include("/home/lee/Projects/Tenzor/build_fresh/tests/test_electra[1]_tests.cmake")
+else()
+  add_test(test_electra_NOT_BUILT test_electra_NOT_BUILT)
+endif()

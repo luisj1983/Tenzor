@@ -1,0 +1,126 @@
+Initializing Tenzor library v1.0.0
+Loading CPU backend from: "/home/lee/Projects/Tenzor/bin/tenzor_backend_cpu.so"
+CPU backend registered: cpu
+Registering CPU kernels with operation registry
+Loading CUDA backend from: "/home/lee/Projects/Tenzor/bin/tenzor_backend_cuda.so"
+CUDA backend registered: cuda
+Found 1 CUDA device(s)
+Registering CUDA kernels with operation registry
+CUDA operations registered successfully
+ROCm backend not found at: "/home/lee/Projects/Tenzor/bin/tenzor_backend_rocm.so"
+Loading OneAPI backend from: "/home/lee/Projects/Tenzor/bin/tenzor_backend_oneapi.so"
+Warning: Failed to load OneAPI backend: Failed to load library: /home/lee/Projects/Tenzor/bin/tenzor_backend_oneapi.so
+Loading Vulkan backend from: "/home/lee/Projects/Tenzor/bin/libtenzor_backend_vulkan.so"
+Vulkan backend registered: vulkan
+Found 2 Vulkan device(s)
+Registering Vulkan kernels with operation registry
+Vulkan operations registered successfully
+Tenzor initialization complete - 51 CPU operations registered
+
+========================================
+Phase 11 Backend Tests
+========================================
+
+Testing backends:
+  ✓ OneAPI (Intel GPUs) - Fixed conv2d backward
+  ⚠ Vulkan (Cross-platform) - Needs dynamic loading
+  ⚠ Metal (macOS/iOS) - Platform specific
+  ⚠ WebGPU (Browser/WASM) - Environment specific
+  ✗ ROCm (AMD GPUs) - EXCLUDED (system crashes)
+
+Note: Backends will skip tests if not available
+========================================
+
+[==========] Running 12 tests from 5 test suites.
+[----------] Global test environment set-up.
+[----------] 5 tests from OneAPIBackendTest
+[ RUN      ] OneAPIBackendTest.BackendInitialization
+Backend unavailable - Error: Backend not available for device type
+/home/lee/Projects/Tenzor/tests/test_phase11_backends.cpp:66: Skipped
+OneAPI backend not available
+
+[  SKIPPED ] OneAPIBackendTest.BackendInitialization (0 ms)
+[ RUN      ] OneAPIBackendTest.MemoryAllocation
+Backend unavailable - Error: Backend not available for device type
+/home/lee/Projects/Tenzor/tests/test_phase11_backends.cpp:76: Skipped
+OneAPI backend not available
+
+[  SKIPPED ] OneAPIBackendTest.MemoryAllocation (0 ms)
+[ RUN      ] OneAPIBackendTest.BasicMatMul
+Backend unavailable - Error: Backend not available for device type
+/home/lee/Projects/Tenzor/tests/test_phase11_backends.cpp:88: Skipped
+OneAPI backend not available
+
+[  SKIPPED ] OneAPIBackendTest.BasicMatMul (0 ms)
+[ RUN      ] OneAPIBackendTest.Conv2dForward
+Backend unavailable - Error: Backend not available for device type
+/home/lee/Projects/Tenzor/tests/test_phase11_backends.cpp:110: Skipped
+OneAPI backend not available
+
+[  SKIPPED ] OneAPIBackendTest.Conv2dForward (0 ms)
+[ RUN      ] OneAPIBackendTest.Conv2dBackwardFixed
+Backend unavailable - Error: Backend not available for device type
+/home/lee/Projects/Tenzor/tests/test_phase11_backends.cpp:134: Skipped
+OneAPI backend not available
+
+[  SKIPPED ] OneAPIBackendTest.Conv2dBackwardFixed (0 ms)
+[----------] 5 tests from OneAPIBackendTest (0 ms total)
+
+[----------] 1 test from VulkanBackendTest
+[ RUN      ] VulkanBackendTest.BackendInitialization
+Backend unavailable - Error: VulkanBackend: Operation 'zeros' not implemented
+/home/lee/Projects/Tenzor/tests/test_phase11_backends.cpp:169: Skipped
+Vulkan backend not available
+
+[  SKIPPED ] VulkanBackendTest.BackendInitialization (0 ms)
+[----------] 1 test from VulkanBackendTest (0 ms total)
+
+[----------] 1 test from MetalBackendTest
+[ RUN      ] MetalBackendTest.BackendSkipped
+/home/lee/Projects/Tenzor/tests/test_phase11_backends.cpp:187: Skipped
+Metal backend requires macOS/iOS
+
+[  SKIPPED ] MetalBackendTest.BackendSkipped (0 ms)
+[----------] 1 test from MetalBackendTest (0 ms total)
+
+[----------] 1 test from WebGPUBackendTest
+[ RUN      ] WebGPUBackendTest.BackendSkipped
+/home/lee/Projects/Tenzor/tests/test_phase11_backends.cpp:197: Skipped
+WebGPU backend requires browser/WASM environment
+
+[  SKIPPED ] WebGPUBackendTest.BackendSkipped (0 ms)
+[----------] 1 test from WebGPUBackendTest (0 ms total)
+
+[----------] 4 tests from CrossBackendTest
+[ RUN      ] CrossBackendTest.TensorTransferCPU
+[       OK ] CrossBackendTest.TensorTransferCPU (0 ms)
+[ RUN      ] CrossBackendTest.BasicCPUOperations
+[       OK ] CrossBackendTest.BasicCPUOperations (0 ms)
+[ RUN      ] CrossBackendTest.OneAPIToCPUTransfer
+Backend unavailable - Error: Backend not available for device type
+/home/lee/Projects/Tenzor/tests/test_phase11_backends.cpp:234: Skipped
+OneAPI backend not available
+
+[  SKIPPED ] CrossBackendTest.OneAPIToCPUTransfer (0 ms)
+[ RUN      ] CrossBackendTest.CPUToOneAPITransfer
+Backend unavailable - Error: Backend not available for device type
+/home/lee/Projects/Tenzor/tests/test_phase11_backends.cpp:252: Skipped
+OneAPI backend not available
+
+[  SKIPPED ] CrossBackendTest.CPUToOneAPITransfer (0 ms)
+[----------] 4 tests from CrossBackendTest (0 ms total)
+
+[----------] Global test environment tear-down
+[==========] 12 tests from 5 test suites ran. (0 ms total)
+[  PASSED  ] 2 tests.
+[  SKIPPED ] 10 tests, listed below:
+[  SKIPPED ] OneAPIBackendTest.BackendInitialization
+[  SKIPPED ] OneAPIBackendTest.MemoryAllocation
+[  SKIPPED ] OneAPIBackendTest.BasicMatMul
+[  SKIPPED ] OneAPIBackendTest.Conv2dForward
+[  SKIPPED ] OneAPIBackendTest.Conv2dBackwardFixed
+[  SKIPPED ] VulkanBackendTest.BackendInitialization
+[  SKIPPED ] MetalBackendTest.BackendSkipped
+[  SKIPPED ] WebGPUBackendTest.BackendSkipped
+[  SKIPPED ] CrossBackendTest.OneAPIToCPUTransfer
+[  SKIPPED ] CrossBackendTest.CPUToOneAPITransfer

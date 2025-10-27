@@ -31,6 +31,9 @@
         } while(0)
 #elif defined(TENZOR_USE_CUDA)
     #include <cuda_runtime.h>
+    #ifdef TENZOR_HAS_NCCL
+        #include <nccl.h>
+    #endif
     #define GPU_CHECK(call) \
         do { \
             cudaError_t err = call; \
@@ -38,13 +41,18 @@
                 throw std::runtime_error(std::string("CUDA error: ") + cudaGetErrorString(err)); \
             } \
         } while(0)
-    #define NCCL_CHECK(call) \
-        do { \
-            ncclResult_t err = call; \
-            if (err != ncclSuccess) { \
-                throw std::runtime_error(std::string("NCCL error: ") + ncclGetErrorString(err)); \
-            } \
-        } while(0)
+    #ifdef TENZOR_HAS_NCCL
+        #define NCCL_CHECK(call) \
+            do { \
+                ncclResult_t err = call; \
+                if (err != ncclSuccess) { \
+                    throw std::runtime_error(std::string("NCCL error: ") + ncclGetErrorString(err)); \
+                } \
+            } while(0)
+    #else
+        #define NCCL_CHECK(call) \
+            throw std::runtime_error("NCCL not available - recompile with NCCL support")
+    #endif
 #else
     #define GPU_CHECK(call) call
     #define NCCL_CHECK(call) call
@@ -193,12 +201,20 @@ auto ProcessGroup::all_reduce(Tensor& tensor, ncclRedOp_t op, int device_id) -> 
         GPU_CHECK(cudaSetDevice(device_id));
     #endif
 
+    // For now, use the new Phase 4 distributed training API instead of direct NCCL
+    // This old DDP implementation will be deprecated in favor of the new distributed module
+    throw std::runtime_error(
+        "ProcessGroup::all_reduce - Please use the new distributed training API "
+        "from tenzor/distributed/distributed.hpp instead of the old DDP API"
+    );
+
+#if 0  // Old NCCL code - disabled
     // Determine NCCL data type
     ncclDataType_t nccl_type;
     switch (tensor.dtype()) {
-        case DType::Float32: nccl_type = ncclFloat32; break;
-        case DType::Float64: nccl_type = ncclFloat64; break;
-        case DType::Int32:   nccl_type = ncclInt32; break;
+        case DType::Float32: nccl_type = ncclFloat; break;
+        case DType::Float64: nccl_type = ncclDouble; break;
+        case DType::Int32:   nccl_type = ncclInt; break;
         case DType::Int64:   nccl_type = ncclInt64; break;
         default:
             throw std::runtime_error("ProcessGroup: unsupported dtype for all_reduce");
@@ -491,7 +507,7 @@ auto DistributedDataParallel::initialize_distributed() -> void {
 auto DistributedDataParallel::broadcast_parameters() -> void {
     auto params = module_->parameters();
 
-    for (auto* param : params) {
+    for (const auto& param : params) {
         if (!param) continue;
 
         auto& tensor = param->tensor();
@@ -504,7 +520,7 @@ auto DistributedDataParallel::broadcast_parameters() -> void {
 auto DistributedDataParallel::broadcast_buffers() -> void {
     auto buffers = module_->buffers();
 
-    for (auto* buffer : buffers) {
+    for (const auto& buffer : buffers) {
         if (!buffer) continue;
 
         auto& tensor = buffer->tensor();
@@ -524,13 +540,13 @@ auto DistributedDataParallel::create_gradient_buckets() -> void {
     // Create buckets
     GradientBucket current_bucket(bucket_size_mb_);
 
-    for (auto* param : params) {
+    for (const auto& param : params) {
         if (!param || !param->requires_grad()) {
             continue;
         }
 
         // Add to current bucket
-        bool is_full = current_bucket.add_gradient(param);
+        bool is_full = current_bucket.add_gradient(param.get());
 
         // Track parameter for synchronization
         parameters_to_sync_.push_back(param);
@@ -662,16 +678,20 @@ auto DistributedDataParallel::validate_devices() -> void {
 }
 
 auto DistributedDataParallel::get_nccl_datatype(DType dtype) -> ncclDataType_t {
+#if defined(TENZOR_USE_CUDA)
     switch (dtype) {
-        case DType::Float32: return ncclFloat32;
-        case DType::Float64: return ncclFloat64;
-        case DType::Int32:   return ncclInt32;
+        case DType::Float32: return ncclFloat;
+        case DType::Float64: return ncclDouble;
+        case DType::Int32:   return ncclInt;
         case DType::Int64:   return ncclInt64;
         default:
             throw std::runtime_error(
                 "DistributedDataParallel: unsupported dtype for NCCL"
             );
     }
+#else
+    throw std::runtime_error("NCCL not available - CUDA support not enabled");
+#endif
 }
 
 // ============================================================================

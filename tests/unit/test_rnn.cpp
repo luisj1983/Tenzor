@@ -1,245 +1,241 @@
 #include <gtest/gtest.h>
-#include <tenzor/tenzor.hpp>
+#include "../backend_test_fixture.hpp"
 #include <cmath>
 
 using namespace tenzor;
-
-// Global test environment
-class RNNTestEnvironment : public ::testing::Environment {
-public:
-    void SetUp() override {
-        tenzor::initialize();
-    }
-};
-
-static ::testing::Environment* const rnn_env =
-    ::testing::AddGlobalTestEnvironment(new RNNTestEnvironment);
+using namespace tenzor::testing;
 
 // ============================================================================
 // RNNCell Tests
 // ============================================================================
 
-TEST(RNNCellTest, BasicForward) {
+class RNNCellTestFixture : public BackendTest {};
+
+TEST_P(RNNCellTestFixture, BasicForward) {
     // Test basic forward pass with tanh activation
     nn::RNNCell cell(10, 20, "tanh");
-    auto input = Variable(randn({5, 10}), true);
-    auto h = Variable(randn({5, 20}), true);
+    auto input = Variable(randn({5, 10}, DType::Float32, device), true);
+    auto h = Variable(randn({5, 20}, DType::Float32, device), true);
 
     auto output = cell.forward(input, h);
 
-    EXPECT_EQ(output.shape().size(), 2);
-    EXPECT_EQ(output.shape()[0], 5);
-    EXPECT_EQ(output.shape()[1], 20);
+    EXPECT_EQ(output.shape().size(), 2) << "Failed on " << device.to_string();
+    EXPECT_EQ(output.shape()[0], 5) << "Failed on " << device.to_string();
+    EXPECT_EQ(output.shape()[1], 20) << "Failed on " << device.to_string();
 }
 
-TEST(RNNCellTest, ReLUActivation) {
+TEST_P(RNNCellTestFixture, ReLUActivation) {
     // Test with ReLU activation
     nn::RNNCell cell(10, 20, "relu");
-    auto input = Variable(randn({5, 10}), true);
-    auto h = Variable(randn({5, 20}), true);
+    auto input = Variable(randn({5, 10}, DType::Float32, device), true);
+    auto h = Variable(randn({5, 20}, DType::Float32, device), true);
 
     auto output = cell.forward(input, h);
 
-    EXPECT_EQ(output.shape().size(), 2);
-    EXPECT_EQ(output.shape()[0], 5);
-    EXPECT_EQ(output.shape()[1], 20);
+    EXPECT_EQ(output.shape().size(), 2) << "Failed on " << device.to_string();
+    EXPECT_EQ(output.shape()[0], 5) << "Failed on " << device.to_string();
+    EXPECT_EQ(output.shape()[1], 20) << "Failed on " << device.to_string();
 }
 
-TEST(RNNCellTest, NoInitialHidden) {
+TEST_P(RNNCellTestFixture, NoInitialHidden) {
     // Test with zero-initialized hidden state
     nn::RNNCell cell(10, 20);
-    auto input = Variable(randn({5, 10}), true);
+    auto input = Variable(randn({5, 10}, DType::Float32, device), true);
 
     auto output = cell.forward(input);
 
-    EXPECT_EQ(output.shape().size(), 2);
-    EXPECT_EQ(output.shape()[0], 5);
-    EXPECT_EQ(output.shape()[1], 20);
+    EXPECT_EQ(output.shape().size(), 2) << "Failed on " << device.to_string();
+    EXPECT_EQ(output.shape()[0], 5) << "Failed on " << device.to_string();
+    EXPECT_EQ(output.shape()[1], 20) << "Failed on " << device.to_string();
 }
 
-TEST(RNNCellTest, NoBias) {
+TEST_P(RNNCellTestFixture, NoBias) {
     // Test without bias
     nn::RNNCell cell(10, 20, "tanh", false);
-    auto input = Variable(randn({5, 10}), true);
+    auto input = Variable(randn({5, 10}, DType::Float32, device), true);
 
     auto output = cell.forward(input);
 
-    EXPECT_EQ(output.shape()[0], 5);
-    EXPECT_EQ(output.shape()[1], 20);
+    EXPECT_EQ(output.shape()[0], 5) << "Failed on " << device.to_string();
+    EXPECT_EQ(output.shape()[1], 20) << "Failed on " << device.to_string();
 }
 
-TEST(RNNCellTest, InvalidNonlinearity) {
+TEST_P(RNNCellTestFixture, InvalidNonlinearity) {
     // Test that invalid activation throws
     EXPECT_THROW({
         nn::RNNCell cell(10, 20, "sigmoid");
-    }, std::invalid_argument);
+    }, std::invalid_argument) << "Failed on " << device.to_string();
 }
+
+INSTANTIATE_BACKEND_TESTS(RNNCellTestFixture);
 
 // ============================================================================
 // RNN Tests
 // ============================================================================
 
-TEST(RNNTest, BasicForward) {
+class RNNTestFixture : public BackendTest {};
+
+TEST_P(RNNTestFixture, BasicForward) {
     // Test basic forward pass
     nn::RNN rnn(10, 20, 1);
-    auto input = Variable(randn({7, 5, 10}), true);  // (seq_len, batch, features)
+    auto input = Variable(randn({7, 5, 10}, DType::Float32, device), true);  // (seq_len, batch, features)
 
     auto [output, h_n] = rnn.forward(input, Variable{});
 
-    EXPECT_EQ(output.shape().size(), 3);
-    EXPECT_EQ(output.shape()[0], 7);  // seq_len
-    EXPECT_EQ(output.shape()[1], 5);  // batch
-    EXPECT_EQ(output.shape()[2], 20); // hidden_size
+    EXPECT_EQ(output.shape().size(), 3) << "Failed on " << device.to_string();
+    EXPECT_EQ(output.shape()[0], 7) << "Failed on " << device.to_string();  // seq_len
+    EXPECT_EQ(output.shape()[1], 5) << "Failed on " << device.to_string();  // batch
+    EXPECT_EQ(output.shape()[2], 20) << "Failed on " << device.to_string(); // hidden_size
 
-    EXPECT_EQ(h_n.shape().size(), 3);
-    EXPECT_EQ(h_n.shape()[0], 1);  // num_layers
-    EXPECT_EQ(h_n.shape()[1], 5);  // batch
-    EXPECT_EQ(h_n.shape()[2], 20); // hidden_size
+    EXPECT_EQ(h_n.shape().size(), 3) << "Failed on " << device.to_string();
+    EXPECT_EQ(h_n.shape()[0], 1) << "Failed on " << device.to_string();  // num_layers
+    EXPECT_EQ(h_n.shape()[1], 5) << "Failed on " << device.to_string();  // batch
+    EXPECT_EQ(h_n.shape()[2], 20) << "Failed on " << device.to_string(); // hidden_size
 }
 
-TEST(RNNTest, MultiLayer) {
+TEST_P(RNNTestFixture, MultiLayer) {
     // Test multi-layer RNN
     nn::RNN rnn(10, 20, 3);  // 3 layers
-    auto input = Variable(randn({7, 5, 10}), true);
+    auto input = Variable(randn({7, 5, 10}, DType::Float32, device), true);
 
     auto [output, h_n] = rnn.forward(input, Variable{});
 
-    EXPECT_EQ(output.shape()[0], 7);
-    EXPECT_EQ(output.shape()[1], 5);
-    EXPECT_EQ(output.shape()[2], 20);
+    EXPECT_EQ(output.shape()[0], 7) << "Failed on " << device.to_string();
+    EXPECT_EQ(output.shape()[1], 5) << "Failed on " << device.to_string();
+    EXPECT_EQ(output.shape()[2], 20) << "Failed on " << device.to_string();
 
-    EXPECT_EQ(h_n.shape()[0], 3);  // 3 layers
-    EXPECT_EQ(h_n.shape()[1], 5);
-    EXPECT_EQ(h_n.shape()[2], 20);
+    EXPECT_EQ(h_n.shape()[0], 3) << "Failed on " << device.to_string();  // 3 layers
+    EXPECT_EQ(h_n.shape()[1], 5) << "Failed on " << device.to_string();
+    EXPECT_EQ(h_n.shape()[2], 20) << "Failed on " << device.to_string();
 }
 
-TEST(RNNTest, BatchFirst) {
+TEST_P(RNNTestFixture, BatchFirst) {
     // Test with batch_first=true
     nn::RNN rnn(10, 20, 1, "tanh", true, true);  // batch_first=true
-    auto input = Variable(randn({5, 7, 10}), true);  // (batch, seq_len, features)
+    auto input = Variable(randn({5, 7, 10}, DType::Float32, device), true);  // (batch, seq_len, features)
 
     auto [output, h_n] = rnn.forward(input, Variable{});
 
-    EXPECT_EQ(output.shape()[0], 5);  // batch
-    EXPECT_EQ(output.shape()[1], 7);  // seq_len
-    EXPECT_EQ(output.shape()[2], 20); // hidden_size
+    EXPECT_EQ(output.shape()[0], 5) << "Failed on " << device.to_string();  // batch
+    EXPECT_EQ(output.shape()[1], 7) << "Failed on " << device.to_string();  // seq_len
+    EXPECT_EQ(output.shape()[2], 20) << "Failed on " << device.to_string(); // hidden_size
 }
 
-TEST(RNNTest, Bidirectional) {
+TEST_P(RNNTestFixture, Bidirectional) {
     // Test bidirectional RNN
     nn::RNN rnn(10, 20, 1, "tanh", true, false, 0.0, true);  // bidirectional=true
-    auto input = Variable(randn({7, 5, 10}), true);
+    auto input = Variable(randn({7, 5, 10}, DType::Float32, device), true);
 
     auto [output, h_n] = rnn.forward(input, Variable{});
 
-    EXPECT_EQ(output.shape()[0], 7);
-    EXPECT_EQ(output.shape()[1], 5);
-    EXPECT_EQ(output.shape()[2], 40); // hidden_size * 2
+    EXPECT_EQ(output.shape()[0], 7) << "Failed on " << device.to_string();
+    EXPECT_EQ(output.shape()[1], 5) << "Failed on " << device.to_string();
+    EXPECT_EQ(output.shape()[2], 40) << "Failed on " << device.to_string(); // hidden_size * 2
 
-    EXPECT_EQ(h_n.shape()[0], 2);  // num_layers * num_directions
-    EXPECT_EQ(h_n.shape()[1], 5);
-    EXPECT_EQ(h_n.shape()[2], 20);
+    EXPECT_EQ(h_n.shape()[0], 2) << "Failed on " << device.to_string();  // num_layers * num_directions
+    EXPECT_EQ(h_n.shape()[1], 5) << "Failed on " << device.to_string();
+    EXPECT_EQ(h_n.shape()[2], 20) << "Failed on " << device.to_string();
 }
 
-TEST(RNNTest, BidirectionalMultiLayer) {
+TEST_P(RNNTestFixture, BidirectionalMultiLayer) {
     // Test bidirectional multi-layer RNN
     nn::RNN rnn(10, 20, 2, "tanh", true, false, 0.0, true);
-    auto input = Variable(randn({7, 5, 10}), true);
+    auto input = Variable(randn({7, 5, 10}, DType::Float32, device), true);
 
     auto [output, h_n] = rnn.forward(input, Variable{});
 
-    EXPECT_EQ(output.shape()[2], 40); // hidden_size * 2
-    EXPECT_EQ(h_n.shape()[0], 4);     // num_layers * num_directions
+    EXPECT_EQ(output.shape()[2], 40) << "Failed on " << device.to_string(); // hidden_size * 2
+    EXPECT_EQ(h_n.shape()[0], 4) << "Failed on " << device.to_string();     // num_layers * num_directions
 }
 
-TEST(RNNTest, WithDropout) {
+TEST_P(RNNTestFixture, WithDropout) {
     // Test with dropout between layers
     nn::RNN rnn(10, 20, 3, "tanh", true, false, 0.5);  // 50% dropout
-    auto input = Variable(randn({7, 5, 10}), true);
+    auto input = Variable(randn({7, 5, 10}, DType::Float32, device), true);
 
     auto [output, h_n] = rnn.forward(input, Variable{});
 
-    EXPECT_EQ(output.shape()[0], 7);
-    EXPECT_EQ(output.shape()[1], 5);
-    EXPECT_EQ(output.shape()[2], 20);
+    EXPECT_EQ(output.shape()[0], 7) << "Failed on " << device.to_string();
+    EXPECT_EQ(output.shape()[1], 5) << "Failed on " << device.to_string();
+    EXPECT_EQ(output.shape()[2], 20) << "Failed on " << device.to_string();
 }
 
-TEST(RNNTest, InitialHiddenState) {
+TEST_P(RNNTestFixture, InitialHiddenState) {
     // Test with provided initial hidden state
     nn::RNN rnn(10, 20, 2);
-    auto input = Variable(randn({7, 5, 10}), true);
-    auto h0 = Variable(randn({2, 5, 20}), true);
+    auto input = Variable(randn({7, 5, 10}, DType::Float32, device), true);
+    auto h0 = Variable(randn({2, 5, 20}, DType::Float32, device), true);
 
     auto [output, h_n] = rnn.forward(input, h0);
 
-    EXPECT_EQ(output.shape()[0], 7);
-    EXPECT_EQ(h_n.shape()[0], 2);
+    EXPECT_EQ(output.shape()[0], 7) << "Failed on " << device.to_string();
+    EXPECT_EQ(h_n.shape()[0], 2) << "Failed on " << device.to_string();
 }
 
-TEST(RNNTest, SequenceLengthVariation) {
+TEST_P(RNNTestFixture, SequenceLengthVariation) {
     // Test with different sequence lengths
     nn::RNN rnn(10, 20);
 
     // Short sequence
-    auto input1 = Variable(randn({3, 5, 10}), true);
+    auto input1 = Variable(randn({3, 5, 10}, DType::Float32, device), true);
     auto [output1, h_n1] = rnn.forward(input1, Variable{});
-    EXPECT_EQ(output1.shape()[0], 3);
+    EXPECT_EQ(output1.shape()[0], 3) << "Failed on " << device.to_string();
 
     // Long sequence
-    auto input2 = Variable(randn({50, 5, 10}), true);
+    auto input2 = Variable(randn({50, 5, 10}, DType::Float32, device), true);
     auto [output2, h_n2] = rnn.forward(input2, Variable{});
-    EXPECT_EQ(output2.shape()[0], 50);
+    EXPECT_EQ(output2.shape()[0], 50) << "Failed on " << device.to_string();
 }
 
-TEST(RNNTest, BatchSizeVariation) {
+TEST_P(RNNTestFixture, BatchSizeVariation) {
     // Test with different batch sizes
     nn::RNN rnn(10, 20);
 
     // Small batch
-    auto input1 = Variable(randn({7, 2, 10}), true);
+    auto input1 = Variable(randn({7, 2, 10}, DType::Float32, device), true);
     auto [output1, h_n1] = rnn.forward(input1, Variable{});
-    EXPECT_EQ(output1.shape()[1], 2);
+    EXPECT_EQ(output1.shape()[1], 2) << "Failed on " << device.to_string();
 
     // Large batch
-    auto input2 = Variable(randn({7, 32, 10}), true);
+    auto input2 = Variable(randn({7, 32, 10}, DType::Float32, device), true);
     auto [output2, h_n2] = rnn.forward(input2, Variable{});
-    EXPECT_EQ(output2.shape()[1], 32);
+    EXPECT_EQ(output2.shape()[1], 32) << "Failed on " << device.to_string();
 }
 
-TEST(RNNTest, SingleTimestep) {
+TEST_P(RNNTestFixture, SingleTimestep) {
     // Test with single timestep
     nn::RNN rnn(10, 20);
-    auto input = Variable(randn({1, 5, 10}), true);
+    auto input = Variable(randn({1, 5, 10}, DType::Float32, device), true);
 
     auto [output, h_n] = rnn.forward(input, Variable{});
 
-    EXPECT_EQ(output.shape()[0], 1);
+    EXPECT_EQ(output.shape()[0], 1) << "Failed on " << device.to_string();
 }
 
-TEST(RNNTest, OutputConsistency) {
+TEST_P(RNNTestFixture, OutputConsistency) {
     // Test that output is deterministic
     nn::RNN rnn(10, 20);
-    auto input = Variable(ones({7, 5, 10}), true);
+    auto input = Variable(ones({7, 5, 10}, DType::Float32, device), true);
 
     auto [output1, h_n1] = rnn.forward(input, Variable{});
     auto [output2, h_n2] = rnn.forward(input, Variable{});
 
     // Shapes should match
     for (size_t i = 0; i < 3; ++i) {
-        EXPECT_EQ(output1.shape()[i], output2.shape()[i]);
-        EXPECT_EQ(h_n1.shape()[i], h_n2.shape()[i]);
+        EXPECT_EQ(output1.shape()[i], output2.shape()[i]) << "Failed on " << device.to_string();
+        EXPECT_EQ(h_n1.shape()[i], h_n2.shape()[i]) << "Failed on " << device.to_string();
     }
 }
 
-TEST(RNNTest, GradientFlow) {
+TEST_P(RNNTestFixture, GradientFlow) {
     // Test that gradients can flow through RNN
     nn::RNN rnn(10, 20);
-    auto input = Variable(randn({7, 5, 10}), true);
+    auto input = Variable(randn({7, 5, 10}, DType::Float32, device), true);
 
     auto [output, h_n] = rnn.forward(input, Variable{});
 
     // Check that output requires grad
-    EXPECT_TRUE(output.requires_grad());
+    EXPECT_TRUE(output.requires_grad()) << "Failed on " << device.to_string();
 
     // Sum for scalar output
     auto loss = Variable(sum(output.tensor(), std::nullopt, false), true);
@@ -247,23 +243,23 @@ TEST(RNNTest, GradientFlow) {
     // Backward should not throw
     EXPECT_NO_THROW({
         loss.backward();
-    });
+    }) << "Failed on " << device.to_string();
 }
 
-TEST(RNNTest, TrainingMode) {
+TEST_P(RNNTestFixture, TrainingMode) {
     // Test training/eval mode switching
     nn::RNN rnn(10, 20, 2, "tanh", true, false, 0.5);
 
-    EXPECT_TRUE(rnn.is_training());
+    EXPECT_TRUE(rnn.is_training()) << "Failed on " << device.to_string();
 
     rnn.eval();
-    EXPECT_FALSE(rnn.is_training());
+    EXPECT_FALSE(rnn.is_training()) << "Failed on " << device.to_string();
 
     rnn.train();
-    EXPECT_TRUE(rnn.is_training());
+    EXPECT_TRUE(rnn.is_training()) << "Failed on " << device.to_string();
 }
 
-TEST(RNNTest, ParameterCount) {
+TEST_P(RNNTestFixture, ParameterCount) {
     // Test parameter counting
     nn::RNN rnn(10, 20, 2);
     auto params = rnn.parameters();
@@ -272,30 +268,32 @@ TEST(RNNTest, ParameterCount) {
     // Layer 0: input (10->20), hidden (20->20)
     // Layer 1: input (20->20), hidden (20->20)
     // Total: 4 weights + 4 biases = 8 parameters
-    EXPECT_EQ(params.size(), 8);
+    EXPECT_EQ(params.size(), 8) << "Failed on " << device.to_string();
 }
 
-TEST(RNNTest, LargeHidden) {
+TEST_P(RNNTestFixture, LargeHidden) {
     // Test with large hidden size
     nn::RNN rnn(10, 512);
-    auto input = Variable(randn({7, 5, 10}), true);
+    auto input = Variable(randn({7, 5, 10}, DType::Float32, device), true);
 
     auto [output, h_n] = rnn.forward(input, Variable{});
 
-    EXPECT_EQ(output.shape()[2], 512);
-    EXPECT_EQ(h_n.shape()[2], 512);
+    EXPECT_EQ(output.shape()[2], 512) << "Failed on " << device.to_string();
+    EXPECT_EQ(h_n.shape()[2], 512) << "Failed on " << device.to_string();
 }
 
-TEST(RNNTest, InvalidNumLayers) {
+TEST_P(RNNTestFixture, InvalidNumLayers) {
     // Test that invalid num_layers throws
     EXPECT_THROW({
         nn::RNN rnn(10, 20, 0);
-    }, std::invalid_argument);
+    }, std::invalid_argument) << "Failed on " << device.to_string();
 }
 
-TEST(RNNTest, InvalidDropout) {
+TEST_P(RNNTestFixture, InvalidDropout) {
     // Test that invalid dropout throws
     EXPECT_THROW({
         nn::RNN rnn(10, 20, 2, "tanh", true, false, 1.5);
-    }, std::invalid_argument);
+    }, std::invalid_argument) << "Failed on " << device.to_string();
 }
+
+INSTANTIATE_BACKEND_TESTS(RNNTestFixture);

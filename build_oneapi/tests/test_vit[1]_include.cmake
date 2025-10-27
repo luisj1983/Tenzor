@@ -1,0 +1,5 @@
+if(EXISTS "/home/lee/Projects/Tenzor/build_oneapi/tests/test_vit[1]_tests.cmake")
+  include("/home/lee/Projects/Tenzor/build_oneapi/tests/test_vit[1]_tests.cmake")
+else()
+  add_test(test_vit_NOT_BUILT test_vit_NOT_BUILT)
+endif()

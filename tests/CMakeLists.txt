@@ -27,9 +27,22 @@ add_executable(tenzor_unit_tests
     unit/test_linear.cpp
     unit/test_losses.cpp
     unit/test_optimizers.cpp
+    unit/test_callbacks.cpp
+    unit/test_graph_optimizer.cpp
+    unit/test_simd_dispatch.cpp
 )
 
 target_link_libraries(tenzor_unit_tests PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+# SIMD Benchmark tests (separate executable for benchmarking)
+add_executable(tenzor_simd_benchmark
+    unit/benchmark_simd.cpp
+)
+
+target_link_libraries(tenzor_simd_benchmark PRIVATE
     tenzor_core
     GTest::gtest_main
 )
@@ -268,6 +281,16 @@ target_link_libraries(test_autocast PRIVATE
     GTest::gtest_main
 )
 
+# Mixed precision training tests
+add_executable(test_mixed_precision
+    unit/test_mixed_precision.cpp
+)
+
+target_link_libraries(test_mixed_precision PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
 # DataLoader tests
 add_executable(test_dataloader
     unit/test_dataloader.cpp
@@ -318,6 +341,16 @@ target_link_libraries(test_model_checkpoint PRIVATE
     GTest::gtest_main
 )
 
+# Comprehensive checkpoint tests
+add_executable(test_checkpoint
+    unit/test_checkpoint.cpp
+)
+
+target_link_libraries(test_checkpoint PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
 # BMM autograd tests
 add_executable(test_bmm_autograd
     test_bmm_autograd.cpp
@@ -358,25 +391,21 @@ target_link_libraries(test_backend_ops_parameterized PRIVATE
     GTest::gtest_main
 )
 
+# CachingAllocator tests (universal - uses mock backend)
+add_executable(test_caching_allocator
+    unit/test_caching_allocator.cpp
+)
+
+target_link_libraries(test_caching_allocator PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_caching_allocator DISCOVERY_TIMEOUT 30)
+
 # CUDA-specific tests
 if(TENZOR_BUILD_CUDA)
     find_package(CUDAToolkit REQUIRED)
-
-    # CachingAllocator tests (requires CUDA)
-    add_executable(test_caching_allocator
-        unit/test_caching_allocator.cpp
-    )
-
-    target_link_libraries(test_caching_allocator PRIVATE
-        tenzor_core
-        tenzor_backend_cuda
-        GTest::gtest_main
-        CUDA::cudart
-    )
-
-    target_include_directories(test_caching_allocator PRIVATE
-        ${CUDAToolkit_INCLUDE_DIRS}
-    )
 
     # DataParallel tests (requires CUDA)
     add_executable(test_data_parallel
@@ -596,6 +625,7 @@ gtest_discover_tests(test_fp16 DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_dtype_conversion DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_gradient_checkpoint DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_model_checkpoint DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_checkpoint DISCOVERY_TIMEOUT 30)
 
 gtest_discover_tests(test_fused_ops DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_backend_ops_parameterized DISCOVERY_TIMEOUT 30)
@@ -646,7 +676,6 @@ if(TENZOR_BUILD_CUDA)
     # CUDA tests with thread-safe handle management - can run in parallel
     gtest_discover_tests(test_cuda_kernels DISCOVERY_TIMEOUT 30)
     gtest_discover_tests(test_cuda_training DISCOVERY_TIMEOUT 30)
-    gtest_discover_tests(test_caching_allocator DISCOVERY_TIMEOUT 30)
     gtest_discover_tests(test_data_parallel DISCOVERY_TIMEOUT 30)
     gtest_discover_tests(test_data_parallel_single_gpu DISCOVERY_TIMEOUT 30)
     gtest_discover_tests(test_fp16_kernels DISCOVERY_TIMEOUT 30)
@@ -1103,6 +1132,66 @@ target_link_libraries(test_ciou_loss PRIVATE
 
 gtest_discover_tests(test_ciou_loss DISCOVERY_TIMEOUT 30)
 
+# Backend Parity Test - Verify slice operations work correctly on all backends
+add_executable(test_slice_backend_parity
+    test_slice_backend_parity.cpp
+)
+
+target_link_libraries(test_slice_backend_parity PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_slice_backend_parity DISCOVERY_TIMEOUT 30)
+
+# Slice Debug Test - Debug slice offset and data_ptr behavior
+add_executable(test_slice_debug
+    test_slice_debug.cpp
+)
+
+target_link_libraries(test_slice_debug PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_slice_debug DISCOVERY_TIMEOUT 30)
+
+# Contiguous Fix Test - Verify .contiguous() fixes slice data access
+add_executable(test_contiguous_fix
+    test_contiguous_fix.cpp
+)
+
+target_link_libraries(test_contiguous_fix PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_contiguous_fix DISCOVERY_TIMEOUT 30)
+
+# Tensor Lifetime Test - Debug tensor data pointer stability
+add_executable(test_tensor_lifetime
+    test_tensor_lifetime.cpp
+)
+
+target_link_libraries(test_tensor_lifetime PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_tensor_lifetime DISCOVERY_TIMEOUT 30)
+
+# Backend Parity Example - Shows how to write multi-backend tests
+add_executable(test_backend_parity_example
+    test_backend_parity_example.cpp
+)
+
+target_link_libraries(test_backend_parity_example PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_backend_parity_example DISCOVERY_TIMEOUT 30)
+
 # ============================================================================
 # Phase 12 Tests - Enhanced Test Coverage and Validation
 # ============================================================================
@@ -1142,6 +1231,18 @@ target_link_libraries(test_vulkan_complete_ops PRIVATE
 )
 
 gtest_discover_tests(test_vulkan_complete_ops DISCOVERY_TIMEOUT 30)
+
+# Async operations tests
+add_executable(test_async_ops
+    unit/test_async_ops.cpp
+)
+
+target_link_libraries(test_async_ops PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_async_ops DISCOVERY_TIMEOUT 30)
 
 # Utility module tests
 add_subdirectory(utils)

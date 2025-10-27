@@ -1,0 +1,5 @@
+if(EXISTS "/home/lee/Projects/Tenzor/build_fresh/tests/test_embedding[1]_tests.cmake")
+  include("/home/lee/Projects/Tenzor/build_fresh/tests/test_embedding[1]_tests.cmake")
+else()
+  add_test(test_embedding_NOT_BUILT test_embedding_NOT_BUILT)
+endif()

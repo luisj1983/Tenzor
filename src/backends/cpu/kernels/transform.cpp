@@ -2,6 +2,7 @@
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/core/shape.hpp"
 #include <cstring>
+#include <iostream>
 
 namespace tenzor {
 namespace cpu {
@@ -163,10 +164,11 @@ auto contiguous_kernel(const Tensor& input) -> Tensor {
     const int64_t total_elements = input.numel();
     const size_t element_size = dtype_size(input.dtype());
 
-    // Get raw pointers (accounting for offset in the source tensor)
-    auto* src = static_cast<uint8_t*>(const_cast<void*>(
-        static_cast<const void*>(input.data<uint8_t>())));
-    auto* dst = static_cast<uint8_t*>(static_cast<void*>(result.data<uint8_t>()));
+    // Get raw storage pointers WITHOUT offset
+    // input.impl_->storage->data() returns the base pointer
+    // We'll apply offset manually in the loop using element-based indexing
+    auto* src = static_cast<uint8_t*>(const_cast<void*>(input.impl_->storage->data()));
+    auto* dst = static_cast<uint8_t*>(static_cast<void*>(result.impl_->storage->data()));
 
     const int64_t ndims = input.ndim();
 

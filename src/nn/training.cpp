@@ -1,0 +1,179 @@
+/**
+ * @file training.cpp
+ * @brief Implementation of high-level training API
+ */
+
+#include <tenzor/nn/training.hpp>
+#include <tenzor/autograd/variable.hpp>
+#include <stdexcept>
+#include <iostream>
+#include <iomanip>
+
+namespace tenzor {
+namespace nn {
+
+NeuralNetwork::NeuralNetwork(std::shared_ptr<Module> model,
+                             std::shared_ptr<optim::Optimizer> optimizer,
+                             std::function<Variable(const Variable&, const Variable&)> loss_fn)
+    : model_(std::move(model)),
+      optimizer_(std::move(optimizer)),
+      loss_fn_(std::move(loss_fn)),
+      training_(true) {
+
+    if (!model_) {
+        throw std::invalid_argument("NeuralNetwork: model cannot be null");
+    }
+    if (!optimizer_) {
+        throw std::invalid_argument("NeuralNetwork: optimizer cannot be null");
+    }
+    if (!loss_fn_) {
+        throw std::invalid_argument("NeuralNetwork: loss_fn cannot be null");
+    }
+}
+
+auto NeuralNetwork::train_step(const Variable& input, const Variable& target) -> float {
+    // 1. Set model to training mode
+    model_->train();
+
+    // 2. Forward pass through model
+    Variable predictions = model_->forward(input);
+
+    // 3. Compute loss
+    Variable loss = loss_fn_(predictions, target);
+
+    // 4. Zero gradients before backward pass
+    optimizer_->zero_grad();
+
+    // 5. Backward pass - compute gradients
+    loss.backward();
+
+    // 6. Update parameters
+    optimizer_->step();
+
+    // 7. Extract and return loss value as float
+    // Handle both scalar and multi-element loss tensors
+    const auto& loss_tensor = loss.tensor();
+    if (loss_tensor.numel() == 1) {
+        // Scalar loss - extract directly
+        return loss_tensor.item<float>();
+    } else {
+        // Multi-element loss - compute mean
+        // This handles cases where reduction=None in loss function
+        auto sum = 0.0f;
+        auto* data = static_cast<const float*>(loss_tensor.data_ptr());
+        for (size_t i = 0; i < loss_tensor.numel(); ++i) {
+            sum += data[i];
+        }
+        return sum / static_cast<float>(loss_tensor.numel());
+    }
+}
+
+auto NeuralNetwork::eval_step(const Variable& input, const Variable& target) -> float {
+    // 1. Set model to evaluation mode
+    model_->eval();
+
+    // 2. Disable gradient computation for efficiency
+    NoGradGuard no_grad;
+
+    // 3. Forward pass through model
+    Variable predictions = model_->forward(input);
+
+    // 4. Compute loss (no gradients)
+    Variable loss = loss_fn_(predictions, target);
+
+    // 5. Extract and return loss value as float
+    const auto& loss_tensor = loss.tensor();
+    if (loss_tensor.numel() == 1) {
+        // Scalar loss - extract directly
+        return loss_tensor.item<float>();
+    } else {
+        // Multi-element loss - compute mean
+        auto sum = 0.0f;
+        auto* data = static_cast<const float*>(loss_tensor.data_ptr());
+        for (size_t i = 0; i < loss_tensor.numel(); ++i) {
+            sum += data[i];
+        }
+        return sum / static_cast<float>(loss_tensor.numel());
+    }
+}
+
+auto NeuralNetwork::fit(DataLoader& train_loader,
+                       int epochs,
+                       DataLoader* val_loader,
+                       std::vector<std::shared_ptr<Callback>> callbacks) -> void {
+
+    // Add default progress callback if no callbacks provided
+    if (callbacks.empty()) {
+        callbacks.push_back(std::make_shared<ProgressCallback>());
+    }
+
+    // Main training loop
+    for (int epoch = 0; epoch < epochs; ++epoch) {
+        // === Callbacks: on_epoch_begin ===
+        for (auto& callback : callbacks) {
+            callback->on_epoch_begin(epoch);
+        }
+
+        // === Training Phase ===
+        model_->train();
+        double running_train_loss = 0.0;
+        int train_batch_count = 0;
+
+        for (auto [inputs, targets] : train_loader) {
+            // Convert tensors to variables
+            Variable input_var(inputs, false);   // Input doesn't need gradients
+            Variable target_var(targets, false); // Target doesn't need gradients
+
+            // Perform training step
+            float batch_loss = train_step(input_var, target_var);
+            running_train_loss += batch_loss;
+            train_batch_count++;
+
+            // === Callbacks: on_batch_end ===
+            for (auto& callback : callbacks) {
+                callback->on_batch_end(train_batch_count - 1, batch_loss);
+            }
+        }
+
+        // Compute average training loss
+        double avg_train_loss = train_batch_count > 0
+            ? running_train_loss / train_batch_count
+            : 0.0;
+
+        // === Validation Phase ===
+        double avg_val_loss = 0.0;
+
+        if (val_loader != nullptr) {
+            model_->eval();
+            double running_val_loss = 0.0;
+            int val_batch_count = 0;
+
+            for (auto [inputs, targets] : *val_loader) {
+                // Convert tensors to variables
+                Variable input_var(inputs, false);
+                Variable target_var(targets, false);
+
+                // Perform evaluation step
+                float batch_loss = eval_step(input_var, target_var);
+                running_val_loss += batch_loss;
+                val_batch_count++;
+            }
+
+            // Compute average validation loss
+            avg_val_loss = val_batch_count > 0
+                ? running_val_loss / val_batch_count
+                : 0.0;
+        }
+
+        // === Callbacks: on_epoch_end ===
+        for (auto& callback : callbacks) {
+            callback->on_epoch_end(epoch, avg_train_loss, avg_val_loss);
+        }
+    }
+
+    // Final summary
+    std::cout << "\nTraining completed successfully!" << std::endl;
+}
+
+} // namespace nn
+} // namespace tenzor

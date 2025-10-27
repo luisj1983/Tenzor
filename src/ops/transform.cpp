@@ -376,4 +376,38 @@ auto expand(const Tensor& input, std::vector<int64_t> shape) -> Tensor {
     return output;
 }
 
+auto roll(const Tensor& input, int64_t shifts, int64_t dim) -> Tensor {
+    // Normalize dimension
+    int64_t ndim = input.ndim();
+    if (dim < 0) {
+        dim += ndim;
+    }
+    if (dim < 0 || dim >= ndim) {
+        throw std::invalid_argument("Dimension out of range for roll");
+    }
+
+    int64_t dim_size = input.shape()[dim];
+    if (dim_size == 0) {
+        return input.clone();
+    }
+
+    // Normalize shifts to [0, dim_size)
+    shifts = shifts % dim_size;
+    if (shifts < 0) {
+        shifts += dim_size;
+    }
+
+    if (shifts == 0) {
+        return input.clone();
+    }
+
+    // Roll by splitting at the shift point and concatenating in reverse order
+    // For positive shift: [a, b, c, d] shift by 2 => [c, d, a, b]
+    // Split: [a, b] and [c, d], then cat([c, d], [a, b])
+    Tensor part1 = input.slice(dim, 0, dim_size - shifts);
+    Tensor part2 = input.slice(dim, dim_size - shifts, dim_size);
+
+    return cat({part2, part1}, dim);
+}
+
 } // namespace tenzor

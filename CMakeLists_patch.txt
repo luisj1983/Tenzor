@@ -1,0 +1,3 @@
+# Add to tests section
+add_executable(test_slice_backend_parity tests/test_slice_backend_parity.cpp)
+target_link_libraries(test_slice_backend_parity PRIVATE tenzor_core GTest::gtest GTest::gtest_main)

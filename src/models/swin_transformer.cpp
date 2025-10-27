@@ -78,7 +78,7 @@ SwinTransformerBlock::SwinTransformerBlock(
         window_size_ = std::min(input_resolution.first, input_resolution.second);
     }
 
-    norm1_ = std::make_shared<LayerNorm>(dim);
+    norm1_ = std::make_shared<LayerNorm>(std::vector<int64_t>{dim});
     register_module("norm1", norm1_);
 
     attn_ = std::make_shared<WindowAttention>(
@@ -88,7 +88,7 @@ SwinTransformerBlock::SwinTransformerBlock(
     drop_path_ = std::make_shared<Dropout>(drop_path);
     register_module("drop_path", drop_path_);
 
-    norm2_ = std::make_shared<LayerNorm>(dim);
+    norm2_ = std::make_shared<LayerNorm>(std::vector<int64_t>{dim});
     register_module("norm2", norm2_);
 
     int64_t mlp_hidden_dim = static_cast<int64_t>(dim * mlp_ratio);
@@ -136,8 +136,8 @@ auto SwinTransformerBlock::forward(const Variable& input) -> Variable {
     if (shift_size_ > 0) {
         // Roll operation: shift by (-shift_size, -shift_size)
         auto x_tensor = x.tensor();
-        x_tensor = x_tensor.roll(-shift_size_, 1);  // shift height
-        x_tensor = x_tensor.roll(-shift_size_, 2);  // shift width
+        x_tensor = roll(x_tensor, -shift_size_, 1);  // shift height
+        x_tensor = roll(x_tensor, -shift_size_, 2);  // shift width
         x = Variable(x_tensor, x.requires_grad());
     }
 
@@ -154,8 +154,8 @@ auto SwinTransformerBlock::forward(const Variable& input) -> Variable {
     // Reverse cyclic shift
     if (shift_size_ > 0) {
         auto x_tensor = x.tensor();
-        x_tensor = x_tensor.roll(shift_size_, 1);  // reverse shift height
-        x_tensor = x_tensor.roll(shift_size_, 2);  // reverse shift width
+        x_tensor = roll(x_tensor, shift_size_, 1);  // reverse shift height
+        x_tensor = roll(x_tensor, shift_size_, 2);  // reverse shift width
         x = Variable(x_tensor, x.requires_grad());
     }
 
@@ -180,7 +180,7 @@ PatchMerging::PatchMerging(const std::pair<int64_t, int64_t>& input_resolution,
     : input_resolution_(input_resolution)
     , dim_(dim)
 {
-    norm_ = std::make_shared<LayerNorm>(4 * dim);
+    norm_ = std::make_shared<LayerNorm>(std::vector<int64_t>{4 * dim});
     register_module("norm", norm_);
 
     reduction_ = std::make_shared<Linear>(4 * dim, 2 * dim, false);
@@ -326,7 +326,7 @@ PatchEmbed::PatchEmbed(int64_t img_size,
 
     // Optional layer norm
     if (norm_layer) {
-        norm_ = std::make_shared<LayerNorm>(embed_dim);
+        norm_ = std::make_shared<LayerNorm>(std::vector<int64_t>{embed_dim});
         register_module("norm", norm_);
     }
 }
@@ -443,7 +443,7 @@ SwinTransformer::SwinTransformer(int64_t img_size,
     }
 
     // Final layer norm
-    norm_ = std::make_shared<LayerNorm>(num_features_);
+    norm_ = std::make_shared<LayerNorm>(std::vector<int64_t>{num_features_});
     register_module("norm", norm_);
 
     // Global average pooling

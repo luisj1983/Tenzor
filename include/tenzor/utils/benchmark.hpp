@@ -113,6 +113,11 @@ struct BenchmarkResult {
      * @brief Print formatted results
      */
     auto print() const -> void;
+
+    /**
+     * @brief Export results as JSON string
+     */
+    auto to_json() const -> std::string;
 };
 
 /**
@@ -211,6 +216,16 @@ public:
      * @brief Print summary of all results
      */
     auto print_summary(const std::vector<BenchmarkResult>& results) const -> void;
+
+    /**
+     * @brief Export all results as JSON string
+     */
+    auto export_json(const std::vector<BenchmarkResult>& results) const -> std::string;
+
+    /**
+     * @brief Save results to JSON file
+     */
+    auto save_json(const std::vector<BenchmarkResult>& results, const std::string& filepath) const -> void;
 
 private:
     std::string name_;

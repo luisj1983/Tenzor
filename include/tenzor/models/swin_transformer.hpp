@@ -18,6 +18,7 @@
 #include "../nn/layers/linear.hpp"
 #include "../nn/layers/normalization.hpp"
 #include "../nn/layers/dropout.hpp"
+#include "../nn/layers/pooling.hpp"
 #include "../nn/layers/vision.hpp"
 #include "../nn/activations/activations.hpp"
 

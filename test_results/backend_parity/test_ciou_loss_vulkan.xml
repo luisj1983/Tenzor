@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites tests="15" failures="0" disabled="0" errors="0" time="0.003" timestamp="2025-10-25T09:37:47.689" name="AllTests">
+  <testsuite name="CIoULossTest" tests="15" failures="0" disabled="0" skipped="0" errors="0" time="0.003" timestamp="2025-10-25T09:37:47.689">
+    <testcase name="PerfectOverlap" file="/home/lee/Projects/Tenzor/tests/test_ciou_loss.cpp" line="58" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:47.689" classname="CIoULossTest" />
+    <testcase name="NoOverlap" file="/home/lee/Projects/Tenzor/tests/test_ciou_loss.cpp" line="73" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:47.689" classname="CIoULossTest" />
+    <testcase name="PartialOverlap" file="/home/lee/Projects/Tenzor/tests/test_ciou_loss.cpp" line="87" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:47.689" classname="CIoULossTest" />
+    <testcase name="AspectRatioPenalty" file="/home/lee/Projects/Tenzor/tests/test_ciou_loss.cpp" line="103" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:47.689" classname="CIoULossTest" />
+    <testcase name="CenterDistancePenalty" file="/home/lee/Projects/Tenzor/tests/test_ciou_loss.cpp" line="122" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:47.689" classname="CIoULossTest" />
+    <testcase name="Monotonicity" file="/home/lee/Projects/Tenzor/tests/test_ciou_loss.cpp" line="142" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:47.689" classname="CIoULossTest" />
+    <testcase name="BatchProcessing" file="/home/lee/Projects/Tenzor/tests/test_ciou_loss.cpp" line="162" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:47.689" classname="CIoULossTest" />
+    <testcase name="LossComputation" file="/home/lee/Projects/Tenzor/tests/test_ciou_loss.cpp" line="192" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:47.689" classname="CIoULossTest" />
+    <testcase name="NumericalStability" file="/home/lee/Projects/Tenzor/tests/test_ciou_loss.cpp" line="216" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:47.689" classname="CIoULossTest" />
+    <testcase name="Symmetry" file="/home/lee/Projects/Tenzor/tests/test_ciou_loss.cpp" line="252" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:47.690" classname="CIoULossTest" />
+    <testcase name="ManualCalculation" file="/home/lee/Projects/Tenzor/tests/test_ciou_loss.cpp" line="267" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:47.690" classname="CIoULossTest" />
+    <testcase name="BoxFormatConsistency" file="/home/lee/Projects/Tenzor/tests/test_ciou_loss.cpp" line="300" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:47.690" classname="CIoULossTest" />
+    <testcase name="ZeroSizedBoxes" file="/home/lee/Projects/Tenzor/tests/test_ciou_loss.cpp" line="315" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:47.690" classname="CIoULossTest" />
+    <testcase name="LargeBatchStressTest" file="/home/lee/Projects/Tenzor/tests/test_ciou_loss.cpp" line="329" status="run" result="completed" time="0.002" timestamp="2025-10-25T09:37:47.690" classname="CIoULossTest" />
+    <testcase name="CIoUVsIoUImprovement" file="/home/lee/Projects/Tenzor/tests/test_ciou_loss.cpp" line="362" status="run" result="completed" time="0." timestamp="2025-10-25T09:37:47.692" classname="CIoULossTest" />
+  </testsuite>
+</testsuites>

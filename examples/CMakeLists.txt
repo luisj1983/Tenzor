@@ -35,3 +35,23 @@ target_link_libraries(classic_models_example PRIVATE tenzor_core)
 # GPT text generation example
 add_executable(gpt_text_generation nlp/gpt_text_generation.cpp)
 target_link_libraries(gpt_text_generation PRIVATE tenzor_core)
+
+# ============================================================================
+# Tutorial Examples (Complete, production-ready examples)
+# ============================================================================
+
+# Tutorial 1: Complete MNIST training with manual loop
+add_executable(mnist_complete tutorials/mnist_complete.cpp)
+target_link_libraries(mnist_complete PRIVATE tenzor_core)
+
+# Tutorial 2: MNIST with high-level DataLoader and Callbacks
+add_executable(mnist_with_dataloader tutorials/mnist_with_dataloader.cpp)
+target_link_libraries(mnist_with_dataloader PRIVATE tenzor_core)
+
+# Tutorial 3: Custom training loop with advanced features
+add_executable(custom_training_loop tutorials/custom_training_loop.cpp)
+target_link_libraries(custom_training_loop PRIVATE tenzor_core)
+
+# Tutorial 4: Mixed precision training
+add_executable(mixed_precision_training tutorials/mixed_precision_training.cpp)
+target_link_libraries(mixed_precision_training PRIVATE tenzor_core)

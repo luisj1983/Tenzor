@@ -7,6 +7,8 @@
 #include <tenzor/ops/indexing.hpp>
 #include <tenzor/ops/advanced.hpp>
 #include <tenzor/ops/reduction.hpp>
+#include <tenzor/ops/math.hpp>
+#include <tenzor/ops/transform.hpp>
 #include <tenzor/backend/loader.hpp>
 #include <tenzor/backend/backend.hpp>
 #include <tenzor/nn/optim/scheduler.hpp>
@@ -18,12 +20,25 @@
 #include <tenzor/nn/optim/adagrad.hpp>
 #include <tenzor/nn/optim/adadelta.hpp>
 #include <tenzor/nn/loss/losses.hpp>
-#include <tenzor/nn/parallel/distributed_data_parallel.hpp>
+#include <tenzor/nn/callbacks.hpp>
+#include <tenzor/nn/training.hpp>
+#include <tenzor/nn/checkpoint.hpp>
+#include <tenzor/nn/mixed_precision.hpp>
+#include <tenzor/nn/amp/grad_scaler.hpp>
+#include <tenzor/nn/amp/autocast.hpp>
+// #include <tenzor/nn/parallel/distributed_data_parallel.hpp> // Not implemented yet (Phase 4)
 #include <tenzor/models/hub.hpp>
 #include <tenzor/onnx/exporter.hpp>
+#include <tenzor/data/dataset.hpp>
+#include <tenzor/data/dataloader.hpp>
+#include <tenzor/nn/compression/pruning.hpp>
+#include <tenzor/nn/quantization.hpp>
 #include "numpy_interop.hpp"
 
 namespace py = pybind11;
+
+// Forward declaration for compression bindings
+void bind_compression(py::module& m);
 
 PYBIND11_MODULE(tenzor_core, m) {
     m.doc() = "Tenzor: High-performance tensor library";
@@ -149,6 +164,70 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def("__add__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return a + b; })
         .def("__sub__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return a - b; })
         .def("__mul__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return a * b; })
+        .def("__truediv__", [](const tenzor::Tensor& a, const tenzor::Tensor& b) { return a / b; },
+             py::is_operator(), "Element-wise division")
+        .def("__pow__", [](const tenzor::Tensor& a, float exponent) -> tenzor::Tensor {
+             return tenzor::pow(a, exponent);
+             }, py::is_operator(), "Element-wise power")
+        .def("__neg__", [](const tenzor::Tensor& a) -> tenzor::Tensor { return tenzor::neg(a); },
+             py::is_operator(), "Unary negation")
+        // Math methods
+        .def("exp", [](const tenzor::Tensor& t) { return tenzor::exp(t); },
+             "Element-wise exponential")
+        .def("log", [](const tenzor::Tensor& t) { return tenzor::log(t); },
+             "Element-wise natural logarithm")
+        .def("sqrt", [](const tenzor::Tensor& t) { return tenzor::sqrt(t); },
+             "Element-wise square root")
+        .def("sin", [](const tenzor::Tensor& t) { return tenzor::sin(t); },
+             "Element-wise sine")
+        .def("cos", [](const tenzor::Tensor& t) { return tenzor::cos(t); },
+             "Element-wise cosine")
+        .def("tan", [](const tenzor::Tensor& t) { return tenzor::tan(t); },
+             "Element-wise tangent")
+        .def("abs", [](const tenzor::Tensor& t) { return tenzor::abs(t); },
+             "Element-wise absolute value")
+        .def("pow", [](const tenzor::Tensor& t, float exponent) {
+             return tenzor::pow(t, exponent);
+             }, py::arg("exponent"), "Element-wise power")
+        // Reduction operations (as member methods calling free functions)
+        .def("sum", [](const tenzor::Tensor& t) {
+             return tenzor::sum(t, std::nullopt, false);
+             }, "Sum all elements")
+        .def("sum", [](const tenzor::Tensor& t, int64_t dim, bool keepdim) {
+             return tenzor::sum(t, std::make_optional(dim), keepdim);
+             }, py::arg("dim"), py::arg("keepdim")=false,
+             "Sum along dimension")
+        .def("mean", [](const tenzor::Tensor& t) {
+             return tenzor::mean(t, std::nullopt, false);
+             }, "Mean of all elements")
+        .def("mean", [](const tenzor::Tensor& t, int64_t dim, bool keepdim) {
+             return tenzor::mean(t, std::make_optional(dim), keepdim);
+             }, py::arg("dim"), py::arg("keepdim")=false,
+             "Mean along dimension")
+        .def("max", [](const tenzor::Tensor& t) {
+             return tenzor::max(t, std::nullopt, false);
+             }, "Maximum of all elements")
+        .def("max", [](const tenzor::Tensor& t, int64_t dim, bool keepdim) {
+             return tenzor::max(t, std::make_optional(dim), keepdim);
+             }, py::arg("dim"), py::arg("keepdim")=false,
+             "Maximum along dimension")
+        .def("min", [](const tenzor::Tensor& t) {
+             return tenzor::min(t, std::nullopt, false);
+             }, "Minimum of all elements")
+        .def("min", [](const tenzor::Tensor& t, int64_t dim, bool keepdim) {
+             return tenzor::min(t, std::make_optional(dim), keepdim);
+             }, py::arg("dim"), py::arg("keepdim")=false,
+             "Minimum along dimension")
+        // Device transfer with overloads
+        .def("cuda", [](const tenzor::Tensor& t, int32_t device_id) {
+             return t.cuda(device_id);
+             }, py::arg("device_id")=0, "Move tensor to CUDA device")
+        .def("cpu", [](const tenzor::Tensor& t) {
+             return t.cpu();
+             }, "Move tensor to CPU")
+        // DType conversion
+        .def("to", py::overload_cast<tenzor::DType>(&tenzor::Tensor::to, py::const_),
+             py::arg("dtype"), "Convert to different dtype")
         .def("__repr__", [](const tenzor::Tensor& t) {
             return "Tensor(shape=[...])";
         })
@@ -590,6 +669,20 @@ PYBIND11_MODULE(tenzor_core, m) {
          py::arg("end_dim") = -1);
     m.def("contiguous", &tenzor::contiguous, "Make tensor contiguous");
 
+    // Concatenation and stacking operations
+    m.def("cat", [](const std::vector<tenzor::Tensor>& tensors, int64_t dim) {
+         return tenzor::cat(tensors, dim);
+         }, "Concatenate tensors along dimension",
+         py::arg("tensors"), py::arg("dim")=0);
+    m.def("stack", [](const std::vector<tenzor::Tensor>& tensors, int64_t dim) {
+         return tenzor::stack(tensors, dim);
+         }, "Stack tensors along new dimension",
+         py::arg("tensors"), py::arg("dim")=0);
+    m.def("split", [](const tenzor::Tensor& tensor, int64_t split_size, int64_t dim) {
+         return tenzor::split(tensor, split_size, dim);
+         }, "Split tensor into chunks",
+         py::arg("tensor"), py::arg("split_size"), py::arg("dim")=0);
+
     // Indexing operations
     // Cast to the tensor-level slice function to avoid ambiguity with autograd::slice
     m.def("slice", static_cast<tenzor::Tensor(*)(const tenzor::Tensor&, int64_t, int64_t, int64_t, int64_t)>(&tenzor::slice),
@@ -839,10 +932,19 @@ PYBIND11_MODULE(tenzor_core, m) {
     // Sequential container
     py::class_<tenzor::nn::Sequential, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::Sequential>>(nn, "Sequential")
-        .def(py::init<>())
+        .def(py::init<>(),
+             "Create an empty Sequential container")
+        .def(py::init([](py::args modules) {
+            auto seq = std::make_shared<tenzor::nn::Sequential>();
+            for (auto module : modules) {
+                seq->add_module(module.cast<std::shared_ptr<tenzor::nn::Module>>());
+            }
+            return seq;
+        }), "Create Sequential container with variadic modules")
         .def("add_module", &tenzor::nn::Sequential::add_module,
              py::return_value_policy::reference_internal,
-             py::arg("module"));
+             py::arg("module"),
+             "Add a module to the sequential container");
 
     // Activation function classes
     py::class_<tenzor::nn::ReLU, tenzor::nn::Module,
@@ -885,9 +987,12 @@ PYBIND11_MODULE(tenzor_core, m) {
                std::shared_ptr<tenzor::nn::SELU>>(nn, "SELU")
         .def(py::init<>());
 
-    py::class_<tenzor::nn::Swish, tenzor::nn::Module,
+    auto swish_class = py::class_<tenzor::nn::Swish, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::Swish>>(nn, "Swish")
         .def(py::init<>());
+
+    // SiLU is an alias for Swish (same activation function)
+    nn.attr("SiLU") = swish_class;
 
     py::class_<tenzor::nn::Mish, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::Mish>>(nn, "Mish")
@@ -1090,54 +1195,101 @@ PYBIND11_MODULE(tenzor_core, m) {
     nn.def("mish", &tenzor::nn::mish, "Mish activation function");
 
     // Reduction enum for loss functions
-    py::enum_<tenzor::nn::Reduction>(nn, "Reduction")
-        .value("none", tenzor::nn::Reduction::None)
-        .value("mean", tenzor::nn::Reduction::Mean)
-        .value("sum", tenzor::nn::Reduction::Sum);
+    py::enum_<tenzor::nn::Reduction>(nn, "Reduction",
+        "Specifies the reduction to apply to the output: 'none' | 'mean' | 'sum'")
+        .value("NONE", tenzor::nn::Reduction::None, "No reduction will be applied")
+        .value("MEAN", tenzor::nn::Reduction::Mean, "The output will be averaged")
+        .value("SUM", tenzor::nn::Reduction::Sum, "The output will be summed")
+        .value("none", tenzor::nn::Reduction::None)  // Lowercase alias
+        .value("mean", tenzor::nn::Reduction::Mean)  // Lowercase alias
+        .value("sum", tenzor::nn::Reduction::Sum)    // Lowercase alias
+        .export_values();
 
     // Loss function classes
-    py::class_<tenzor::nn::MSELoss>(nn, "MSELoss")
+    py::class_<tenzor::nn::MSELoss>(nn, "MSELoss",
+        "Mean Squared Error loss for regression tasks")
         .def(py::init<tenzor::nn::Reduction>(),
-             py::arg("reduction") = tenzor::nn::Reduction::Mean)
-        .def("forward", &tenzor::nn::MSELoss::forward)
-        .def("__call__", &tenzor::nn::MSELoss::operator());
+             py::arg("reduction") = tenzor::nn::Reduction::Mean,
+             "Create MSELoss with specified reduction mode")
+        .def("forward", &tenzor::nn::MSELoss::forward,
+             py::arg("input"), py::arg("target"),
+             "Compute MSE loss between input and target")
+        .def("__call__", &tenzor::nn::MSELoss::operator(),
+             py::arg("input"), py::arg("target"),
+             "Compute MSE loss between input and target");
 
-    py::class_<tenzor::nn::L1Loss>(nn, "L1Loss")
+    py::class_<tenzor::nn::L1Loss>(nn, "L1Loss",
+        "L1 Loss (Mean Absolute Error) for robust regression")
         .def(py::init<tenzor::nn::Reduction>(),
-             py::arg("reduction") = tenzor::nn::Reduction::Mean)
-        .def("forward", &tenzor::nn::L1Loss::forward)
-        .def("__call__", &tenzor::nn::L1Loss::operator());
+             py::arg("reduction") = tenzor::nn::Reduction::Mean,
+             "Create L1Loss with specified reduction mode")
+        .def("forward", &tenzor::nn::L1Loss::forward,
+             py::arg("input"), py::arg("target"),
+             "Compute L1 loss between input and target")
+        .def("__call__", &tenzor::nn::L1Loss::operator(),
+             py::arg("input"), py::arg("target"),
+             "Compute L1 loss between input and target");
 
-    py::class_<tenzor::nn::SmoothL1Loss>(nn, "SmoothL1Loss")
+    py::class_<tenzor::nn::SmoothL1Loss>(nn, "SmoothL1Loss",
+        "Smooth L1 Loss (Huber Loss) combining L1 and L2 loss properties")
         .def(py::init<tenzor::nn::Reduction, double>(),
              py::arg("reduction") = tenzor::nn::Reduction::Mean,
-             py::arg("beta") = 1.0)
-        .def("forward", &tenzor::nn::SmoothL1Loss::forward)
-        .def("__call__", &tenzor::nn::SmoothL1Loss::operator());
+             py::arg("beta") = 1.0,
+             "Create SmoothL1Loss with reduction mode and beta threshold")
+        .def("forward", &tenzor::nn::SmoothL1Loss::forward,
+             py::arg("input"), py::arg("target"),
+             "Compute Smooth L1 loss between input and target")
+        .def("__call__", &tenzor::nn::SmoothL1Loss::operator(),
+             py::arg("input"), py::arg("target"),
+             "Compute Smooth L1 loss between input and target");
 
-    py::class_<tenzor::nn::CrossEntropyLoss>(nn, "CrossEntropyLoss")
+    py::class_<tenzor::nn::CrossEntropyLoss>(nn, "CrossEntropyLoss",
+        "Cross Entropy Loss for multi-class classification (combines LogSoftmax and NLLLoss)")
         .def(py::init<tenzor::nn::Reduction>(),
-             py::arg("reduction") = tenzor::nn::Reduction::Mean)
-        .def("forward", &tenzor::nn::CrossEntropyLoss::forward)
-        .def("__call__", &tenzor::nn::CrossEntropyLoss::operator());
+             py::arg("reduction") = tenzor::nn::Reduction::Mean,
+             "Create CrossEntropyLoss with specified reduction mode")
+        .def("forward", &tenzor::nn::CrossEntropyLoss::forward,
+             py::arg("input"), py::arg("target"),
+             "Compute cross entropy loss between input logits and target class indices")
+        .def("__call__", &tenzor::nn::CrossEntropyLoss::operator(),
+             py::arg("input"), py::arg("target"),
+             "Compute cross entropy loss between input logits and target class indices");
 
-    py::class_<tenzor::nn::NLLLoss>(nn, "NLLLoss")
+    py::class_<tenzor::nn::NLLLoss>(nn, "NLLLoss",
+        "Negative Log Likelihood Loss for classification with log-probabilities")
         .def(py::init<tenzor::nn::Reduction>(),
-             py::arg("reduction") = tenzor::nn::Reduction::Mean)
-        .def("forward", &tenzor::nn::NLLLoss::forward)
-        .def("__call__", &tenzor::nn::NLLLoss::operator());
+             py::arg("reduction") = tenzor::nn::Reduction::Mean,
+             "Create NLLLoss with specified reduction mode")
+        .def("forward", &tenzor::nn::NLLLoss::forward,
+             py::arg("input"), py::arg("target"),
+             "Compute NLL loss between input log-probabilities and target class indices")
+        .def("__call__", &tenzor::nn::NLLLoss::operator(),
+             py::arg("input"), py::arg("target"),
+             "Compute NLL loss between input log-probabilities and target class indices");
 
-    py::class_<tenzor::nn::BCELoss>(nn, "BCELoss")
+    py::class_<tenzor::nn::BCELoss>(nn, "BCELoss",
+        "Binary Cross Entropy Loss for binary classification with probabilities")
         .def(py::init<tenzor::nn::Reduction>(),
-             py::arg("reduction") = tenzor::nn::Reduction::Mean)
-        .def("forward", &tenzor::nn::BCELoss::forward)
-        .def("__call__", &tenzor::nn::BCELoss::operator());
+             py::arg("reduction") = tenzor::nn::Reduction::Mean,
+             "Create BCELoss with specified reduction mode")
+        .def("forward", &tenzor::nn::BCELoss::forward,
+             py::arg("input"), py::arg("target"),
+             "Compute BCE loss between input probabilities and binary targets")
+        .def("__call__", &tenzor::nn::BCELoss::operator(),
+             py::arg("input"), py::arg("target"),
+             "Compute BCE loss between input probabilities and binary targets");
 
-    py::class_<tenzor::nn::BCEWithLogitsLoss>(nn, "BCEWithLogitsLoss")
+    py::class_<tenzor::nn::BCEWithLogitsLoss>(nn, "BCEWithLogitsLoss",
+        "Binary Cross Entropy with Logits Loss (numerically stable version for binary classification)")
         .def(py::init<tenzor::nn::Reduction>(),
-             py::arg("reduction") = tenzor::nn::Reduction::Mean)
-        .def("forward", &tenzor::nn::BCEWithLogitsLoss::forward)
-        .def("__call__", &tenzor::nn::BCEWithLogitsLoss::operator());
+             py::arg("reduction") = tenzor::nn::Reduction::Mean,
+             "Create BCEWithLogitsLoss with specified reduction mode")
+        .def("forward", &tenzor::nn::BCEWithLogitsLoss::forward,
+             py::arg("input"), py::arg("target"),
+             "Compute BCE with logits loss between input logits and binary targets")
+        .def("__call__", &tenzor::nn::BCEWithLogitsLoss::operator(),
+             py::arg("input"), py::arg("target"),
+             "Compute BCE with logits loss between input logits and binary targets");
 
     // Advanced loss functions
     py::class_<tenzor::nn::KLDivLoss>(nn, "KLDivLoss")
@@ -1404,7 +1556,546 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("eta_min") = 0.0)
         .def("step", &tenzor::optim::CosineAnnealingWarmRestarts::step);
 
-    // Distributed training
+    // ========================================================================
+    // Training Callbacks
+    // ========================================================================
+
+    // Base Callback class
+    py::class_<tenzor::nn::Callback, std::shared_ptr<tenzor::nn::Callback>>(nn, "Callback",
+        "Base callback interface for training loop hooks")
+        .def(py::init<>())
+        .def("on_epoch_begin", &tenzor::nn::Callback::on_epoch_begin,
+             py::arg("epoch"),
+             "Called at the beginning of each epoch")
+        .def("on_epoch_end", &tenzor::nn::Callback::on_epoch_end,
+             py::arg("epoch"), py::arg("train_loss"), py::arg("val_loss"),
+             "Called at the end of each epoch")
+        .def("on_batch_begin", &tenzor::nn::Callback::on_batch_begin,
+             py::arg("batch_idx"),
+             "Called at the beginning of each batch")
+        .def("on_batch_end", &tenzor::nn::Callback::on_batch_end,
+             py::arg("batch_idx"), py::arg("loss"),
+             "Called at the end of each batch")
+        .def("on_train_begin", &tenzor::nn::Callback::on_train_begin,
+             "Called at the beginning of training")
+        .def("on_train_end", &tenzor::nn::Callback::on_train_end,
+             "Called at the end of training");
+
+    // ProgressCallback
+    py::class_<tenzor::nn::ProgressCallback, tenzor::nn::Callback,
+               std::shared_ptr<tenzor::nn::ProgressCallback>>(nn, "ProgressCallback",
+        "Callback for printing training progress with progress bars and loss summaries")
+        .def(py::init<int>(),
+             py::arg("print_every") = 1,
+             "Create ProgressCallback that prints every N batches")
+        .def("set_total_batches", &tenzor::nn::ProgressCallback::set_total_batches,
+             py::arg("total"),
+             "Set total number of batches per epoch for progress display")
+        .def("set_total_epochs", &tenzor::nn::ProgressCallback::set_total_epochs,
+             py::arg("total"),
+             "Set total number of epochs for progress display");
+
+    // EarlyStoppingCallback
+    py::class_<tenzor::nn::EarlyStoppingCallback, tenzor::nn::Callback,
+               std::shared_ptr<tenzor::nn::EarlyStoppingCallback>>(nn, "EarlyStoppingCallback",
+        "Callback for early stopping based on validation loss")
+        .def(py::init<int, float, const std::string&>(),
+             py::arg("patience") = 5,
+             py::arg("min_delta") = 0.0f,
+             py::arg("monitor") = "val_loss",
+             "Create EarlyStoppingCallback\n\n"
+             "Args:\n"
+             "    patience: Number of epochs with no improvement before stopping\n"
+             "    min_delta: Minimum change to qualify as improvement\n"
+             "    monitor: Metric to monitor ('val_loss' or 'train_loss')")
+        .def("should_stop", &tenzor::nn::EarlyStoppingCallback::should_stop,
+             "Check if training should stop")
+        .def("best_loss", &tenzor::nn::EarlyStoppingCallback::best_loss,
+             "Get best loss value seen so far")
+        .def("wait_count", &tenzor::nn::EarlyStoppingCallback::wait_count,
+             "Get number of epochs since last improvement");
+
+    // ModelCheckpointCallback
+    py::class_<tenzor::nn::ModelCheckpointCallback, tenzor::nn::Callback,
+               std::shared_ptr<tenzor::nn::ModelCheckpointCallback>>(nn, "ModelCheckpointCallback",
+        "Callback for saving model checkpoints during training")
+        .def(py::init<const std::string&, std::shared_ptr<tenzor::nn::Module>, bool, const std::string&>(),
+             py::arg("filepath"),
+             py::arg("model"),
+             py::arg("save_best_only") = true,
+             py::arg("monitor") = "val_loss",
+             "Create ModelCheckpointCallback\n\n"
+             "Args:\n"
+             "    filepath: Path template for checkpoint files (can include {epoch} or {epoch:03d})\n"
+             "    model: Model to save\n"
+             "    save_best_only: If True, only save when validation loss improves\n"
+             "    monitor: Metric to monitor for best model ('val_loss' or 'train_loss')")
+        .def("best_loss", &tenzor::nn::ModelCheckpointCallback::best_loss,
+             "Get best loss value for saved model")
+        .def("last_checkpoint", &tenzor::nn::ModelCheckpointCallback::last_checkpoint,
+             "Get path of last saved checkpoint");
+
+    // LRSchedulerCallback
+    py::class_<tenzor::nn::LRSchedulerCallback, tenzor::nn::Callback,
+               std::shared_ptr<tenzor::nn::LRSchedulerCallback>>(nn, "LRSchedulerCallback",
+        "Callback for adjusting learning rate during training")
+        .def(py::init<std::shared_ptr<tenzor::optim::Optimizer>, const std::string&, float, int, float, int>(),
+             py::arg("optimizer"),
+             py::arg("schedule_type") = "step",
+             py::arg("decay_factor") = 0.1f,
+             py::arg("decay_epochs") = 10,
+             py::arg("min_lr") = 0.0f,
+             py::arg("patience") = 5,
+             "Create LRSchedulerCallback\n\n"
+             "Args:\n"
+             "    optimizer: Optimizer to adjust learning rate for\n"
+             "    schedule_type: Type of schedule ('step', 'exponential', 'cosine', 'plateau')\n"
+             "    decay_factor: Factor to multiply learning rate by\n"
+             "    decay_epochs: For 'step': decay every N epochs. For 'cosine': total epochs\n"
+             "    min_lr: Minimum learning rate\n"
+             "    patience: For 'plateau': epochs to wait before reducing LR")
+        .def("current_lr", &tenzor::nn::LRSchedulerCallback::current_lr,
+             "Get current learning rate");
+
+    // CallbackList
+    py::class_<tenzor::nn::CallbackList>(nn, "CallbackList",
+        "Collection of callbacks for training")
+        .def(py::init<>())
+        .def("add", &tenzor::nn::CallbackList::add,
+             py::arg("callback"),
+             "Add a callback to the list")
+        .def("on_epoch_begin", &tenzor::nn::CallbackList::on_epoch_begin,
+             py::arg("epoch"))
+        .def("on_epoch_end", &tenzor::nn::CallbackList::on_epoch_end,
+             py::arg("epoch"), py::arg("train_loss"), py::arg("val_loss"))
+        .def("on_batch_begin", &tenzor::nn::CallbackList::on_batch_begin,
+             py::arg("batch_idx"))
+        .def("on_batch_end", &tenzor::nn::CallbackList::on_batch_end,
+             py::arg("batch_idx"), py::arg("loss"))
+        .def("on_train_begin", &tenzor::nn::CallbackList::on_train_begin)
+        .def("on_train_end", &tenzor::nn::CallbackList::on_train_end)
+        .def("callbacks", &tenzor::nn::CallbackList::callbacks,
+             "Get all callbacks");
+
+    // ========================================================================
+    // Model Checkpointing
+    // ========================================================================
+
+    // TrainingMetadata
+    py::class_<tenzor::nn::TrainingMetadata>(nn, "TrainingMetadata",
+        "Training metadata stored with checkpoints")
+        .def(py::init<>())
+        .def_readwrite("epoch", &tenzor::nn::TrainingMetadata::epoch,
+                      "Current training epoch")
+        .def_readwrite("global_step", &tenzor::nn::TrainingMetadata::global_step,
+                      "Total training steps")
+        .def_readwrite("learning_rate", &tenzor::nn::TrainingMetadata::learning_rate,
+                      "Current learning rate")
+        .def_readwrite("train_loss", &tenzor::nn::TrainingMetadata::train_loss,
+                      "Last training loss")
+        .def_readwrite("val_loss", &tenzor::nn::TrainingMetadata::val_loss,
+                      "Last validation loss")
+        .def_readwrite("train_accuracy", &tenzor::nn::TrainingMetadata::train_accuracy,
+                      "Last training accuracy")
+        .def_readwrite("val_accuracy", &tenzor::nn::TrainingMetadata::val_accuracy,
+                      "Last validation accuracy")
+        .def_readwrite("best_val_loss", &tenzor::nn::TrainingMetadata::best_val_loss,
+                      "Best validation loss")
+        .def_readwrite("best_val_accuracy", &tenzor::nn::TrainingMetadata::best_val_accuracy,
+                      "Best validation accuracy")
+        .def_readwrite("timestamp", &tenzor::nn::TrainingMetadata::timestamp,
+                      "Checkpoint creation time")
+        .def_readwrite("custom_metrics", &tenzor::nn::TrainingMetadata::custom_metrics,
+                      "User-defined metrics")
+        .def("to_dict", &tenzor::nn::TrainingMetadata::to_dict,
+             "Serialize metadata to dictionary")
+        .def("from_dict", &tenzor::nn::TrainingMetadata::from_dict,
+             py::arg("dict"),
+             "Deserialize metadata from dictionary");
+
+    // CheckpointConfig
+    py::class_<tenzor::nn::CheckpointConfig>(nn, "CheckpointConfig",
+        "Checkpoint configuration")
+        .def(py::init<>())
+        .def_readwrite("save_optimizer", &tenzor::nn::CheckpointConfig::save_optimizer,
+                      "Include optimizer state")
+        .def_readwrite("save_scheduler", &tenzor::nn::CheckpointConfig::save_scheduler,
+                      "Include scheduler state")
+        .def_readwrite("verify_checksum", &tenzor::nn::CheckpointConfig::verify_checksum,
+                      "Verify data integrity")
+        .def_readwrite("atomic_save", &tenzor::nn::CheckpointConfig::atomic_save,
+                      "Use atomic writes");
+
+    // Checkpoint
+    py::class_<tenzor::nn::Checkpoint>(nn, "Checkpoint",
+        "Complete checkpoint data structure")
+        .def(py::init<>())
+        .def_readwrite("version", &tenzor::nn::Checkpoint::version,
+                      "Format version")
+        .def_readwrite("model_state", &tenzor::nn::Checkpoint::model_state,
+                      "Model parameters and buffers")
+        .def_readwrite("optimizer_state", &tenzor::nn::Checkpoint::optimizer_state,
+                      "Optimizer state")
+        .def_readwrite("scheduler_state", &tenzor::nn::Checkpoint::scheduler_state,
+                      "Scheduler state")
+        .def_readwrite("metadata", &tenzor::nn::Checkpoint::metadata,
+                      "Training metadata")
+        .def_readwrite("config", &tenzor::nn::Checkpoint::config,
+                      "Checkpoint configuration")
+        .def("size_bytes", &tenzor::nn::Checkpoint::size_bytes,
+             "Get total size of checkpoint in bytes")
+        .def("is_valid", &tenzor::nn::Checkpoint::is_valid,
+             "Check if checkpoint is valid");
+
+    // ModelCheckpoint
+    py::class_<tenzor::nn::ModelCheckpoint>(nn, "ModelCheckpoint",
+        R"pbdoc(
+            Model checkpoint manager.
+
+            Handles saving and loading of model checkpoints with support for:
+            - Model state (parameters, buffers)
+            - Optimizer state (momentum, adaptive learning rates, etc.)
+            - Scheduler state (step counts, learning rate history)
+            - Training metadata (epoch, loss, metrics)
+            - Versioning and backward compatibility
+            - Optional compression
+            - Atomic writes for crash safety
+
+            Example:
+                >>> checkpoint_manager = tenzor.nn.ModelCheckpoint()
+                >>> # Save model
+                >>> metadata = tenzor.nn.TrainingMetadata()
+                >>> metadata.epoch = 10
+                >>> metadata.train_loss = 0.25
+                >>> checkpoint_manager.save_model("model.pt", model, metadata)
+                >>>
+                >>> # Load model
+                >>> state_dict = checkpoint_manager.load_model("model.pt")
+                >>> model.load_state_dict(state_dict)
+        )pbdoc")
+        .def(py::init<>())
+        .def(py::init<tenzor::nn::CheckpointConfig>(),
+             py::arg("config"),
+             "Create ModelCheckpoint with custom configuration")
+        .def("save", &tenzor::nn::ModelCheckpoint::save,
+             py::arg("path"),
+             py::arg("module"),
+             py::arg("optimizer") = nullptr,
+             py::arg("scheduler") = nullptr,
+             py::arg("metadata") = tenzor::nn::TrainingMetadata{},
+             R"pbdoc(
+                 Save complete checkpoint to file.
+
+                 Args:
+                     path: File path for checkpoint
+                     module: Model to save
+                     optimizer: Optimizer to save (optional)
+                     scheduler: Learning rate scheduler to save (optional)
+                     metadata: Training metadata (optional)
+
+                 Example:
+                     >>> checkpoint_manager.save(
+                     ...     "checkpoint.pt",
+                     ...     model,
+                     ...     optimizer,
+                     ...     scheduler,
+                     ...     metadata
+                     ... )
+             )pbdoc")
+        .def("load", &tenzor::nn::ModelCheckpoint::load,
+             py::arg("path"),
+             "Load complete checkpoint from file")
+        .def("save_model", &tenzor::nn::ModelCheckpoint::save_model,
+             py::arg("path"),
+             py::arg("module"),
+             py::arg("metadata") = tenzor::nn::TrainingMetadata{},
+             "Save only model state (no optimizer/scheduler)")
+        .def("load_model", &tenzor::nn::ModelCheckpoint::load_model,
+             py::arg("path"),
+             "Load only model state")
+        .def("verify_checkpoint", &tenzor::nn::ModelCheckpoint::verify_checkpoint,
+             py::arg("path"),
+             "Verify checkpoint file integrity")
+        .def("get_metadata", &tenzor::nn::ModelCheckpoint::get_metadata,
+             py::arg("path"),
+             "Get checkpoint metadata without loading full checkpoint")
+        .def("get_version", &tenzor::nn::ModelCheckpoint::get_version,
+             py::arg("path"),
+             "Get checkpoint version")
+        .def("is_compatible", &tenzor::nn::ModelCheckpoint::is_compatible,
+             py::arg("path"),
+             "Check if checkpoint is compatible with current version")
+        .def("config", &tenzor::nn::ModelCheckpoint::config,
+             "Get current configuration")
+        .def("set_config", &tenzor::nn::ModelCheckpoint::set_config,
+             py::arg("config"),
+             "Set configuration");
+
+    // AutoCheckpoint
+    py::class_<tenzor::nn::AutoCheckpoint>(nn, "AutoCheckpoint",
+        R"pbdoc(
+            Automatic checkpoint manager for training loops.
+
+            Automatically saves checkpoints at specified intervals and
+            keeps only the best N checkpoints based on a metric.
+
+            Features:
+            - Save every N epochs
+            - Save every N steps
+            - Keep top K checkpoints by metric
+            - Early stopping integration
+            - Automatic cleanup of old checkpoints
+
+            Example:
+                >>> auto_checkpoint = tenzor.nn.AutoCheckpoint("./checkpoints", max_checkpoints=5)
+                >>> auto_checkpoint.set_metric_mode("min")  # Lower is better
+                >>>
+                >>> for epoch in range(num_epochs):
+                ...     # Training code...
+                ...     val_loss = validate(model)
+                ...
+                ...     # Automatically saves and manages checkpoints
+                ...     auto_checkpoint.step(
+                ...         model,
+                ...         optimizer,
+                ...         epoch,
+                ...         val_loss,
+                ...         "val_loss",
+                ...         scheduler
+                ...     )
+                >>>
+                >>> # Get path to best checkpoint
+                >>> best_path = auto_checkpoint.best_checkpoint_path()
+        )pbdoc")
+        .def(py::init<std::string, int, int>(),
+             py::arg("directory"),
+             py::arg("max_checkpoints") = 3,
+             py::arg("save_frequency") = 1,
+             R"pbdoc(
+                 Create auto checkpoint manager.
+
+                 Args:
+                     directory: Directory to save checkpoints
+                     max_checkpoints: Maximum number of checkpoints to keep (default: 3)
+                     save_frequency: Save every N epochs (default: 1)
+             )pbdoc")
+        .def("step", &tenzor::nn::AutoCheckpoint::step,
+             py::arg("module"),
+             py::arg("optimizer"),
+             py::arg("epoch"),
+             py::arg("metric_value"),
+             py::arg("metric_name"),
+             py::arg("scheduler") = nullptr,
+             R"pbdoc(
+                 Step function to call after each epoch/step.
+
+                 Args:
+                     module: Model to save
+                     optimizer: Optimizer to save
+                     epoch: Current epoch number
+                     metric_value: Current metric value
+                     metric_name: Metric name for tracking
+                     scheduler: Optional scheduler to save
+
+                 Returns:
+                     True if checkpoint was saved
+             )pbdoc")
+        .def("set_metric_mode", &tenzor::nn::AutoCheckpoint::set_metric_mode,
+             py::arg("mode"),
+             R"pbdoc(
+                 Set metric optimization mode.
+
+                 Args:
+                     mode: "min" or "max" (default: "min")
+
+                 Example:
+                     >>> auto_checkpoint.set_metric_mode("min")  # For loss
+                     >>> auto_checkpoint.set_metric_mode("max")  # For accuracy
+             )pbdoc")
+        .def("best_checkpoint_path", &tenzor::nn::AutoCheckpoint::best_checkpoint_path,
+             "Get path to best checkpoint")
+        .def("best_metric_value", &tenzor::nn::AutoCheckpoint::best_metric_value,
+             "Get best metric value")
+        .def("checkpoint_paths", &tenzor::nn::AutoCheckpoint::checkpoint_paths,
+             "Get list of all checkpoint paths")
+        .def("cleanup", &tenzor::nn::AutoCheckpoint::cleanup,
+             "Clean up old checkpoints (keep only top K)");
+
+    // ========================================================================
+    // High-Level Training API
+    // ========================================================================
+
+    // DataLoader class for simple batch iteration
+    py::class_<tenzor::nn::DataLoader>(nn, "SimpleDataLoader",
+        R"pbdoc(
+            Simple DataLoader for iterating over batches of data.
+
+            Provides basic iterator interface for training/validation data batches.
+            For more advanced features (shuffling, multi-threading, etc.), use
+            tenzor.data.DataLoader instead.
+
+            Args:
+                data: List of (input, target) tensor pairs
+                batch_size: Number of samples per batch
+
+            Example:
+                >>> data = [(input1, target1), (input2, target2), ...]
+                >>> loader = tenzor.nn.SimpleDataLoader(data, batch_size=32)
+                >>> for inputs, targets in loader:
+                ...     loss = model.train_step(inputs, targets)
+        )pbdoc")
+        .def(py::init<std::vector<std::pair<tenzor::Tensor, tenzor::Tensor>>, size_t>(),
+             py::arg("data"), py::arg("batch_size"),
+             "Create DataLoader with data and batch size")
+        .def("__iter__", [](tenzor::nn::DataLoader& loader) {
+            return py::make_iterator(loader.begin(), loader.end());
+        }, py::keep_alive<0, 1>())
+        .def("size", &tenzor::nn::DataLoader::size,
+             "Get number of batches");
+
+    // NeuralNetwork high-level training wrapper
+    py::class_<tenzor::nn::NeuralNetwork, std::shared_ptr<tenzor::nn::NeuralNetwork>>(nn, "NeuralNetwork",
+        R"pbdoc(
+            High-level neural network training wrapper.
+
+            NeuralNetwork provides a complete training API that wraps a model, optimizer,
+            and loss function. It handles the standard training loop pattern automatically.
+
+            Features:
+            - Single-call training step with train_step()
+            - Evaluation without gradients via eval_step()
+            - Complete training loop with fit()
+            - Automatic mode switching (train/eval)
+            - Validation support
+            - Callback system for monitoring
+
+            Args:
+                model: Neural network model (any Module subclass)
+                optimizer: Optimization algorithm (SGD, Adam, etc.)
+                loss_fn: Loss function module (MSELoss, CrossEntropyLoss, etc.)
+
+            Example:
+                >>> # Create model, optimizer, and loss
+                >>> model = tenzor.nn.Sequential(
+                ...     tenzor.nn.Linear(784, 128),
+                ...     tenzor.nn.ReLU(),
+                ...     tenzor.nn.Linear(128, 10)
+                ... )
+                >>> optimizer = tenzor.optim.Adam(model.parameters(), lr=0.001)
+                >>> loss_fn = tenzor.nn.CrossEntropyLoss()
+                >>>
+                >>> # Wrap in NeuralNetwork
+                >>> nn_wrapper = tenzor.nn.NeuralNetwork(model, optimizer, loss_fn)
+                >>>
+                >>> # Train for 10 epochs
+                >>> train_loader = tenzor.nn.SimpleDataLoader(train_data, batch_size=32)
+                >>> val_loader = tenzor.nn.SimpleDataLoader(val_data, batch_size=32)
+                >>> nn_wrapper.fit(train_loader, epochs=10, val_loader=val_loader)
+        )pbdoc")
+        .def(py::init([](std::shared_ptr<tenzor::nn::Module> model,
+                        std::shared_ptr<tenzor::optim::Optimizer> optimizer,
+                        py::object loss_fn_obj) {
+            // Create a lambda that wraps the Python loss function
+            auto loss_fn = [loss_fn_obj](const tenzor::Variable& pred, const tenzor::Variable& target) -> tenzor::Variable {
+                // Call the Python loss function
+                py::object result = loss_fn_obj(pred, target);
+                return py::cast<tenzor::Variable>(result);
+            };
+            return std::make_shared<tenzor::nn::NeuralNetwork>(model, optimizer, loss_fn);
+        }),
+             py::arg("model"), py::arg("optimizer"), py::arg("loss_fn"),
+             "Create NeuralNetwork with model, optimizer, and loss function")
+        .def("train_step", &tenzor::nn::NeuralNetwork::train_step,
+             py::arg("input"), py::arg("target"),
+             R"pbdoc(
+                Perform single training step.
+
+                Executes complete training iteration:
+                1. Forward pass through model
+                2. Loss computation
+                3. Backward pass (gradient computation)
+                4. Parameter update
+
+                Args:
+                    input: Input batch variable
+                    target: Target batch variable
+
+                Returns:
+                    Loss value as float
+
+                Example:
+                    >>> loss = nn_wrapper.train_step(input_var, target_var)
+                    >>> print(f"Loss: {loss:.4f}")
+             )pbdoc")
+        .def("eval_step", &tenzor::nn::NeuralNetwork::eval_step,
+             py::arg("input"), py::arg("target"),
+             R"pbdoc(
+                Perform single evaluation step.
+
+                Executes evaluation without gradient computation:
+                1. Set model to evaluation mode
+                2. Disable gradients (more efficient)
+                3. Forward pass through model
+                4. Loss computation
+                5. Return loss value
+
+                Args:
+                    input: Input batch variable
+                    target: Target batch variable
+
+                Returns:
+                    Loss value as float
+
+                Example:
+                    >>> val_loss = nn_wrapper.eval_step(val_input, val_target)
+                    >>> print(f"Validation Loss: {val_loss:.4f}")
+             )pbdoc")
+        .def("fit", &tenzor::nn::NeuralNetwork::fit,
+             py::arg("train_loader"), py::arg("epochs"),
+             py::arg("val_loader") = nullptr,
+             py::arg("callbacks") = std::vector<std::shared_ptr<tenzor::nn::Callback>>{},
+             R"pbdoc(
+                Train model for multiple epochs.
+
+                Complete training loop with:
+                - Epoch iteration
+                - Training batch processing
+                - Optional validation after each epoch
+                - Callback invocation for monitoring
+                - Automatic mode switching
+
+                Args:
+                    train_loader: DataLoader for training data
+                    epochs: Number of epochs to train
+                    val_loader: Optional DataLoader for validation (default: None)
+                    callbacks: Optional list of callbacks for monitoring (default: [])
+
+                Example:
+                    >>> # Basic training
+                    >>> nn_wrapper.fit(train_loader, epochs=10)
+                    >>>
+                    >>> # With validation
+                    >>> nn_wrapper.fit(train_loader, epochs=10, val_loader=val_loader)
+                    >>>
+                    >>> # With callbacks
+                    >>> progress = tenzor.nn.ProgressCallback()
+                    >>> nn_wrapper.fit(train_loader, epochs=10, val_loader=val_loader, callbacks=[progress])
+             )pbdoc")
+        .def("train", &tenzor::nn::NeuralNetwork::train,
+             "Set model to training mode")
+        .def("eval", &tenzor::nn::NeuralNetwork::eval,
+             "Set model to evaluation mode")
+        .def("is_training", &tenzor::nn::NeuralNetwork::is_training,
+             "Check if model is in training mode")
+        .def_property_readonly("model", &tenzor::nn::NeuralNetwork::model,
+             "Get underlying model")
+        .def_property_readonly("optimizer", &tenzor::nn::NeuralNetwork::optimizer,
+             "Get optimizer");
+
+    // ========================================================================
+    // Distributed training (Phase 4 - Not implemented yet)
+    // ========================================================================
+    /* COMMENTED OUT - Not part of Phase 1
     auto distributed = nn.def_submodule("parallel", "Distributed and parallel training");
 
     // ProcessGroup
@@ -1458,6 +2149,7 @@ PYBIND11_MODULE(tenzor_core, m) {
     distributed.def("destroy_process_group", &tenzor::nn::destroy_process_group,
          py::arg("process_group"),
          "Destroy process group and cleanup resources");
+    END COMMENT */
 
     // ModelHub for pretrained weight management
     auto models = m.def_submodule("models", "Pretrained model hub");
@@ -1664,6 +2356,113 @@ PYBIND11_MODULE(tenzor_core, m) {
                   "Convert PyTorch tensor to Tenzor tensor");
     #endif
 
+    // Data loading utilities
+    auto data_mod = m.def_submodule("data", "Data loading and dataset utilities");
+
+    // Dataset abstract base class
+    py::class_<tenzor::data::Dataset, std::shared_ptr<tenzor::data::Dataset>>(data_mod, "Dataset")
+        .def("size", &tenzor::data::Dataset::size,
+             "Get the number of samples in the dataset")
+        .def("__len__", &tenzor::data::Dataset::size,
+             "Get the number of samples in the dataset")
+        .def("get", &tenzor::data::Dataset::get,
+             py::arg("index"),
+             "Get a sample at the specified index")
+        .def("__getitem__", &tenzor::data::Dataset::get,
+             py::arg("index"),
+             "Get a sample at the specified index")
+        .def("empty", &tenzor::data::Dataset::empty,
+             "Check if the dataset is empty");
+
+    // TensorDataset
+    py::class_<tenzor::data::TensorDataset, tenzor::data::Dataset,
+               std::shared_ptr<tenzor::data::TensorDataset>>(data_mod, "TensorDataset")
+        .def(py::init<tenzor::Tensor, tenzor::Tensor>(),
+             py::arg("inputs"), py::arg("targets"),
+             R"pbdoc(
+                Create a dataset from input and target tensors.
+
+                Args:
+                    inputs: Input tensor with shape [N, ...]
+                    targets: Target tensor with shape [N, ...]
+
+                Example:
+                    >>> inputs = tenzor.randn([100, 10])
+                    >>> targets = tenzor.randint(0, 2, [100])
+                    >>> dataset = tenzor.data.TensorDataset(inputs, targets)
+             )pbdoc")
+        .def("size", &tenzor::data::TensorDataset::size)
+        .def("__len__", &tenzor::data::TensorDataset::size)
+        .def("get", &tenzor::data::TensorDataset::get, py::arg("index"))
+        .def("__getitem__", &tenzor::data::TensorDataset::get, py::arg("index"));
+
+    // DataLoaderConfig
+    py::class_<tenzor::data::DataLoaderConfig>(data_mod, "DataLoaderConfig")
+        .def(py::init<>())
+        .def_readwrite("batch_size", &tenzor::data::DataLoaderConfig::batch_size,
+                       "Number of samples per batch")
+        .def_readwrite("shuffle", &tenzor::data::DataLoaderConfig::shuffle,
+                       "Whether to shuffle data each epoch")
+        .def_readwrite("num_workers", &tenzor::data::DataLoaderConfig::num_workers,
+                       "Number of worker threads for parallel loading")
+        .def_readwrite("pin_memory", &tenzor::data::DataLoaderConfig::pin_memory,
+                       "Pin memory for faster CUDA transfer")
+        .def_readwrite("drop_last", &tenzor::data::DataLoaderConfig::drop_last,
+                       "Drop last incomplete batch")
+        .def_readwrite("prefetch_factor", &tenzor::data::DataLoaderConfig::prefetch_factor,
+                       "Number of batches to prefetch per worker");
+
+    // Batch struct
+    py::class_<tenzor::data::Batch>(data_mod, "Batch")
+        .def(py::init<>())
+        .def(py::init<tenzor::Tensor, tenzor::Tensor>(),
+             py::arg("inputs"), py::arg("targets"))
+        .def_readwrite("inputs", &tenzor::data::Batch::inputs,
+                       "Batched input tensor")
+        .def_readwrite("targets", &tenzor::data::Batch::targets,
+                       "Batched target tensor");
+
+    // DataLoader
+    py::class_<tenzor::data::DataLoader>(data_mod, "DataLoader")
+        .def(py::init<std::shared_ptr<tenzor::data::Dataset>, const tenzor::data::DataLoaderConfig&>(),
+             py::arg("dataset"), py::arg("config"),
+             "Create DataLoader with configuration object")
+        .def(py::init<std::shared_ptr<tenzor::data::Dataset>, size_t, bool, size_t, bool, bool>(),
+             py::arg("dataset"),
+             py::arg("batch_size"),
+             py::arg("shuffle") = false,
+             py::arg("num_workers") = 0,
+             py::arg("pin_memory") = false,
+             py::arg("drop_last") = false,
+             R"pbdoc(
+                Create a DataLoader for efficient batch loading.
+
+                Args:
+                    dataset: Dataset to load from
+                    batch_size: Number of samples per batch
+                    shuffle: Whether to shuffle data at the start of each epoch
+                    num_workers: Number of worker threads (0 = single-threaded)
+                    pin_memory: Pin memory for faster CUDA transfer
+                    drop_last: Drop the last incomplete batch
+
+                Example:
+                    >>> dataset = tenzor.data.TensorDataset(inputs, targets)
+                    >>> loader = tenzor.data.DataLoader(dataset, batch_size=32,
+                    ...                                  shuffle=True, num_workers=4)
+                    >>> for batch in loader:
+                    ...     print(batch.inputs.shape, batch.targets.shape)
+             )pbdoc")
+        .def("__iter__", [](tenzor::data::DataLoader& self) {
+            return py::make_iterator(self.begin(), self.end());
+        }, py::keep_alive<0, 1>(),
+        "Iterate over batches")
+        .def("__len__", &tenzor::data::DataLoader::size,
+             "Get the number of batches per epoch")
+        .def("size", &tenzor::data::DataLoader::size,
+             "Get the number of batches per epoch")
+        .def("reset", &tenzor::data::DataLoader::reset,
+             "Reset loader for new epoch (reshuffles if shuffle is enabled)");
+
     // ONNX export/import functionality
     auto onnx_mod = m.def_submodule("onnx", "ONNX model export and import");
 
@@ -1823,5 +2622,545 @@ PYBIND11_MODULE(tenzor_core, m) {
     onnx_mod.def("dtype_to_onnx", &tenzor::onnx::dtype_to_onnx,
                  py::arg("dtype"),
                  "Convert Tenzor DType to ONNX DataType");
+
+    // ========== Automatic Mixed Precision (AMP) ==========
+    auto amp = m.def_submodule("amp", "Automatic Mixed Precision utilities");
+
+    // GradScaler class
+    py::class_<tenzor::nn::amp::GradScaler>(amp, "GradScaler",
+        R"pbdoc(
+            Gradient scaler for automatic mixed precision training.
+
+            Helps prevent gradient underflow when training with FP16/mixed precision
+            by scaling the loss before backward() and unscaling gradients before optimizer.step().
+        )pbdoc")
+        .def(py::init<float, float, float, int>(),
+             py::arg("init_scale") = 65536.0f,
+             py::arg("growth_factor") = 2.0f,
+             py::arg("backoff_factor") = 0.5f,
+             py::arg("growth_interval") = 2000,
+             "Create gradient scaler with specified parameters")
+        .def("scale", &tenzor::nn::amp::GradScaler::scale,
+             py::arg("loss"),
+             "Scale loss by current scale factor")
+        .def("unscale_", &tenzor::nn::amp::GradScaler::unscale_,
+             py::arg("optimizer"),
+             "Unscale gradients in optimizer parameters")
+        .def("step", &tenzor::nn::amp::GradScaler::step,
+             py::arg("optimizer"),
+             "Execute optimizer step with overflow detection")
+        .def("update", &tenzor::nn::amp::GradScaler::update,
+             "Update scale factor based on overflow history")
+        .def("get_scale", &tenzor::nn::amp::GradScaler::get_scale,
+             "Get current scale factor")
+        .def("get_growth_tracker", &tenzor::nn::amp::GradScaler::get_growth_tracker,
+             "Get number of consecutive successful iterations")
+        .def("found_inf_nan", &tenzor::nn::amp::GradScaler::found_inf_nan,
+             "Check if overflow was detected in last step")
+        .def("reset", &tenzor::nn::amp::GradScaler::reset,
+             "Reset scaler to initial state")
+        .def("state_dict", &tenzor::nn::amp::GradScaler::state_dict,
+             "Get scaler state for serialization")
+        .def("load_state_dict", &tenzor::nn::amp::GradScaler::load_state_dict,
+             py::arg("state"),
+             "Load scaler state from dictionary");
+
+    // Autocast context manager
+    py::class_<tenzor::nn::amp::Autocast>(amp, "Autocast",
+        R"pbdoc(
+            Automatic mixed precision context manager.
+
+            Automatically casts operations to lower precision (Float16 or BFloat16)
+            for performance while maintaining numerical stability.
+        )pbdoc")
+        .def(py::init<bool, tenzor::DType, tenzor::Device::Type>(),
+             py::arg("enabled") = true,
+             py::arg("dtype") = tenzor::DType::Float16,
+             py::arg("device_type") = tenzor::Device::Type::CUDA,
+             "Create autocast context")
+        .def_static("is_enabled", &tenzor::nn::amp::Autocast::is_enabled,
+                    "Check if autocast is currently enabled")
+        .def_static("get_dtype", &tenzor::nn::amp::Autocast::get_dtype,
+                    "Get the current autocast dtype")
+        .def_static("get_device_type", &tenzor::nn::amp::Autocast::get_device_type,
+                    "Get the current autocast device type")
+        .def_static("should_autocast", &tenzor::nn::amp::Autocast::should_autocast,
+                    py::arg("op_name"), py::arg("device"),
+                    "Determine if a given operation should be autocast");
+
+    // MixedPrecisionConfig struct
+    py::class_<tenzor::nn::MixedPrecisionConfig>(m, "MixedPrecisionConfig",
+        "Configuration for mixed precision training")
+        .def(py::init<>())
+        .def_readwrite("dtype", &tenzor::nn::MixedPrecisionConfig::dtype,
+                      "Target dtype for mixed precision (Float16 or BFloat16)")
+        .def_readwrite("device_type", &tenzor::nn::MixedPrecisionConfig::device_type,
+                      "Device type to apply mixed precision")
+        .def_readwrite("enabled", &tenzor::nn::MixedPrecisionConfig::enabled,
+                      "Enable automatic mixed precision")
+        .def_readwrite("init_scale", &tenzor::nn::MixedPrecisionConfig::init_scale,
+                      "Initial loss scale for gradient scaler")
+        .def_readwrite("growth_factor", &tenzor::nn::MixedPrecisionConfig::growth_factor,
+                      "Scale growth factor on successful iterations")
+        .def_readwrite("backoff_factor", &tenzor::nn::MixedPrecisionConfig::backoff_factor,
+                      "Scale backoff factor on overflow")
+        .def_readwrite("growth_interval", &tenzor::nn::MixedPrecisionConfig::growth_interval,
+                      "Iterations before attempting scale growth")
+        .def_static("fp16_cuda", &tenzor::nn::MixedPrecisionConfig::fp16_cuda,
+                   "Create default FP16 configuration for CUDA")
+        .def_static("bfloat16_cuda", &tenzor::nn::MixedPrecisionConfig::bfloat16_cuda,
+                   "Create BFloat16 configuration for CUDA")
+        .def_static("conservative", &tenzor::nn::MixedPrecisionConfig::conservative,
+                   "Create conservative configuration (slower scale growth)");
+
+    // MixedPrecisionTrainer class
+    py::class_<tenzor::nn::MixedPrecisionTrainer>(m, "MixedPrecisionTrainer",
+        R"pbdoc(
+            High-level mixed precision training wrapper.
+
+            Provides a complete training API with automatic mixed precision (AMP)
+            and gradient scaling. Handles:
+            - Automatic casting of operations to FP16/BF16
+            - Loss scaling to prevent gradient underflow
+            - Gradient unscaling and overflow detection
+            - Dynamic loss scale adjustment
+
+            Example:
+                >>> model = tenzor.nn.Linear(10, 5)
+                >>> optimizer = tenzor.optim.Adam(model.parameters(), 0.001)
+                >>> loss_fn = lambda pred, target: (pred - target).pow(2).mean()
+                >>> config = tenzor.MixedPrecisionConfig.fp16_cuda()
+                >>> trainer = tenzor.MixedPrecisionTrainer(model, optimizer, loss_fn, config)
+                >>> # Train with mixed precision
+                >>> for inputs, targets in dataloader:
+                >>>     loss = trainer.train_step(inputs, targets)
+        )pbdoc")
+        .def(py::init<std::shared_ptr<tenzor::nn::Module>,
+                     std::shared_ptr<tenzor::optim::Optimizer>,
+                     std::function<tenzor::Variable(const tenzor::Variable&, const tenzor::Variable&)>,
+                     const tenzor::nn::MixedPrecisionConfig&>(),
+             py::arg("model"),
+             py::arg("optimizer"),
+             py::arg("loss_fn"),
+             py::arg("config") = tenzor::nn::MixedPrecisionConfig::fp16_cuda(),
+             "Create mixed precision trainer")
+        .def("train_step", &tenzor::nn::MixedPrecisionTrainer::train_step,
+             py::arg("input"), py::arg("target"),
+             "Perform single training step with mixed precision")
+        .def("eval_step", &tenzor::nn::MixedPrecisionTrainer::eval_step,
+             py::arg("input"), py::arg("target"),
+             "Perform evaluation step (no mixed precision)")
+        .def("fit", &tenzor::nn::MixedPrecisionTrainer::fit,
+             py::arg("train_loader"),
+             py::arg("epochs"),
+             py::arg("val_loader") = nullptr,
+             py::arg("callbacks") = std::vector<std::shared_ptr<tenzor::nn::Callback>>(),
+             "Train model for multiple epochs with mixed precision")
+        .def("train", &tenzor::nn::MixedPrecisionTrainer::train,
+             "Set model to training mode")
+        .def("eval", &tenzor::nn::MixedPrecisionTrainer::eval,
+             "Set model to evaluation mode")
+        .def("is_training", &tenzor::nn::MixedPrecisionTrainer::is_training,
+             "Check if model is in training mode")
+        .def("model", &tenzor::nn::MixedPrecisionTrainer::model,
+             "Get underlying model")
+        .def("optimizer", &tenzor::nn::MixedPrecisionTrainer::optimizer,
+             "Get optimizer")
+        .def("scaler", &tenzor::nn::MixedPrecisionTrainer::scaler,
+             py::return_value_policy::reference_internal,
+             "Get gradient scaler")
+        .def("get_scale", &tenzor::nn::MixedPrecisionTrainer::get_scale,
+             "Get current loss scale")
+        .def("get_skipped_steps", &tenzor::nn::MixedPrecisionTrainer::get_skipped_steps,
+             "Get number of skipped steps due to overflow")
+        .def("get_total_steps", &tenzor::nn::MixedPrecisionTrainer::get_total_steps,
+             "Get total number of training steps")
+        .def("get_config", &tenzor::nn::MixedPrecisionTrainer::get_config,
+             py::return_value_policy::reference_internal,
+             "Get mixed precision configuration")
+        .def("reset_stats", &tenzor::nn::MixedPrecisionTrainer::reset_stats,
+             "Reset training statistics");
+
+    // Helper functions
+    m.def("create_fp16_trainer", &tenzor::nn::create_fp16_trainer,
+          py::arg("model"), py::arg("optimizer"), py::arg("loss_fn"),
+          "Create FP16 mixed precision trainer");
+    m.def("create_bfloat16_trainer", &tenzor::nn::create_bfloat16_trainer,
+          py::arg("model"), py::arg("optimizer"), py::arg("loss_fn"),
+          "Create BFloat16 mixed precision trainer");
+
+    // ========== Model Compression (Pruning + Quantization) ==========
+    bind_compression(m);
 }
 
+/**
+ * @file compression_bindings.cpp
+ * @brief Python bindings for model compression (pruning + quantization)
+ */
+
+#include <pybind11/pybind11.h>
+#include <pybind11/stl.h>
+#include <pybind11/functional.h>
+#include <tenzor/nn/compression/pruning.hpp>
+#include <tenzor/nn/quantization.hpp>
+
+namespace py = pybind11;
+using namespace tenzor;
+using namespace tenzor::nn;
+using namespace tenzor::nn::compression;
+using namespace tenzor::nn::quantization;
+
+void bind_compression(py::module& m) {
+    // Create compression submodule
+    auto compression = m.def_submodule("compression", "Model compression utilities");
+
+    // =============================================================================
+    // Pruning Enums and Structures
+    // =============================================================================
+
+    py::enum_<ImportanceCriterion>(compression, "ImportanceCriterion")
+        .value("L1", ImportanceCriterion::L1, "L1 norm (sum of absolute values)")
+        .value("L2", ImportanceCriterion::L2, "L2 norm (Euclidean distance)")
+        .value("L1Norm", ImportanceCriterion::L1Norm, "L1 norm normalized by parameter count")
+        .value("L2Norm", ImportanceCriterion::L2Norm, "L2 norm normalized by parameter count");
+
+    py::enum_<PruningSchedule>(compression, "PruningSchedule")
+        .value("OneShot", PruningSchedule::OneShot, "Single pruning step")
+        .value("Iterative", PruningSchedule::Iterative, "Linear sparsity increase")
+        .value("Polynomial", PruningSchedule::Polynomial, "Polynomial sparsity schedule");
+
+    py::class_<PruningMask>(compression, "PruningMask")
+        .def(py::init<>())
+        .def_readwrite("mask", &PruningMask::mask)
+        .def_readwrite("layer_name", &PruningMask::layer_name)
+        .def_readwrite("current_sparsity", &PruningMask::current_sparsity)
+        .def("apply", &PruningMask::apply, "Apply mask to weights")
+        .def("compute_sparsity", &PruningMask::compute_sparsity,
+             "Compute actual sparsity of mask");
+
+    py::class_<PruningConfig>(compression, "PruningConfig")
+        .def(py::init<>())
+        .def_readwrite("target_sparsity", &PruningConfig::target_sparsity)
+        .def_readwrite("current_sparsity", &PruningConfig::current_sparsity)
+        .def_readwrite("criterion", &PruningConfig::criterion)
+        .def_readwrite("schedule", &PruningConfig::schedule)
+        .def_readwrite("num_iterations", &PruningConfig::num_iterations)
+        .def_readwrite("current_iteration", &PruningConfig::current_iteration)
+        .def_readwrite("masks", &PruningConfig::masks)
+        .def("get_current_sparsity", &PruningConfig::get_current_sparsity,
+             "Get current sparsity based on schedule");
+
+    // =============================================================================
+    // Pruning Functions
+    // =============================================================================
+
+    compression.def("compute_importance", &compute_importance,
+        py::arg("weights"), py::arg("criterion"),
+        "Compute importance scores for tensor weights");
+
+    compression.def("create_mask_from_importance", &create_mask_from_importance,
+        py::arg("importance"), py::arg("sparsity"),
+        "Create binary mask from importance scores");
+
+    compression.def("prune_unstructured", &prune_unstructured,
+        py::arg("module"), py::arg("sparsity"),
+        py::arg("criterion") = ImportanceCriterion::L1,
+        py::arg("global_pruning") = false,
+        R"doc(
+        Apply unstructured (fine-grained) pruning to module.
+
+        Prunes individual weights based on magnitude, regardless of structure.
+
+        Args:
+            module: Neural network module to prune
+            sparsity: Target sparsity level [0, 1] (0.5 = 50% zeros)
+            criterion: Importance metric for weight selection
+            global_pruning: If True, compute threshold globally across all layers
+
+        Returns:
+            PruningConfig with masks for all pruned layers
+
+        Example:
+            >>> model = MyModel()
+            >>> config = prune_unstructured(model, 0.5, ImportanceCriterion.L1)
+            >>> apply_pruning_masks(model, config)
+        )doc");
+
+    compression.def("prune_iterative", &prune_iterative,
+        py::arg("module"), py::arg("target_sparsity"), py::arg("num_iterations"),
+        py::arg("schedule") = PruningSchedule::Iterative,
+        py::arg("criterion") = ImportanceCriterion::L1,
+        R"doc(
+        Iterative magnitude pruning with gradual sparsity increase.
+
+        Args:
+            module: Module to prune
+            target_sparsity: Final target sparsity [0, 1]
+            num_iterations: Number of pruning steps
+            schedule: Sparsity increase schedule
+            criterion: Importance metric
+
+        Returns:
+            Final pruning configuration
+
+        Example:
+            >>> config = prune_iterative(model, 0.9, 10, PruningSchedule.Polynomial)
+        )doc");
+
+    compression.def("prune_channels", &prune_channels,
+        py::arg("module"), py::arg("sparsity"),
+        py::arg("criterion") = ImportanceCriterion::L1,
+        R"doc(
+        Apply structured channel pruning to convolutional layers.
+
+        Removes entire output channels from Conv2d layers based on importance.
+        Creates regular sparsity that directly reduces computation.
+
+        Args:
+            module: Module containing Conv2d layers
+            sparsity: Fraction of channels to prune [0, 1]
+            criterion: Channel importance metric
+
+        Returns:
+            New module with channels physically removed
+        )doc");
+
+    compression.def("prune_filters", &prune_filters,
+        py::arg("module"), py::arg("sparsity"),
+        py::arg("criterion") = ImportanceCriterion::L1,
+        "Prune entire filters from Conv2d layers");
+
+    compression.def("prune_layers", &prune_layers,
+        py::arg("module"), py::arg("num_layers"),
+        py::arg("criterion") = ImportanceCriterion::L1,
+        "Remove entire layers from sequential models");
+
+    compression.def("apply_pruning_masks", &apply_pruning_masks,
+        py::arg("module"), py::arg("config"),
+        "Apply pruning masks to module parameters");
+
+    compression.def("finalize_pruning", &finalize_pruning,
+        py::arg("module"), py::arg("config"),
+        "Make pruning permanent by removing zero weights");
+
+    compression.def("remove_pruning", &remove_pruning,
+        py::arg("module"), py::arg("config"),
+        "Remove all pruning masks and restore dense weights");
+
+    compression.def("compute_sparsity", &compute_sparsity,
+        py::arg("module"),
+        "Compute actual sparsity of module parameters");
+
+    compression.def("analyze_layer_sparsity", &analyze_layer_sparsity,
+        py::arg("module"),
+        "Analyze per-layer sparsity");
+
+    compression.def("compute_compression_ratio", &compute_compression_ratio,
+        py::arg("original_module"), py::arg("pruned_module"),
+        "Estimate compression ratio achieved by pruning");
+
+    compression.def("estimate_flops_reduction", &estimate_flops_reduction,
+        py::arg("module"), py::arg("input_shape"),
+        "Estimate FLOPs reduction from structured pruning");
+
+    compression.def("sensitivity_analysis", &sensitivity_analysis,
+        py::arg("module"), py::arg("validation_fn"),
+        py::arg("sparsity_levels") = std::vector<float>{0.1f, 0.3f, 0.5f, 0.7f, 0.9f},
+        "Sensitivity analysis for layer-wise pruning");
+
+    compression.def("find_lottery_ticket", &find_lottery_ticket,
+        py::arg("module"), py::arg("initial_weights"),
+        py::arg("target_sparsity"), py::arg("num_rounds"),
+        "Find winning lottery ticket (iterative magnitude pruning)");
+
+    // =============================================================================
+    // Quantization Enums and Classes
+    // =============================================================================
+
+    auto quant = m.def_submodule("quantization", "Neural network quantization");
+
+    py::enum_<QuantizationScheme>(quant, "QuantizationScheme")
+        .value("PerTensorSymmetric", QuantizationScheme::PerTensorSymmetric)
+        .value("PerTensorAsymmetric", QuantizationScheme::PerTensorAsymmetric)
+        .value("PerChannelSymmetric", QuantizationScheme::PerChannelSymmetric)
+        .value("PerChannelAsymmetric", QuantizationScheme::PerChannelAsymmetric);
+
+    py::enum_<QuantDType>(quant, "QuantDType")
+        .value("INT8", QuantDType::INT8, "Signed 8-bit integer [-128, 127]")
+        .value("UINT8", QuantDType::UINT8, "Unsigned 8-bit integer [0, 255]");
+
+    py::class_<QuantizationParams>(quant, "QuantizationParams")
+        .def(py::init<Tensor, Tensor, QuantDType, QuantizationScheme, int64_t>(),
+             py::arg("scale"), py::arg("zero_point"), py::arg("dtype"),
+             py::arg("scheme"), py::arg("axis") = -1)
+        .def_readonly("scale", &QuantizationParams::scale)
+        .def_readonly("zero_point", &QuantizationParams::zero_point)
+        .def_readonly("dtype", &QuantizationParams::dtype)
+        .def_readonly("scheme", &QuantizationParams::scheme)
+        .def_readonly("axis", &QuantizationParams::axis);
+
+    py::class_<QuantizedTensor>(quant, "QuantizedTensor")
+        .def("dequantize", &QuantizedTensor::dequantize,
+             "Dequantize tensor back to floating point")
+        .def("data", &QuantizedTensor::data, "Get quantized integer data")
+        .def("params", &QuantizedTensor::params, "Get quantization parameters")
+        .def("shape", &QuantizedTensor::shape)
+        .def("device", &QuantizedTensor::device);
+
+    // =============================================================================
+    // Quantization Functions
+    // =============================================================================
+
+    quant.def("compute_quantization_params", &compute_quantization_params,
+        py::arg("min"), py::arg("max"), py::arg("dtype"), py::arg("scheme"),
+        "Compute quantization parameters from min/max values");
+
+    quant.def("quantize_tensor", &quantize_tensor,
+        py::arg("input"), py::arg("params"),
+        "Quantize tensor using specified parameters");
+
+    quant.def("quantize_per_tensor_symmetric", &quantize_per_tensor_symmetric,
+        py::arg("input"), py::arg("dtype") = QuantDType::INT8,
+        R"doc(
+        Symmetric per-tensor quantization (zero-point = 0).
+
+        Args:
+            input: Input tensor to quantize
+            dtype: Target quantized data type
+
+        Returns:
+            QuantizedTensor with INT8/UINT8 data
+
+        Example:
+            >>> x = Tensor([...])
+            >>> q = quantize_per_tensor_symmetric(x, QuantDType.INT8)
+            >>> dequant = q.dequantize()
+        )doc");
+
+    quant.def("quantize_per_tensor_asymmetric", &quantize_per_tensor_asymmetric,
+        py::arg("input"), py::arg("dtype") = QuantDType::INT8,
+        "Asymmetric per-tensor quantization (learnable zero-point)");
+
+    quant.def("quantize_per_channel_symmetric", &quantize_per_channel_symmetric,
+        py::arg("input"), py::arg("axis"), py::arg("dtype") = QuantDType::INT8,
+        R"doc(
+        Symmetric per-channel quantization.
+
+        Better accuracy than per-tensor for convolutional layers.
+
+        Args:
+            input: Input tensor
+            axis: Axis for per-channel quantization (usually 0 for weights)
+            dtype: Target dtype
+
+        Returns:
+            QuantizedTensor
+
+        Example:
+            >>> weight = conv.weight  # [out_channels, in_channels, H, W]
+            >>> q = quantize_per_channel_symmetric(weight, axis=0)
+        )doc");
+
+    quant.def("quantize_per_channel_asymmetric", &quantize_per_channel_asymmetric,
+        py::arg("input"), py::arg("axis"), py::arg("dtype") = QuantDType::INT8,
+        "Asymmetric per-channel quantization");
+
+    quant.def("dequantize_tensor", &dequantize_tensor,
+        py::arg("quantized"),
+        "Dequantize tensor back to floating point");
+
+    quant.def("compute_quantization_error", &compute_quantization_error,
+        py::arg("original"), py::arg("quantized"),
+        "Compute quantization error (MSE) between original and quantized tensors");
+
+    quant.def("calibrate_quantization_params", &calibrate_quantization_params,
+        py::arg("activations"), py::arg("scheme"),
+        py::arg("dtype") = QuantDType::INT8, py::arg("axis") = -1,
+        "Calibrate quantization parameters from activation statistics");
+
+    // =============================================================================
+    // Observers
+    // =============================================================================
+
+    py::class_<Observer, std::shared_ptr<Observer>>(quant, "Observer")
+        .def("observe", &Observer::observe, "Observe tensor statistics")
+        .def("calculate_qparams", &Observer::calculate_qparams,
+             py::arg("dtype"), py::arg("scheme"))
+        .def("reset", &Observer::reset);
+
+    py::class_<MinMaxObserver, Observer, std::shared_ptr<MinMaxObserver>>(quant, "MinMaxObserver")
+        .def(py::init<>());
+
+    py::class_<MovingAverageMinMaxObserver, Observer,
+                std::shared_ptr<MovingAverageMinMaxObserver>>(quant, "MovingAverageMinMaxObserver")
+        .def(py::init<float>(), py::arg("averaging_constant") = 0.01f);
+
+    py::class_<HistogramObserver, Observer, std::shared_ptr<HistogramObserver>>(quant, "HistogramObserver")
+        .def(py::init<int>(), py::arg("bins") = 2048);
+
+    // PerChannelHistogramObserver instead of PerChannelMinMaxObserver
+    py::class_<PerChannelHistogramObserver, Observer,
+                std::shared_ptr<PerChannelHistogramObserver>>(quant, "PerChannelHistogramObserver")
+        .def(py::init<int64_t, int>(), py::arg("axis") = 0, py::arg("bins") = 2048);
+
+    quant.def("make_observer", &make_observer,
+        py::arg("scheme"), py::arg("use_histogram") = false, py::arg("axis") = 0,
+        "Create observer instance");
+
+    // =============================================================================
+    // Fake Quantization (for QAT)
+    // =============================================================================
+
+    py::class_<FakeQuantize, Module, std::shared_ptr<FakeQuantize>>(quant, "FakeQuantize")
+        .def(py::init<QuantDType, QuantizationScheme, bool, bool, int64_t>(),
+             py::arg("dtype") = QuantDType::INT8,
+             py::arg("scheme") = QuantizationScheme::PerTensorSymmetric,
+             py::arg("learnable") = false,
+             py::arg("observer_enabled") = true,
+             py::arg("axis") = -1,
+             "Fake quantization module for QAT")
+        .def("enable_observer", &FakeQuantize::enable_observer, py::arg("enabled") = true)
+        .def("disable_observer", &FakeQuantize::disable_observer)
+        .def("enable_fake_quant", &FakeQuantize::enable_fake_quant, py::arg("enabled") = true)
+        .def("disable_fake_quant", &FakeQuantize::disable_fake_quant)
+        .def("set_qparams", &FakeQuantize::set_qparams, py::arg("params"));
+
+    py::class_<LearnableFakeQuantize, FakeQuantize,
+                std::shared_ptr<LearnableFakeQuantize>>(quant, "LearnableFakeQuantize")
+        .def(py::init<QuantDType, QuantizationScheme, int64_t>(),
+             py::arg("dtype") = QuantDType::INT8,
+             py::arg("scheme") = QuantizationScheme::PerTensorSymmetric,
+             py::arg("axis") = -1);
+
+    // =============================================================================
+    // QConfig
+    // =============================================================================
+
+    // QConfig uses factory functions internally, expose DefaultQConfigs instead
+    py::class_<QConfig>(quant, "QConfig");
+
+    // Expose DefaultQConfigs static methods
+    py::class_<DefaultQConfigs>(quant, "DefaultQConfigs")
+        .def_static("default_qconfig", &DefaultQConfigs::default_qconfig, "Default quantization config")
+        .def_static("high_accuracy_qconfig", &DefaultQConfigs::high_accuracy_qconfig, "High accuracy QConfig")
+        .def_static("fast_qconfig", &DefaultQConfigs::fast_qconfig, "Fast calibration QConfig")
+        .def_static("qat_qconfig", &DefaultQConfigs::qat_qconfig, "QAT QConfig")
+        .def_static("uint8_activation_qconfig", &DefaultQConfigs::uint8_activation_qconfig, "UINT8 activation config");
+
+    py::class_<QConfigMapping>(quant, "QConfigMapping")
+        .def(py::init<>())
+        .def("set_global", &QConfigMapping::set_global)
+        .def("set_layer_qconfig", &QConfigMapping::set_layer_qconfig)
+        .def("set_type_qconfig", &QConfigMapping::set_type_qconfig)
+        .def("get_qconfig", &QConfigMapping::get_qconfig);
+
+    // =============================================================================
+    // Quantized Layers
+    // =============================================================================
+
+    py::class_<QuantizedLinear, Module, std::shared_ptr<QuantizedLinear>>(quant, "QuantizedLinear")
+        .def(py::init<int64_t, int64_t, QuantizationParams, float>(),
+             py::arg("in_features"), py::arg("out_features"),
+             py::arg("weight_qparams"), py::arg("bias_scale") = 1.0f,
+             "INT8 quantized linear layer");
+}

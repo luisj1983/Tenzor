@@ -595,4 +595,87 @@ auto mish(const Variable& input) -> Variable {
     return output;
 }
 
+// In-place activation functions
+auto relu_(Tensor& input) -> Tensor& {
+    if (!input.is_contiguous()) {
+        throw std::runtime_error("In-place relu requires contiguous tensor");
+    }
+
+    std::vector<Tensor> inputs = {input};
+    auto result = Dispatcher::dispatch("relu_inplace", inputs);
+
+    // Result should be same tensor modified in-place
+    if (result[0].data<float>() != input.data<float>()) {
+        input = result[0];
+    }
+
+    return input;
+}
+
+auto sigmoid_(Tensor& input) -> Tensor& {
+    if (!input.is_contiguous()) {
+        throw std::runtime_error("In-place sigmoid requires contiguous tensor");
+    }
+
+    std::vector<Tensor> inputs = {input};
+    auto result = Dispatcher::dispatch("sigmoid_inplace", inputs);
+
+    // Result should be same tensor modified in-place
+    if (result[0].data<float>() != input.data<float>()) {
+        input = result[0];
+    }
+
+    return input;
+}
+
+auto tanh_(Tensor& input) -> Tensor& {
+    if (!input.is_contiguous()) {
+        throw std::runtime_error("In-place tanh requires contiguous tensor");
+    }
+
+    std::vector<Tensor> inputs = {input};
+    auto result = Dispatcher::dispatch("tanh_inplace", inputs);
+
+    // Result should be same tensor modified in-place
+    if (result[0].data<float>() != input.data<float>()) {
+        input = result[0];
+    }
+
+    return input;
+}
+
+auto leaky_relu_(Tensor& input, double negative_slope) -> Tensor& {
+    if (!input.is_contiguous()) {
+        throw std::runtime_error("In-place leaky_relu requires contiguous tensor");
+    }
+
+    std::vector<Tensor> inputs = {input};
+    OpAttributes attrs;
+    attrs["negative_slope"] = negative_slope;
+    auto result = Dispatcher::dispatch("leaky_relu_inplace", inputs, attrs);
+
+    // Result should be same tensor modified in-place
+    if (result[0].data<float>() != input.data<float>()) {
+        input = result[0];
+    }
+
+    return input;
+}
+
+auto gelu_(Tensor& input) -> Tensor& {
+    if (!input.is_contiguous()) {
+        throw std::runtime_error("In-place gelu requires contiguous tensor");
+    }
+
+    std::vector<Tensor> inputs = {input};
+    auto result = Dispatcher::dispatch("gelu_inplace", inputs);
+
+    // Result should be same tensor modified in-place
+    if (result[0].data<float>() != input.data<float>()) {
+        input = result[0];
+    }
+
+    return input;
+}
+
 } // namespace tenzor::nn

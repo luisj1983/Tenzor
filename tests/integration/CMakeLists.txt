@@ -73,6 +73,32 @@ target_link_libraries(test_optimization PRIVATE
 
 gtest_discover_tests(test_optimization DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 600)
 
+# DataParallel multi-GPU integration tests
+add_executable(test_data_parallel_integration
+    test_data_parallel.cpp
+)
+
+target_link_libraries(test_data_parallel_integration PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_data_parallel_integration DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 600)
+
+# Distributed training tests
+add_executable(test_distributed
+    test_distributed.cpp
+)
+
+target_link_libraries(test_distributed PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+# Distributed tests require special setup (multi-process environment)
+# Tests will automatically skip if RANK/WORLD_SIZE environment variables are not set
+gtest_discover_tests(test_distributed DISCOVERY_TIMEOUT 60 PROPERTIES TIMEOUT 600)
+
 # Note: Existing integration tests
 # - test_nn.cpp
 # - test_training.cpp

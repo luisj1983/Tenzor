@@ -302,4 +302,86 @@ auto ge(const Tensor& a, const Tensor& b) -> Tensor {
     return Dispatcher::dispatch("ge", inputs)[0];
 }
 
+// In-place operations
+auto add_(Tensor& self, const Tensor& other) -> Tensor& {
+    // Ensure self is contiguous for in-place modification
+    if (!self.is_contiguous()) {
+        throw std::runtime_error("In-place add requires contiguous tensor");
+    }
+
+    Tensor other_contiguous = other.is_contiguous() ? other : other.contiguous();
+    std::vector<Tensor> inputs = {self, other_contiguous};
+
+    // Dispatch to backend in-place operation
+    auto result = Dispatcher::dispatch("add_inplace", inputs);
+
+    // Result should be same tensor modified in-place
+    // Copy result data back to self if backend created new tensor
+    if (result[0].data<float>() != self.data<float>()) {
+        self = result[0];
+    }
+
+    return self;
+}
+
+auto mul_(Tensor& self, const Tensor& other) -> Tensor& {
+    // Ensure self is contiguous for in-place modification
+    if (!self.is_contiguous()) {
+        throw std::runtime_error("In-place mul requires contiguous tensor");
+    }
+
+    Tensor other_contiguous = other.is_contiguous() ? other : other.contiguous();
+    std::vector<Tensor> inputs = {self, other_contiguous};
+
+    // Dispatch to backend in-place operation
+    auto result = Dispatcher::dispatch("mul_inplace", inputs);
+
+    // Result should be same tensor modified in-place
+    if (result[0].data<float>() != self.data<float>()) {
+        self = result[0];
+    }
+
+    return self;
+}
+
+auto sub_(Tensor& self, const Tensor& other) -> Tensor& {
+    // Ensure self is contiguous for in-place modification
+    if (!self.is_contiguous()) {
+        throw std::runtime_error("In-place sub requires contiguous tensor");
+    }
+
+    Tensor other_contiguous = other.is_contiguous() ? other : other.contiguous();
+    std::vector<Tensor> inputs = {self, other_contiguous};
+
+    // Dispatch to backend in-place operation
+    auto result = Dispatcher::dispatch("sub_inplace", inputs);
+
+    // Result should be same tensor modified in-place
+    if (result[0].data<float>() != self.data<float>()) {
+        self = result[0];
+    }
+
+    return self;
+}
+
+auto div_(Tensor& self, const Tensor& other) -> Tensor& {
+    // Ensure self is contiguous for in-place modification
+    if (!self.is_contiguous()) {
+        throw std::runtime_error("In-place div requires contiguous tensor");
+    }
+
+    Tensor other_contiguous = other.is_contiguous() ? other : other.contiguous();
+    std::vector<Tensor> inputs = {self, other_contiguous};
+
+    // Dispatch to backend in-place operation
+    auto result = Dispatcher::dispatch("div_inplace", inputs);
+
+    // Result should be same tensor modified in-place
+    if (result[0].data<float>() != self.data<float>()) {
+        self = result[0];
+    }
+
+    return self;
+}
+
 } // namespace tenzor

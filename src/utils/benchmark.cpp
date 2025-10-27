@@ -9,6 +9,8 @@
 #include <cmath>
 #include <iostream>
 #include <iomanip>
+#include <sstream>
+#include <fstream>
 
 namespace tenzor {
 namespace benchmark {
@@ -140,6 +142,40 @@ auto BenchmarkResult::print() const -> void {
     std::cout << std::endl;
 }
 
+auto BenchmarkResult::to_json() const -> std::string {
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(6);
+
+    oss << "{\n";
+    oss << "  \"name\": \"" << name << "\",\n";
+    oss << "  \"stats\": {\n";
+    oss << "    \"num_runs\": " << stats.num_runs << ",\n";
+    oss << "    \"mean_ms\": " << (stats.mean * 1000.0) << ",\n";
+    oss << "    \"std_dev_ms\": " << (stats.std_dev * 1000.0) << ",\n";
+    oss << "    \"min_ms\": " << (stats.min * 1000.0) << ",\n";
+    oss << "    \"max_ms\": " << (stats.max * 1000.0) << ",\n";
+    oss << "    \"median_ms\": " << (stats.median * 1000.0) << ",\n";
+    oss << "    \"p95_ms\": " << (stats.p95 * 1000.0) << ",\n";
+    oss << "    \"p99_ms\": " << (stats.p99 * 1000.0) << "\n";
+    oss << "  }";
+
+    if (num_flops > 0) {
+        oss << ",\n  \"performance\": {\n";
+        oss << "    \"tflops\": " << tflops << ",\n";
+        oss << "    \"gflops\": " << (tflops * 1000.0) << "\n";
+        oss << "  }";
+    }
+
+    if (num_bytes > 0) {
+        oss << ",\n  \"bandwidth\": {\n";
+        oss << "    \"gbs\": " << bandwidth_gbs << "\n";
+        oss << "  }";
+    }
+
+    oss << "\n}";
+    return oss.str();
+}
+
 auto BenchmarkSuite::run_all() -> std::vector<BenchmarkResult> {
     std::vector<BenchmarkResult> results;
     results.reserve(benchmarks_.size());
@@ -187,6 +223,48 @@ auto BenchmarkSuite::print_summary(const std::vector<BenchmarkResult>& results) 
     }
 
     std::cout << std::endl;
+}
+
+auto BenchmarkSuite::export_json(const std::vector<BenchmarkResult>& results) const -> std::string {
+    std::ostringstream oss;
+    oss << "{\n";
+    oss << "  \"suite_name\": \"" << name_ << "\",\n";
+    oss << "  \"benchmarks\": [\n";
+
+    for (size_t i = 0; i < results.size(); ++i) {
+        auto json = results[i].to_json();
+        // Indent each line by 4 spaces
+        std::string indented;
+        std::istringstream iss(json);
+        std::string line;
+        while (std::getline(iss, line)) {
+            indented += "    " + line + "\n";
+        }
+        // Remove trailing newline and add to output
+        if (!indented.empty() && indented.back() == '\n') {
+            indented.pop_back();
+        }
+        oss << indented;
+
+        if (i < results.size() - 1) {
+            oss << ",";
+        }
+        oss << "\n";
+    }
+
+    oss << "  ]\n";
+    oss << "}\n";
+    return oss.str();
+}
+
+auto BenchmarkSuite::save_json(const std::vector<BenchmarkResult>& results, const std::string& filepath) const -> void {
+    std::ofstream file(filepath);
+    if (!file.is_open()) {
+        throw std::runtime_error("Failed to open file: " + filepath);
+    }
+    file << export_json(results);
+    file.close();
+    std::cout << "Benchmark results saved to: " << filepath << std::endl;
 }
 
 } // namespace benchmark

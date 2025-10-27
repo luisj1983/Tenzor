@@ -1,0 +1,5 @@
+if(EXISTS "/home/lee/Projects/Tenzor/build_oneapi/tests/test_grad_scaler[1]_tests.cmake")
+  include("/home/lee/Projects/Tenzor/build_oneapi/tests/test_grad_scaler[1]_tests.cmake")
+else()
+  add_test(test_grad_scaler_NOT_BUILT test_grad_scaler_NOT_BUILT)
+endif()
