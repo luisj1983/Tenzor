@@ -1,5 +1,5 @@
 #include <gtest/gtest.h>
-#include "tests/backend_test_fixture.hpp"
+#include "../../backend_test_fixture.hpp"
 #include <tenzor/tenzor.hpp>
 #include <cmath>
 

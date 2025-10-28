@@ -97,6 +97,14 @@ add_library(tenzor_backend_vulkan SHARED
     vulkan_utils.hpp
 )
 
+# Set target properties
+set_target_properties(tenzor_backend_vulkan PROPERTIES
+    VERSION ${PROJECT_VERSION}
+    SOVERSION 1
+    OUTPUT_NAME "tenzor_backend_vulkan"
+    PREFIX ""  # Remove 'lib' prefix on Unix
+)
+
 target_include_directories(tenzor_backend_vulkan PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${Vulkan_INCLUDE_DIRS}

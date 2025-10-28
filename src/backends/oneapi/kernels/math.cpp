@@ -7,6 +7,14 @@
 #include <oneapi/mkl.hpp>
 #endif
 
+// Forward declaration for broadcasting fallback
+namespace tenzor {
+    auto add(const Tensor& a, const Tensor& b) -> Tensor;
+    auto sub(const Tensor& a, const Tensor& b) -> Tensor;
+    auto mul(const Tensor& a, const Tensor& b) -> Tensor;
+    auto div(const Tensor& a, const Tensor& b) -> Tensor;
+}
+
 namespace tenzor {
 namespace oneapi {
 
@@ -54,8 +62,22 @@ auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
     // Validate inputs
     auto a_shape = a.shape();
     auto b_shape = b.shape();
-    if (!std::equal(a_shape.begin(), a_shape.end(), b_shape.begin(), b_shape.end())) {
-        throw std::invalid_argument("Tensor shapes must match for addition");
+
+    // Check if shapes match exactly
+    bool same_shape = std::equal(a_shape.begin(), a_shape.end(), b_shape.begin(), b_shape.end());
+
+    // If shapes don't match, fall back to CPU for broadcasting
+    // TODO: Implement proper SYCL broadcasting kernels
+    if (!same_shape) {
+        // Copy to CPU, perform operation, copy back
+        auto a_cpu = a.to(Device::cpu());
+        auto b_cpu = b.to(Device::cpu());
+
+        // CPU backend handles broadcasting
+        auto result_cpu = tenzor::add(a_cpu, b_cpu);
+
+        // Copy result back to OneAPI device
+        return result_cpu.to(a.device());
     }
 
     if (a.dtype() != b.dtype()) {
@@ -98,8 +120,16 @@ auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 auto sub_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
     auto a_shape = a.shape();
     auto b_shape = b.shape();
-    if (!std::equal(a_shape.begin(), a_shape.end(), b_shape.begin(), b_shape.end())) {
-        throw std::invalid_argument("Tensor shapes must match for subtraction");
+
+    // Check if shapes match exactly
+    bool same_shape = std::equal(a_shape.begin(), a_shape.end(), b_shape.begin(), b_shape.end());
+
+    // If shapes don't match, fall back to CPU for broadcasting
+    if (!same_shape) {
+        auto a_cpu = a.to(Device::cpu());
+        auto b_cpu = b.to(Device::cpu());
+        auto result_cpu = tenzor::sub(a_cpu, b_cpu);
+        return result_cpu.to(a.device());
     }
 
     Tensor output(std::vector<int64_t>(a.shape().begin(), a.shape().end()),
@@ -136,8 +166,16 @@ auto sub_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 auto mul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
     auto a_shape = a.shape();
     auto b_shape = b.shape();
-    if (!std::equal(a_shape.begin(), a_shape.end(), b_shape.begin(), b_shape.end())) {
-        throw std::invalid_argument("Tensor shapes must match for multiplication");
+
+    // Check if shapes match exactly
+    bool same_shape = std::equal(a_shape.begin(), a_shape.end(), b_shape.begin(), b_shape.end());
+
+    // If shapes don't match, fall back to CPU for broadcasting
+    if (!same_shape) {
+        auto a_cpu = a.to(Device::cpu());
+        auto b_cpu = b.to(Device::cpu());
+        auto result_cpu = tenzor::mul(a_cpu, b_cpu);
+        return result_cpu.to(a.device());
     }
 
     Tensor output(std::vector<int64_t>(a.shape().begin(), a.shape().end()),
@@ -174,8 +212,16 @@ auto mul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 auto div_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
     auto a_shape = a.shape();
     auto b_shape = b.shape();
-    if (!std::equal(a_shape.begin(), a_shape.end(), b_shape.begin(), b_shape.end())) {
-        throw std::invalid_argument("Tensor shapes must match for division");
+
+    // Check if shapes match exactly
+    bool same_shape = std::equal(a_shape.begin(), a_shape.end(), b_shape.begin(), b_shape.end());
+
+    // If shapes don't match, fall back to CPU for broadcasting
+    if (!same_shape) {
+        auto a_cpu = a.to(Device::cpu());
+        auto b_cpu = b.to(Device::cpu());
+        auto result_cpu = tenzor::div(a_cpu, b_cpu);
+        return result_cpu.to(a.device());
     }
 
     Tensor output(std::vector<int64_t>(a.shape().begin(), a.shape().end()),
@@ -239,6 +285,11 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
 
 #ifdef TENZOR_HAS_ONEMKL
     // Use oneMKL for optimized GEMM
+    // oneMKL GEMM: C = alpha * op(A) * op(B) + beta * C
+    // where A is (m x k), B is (k x n), C is (m x n)
+    // oneMKL uses column-major layout, so we compute C^T = B^T * A^T
+    // This means: gemm(transB, transA, n, m, k, alpha, B, ldb, A, lda, beta, C, ldc)
+
     if (a.dtype() == DType::Float32) {
         const float* a_ptr = get_data_ptr<const float>(a);
         const float* b_ptr = get_data_ptr<const float>(b);
@@ -247,11 +298,22 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
         const float alpha = 1.0f;
         const float beta = 0.0f;
 
-        oneapi::mkl::blas::gemm(queue, oneapi::mkl::transpose::nontrans,
-                                oneapi::mkl::transpose::nontrans,
-                                n, m, k,
-                                alpha, b_ptr, n, a_ptr, k,
-                                beta, out_ptr, n);
+        // oneMKL expects column-major, we have row-major
+        // For row-major C = A * B (A: m x k, B: k x n, C: m x n)
+        // Equivalent to column-major C^T = B^T * A^T
+        ::oneapi::mkl::blas::column_major::gemm(
+            queue,
+            ::oneapi::mkl::transpose::nontrans,  // B^T is not transposed (since B is already in memory as we want)
+            ::oneapi::mkl::transpose::nontrans,  // A^T is not transposed
+            n,        // number of rows of op(B) and C in column-major
+            m,        // number of columns of op(A) and C in column-major
+            k,        // number of columns of op(B) and rows of op(A)
+            alpha,
+            b_ptr, n, // B, leading dimension n
+            a_ptr, k, // A, leading dimension k
+            beta,
+            out_ptr, n // C, leading dimension n
+        );
         queue.wait();
     }
     else if (a.dtype() == DType::Float64) {
@@ -262,11 +324,17 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
         const double alpha = 1.0;
         const double beta = 0.0;
 
-        oneapi::mkl::blas::gemm(queue, oneapi::mkl::transpose::nontrans,
-                                oneapi::mkl::transpose::nontrans,
-                                n, m, k,
-                                alpha, b_ptr, n, a_ptr, k,
-                                beta, out_ptr, n);
+        ::oneapi::mkl::blas::column_major::gemm(
+            queue,
+            ::oneapi::mkl::transpose::nontrans,
+            ::oneapi::mkl::transpose::nontrans,
+            n, m, k,
+            alpha,
+            b_ptr, n,
+            a_ptr, k,
+            beta,
+            out_ptr, n
+        );
         queue.wait();
     }
     else {

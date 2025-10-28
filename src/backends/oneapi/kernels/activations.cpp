@@ -535,5 +535,129 @@ auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, 
     return grad_input;
 }
 
+// LogSoftmax activation - numerically stable version
+// log(softmax(x)) = x - max(x) - log(sum(exp(x - max(x))))
+auto log_softmax_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Tensor {
+    auto shape = input.shape();
+    if (dim < 0) {
+        dim += shape.size();
+    }
+
+    if (dim < 0 || dim >= static_cast<int64_t>(shape.size())) {
+        throw std::runtime_error("LogSoftmax dimension out of range");
+    }
+
+    Tensor output(std::vector<int64_t>(shape.begin(), shape.end()), input.dtype(), input.device());
+
+    if (input.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(input);
+        float* out_ptr = get_data_ptr<float>(output);
+
+        // Calculate dimensions
+        int64_t outer_size = 1;
+        for (int64_t i = 0; i < dim; ++i) {
+            outer_size *= shape[i];
+        }
+        int64_t dim_size = shape[dim];
+        int64_t inner_size = 1;
+        for (int64_t i = dim + 1; i < static_cast<int64_t>(shape.size()); ++i) {
+            inner_size *= shape[i];
+        }
+
+        // Process each slice along the reduction dimension
+        queue.submit([&](sycl::handler& cgh) {
+            cgh.parallel_for<class LogSoftmaxKernelFloat32>(
+                sycl::range<2>(outer_size, inner_size),
+                [=](sycl::id<2> idx) {
+                    const int64_t i = idx[0];
+                    const int64_t k = idx[1];
+
+                    // Find max for numerical stability
+                    float max_val = -std::numeric_limits<float>::infinity();
+                    for (int64_t j = 0; j < dim_size; ++j) {
+                        const int64_t index = (i * dim_size + j) * inner_size + k;
+                        max_val = sycl::max(max_val, in_ptr[index]);
+                    }
+
+                    // Compute log(sum(exp(x - max)))
+                    float sum_exp = 0.0f;
+                    for (int64_t j = 0; j < dim_size; ++j) {
+                        const int64_t index = (i * dim_size + j) * inner_size + k;
+                        sum_exp += sycl::exp(in_ptr[index] - max_val);
+                    }
+                    const float log_sum_exp = sycl::log(sum_exp);
+
+                    // Compute log_softmax = x - max - log_sum_exp
+                    for (int64_t j = 0; j < dim_size; ++j) {
+                        const int64_t index = (i * dim_size + j) * inner_size + k;
+                        out_ptr[index] = in_ptr[index] - max_val - log_sum_exp;
+                    }
+                }
+            );
+        }).wait();
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for log_softmax");
+    }
+
+    return output;
+}
+
+// LogSoftmax backward
+// grad_input = grad_output - exp(log_softmax) * sum(grad_output)
+auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, int64_t dim, sycl::queue& queue) -> Tensor {
+    auto shape = output.shape();
+    if (dim < 0) {
+        dim += shape.size();
+    }
+
+    Tensor grad_input(std::vector<int64_t>(shape.begin(), shape.end()), output.dtype(), output.device());
+
+    if (output.dtype() == DType::Float32) {
+        const float* grad_out_ptr = get_data_ptr<const float>(grad_output);
+        const float* out_ptr = get_data_ptr<const float>(output);
+        float* grad_in_ptr = get_data_ptr<float>(grad_input);
+
+        // Calculate dimensions
+        int64_t outer_size = 1;
+        for (int64_t i = 0; i < dim; ++i) {
+            outer_size *= shape[i];
+        }
+        int64_t dim_size = shape[dim];
+        int64_t inner_size = 1;
+        for (int64_t i = dim + 1; i < static_cast<int64_t>(shape.size()); ++i) {
+            inner_size *= shape[i];
+        }
+
+        queue.submit([&](sycl::handler& cgh) {
+            cgh.parallel_for<class LogSoftmaxBackwardKernelFloat32>(
+                sycl::range<2>(outer_size, inner_size),
+                [=](sycl::id<2> idx) {
+                    const int64_t i = idx[0];
+                    const int64_t k = idx[1];
+
+                    // Compute sum of gradients along dim
+                    float sum_grad = 0.0f;
+                    for (int64_t j = 0; j < dim_size; ++j) {
+                        const int64_t index = (i * dim_size + j) * inner_size + k;
+                        sum_grad += grad_out_ptr[index];
+                    }
+
+                    // Compute gradient: grad_output - exp(log_softmax) * sum_grad
+                    for (int64_t j = 0; j < dim_size; ++j) {
+                        const int64_t index = (i * dim_size + j) * inner_size + k;
+                        grad_in_ptr[index] = grad_out_ptr[index] - sycl::exp(out_ptr[index]) * sum_grad;
+                    }
+                }
+            );
+        }).wait();
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for log_softmax_backward");
+    }
+
+    return grad_input;
+}
+
 } // namespace oneapi
 } // namespace tenzor

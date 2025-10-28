@@ -40,6 +40,8 @@ namespace oneapi {
     auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::queue& queue) -> Tensor;
     auto softmax_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Tensor;
     auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, int64_t dim, sycl::queue& queue) -> Tensor;
+    auto log_softmax_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Tensor;
+    auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, int64_t dim, sycl::queue& queue) -> Tensor;
     auto leaky_relu_kernel(const Tensor& input, float alpha, sycl::queue& queue) -> Tensor;
     auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, float alpha, sycl::queue& queue) -> Tensor;
 
@@ -64,7 +66,15 @@ namespace oneapi {
     auto full_kernel(const std::vector<int64_t>& shape, float value, DType dtype, Device device, sycl::queue& queue) -> Tensor;
     auto fill_kernel(const Tensor& tensor, float value, sycl::queue& queue) -> Tensor;
 
+    // Random number generation
+    auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, sycl::queue& queue) -> Tensor;
+    auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, sycl::queue& queue) -> Tensor;
+
     // Batch normalization
+    auto batchnorm2d_mean_var(const Tensor& input, sycl::queue& queue) -> std::vector<Tensor>;
+    auto batchnorm2d_update_running_stats(Tensor& running_mean, Tensor& running_var,
+                                         const Tensor& batch_mean, const Tensor& batch_var,
+                                         float momentum, sycl::queue& queue) -> void;
     auto batchnorm2d_forward(const Tensor& input, const Tensor& mean, const Tensor& variance,
                             float epsilon, sycl::queue& queue) -> Tensor;
     auto batchnorm2d_forward_affine(const Tensor& input, const Tensor& mean, const Tensor& variance,
@@ -80,6 +90,19 @@ namespace oneapi {
                         int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
                         bool compute_grad_input, bool compute_grad_weight, bool compute_grad_bias,
                         sycl::queue& queue) -> std::tuple<Tensor, Tensor, Tensor>;
+
+    // Embedding operations
+    auto embedding_lookup_kernel(const Tensor& indices, const Tensor& weights,
+                                int64_t padding_idx, sycl::queue& queue) -> Tensor;
+    auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
+                                  int64_t vocab_size, int64_t embedding_dim,
+                                  sycl::queue& queue) -> Tensor;
+    auto embedding_bag_forward_kernel(const Tensor& embeddings, const Tensor& offsets,
+                                     const std::string& mode, bool include_last_offset,
+                                     sycl::queue& queue) -> Tensor;
+    auto embedding_renorm_kernel(Tensor& weights, const Tensor& indices,
+                                double max_norm, double norm_type,
+                                sycl::queue& queue) -> void;
 } // namespace oneapi
 
 /**
@@ -161,12 +184,17 @@ public:
         validate_device_id(device_id);
 
         try {
-            // Use USM (Unified Shared Memory) device allocation
+            // Use USM (Unified Shared Memory) shared allocation
+            // IMPORTANT: We use malloc_shared instead of malloc_device because:
+            // 1. SYCL kernels need to directly access tensor memory via raw pointers
+            // 2. Shared memory is accessible from both host and device
+            // 3. This avoids complex buffer/accessor patterns while maintaining correctness
+            // 4. Performance is comparable for most workloads on modern hardware
             auto& queue = get_queue(device_id);
-            void* ptr = sycl::malloc_device(bytes, queue);
+            void* ptr = sycl::malloc_shared(bytes, queue);
 
             if (ptr == nullptr) {
-                throw std::runtime_error("SYCL malloc_device failed");
+                throw std::runtime_error("SYCL malloc_shared failed");
             }
 
             // Track allocation for proper deallocation
@@ -412,6 +440,16 @@ public:
                 int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
                 return {oneapi::softmax_backward_kernel(inputs[0], inputs[1], dim, queue)};
             }
+            else if (op_name == "log_softmax") {
+                if (inputs.size() != 1) throw std::invalid_argument("log_softmax requires 1 input");
+                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
+                return {oneapi::log_softmax_kernel(inputs[0], dim, queue)};
+            }
+            else if (op_name == "log_softmax_backward") {
+                if (inputs.size() != 2) throw std::invalid_argument("log_softmax_backward requires 2 inputs");
+                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
+                return {oneapi::log_softmax_backward_kernel(inputs[0], inputs[1], dim, queue)};
+            }
             else if (op_name == "leaky_relu") {
                 if (inputs.size() != 1) throw std::invalid_argument("leaky_relu requires 1 input");
                 float alpha = attrs.contains("alpha") ? std::stof(attrs.at("alpha")) : 0.01f;
@@ -511,7 +549,34 @@ public:
                 return {oneapi::fill_kernel(inputs[0], value, queue)};
             }
 
+            // Random number generation
+            else if (op_name == "randn") {
+                std::vector<int64_t> shape = parse_shape(attrs.at("shape"));
+                DType dtype = parse_dtype(attrs);
+                Device device = inputs.empty() ? Device::oneapi(device_id) : inputs[0].device();
+                return {oneapi::randn_kernel(shape, dtype, device, queue)};
+            }
+            else if (op_name == "rand") {
+                std::vector<int64_t> shape = parse_shape(attrs.at("shape"));
+                DType dtype = parse_dtype(attrs);
+                Device device = inputs.empty() ? Device::oneapi(device_id) : inputs[0].device();
+                return {oneapi::rand_kernel(shape, dtype, device, queue)};
+            }
+
             // Batch normalization
+            else if (op_name == "batchnorm2d_mean_var") {
+                if (inputs.size() != 1) throw std::invalid_argument("batchnorm2d_mean_var requires 1 input");
+                return oneapi::batchnorm2d_mean_var(inputs[0], queue);
+            }
+            else if (op_name == "batchnorm2d_update_running_stats") {
+                if (inputs.size() != 4) throw std::invalid_argument("batchnorm2d_update_running_stats requires 4 inputs");
+                float momentum = attrs.contains("momentum") ? std::stof(attrs.at("momentum")) : 0.1f;
+                // Clone the running stats as we'll modify them
+                Tensor updated_mean = inputs[0].clone();
+                Tensor updated_var = inputs[1].clone();
+                oneapi::batchnorm2d_update_running_stats(updated_mean, updated_var, inputs[2], inputs[3], momentum, queue);
+                return {updated_mean, updated_var};
+            }
             else if (op_name == "batchnorm2d_forward") {
                 if (inputs.size() != 3) throw std::invalid_argument("batchnorm2d_forward requires 3 inputs");
                 float epsilon = attrs.contains("epsilon") ? std::stof(attrs.at("epsilon")) : 1e-5f;
@@ -558,6 +623,25 @@ public:
                     inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups,
                     compute_grad_input, compute_grad_weight, compute_grad_bias, queue);
                 return {grad_input, grad_weight, grad_bias};
+            }
+
+            // Embedding operations
+            else if (op_name == "embedding_lookup") {
+                if (inputs.size() != 2) throw std::invalid_argument("embedding_lookup requires 2 inputs");
+                int64_t padding_idx = attrs.contains("padding_idx") ? std::stoll(attrs.at("padding_idx")) : -1;
+                return {oneapi::embedding_lookup_kernel(inputs[0], inputs[1], padding_idx, queue)};
+            }
+            else if (op_name == "embedding_backward") {
+                if (inputs.size() != 2) throw std::invalid_argument("embedding_backward requires 2 inputs");
+                int64_t vocab_size = std::stoll(attrs.at("vocab_size"));
+                int64_t embedding_dim = std::stoll(attrs.at("embedding_dim"));
+                return {oneapi::embedding_backward_kernel(inputs[0], inputs[1], vocab_size, embedding_dim, queue)};
+            }
+            else if (op_name == "embedding_bag_forward") {
+                if (inputs.size() != 2) throw std::invalid_argument("embedding_bag_forward requires 2 inputs");
+                std::string mode = attrs.contains("mode") ? attrs.at("mode") : "mean";
+                bool include_last_offset = attrs.contains("include_last_offset") && attrs.at("include_last_offset") == "1";
+                return {oneapi::embedding_bag_forward_kernel(inputs[0], inputs[1], mode, include_last_offset, queue)};
             }
 
             else {

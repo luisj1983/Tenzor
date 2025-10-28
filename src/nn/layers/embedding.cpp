@@ -146,7 +146,14 @@ auto Embedding::forward(const Variable& input) -> Variable {
 
     const auto& input_tensor = input.tensor();
     auto input_shape = input_tensor.shape();
-    auto input_ptr = input_tensor.data<int64_t>();
+    auto target_device = input_tensor.device();
+
+    // For device tensors (OneAPI, CUDA, Vulkan), transfer to CPU for lookup
+    // This is a simple implementation; optimized version would use backend dispatch
+    bool is_device_tensor = (target_device.type != Device::Type::CPU);
+
+    Tensor input_cpu = is_device_tensor ? input_tensor.to(Device::cpu()) : input_tensor;
+    auto input_ptr = input_cpu.data<int64_t>();
 
     // Calculate total number of indices
     int64_t num_indices = 1;
@@ -164,8 +171,12 @@ auto Embedding::forward(const Variable& input) -> Variable {
 
     // Apply max_norm if specified
     if (max_norm_ > 0.0) {
-        renorm_embeddings(input_tensor);
+        renorm_embeddings(input_cpu);
     }
+
+    // Ensure weights are on CPU for lookup
+    auto weight_cpu = weight_.tensor().device().type == Device::Type::CPU ?
+                      weight_.tensor() : weight_.tensor().to(Device::cpu());
 
     // Check if gradient is needed
     if (!weight_.requires_grad() || !is_grad_enabled()) {
@@ -175,7 +186,7 @@ auto Embedding::forward(const Variable& input) -> Variable {
 
         auto output = zeros(output_shape);
         auto output_ptr = output.data<float>();
-        auto weight_ptr = weight_.tensor().data<float>();
+        auto weight_ptr = weight_cpu.data<float>();
 
         for (int64_t i = 0; i < num_indices; ++i) {
             auto idx = input_ptr[i];
@@ -184,20 +195,36 @@ auto Embedding::forward(const Variable& input) -> Variable {
             }
         }
 
+        // Transfer back to target device if needed
+        if (is_device_tensor) {
+            output = output.to(target_device);
+        }
+
         return Variable(output, false);
     }
 
     // Use EmbeddingBackward function to preserve gradient graph
-    auto grad_fn = std::make_shared<EmbeddingBackward>(input_tensor, num_embeddings_, embedding_dim_);
+    // Note: For device tensors, this uses CPU tensors internally
+    auto grad_fn = std::make_shared<EmbeddingBackward>(input_cpu, num_embeddings_, embedding_dim_);
+
+    // Create temporary weight variable on CPU if needed
+    Variable weight_for_lookup = weight_.tensor().device().type == Device::Type::CPU ?
+                                 weight_ : Variable(weight_cpu, weight_.requires_grad());
 
     // Perform forward pass
-    auto outputs = grad_fn->forward({weight_});
+    auto outputs = grad_fn->forward({weight_for_lookup});
 
     if (outputs.empty()) {
         throw std::runtime_error("EmbeddingBackward returned no outputs");
     }
 
     auto& result = outputs[0];
+
+    // Transfer result back to target device if needed
+    if (is_device_tensor) {
+        Tensor result_device = result.tensor().to(target_device);
+        result = Variable(result_device, result.requires_grad());
+    }
 
     // Set up backward graph
     std::vector<std::shared_ptr<Function>> next_funcs;

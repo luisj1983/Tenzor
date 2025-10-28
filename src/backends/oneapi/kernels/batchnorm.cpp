@@ -18,6 +18,9 @@ class BatchNorm2dBackwardGammaKernelFloat32;
 class BatchNorm2dBackwardInputKernelFloat32;
 class BatchNormScaleShiftKernelFloat32;
 class BatchNormExtractGradKernelFloat32;
+class BatchNorm2dMeanKernelFloat32;
+class BatchNorm2dVarianceKernelFloat32;
+class BatchNorm2dUpdateRunningStatsKernelFloat32;
 
 // Helper function to get typed pointer from tensor
 template<typename T>
@@ -472,6 +475,98 @@ auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const 
 }
 
 #endif // TENZOR_HAS_ONEDNN
+
+// Update running statistics: running = (1 - momentum) * running + momentum * batch
+auto batchnorm2d_update_running_stats(Tensor& running_mean, Tensor& running_var,
+                                      const Tensor& batch_mean, const Tensor& batch_var,
+                                      float momentum, sycl::queue& queue) -> void {
+    const int64_t C = batch_mean.shape()[0];
+
+    if (running_mean.dtype() == DType::Float32) {
+        float* run_mean_ptr = get_data_ptr<float>(running_mean);
+        float* run_var_ptr = get_data_ptr<float>(running_var);
+        const float* batch_mean_ptr = get_data_ptr<const float>(batch_mean);
+        const float* batch_var_ptr = get_data_ptr<const float>(batch_var);
+
+        queue.parallel_for<BatchNorm2dUpdateRunningStatsKernelFloat32>(sycl::range<1>(C), [=](sycl::id<1> c_id) {
+            const int64_t c = c_id[0];
+            run_mean_ptr[c] = (1.0f - momentum) * run_mean_ptr[c] + momentum * batch_mean_ptr[c];
+            run_var_ptr[c] = (1.0f - momentum) * run_var_ptr[c] + momentum * batch_var_ptr[c];
+        }).wait();
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for batchnorm2d_update_running_stats");
+    }
+}
+
+// Compute per-channel mean and variance
+auto batchnorm2d_mean_var(const Tensor& input, sycl::queue& queue) -> std::vector<Tensor> {
+    auto shape = input.shape();
+    if (shape.size() != 4) {
+        throw std::invalid_argument("batchnorm2d_mean_var expects 4D input (NCHW)");
+    }
+
+    const int64_t N = shape[0];
+    const int64_t C = shape[1];
+    const int64_t H = shape[2];
+    const int64_t W = shape[3];
+    const int64_t spatial = H * W;
+    const int64_t total_elements = N * spatial;
+
+    if (total_elements == 0) {
+        throw std::runtime_error("BatchNorm2d: Cannot compute mean/variance for empty tensor");
+    }
+
+    Tensor mean({C}, input.dtype(), input.device());
+    Tensor variance({C}, input.dtype(), input.device());
+
+    if (input.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(input);
+        float* mean_ptr = get_data_ptr<float>(mean);
+        float* var_ptr = get_data_ptr<float>(variance);
+
+        // Compute mean for each channel
+        queue.parallel_for<BatchNorm2dMeanKernelFloat32>(sycl::range<1>(C), [=](sycl::id<1> c_id) {
+            const int64_t c = c_id[0];
+            float sum = 0.0f;
+
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t h = 0; h < H; ++h) {
+                    for (int64_t w = 0; w < W; ++w) {
+                        const int64_t idx = ((n * C + c) * H + h) * W + w;
+                        sum += in_ptr[idx];
+                    }
+                }
+            }
+
+            mean_ptr[c] = sum / static_cast<float>(total_elements);
+        }).wait();
+
+        // Compute variance for each channel
+        queue.parallel_for<BatchNorm2dVarianceKernelFloat32>(sycl::range<1>(C), [=](sycl::id<1> c_id) {
+            const int64_t c = c_id[0];
+            const float channel_mean = mean_ptr[c];
+            float sum_sq_diff = 0.0f;
+
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t h = 0; h < H; ++h) {
+                    for (int64_t w = 0; w < W; ++w) {
+                        const int64_t idx = ((n * C + c) * H + h) * W + w;
+                        const float diff = in_ptr[idx] - channel_mean;
+                        sum_sq_diff += diff * diff;
+                    }
+                }
+            }
+
+            var_ptr[c] = sum_sq_diff / static_cast<float>(total_elements);
+        }).wait();
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for batchnorm2d_mean_var (pure SYCL)");
+    }
+
+    return {mean, variance};
+}
 
 } // namespace oneapi
 } // namespace tenzor

@@ -39,6 +39,11 @@ TEST_P(EmbeddingTest, BasicLookup) {
     input_ptr[1] = 5;
     input_ptr[2] = 9;
 
+    // Copy modified data back to device tensor
+    if (device.type != Device::Type::CPU) {
+        input_data = input_cpu.to(device);
+    }
+
     auto input = Variable(input_data, false);
 
     // Forward pass
@@ -75,6 +80,11 @@ TEST_P(EmbeddingTest, MultiDimensionalInput) {
         input_ptr[i] = i * 10;
     }
 
+    // Copy modified data back to device tensor
+    if (device.type != Device::Type::CPU) {
+        input_data = input_cpu.to(device);
+    }
+
     auto input = Variable(input_data, false);
     auto output = embedding->forward(input);
 
@@ -106,6 +116,11 @@ TEST_P(EmbeddingTest, PaddingIdx) {
     input_ptr[0] = 0;  // Padding
     input_ptr[1] = 5;
     input_ptr[2] = 0;  // Padding
+
+    // Copy modified data back to device tensor
+    if (device.type != Device::Type::CPU) {
+        input_data = input_cpu.to(device);
+    }
 
     auto input = Variable(input_data, false);
     auto output = embedding->forward(input);
@@ -149,6 +164,11 @@ TEST_P(EmbeddingTest, MaxNormRenormalization) {
     auto input_ptr = input_cpu.data<int64_t>();
     input_ptr[0] = 0;
 
+    // Copy modified data back to device tensor
+    if (device.type != Device::Type::CPU) {
+        input_data = input_cpu.to(device);
+    }
+
     auto input = Variable(input_data, false);
     auto output = embedding->forward(input);
 
@@ -173,6 +193,11 @@ TEST_P(EmbeddingTest, OutOfRangeIndex) {
     auto input_cpu = input_data.to(Device::cpu());
     auto input_ptr = input_cpu.data<int64_t>();
     input_ptr[0] = 10;  // Out of range
+
+    // Copy modified data back to device tensor
+    if (device.type != Device::Type::CPU) {
+        input_data = input_cpu.to(device);
+    }
 
     auto input = Variable(input_data, false);
 
@@ -224,6 +249,11 @@ TEST_P(EmbeddingTest, EmbeddingBagSum) {
     input_ptr[1] = 1;
     input_ptr[2] = 2;
 
+    // Copy modified data back to device tensor
+    if (device.type != Device::Type::CPU) {
+        input_data = input_cpu.to(device);
+    }
+
     auto input = Variable(input_data, false);
     auto output = embedding_bag->forward(input, Variable{});
 
@@ -261,6 +291,11 @@ TEST_P(EmbeddingTest, EmbeddingBagMean) {
     input_ptr[1] = 1;
     input_ptr[2] = 2;
 
+    // Copy modified data back to device tensor
+    if (device.type != Device::Type::CPU) {
+        input_data = input_cpu.to(device);
+    }
+
     auto input = Variable(input_data, false);
     auto output = embedding_bag->forward(input, Variable{});
 
@@ -295,6 +330,11 @@ TEST_P(EmbeddingTest, EmbeddingBagMax) {
     input_ptr[0] = 0;
     input_ptr[1] = 1;
     input_ptr[2] = 2;
+
+    // Copy modified data back to device tensor
+    if (device.type != Device::Type::CPU) {
+        input_data = input_cpu.to(device);
+    }
 
     auto input = Variable(input_data, false);
     auto output = embedding_bag->forward(input, Variable{});
@@ -333,6 +373,12 @@ TEST_P(EmbeddingTest, EmbeddingBagWithOffsets) {
     offsets_ptr[0] = 0;
     offsets_ptr[1] = 2;
     offsets_ptr[2] = 5;
+
+    // Copy modified data back to device tensor
+    if (device.type != Device::Type::CPU) {
+        input_data = input_cpu.to(device);
+        offsets_data = offsets_cpu.to(device);
+    }
 
     auto input = Variable(input_data, false);
     auto offsets = Variable(offsets_data, false);

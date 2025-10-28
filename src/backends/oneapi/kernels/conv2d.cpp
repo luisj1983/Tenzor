@@ -402,10 +402,10 @@ auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
             const int64_t N_gemm = H_out * W_out;
             const int64_t K = C_in * K_h * K_w;
 
-            oneapi::mkl::blas::gemm(
+            ::oneapi::mkl::blas::gemm(
                 queue,
-                oneapi::mkl::transpose::nontrans,
-                oneapi::mkl::transpose::nontrans,
+                ::oneapi::mkl::transpose::nontrans,
+                ::oneapi::mkl::transpose::nontrans,
                 N_gemm, M, K,
                 1.0f,
                 col_ptr, N_gemm,
@@ -505,10 +505,10 @@ auto conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tenso
             const int64_t N_gemm = H_out * W_out;
             const int64_t K = C_out;
 
-            oneapi::mkl::blas::gemm(
+            ::oneapi::mkl::blas::gemm(
                 queue,
-                oneapi::mkl::transpose::nontrans,
-                oneapi::mkl::transpose::trans,
+                ::oneapi::mkl::transpose::nontrans,
+                ::oneapi::mkl::transpose::trans,
                 N_gemm, M, K,
                 1.0f,
                 grad_out_batch, N_gemm,
@@ -575,10 +575,10 @@ auto conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tenso
             const int64_t N_gemm = C_in * K_h * K_w;
             const int64_t K = H_out * W_out;
 
-            oneapi::mkl::blas::gemm(
+            ::oneapi::mkl::blas::gemm(
                 queue,
-                oneapi::mkl::transpose::trans,
-                oneapi::mkl::transpose::nontrans,
+                ::oneapi::mkl::transpose::trans,
+                ::oneapi::mkl::transpose::nontrans,
                 N_gemm, M, K,
                 1.0f,
                 col_ptr, K,

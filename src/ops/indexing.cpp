@@ -102,6 +102,21 @@ auto nonzero(const Tensor& input) -> Tensor {
 }
 
 auto select(const Tensor& input, int64_t dim, int64_t index) -> Tensor {
+    // Normalize dimension
+    int64_t ndim = input.ndim();
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::out_of_range("Dimension out of range for select");
+    }
+
+    // Normalize and validate index
+    int64_t dim_size = input.shape()[dim];
+    if (index < 0) index += dim_size;
+    if (index < 0 || index >= dim_size) {
+        throw std::out_of_range("Index out of range for select: index=" + std::to_string(index) +
+                               ", dimension size=" + std::to_string(dim_size));
+    }
+
     // Use slice to get the single element, then squeeze to remove the dimension
     auto sliced = input.slice(dim, index, index + 1, 1);
     return sliced.squeeze(dim);

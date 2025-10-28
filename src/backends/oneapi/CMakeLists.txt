@@ -26,10 +26,12 @@ set(ONEAPI_BACKEND_SOURCES
     kernels/activations.cpp
     kernels/reduction.cpp
     kernels/transform.cpp
+    kernels/creation.cpp
     kernels/batchnorm.cpp
     kernels/conv2d.cpp
     kernels/pooling.cpp
     kernels/indexing.cpp
+    kernels/embedding.cpp
 )
 
 # Separate SYCL kernel sources from C++ backend source
@@ -39,10 +41,12 @@ set(ONEAPI_SYCL_SOURCES
     kernels/activations.cpp
     kernels/reduction.cpp
     kernels/transform.cpp
+    kernels/creation.cpp
     kernels/batchnorm.cpp
     kernels/conv2d.cpp
     kernels/pooling.cpp
     kernels/indexing.cpp
+    kernels/embedding.cpp
 )
 
 set(ONEAPI_BACKEND_SOURCE
@@ -69,6 +73,12 @@ foreach(SRC ${ONEAPI_SYCL_SOURCES})
     set(OBJ_FILE "${CMAKE_CURRENT_BINARY_DIR}/${OBJ_NAME}.o")
     list(APPEND SYCL_OBJECTS ${OBJ_FILE})
 
+    # Prepare MKL compile flags
+    set(MKL_COMPILE_FLAGS "")
+    if(MKL_FOUND)
+        set(MKL_COMPILE_FLAGS "-DTENZOR_HAS_ONEMKL -I/opt/intel/oneapi/2025.2/include")
+    endif()
+
     add_custom_command(
         OUTPUT ${OBJ_FILE}
         COMMAND ${ICPX_COMPILER}
@@ -78,6 +88,7 @@ foreach(SRC ${ONEAPI_SYCL_SOURCES})
             -fsycl -fsycl-targets=${SYCL_TARGET_ARCH}
             -O3
             -I${CMAKE_SOURCE_DIR}/include
+            ${MKL_COMPILE_FLAGS}
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${SRC}
         COMMENT "Compiling SYCL kernel: ${SRC}"
         VERBATIM
@@ -130,6 +141,12 @@ target_compile_options(tenzor_backend_oneapi PRIVATE
     -fopenmp
     -DTENZOR_ONEAPI_BACKEND
 )
+
+# Add MKL definitions if available
+if(MKL_FOUND)
+    target_compile_definitions(tenzor_backend_oneapi PRIVATE TENZOR_HAS_ONEMKL)
+    target_include_directories(tenzor_backend_oneapi PRIVATE /opt/intel/oneapi/2025.2/include)
+endif()
 
 # Include directories
 target_include_directories(tenzor_backend_oneapi PRIVATE

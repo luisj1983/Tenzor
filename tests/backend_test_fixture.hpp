@@ -21,8 +21,15 @@ namespace testing {
 class BackendTest : public ::testing::TestWithParam<std::string> {
 protected:
     Device device;
+    static bool initialized;
 
     void SetUp() override {
+        // Initialize Tenzor library and load backends (only once)
+        if (!initialized) {
+            tenzor::initialize();
+            initialized = true;
+        }
+
         std::string backend_name = GetParam();
 
         if (backend_name == "cpu") {
@@ -80,6 +87,9 @@ protected:
         }
     }
 };
+
+// Define static member with inline to avoid multiple definition errors
+inline bool BackendTest::initialized = false;
 
 // Instantiate tests for all available backends
 #define INSTANTIATE_BACKEND_TESTS(TestSuiteName) \

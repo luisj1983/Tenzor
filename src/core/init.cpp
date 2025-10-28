@@ -1086,7 +1086,7 @@ auto initialize() -> void {
     }
 
     // Try to load Vulkan backend if available
-    std::filesystem::path vulkan_backend_path = bin_path / "libtenzor_backend_vulkan.so";
+    std::filesystem::path vulkan_backend_path = bin_path / "tenzor_backend_vulkan.so";
 
     if (std::filesystem::exists(vulkan_backend_path)) {
         std::cout << "Loading Vulkan backend from: " << vulkan_backend_path << std::endl;
