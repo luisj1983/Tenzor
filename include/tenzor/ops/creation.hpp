@@ -254,6 +254,15 @@ auto rand_like(const Tensor& tensor) -> Tensor;
  */
 auto randn_like(const Tensor& tensor) -> Tensor;
 
+/**
+ * @brief Set the seed for random number generation.
+ * @param seed Seed value for reproducible random tensors
+ *
+ * Sets the seed for rand() and randn() operations to enable reproducible
+ * random tensor generation across multiple runs.
+ */
+void manual_seed(unsigned int seed);
+
 /** @} */ // end of tensor_creation group
 
 } // namespace tenzor

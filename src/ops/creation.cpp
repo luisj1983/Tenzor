@@ -10,6 +10,20 @@
 
 namespace tenzor {
 
+// Global random number generator for reproducible randomness
+static std::random_device rd;
+static std::mt19937 global_rng(rd());
+
+// Function to access the global RNG
+static std::mt19937& get_rng() {
+    return global_rng;
+}
+
+// Public function to set the random seed
+void manual_seed(unsigned int seed) {
+    global_rng.seed(seed);
+}
+
 // Helper function to convert shape vector to comma-separated string
 static auto shape_to_string(const std::vector<int64_t>& shape) -> std::string {
     std::ostringstream oss;
@@ -204,9 +218,8 @@ auto rand(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
     size_t numel = tensor.numel();
     void* data = tensor.impl()->storage->data();
 
-    // Random number generator
-    static std::random_device rd;
-    static std::mt19937 gen(rd());
+    // Use global random number generator (can be seeded via manual_seed)
+    auto& gen = get_rng();
 
     // Fill with uniform random values based on dtype
     switch (dtype) {
@@ -255,9 +268,8 @@ auto randn(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
     size_t numel = tensor.numel();
     void* data = tensor.impl()->storage->data();
 
-    // Random number generator
-    static std::random_device rd;
-    static std::mt19937 gen(rd());
+    // Use global random number generator (can be seeded via manual_seed)
+    auto& gen = get_rng();
 
     // Fill with normal random values N(0,1) based on dtype
     switch (dtype) {
@@ -498,8 +510,7 @@ auto randperm(int64_t n, Device device) -> Tensor {
     // For CPU, shuffle in place
     if (device.type == Device::Type::CPU) {
         auto data = tensor.data<int64_t>();
-        std::random_device rd;
-        std::mt19937 gen(rd());
+        auto& gen = get_rng();
         std::shuffle(data, data + n, gen);
     } else {
         // For other devices, would need backend-specific implementation
