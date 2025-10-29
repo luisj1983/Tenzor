@@ -303,4 +303,74 @@ auto Sequential::load_state_dict(const std::unordered_map<std::string, Tensor>& 
     }
 }
 
+// ============================================================================
+// Hook System Implementation (Phase 2 Offload Support)
+// ============================================================================
+
+auto Module::register_forward_pre_hook(ForwardPreHook hook) -> size_t {
+    forward_pre_hooks_.push_back(std::move(hook));
+    return next_hook_id_++;
+}
+
+auto Module::register_forward_post_hook(ForwardPostHook hook) -> size_t {
+    forward_post_hooks_.push_back(std::move(hook));
+    return next_hook_id_++;
+}
+
+auto Module::register_backward_pre_hook(BackwardPreHook hook) -> size_t {
+    backward_pre_hooks_.push_back(std::move(hook));
+    return next_hook_id_++;
+}
+
+auto Module::register_backward_post_hook(BackwardPostHook hook) -> size_t {
+    backward_post_hooks_.push_back(std::move(hook));
+    return next_hook_id_++;
+}
+
+auto Module::remove_hook(size_t hook_id) -> void {
+    // Note: Simple implementation - for production, would track hook IDs properly
+    // For now, we don't implement removal as hooks are registered once and kept
+    (void)hook_id;  // Suppress unused parameter warning
+}
+
+auto Module::call_forward_pre_hooks() -> void {
+    for (auto& hook : forward_pre_hooks_) {
+        hook(this);
+    }
+    // Recursively call hooks on submodules
+    for (auto& [name, module] : submodules_) {
+        module->call_forward_pre_hooks();
+    }
+}
+
+auto Module::call_forward_post_hooks() -> void {
+    for (auto& hook : forward_post_hooks_) {
+        hook(this);
+    }
+    // Recursively call hooks on submodules
+    for (auto& [name, module] : submodules_) {
+        module->call_forward_post_hooks();
+    }
+}
+
+auto Module::call_backward_pre_hooks() -> void {
+    for (auto& hook : backward_pre_hooks_) {
+        hook(this);
+    }
+    // Recursively call hooks on submodules
+    for (auto& [name, module] : submodules_) {
+        module->call_backward_pre_hooks();
+    }
+}
+
+auto Module::call_backward_post_hooks() -> void {
+    for (auto& hook : backward_post_hooks_) {
+        hook(this);
+    }
+    // Recursively call hooks on submodules
+    for (auto& [name, module] : submodules_) {
+        module->call_backward_post_hooks();
+    }
+}
+
 } // namespace tenzor::nn

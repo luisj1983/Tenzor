@@ -66,12 +66,16 @@ public:
      * @brief Convenience operator for forward pass.
      *
      * Allows calling module like a function: output = module(input)
+     * Automatically calls forward pre-hooks and post-hooks.
      *
      * @param input Input variable
      * @return Output variable
      */
     auto operator()(const Variable& input) -> Variable {
-        return forward(input);
+        call_forward_pre_hooks();
+        auto output = forward(input);
+        call_forward_post_hooks();
+        return output;
     }
 
     // ============================================================================
@@ -124,6 +128,15 @@ public:
      */
     auto named_buffers() -> std::vector<std::pair<std::string, std::shared_ptr<Variable>>>;
 
+    /**
+     * @brief Get all direct submodules.
+     *
+     * @return Map of (name -> submodule) pairs
+     */
+    auto get_submodules() const -> const std::unordered_map<std::string, std::shared_ptr<Module>>& {
+        return submodules_;
+    }
+
     // ============================================================================
     // Training Mode
     // ============================================================================
@@ -159,6 +172,93 @@ public:
      * @return true if in training mode
      */
     auto is_training() const -> bool { return training_; }
+
+    // ============================================================================
+    // Hook System (for Phase 2 Offload Support)
+    // ============================================================================
+
+    /**
+     * @brief Hook function types for forward and backward passes.
+     */
+    using ForwardPreHook = std::function<void(Module*)>;
+    using ForwardPostHook = std::function<void(Module*)>;
+    using BackwardPreHook = std::function<void(Module*)>;
+    using BackwardPostHook = std::function<void(Module*)>;
+
+    /**
+     * @brief Register a forward pre-hook.
+     *
+     * Hook is called before forward() executes. Useful for parameter prefetching.
+     *
+     * @param hook Function to call before forward pass
+     * @return Hook ID for later removal
+     */
+    auto register_forward_pre_hook(ForwardPreHook hook) -> size_t;
+
+    /**
+     * @brief Register a forward post-hook.
+     *
+     * Hook is called after forward() executes. Useful for parameter offloading.
+     *
+     * @param hook Function to call after forward pass
+     * @return Hook ID for later removal
+     */
+    auto register_forward_post_hook(ForwardPostHook hook) -> size_t;
+
+    /**
+     * @brief Register a backward pre-hook.
+     *
+     * Hook is called before backward pass. Useful for gradient prefetching.
+     *
+     * @param hook Function to call before backward pass
+     * @return Hook ID for later removal
+     */
+    auto register_backward_pre_hook(BackwardPreHook hook) -> size_t;
+
+    /**
+     * @brief Register a backward post-hook.
+     *
+     * Hook is called after backward pass. Useful for gradient offloading.
+     *
+     * @param hook Function to call after backward pass
+     * @return Hook ID for later removal
+     */
+    auto register_backward_post_hook(BackwardPostHook hook) -> size_t;
+
+    /**
+     * @brief Remove a registered hook by ID.
+     *
+     * @param hook_id ID returned from register_*_hook()
+     */
+    auto remove_hook(size_t hook_id) -> void;
+
+    /**
+     * @brief Call all registered forward pre-hooks.
+     *
+     * Called internally before forward() execution.
+     */
+    auto call_forward_pre_hooks() -> void;
+
+    /**
+     * @brief Call all registered forward post-hooks.
+     *
+     * Called internally after forward() execution.
+     */
+    auto call_forward_post_hooks() -> void;
+
+    /**
+     * @brief Call all registered backward pre-hooks.
+     *
+     * Called before backward pass execution.
+     */
+    auto call_backward_pre_hooks() -> void;
+
+    /**
+     * @brief Call all registered backward post-hooks.
+     *
+     * Called after backward pass execution.
+     */
+    auto call_backward_post_hooks() -> void;
 
     // ============================================================================
     // Device Management
@@ -280,6 +380,13 @@ protected:
     std::unordered_map<std::string, std::shared_ptr<Variable>> parameters_;       ///< Named parameters (stable addresses)
     std::unordered_map<std::string, std::shared_ptr<Variable>> buffers_;          ///< Named buffers (stable addresses)
     std::unordered_map<std::string, std::shared_ptr<Module>> submodules_;         ///< Named submodules
+
+    // Hook system storage
+    std::vector<ForwardPreHook> forward_pre_hooks_;                               ///< Forward pre-hooks
+    std::vector<ForwardPostHook> forward_post_hooks_;                             ///< Forward post-hooks
+    std::vector<BackwardPreHook> backward_pre_hooks_;                             ///< Backward pre-hooks
+    std::vector<BackwardPostHook> backward_post_hooks_;                           ///< Backward post-hooks
+    size_t next_hook_id_{0};                                                      ///< Next hook ID for tracking
 };
 
 /**

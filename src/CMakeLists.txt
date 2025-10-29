@@ -10,6 +10,7 @@ set(TENZOR_CORE_SOURCES
     core/memory_manager.cpp
     core/transfer_engine.cpp
     core/pinned_allocator.cpp
+    core/offload_engine.cpp
     backend/backend.cpp
     backend/loader.cpp
     backend/registry.cpp
@@ -71,6 +72,7 @@ set(TENZOR_CORE_SOURCES
     nn/callbacks.cpp
     nn/training.cpp
     nn/mixed_precision.cpp
+    nn/offload.cpp
     nn/amp/grad_scaler.cpp
     nn/amp/autocast.cpp
     nn/parallel/data_parallel.cpp

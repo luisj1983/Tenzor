@@ -191,6 +191,16 @@ target_link_libraries(test_losses_advanced PRIVATE
     GTest::gtest_main
 )
 
+# Offload tests (ZeRO Stage 2 Parameter Offloading)
+add_executable(test_offload
+    nn/test_offload.cpp
+)
+
+target_link_libraries(test_offload PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
 # RNN tests
 add_executable(test_rnn
     unit/test_rnn.cpp
@@ -483,6 +493,44 @@ if(TENZOR_BUILD_CUDA)
         TENZOR_CUDA_ENABLED
     )
 
+    # Phase 2: Offload Engine tests
+    add_executable(test_offload_engine
+        core/test_offload_engine.cpp
+    )
+
+    target_link_libraries(test_offload_engine PRIVATE
+        tenzor_core
+        GTest::gtest_main
+        CUDA::cudart
+    )
+
+    target_include_directories(test_offload_engine PRIVATE
+        ${CUDAToolkit_INCLUDE_DIRS}
+    )
+
+    target_compile_definitions(test_offload_engine PRIVATE
+        TENZOR_CUDA_ENABLED
+    )
+
+    # Phase 2: Parameter Offloading API tests
+    add_executable(test_parameter_offload
+        nn/test_offload.cpp
+    )
+
+    target_link_libraries(test_parameter_offload PRIVATE
+        tenzor_core
+        GTest::gtest_main
+        CUDA::cudart
+    )
+
+    target_include_directories(test_parameter_offload PRIVATE
+        ${CUDAToolkit_INCLUDE_DIRS}
+    )
+
+    target_compile_definitions(test_parameter_offload PRIVATE
+        TENZOR_CUDA_ENABLED
+    )
+
     # DataParallel tests (requires CUDA)
     add_executable(test_data_parallel
         unit/test_data_parallel.cpp
@@ -754,6 +802,8 @@ if(TENZOR_BUILD_CUDA)
     gtest_discover_tests(test_pinned_allocator DISCOVERY_TIMEOUT 30)
     gtest_discover_tests(test_transfer_engine DISCOVERY_TIMEOUT 30)
     gtest_discover_tests(test_transfer_benchmark DISCOVERY_TIMEOUT 30)
+    gtest_discover_tests(test_offload_engine DISCOVERY_TIMEOUT 30)
+    gtest_discover_tests(test_parameter_offload DISCOVERY_TIMEOUT 30)
     gtest_discover_tests(test_cuda_kernels DISCOVERY_TIMEOUT 30)
     gtest_discover_tests(test_cuda_training DISCOVERY_TIMEOUT 30)
     gtest_discover_tests(test_data_parallel DISCOVERY_TIMEOUT 30)
