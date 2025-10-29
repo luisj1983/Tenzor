@@ -17,18 +17,18 @@ namespace tenzor::core {
 
 namespace {
 
+#ifdef TENZOR_USE_CUDA
 /**
  * @brief Check CUDA error and throw exception if failed
  */
 inline auto check_cuda_error(cudaError_t error, const char* msg) -> void {
-#ifdef TENZOR_USE_CUDA
     if (error != cudaSuccess) {
         std::ostringstream oss;
         oss << "CUDA Error in " << msg << ": " << cudaGetErrorString(error);
         throw std::runtime_error(oss.str());
     }
-#endif
 }
+#endif
 
 /**
  * @brief Align size to alignment boundary

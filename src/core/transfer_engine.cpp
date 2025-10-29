@@ -108,8 +108,11 @@ auto TransferHandle::wait() -> void {
     std::unique_lock lock(state_->mutex);
     state_->cv.wait(lock, [this] {
         // Wake up if completed OR if event has been set
-        return state_->completed.load(std::memory_order_acquire) ||
-               (state_->event != nullptr);
+        return state_->completed.load(std::memory_order_acquire)
+#ifdef TENZOR_USE_CUDA
+               || (state_->event != nullptr)
+#endif
+               ;
     });
 
 #ifdef TENZOR_USE_CUDA
