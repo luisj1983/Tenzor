@@ -131,6 +131,46 @@ target_link_libraries(test_schedulers PRIVATE
     GTest::gtest_main
 )
 
+# ZeRO Stage 1 Optimizer tests (Phase 4)
+add_executable(test_zero_stage1
+    nn/optim/test_zero_stage1.cpp
+)
+
+target_link_libraries(test_zero_stage1 PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+# ZeRO Stage 1 Integration tests
+add_executable(test_zero_stage1_integration
+    nn/optim/test_zero_stage1_integration.cpp
+)
+
+target_link_libraries(test_zero_stage1_integration PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+# ZeRO Stage 1 Distributed tests
+add_executable(test_zero_stage1_distributed
+    nn/optim/test_zero_stage1_distributed.cpp
+)
+
+target_link_libraries(test_zero_stage1_distributed PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+# Minimal training test (debugging NaN issue)
+add_executable(test_minimal_training
+    test_minimal_training.cpp
+)
+
+target_link_libraries(test_minimal_training PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
 # Normalization tests
 add_executable(test_normalization
     nn/layers/test_normalization.cpp

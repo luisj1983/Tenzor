@@ -230,6 +230,9 @@ private:
     std::vector<Tensor> gradient_buffers_;          ///< Buffers for gradient all-reduce
     std::vector<Tensor> param_buffers_;             ///< Buffers for parameter all-gather
 
+    // Optimizer state
+    int64_t step_count_{0};                         ///< Step counter for bias correction
+
     // Synchronization
     mutable std::mutex mutex_;                      ///< Thread safety
 
@@ -279,6 +282,59 @@ private:
      * Calls base optimizer step() on local partition only.
      */
     auto update_local_partition() -> void;
+
+    /**
+     * @brief Apply Adam update algorithm to partition
+     *
+     * @param partition State partition to update
+     * @param lr Learning rate
+     * @param beta1 First moment decay rate
+     * @param beta2 Second moment decay rate
+     * @param eps Numerical stability constant
+     * @param weight_decay Weight decay coefficient
+     */
+    auto update_partition_adam(
+        StatePartition& partition,
+        double lr,
+        double beta1,
+        double beta2,
+        double eps,
+        double weight_decay
+    ) -> void;
+
+    /**
+     * @brief Apply AdamW update algorithm to partition
+     *
+     * @param partition State partition to update
+     * @param lr Learning rate
+     * @param beta1 First moment decay rate
+     * @param beta2 Second moment decay rate
+     * @param eps Numerical stability constant
+     * @param weight_decay Weight decay coefficient (decoupled)
+     */
+    auto update_partition_adamw(
+        StatePartition& partition,
+        double lr,
+        double beta1,
+        double beta2,
+        double eps,
+        double weight_decay
+    ) -> void;
+
+    /**
+     * @brief Apply SGD update algorithm to partition
+     *
+     * @param partition State partition to update
+     * @param lr Learning rate
+     * @param momentum_coef Momentum coefficient
+     * @param weight_decay Weight decay coefficient
+     */
+    auto update_partition_sgd(
+        StatePartition& partition,
+        double lr,
+        double momentum_coef,
+        double weight_decay
+    ) -> void;
 
     /**
      * @brief Fetch optimizer states from CPU to GPU (if offloaded)

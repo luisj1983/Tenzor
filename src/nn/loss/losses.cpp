@@ -104,37 +104,43 @@ auto CrossEntropyLoss::forward(const Variable& input, const Tensor& target) -> V
     // Use the log_softmax function from activations
     auto log_probs = nn::log_softmax(input, 1);  // Compute log_softmax along dim=1
 
-    // Gather the log probabilities for the target classes
+    // Create one-hot encoded target for proper gradient flow
     // target contains class indices (Int64), log_probs has shape [N, C]
     auto batch_size = input.tensor().shape()[0];
     auto num_classes = input.tensor().shape()[1];
 
-    // Manual gather: select log_probs[i, target[i]] for each i
-    auto loss_per_sample_tensor = tenzor::zeros({batch_size}, input.tensor().dtype(), input.tensor().device());
-    auto* loss_data = loss_per_sample_tensor.data<float>();
+    // Create one-hot tensor
+    auto one_hot = tenzor::zeros({batch_size, num_classes}, input.tensor().dtype(), input.tensor().device());
+    auto* one_hot_data = one_hot.data<float>();
     const int64_t* target_data = target.data<int64_t>();
 
     for (int64_t i = 0; i < batch_size; ++i) {
         int64_t class_idx = target_data[i];
-        auto log_prob_i = tenzor::select(log_probs.tensor(), 0, i);  // Get row i
-        auto log_prob_class = tenzor::select(log_prob_i, 0, class_idx);  // Get element at class_idx
-        loss_data[i] = -log_prob_class.template item<float>();  // Negative log likelihood
+        one_hot_data[i * num_classes + class_idx] = 1.0f;
     }
 
-    auto loss_per_sample = Variable(loss_per_sample_tensor, true);
-    loss_per_sample.set_grad_fn(log_probs.grad_fn());
+    // Convert to Variable for autograd
+    auto one_hot_var = Variable(one_hot, false);  // Don't need gradients w.r.t. targets
 
-    auto neg_loss = loss_per_sample;
+    // Compute element-wise product: log_probs * one_hot
+    // This selects the log probability for the correct class
+    auto selected_log_probs = log_probs * one_hot_var;
+
+    // Sum across classes (dim=1) to get the selected log prob for each sample
+    auto selected = sum(selected_log_probs, 1, false);  // Shape: [batch_size]
+
+    // Negative for NLL
+    auto neg_selected = neg(selected);
 
     switch (reduction_) {
         case Reduction::None:
-            return neg_loss;
+            return neg_selected;
         case Reduction::Mean:
-            return mean(neg_loss);
+            return mean(neg_selected);
         case Reduction::Sum:
-            return sum(neg_loss);
+            return sum(neg_selected);
     }
-    return neg_loss;
+    return neg_selected;
 }
 
 // NLLLoss implementation
