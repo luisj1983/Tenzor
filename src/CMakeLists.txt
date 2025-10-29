@@ -7,6 +7,9 @@ set(TENZOR_CORE_SOURCES
     core/shape.cpp
     core/init.cpp
     core/caching_allocator.cpp
+    core/memory_manager.cpp
+    core/transfer_engine.cpp
+    core/pinned_allocator.cpp
     backend/backend.cpp
     backend/loader.cpp
     backend/registry.cpp

@@ -407,6 +407,82 @@ gtest_discover_tests(test_caching_allocator DISCOVERY_TIMEOUT 30)
 if(TENZOR_BUILD_CUDA)
     find_package(CUDAToolkit REQUIRED)
 
+    # Memory Manager tests (ZeRO Phase 1)
+    add_executable(test_memory_manager
+        core/test_memory_manager.cpp
+    )
+
+    target_link_libraries(test_memory_manager PRIVATE
+        tenzor_core
+        GTest::gtest_main
+        CUDA::cudart
+    )
+
+    target_include_directories(test_memory_manager PRIVATE
+        ${CUDAToolkit_INCLUDE_DIRS}
+    )
+
+    target_compile_definitions(test_memory_manager PRIVATE
+        TENZOR_CUDA_ENABLED
+    )
+
+    # Transfer Engine tests (ZeRO Phase 1)
+    add_executable(test_transfer_engine
+        core/test_transfer_engine.cpp
+    )
+
+    target_link_libraries(test_transfer_engine PRIVATE
+        tenzor_core
+        GTest::gtest_main
+        CUDA::cudart
+    )
+
+    target_include_directories(test_transfer_engine PRIVATE
+        ${CUDAToolkit_INCLUDE_DIRS}
+    )
+
+    target_compile_definitions(test_transfer_engine PRIVATE
+        TENZOR_CUDA_ENABLED
+    )
+
+    # Pinned Allocator tests (ZeRO Phase 1)
+    add_executable(test_pinned_allocator
+        core/test_pinned_allocator.cpp
+    )
+
+    target_link_libraries(test_pinned_allocator PRIVATE
+        tenzor_core
+        GTest::gtest_main
+        CUDA::cudart
+    )
+
+    target_include_directories(test_pinned_allocator PRIVATE
+        ${CUDAToolkit_INCLUDE_DIRS}
+    )
+
+    target_compile_definitions(test_pinned_allocator PRIVATE
+        TENZOR_CUDA_ENABLED
+    )
+
+    # Transfer Bandwidth Benchmark (ZeRO Phase 1)
+    add_executable(test_transfer_benchmark
+        core/test_transfer_benchmark.cpp
+    )
+
+    target_link_libraries(test_transfer_benchmark PRIVATE
+        tenzor_core
+        GTest::gtest_main
+        CUDA::cudart
+    )
+
+    target_include_directories(test_transfer_benchmark PRIVATE
+        ${CUDAToolkit_INCLUDE_DIRS}
+    )
+
+    target_compile_definitions(test_transfer_benchmark PRIVATE
+        TENZOR_CUDA_ENABLED
+    )
+
     # DataParallel tests (requires CUDA)
     add_executable(test_data_parallel
         unit/test_data_parallel.cpp
@@ -674,6 +750,10 @@ target_link_libraries(debug_dataloader PRIVATE
 
 if(TENZOR_BUILD_CUDA)
     # CUDA tests with thread-safe handle management - can run in parallel
+    gtest_discover_tests(test_memory_manager DISCOVERY_TIMEOUT 30)
+    gtest_discover_tests(test_pinned_allocator DISCOVERY_TIMEOUT 30)
+    gtest_discover_tests(test_transfer_engine DISCOVERY_TIMEOUT 30)
+    gtest_discover_tests(test_transfer_benchmark DISCOVERY_TIMEOUT 30)
     gtest_discover_tests(test_cuda_kernels DISCOVERY_TIMEOUT 30)
     gtest_discover_tests(test_cuda_training DISCOVERY_TIMEOUT 30)
     gtest_discover_tests(test_data_parallel DISCOVERY_TIMEOUT 30)
