@@ -169,6 +169,16 @@ private:
     auto connect_to_rank(int peer_rank) -> std::shared_ptr<TCPConnection>;
 
     /**
+     * @brief Write port to file-based rendezvous store.
+     */
+    auto write_port_to_store(int rank, int port) -> void;
+
+    /**
+     * @brief Read port from file-based rendezvous store.
+     */
+    auto read_port_from_store(int rank) -> int;
+
+    /**
      * @brief Send tensor data to peer.
      */
     auto send_tensor(const Tensor& tensor, int peer_rank) -> void;

@@ -7,7 +7,7 @@
 #include <tenzor/tenzor.hpp>
 #include <tenzor/nn/parallel/distributed_data_parallel.hpp>
 #include <tenzor/nn/layers/linear.hpp>
-#include <tenzor/nn/activation.hpp>
+#include <tenzor/nn/activations/activations.hpp>
 #include <memory>
 
 using namespace tenzor;

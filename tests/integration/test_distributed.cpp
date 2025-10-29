@@ -7,6 +7,7 @@
  */
 
 #include <gtest/gtest.h>
+#include "tenzor/tenzor.hpp"  // For tenzor::initialize()
 #include "tenzor/distributed/distributed.hpp"
 #include "tenzor/distributed/nccl_backend.hpp"
 #include "tenzor/distributed/gloo_backend.hpp"
@@ -25,6 +26,11 @@ using namespace tenzor::distributed;
 
 class DistributedTestBase : public ::testing::Test {
 protected:
+    static void SetUpTestSuite() {
+        // Initialize Tenzor backend system (required for tensor operations)
+        tenzor::initialize();
+    }
+
     void SetUp() override {
         // Check if distributed environment is available
         rank_env_ = std::getenv("RANK");
@@ -56,6 +62,12 @@ protected:
 
 class GlooBackendTest : public DistributedTestBase {
 protected:
+    static void SetUpTestSuite() {
+        // Ensure Tenzor backend is initialized for Gloo tests
+        tenzor::initialize();
+        std::cout << "[GlooBackendTest] Backend initialized" << std::endl;
+    }
+
     void SetUp() override {
         DistributedTestBase::SetUp();
         if (!::testing::Test::IsSkipped()) {
@@ -67,6 +79,12 @@ protected:
 #if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
 class NCCLBackendTest : public DistributedTestBase {
 protected:
+    static void SetUpTestSuite() {
+        // Ensure Tenzor backend is initialized for NCCL tests
+        tenzor::initialize();
+        std::cout << "[NCCLBackendTest] Backend initialized" << std::endl;
+    }
+
     void SetUp() override {
         DistributedTestBase::SetUp();
         if (!::testing::Test::IsSkipped()) {

@@ -201,6 +201,13 @@ target_link_libraries(test_offload PRIVATE
     GTest::gtest_main
 )
 
+# Note: Distributed tests for Phase 3 (collective operations) are in
+# integration/test_distributed.cpp and built via integration/CMakeLists.txt
+# as the 'test_distributed' target.
+#
+# The nn/test_distributed.cpp file tests Phase 4+ features (DistributedDataParallel,
+# GradientBucket) that are not yet implemented and will be added in future phases.
+
 # RNN tests
 add_executable(test_rnn
     unit/test_rnn.cpp

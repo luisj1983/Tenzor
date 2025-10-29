@@ -213,13 +213,154 @@ auto NCCLBackend::all_gather(const Tensor& tensor, std::vector<Tensor>& output) 
 }
 
 auto NCCLBackend::gather(const Tensor& tensor, std::vector<Tensor>& output, int dst_rank) -> void {
-    // NCCL doesn't have native gather, implement using send/recv
-    throw std::runtime_error("NCCLBackend::gather not yet implemented");
+#if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
+    validate_gpu_tensor(tensor);
+
+    if (dst_rank < 0 || dst_rank >= world_size_) {
+        throw std::invalid_argument("gather: invalid dst_rank");
+    }
+
+    int device_id = get_device_id(tensor);
+    ncclComm_t comm = get_communicator(device_id);
+
+    // NCCL doesn't have native gather, so we implement it using send/recv
+    // within a group to enable communication/computation overlap
+
+    NCCL_CHECK(ncclGroupStart());
+
+    if (rank_ == dst_rank) {
+        // Destination rank: receive from all other ranks
+        if (output.size() != static_cast<size_t>(world_size_)) {
+            throw std::invalid_argument("gather: output size must equal world_size");
+        }
+
+        for (int src = 0; src < world_size_; ++src) {
+            if (src == rank_) {
+                // Copy own data
+                if (output[src].device() != tensor.device() ||
+                    output[src].numel() != tensor.numel() ||
+                    output[src].dtype() != tensor.dtype()) {
+                    throw std::invalid_argument("gather: output tensor mismatch");
+                }
+                NCCL_CHECK(ncclRecv(
+                    output[src].data_ptr(),
+                    tensor.numel(),
+                    to_nccl_datatype(tensor.dtype()),
+                    rank_,  // Receive from self
+                    comm,
+                    nullptr  // Use default stream
+                ));
+            } else {
+                // Receive from other ranks
+                validate_gpu_tensor(output[src]);
+                NCCL_CHECK(ncclRecv(
+                    output[src].data_ptr(),
+                    tensor.numel(),
+                    to_nccl_datatype(tensor.dtype()),
+                    src,
+                    comm,
+                    nullptr
+                ));
+            }
+        }
+    } else {
+        // Non-destination ranks: send to destination
+        NCCL_CHECK(ncclSend(
+            tensor.data_ptr(),
+            tensor.numel(),
+            to_nccl_datatype(tensor.dtype()),
+            dst_rank,
+            comm,
+            nullptr
+        ));
+    }
+
+    NCCL_CHECK(ncclGroupEnd());
+
+    // Synchronize to ensure gather completes
+    GPU_CHECK(cudaDeviceSynchronize());
+#else
+    (void)tensor;
+    (void)output;
+    (void)dst_rank;
+    throw std::runtime_error("NCCLBackend: NCCL not available");
+#endif
 }
 
 auto NCCLBackend::scatter(const std::vector<Tensor>& tensors, Tensor& output, int src_rank) -> void {
-    // NCCL doesn't have native scatter, implement using send/recv
-    throw std::runtime_error("NCCLBackend::scatter not yet implemented");
+#if defined(TENZOR_USE_CUDA) || defined(TENZOR_USE_ROCM)
+    validate_gpu_tensor(output);
+
+    if (src_rank < 0 || src_rank >= world_size_) {
+        throw std::invalid_argument("scatter: invalid src_rank");
+    }
+
+    int device_id = get_device_id(output);
+    ncclComm_t comm = get_communicator(device_id);
+
+    // NCCL doesn't have native scatter, so we implement it using send/recv
+    // within a group to enable communication/computation overlap
+
+    NCCL_CHECK(ncclGroupStart());
+
+    if (rank_ == src_rank) {
+        // Source rank: send to all other ranks
+        if (tensors.size() != static_cast<size_t>(world_size_)) {
+            throw std::invalid_argument("scatter: tensors size must equal world_size");
+        }
+
+        for (int dst = 0; dst < world_size_; ++dst) {
+            validate_gpu_tensor(tensors[dst]);
+
+            if (dst == rank_) {
+                // Send to self (copy)
+                if (tensors[dst].device() != output.device() ||
+                    tensors[dst].numel() != output.numel() ||
+                    tensors[dst].dtype() != output.dtype()) {
+                    throw std::invalid_argument("scatter: tensor mismatch");
+                }
+                NCCL_CHECK(ncclSend(
+                    tensors[dst].data_ptr(),
+                    tensors[dst].numel(),
+                    to_nccl_datatype(tensors[dst].dtype()),
+                    rank_,  // Send to self
+                    comm,
+                    nullptr
+                ));
+            } else {
+                // Send to other ranks
+                NCCL_CHECK(ncclSend(
+                    tensors[dst].data_ptr(),
+                    tensors[dst].numel(),
+                    to_nccl_datatype(tensors[dst].dtype()),
+                    dst,
+                    comm,
+                    nullptr
+                ));
+            }
+        }
+    }
+
+    // All ranks receive their portion
+    NCCL_CHECK(ncclRecv(
+        output.data_ptr(),
+        output.numel(),
+        to_nccl_datatype(output.dtype()),
+        src_rank,
+        comm,
+        nullptr
+    ));
+
+    NCCL_CHECK(ncclGroupEnd());
+
+    // Synchronize to ensure scatter completes
+    GPU_CHECK(cudaDeviceSynchronize());
+#else
+    (void)tensors;
+    (void)output;
+    (void)src_rank;
+    throw std::runtime_error("NCCLBackend: NCCL not available");
+#endif
 }
 
 auto NCCLBackend::reduce_scatter(const std::vector<Tensor>& tensors, Tensor& output, ReduceOp op) -> void {

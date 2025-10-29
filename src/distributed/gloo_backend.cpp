@@ -10,12 +10,17 @@
 #include <stdexcept>
 #include <cstring>
 #include <algorithm>
+#include <iostream>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <netdb.h>
 #include <fcntl.h>
+#include <fstream>
+#include <filesystem>
+#include <chrono>
+#include <thread>
 
 namespace tenzor {
 namespace distributed {
@@ -434,6 +439,12 @@ auto GlooBackend::barrier() -> void {
 }
 
 auto GlooBackend::finalize() -> void {
+    // Close all TCP connections explicitly
+    for (auto& conn : connections_) {
+        if (conn) {
+            conn->close();
+        }
+    }
     connections_.clear();
 
     if (accept_thread_ && accept_thread_->joinable()) {
@@ -443,6 +454,16 @@ auto GlooBackend::finalize() -> void {
     if (server_socket_ >= 0) {
         ::close(server_socket_);
         server_socket_ = -1;
+    }
+
+    // Clean up rendezvous store files
+    std::string store_path = "/tmp/tenzor_rendezvous_" + std::to_string(master_port_);
+    if (std::filesystem::exists(store_path)) {
+        try {
+            std::filesystem::remove_all(store_path);
+        } catch (...) {
+            // Ignore errors during cleanup
+        }
     }
 
     initialized_ = false;
@@ -463,14 +484,39 @@ auto GlooBackend::init_connections() -> void {
     // Create server socket
     server_socket_ = create_server_socket();
 
-    // Start accept thread
-    accept_thread_ = std::make_unique<std::thread>([this]() {
-        accept_connections();
-    });
+    // Write our port to rendezvous store
+    write_port_to_store(rank_, server_port_);
 
-    // Connect to all ranks
+    // Use ordered connections to avoid deadlock:
+    // - Lower ranks connect to higher ranks
+    // - Higher ranks accept from lower ranks
     for (int peer_rank = 0; peer_rank < world_size_; ++peer_rank) {
-        if (peer_rank != rank_) {
+        if (peer_rank == rank_) {
+            continue;
+        }
+
+        if (peer_rank < rank_) {
+            // Accept connection from lower rank
+            int client_fd = accept(server_socket_, nullptr, nullptr);
+            if (client_fd < 0) {
+                throw std::runtime_error("Failed to accept connection from rank " + std::to_string(peer_rank));
+            }
+
+            // Receive peer rank ID for verification
+            int received_rank = -1;
+            ssize_t n = recv(client_fd, &received_rank, sizeof(int), 0);
+            if (n != sizeof(int) || received_rank != peer_rank) {
+                ::close(client_fd);
+                throw std::runtime_error("Handshake failed: expected rank " + std::to_string(peer_rank) +
+                                       " but got " + std::to_string(received_rank));
+            }
+
+            // Send our rank ID
+            send(client_fd, &rank_, sizeof(int), 0);
+
+            connections_[peer_rank] = std::make_shared<TCPConnection>(client_fd);
+        } else {
+            // Connect to higher rank
             connections_[peer_rank] = connect_to_rank(peer_rank);
         }
     }
@@ -521,13 +567,100 @@ auto GlooBackend::accept_connections() -> void {
 }
 
 auto GlooBackend::connect_to_rank(int peer_rank) -> std::shared_ptr<TCPConnection> {
-    // Simplified: In real implementation, use rendezvous store to exchange addresses
+    // Read peer's port from the store (with retries)
+    int peer_port = read_port_from_store(peer_rank);
+
+    // Connect to peer
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0) {
         throw std::runtime_error("Failed to create socket for rank " + std::to_string(peer_rank));
     }
 
-    return std::make_shared<TCPConnection>(sockfd);
+    struct sockaddr_in addr;
+    std::memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(peer_port);
+
+    // Convert master_addr to IP
+    if (inet_pton(AF_INET, master_addr_.c_str(), &addr.sin_addr) <= 0) {
+        // Try as hostname
+        struct hostent* he = gethostbyname(master_addr_.c_str());
+        if (he == nullptr) {
+            ::close(sockfd);
+            throw std::runtime_error("Invalid address: " + master_addr_);
+        }
+        std::memcpy(&addr.sin_addr, he->h_addr_list[0], he->h_length);
+    }
+
+    // Retry connection with exponential backoff
+    int max_retries = 10;
+    for (int retry = 0; retry < max_retries; ++retry) {
+        if (connect(sockfd, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
+            // Connection successful - perform handshake
+            // Send our rank ID
+            send(sockfd, &rank_, sizeof(int), 0);
+
+            // Receive peer rank ID for verification
+            int received_rank = -1;
+            ssize_t n = recv(sockfd, &received_rank, sizeof(int), 0);
+            if (n != sizeof(int) || received_rank != peer_rank) {
+                ::close(sockfd);
+                throw std::runtime_error("Handshake failed: expected rank " + std::to_string(peer_rank) +
+                                       " but got " + std::to_string(received_rank));
+            }
+
+            return std::make_shared<TCPConnection>(sockfd);
+        }
+
+        // Sleep and retry
+        std::this_thread::sleep_for(std::chrono::milliseconds(100 * (1 << retry)));
+    }
+
+    ::close(sockfd);
+    throw std::runtime_error("Failed to connect to rank " + std::to_string(peer_rank) +
+                            " at " + master_addr_ + ":" + std::to_string(peer_port));
+}
+
+auto GlooBackend::write_port_to_store(int rank, int port) -> void {
+    std::string store_path = "/tmp/tenzor_rendezvous_" + std::to_string(master_port_);
+    std::filesystem::create_directories(store_path);
+
+    std::string rank_file = store_path + "/rank_" + std::to_string(rank);
+    std::ofstream file(rank_file);
+    if (!file) {
+        throw std::runtime_error("Failed to write to rendezvous store");
+    }
+    file << port << std::endl;
+    file.close();
+}
+
+auto GlooBackend::read_port_from_store(int rank) -> int {
+    std::string store_path = "/tmp/tenzor_rendezvous_" + std::to_string(master_port_);
+    std::string rank_file = store_path + "/rank_" + std::to_string(rank);
+
+    // Wait for file to appear (with timeout)
+    int max_wait_ms = 30000;  // 30 seconds
+    int wait_interval_ms = 100;
+    int elapsed = 0;
+
+    while (!std::filesystem::exists(rank_file) && elapsed < max_wait_ms) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(wait_interval_ms));
+        elapsed += wait_interval_ms;
+    }
+
+    if (!std::filesystem::exists(rank_file)) {
+        throw std::runtime_error("Timeout waiting for rank " + std::to_string(rank) +
+                                " to write port to rendezvous store");
+    }
+
+    std::ifstream file(rank_file);
+    if (!file) {
+        throw std::runtime_error("Failed to read from rendezvous store");
+    }
+
+    int port;
+    file >> port;
+    return port;
 }
 
 auto GlooBackend::send_tensor(const Tensor& tensor, int peer_rank) -> void {
@@ -561,9 +694,18 @@ auto GlooBackend::recv_tensor(Tensor& tensor, int peer_rank) -> void {
     conn->recv(&numel, sizeof(numel));
     conn->recv(&dtype, sizeof(dtype));
 
-    // Receive data
+    // Receive data - use dtype from metadata, not cpu_tensor.dtype()
     Tensor cpu_tensor = get_cpu_buffer(tensor);
-    size_t data_size = numel * dtype_size(cpu_tensor.dtype());
+    size_t data_size = numel * dtype_size(static_cast<DType>(dtype));
+
+    // Validate tensor size matches
+    if (cpu_tensor.numel() != static_cast<int64_t>(numel)) {
+        throw std::runtime_error(
+            "recv_tensor: size mismatch - expected " + std::to_string(numel) +
+            " elements, but tensor has " + std::to_string(cpu_tensor.numel())
+        );
+    }
+
     conn->recv(cpu_tensor.data_ptr(), data_size);
 
     // Copy back to original device if needed
@@ -679,60 +821,113 @@ auto GlooBackend::apply_reduce_op(Tensor& result, const Tensor& operand, ReduceO
 }
 
 auto GlooBackend::ring_all_reduce(Tensor& tensor, ReduceOp op) -> void {
-    // Ring all-reduce algorithm
-    // Divide tensor into chunks and pipeline communication
+    // Ring all-reduce algorithm using direct memory operations
+    // Works with any tensor shape by operating on contiguous memory
 
+    validate_cpu_accessible(tensor);
+    Tensor cpu_tensor = get_cpu_buffer(tensor);
+
+    int64_t total_elements = cpu_tensor.numel();
     int num_chunks = world_size_;
-    size_t chunk_size = (tensor.numel() + num_chunks - 1) / num_chunks;
+    size_t chunk_size = (total_elements + num_chunks - 1) / num_chunks;
 
-    // Reduce-scatter phase
+    // Get direct pointer to contiguous data
+    auto* data_ptr = static_cast<float*>(cpu_tensor.data_ptr());
+
+    // Temporary buffer for receiving chunks
+    std::vector<float> recv_buffer(chunk_size);
+
+    // Reduce-scatter phase: reduce chunks in a ring pattern
     for (int i = 0; i < world_size_ - 1; ++i) {
-        int send_chunk = (rank_ - i + world_size_) % world_size_;
-        int recv_chunk = (rank_ - i - 1 + world_size_) % world_size_;
+        int send_chunk_idx = (rank_ - i + world_size_) % world_size_;
+        int recv_chunk_idx = (rank_ - i - 1 + world_size_) % world_size_;
 
         int send_rank = (rank_ + 1) % world_size_;
         int recv_rank = (rank_ - 1 + world_size_) % world_size_;
 
-        // Extract chunk
-        size_t chunk_start = recv_chunk * chunk_size;
-        size_t chunk_end = std::min(chunk_start + chunk_size, static_cast<size_t>(tensor.numel()));
+        // Calculate chunk boundaries
+        size_t send_start = send_chunk_idx * chunk_size;
+        size_t send_count = std::min(chunk_size, static_cast<size_t>(total_elements - send_start));
 
-        if (chunk_start < tensor.numel()) {
-            Tensor chunk = tensor.slice(0, chunk_start, chunk_end);
-            Tensor recv_chunk_tensor = zeros_like(chunk);
+        size_t recv_start = recv_chunk_idx * chunk_size;
+        size_t recv_count = std::min(chunk_size, static_cast<size_t>(total_elements - recv_start));
+
+        if (send_start < static_cast<size_t>(total_elements) && recv_start < static_cast<size_t>(total_elements)) {
+            // Create tensor views for send/recv
+            Tensor send_chunk = zeros({static_cast<int64_t>(send_count)}, cpu_tensor.dtype(), cpu_tensor.device());
+            std::memcpy(send_chunk.data_ptr(), data_ptr + send_start, send_count * sizeof(float));
+
+            Tensor recv_chunk = zeros({static_cast<int64_t>(recv_count)}, cpu_tensor.dtype(), cpu_tensor.device());
 
             // Send/receive
-            send_tensor(chunk, send_rank);
-            recv_tensor(recv_chunk_tensor, recv_rank);
+            send_tensor(send_chunk, send_rank);
+            recv_tensor(recv_chunk, recv_rank);
 
-            // Reduce
-            apply_reduce_op(chunk, recv_chunk_tensor, op);
+            // Reduce received data into our chunk
+            auto* recv_data = static_cast<float*>(recv_chunk.data_ptr());
+            for (size_t j = 0; j < recv_count; ++j) {
+                switch (op) {
+                    case ReduceOp::SUM:
+                    case ReduceOp::AVG:
+                        data_ptr[recv_start + j] += recv_data[j];
+                        break;
+                    case ReduceOp::PRODUCT:
+                        data_ptr[recv_start + j] *= recv_data[j];
+                        break;
+                    case ReduceOp::MIN:
+                        data_ptr[recv_start + j] = std::min(data_ptr[recv_start + j], recv_data[j]);
+                        break;
+                    case ReduceOp::MAX:
+                        data_ptr[recv_start + j] = std::max(data_ptr[recv_start + j], recv_data[j]);
+                        break;
+                }
+            }
         }
     }
 
-    // All-gather phase
+    // All-gather phase: distribute reduced chunks to all nodes
     for (int i = 0; i < world_size_ - 1; ++i) {
-        int send_chunk = (rank_ - i + 1 + world_size_) % world_size_;
-        int recv_chunk = (rank_ - i + world_size_) % world_size_;
+        int send_chunk_idx = (rank_ - i + 1 + world_size_) % world_size_;
+        int recv_chunk_idx = (rank_ - i + world_size_) % world_size_;
 
         int send_rank = (rank_ + 1) % world_size_;
         int recv_rank = (rank_ - 1 + world_size_) % world_size_;
 
-        size_t chunk_start = recv_chunk * chunk_size;
-        size_t chunk_end = std::min(chunk_start + chunk_size, static_cast<size_t>(tensor.numel()));
+        // Calculate chunk boundaries
+        size_t send_start = send_chunk_idx * chunk_size;
+        size_t send_count = std::min(chunk_size, static_cast<size_t>(total_elements - send_start));
 
-        if (chunk_start < tensor.numel()) {
-            Tensor chunk = tensor.slice(0, chunk_start, chunk_end);
-            Tensor recv_chunk_tensor = zeros_like(chunk);
+        size_t recv_start = recv_chunk_idx * chunk_size;
+        size_t recv_count = std::min(chunk_size, static_cast<size_t>(total_elements - recv_start));
 
-            send_tensor(chunk, send_rank);
-            recv_tensor(recv_chunk_tensor, recv_rank);
+        if (send_start < static_cast<size_t>(total_elements) && recv_start < static_cast<size_t>(total_elements)) {
+            // Create tensor views for send/recv
+            Tensor send_chunk = zeros({static_cast<int64_t>(send_count)}, cpu_tensor.dtype(), cpu_tensor.device());
+            std::memcpy(send_chunk.data_ptr(), data_ptr + send_start, send_count * sizeof(float));
+
+            Tensor recv_chunk = zeros({static_cast<int64_t>(recv_count)}, cpu_tensor.dtype(), cpu_tensor.device());
+
+            // Send/receive
+            send_tensor(send_chunk, send_rank);
+            recv_tensor(recv_chunk, recv_rank);
+
+            // Copy received data to our buffer
+            std::memcpy(data_ptr + recv_start, recv_chunk.data_ptr(), recv_count * sizeof(float));
         }
     }
 
     // Handle AVG operation
     if (op == ReduceOp::AVG) {
-        tensor = tensor / static_cast<float>(world_size_);
+        for (int64_t i = 0; i < total_elements; ++i) {
+            data_ptr[i] /= static_cast<float>(world_size_);
+        }
+    }
+
+    // Copy back to original device if needed
+    if (tensor.device().type != Device::Type::CPU) {
+        tensor = cpu_tensor.to(tensor.device());
+    } else {
+        tensor = cpu_tensor;
     }
 }
 

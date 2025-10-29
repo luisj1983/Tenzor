@@ -142,6 +142,20 @@ auto ProcessGroup::create_process_group(
     const std::string& master_addr,
     int master_port
 ) -> std::shared_ptr<ProcessGroup> {
+    // Validate parameters before backend initialization
+    if (rank < 0 || rank >= world_size) {
+        throw std::invalid_argument(
+            "ProcessGroup: rank must be in range [0, world_size). "
+            "Got rank=" + std::to_string(rank) + ", world_size=" + std::to_string(world_size)
+        );
+    }
+
+    if (world_size <= 0) {
+        throw std::invalid_argument(
+            "ProcessGroup: world_size must be positive. "
+            "Got world_size=" + std::to_string(world_size)
+        );
+    }
 
     std::unique_ptr<CommunicationBackend> comm_backend;
 
