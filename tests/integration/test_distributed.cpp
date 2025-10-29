@@ -243,6 +243,211 @@ TEST_F(GlooBackendTest, GetRankAndWorldSize) {
 }
 
 // ============================================================================
+// AllGather Tests (Gloo Backend)
+// ============================================================================
+
+TEST_F(GlooBackendTest, AllGatherBasic) {
+    // Each rank creates a tensor with its rank value
+    Tensor local = ones({100}, DType::Float32, Device::cpu()) * static_cast<float>(rank_);
+
+    // Prepare output vector
+    std::vector<Tensor> gathered(world_size_);
+    for (int i = 0; i < world_size_; ++i) {
+        gathered[i] = zeros({100}, DType::Float32, Device::cpu());
+    }
+
+    // All-gather operation
+    auto pg = DistributedContext::get_process_group();
+    pg->all_gather(local, gathered);
+
+    // Verify: each rank should have all tensors
+    for (int i = 0; i < world_size_; ++i) {
+        auto data = static_cast<float*>(gathered[i].data_ptr());
+        for (int j = 0; j < 100; ++j) {
+            EXPECT_NEAR(data[j], static_cast<float>(i), 1e-5);
+        }
+    }
+}
+
+TEST_F(GlooBackendTest, AllGatherDifferentSizes) {
+    // Test with larger tensor
+    Tensor local = ones({1000}, DType::Float32, Device::cpu()) * static_cast<float>(rank_ + 1);
+
+    std::vector<Tensor> gathered(world_size_);
+    for (int i = 0; i < world_size_; ++i) {
+        gathered[i] = zeros({1000}, DType::Float32, Device::cpu());
+    }
+
+    auto pg = DistributedContext::get_process_group();
+    pg->all_gather(local, gathered);
+
+    // Verify correct data
+    for (int i = 0; i < world_size_; ++i) {
+        auto data = static_cast<float*>(gathered[i].data_ptr());
+        float expected = static_cast<float>(i + 1);
+        EXPECT_NEAR(data[0], expected, 1e-5);
+        EXPECT_NEAR(data[500], expected, 1e-5);
+        EXPECT_NEAR(data[999], expected, 1e-5);
+    }
+}
+
+TEST_F(GlooBackendTest, AllGatherMultiDim) {
+    // Test with multi-dimensional tensor
+    Tensor local = ones({10, 10}, DType::Float32, Device::cpu()) * static_cast<float>(rank_);
+
+    std::vector<Tensor> gathered(world_size_);
+    for (int i = 0; i < world_size_; ++i) {
+        gathered[i] = zeros({10, 10}, DType::Float32, Device::cpu());
+    }
+
+    auto pg = DistributedContext::get_process_group();
+    pg->all_gather(local, gathered);
+
+    // Verify
+    for (int i = 0; i < world_size_; ++i) {
+        auto data = static_cast<float*>(gathered[i].data_ptr());
+        for (int j = 0; j < 100; ++j) {
+            EXPECT_NEAR(data[j], static_cast<float>(i), 1e-5);
+        }
+    }
+}
+
+// ============================================================================
+// ReduceScatter Tests (Gloo Backend)
+// ============================================================================
+
+TEST_F(GlooBackendTest, ReduceScatterSum) {
+    // Each rank creates chunks of data
+    std::vector<Tensor> input_chunks;
+    for (int i = 0; i < world_size_; ++i) {
+        // Each chunk has value = (rank + 1) * 10
+        Tensor chunk = ones({100}, DType::Float32, Device::cpu()) *
+                      static_cast<float>((rank_ + 1) * 10);
+        input_chunks.push_back(chunk);
+    }
+
+    // Output: each rank gets one reduced chunk
+    Tensor output = zeros({100}, DType::Float32, Device::cpu());
+
+    // Reduce-scatter with SUM
+    auto pg = DistributedContext::get_process_group();
+    pg->reduce_scatter(input_chunks, output, ReduceOp::SUM);
+
+    // Expected: sum of all ranks' contributions for this rank's chunk
+    // Each rank contributes (rank+1)*10, so sum = 10+20+...+world_size*10
+    float expected = 0.0f;
+    for (int r = 0; r < world_size_; ++r) {
+        expected += static_cast<float>((r + 1) * 10);
+    }
+
+    auto data = static_cast<float*>(output.data_ptr());
+    for (int i = 0; i < 100; ++i) {
+        EXPECT_NEAR(data[i], expected, 1e-5);
+    }
+}
+
+TEST_F(GlooBackendTest, ReduceScatterAverage) {
+    std::vector<Tensor> input_chunks;
+    for (int i = 0; i < world_size_; ++i) {
+        Tensor chunk = ones({50}, DType::Float32, Device::cpu()) *
+                      static_cast<float>(rank_ + 1);
+        input_chunks.push_back(chunk);
+    }
+
+    Tensor output = zeros({50}, DType::Float32, Device::cpu());
+
+    auto pg = DistributedContext::get_process_group();
+    pg->reduce_scatter(input_chunks, output, ReduceOp::AVG);
+
+    // Expected average: (1 + 2 + ... + world_size) / world_size
+    float expected = (world_size_ * (world_size_ + 1)) / (2.0f * world_size_);
+
+    auto data = static_cast<float*>(output.data_ptr());
+    for (int i = 0; i < 50; ++i) {
+        EXPECT_NEAR(data[i], expected, 1e-5);
+    }
+}
+
+TEST_F(GlooBackendTest, ReduceScatterMax) {
+    std::vector<Tensor> input_chunks;
+    for (int i = 0; i < world_size_; ++i) {
+        // Each chunk has a different value per rank
+        Tensor chunk = ones({100}, DType::Float32, Device::cpu()) *
+                      static_cast<float>(rank_ + i);
+        input_chunks.push_back(chunk);
+    }
+
+    Tensor output = zeros({100}, DType::Float32, Device::cpu());
+
+    auto pg = DistributedContext::get_process_group();
+    pg->reduce_scatter(input_chunks, output, ReduceOp::MAX);
+
+    // Expected: max value contributed by any rank for this chunk
+    float expected_max = static_cast<float>(world_size_ - 1 + rank_);
+
+    auto data = static_cast<float*>(output.data_ptr());
+    for (int i = 0; i < 100; ++i) {
+        EXPECT_NEAR(data[i], expected_max, 1e-5);
+    }
+}
+
+// ============================================================================
+// Gather and Scatter Tests (Gloo Backend)
+// ============================================================================
+
+TEST_F(GlooBackendTest, GatherToRoot) {
+    // Each rank creates a tensor with its rank
+    Tensor local = ones({50}, DType::Float32, Device::cpu()) * static_cast<float>(rank_);
+
+    std::vector<Tensor> gathered;
+    if (rank_ == 0) {
+        // Root rank prepares output
+        for (int i = 0; i < world_size_; ++i) {
+            gathered.push_back(zeros({50}, DType::Float32, Device::cpu()));
+        }
+    }
+
+    // Gather to rank 0
+    auto pg = DistributedContext::get_process_group();
+    pg->gather(local, gathered, 0);
+
+    // Only rank 0 verifies
+    if (rank_ == 0) {
+        for (int i = 0; i < world_size_; ++i) {
+            auto data = static_cast<float*>(gathered[i].data_ptr());
+            for (int j = 0; j < 50; ++j) {
+                EXPECT_NEAR(data[j], static_cast<float>(i), 1e-5);
+            }
+        }
+    }
+}
+
+TEST_F(GlooBackendTest, ScatterFromRoot) {
+    std::vector<Tensor> scatter_data;
+    Tensor output = zeros({50}, DType::Float32, Device::cpu());
+
+    if (rank_ == 0) {
+        // Root creates data for all ranks
+        for (int i = 0; i < world_size_; ++i) {
+            scatter_data.push_back(
+                ones({50}, DType::Float32, Device::cpu()) * static_cast<float>(i * 10)
+            );
+        }
+    }
+
+    // Scatter from rank 0
+    auto pg = DistributedContext::get_process_group();
+    pg->scatter(scatter_data, output, 0);
+
+    // Each rank verifies it got its chunk
+    auto data = static_cast<float*>(output.data_ptr());
+    float expected = static_cast<float>(rank_ * 10);
+    for (int i = 0; i < 50; ++i) {
+        EXPECT_NEAR(data[i], expected, 1e-5);
+    }
+}
+
+// ============================================================================
 // NCCL Backend Tests (GPU only)
 // ============================================================================
 
@@ -319,6 +524,237 @@ TEST_F(NCCLBackendTest, LargeTensorAllReduce) {
     EXPECT_NEAR(data_ptr[0], expected_sum, 1e-5);
     EXPECT_NEAR(data_ptr[num_elements / 2], expected_sum, 1e-5);
     EXPECT_NEAR(data_ptr[num_elements - 1], expected_sum, 1e-5);
+}
+
+// ============================================================================
+// AllGather Tests (NCCL Backend)
+// ============================================================================
+
+TEST_F(NCCLBackendTest, AllGatherGPU) {
+    Device gpu = Device::cuda(0);
+
+    // Each rank creates a tensor with its rank value
+    Tensor local = ones({1000}, DType::Float32, gpu) * static_cast<float>(rank_);
+
+    // Prepare output vector
+    std::vector<Tensor> gathered(world_size_);
+    for (int i = 0; i < world_size_; ++i) {
+        gathered[i] = zeros({1000}, DType::Float32, gpu);
+    }
+
+    // All-gather operation
+    auto pg = DistributedContext::get_process_group();
+    pg->all_gather(local, gathered);
+
+    // Move to CPU for verification
+    for (int i = 0; i < world_size_; ++i) {
+        auto cpu_tensor = gathered[i].to(Device::cpu());
+        auto data = static_cast<float*>(cpu_tensor.data_ptr());
+        for (int j = 0; j < 1000; ++j) {
+            EXPECT_NEAR(data[j], static_cast<float>(i), 1e-5);
+        }
+    }
+}
+
+TEST_F(NCCLBackendTest, AllGatherLargeTensorGPU) {
+    Device gpu = Device::cuda(0);
+
+    // Test with larger tensor (10MB per rank)
+    size_t num_elements = 2560 * 1024;  // 10MB for float32
+    Tensor local = ones({static_cast<int64_t>(num_elements)}, DType::Float32, gpu) *
+                   static_cast<float>(rank_ + 1);
+
+    std::vector<Tensor> gathered(world_size_);
+    for (int i = 0; i < world_size_; ++i) {
+        gathered[i] = zeros({static_cast<int64_t>(num_elements)}, DType::Float32, gpu);
+    }
+
+    auto pg = DistributedContext::get_process_group();
+    pg->all_gather(local, gathered);
+
+    // Verify samples
+    for (int i = 0; i < world_size_; ++i) {
+        auto cpu_tensor = gathered[i].to(Device::cpu());
+        auto data = static_cast<float*>(cpu_tensor.data_ptr());
+        float expected = static_cast<float>(i + 1);
+        EXPECT_NEAR(data[0], expected, 1e-5);
+        EXPECT_NEAR(data[num_elements / 2], expected, 1e-5);
+        EXPECT_NEAR(data[num_elements - 1], expected, 1e-5);
+    }
+}
+
+TEST_F(NCCLBackendTest, AllGatherMultiDimGPU) {
+    Device gpu = Device::cuda(0);
+
+    // Test with multi-dimensional tensor
+    Tensor local = ones({100, 100}, DType::Float32, gpu) * static_cast<float>(rank_);
+
+    std::vector<Tensor> gathered(world_size_);
+    for (int i = 0; i < world_size_; ++i) {
+        gathered[i] = zeros({100, 100}, DType::Float32, gpu);
+    }
+
+    auto pg = DistributedContext::get_process_group();
+    pg->all_gather(local, gathered);
+
+    // Verify
+    for (int i = 0; i < world_size_; ++i) {
+        auto cpu_tensor = gathered[i].to(Device::cpu());
+        auto data = static_cast<float*>(cpu_tensor.data_ptr());
+        for (int j = 0; j < 10000; ++j) {
+            EXPECT_NEAR(data[j], static_cast<float>(i), 1e-5);
+        }
+    }
+}
+
+// ============================================================================
+// ReduceScatter Tests (NCCL Backend)
+// ============================================================================
+
+TEST_F(NCCLBackendTest, ReduceScatterSumGPU) {
+    Device gpu = Device::cuda(0);
+
+    // Each rank creates chunks of data
+    std::vector<Tensor> input_chunks;
+    for (int i = 0; i < world_size_; ++i) {
+        Tensor chunk = ones({1000}, DType::Float32, gpu) *
+                      static_cast<float>((rank_ + 1) * 10);
+        input_chunks.push_back(chunk);
+    }
+
+    // Output: each rank gets one reduced chunk
+    Tensor output = zeros({1000}, DType::Float32, gpu);
+
+    // Reduce-scatter with SUM
+    auto pg = DistributedContext::get_process_group();
+    pg->reduce_scatter(input_chunks, output, ReduceOp::SUM);
+
+    // Move to CPU for verification
+    Tensor cpu_output = output.to(Device::cpu());
+
+    // Expected: sum of all ranks' contributions
+    float expected = 0.0f;
+    for (int r = 0; r < world_size_; ++r) {
+        expected += static_cast<float>((r + 1) * 10);
+    }
+
+    auto data = static_cast<float*>(cpu_output.data_ptr());
+    for (int i = 0; i < 1000; ++i) {
+        EXPECT_NEAR(data[i], expected, 1e-5);
+    }
+}
+
+TEST_F(NCCLBackendTest, ReduceScatterAverageGPU) {
+    Device gpu = Device::cuda(0);
+
+    std::vector<Tensor> input_chunks;
+    for (int i = 0; i < world_size_; ++i) {
+        Tensor chunk = ones({500}, DType::Float32, gpu) *
+                      static_cast<float>(rank_ + 1);
+        input_chunks.push_back(chunk);
+    }
+
+    Tensor output = zeros({500}, DType::Float32, gpu);
+
+    reduce_scatter(input_chunks, output, ReduceOp::AVG);
+
+    Tensor cpu_output = output.to(Device::cpu());
+
+    // Expected average
+    float expected = (world_size_ * (world_size_ + 1)) / (2.0f * world_size_);
+
+    auto data = static_cast<float*>(cpu_output.data_ptr());
+    for (int i = 0; i < 500; ++i) {
+        EXPECT_NEAR(data[i], expected, 1e-5);
+    }
+}
+
+TEST_F(NCCLBackendTest, ReduceScatterLargeTensorGPU) {
+    Device gpu = Device::cuda(0);
+
+    // Test with larger chunks (5MB each)
+    size_t chunk_elements = 1280 * 1024;  // 5MB for float32
+    std::vector<Tensor> input_chunks;
+    for (int i = 0; i < world_size_; ++i) {
+        Tensor chunk = ones({static_cast<int64_t>(chunk_elements)}, DType::Float32, gpu) *
+                      static_cast<float>(rank_ + 1);
+        input_chunks.push_back(chunk);
+    }
+
+    Tensor output = zeros({static_cast<int64_t>(chunk_elements)}, DType::Float32, gpu);
+
+    auto pg = DistributedContext::get_process_group();
+    pg->reduce_scatter(input_chunks, output, ReduceOp::SUM);
+
+    Tensor cpu_output = output.to(Device::cpu());
+
+    float expected = (world_size_ * (world_size_ + 1)) / 2.0f;
+
+    auto data = static_cast<float*>(cpu_output.data_ptr());
+    // Verify samples
+    EXPECT_NEAR(data[0], expected, 1e-5);
+    EXPECT_NEAR(data[chunk_elements / 2], expected, 1e-5);
+    EXPECT_NEAR(data[chunk_elements - 1], expected, 1e-5);
+}
+
+// ============================================================================
+// Gather and Scatter Tests (NCCL Backend)
+// ============================================================================
+
+TEST_F(NCCLBackendTest, GatherToRootGPU) {
+    Device gpu = Device::cuda(0);
+
+    // Each rank creates a tensor
+    Tensor local = ones({100}, DType::Float32, gpu) * static_cast<float>(rank_);
+
+    std::vector<Tensor> gathered;
+    if (rank_ == 0) {
+        for (int i = 0; i < world_size_; ++i) {
+            gathered.push_back(zeros({100}, DType::Float32, gpu));
+        }
+    }
+
+    // Gather to rank 0
+    auto pg = DistributedContext::get_process_group();
+    pg->gather(local, gathered, 0);
+
+    // Only rank 0 verifies
+    if (rank_ == 0) {
+        for (int i = 0; i < world_size_; ++i) {
+            auto cpu_tensor = gathered[i].to(Device::cpu());
+            auto data = static_cast<float*>(cpu_tensor.data_ptr());
+            for (int j = 0; j < 100; ++j) {
+                EXPECT_NEAR(data[j], static_cast<float>(i), 1e-5);
+            }
+        }
+    }
+}
+
+TEST_F(NCCLBackendTest, ScatterFromRootGPU) {
+    Device gpu = Device::cuda(0);
+
+    std::vector<Tensor> scatter_data;
+    Tensor output = zeros({100}, DType::Float32, gpu);
+
+    if (rank_ == 0) {
+        for (int i = 0; i < world_size_; ++i) {
+            scatter_data.push_back(
+                ones({100}, DType::Float32, gpu) * static_cast<float>(i * 100)
+            );
+        }
+    }
+
+    // Scatter from rank 0
+    auto pg = DistributedContext::get_process_group();
+    pg->scatter(scatter_data, output, 0);
+
+    // Each rank verifies
+    Tensor cpu_output = output.to(Device::cpu());
+    auto data = static_cast<float*>(cpu_output.data_ptr());
+    float expected = static_cast<float>(rank_ * 100);
+    for (int i = 0; i < 100; ++i) {
+        EXPECT_NEAR(data[i], expected, 1e-5);
+    }
 }
 
 #endif // TENZOR_USE_CUDA || TENZOR_USE_ROCM
