@@ -23,6 +23,7 @@
 #include <chrono>
 #include <unordered_set>
 #include <queue>
+#include <deque>
 #include <functional>
 
 namespace tenzor {
@@ -223,6 +224,82 @@ public:
         return *base_optimizer_;
     }
 
+    // ========================================================================
+    // Performance Profiling
+    // ========================================================================
+
+    /**
+     * @brief Performance profiling statistics
+     */
+    struct ProfilingStats {
+        // Timing statistics (milliseconds)
+        double total_step_time_ms{0.0};
+        double gather_time_ms{0.0};
+        double scatter_time_ms{0.0};
+        double communication_time_ms{0.0};
+        double compute_time_ms{0.0};
+        double offload_time_ms{0.0};
+        double all_reduce_time_ms{0.0};
+        double all_gather_time_ms{0.0};
+
+        // Memory statistics (bytes)
+        size_t peak_memory_bytes{0};
+        size_t current_memory_bytes{0};
+        size_t transferred_bytes{0};
+        size_t offloaded_bytes{0};
+
+        // Operation counts
+        size_t num_steps{0};
+        size_t num_gathers{0};
+        size_t num_scatters{0};
+        size_t num_offloads{0};
+        size_t num_all_reduces{0};
+        size_t num_all_gathers{0};
+
+        // Overlap metrics (0.0 to 1.0)
+        double comm_compute_overlap_ratio{0.0};
+
+        // Average times
+        double avg_step_time_ms{0.0};
+        double avg_gather_time_ms{0.0};
+        double avg_scatter_time_ms{0.0};
+        double avg_all_reduce_time_ms{0.0};
+
+        // Bandwidth (MB/s)
+        double effective_bandwidth_mbps{0.0};
+
+        /**
+         * @brief Print formatted profiling summary
+         */
+        auto print_summary() const -> void;
+
+        /**
+         * @brief Get profiling data as string
+         */
+        auto to_string() const -> std::string;
+    };
+
+    /**
+     * @brief Get performance profiling statistics
+     */
+    auto get_profiling_stats() const -> ProfilingStats;
+
+    /**
+     * @brief Reset profiling statistics
+     */
+    auto reset_profiling_stats() -> void;
+
+    /**
+     * @brief Enable or disable profiling
+     * @param enabled Whether to enable profiling
+     */
+    auto enable_profiling(bool enabled) -> void;
+
+    /**
+     * @brief Check if profiling is enabled
+     */
+    auto is_profiling_enabled() const -> bool { return profiling_enabled_; }
+
 protected:
     /**
      * @brief State partition for a single rank
@@ -251,6 +328,16 @@ protected:
 
     // Synchronization
     mutable std::mutex mutex_;                      ///< Thread safety
+
+    // Profiling state
+    bool profiling_enabled_{false};                 ///< Enable performance profiling
+    mutable ProfilingStats profiling_stats_;        ///< Accumulated profiling statistics
+    mutable std::mutex profiling_mutex_;            ///< Profiling thread safety
+
+    // Timing helpers
+    std::chrono::steady_clock::time_point step_start_time_;
+    std::chrono::steady_clock::time_point comm_start_time_;
+    std::chrono::steady_clock::time_point compute_start_time_;
 
     // Initialization
 
@@ -696,6 +783,57 @@ struct Stage3Config : public ZeROStage2Config {
      *  Improves memory coalescing. Recommended: 128 or 256. */
     size_t partition_alignment{128};
 
+    // ========================================================================
+    // Adaptive Prefetch Configuration (Phase 7 Optimizations)
+    // ========================================================================
+
+    /** Enable adaptive prefetch depth adjustment based on performance */
+    bool enable_adaptive_prefetch{true};
+
+    /** Target overlap ratio: fraction of communication to hide (0.0-1.0) */
+    double target_overlap_ratio{0.8};  // Target 80% overlap
+
+    /** Minimum allowed prefetch depth */
+    int min_prefetch_depth{1};
+
+    /** Maximum allowed prefetch depth */
+    int max_prefetch_depth{5};
+
+    /** Number of recent operations to consider for adaptation */
+    size_t prefetch_window_size{10};
+
+    // ========================================================================
+    // Dynamic Bucket Sizing Configuration (Phase 7 Optimizations)
+    // ========================================================================
+
+    /** Enable dynamic bucket size adjustment based on communication patterns */
+    bool enable_dynamic_bucket_sizing{true};
+
+    /** Minimum bucket size (bytes) */
+    size_t min_bucket_size{1 * 1024 * 1024};   // 1MB
+
+    /** Maximum bucket size (bytes) */
+    size_t max_bucket_size{500 * 1024 * 1024}; // 500MB
+
+    /** Target communication efficiency (0.0-1.0) */
+    double target_comm_efficiency{0.9};  // Target 90% efficiency
+
+    // ========================================================================
+    // Adaptive CPU Offload Configuration (Phase 7 Optimizations)
+    // ========================================================================
+
+    /** Enable adaptive offloading based on GPU memory pressure */
+    bool enable_adaptive_offload{true};
+
+    /** GPU memory pressure threshold to trigger offload (0.0-1.0) */
+    double memory_pressure_threshold{0.85};  // Offload at 85% GPU memory
+
+    /** Hysteresis for offload decisions to prevent thrashing (bytes) */
+    size_t offload_hysteresis{100 * 1024 * 1024};  // 100MB hysteresis
+
+    /** Monitor interval for memory pressure (milliseconds) */
+    int memory_monitor_interval_ms{100};
+
     Stage3Config() = default;
 };
 
@@ -1054,6 +1192,68 @@ public:
      */
     auto get_prefetch_stats() const -> PrefetchStats;
 
+    // ========================================================================
+    // Phase 7: Advanced Optimizations
+    // ========================================================================
+
+    /**
+     * @brief Update prefetch depth dynamically based on performance metrics
+     *
+     * Analyzes recent gather operations and adjusts prefetch_depth to:
+     * - Maximize communication/compute overlap
+     * - Minimize memory pressure
+     * - Balance latency hiding vs memory consumption
+     */
+    auto update_prefetch_depth() -> void;
+
+    /**
+     * @brief Calculate optimal prefetch depth based on current metrics
+     *
+     * @return Recommended prefetch depth (within min/max bounds)
+     */
+    auto calculate_optimal_prefetch_depth() -> int;
+
+    /**
+     * @brief Adjust bucket size dynamically based on communication patterns
+     *
+     * Analyzes communication efficiency and adjusts bucket size to:
+     * - Maximize bandwidth utilization
+     * - Minimize communication overhead
+     * - Balance message size vs frequency
+     */
+    auto adjust_bucket_size() -> void;
+
+    /**
+     * @brief Calculate optimal bucket size based on communication metrics
+     *
+     * @return Recommended bucket size in bytes
+     */
+    auto calculate_optimal_bucket_size() -> size_t;
+
+    /**
+     * @brief Check current GPU memory pressure level
+     *
+     * @return Memory pressure ratio (0.0 = empty, 1.0 = full)
+     */
+    auto check_memory_pressure() -> double;
+
+    /**
+     * @brief Determine if parameter should be offloaded based on memory pressure
+     *
+     * @param param Parameter to evaluate
+     * @return true if parameter should be offloaded to CPU
+     */
+    auto should_offload_parameter(Tensor* param) -> bool;
+
+    /**
+     * @brief Make adaptive offload decision based on current memory state
+     *
+     * Evaluates memory pressure and selectively offloads parameters to CPU
+     * when GPU memory usage exceeds threshold. Uses hysteresis to prevent
+     * thrashing between offload/prefetch cycles.
+     */
+    auto adaptive_offload_decision() -> void;
+
 private:
     // ========================================================================
     // Internal State Structures
@@ -1183,10 +1383,13 @@ private:
     std::vector<BackwardPostHook> backward_hooks_;
     int next_hook_id_{0};
 
-    /** Communication streams */
-    // TODO: Add CUDAStream when available
-    // CUDAStream gather_stream_;
-    // CUDAStream scatter_stream_;
+    /** Communication streams for async operations
+     * Note: CUDA stream support for gather/scatter operations is planned for future enhancement.
+     * Currently operations execute synchronously on the default stream.
+     * When stream support is added, uncomment these members:
+     * CUDAStream gather_stream_;
+     * CUDAStream scatter_stream_;
+     */
 
     /** Performance statistics (internal structure) */
     struct PerformanceStats {
@@ -1203,6 +1406,39 @@ private:
     Stats stats_;
     PerformanceStats perf_stats_;
     mutable std::mutex stats_mutex_;
+
+    // ========================================================================
+    // Phase 7: Adaptive Optimization State
+    // ========================================================================
+
+    /** Adaptive prefetch tracking */
+    struct AdaptiveMetrics {
+        // Gather timing metrics (rolling window)
+        std::deque<double> recent_gather_times_ms;
+        std::deque<double> recent_compute_times_ms;
+
+        // Communication overlap metrics
+        double actual_overlap_ratio{0.0};
+        double target_overlap_ratio{0.8};
+
+        // Bucket sizing metrics
+        std::deque<double> recent_comm_efficiency;
+        size_t current_bucket_size{100 * 1024 * 1024};
+
+        // Memory pressure tracking
+        double current_memory_pressure{0.0};
+        size_t last_offload_memory_threshold{0};
+        std::chrono::steady_clock::time_point last_memory_check;
+        std::chrono::steady_clock::time_point last_offload_decision;
+
+        // Prefetch depth tracking
+        int current_prefetch_depth{2};
+        int consecutive_improvements{0};
+        int consecutive_degradations{0};
+    };
+
+    AdaptiveMetrics adaptive_metrics_;
+    mutable std::mutex adaptive_mutex_;
 
     // ========================================================================
     // Internal Methods

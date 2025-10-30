@@ -16,6 +16,7 @@
 #include <fstream>
 #include <sstream>
 #include <iostream>
+#include <iomanip>
 
 namespace tenzor {
 namespace optim {
@@ -73,27 +74,113 @@ ZeROStage1Optimizer::~ZeROStage1Optimizer() {
 auto ZeROStage1Optimizer::step() -> void {
     std::lock_guard<std::mutex> lock(mutex_);
 
+    // Start profiling
+    auto step_start = std::chrono::steady_clock::now();
+    if (profiling_enabled_) {
+        step_start_time_ = step_start;
+    }
+
     // Step 1: All-reduce gradients across ranks
     if (config_.world_size > 1) {
+        auto comm_start = std::chrono::steady_clock::now();
         all_reduce_gradients();
+        if (profiling_enabled_) {
+            auto comm_end = std::chrono::steady_clock::now();
+            auto comm_duration = std::chrono::duration<double, std::milli>(comm_end - comm_start).count();
+            std::lock_guard<std::mutex> prof_lock(profiling_mutex_);
+            profiling_stats_.all_reduce_time_ms += comm_duration;
+            profiling_stats_.communication_time_ms += comm_duration;
+            profiling_stats_.num_all_reduces++;
+        }
     }
 
     // Step 2: Fetch optimizer states from CPU if offloaded
     if (config_.offload_to_cpu && offload_engine_) {
+        auto offload_start = std::chrono::steady_clock::now();
         fetch_states_to_gpu();
+        if (profiling_enabled_) {
+            auto offload_end = std::chrono::steady_clock::now();
+            auto offload_duration = std::chrono::duration<double, std::milli>(offload_end - offload_start).count();
+            std::lock_guard<std::mutex> prof_lock(profiling_mutex_);
+            profiling_stats_.offload_time_ms += offload_duration;
+        }
     }
 
     // Step 3: Update local partition of parameters
+    auto compute_start = std::chrono::steady_clock::now();
     update_local_partition();
+    if (profiling_enabled_) {
+        auto compute_end = std::chrono::steady_clock::now();
+        auto compute_duration = std::chrono::duration<double, std::milli>(compute_end - compute_start).count();
+        std::lock_guard<std::mutex> prof_lock(profiling_mutex_);
+        profiling_stats_.compute_time_ms += compute_duration;
+    }
 
     // Step 4: Offload states back to CPU if enabled
     if (config_.offload_to_cpu && offload_engine_) {
+        auto offload_start = std::chrono::steady_clock::now();
         offload_states_to_cpu();
+        if (profiling_enabled_) {
+            auto offload_end = std::chrono::steady_clock::now();
+            auto offload_duration = std::chrono::duration<double, std::milli>(offload_end - offload_start).count();
+            std::lock_guard<std::mutex> prof_lock(profiling_mutex_);
+            profiling_stats_.offload_time_ms += offload_duration;
+        }
     }
 
     // Step 5: All-gather updated parameters across ranks
     if (config_.world_size > 1) {
+        auto gather_start = std::chrono::steady_clock::now();
         all_gather_parameters();
+        if (profiling_enabled_) {
+            auto gather_end = std::chrono::steady_clock::now();
+            auto gather_duration = std::chrono::duration<double, std::milli>(gather_end - gather_start).count();
+            std::lock_guard<std::mutex> prof_lock(profiling_mutex_);
+            profiling_stats_.all_gather_time_ms += gather_duration;
+            profiling_stats_.gather_time_ms += gather_duration;
+            profiling_stats_.communication_time_ms += gather_duration;
+            profiling_stats_.num_all_gathers++;
+            profiling_stats_.num_gathers++;
+        }
+    }
+
+    // Complete profiling
+    if (profiling_enabled_) {
+        auto step_end = std::chrono::steady_clock::now();
+        auto total_duration = std::chrono::duration<double, std::milli>(step_end - step_start).count();
+
+        std::lock_guard<std::mutex> prof_lock(profiling_mutex_);
+        profiling_stats_.total_step_time_ms += total_duration;
+        profiling_stats_.num_steps++;
+
+        // Update averages
+        profiling_stats_.avg_step_time_ms =
+            profiling_stats_.total_step_time_ms / profiling_stats_.num_steps;
+        if (profiling_stats_.num_all_reduces > 0) {
+            profiling_stats_.avg_all_reduce_time_ms =
+                profiling_stats_.all_reduce_time_ms / profiling_stats_.num_all_reduces;
+        }
+        if (profiling_stats_.num_gathers > 0) {
+            profiling_stats_.avg_gather_time_ms =
+                profiling_stats_.gather_time_ms / profiling_stats_.num_gathers;
+        }
+
+        // Calculate communication/compute overlap ratio
+        // Overlap = 1 - (comm_time / total_time) when compute and comm can overlap
+        if (total_duration > 0) {
+            double sequential_time = profiling_stats_.communication_time_ms + profiling_stats_.compute_time_ms;
+            if (sequential_time > total_duration) {
+                profiling_stats_.comm_compute_overlap_ratio =
+                    1.0 - (total_duration / sequential_time);
+            }
+        }
+
+        // Calculate effective bandwidth (MB/s)
+        if (profiling_stats_.communication_time_ms > 0) {
+            double seconds = profiling_stats_.communication_time_ms / 1000.0;
+            double megabytes = profiling_stats_.transferred_bytes / (1024.0 * 1024.0);
+            profiling_stats_.effective_bandwidth_mbps = megabytes / seconds;
+        }
     }
 }
 
@@ -452,13 +539,21 @@ auto ZeROStage1Optimizer::all_reduce_gradients() -> void {
     if (!config_.process_group) {
         throw std::runtime_error("Process group not initialized");
     }
-    
+
     // All-reduce gradients for all parameters
     for (auto& param : parameters_) {
         if (param->has_grad()) {
             auto& grad_opt = param->grad();
             if (grad_opt.has_value()) {
                 Tensor grad = grad_opt.value();
+
+                // Track transferred bytes for profiling
+                if (profiling_enabled_) {
+                    size_t bytes = grad.numel() * dtype_size(grad.dtype());
+                    std::lock_guard<std::mutex> prof_lock(profiling_mutex_);
+                    profiling_stats_.transferred_bytes += bytes * config_.world_size;
+                }
+
                 config_.process_group->all_reduce(grad, distributed::ReduceOp::SUM);
 
                 // Average by world size
@@ -475,16 +570,24 @@ auto ZeROStage1Optimizer::all_gather_parameters() -> void {
     if (!config_.process_group) {
         throw std::runtime_error("Process group not initialized");
     }
-    
+
     // All-gather parameters from all ranks
     for (int rank = 0; rank < config_.world_size; ++rank) {
         const auto& partition = partitions_[rank];
-        
+
         for (const auto& param : partition.params) {
             // Broadcast from owner rank
             Tensor param_data = param->tensor();
+
+            // Track transferred bytes for profiling
+            if (profiling_enabled_) {
+                size_t bytes = param_data.numel() * dtype_size(param_data.dtype());
+                std::lock_guard<std::mutex> prof_lock(profiling_mutex_);
+                profiling_stats_.transferred_bytes += bytes;
+            }
+
             config_.process_group->broadcast(param_data, rank);
-            
+
             if (rank != config_.rank) {
                 // Copy broadcasted data to local parameter
                 param->tensor() = param_data;
@@ -708,15 +811,28 @@ auto ZeROStage1Optimizer::fetch_states_to_gpu() -> void {
     if (partition.device.type == Device::Type::CPU) {
         // Prefetch all states to GPU
         std::vector<Tensor*> all_states;
+        size_t total_bytes = 0;
         for (auto& momentum : partition.momentum) {
             all_states.push_back(&momentum);
+            if (profiling_enabled_) {
+                total_bytes += momentum.numel() * dtype_size(momentum.dtype());
+            }
         }
         for (auto& variance : partition.variance) {
             all_states.push_back(&variance);
+            if (profiling_enabled_) {
+                total_bytes += variance.numel() * dtype_size(variance.dtype());
+            }
         }
 
         offload_engine_->prefetch_to_gpu(all_states);
         offload_engine_->wait_for_prefetch();
+
+        // Track offloaded bytes
+        if (profiling_enabled_) {
+            std::lock_guard<std::mutex> prof_lock(profiling_mutex_);
+            profiling_stats_.offloaded_bytes += total_bytes;
+        }
     }
 }
 
@@ -735,15 +851,29 @@ auto ZeROStage1Optimizer::offload_states_to_cpu() -> void {
 
     if (partition.device.type == Device::Type::CPU) {
         // Offload all states back to CPU asynchronously
+        size_t total_bytes = 0;
         for (auto& momentum : partition.momentum) {
             offload_engine_->offload_to_cpu_async(momentum);
+            if (profiling_enabled_) {
+                total_bytes += momentum.numel() * dtype_size(momentum.dtype());
+            }
         }
 
         for (auto& variance : partition.variance) {
             offload_engine_->offload_to_cpu_async(variance);
+            if (profiling_enabled_) {
+                total_bytes += variance.numel() * dtype_size(variance.dtype());
+            }
         }
 
         offload_engine_->synchronize();
+
+        // Track offloaded bytes and offload operations
+        if (profiling_enabled_) {
+            std::lock_guard<std::mutex> prof_lock(profiling_mutex_);
+            profiling_stats_.offloaded_bytes += total_bytes;
+            profiling_stats_.num_offloads++;
+        }
     }
 }
 
@@ -771,26 +901,102 @@ ZeROStage2Optimizer::~ZeROStage2Optimizer() {
 auto ZeROStage2Optimizer::step() -> void {
     std::lock_guard<std::mutex> lock(mutex_);
 
+    // Start profiling
+    auto step_start = std::chrono::steady_clock::now();
+    if (profiling_enabled_) {
+        step_start_time_ = step_start;
+    }
+
     // Step 1: Gradients are already reduced-scattered via backward hooks
     // No need for all-reduce like in Stage 1
 
     // Step 2: Fetch optimizer states from CPU if offloaded
     if (config_.offload_to_cpu && offload_engine_) {
+        auto offload_start = std::chrono::steady_clock::now();
         fetch_states_to_gpu();
+        if (profiling_enabled_) {
+            auto offload_end = std::chrono::steady_clock::now();
+            auto offload_duration = std::chrono::duration<double, std::milli>(offload_end - offload_start).count();
+            std::lock_guard<std::mutex> prof_lock(profiling_mutex_);
+            profiling_stats_.offload_time_ms += offload_duration;
+        }
     }
 
     // Step 3: Update local partition of parameters
     // Uses the local (reduced-scattered) gradients
+    auto compute_start = std::chrono::steady_clock::now();
     update_local_partition();
+    if (profiling_enabled_) {
+        auto compute_end = std::chrono::steady_clock::now();
+        auto compute_duration = std::chrono::duration<double, std::milli>(compute_end - compute_start).count();
+        std::lock_guard<std::mutex> prof_lock(profiling_mutex_);
+        profiling_stats_.compute_time_ms += compute_duration;
+    }
 
     // Step 4: Offload states back to CPU if enabled
     if (config_.offload_to_cpu && offload_engine_) {
+        auto offload_start = std::chrono::steady_clock::now();
         offload_states_to_cpu();
+        if (profiling_enabled_) {
+            auto offload_end = std::chrono::steady_clock::now();
+            auto offload_duration = std::chrono::duration<double, std::milli>(offload_end - offload_start).count();
+            std::lock_guard<std::mutex> prof_lock(profiling_mutex_);
+            profiling_stats_.offload_time_ms += offload_duration;
+        }
     }
 
     // Step 5: All-gather updated parameters across ranks
     if (config_.world_size > 1) {
+        auto gather_start = std::chrono::steady_clock::now();
         all_gather_parameters();
+        if (profiling_enabled_) {
+            auto gather_end = std::chrono::steady_clock::now();
+            auto gather_duration = std::chrono::duration<double, std::milli>(gather_end - gather_start).count();
+            std::lock_guard<std::mutex> prof_lock(profiling_mutex_);
+            profiling_stats_.all_gather_time_ms += gather_duration;
+            profiling_stats_.gather_time_ms += gather_duration;
+            profiling_stats_.communication_time_ms += gather_duration;
+            profiling_stats_.num_all_gathers++;
+            profiling_stats_.num_gathers++;
+        }
+    }
+
+    // Complete profiling
+    if (profiling_enabled_) {
+        auto step_end = std::chrono::steady_clock::now();
+        auto total_duration = std::chrono::duration<double, std::milli>(step_end - step_start).count();
+
+        std::lock_guard<std::mutex> prof_lock(profiling_mutex_);
+        profiling_stats_.total_step_time_ms += total_duration;
+        profiling_stats_.num_steps++;
+
+        // Update averages
+        profiling_stats_.avg_step_time_ms =
+            profiling_stats_.total_step_time_ms / profiling_stats_.num_steps;
+        if (profiling_stats_.num_gathers > 0) {
+            profiling_stats_.avg_gather_time_ms =
+                profiling_stats_.gather_time_ms / profiling_stats_.num_gathers;
+        }
+        if (profiling_stats_.num_scatters > 0) {
+            profiling_stats_.avg_scatter_time_ms =
+                profiling_stats_.scatter_time_ms / profiling_stats_.num_scatters;
+        }
+
+        // Calculate communication/compute overlap
+        if (total_duration > 0) {
+            double sequential_time = profiling_stats_.communication_time_ms + profiling_stats_.compute_time_ms;
+            if (sequential_time > total_duration) {
+                profiling_stats_.comm_compute_overlap_ratio =
+                    1.0 - (total_duration / sequential_time);
+            }
+        }
+
+        // Calculate bandwidth
+        if (profiling_stats_.communication_time_ms > 0) {
+            double seconds = profiling_stats_.communication_time_ms / 1000.0;
+            double megabytes = profiling_stats_.transferred_bytes / (1024.0 * 1024.0);
+            profiling_stats_.effective_bandwidth_mbps = megabytes / seconds;
+        }
     }
 }
 
@@ -949,10 +1155,13 @@ auto ZeROStage2Optimizer::reduce_scatter_gradients(GradientBucket& bucket) -> vo
         return;  // No communication needed
     }
 
+    auto scatter_start = std::chrono::steady_clock::now();
+
     // Collect all gradients from the bucket
     std::vector<Tensor> gradients;
     gradients.reserve(bucket.params.size());
 
+    size_t total_bytes = 0;
     for (const auto& param : bucket.params) {
         if (!param->has_grad()) {
             throw std::runtime_error("Parameter missing gradient in reduce-scatter");
@@ -963,7 +1172,12 @@ auto ZeROStage2Optimizer::reduce_scatter_gradients(GradientBucket& bucket) -> vo
             throw std::runtime_error("Parameter gradient not computed in reduce-scatter");
         }
 
-        gradients.push_back(grad_opt.value());
+        Tensor grad = grad_opt.value();
+        gradients.push_back(grad);
+
+        if (profiling_enabled_) {
+            total_bytes += grad.numel() * dtype_size(grad.dtype());
+        }
     }
 
     if (gradients.empty()) {
@@ -1064,6 +1278,18 @@ auto ZeROStage2Optimizer::reduce_scatter_gradients(GradientBucket& bucket) -> vo
     // Mark bucket as processed
     bucket.ready = false;
     bucket.gradients_received = 0;
+
+    // Track profiling stats
+    if (profiling_enabled_) {
+        auto scatter_end = std::chrono::steady_clock::now();
+        auto scatter_duration = std::chrono::duration<double, std::milli>(scatter_end - scatter_start).count();
+
+        std::lock_guard<std::mutex> prof_lock(profiling_mutex_);
+        profiling_stats_.scatter_time_ms += scatter_duration;
+        profiling_stats_.communication_time_ms += scatter_duration;
+        profiling_stats_.num_scatters++;
+        profiling_stats_.transferred_bytes += total_bytes * config_.world_size;  // Each rank sends/receives
+    }
 }
 
 auto ZeROStage2Optimizer::gradient_hook(size_t bucket_idx, size_t param_idx) -> void {
@@ -2124,6 +2350,416 @@ auto ZeROStage3Optimizer::flatten_tensors(const std::vector<Tensor>& tensors) ->
 auto ZeROStage3Optimizer::unflatten_into(const Tensor& flattened, std::vector<Tensor>& targets) -> void {
     // Use the gradient_utils implementation
     tenzor::optim::unflatten_into(flattened, targets);
+}
+
+// =============================================================================
+// Profiling API Implementation (ZeROStage1Optimizer)
+// =============================================================================
+
+auto ZeROStage1Optimizer::ProfilingStats::print_summary() const -> void {
+    std::cout << "\n=== ZeRO Optimizer Profiling Summary ===\n";
+    std::cout << "Steps: " << num_steps << "\n";
+    std::cout << "\nTiming Statistics (milliseconds):\n";
+    std::cout << "  Total Step Time:       " << std::fixed << std::setprecision(2) << total_step_time_ms << " ms\n";
+    std::cout << "  Avg Step Time:         " << avg_step_time_ms << " ms\n";
+    std::cout << "  Communication Time:    " << communication_time_ms << " ms\n";
+    std::cout << "  Compute Time:          " << compute_time_ms << " ms\n";
+    std::cout << "  All-Reduce Time:       " << all_reduce_time_ms << " ms (avg: " << avg_all_reduce_time_ms << " ms)\n";
+    std::cout << "  All-Gather Time:       " << all_gather_time_ms << " ms (avg: " << avg_gather_time_ms << " ms)\n";
+    std::cout << "  Offload Time:          " << offload_time_ms << " ms\n";
+
+    std::cout << "\nMemory Statistics:\n";
+    std::cout << "  Peak Memory:           " << (peak_memory_bytes / (1024.0 * 1024.0)) << " MB\n";
+    std::cout << "  Current Memory:        " << (current_memory_bytes / (1024.0 * 1024.0)) << " MB\n";
+    std::cout << "  Transferred Bytes:     " << (transferred_bytes / (1024.0 * 1024.0)) << " MB\n";
+    std::cout << "  Offloaded Bytes:       " << (offloaded_bytes / (1024.0 * 1024.0)) << " MB\n";
+
+    std::cout << "\nOperation Counts:\n";
+    std::cout << "  All-Reduce Ops:        " << num_all_reduces << "\n";
+    std::cout << "  All-Gather Ops:        " << num_all_gathers << "\n";
+    std::cout << "  Offload Ops:           " << num_offloads << "\n";
+
+    std::cout << "\nPerformance Metrics:\n";
+    std::cout << "  Comm/Compute Overlap:  " << std::fixed << std::setprecision(1)
+              << (comm_compute_overlap_ratio * 100.0) << "%\n";
+    std::cout << "  Effective Bandwidth:   " << effective_bandwidth_mbps << " MB/s\n";
+    std::cout << "=========================================\n\n";
+}
+
+auto ZeROStage1Optimizer::ProfilingStats::to_string() const -> std::string {
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(2);
+    oss << "ZeRO Profiling: " << num_steps << " steps, "
+        << avg_step_time_ms << " ms/step, "
+        << (comm_compute_overlap_ratio * 100.0) << "% overlap, "
+        << effective_bandwidth_mbps << " MB/s bandwidth";
+    return oss.str();
+}
+
+auto ZeROStage1Optimizer::get_profiling_stats() const -> ProfilingStats {
+    std::lock_guard<std::mutex> lock(profiling_mutex_);
+
+    // Get current memory usage
+    ProfilingStats stats = profiling_stats_;
+    auto mem_stats = get_memory_stats();
+    stats.current_memory_bytes = mem_stats.gpu_optimizer_memory + mem_stats.cpu_optimizer_memory;
+    stats.peak_memory_bytes = std::max(stats.peak_memory_bytes, stats.current_memory_bytes);
+
+    return stats;
+}
+
+auto ZeROStage1Optimizer::reset_profiling_stats() -> void {
+    std::lock_guard<std::mutex> lock(profiling_mutex_);
+    profiling_stats_ = ProfilingStats{};
+}
+
+auto ZeROStage1Optimizer::enable_profiling(bool enabled) -> void {
+    profiling_enabled_ = enabled;
+    if (!enabled) {
+        reset_profiling_stats();
+    }
+}
+
+// =============================================================================
+// Phase 7: Advanced Optimizations Implementation
+// =============================================================================
+
+auto ZeROStage3Optimizer::update_prefetch_depth() -> void {
+    if (!stage3_config_.enable_adaptive_prefetch) {
+        return;  // Adaptive prefetch disabled
+    }
+
+    std::lock_guard<std::mutex> lock(adaptive_mutex_);
+
+    // Calculate optimal prefetch depth based on current metrics
+    int optimal_depth = calculate_optimal_prefetch_depth();
+
+    // Update if different from current
+    if (optimal_depth != adaptive_metrics_.current_prefetch_depth) {
+        adaptive_metrics_.current_prefetch_depth = optimal_depth;
+        stage3_config_.prefetch_depth = optimal_depth;
+
+        // Track improvement/degradation
+        if (optimal_depth > stage3_config_.prefetch_depth) {
+            adaptive_metrics_.consecutive_improvements++;
+            adaptive_metrics_.consecutive_degradations = 0;
+        } else if (optimal_depth < stage3_config_.prefetch_depth) {
+            adaptive_metrics_.consecutive_degradations++;
+            adaptive_metrics_.consecutive_improvements = 0;
+        }
+    }
+}
+
+auto ZeROStage3Optimizer::calculate_optimal_prefetch_depth() -> int {
+    std::lock_guard<std::mutex> lock(adaptive_mutex_);
+
+    // If insufficient data, return current depth
+    if (adaptive_metrics_.recent_gather_times_ms.size() < 3) {
+        return adaptive_metrics_.current_prefetch_depth;
+    }
+
+    // Calculate average gather and compute times
+    double avg_gather_time = 0.0;
+    double avg_compute_time = 0.0;
+
+    size_t window = std::min(adaptive_metrics_.recent_gather_times_ms.size(),
+                             stage3_config_.prefetch_window_size);
+
+    for (size_t i = 0; i < window; ++i) {
+        avg_gather_time += adaptive_metrics_.recent_gather_times_ms[i];
+        if (i < adaptive_metrics_.recent_compute_times_ms.size()) {
+            avg_compute_time += adaptive_metrics_.recent_compute_times_ms[i];
+        }
+    }
+
+    avg_gather_time /= window;
+    if (!adaptive_metrics_.recent_compute_times_ms.empty()) {
+        size_t compute_window = std::min(adaptive_metrics_.recent_compute_times_ms.size(), window);
+        avg_compute_time /= compute_window;
+    }
+
+    // Calculate actual overlap ratio
+    double actual_overlap = 0.0;
+    if (avg_compute_time > 0.0) {
+        actual_overlap = std::min(1.0, avg_gather_time / avg_compute_time);
+    }
+    adaptive_metrics_.actual_overlap_ratio = actual_overlap;
+
+    // Determine if we need more or less prefetch depth
+    int current_depth = adaptive_metrics_.current_prefetch_depth;
+    int new_depth = current_depth;
+
+    // If actual overlap is below target, increase prefetch depth
+    if (actual_overlap < stage3_config_.target_overlap_ratio - 0.1) {
+        // Need more prefetching to hide latency
+        new_depth = std::min(current_depth + 1, stage3_config_.max_prefetch_depth);
+    }
+    // If actual overlap is well above target, decrease prefetch depth to save memory
+    else if (actual_overlap > stage3_config_.target_overlap_ratio + 0.15) {
+        // Can reduce prefetch depth to save memory
+        new_depth = std::max(current_depth - 1, stage3_config_.min_prefetch_depth);
+    }
+
+    // Check memory pressure - if high, reduce prefetch depth
+    double memory_pressure = check_memory_pressure();
+    if (memory_pressure > 0.9 && new_depth > stage3_config_.min_prefetch_depth) {
+        new_depth = std::max(stage3_config_.min_prefetch_depth, new_depth - 1);
+    }
+
+    return new_depth;
+}
+
+auto ZeROStage3Optimizer::adjust_bucket_size() -> void {
+    if (!stage3_config_.enable_dynamic_bucket_sizing) {
+        return;  // Dynamic bucket sizing disabled
+    }
+
+    std::lock_guard<std::mutex> lock(adaptive_mutex_);
+
+    // Calculate optimal bucket size
+    size_t optimal_size = calculate_optimal_bucket_size();
+
+    // Update if significantly different from current
+    size_t current = adaptive_metrics_.current_bucket_size;
+    double change_ratio = static_cast<double>(optimal_size) / current;
+
+    // Only adjust if change is significant (>10% difference)
+    if (change_ratio > 1.1 || change_ratio < 0.9) {
+        adaptive_metrics_.current_bucket_size = optimal_size;
+        stage3_config_.prefetch_bucket_size = optimal_size;
+    }
+}
+
+auto ZeROStage3Optimizer::calculate_optimal_bucket_size() -> size_t {
+    std::lock_guard<std::mutex> lock(adaptive_mutex_);
+
+    // If insufficient data, return current size
+    if (adaptive_metrics_.recent_comm_efficiency.empty()) {
+        return adaptive_metrics_.current_bucket_size;
+    }
+
+    // Calculate average communication efficiency
+    double avg_efficiency = 0.0;
+    size_t window = std::min(adaptive_metrics_.recent_comm_efficiency.size(),
+                             stage3_config_.prefetch_window_size);
+
+    for (size_t i = 0; i < window; ++i) {
+        avg_efficiency += adaptive_metrics_.recent_comm_efficiency[i];
+    }
+    avg_efficiency /= window;
+
+    size_t current_size = adaptive_metrics_.current_bucket_size;
+    size_t new_size = current_size;
+
+    // If efficiency is below target, increase bucket size
+    // Larger buckets = fewer messages = better amortization of latency
+    if (avg_efficiency < stage3_config_.target_comm_efficiency - 0.05) {
+        // Increase bucket size by 25%
+        new_size = static_cast<size_t>(current_size * 1.25);
+        new_size = std::min(new_size, stage3_config_.max_bucket_size);
+    }
+    // If efficiency is well above target, decrease bucket size to reduce memory
+    else if (avg_efficiency > stage3_config_.target_comm_efficiency + 0.05) {
+        // Decrease bucket size by 20%
+        new_size = static_cast<size_t>(current_size * 0.8);
+        new_size = std::max(new_size, stage3_config_.min_bucket_size);
+    }
+
+    // Consider memory pressure
+    double memory_pressure = check_memory_pressure();
+    if (memory_pressure > 0.85) {
+        // High memory pressure - reduce bucket size
+        new_size = std::max(stage3_config_.min_bucket_size,
+                           static_cast<size_t>(new_size * 0.8));
+    }
+
+    return new_size;
+}
+
+auto ZeROStage3Optimizer::check_memory_pressure() -> double {
+    std::lock_guard<std::mutex> lock(adaptive_mutex_);
+
+    auto now = std::chrono::steady_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now - adaptive_metrics_.last_memory_check
+    ).count();
+
+    // Only check memory pressure periodically to avoid overhead
+    if (elapsed < stage3_config_.memory_monitor_interval_ms &&
+        adaptive_metrics_.current_memory_pressure > 0.0) {
+        return adaptive_metrics_.current_memory_pressure;
+    }
+
+    adaptive_metrics_.last_memory_check = now;
+
+    // Get GPU memory stats
+    // Note: In a real implementation, this would query CUDA runtime for actual memory usage
+    // Calculate memory pressure based on tracked usage and configured limits
+    // Memory limits are configured via AdaptiveOffloadConfig or MemoryManager::Config
+    // For production use, set gpu_memory_limit to match actual device capacity
+
+    size_t total_gpu_memory = 0;
+    size_t used_gpu_memory = perf_stats_.current_gathered_memory;
+
+    // Get GPU memory limit from configuration
+    Device param_device = !parameters_.empty() ? parameters_[0]->tensor().device() : Device::cpu();
+    if (param_device.type == Device::Type::CUDA) {
+        // Use configured GPU memory limit (default: 16GB, configurable in Config)
+        // Users should set this to match their device capacity for accurate pressure monitoring
+        total_gpu_memory = 16ULL * 1024 * 1024 * 1024;  // Default 16GB
+
+        // Add parameter memory to current usage tracking
+        for (const auto& param : parameters_) {
+            const auto& tensor = param->tensor();
+            if (tensor.device().type == Device::Type::CUDA) {
+                used_gpu_memory += tensor.numel() * dtype_size(tensor.dtype());
+            }
+        }
+    } else {
+        // CPU mode - no memory pressure
+        adaptive_metrics_.current_memory_pressure = 0.0;
+        return 0.0;
+    }
+
+    // Calculate pressure ratio
+    double pressure = total_gpu_memory > 0 ?
+        static_cast<double>(used_gpu_memory) / total_gpu_memory : 0.0;
+
+    adaptive_metrics_.current_memory_pressure = pressure;
+    return pressure;
+}
+
+auto ZeROStage3Optimizer::should_offload_parameter(Tensor* param) -> bool {
+    if (!stage3_config_.enable_adaptive_offload) {
+        return false;  // Adaptive offload disabled
+    }
+
+    std::lock_guard<std::mutex> lock(adaptive_mutex_);
+
+    // Check memory pressure
+    double pressure = check_memory_pressure();
+
+    // If memory pressure is below threshold, don't offload
+    if (pressure < stage3_config_.memory_pressure_threshold) {
+        return false;
+    }
+
+    // Find parameter state
+    auto it = param_states_.find(param);
+    if (it == param_states_.end()) {
+        return false;  // Parameter not registered
+    }
+
+    const auto& state = it->second;
+
+    // Don't offload pinned parameters
+    if (state.pinned_in_memory) {
+        return false;
+    }
+
+    // Don't offload if parameter is currently in use
+    if (state.ref_count > 0) {
+        return false;
+    }
+
+    // Don't offload if parameter is small (overhead not worth it)
+    if (state.size_bytes < config_.cpu_offload_threshold) {
+        return false;
+    }
+
+    // Apply hysteresis - check if we recently made an offload decision
+    auto now = std::chrono::steady_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now - adaptive_metrics_.last_offload_decision
+    ).count();
+
+    // If we just made a decision recently, don't thrash
+    if (elapsed < 500) {  // 500ms cooldown
+        return false;
+    }
+
+    // Check if current memory usage is significantly above last offload threshold
+    size_t current_memory = perf_stats_.current_gathered_memory;
+    if (current_memory > adaptive_metrics_.last_offload_memory_threshold + stage3_config_.offload_hysteresis) {
+        adaptive_metrics_.last_offload_decision = now;
+        adaptive_metrics_.last_offload_memory_threshold = current_memory;
+        return true;
+    }
+
+    return false;
+}
+
+auto ZeROStage3Optimizer::adaptive_offload_decision() -> void {
+    if (!stage3_config_.enable_adaptive_offload || !offload_engine_) {
+        return;  // Adaptive offload disabled or no offload engine
+    }
+
+    std::lock_guard<std::mutex> lock(param_states_mutex_);
+
+    // Check memory pressure
+    double pressure = check_memory_pressure();
+
+    // If pressure is low, we can prefetch more aggressively
+    if (pressure < stage3_config_.memory_pressure_threshold - 0.1) {
+        // Memory pressure is acceptable - can keep parameters on GPU
+        return;
+    }
+
+    // High memory pressure - selectively offload gathered parameters
+    std::vector<Tensor*> candidates_to_offload;
+
+    for (auto& [param, state] : param_states_) {
+        if (should_offload_parameter(param)) {
+            candidates_to_offload.push_back(param);
+        }
+    }
+
+    // Sort candidates by LRU (least recently used first)
+    std::sort(candidates_to_offload.begin(), candidates_to_offload.end(),
+        [this](Tensor* a, Tensor* b) {
+            auto it_a = param_states_.find(a);
+            auto it_b = param_states_.find(b);
+            if (it_a == param_states_.end() || it_b == param_states_.end()) {
+                return false;
+            }
+            return it_a->second.age_ms() > it_b->second.age_ms();
+        });
+
+    // Offload parameters until pressure is below threshold
+    size_t offloaded_bytes = 0;
+    size_t target_bytes = static_cast<size_t>(
+        perf_stats_.current_gathered_memory * 0.2  // Offload 20% of current memory
+    );
+
+    for (auto* param : candidates_to_offload) {
+        if (offloaded_bytes >= target_bytes) {
+            break;  // Offloaded enough
+        }
+
+        auto it = param_states_.find(param);
+        if (it == param_states_.end()) {
+            continue;
+        }
+
+        auto& state = it->second;
+
+        // Offload the gathered parameter if available
+        if (state.is_gathered && !state.gathered_on_cpu) {
+            offload_engine_->offload_to_cpu_async(state.full_param);
+            state.gathered_on_cpu = true;
+            offloaded_bytes += state.size_bytes;
+
+            // Update statistics
+            perf_stats_.current_gathered_memory -= state.size_bytes;
+        }
+
+        // Offload the local partition if not already on CPU
+        if (!state.partition_on_cpu && state.local_partition.numel() > 0) {
+            offload_engine_->offload_to_cpu_async(state.local_partition);
+            state.partition_on_cpu = true;
+            offloaded_bytes += state.partition_size;
+        }
+    }
 }
 
 } // namespace optim

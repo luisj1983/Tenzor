@@ -211,6 +211,16 @@ target_link_libraries(test_zero_stage3_integration PRIVATE
     GTest::gtest_main
 )
 
+# ZeRO Profiling tests (Phase 7 - Performance Profiling)
+add_executable(test_zero_profiling
+    nn/optim/test_zero_profiling.cpp
+)
+
+target_link_libraries(test_zero_profiling PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
 # Minimal training test (debugging NaN issue)
 add_executable(test_minimal_training
     test_minimal_training.cpp
@@ -855,6 +865,7 @@ gtest_discover_tests(test_zero_stage2 DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_zero_stage2_integration DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_zero_stage3 DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_zero_stage3_integration DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_zero_profiling DISCOVERY_TIMEOUT 30)
 
 gtest_discover_tests(test_fused_ops DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_backend_ops_parameterized DISCOVERY_TIMEOUT 30)
