@@ -104,23 +104,30 @@ auto CrossEntropyLoss::forward(const Variable& input, const Tensor& target) -> V
     // Use the log_softmax function from activations
     auto log_probs = nn::log_softmax(input, 1);  // Compute log_softmax along dim=1
 
-    // Create one-hot encoded target for proper gradient flow
-    // target contains class indices (Int64), log_probs has shape [N, C]
-    auto batch_size = input.tensor().shape()[0];
-    auto num_classes = input.tensor().shape()[1];
+    // Handle both one-hot encoded targets (Float32, shape [N, C]) and class indices (Int64, shape [N])
+    Variable one_hot_var;
 
-    // Create one-hot tensor
-    auto one_hot = tenzor::zeros({batch_size, num_classes}, input.tensor().dtype(), input.tensor().device());
-    auto* one_hot_data = one_hot.data<float>();
-    const int64_t* target_data = target.data<int64_t>();
+    if (target.dtype() == DType::Float32 && target.ndim() == 2) {
+        // Target is already one-hot encoded (Float32 with shape [N, C])
+        one_hot_var = Variable(target, false);  // Don't need gradients w.r.t. targets
+    } else {
+        // Target contains class indices (Int64), need to create one-hot encoding
+        auto batch_size = input.tensor().shape()[0];
+        auto num_classes = input.tensor().shape()[1];
 
-    for (int64_t i = 0; i < batch_size; ++i) {
-        int64_t class_idx = target_data[i];
-        one_hot_data[i * num_classes + class_idx] = 1.0f;
+        // Create one-hot tensor
+        auto one_hot = tenzor::zeros({batch_size, num_classes}, input.tensor().dtype(), input.tensor().device());
+        auto* one_hot_data = one_hot.data<float>();
+        const int64_t* target_data = target.data<int64_t>();
+
+        for (int64_t i = 0; i < batch_size; ++i) {
+            int64_t class_idx = target_data[i];
+            one_hot_data[i * num_classes + class_idx] = 1.0f;
+        }
+
+        // Convert to Variable for autograd
+        one_hot_var = Variable(one_hot, false);
     }
-
-    // Convert to Variable for autograd
-    auto one_hot_var = Variable(one_hot, false);  // Don't need gradients w.r.t. targets
 
     // Compute element-wise product: log_probs * one_hot
     // This selects the log probability for the correct class

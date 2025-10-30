@@ -26,7 +26,7 @@
 #include <tenzor/nn/mixed_precision.hpp>
 #include <tenzor/nn/amp/grad_scaler.hpp>
 #include <tenzor/nn/amp/autocast.hpp>
-// #include <tenzor/nn/parallel/distributed_data_parallel.hpp> // Not implemented yet (Phase 4)
+#include <tenzor/nn/parallel/distributed_data_parallel.hpp> // Now enabled!
 #include <tenzor/models/hub.hpp>
 #include <tenzor/onnx/exporter.hpp>
 #include <tenzor/data/dataset.hpp>
@@ -2189,28 +2189,63 @@ PYBIND11_MODULE(tenzor_core, m) {
              "Get optimizer");
 
     // ========================================================================
-    // Distributed training (Phase 4 - Not implemented yet)
+    // Distributed training - NOW ENABLED!
     // ========================================================================
-    /* COMMENTED OUT - Not part of Phase 1
     auto distributed = nn.def_submodule("parallel", "Distributed and parallel training");
 
     // ProcessGroup
-    py::class_<tenzor::nn::ProcessGroup, std::shared_ptr<tenzor::nn::ProcessGroup>>(distributed, "ProcessGroup")
+    py::class_<tenzor::nn::ProcessGroup, std::shared_ptr<tenzor::nn::ProcessGroup>>(distributed, "ProcessGroup",
+        R"pbdoc(
+            Process group for distributed training coordination.
+
+            Manages NCCL/RCCL communicators for multi-node/multi-GPU training.
+
+            Example:
+                >>> # On each process
+                >>> rank = int(os.environ['RANK'])
+                >>> world_size = int(os.environ['WORLD_SIZE'])
+                >>> pg = tz.nn.parallel.ProcessGroup(rank, world_size, backend='nccl')
+                >>> print(f"Process {pg.rank} of {pg.world_size}")
+        )pbdoc")
         .def(py::init<int, int, const std::string&>(),
              py::arg("rank"), py::arg("world_size"), py::arg("backend") = "nccl",
              "Create a process group for distributed training")
         .def_property_readonly("rank", &tenzor::nn::ProcessGroup::rank,
-             "Get process rank")
+             "Get process rank (0-indexed)")
         .def_property_readonly("world_size", &tenzor::nn::ProcessGroup::world_size,
              "Get world size (total number of processes)")
         .def_property_readonly("backend", &tenzor::nn::ProcessGroup::backend,
-             "Get backend name")
+             "Get backend name (nccl, gloo, or mpi)")
         .def("barrier", &tenzor::nn::ProcessGroup::barrier,
-             "Synchronize all processes");
+             "Synchronize all processes at this barrier");
 
     // DistributedDataParallel
     py::class_<tenzor::nn::DistributedDataParallel, tenzor::nn::Module,
-               std::shared_ptr<tenzor::nn::DistributedDataParallel>>(distributed, "DistributedDataParallel")
+               std::shared_ptr<tenzor::nn::DistributedDataParallel>>(distributed, "DistributedDataParallel",
+        R"pbdoc(
+            Distributed Data Parallel training wrapper.
+
+            Wraps a module for multi-GPU/multi-node training with automatic gradient
+            synchronization using NCCL all-reduce. Similar to PyTorch DDP.
+
+            Features:
+            - Automatic gradient synchronization across processes
+            - Bucket-based gradient communication for efficiency
+            - Broadcast parameters at initialization
+            - Optional unused parameter detection
+
+            Example:
+                >>> model = MyModel().cuda()
+                >>> process_group = tz.nn.parallel.ProcessGroup(rank, world_size)
+                >>> ddp_model = tz.nn.parallel.DistributedDataParallel(
+                ...     model, process_group, device_ids=[rank]
+                ... )
+                >>> # Train normally - gradients auto-sync
+                >>> for batch in dataloader:
+                ...     loss = ddp_model(batch)
+                ...     loss.backward()
+                ...     optimizer.step()
+        )pbdoc")
         .def(py::init<std::shared_ptr<tenzor::nn::Module>,
                      std::shared_ptr<tenzor::nn::ProcessGroup>,
                      std::vector<int>, int, bool, bool, bool, size_t>(),
@@ -2240,12 +2275,30 @@ PYBIND11_MODULE(tenzor_core, m) {
     // Helper functions
     distributed.def("init_process_group", &tenzor::nn::init_process_group,
          py::arg("backend") = "nccl",
-         "Initialize distributed training environment from environment variables");
+         R"pbdoc(
+             Initialize distributed training environment from environment variables.
+
+             Reads RANK, WORLD_SIZE, MASTER_ADDR, MASTER_PORT from environment
+             and creates a process group.
+
+             Args:
+                 backend: Communication backend ('nccl', 'gloo', or 'mpi')
+
+             Returns:
+                 ProcessGroup instance
+
+             Example:
+                 >>> # Set environment variables first:
+                 >>> # export RANK=0
+                 >>> # export WORLD_SIZE=4
+                 >>> # export MASTER_ADDR=localhost
+                 >>> # export MASTER_PORT=29500
+                 >>> pg = tz.nn.parallel.init_process_group(backend='nccl')
+         )pbdoc");
 
     distributed.def("destroy_process_group", &tenzor::nn::destroy_process_group,
          py::arg("process_group"),
          "Destroy process group and cleanup resources");
-    END COMMENT */
 
     // ModelHub for pretrained weight management
     auto models = m.def_submodule("models", "Pretrained model hub");
