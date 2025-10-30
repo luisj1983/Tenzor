@@ -13,13 +13,29 @@
 #include "optimizer.hpp"
 #include "../../distributed/distributed.hpp"
 #include "../../core/offload_engine.hpp"
+#include "../../nn/module.hpp"
 #include <memory>
 #include <vector>
 #include <map>
 #include <mutex>
+#include <condition_variable>
+#include <atomic>
+#include <chrono>
+#include <unordered_set>
+#include <queue>
+#include <functional>
 
 namespace tenzor {
+
+// Forward declare Module to avoid namespace issues
+namespace nn {
+    class Module;
+}
+
 namespace optim {
+
+// Bring Module into this namespace for convenience
+using nn::Module;
 
 /**
  * @brief Configuration for ZeRO Stage 1 Optimizer
@@ -593,6 +609,677 @@ private:
      * @param targets Target tensors to write into
      */
     auto unflatten_into(const Tensor& flattened, std::vector<Tensor>& targets) -> void;
+};
+
+/**
+ * @brief Configuration for ZeRO Stage 3 Optimizer
+ */
+struct Stage3Config : public ZeROStage2Config {
+    // ========================================================================
+    // Prefetching Configuration
+    // ========================================================================
+
+    /** Size of buckets for parameter gathering (bytes).
+     *  Larger buckets = fewer all-gather calls but more memory.
+     *  Recommended: 100-500 MB based on model size. */
+    size_t prefetch_bucket_size{100 * 1024 * 1024};  // 100 MB default
+
+    /** Number of layers to prefetch ahead during forward/backward.
+     *  Larger depth = better latency hiding but more GPU memory.
+     *  Recommended: 1-4 based on available memory. */
+    int prefetch_depth{2};
+
+    /** Maximum number of concurrent prefetch operations. */
+    int max_concurrent_prefetches{4};
+
+    /** Enable overlap of communication with computation.
+     *  Uses separate CUDA streams for gather/compute. */
+    bool overlap_comm_compute{true};
+
+    // ========================================================================
+    // Memory Management
+    // ========================================================================
+
+    /** Maximum number of gathered parameters to cache simultaneously.
+     *  Limits peak memory usage during forward/backward passes. */
+    int max_cached_params{10};
+
+    /** Enable parameter caching across forward/backward passes.
+     *  Avoids re-gathering parameters if they're used in both passes. */
+    bool cache_params_across_passes{true};
+
+    /** Threshold for small parameters (bytes).
+     *  Parameters smaller than this are not partitioned. */
+    size_t partition_threshold{1024};  // 1 KB
+
+    /** Pin first layer parameters in memory (keep gathered). */
+    bool pin_first_layer{true};
+
+    /** Pin last layer parameters in memory (keep gathered). */
+    bool pin_last_layer{true};
+
+    /** Maximum memory for gathered parameters (bytes). */
+    size_t max_gathered_buffer_size{500 * 1024 * 1024};  // 500 MB
+
+    // ========================================================================
+    // CPU Offload Integration
+    // ========================================================================
+
+    /** Offload partitioned parameters to CPU when not in use. */
+    bool offload_params_to_cpu{false};
+
+    /** Offload gathered parameters to CPU after use. */
+    bool offload_gathered_to_cpu{false};
+
+    // ========================================================================
+    // Communication Settings
+    // ========================================================================
+
+    /** Use asynchronous all-gather operations. */
+    bool use_async_gather{true};
+
+    /** Use separate CUDA streams for communication. */
+    bool use_separate_streams{true};
+
+    /** CUDA stream priority for gather operations (higher = more urgent). */
+    int gather_stream_priority{-1};
+
+    /** Use NCCL groups for parallel gather operations.
+     *  Experimental: may improve bandwidth utilization. */
+    bool use_nccl_groups{false};
+
+    /** Enable gradient checkpointing integration.
+     *  Manages parameter gathering during recomputation. */
+    bool gradient_checkpointing_aware{false};
+
+    /** Align parameter partitions to this byte boundary.
+     *  Improves memory coalescing. Recommended: 128 or 256. */
+    size_t partition_alignment{128};
+
+    Stage3Config() = default;
+};
+
+/**
+ * @brief ZeRO Stage 3: Full Model Partitioning
+ *
+ * Most aggressive memory savings. Partitions parameters, gradients, AND
+ * optimizer states across distributed ranks. Parameters are gathered
+ * on-demand for computation and freed immediately after use.
+ *
+ * **Memory Usage Per Rank (N ranks, M parameters)**:
+ *   - Parameters: M/N (only local partition)
+ *   - Gradients: M/N (only local partition)
+ *   - Optimizer States: 2M/N (only local partition for Adam)
+ *   - Temporary: M (gathered parameters during forward/backward)
+ *
+ * **Communication Pattern**:
+ *   - Forward: All-gather parameters before each layer
+ *   - Backward: All-gather parameters, reduce-scatter gradients
+ *   - Optimizer: No communication (operates on local partition)
+ *
+ * **Key Features**:
+ *   - Automatic parameter gathering via forward/backward hooks
+ *   - Intelligent prefetch scheduling to hide communication latency
+ *   - Parameter caching to avoid redundant gathers
+ *   - Reference counting for shared parameters
+ *   - CPU offload support for maximum memory savings
+ *
+ * @code
+ * // Example: Training with ZeRO Stage 3
+ * distributed::init_process_group("nccl");
+ * auto rank = distributed::get_rank();
+ * auto world_size = distributed::get_world_size();
+ *
+ * // Create model
+ * auto model = GPT2Model(GPT2Config::gpt2_medium());  // 350M parameters
+ * model.to(Device::cuda(rank));
+ *
+ * // Configure ZeRO Stage 3
+ * Stage3Config config;
+ * config.world_size = world_size;
+ * config.rank = rank;
+ * config.prefetch_bucket_size = 100 * 1024 * 1024;  // 100 MB
+ * config.prefetch_depth = 2;  // Prefetch 2 layers ahead
+ * config.overlap_comm_compute = true;
+ * config.cache_params_across_passes = true;
+ *
+ * // Create optimizer
+ * auto optimizer = ZeROStage3Optimizer(
+ *     std::make_unique<AdamW>(model.parameters(), 1e-4),
+ *     config
+ * );
+ *
+ * // Register model for parameter partitioning
+ * optimizer.register_model(model);
+ *
+ * // Training loop (parameters automatically gathered/freed)
+ * for (auto& batch : dataloader) {
+ *     optimizer.zero_grad();
+ *     auto output = model.forward(batch.input);  // Parameters gathered
+ *     auto loss = criterion(output, batch.labels);
+ *     loss.backward();  // Gradients reduced-scattered
+ *     optimizer.step();  // Update local partition only
+ * }
+ * @endcode
+ *
+ * @see ZeROStage1Optimizer, ZeROStage2Optimizer
+ */
+class ZeROStage3Optimizer : public ZeROStage2Optimizer {
+public:
+    // ========================================================================
+    // Forward Declarations (public section for visibility)
+    // ========================================================================
+
+    /**
+     * @brief Async handle for non-blocking operations (forward declaration)
+     */
+    struct AsyncHandle;
+
+    /**
+     * @brief Prefetch scheduler for predictive parameter gathering
+     */
+    class PrefetchScheduler;
+
+    // ========================================================================
+    // Constructor & Destructor
+    // ========================================================================
+
+    /**
+     * @brief Construct ZeRO Stage 3 optimizer
+     *
+     * @param base_optimizer The underlying optimizer (Adam, AdamW, SGD, etc.)
+     * @param config Stage 3 configuration
+     * @throws std::invalid_argument if rank >= world_size or base_optimizer is null
+     */
+    ZeROStage3Optimizer(
+        std::unique_ptr<Optimizer> base_optimizer,
+        const Stage3Config& config
+    );
+
+    /**
+     * @brief Destructor - cleanup hooks and resources
+     */
+    ~ZeROStage3Optimizer() override;
+
+    // ========================================================================
+    // Model Registration
+    // ========================================================================
+
+    /**
+     * @brief Register model for parameter partitioning
+     *
+     * This must be called before training begins. It:
+     *   1. Partitions all model parameters across ranks
+     *   2. Registers forward/backward hooks for automatic gather/scatter
+     *   3. Builds execution graph for prefetch scheduling
+     *   4. Initializes parameter state tracking
+     *
+     * @param model The model to partition
+     * @throws std::runtime_error if model is already registered
+     */
+    auto register_model(Module& model) -> void;
+
+    /**
+     * @brief Unregister model (for cleanup or re-registration)
+     */
+    auto unregister_model() -> void;
+
+    // ========================================================================
+    // Optimizer Interface (Override)
+    // ========================================================================
+
+    /**
+     * @brief Perform optimizer step
+     *
+     * Stage 3 step workflow:
+     *   1. Wait for all gradient reduce-scatter to complete
+     *   2. Update only local partition of parameters
+     *   3. NO all-gather needed (parameters remain partitioned)
+     *
+     * @throws std::runtime_error if distributed not initialized
+     */
+    auto step() -> void override;
+
+    /**
+     * @brief Zero gradients
+     *
+     * Only zeros local partition of gradients.
+     */
+    auto zero_grad() -> void;
+
+    // ========================================================================
+    // State Management
+    // ========================================================================
+
+    /**
+     * @brief Get optimizer state dictionary
+     *
+     * Returns state for only the local partition. To get full state,
+     * use gather_full_state().
+     *
+     * @return Map of state variable names to tensors
+     */
+    auto state_dict() const -> std::unordered_map<std::string, Tensor> override;
+
+    /**
+     * @brief Load optimizer state dictionary
+     *
+     * Expects partitioned state. To load from full checkpoint,
+     * use load_full_state().
+     *
+     * @param state State dictionary to load
+     */
+    auto load_state_dict(const std::unordered_map<std::string, Tensor>& state) -> void override;
+
+    /**
+     * @brief Gather full optimizer state from all ranks
+     *
+     * Used for checkpointing. Expensive operation that should only
+     * be called periodically.
+     *
+     * @return Full optimizer state (gathered from all ranks)
+     */
+    auto gather_full_state() -> std::unordered_map<std::string, Tensor>;
+
+    /**
+     * @brief Load from full (non-partitioned) checkpoint
+     *
+     * Automatically partitions the state across ranks.
+     *
+     * @param full_state Full optimizer state to load
+     */
+    auto load_full_state(const std::unordered_map<std::string, Tensor>& full_state) -> void;
+
+    // ========================================================================
+    // Manual Control API
+    // ========================================================================
+
+    /**
+     * @brief Manually gather a parameter
+     *
+     * Useful for inference or fine-grained control.
+     * Returns the full (gathered) parameter.
+     *
+     * @param param Parameter to gather (must be registered)
+     * @return Full parameter (replicated across all ranks)
+     * @throws std::runtime_error if communication fails
+     */
+    auto gather_parameter(Tensor* param) -> Tensor;
+
+    /**
+     * @brief Manually gather a parameter asynchronously
+     *
+     * @param param Parameter to gather
+     * @return Handle for async operation
+     */
+    auto gather_parameter_async(Tensor* param) -> std::shared_ptr<AsyncHandle>;
+
+    /**
+     * @brief Wait for async gather to complete
+     *
+     * @param handle Handle from gather_parameter_async()
+     * @return Full parameter tensor
+     */
+    auto wait_gather(std::shared_ptr<AsyncHandle> handle) -> Tensor;
+
+    /**
+     * @brief Manually free a gathered parameter
+     *
+     * Releases the full parameter, keeping only the local partition.
+     *
+     * @param param Parameter to free
+     */
+    auto free_gathered_parameter(Tensor* param) -> void;
+
+    /**
+     * @brief Prefetch parameters for upcoming layers
+     *
+     * Manually trigger prefetch for specific parameters.
+     *
+     * @param params Parameters to prefetch
+     */
+    auto prefetch_parameters(const std::vector<Tensor*>& params) -> void;
+
+    // ========================================================================
+    // State Queries
+    // ========================================================================
+
+    /**
+     * @brief Parameter state enumeration
+     */
+    enum class ParameterState {
+        PARTITIONED,    ///< Only local partition exists
+        GATHERING,      ///< All-gather in progress (async)
+        GATHERED,       ///< Full parameter available
+        SCATTERING,     ///< Reduce-scatter in progress (async)
+    };
+
+    /**
+     * @brief Get current state of a parameter
+     *
+     * @param param Parameter to query
+     * @return Current state (PARTITIONED, GATHERING, GATHERED, SCATTERING)
+     */
+    auto get_parameter_state(Tensor* param) const -> ParameterState;
+
+    /**
+     * @brief Check if parameter is currently gathered
+     *
+     * @param param Parameter to check
+     * @return true if full parameter is available
+     */
+    auto is_parameter_gathered(Tensor* param) const -> bool;
+
+    /**
+     * @brief Pin parameter in memory (keep gathered)
+     *
+     * Useful for frequently used parameters (e.g., first/last layer).
+     * Pinned parameters are never freed after gathering.
+     *
+     * @param param Parameter to pin
+     */
+    auto pin_parameter(Tensor* param) -> void;
+
+    /**
+     * @brief Unpin parameter (allow freeing)
+     *
+     * @param param Parameter to unpin
+     */
+    auto unpin_parameter(Tensor* param) -> void;
+
+    /**
+     * @brief Check if parameter is pinned
+     *
+     * @param param Parameter to check
+     * @return true if parameter is pinned in memory
+     */
+    auto is_parameter_pinned(Tensor* param) const -> bool;
+
+    // ========================================================================
+    // Statistics and Monitoring
+    // ========================================================================
+
+    /**
+     * @brief Performance statistics
+     */
+    struct Stats {
+        // Communication stats
+        size_t total_all_gather_calls{0};
+        size_t total_all_gather_bytes{0};
+        double avg_all_gather_time_ms{0.0};
+
+        // Memory stats
+        size_t peak_gathered_memory_bytes{0};
+        size_t current_gathered_memory_bytes{0};
+        int num_cached_params{0};
+
+        // Prefetch efficiency
+        double prefetch_hit_rate{0.0};  // % of gathers satisfied by prefetch
+        int prefetch_queue_depth{0};
+
+        // Performance metrics
+        double forward_comm_time_ms{0.0};
+        double backward_comm_time_ms{0.0};
+        double overlap_efficiency{0.0};  // % of comm hidden by compute
+    };
+
+    /**
+     * @brief Get performance statistics
+     *
+     * @return Current performance statistics
+     */
+    auto get_stats() -> Stats;
+
+    /**
+     * @brief Reset performance statistics
+     */
+    auto reset_stats() -> void;
+
+    /**
+     * @brief Get prefetch statistics
+     */
+    struct PrefetchStats {
+        size_t prefetch_queue_size{0};
+        size_t prefetched_bytes{0};
+        double hit_rate{0.0};           ///< Fraction of gathers that hit prefetch
+        double avg_prefetch_time_ms{0.0};
+        size_t prefetch_hits{0};
+        size_t prefetch_misses{0};
+    };
+
+    /**
+     * @brief Get prefetch statistics
+     *
+     * @return Current prefetch statistics
+     */
+    auto get_prefetch_stats() const -> PrefetchStats;
+
+private:
+    // ========================================================================
+    // Internal State Structures
+    // ========================================================================
+
+    /**
+     * @brief State information for a single parameter
+     *
+     * Tracks the lifecycle of a parameter including whether it's currently
+     * gathered, who is using it, and manages temporary buffers.
+     */
+    struct ParameterInfo {
+        Tensor* param;                      ///< Original parameter pointer
+        std::string name;                   ///< Parameter name (for debugging)
+        size_t size_bytes;                  ///< Size of full parameter
+
+        // Partitioning information
+        int owner_rank;                     ///< Rank that owns this partition
+        Tensor local_partition;             ///< Local partition (1/N of full parameter)
+        size_t partition_offset;            ///< Offset in full parameter
+        size_t partition_size;              ///< Size of local partition
+
+        // Gathered state
+        Tensor full_param;                  ///< Full parameter (temporarily gathered)
+        bool is_gathered{false};            ///< Is the full parameter available?
+        int ref_count{0};                   ///< Reference count for shared parameters (non-atomic for simplicity)
+        std::chrono::steady_clock::time_point last_access_time;  ///< For LRU eviction
+
+        // Communication handles (using shared_ptr with forward-declared type is OK)
+        std::shared_ptr<void> gather_handle;   ///< Handle for ongoing all-gather (opaque)
+        std::shared_ptr<void> scatter_handle;  ///< Handle for ongoing reduce-scatter (opaque)
+
+        // Prefetch state
+        bool is_prefetching{false};         ///< Is this parameter being prefetched?
+        int prefetch_priority{0};           ///< Priority for prefetch scheduling
+        int64_t time_until_use_us{0};       ///< Estimated time until needed
+
+        // CPU offload state
+        bool partition_on_cpu{false};       ///< Is partition on CPU?
+        bool gathered_on_cpu{false};        ///< Is gathered param on CPU?
+        std::shared_ptr<core::TransferHandle> offload_handle;  ///< Offload operation handle
+
+        // Module dependency tracking
+        std::vector<int> dependent_modules; ///< Modules that use this parameter
+        int layer_index{-1};                ///< Layer index in execution graph
+
+        // Memory management
+        bool pinned_in_memory{false};       ///< Keep gathered (e.g., first/last layer)
+        ParameterState state{ParameterState::PARTITIONED};  ///< Current state
+
+        /**
+         * @brief Increment reference count
+         */
+        auto acquire() -> void {
+            ref_count++;
+            last_access_time = std::chrono::steady_clock::now();
+        }
+
+        /**
+         * @brief Decrement reference count
+         * @return New reference count value
+         */
+        auto release() -> int {
+            return --ref_count;
+        }
+
+        /**
+         * @brief Check if parameter can be freed
+         * @return true if gathered and no active users
+         */
+        auto can_free() const -> bool {
+            return is_gathered && ref_count == 0;
+        }
+
+        /**
+         * @brief Get age since last access (for LRU eviction)
+         * @return Age in milliseconds
+         */
+        auto age_ms() const -> int64_t {
+            auto now = std::chrono::steady_clock::now();
+            return std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - last_access_time
+            ).count();
+        }
+    };
+
+    /**
+     * @brief Forward pre-hook for parameter gathering
+     */
+    struct ForwardPreHook {
+        Module* module;                     ///< Module this hook is attached to
+        std::vector<Tensor*> params;        ///< Parameters used by this module
+        std::function<void(Module*, const std::vector<Tensor>&)> hook_fn;  ///< Hook callback
+        int hook_id;                        ///< Unique hook identifier
+    };
+
+    /**
+     * @brief Backward post-hook for gradient scattering
+     */
+    struct BackwardPostHook {
+        Module* module;                     ///< Module this hook is attached to
+        std::vector<Tensor*> params;        ///< Parameters used by this module
+        std::function<void(Module*, const std::vector<Tensor>&, const std::vector<Tensor>&)> hook_fn;
+        int hook_id;                        ///< Unique hook identifier
+    };
+
+    // Forward declarations moved to public section
+
+    // ========================================================================
+    // Internal State
+    // ========================================================================
+
+    Stage3Config stage3_config_;
+
+    /** Module being managed (weak reference to avoid ownership) */
+    Module* registered_model_{nullptr};
+
+    /** Parameter state tracking map */
+    std::unordered_map<Tensor*, ParameterInfo> param_states_;
+    mutable std::mutex param_states_mutex_;
+
+    /** Prefetch queue and scheduler */
+    std::unique_ptr<PrefetchScheduler> prefetch_scheduler_;
+
+    /** Hook handles for cleanup */
+    std::vector<ForwardPreHook> forward_hooks_;
+    std::vector<BackwardPostHook> backward_hooks_;
+    int next_hook_id_{0};
+
+    /** Communication streams */
+    // TODO: Add CUDAStream when available
+    // CUDAStream gather_stream_;
+    // CUDAStream scatter_stream_;
+
+    /** Performance statistics (internal structure) */
+    struct PerformanceStats {
+        size_t total_gathers{0};
+        size_t total_gather_bytes{0};
+        double avg_gather_time_ms{0.0};
+        size_t peak_gathered_memory{0};
+        size_t current_gathered_memory{0};
+        size_t prefetch_hits{0};
+        size_t prefetch_misses{0};
+    };
+
+    /** Statistics */
+    Stats stats_;
+    PerformanceStats perf_stats_;
+    mutable std::mutex stats_mutex_;
+
+    // ========================================================================
+    // Internal Methods
+    // ========================================================================
+
+    /** Partition all model parameters across ranks */
+    auto partition_model_parameters(Module& model) -> void;
+
+    /** Register gather/scatter hooks on all modules */
+    auto register_gather_scatter_hooks(Module& model) -> void;
+
+    /** Build execution graph for prefetch scheduling */
+    auto build_execution_graph(Module& model) -> void;
+
+    /** All-gather parameter (internal implementation) */
+    auto gather_parameter_impl(ParameterInfo& state) -> void;
+
+    /** Free gathered parameter (internal implementation) */
+    auto free_gathered_parameter_impl(ParameterInfo& state) -> void;
+
+    /** Check if parameter should be partitioned */
+    auto should_partition_parameter(const Tensor& param) const -> bool;
+
+    /** Forward pre-hook callback */
+    auto forward_pre_hook(Module* module, const std::vector<Tensor>& inputs) -> void;
+
+    /** Backward post-hook callback */
+    auto backward_post_hook(Module* module, const std::vector<Tensor>& inputs,
+                           const std::vector<Tensor>& grad_outputs) -> void;
+
+    /** Scatter (reduce-scatter) gradient for a parameter */
+    auto scatter_parameter_gradient(Tensor* param) -> void;
+
+    /** Prefetch parameters for next modules */
+    auto prefetch_next_parameters(Module* current_module) -> void;
+
+    /** Get next module in execution order */
+    auto get_next_module_in_execution_order(Module* current_module) -> Module*;
+
+    /** Get next parameters in execution order */
+    auto get_next_parameters_in_execution_order(const ParameterInfo& state)
+        -> std::vector<Tensor*>;
+
+    /** Flatten tensors into contiguous buffer */
+    auto flatten_tensors(const std::vector<Tensor>& tensors) -> Tensor;
+
+    /** Unflatten buffer into individual tensors */
+    auto unflatten_into(const Tensor& flattened, std::vector<Tensor>& targets) -> void;
+};
+
+/**
+ * @brief Async handle for non-blocking operations (definition)
+ *
+ * Placed here after the class definition to avoid forward declaration issues.
+ */
+struct ZeROStage3Optimizer::AsyncHandle {
+    bool ready{false};                  ///< Operation complete?
+    Tensor result;                      ///< Result tensor (when ready)
+    std::shared_ptr<void> comm_handle;  ///< Underlying communication handle
+    std::mutex mutex;                   ///< Thread safety
+    std::condition_variable cv;         ///< Notification for completion
+
+    /**
+     * @brief Check if operation is complete
+     */
+    auto is_ready() -> bool {
+        std::lock_guard<std::mutex> lock(mutex);
+        return ready;
+    }
+
+    /**
+     * @brief Wait for operation to complete
+     */
+    auto wait() -> void {
+        std::unique_lock<std::mutex> lock(mutex);
+        cv.wait(lock, [this] { return ready; });
+    }
 };
 
 } // namespace optim

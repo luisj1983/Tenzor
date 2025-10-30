@@ -191,6 +191,26 @@ target_link_libraries(test_zero_stage2_integration PRIVATE
     GTest::gtest_main
 )
 
+# ZeRO Stage 3 Optimizer tests (Phase 6 - Parameter Partitioning)
+add_executable(test_zero_stage3
+    nn/optim/test_zero_stage3.cpp
+)
+
+target_link_libraries(test_zero_stage3 PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+# ZeRO Stage 3 Integration tests (Phase 6 - Parameter Partitioning)
+add_executable(test_zero_stage3_integration
+    nn/optim/test_zero_stage3_integration.cpp
+)
+
+target_link_libraries(test_zero_stage3_integration PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
 # Minimal training test (debugging NaN issue)
 add_executable(test_minimal_training
     test_minimal_training.cpp
@@ -833,6 +853,8 @@ gtest_discover_tests(test_zero_stage1_integration DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_zero_stage1_distributed DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_zero_stage2 DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_zero_stage2_integration DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_zero_stage3 DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_zero_stage3_integration DISCOVERY_TIMEOUT 30)
 
 gtest_discover_tests(test_fused_ops DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_backend_ops_parameterized DISCOVERY_TIMEOUT 30)
