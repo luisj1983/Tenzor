@@ -440,6 +440,14 @@ auto Tensor::to(Device device) const -> Tensor {
         throw std::runtime_error("Backend not available for device transfer");
     }
 
+    // Synchronize source device before copy if transferring from device
+    if (copy_kind == CopyKind::DeviceToHost || copy_kind == CopyKind::DeviceToDevice) {
+        auto* src_backend = backend_registry().get_backend(cont.impl_->device.type);
+        if (src_backend) {
+            src_backend->synchronize(cont.impl_->device.index);
+        }
+    }
+
     // Perform the copy
     backend->copy(result.impl_->storage->data(),
                   cont.impl_->storage->data(),

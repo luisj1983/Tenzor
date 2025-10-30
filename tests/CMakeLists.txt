@@ -47,6 +47,19 @@ target_link_libraries(tenzor_simd_benchmark PRIVATE
     GTest::gtest_main
 )
 
+# CUDA scalar debug test (separate executable for quick debugging)
+add_executable(test_cuda_scalar_debug
+    test_cuda_scalar_debug.cpp
+)
+
+target_link_libraries(test_cuda_scalar_debug PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+# Register all tests with CTest at the end of the file
+# (will be added to gtest_discover_tests section below)
+
 # Legacy integration tests (kept for compatibility)
 add_executable(tenzor_integration_tests
     integration/test_nn.cpp
@@ -828,6 +841,7 @@ endif()
 include(GoogleTest)
 gtest_discover_tests(tenzor_unit_tests DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(tenzor_integration_tests DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_cuda_scalar_debug DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_dropout DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_batchnorm2d DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_conv2d DISCOVERY_TIMEOUT 30)

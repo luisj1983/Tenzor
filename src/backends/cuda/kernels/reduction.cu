@@ -376,20 +376,38 @@ static void launch_full_reduction_sum(const T* d_input, T* d_output, int64_t n, 
 
     if (num_blocks == 1) {
         sum_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
+        // Check for kernel launch errors
+        cudaError_t err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            throw std::runtime_error(std::string("CUDA kernel launch failed in sum_reduce_kernel: ") + cudaGetErrorString(err));
+        }
     } else {
         // Phase 1: Reduce to num_blocks intermediate results
         T* d_temp;
         cudaMalloc(&d_temp, num_blocks * sizeof(T));
         sum_reduce_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
+        // Check for kernel launch errors
+        cudaError_t err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            throw std::runtime_error(std::string("CUDA kernel launch failed in sum_reduce_kernel phase 1: ") + cudaGetErrorString(err));
+        }
 
         // Phase 2: Final reduction
         sum_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, d_output, num_blocks);
+        err = cudaGetLastError();
+        if (err != cudaSuccess) {
+            throw std::runtime_error(std::string("CUDA kernel launch failed in sum_reduce_kernel phase 2: ") + cudaGetErrorString(err));
+        }
 
         // Synchronize before freeing temp buffer
         cudaStreamSynchronize(stream);
         cudaFree(d_temp);
     }
-    cudaStreamSynchronize(stream);
+    // Check for any errors during synchronization
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        throw std::runtime_error(std::string("CUDA error in sum reduction: ") + cudaGetErrorString(err));
+    }
 }
 
 template<typename T>
@@ -416,7 +434,6 @@ static void launch_full_reduction_max(const T* d_input, T* d_output, int64_t n, 
         cudaStreamSynchronize(stream);
         cudaFree(d_temp);
     }
-    cudaStreamSynchronize(stream);
 }
 
 template<typename T>
@@ -434,6 +451,7 @@ static void launch_full_reduction_min(const T* d_input, T* d_output, int64_t n, 
 
     if (num_blocks == 1) {
         min_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
+        cudaStreamSynchronize(stream);
     } else {
         T* d_temp;
         cudaMalloc(&d_temp, num_blocks * sizeof(T));
@@ -443,7 +461,6 @@ static void launch_full_reduction_min(const T* d_input, T* d_output, int64_t n, 
         cudaStreamSynchronize(stream);
         cudaFree(d_temp);
     }
-    cudaStreamSynchronize(stream);
 }
 
 template<typename T>
@@ -483,6 +500,9 @@ static void launch_dim_reduction_sum(
         d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size
     );
 
+    // Wait for kernel to complete before freeing memory
+    cudaDeviceSynchronize();
+
     cudaFree(d_shape);
     cudaFree(d_strides);
 }
@@ -521,6 +541,9 @@ static void launch_dim_reduction_max(
         d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size
     );
 
+    // Wait for kernel to complete before freeing memory
+    cudaDeviceSynchronize();
+
     cudaFree(d_shape);
     cudaFree(d_strides);
 }
@@ -558,6 +581,9 @@ static void launch_dim_reduction_min(
     min_along_dim_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
         d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size
     );
+
+    // Wait for kernel to complete before freeing memory
+    cudaDeviceSynchronize();
 
     cudaFree(d_shape);
     cudaFree(d_strides);
@@ -657,6 +683,15 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
     return output;
 }
 
+// Scaling kernel for mean computation
+template<typename T>
+__global__ void scale_kernel(T* data, int64_t n, T scale) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        data[idx] *= scale;
+    }
+}
+
 auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
     const auto dtype = input.dtype();
 
@@ -679,48 +714,26 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t st
         throw std::runtime_error("mean: cannot compute mean of empty tensor");
     }
 
-    // Divide by count (in-place)
+    // Divide by count (in-place) using proper CUDA kernel
     const int64_t n = sum_result.numel();
+    const int block_size = 256;
+    const int grid_size = (n + block_size - 1) / block_size;
 
     if (dtype == DType::Float32) {
         auto* data = sum_result.data<float>();
         const float scale = 1.0f / static_cast<float>(count);
-
-        // Simple scaling kernel
-        int num_blocks = (n + 255) / 256;
-        auto scale_kernel = [scale] __device__ (float* d, int64_t n) {
-            int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-            if (idx < n) {
-                d[idx] *= scale;
-            }
-        };
-
-        // Launch inline lambda kernel (requires C++17)
-        int block_size = 256;
-        int grid_size = (n + block_size - 1) / block_size;
-
-        // Simple element-wise scaling
-        auto scale_fn = [] __device__ (float val, float scale) { return val * scale; };
-
-        // For simplicity, use a host-side loop with async copies for small tensors
-        // For production, implement a proper scaling kernel
-        std::vector<float> host_data(n);
-        cudaMemcpy(host_data.data(), data, n * sizeof(float), cudaMemcpyDeviceToHost);
-        for (int64_t i = 0; i < n; i++) {
-            host_data[i] *= scale;
-        }
-        cudaMemcpy(data, host_data.data(), n * sizeof(float), cudaMemcpyHostToDevice);
-
+        scale_kernel<<<grid_size, block_size, 0, stream>>>(data, n, scale);
     } else {  // Float64
         auto* data = sum_result.data<double>();
         const double scale = 1.0 / static_cast<double>(count);
+        scale_kernel<<<grid_size, block_size, 0, stream>>>(data, n, scale);
+    }
 
-        std::vector<double> host_data(n);
-        cudaMemcpy(host_data.data(), data, n * sizeof(double), cudaMemcpyDeviceToHost);
-        for (int64_t i = 0; i < n; i++) {
-            host_data[i] *= scale;
-        }
-        cudaMemcpy(data, host_data.data(), n * sizeof(double), cudaMemcpyHostToDevice);
+    cudaStreamSynchronize(stream);
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        throw std::runtime_error(std::string("CUDA error in mean_kernel: ") + cudaGetErrorString(err));
     }
 
     return sum_result;
