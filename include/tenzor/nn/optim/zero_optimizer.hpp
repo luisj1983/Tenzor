@@ -207,7 +207,7 @@ public:
         return *base_optimizer_;
     }
 
-private:
+protected:
     /**
      * @brief State partition for a single rank
      */
@@ -359,6 +359,240 @@ private:
     auto local_partition() const -> const StatePartition& {
         return partitions_[config_.rank];
     }
+};
+
+/**
+ * @brief Configuration for ZeRO Stage 2 Optimizer
+ */
+struct ZeROStage2Config : public ZeROStage1Config {
+    size_t gradient_bucket_size{25 * 1024 * 1024};  ///< Target bucket size (default: 25MB)
+    bool reduce_scatter_in_backward{true};           ///< Enable reduce-scatter during backward
+    bool gradient_bucketing{true};                   ///< Enable gradient bucketing
+
+    ZeROStage2Config() = default;
+};
+
+/**
+ * @brief ZeRO Stage 2: Gradient + Optimizer State Partitioning
+ *
+ * Extends ZeRO Stage 1 by also partitioning gradients across ranks.
+ * Uses reduce-scatter during backward pass to compute and partition
+ * gradients simultaneously, eliminating the need for all-reduce.
+ *
+ * **Algorithm**:
+ * 1. Parameters are replicated on all ranks
+ * 2. During backward pass: Reduce-scatter gradients by partition
+ * 3. Each rank receives sum of its gradient partition only
+ * 4. Optimizer states are partitioned (inherited from Stage 1)
+ * 5. Each rank updates its parameter partition
+ * 6. Parameters are all-gathered after update
+ *
+ * **Memory Savings**:
+ * - Adam: 8x reduction (4x optimizer states + 4x gradients)
+ * - SGD with momentum: 4x reduction (2x optimizer states + 2x gradients)
+ *
+ * **Key Optimization: Gradient Bucketing**
+ * - Groups small gradients into larger buckets for efficient communication
+ * - Overlaps reduce-scatter with backward computation
+ * - Reduces communication overhead
+ *
+ * @code
+ * // Example: Distributed training with ZeRO Stage 2
+ * distributed::init_process_group("nccl");
+ * auto rank = distributed::get_rank();
+ * auto world_size = distributed::get_world_size();
+ *
+ * // Create model and optimizer
+ * auto model = MyModel();
+ * auto adam = std::make_unique<Adam>(model.parameters(), 1e-3);
+ *
+ * // Wrap with ZeRO Stage 2
+ * ZeROStage2Config config;
+ * config.world_size = world_size;
+ * config.rank = rank;
+ * config.offload_to_cpu = true;
+ * config.gradient_bucket_size = 50 * 1024 * 1024;  // 50MB buckets
+ * auto zero_optimizer = ZeROStage2Optimizer(std::move(adam), config);
+ *
+ * // Register backward hooks for gradient reduce-scatter
+ * zero_optimizer.register_backward_hooks();
+ *
+ * // Training loop
+ * for (auto& batch : dataloader) {
+ *     zero_optimizer.zero_grad();
+ *     auto output = model.forward(batch.input);
+ *     auto loss = criterion(output, batch.target);
+ *     loss.backward();  // Gradients reduced-scattered automatically
+ *     zero_optimizer.step();
+ * }
+ * @endcode
+ *
+ * @see ZeROStage1Optimizer, ZeROStage3Optimizer
+ */
+class ZeROStage2Optimizer : public ZeROStage1Optimizer {
+public:
+    /**
+     * @brief Construct ZeRO Stage 2 optimizer
+     *
+     * @param base_optimizer Base optimizer (Adam, SGD, etc.) - ownership transferred
+     * @param config ZeRO Stage 2 configuration
+     * @throws std::invalid_argument if rank >= world_size or base_optimizer is null
+     */
+    ZeROStage2Optimizer(
+        std::unique_ptr<Optimizer> base_optimizer,
+        const ZeROStage2Config& config
+    );
+
+    /**
+     * @brief Destructor - cleanup hooks and resources
+     */
+    ~ZeROStage2Optimizer() override;
+
+    /**
+     * @brief Perform optimizer step with gradient partitioning
+     *
+     * Algorithm:
+     * 1. Reduce-scatter gradients (already done in backward hooks)
+     * 2. If CPU offload: Fetch local state partition to GPU
+     * 3. Update local parameter partition with base optimizer
+     * 4. If CPU offload: Offload states back to CPU
+     * 5. All-gather updated parameters across ranks
+     *
+     * Note: Unlike Stage 1, no all-reduce is needed since gradients
+     * are already reduced-scattered during backward pass.
+     *
+     * @throws std::runtime_error if distributed not initialized
+     */
+    auto step() -> void override;
+
+    /**
+     * @brief Register backward hooks for gradient reduce-scatter
+     *
+     * Must be called after model creation to enable automatic gradient
+     * partitioning during backward pass. Hooks are registered per parameter
+     * and trigger reduce-scatter when gradient is computed.
+     *
+     * @throws std::runtime_error if parameters have no grad_fn
+     */
+    auto register_backward_hooks() -> void;
+
+    /**
+     * @brief Get gradient bucket statistics
+     */
+    struct BucketStats {
+        size_t num_buckets{0};           ///< Number of gradient buckets
+        size_t avg_bucket_size{0};       ///< Average bucket size (bytes)
+        size_t max_bucket_size{0};       ///< Maximum bucket size (bytes)
+        size_t total_gradient_memory{0}; ///< Total gradient memory (bytes)
+    };
+
+    /**
+     * @brief Get gradient bucket statistics
+     */
+    auto get_bucket_stats() const -> BucketStats;
+
+    /**
+     * @brief Check if backward hooks are registered
+     */
+    auto hooks_registered() const -> bool { return hooks_registered_; }
+
+private:
+    /**
+     * @brief Gradient bucket for efficient reduce-scatter
+     */
+    struct GradientBucket {
+        std::vector<std::shared_ptr<Variable>> params;  ///< Parameters in bucket
+        std::vector<Tensor> gradient_buffers;           ///< Flattened gradient buffers per rank
+        size_t total_size{0};                           ///< Total size in bytes
+        int target_rank{-1};                            ///< Rank that owns these gradients
+        bool ready{false};                              ///< All gradients computed
+        size_t gradients_received{0};                   ///< Count of gradients received
+        std::unique_ptr<std::mutex> mutex;              ///< Thread safety for async hooks
+
+        // Constructor to initialize mutex
+        GradientBucket() : mutex(std::make_unique<std::mutex>()) {}
+
+        // Move constructor
+        GradientBucket(GradientBucket&&) = default;
+        GradientBucket& operator=(GradientBucket&&) = default;
+
+        // Delete copy operations (mutex is non-copyable)
+        GradientBucket(const GradientBucket&) = delete;
+        GradientBucket& operator=(const GradientBucket&) = delete;
+    };
+
+    // Configuration
+    ZeROStage2Config stage2_config_;
+
+    // Gradient buckets
+    std::vector<GradientBucket> gradient_buckets_;
+    mutable std::mutex buckets_mutex_;  // Mutable so const methods can lock
+
+    // Hook management
+    bool hooks_registered_{false};
+
+    // Initialization
+
+    /**
+     * @brief Create gradient buckets for efficient communication
+     *
+     * Groups parameters into buckets based on:
+     * - Target size (gradient_bucket_size config)
+     * - Parameter ownership (which rank owns the gradient partition)
+     * - Memory alignment
+     */
+    auto create_gradient_buckets() -> void;
+
+    // Communication
+
+    /**
+     * @brief Reduce-scatter gradients in a bucket
+     *
+     * Performs reduce-scatter operation on all gradients in the bucket:
+     * 1. Flatten gradients into contiguous buffer
+     * 2. Reduce-scatter: Each rank gets 1/N of the summed gradients
+     * 3. Unflatten into individual gradient tensors
+     * 4. Free non-local gradients
+     *
+     * @param bucket Gradient bucket to process
+     */
+    auto reduce_scatter_gradients(GradientBucket& bucket) -> void;
+
+    /**
+     * @brief Gradient hook callback
+     *
+     * Called during backward pass when gradient is computed.
+     * Marks gradient as ready and triggers reduce-scatter when
+     * all gradients in bucket are available.
+     *
+     * @param bucket_idx Index of gradient bucket
+     * @param param_idx Index of parameter in bucket
+     */
+    auto gradient_hook(size_t bucket_idx, size_t param_idx) -> void;
+
+    /**
+     * @brief Check if bucket is ready for reduce-scatter
+     *
+     * @param bucket Gradient bucket to check
+     * @return true if all gradients computed
+     */
+    auto is_bucket_ready(const GradientBucket& bucket) const -> bool;
+
+    /**
+     * @brief Flatten tensors into contiguous buffer
+     *
+     * @param tensors Vector of gradient tensors
+     * @return Flattened tensor
+     */
+    auto flatten_tensors(const std::vector<Tensor>& tensors) -> Tensor;
+
+    /**
+     * @brief Unflatten buffer into individual tensors
+     *
+     * @param flattened Flattened tensor buffer
+     * @param targets Target tensors to write into
+     */
+    auto unflatten_into(const Tensor& flattened, std::vector<Tensor>& targets) -> void;
 };
 
 } // namespace optim

@@ -161,6 +161,36 @@ target_link_libraries(test_zero_stage1_distributed PRIVATE
     GTest::gtest_main
 )
 
+# Gradient Utilities tests (ZeRO Stage 2)
+add_executable(test_gradient_utils
+    nn/optim/test_gradient_utils.cpp
+)
+
+target_link_libraries(test_gradient_utils PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+# ZeRO Stage 2 Optimizer tests (Phase 5 - Gradient Partitioning)
+add_executable(test_zero_stage2
+    nn/optim/test_zero_stage2.cpp
+)
+
+target_link_libraries(test_zero_stage2 PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+# ZeRO Stage 2 Integration tests
+add_executable(test_zero_stage2_integration
+    nn/optim/test_zero_stage2_integration.cpp
+)
+
+target_link_libraries(test_zero_stage2_integration PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
 # Minimal training test (debugging NaN issue)
 add_executable(test_minimal_training
     test_minimal_training.cpp
@@ -797,6 +827,12 @@ gtest_discover_tests(test_dtype_conversion DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_gradient_checkpoint DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_model_checkpoint DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_checkpoint DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_gradient_utils DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_zero_stage1 DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_zero_stage1_integration DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_zero_stage1_distributed DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_zero_stage2 DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_zero_stage2_integration DISCOVERY_TIMEOUT 30)
 
 gtest_discover_tests(test_fused_ops DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_backend_ops_parameterized DISCOVERY_TIMEOUT 30)

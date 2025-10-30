@@ -68,6 +68,7 @@ set(TENZOR_CORE_SOURCES
     nn/optim/adagrad.cpp
     nn/optim/adadelta.cpp
     nn/optim/zero_optimizer.cpp
+    nn/optim/gradient_utils.cpp
     nn/optim/scheduler.cpp
     nn/optim/scheduler_advanced.cpp
     nn/callbacks.cpp
