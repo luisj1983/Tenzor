@@ -1,0 +1,34 @@
+#version 450
+
+// Swish backward pass: grad_input = grad_output * swish'(x)
+// where swish(x) = x * sigmoid(x)
+// and swish'(x) = sigmoid(x) + x * sigmoid(x) * (1 - sigmoid(x))
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer GradOutput { float grad_output[]; };
+layout(binding = 1) buffer InputData { float input_data[]; };
+layout(binding = 2) buffer GradInput { float grad_input[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;  // Number of elements
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.n) {
+        return;
+    }
+
+    float x = input_data[idx];
+    float g_out = grad_output[idx];
+
+    // Compute sigmoid(x)
+    float sigmoid_x = 1.0 / (1.0 + exp(-x));
+
+    // Compute swish derivative: sigmoid(x) + x * sigmoid(x) * (1 - sigmoid(x))
+    float swish_derivative = sigmoid_x + x * sigmoid_x * (1.0 - sigmoid_x);
+
+    // Apply chain rule
+    grad_input[idx] = g_out * swish_derivative;
+}

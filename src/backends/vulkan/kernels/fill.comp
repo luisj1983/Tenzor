@@ -1,0 +1,21 @@
+#version 450
+
+// Fill operation: fill tensor with a scalar value
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Output { float data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;          // Number of elements
+    float value;     // Fill value
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.n) {
+        return;
+    }
+
+    data[idx] = params.value;
+}

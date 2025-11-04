@@ -1,0 +1,100 @@
+#version 450
+#extension GL_EXT_shader_atomic_float : enable
+
+// Max Pooling 2D Backward Pass
+// Gradient flows only to max element
+// Recomputes max indices in shader
+
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer GradOutput { float grad_output[]; };  // (N, C, H_out, W_out)
+layout(binding = 1) buffer Input { float input_data[]; };        // (N, C, H, W) - original input
+layout(binding = 2) buffer GradInput { float grad_input[]; };    // (N, C, H, W)
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;          // Total output gradient elements (N * C * H_out * W_out)
+    uint batch;               // N
+    uint channels;            // C
+    uint in_height;           // H
+    uint in_width;            // W
+    uint out_height;          // H_out
+    uint out_width;           // W_out
+    uint kernel_h;            // Kernel height
+    uint kernel_w;            // Kernel width
+    uint stride_h;            // Stride height
+    uint stride_w;            // Stride width
+    uint padding_h;           // Padding height
+    uint padding_w;           // Padding width
+    uint dilation_h;          // Dilation height
+    uint dilation_w;          // Dilation width
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    // Bounds check
+    if (idx >= params.n_elements) {
+        return;
+    }
+
+    // Decode flat index to (n, c, h_out, w_out)
+    uint temp = idx;
+    uint w_out = temp % params.out_width;
+    temp /= params.out_width;
+    uint h_out = temp % params.out_height;
+    temp /= params.out_height;
+    uint c = temp % params.channels;
+    uint n = temp / params.channels;
+
+    // Get output gradient
+    float grad_out = grad_output[idx];
+
+    // Compute input window bounds
+    int h_start = int(h_out * params.stride_h) - int(params.padding_h);
+    int w_start = int(w_out * params.stride_w) - int(params.padding_w);
+
+    // Find max value and its position (recompute from forward pass)
+    float max_val = -1.0 / 0.0;
+    int max_h = -1;
+    int max_w = -1;
+
+    // Iterate over pooling window with dilation to find max
+    for (uint kh = 0; kh < params.kernel_h; kh++) {
+        for (uint kw = 0; kw < params.kernel_w; kw++) {
+            int h_in = h_start + int(kh * params.dilation_h);
+            int w_in = w_start + int(kw * params.dilation_w);
+
+            // Check if within input bounds
+            if (h_in >= 0 && h_in < int(params.in_height) &&
+                w_in >= 0 && w_in < int(params.in_width)) {
+
+                // Compute input index: (n, c, h_in, w_in)
+                uint input_idx = n * params.channels * params.in_height * params.in_width +
+                                c * params.in_height * params.in_width +
+                                uint(h_in) * params.in_width +
+                                uint(w_in);
+
+                float val = input_data[input_idx];
+
+                // Update max if current value is larger
+                if (val > max_val) {
+                    max_val = val;
+                    max_h = h_in;
+                    max_w = w_in;
+                }
+            }
+        }
+    }
+
+    // Propagate gradient only to max element
+    if (max_h >= 0 && max_w >= 0) {
+        // Compute input index for max element
+        uint max_idx = n * params.channels * params.in_height * params.in_width +
+                      c * params.in_height * params.in_width +
+                      uint(max_h) * params.in_width +
+                      uint(max_w);
+
+        // Atomically add gradient (for overlapping pooling windows)
+        atomicAdd(grad_input[max_idx], grad_out);
+    }
+}

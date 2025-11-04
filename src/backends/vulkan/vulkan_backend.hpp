@@ -97,12 +97,28 @@ private:
     // Kernel dispatch helpers - Basic operations
     auto dispatchBinaryOp(const std::string& op_name, const Tensor& a, const Tensor& b) -> Tensor;
     auto dispatchUnaryOp(const std::string& op_name, const Tensor& input) -> Tensor;
+    auto dispatchUnaryOpWithParam(const std::string& op_name, const Tensor& input, float param) -> Tensor;
+    auto dispatchComparisonOp(const std::string& op_name, const Tensor& a, const Tensor& b) -> Tensor;
     auto dispatchReduction(const std::string& op_name, const Tensor& input,
                           int64_t dim, bool keepdim) -> Tensor;
     auto dispatchMatmul(const Tensor& a, const Tensor& b) -> Tensor;
     auto dispatchConv2d(const Tensor& input, const Tensor& weight,
                        const Tensor* bias, int64_t stride, int64_t padding,
                        int64_t dilation, int64_t groups) -> Tensor;
+    auto dispatchConv2dForward(const Tensor& input, const Tensor& weight, const OpAttributes& attrs) -> Tensor;
+
+    // Conv2d backward operations
+    auto dispatchConv2dBackwardInput(const Tensor& grad_output, const Tensor& weight,
+                                     int64_t stride, int64_t padding, int64_t dilation,
+                                     const std::vector<int64_t>& input_shape) -> Tensor;
+    auto dispatchConv2dBackwardWeight(const Tensor& grad_output, const Tensor& input,
+                                      int64_t stride, int64_t padding, int64_t dilation,
+                                      const std::vector<int64_t>& weight_shape) -> Tensor;
+    auto dispatchConv2dBackwardBias(const Tensor& grad_output) -> Tensor;
+
+    // Vision operations
+    auto dispatchIm2Col(const Tensor& input, const OpAttributes& attrs) -> Tensor;
+    auto dispatchCol2Im(const Tensor& input, const OpAttributes& attrs) -> Tensor;
 
     // Pooling operations
     auto dispatchMaxPool2d(const Tensor& input, int64_t kernel_h, int64_t kernel_w,
@@ -118,6 +134,12 @@ private:
                                    int64_t stride_h, int64_t stride_w,
                                    int64_t padding_h, int64_t padding_w) -> Tensor;
 
+    // New pooling operations (OpAttributes versions)
+    auto dispatchAvgPool2dForward(const Tensor& input, const OpAttributes& attrs) -> Tensor;
+    auto dispatchMaxPool2dForward(const Tensor& input, const OpAttributes& attrs) -> Tensor;
+    auto dispatchAvgPool2dBackward(const Tensor& grad_output, const Tensor& input, const OpAttributes& attrs) -> Tensor;
+    auto dispatchMaxPool2dBackward(const Tensor& grad_output, const Tensor& input, const OpAttributes& attrs) -> Tensor;
+
     // Normalization operations
     auto dispatchBatchNorm2d(const Tensor& input, const Tensor& mean, const Tensor& var,
                             const Tensor* gamma, const Tensor* beta, float epsilon) -> Tensor;
@@ -125,6 +147,9 @@ private:
                                      const Tensor& mean, const Tensor& var,
                                      const Tensor* gamma, float epsilon)
                                      -> std::tuple<Tensor, Tensor, Tensor>;
+    auto dispatchBatchNorm2dForward(const Tensor& input, const Tensor& mean, const Tensor& var,
+                                    const Tensor* gamma, const Tensor* beta, float epsilon) -> Tensor;
+    auto dispatchBatchNorm2dMeanVar(const Tensor& input) -> std::pair<Tensor, Tensor>;
     auto dispatchLayerNorm(const Tensor& input, int64_t normalized_shape,
                           const Tensor* gamma, const Tensor* beta, float epsilon) -> Tensor;
     auto dispatchGroupNorm(const Tensor& input, int64_t num_groups,
@@ -157,10 +182,37 @@ private:
     auto dispatchReshape(const Tensor& input, const std::vector<int64_t>& new_shape) -> Tensor;
     auto dispatchTranspose(const Tensor& input, int64_t dim0, int64_t dim1) -> Tensor;
     auto dispatchPermute(const Tensor& input, const std::vector<int64_t>& dims) -> Tensor;
+    auto dispatchSqueeze(const Tensor& input, int64_t dim) -> Tensor;
+    auto dispatchUnsqueeze(const Tensor& input, int64_t dim) -> Tensor;
+    auto dispatchContiguous(const Tensor& input) -> Tensor;
 
     // Memory operations
+    auto dispatchZeros(const std::vector<int64_t>& shape, DType dtype, const Device& device) -> Tensor;
     auto dispatchFill(const Tensor& input, float value) -> Tensor;
-    auto dispatchCopy(const Tensor& input) -> Tensor;
+    auto dispatchClone(const Tensor& input) -> Tensor;
+    auto dispatchFull(const std::vector<int64_t>& shape, float value, DType dtype) -> Tensor;
+    auto dispatchOnes(const std::vector<int64_t>& shape, DType dtype) -> Tensor;
+
+    // Tensor manipulation operations
+    auto dispatchExpand(const Tensor& input, const std::vector<int64_t>& shape) -> Tensor;
+    auto dispatchCat(const std::vector<Tensor>& inputs, int64_t dim) -> Tensor;
+    auto dispatchClamp(const Tensor& input, float min_value, float max_value) -> Tensor;
+
+    // Forward activation operations
+    auto dispatchActivation(const std::string& op_name,
+                           const Tensor& input,
+                           uint32_t opcode,
+                           float param) -> Tensor;
+
+    // Backward activation operations
+    auto dispatchActivationBackward(const std::string& op_name,
+                                     const Tensor& grad_output,
+                                     const Tensor& input_or_output,
+                                     uint32_t opcode,
+                                     float param) -> Tensor;
+    auto dispatchSwishBackward(const Tensor& grad_output, const Tensor& input) -> Tensor;
+    auto dispatchSoftmaxBackward(const Tensor& grad_output, const Tensor& output, int64_t dim) -> Tensor;
+    auto dispatchLogSoftmaxBackward(const Tensor& grad_output, const Tensor& output, int64_t dim) -> Tensor;
 
     // Instance and devices
     VkInstance instance_ = VK_NULL_HANDLE;
@@ -170,6 +222,19 @@ private:
 
     // Memory tracking
     std::unordered_map<void*, std::pair<size_t, int32_t>> allocations_;
+
+    // Buffer tracking: maps tensor data pointer (void*) to actual VulkanBuffer
+    std::unordered_map<void*, std::unique_ptr<vulkan::VulkanBuffer>> bufferMap_;
+
+    // Helper to get VkBuffer from tensor data pointer
+    VkBuffer getVulkanBuffer(const void* ptr) const;
+
+    // Helper to allocate and bind descriptor sets
+    VkDescriptorSet allocateAndWriteDescriptorSet(
+        int32_t device_id,
+        vulkan::ComputePipeline* pipeline,
+        const std::vector<std::pair<uint32_t, VkBuffer>>& bufferBindings,
+        const std::vector<size_t>& bufferSizes);
 
     // Shader paths
     std::string shaderPath_;

@@ -1,6 +1,6 @@
 #version 450
 
-// Math operations: add, sub, mul, div, sqrt, exp, log, neg, abs
+// Math operations: add, sub, mul, div, sqrt, exp, log, neg, abs, pow, sign
 layout(local_size_x = 256) in;
 
 layout(binding = 0) buffer InputA { float a[]; };
@@ -9,7 +9,8 @@ layout(binding = 2) buffer Output { float result[]; };
 
 layout(push_constant) uniform PushConstants {
     uint n;          // Number of elements
-    uint op;         // Operation: 0=add, 1=sub, 2=mul, 3=div, 4=sqrt, 5=exp, 6=log, 7=neg, 8=abs
+    uint op;         // Operation: 0=add, 1=sub, 2=mul, 3=div, 4=sqrt, 5=exp, 6=log, 7=neg, 8=abs, 9=pow, 10=sign
+    float param;     // Parameter for operations like pow (exponent)
 } params;
 
 void main() {
@@ -49,6 +50,18 @@ void main() {
             break;
         case 8: // abs (unary)
             result[idx] = abs(val_a);
+            break;
+        case 9: // pow (unary with parameter)
+            result[idx] = pow(val_a, params.param);
+            break;
+        case 10: // sign (unary)
+            if (val_a < 0.0) {
+                result[idx] = -1.0;
+            } else if (val_a > 0.0) {
+                result[idx] = 1.0;
+            } else {
+                result[idx] = 0.0;
+            }
             break;
     }
 }

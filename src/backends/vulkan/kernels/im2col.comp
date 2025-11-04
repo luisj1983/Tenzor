@@ -1,0 +1,65 @@
+#version 450
+
+// Im2col (Unfold) operation for converting image to column format
+// Transforms (N,C,H,W) → (N, C*K*K, L) where L=out_h*out_w
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Input { float input_data[]; };
+layout(binding = 1) buffer Output { float output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;    // Total elements to process
+    uint batch;
+    uint channels;
+    uint height;
+    uint width;
+    uint kernel_size;
+    uint stride;
+    uint padding;
+    uint dilation;
+    uint out_h;
+    uint out_w;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_elements) return;
+
+    // Calculate derived values
+    uint num_blocks = params.out_h * params.out_w;
+
+    // Decode flat index to (b, c, kh, kw, block_idx)
+    uint temp = idx;
+    uint block_idx = temp % num_blocks; temp /= num_blocks;
+    uint kw = temp % params.kernel_size; temp /= params.kernel_size;
+    uint kh = temp % params.kernel_size; temp /= params.kernel_size;
+    uint c = temp % params.channels; temp /= params.channels;
+    uint b = temp;
+
+    // Calculate output position from block_idx
+    uint oh = block_idx / params.out_w;
+    uint ow = block_idx % params.out_w;
+
+    // Calculate input position with padding and dilation
+    int ih = int(oh * params.stride) - int(params.padding) + int(kh * params.dilation);
+    int iw = int(ow * params.stride) - int(params.padding) + int(kw * params.dilation);
+
+    // Column index in output: (c * K * K + kh * K + kw)
+    uint col_c = c * params.kernel_size * params.kernel_size +
+                 kh * params.kernel_size + kw;
+
+    // Output index: (b, col_c, block_idx)
+    uint output_idx = b * (params.channels * params.kernel_size * params.kernel_size * num_blocks) +
+                      col_c * num_blocks +
+                      block_idx;
+
+    // Check bounds and apply padding
+    if (ih >= 0 && ih < int(params.height) && iw >= 0 && iw < int(params.width)) {
+        uint input_idx = b * (params.channels * params.height * params.width) +
+                        c * (params.height * params.width) +
+                        uint(ih) * params.width + uint(iw);
+        output_data[output_idx] = input_data[input_idx];
+    } else {
+        output_data[output_idx] = 0.0;  // Padding with zeros
+    }
+}

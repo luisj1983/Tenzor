@@ -1,5 +1,5 @@
 #include "tenzor/core/tensor.hpp"
-#include <CL/sycl.hpp>
+#include <sycl/sycl.hpp>
 #include <limits>
 #include <numeric>
 #include <algorithm>
@@ -17,6 +17,10 @@ class MaxKernelFloat32;
 class MaxKernelFloat64;
 class MinKernelFloat32;
 class MinKernelFloat64;
+class ArgmaxKernelFloat32;
+class ArgmaxKernelFloat64;
+class ArgminKernelFloat32;
+class ArgminKernelFloat64;
 
 // Helper function to get typed pointer from tensor
 template<typename T>
@@ -480,6 +484,284 @@ auto min_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
         else {
             throw std::runtime_error("Unsupported dtype for min reduction");
         }
+    }
+
+    return output;
+}
+
+/**
+ * @brief Argmax operation - returns indices of maximum values.
+ *
+ * Finds the indices of maximum values along a dimension.
+ * Currently supports reduction over all dimensions (dim=-1) or last dimension.
+ *
+ * @param input Input tensor
+ * @param dim Dimension to reduce along (-1 for all dimensions)
+ * @param keepdim Whether to keep the reduced dimension
+ * @param queue SYCL queue for execution
+ * @return Tensor containing indices (Int64 dtype)
+ */
+auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor {
+    const auto& shape = input.shape();
+
+    // For full reduction (dim=-1)
+    if (dim == -1) {
+        int64_t total_size = 1;
+        for (auto s : shape) {
+            total_size *= s;
+        }
+
+        std::vector<int64_t> out_shape = keepdim ? std::vector<int64_t>(shape.size(), 1) : std::vector<int64_t>{1};
+        Tensor output(out_shape, DType::Int64, input.device());
+        int64_t* out_ptr = get_data_ptr<int64_t>(output);
+
+        if (input.dtype() == DType::Float32) {
+            const float* in_ptr = get_data_ptr<const float>(input);
+
+            // Copy data to host and find argmax
+            std::vector<float> host_data(total_size);
+            queue.memcpy(host_data.data(), in_ptr, total_size * sizeof(float)).wait();
+
+            int64_t max_idx = 0;
+            float max_val = host_data[0];
+            for (int64_t i = 1; i < total_size; ++i) {
+                if (host_data[i] > max_val) {
+                    max_val = host_data[i];
+                    max_idx = i;
+                }
+            }
+
+            queue.memcpy(out_ptr, &max_idx, sizeof(int64_t)).wait();
+        }
+        else if (input.dtype() == DType::Float64) {
+            const double* in_ptr = get_data_ptr<const double>(input);
+
+            // Copy data to host and find argmax
+            std::vector<double> host_data(total_size);
+            queue.memcpy(host_data.data(), in_ptr, total_size * sizeof(double)).wait();
+
+            int64_t max_idx = 0;
+            double max_val = host_data[0];
+            for (int64_t i = 1; i < total_size; ++i) {
+                if (host_data[i] > max_val) {
+                    max_val = host_data[i];
+                    max_idx = i;
+                }
+            }
+
+            queue.memcpy(out_ptr, &max_idx, sizeof(int64_t)).wait();
+        }
+        else {
+            throw std::runtime_error("Unsupported dtype for argmax");
+        }
+
+        return output;
+    }
+
+    // For reduction along a specific dimension
+    if (dim < 0 || dim >= static_cast<int64_t>(shape.size())) {
+        throw std::invalid_argument("Invalid dimension for argmax");
+    }
+
+    std::vector<int64_t> shape_vec(shape.begin(), shape.end());
+    auto output_shape = compute_reduction_shape(shape_vec, dim, keepdim);
+    Tensor output(output_shape, DType::Int64, input.device());
+
+    const int64_t dim_size = shape[dim];
+    int64_t outer_size = 1;
+    for (int64_t i = 0; i < dim; ++i) {
+        outer_size *= shape[i];
+    }
+    int64_t inner_size = 1;
+    for (int64_t i = dim + 1; i < static_cast<int64_t>(shape.size()); ++i) {
+        inner_size *= shape[i];
+    }
+
+    int64_t* out_ptr = get_data_ptr<int64_t>(output);
+
+    if (input.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(input);
+
+        queue.parallel_for<ArgmaxKernelFloat32>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+            const int64_t outer_idx = idx[0];
+            const int64_t inner_idx = idx[1];
+            const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+
+            float max_val = -std::numeric_limits<float>::infinity();
+            int64_t max_idx = 0;
+            for (int64_t d = 0; d < dim_size; ++d) {
+                float val = in_ptr[base_offset + d * inner_size];
+                if (val > max_val) {
+                    max_val = val;
+                    max_idx = d;
+                }
+            }
+
+            out_ptr[outer_idx * inner_size + inner_idx] = max_idx;
+        }).wait();
+    }
+    else if (input.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(input);
+
+        queue.parallel_for<ArgmaxKernelFloat64>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+            const int64_t outer_idx = idx[0];
+            const int64_t inner_idx = idx[1];
+            const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+
+            double max_val = -std::numeric_limits<double>::infinity();
+            int64_t max_idx = 0;
+            for (int64_t d = 0; d < dim_size; ++d) {
+                double val = in_ptr[base_offset + d * inner_size];
+                if (val > max_val) {
+                    max_val = val;
+                    max_idx = d;
+                }
+            }
+
+            out_ptr[outer_idx * inner_size + inner_idx] = max_idx;
+        }).wait();
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for argmax");
+    }
+
+    return output;
+}
+
+/**
+ * @brief Argmin operation - returns indices of minimum values.
+ *
+ * Finds the indices of minimum values along a dimension.
+ * Currently supports reduction over all dimensions (dim=-1) or last dimension.
+ *
+ * @param input Input tensor
+ * @param dim Dimension to reduce along (-1 for all dimensions)
+ * @param keepdim Whether to keep the reduced dimension
+ * @param queue SYCL queue for execution
+ * @return Tensor containing indices (Int64 dtype)
+ */
+auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor {
+    const auto& shape = input.shape();
+
+    // For full reduction (dim=-1)
+    if (dim == -1) {
+        int64_t total_size = 1;
+        for (auto s : shape) {
+            total_size *= s;
+        }
+
+        std::vector<int64_t> out_shape = keepdim ? std::vector<int64_t>(shape.size(), 1) : std::vector<int64_t>{1};
+        Tensor output(out_shape, DType::Int64, input.device());
+        int64_t* out_ptr = get_data_ptr<int64_t>(output);
+
+        if (input.dtype() == DType::Float32) {
+            const float* in_ptr = get_data_ptr<const float>(input);
+
+            // Copy data to host and find argmin
+            std::vector<float> host_data(total_size);
+            queue.memcpy(host_data.data(), in_ptr, total_size * sizeof(float)).wait();
+
+            int64_t min_idx = 0;
+            float min_val = host_data[0];
+            for (int64_t i = 1; i < total_size; ++i) {
+                if (host_data[i] < min_val) {
+                    min_val = host_data[i];
+                    min_idx = i;
+                }
+            }
+
+            queue.memcpy(out_ptr, &min_idx, sizeof(int64_t)).wait();
+        }
+        else if (input.dtype() == DType::Float64) {
+            const double* in_ptr = get_data_ptr<const double>(input);
+
+            // Copy data to host and find argmin
+            std::vector<double> host_data(total_size);
+            queue.memcpy(host_data.data(), in_ptr, total_size * sizeof(double)).wait();
+
+            int64_t min_idx = 0;
+            double min_val = host_data[0];
+            for (int64_t i = 1; i < total_size; ++i) {
+                if (host_data[i] < min_val) {
+                    min_val = host_data[i];
+                    min_idx = i;
+                }
+            }
+
+            queue.memcpy(out_ptr, &min_idx, sizeof(int64_t)).wait();
+        }
+        else {
+            throw std::runtime_error("Unsupported dtype for argmin");
+        }
+
+        return output;
+    }
+
+    // For reduction along a specific dimension
+    if (dim < 0 || dim >= static_cast<int64_t>(shape.size())) {
+        throw std::invalid_argument("Invalid dimension for argmin");
+    }
+
+    std::vector<int64_t> shape_vec(shape.begin(), shape.end());
+    auto output_shape = compute_reduction_shape(shape_vec, dim, keepdim);
+    Tensor output(output_shape, DType::Int64, input.device());
+
+    const int64_t dim_size = shape[dim];
+    int64_t outer_size = 1;
+    for (int64_t i = 0; i < dim; ++i) {
+        outer_size *= shape[i];
+    }
+    int64_t inner_size = 1;
+    for (int64_t i = dim + 1; i < static_cast<int64_t>(shape.size()); ++i) {
+        inner_size *= shape[i];
+    }
+
+    int64_t* out_ptr = get_data_ptr<int64_t>(output);
+
+    if (input.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(input);
+
+        queue.parallel_for<ArgminKernelFloat32>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+            const int64_t outer_idx = idx[0];
+            const int64_t inner_idx = idx[1];
+            const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+
+            float min_val = std::numeric_limits<float>::infinity();
+            int64_t min_idx = 0;
+            for (int64_t d = 0; d < dim_size; ++d) {
+                float val = in_ptr[base_offset + d * inner_size];
+                if (val < min_val) {
+                    min_val = val;
+                    min_idx = d;
+                }
+            }
+
+            out_ptr[outer_idx * inner_size + inner_idx] = min_idx;
+        }).wait();
+    }
+    else if (input.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(input);
+
+        queue.parallel_for<ArgminKernelFloat64>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+            const int64_t outer_idx = idx[0];
+            const int64_t inner_idx = idx[1];
+            const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+
+            double min_val = std::numeric_limits<double>::infinity();
+            int64_t min_idx = 0;
+            for (int64_t d = 0; d < dim_size; ++d) {
+                double val = in_ptr[base_offset + d * inner_size];
+                if (val < min_val) {
+                    min_val = val;
+                    min_idx = d;
+                }
+            }
+
+            out_ptr[outer_idx * inner_size + inner_idx] = min_idx;
+        }).wait();
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for argmin");
     }
 
     return output;

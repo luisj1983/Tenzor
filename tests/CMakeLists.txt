@@ -19,6 +19,7 @@ add_executable(tenzor_unit_tests
     unit/test_tensor.cpp
     unit/test_device.cpp
     unit/test_ops.cpp
+    unit/test_ops_additional.cpp
     unit/test_autograd.cpp
     test_autograd_transform.cpp
     unit/test_cpu_kernels.cpp
@@ -31,6 +32,8 @@ add_executable(tenzor_unit_tests
     unit/test_graph_optimizer.cpp
     unit/test_simd_dispatch.cpp
     unit/test_simd.cpp
+    unit/test_oneapi_backend_loading.cpp
+    unit/test_oneapi_operations.cpp
 )
 
 target_link_libraries(tenzor_unit_tests PRIVATE
@@ -522,6 +525,16 @@ target_link_libraries(test_backend_ops_parameterized PRIVATE
     GTest::gtest_main
 )
 
+# Comprehensive edge case and error handling tests
+add_executable(test_edge_cases
+    unit/test_edge_cases.cpp
+)
+
+target_link_libraries(test_edge_cases PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
 # CachingAllocator tests (universal - uses mock backend)
 add_executable(test_caching_allocator
     unit/test_caching_allocator.cpp
@@ -884,6 +897,7 @@ gtest_discover_tests(test_zero_profiling DISCOVERY_TIMEOUT 30)
 
 gtest_discover_tests(test_fused_ops DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_backend_ops_parameterized DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_edge_cases DISCOVERY_TIMEOUT 30)
 
 # SIMD operations tests
 add_executable(test_simd_ops
@@ -902,12 +916,23 @@ add_executable(test_comparison_operators
     test_comparison_operators.cpp
 )
 
+# New comparison ops tests (OneAPI/Vulkan backends)
+add_executable(test_comparison_ops
+    unit/test_comparison_ops.cpp
+)
+
 target_link_libraries(test_comparison_operators PRIVATE
     tenzor_core
     GTest::gtest_main
 )
 
+target_link_libraries(test_comparison_ops PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
 gtest_discover_tests(test_comparison_operators DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_comparison_ops DISCOVERY_TIMEOUT 30)
 
 # Benchmark suite
 add_executable(benchmark_suite
@@ -1583,5 +1608,44 @@ target_link_libraries(test_gradcheck_extended PRIVATE
 
 gtest_discover_tests(test_gradcheck_extended DISCOVERY_TIMEOUT 30)
 
+# Additional autograd tests for increased coverage
+add_executable(test_autograd_additional
+    autograd/test_autograd_additional.cpp
+)
+
+target_link_libraries(test_autograd_additional PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_autograd_additional DISCOVERY_TIMEOUT 30)
+
 # Utility module tests
 add_subdirectory(utils)
+
+# Vulkan tensor creation test (standalone, non-GTest)
+add_executable(vulkan_tensor_test
+    vulkan_tensor_test.cpp
+)
+
+target_link_libraries(vulkan_tensor_test PRIVATE
+    tenzor_core
+)
+
+# Vulkan diagnostic test
+add_executable(vulkan_diagnostic
+    vulkan_diagnostic.cpp
+)
+
+target_link_libraries(vulkan_diagnostic PRIVATE
+    tenzor_core
+)
+
+# Vulkan addition debug test
+add_executable(vulkan_add_debug
+    vulkan_add_debug.cpp
+)
+
+target_link_libraries(vulkan_add_debug PRIVATE
+    tenzor_core
+)

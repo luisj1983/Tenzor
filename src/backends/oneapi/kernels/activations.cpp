@@ -1,5 +1,5 @@
 #include "tenzor/core/tensor.hpp"
-#include <CL/sycl.hpp>
+#include <sycl/sycl.hpp>
 #include <cmath>
 #include <stdexcept>
 
@@ -31,6 +31,10 @@ class LeakyReLUKernelFloat32;
 class LeakyReLUKernelFloat64;
 class LeakyReLUBackwardKernelFloat32;
 class LeakyReLUBackwardKernelFloat64;
+class SwishKernelFloat32;
+class SwishKernelFloat64;
+class SwishBackwardKernelFloat32;
+class SwishBackwardKernelFloat64;
 
 // Helper function to get typed pointer from tensor
 template<typename T>
@@ -654,6 +658,88 @@ auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output
     }
     else {
         throw std::runtime_error("Unsupported dtype for log_softmax_backward");
+    }
+
+    return grad_input;
+}
+
+// Swish activation (also known as SiLU)
+// swish(x) = x * sigmoid(x) = x / (1 + exp(-x))
+auto swish_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
+    Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                  input.dtype(), input.device());
+
+    const int64_t numel = input.numel();
+
+    if (input.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(input);
+        float* out_ptr = get_data_ptr<float>(output);
+
+        queue.parallel_for<SwishKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            const float x = in_ptr[idx];
+            const float sigmoid = 1.0f / (1.0f + sycl::exp(-x));
+            out_ptr[idx] = x * sigmoid;
+        }).wait();
+    }
+    else if (input.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(input);
+        double* out_ptr = get_data_ptr<double>(output);
+
+        queue.parallel_for<SwishKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            const double x = in_ptr[idx];
+            const double sigmoid = 1.0 / (1.0 + sycl::exp(-x));
+            out_ptr[idx] = x * sigmoid;
+        }).wait();
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for swish");
+    }
+
+    return output;
+}
+
+// Swish backward
+// swish'(x) = sigmoid(x) + x * sigmoid(x) * (1 - sigmoid(x))
+//           = sigmoid(x) * (1 + x * (1 - sigmoid(x)))
+auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::queue& queue) -> Tensor {
+    Tensor grad_input(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                      input.dtype(), input.device());
+
+    const int64_t numel = input.numel();
+
+    if (input.dtype() == DType::Float32) {
+        const float* grad_out_ptr = get_data_ptr<const float>(grad_output);
+        const float* in_ptr = get_data_ptr<const float>(input);
+        float* grad_in_ptr = get_data_ptr<float>(grad_input);
+
+        queue.parallel_for<SwishBackwardKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            const float x = in_ptr[idx];
+            const float g_out = grad_out_ptr[idx];
+
+            // swish'(x) = sigmoid(x) + x * sigmoid(x) * (1 - sigmoid(x))
+            const float sigmoid = 1.0f / (1.0f + sycl::exp(-x));
+            const float swish_grad = sigmoid + x * sigmoid * (1.0f - sigmoid);
+
+            grad_in_ptr[idx] = g_out * swish_grad;
+        }).wait();
+    }
+    else if (input.dtype() == DType::Float64) {
+        const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
+        const double* in_ptr = get_data_ptr<const double>(input);
+        double* grad_in_ptr = get_data_ptr<double>(grad_input);
+
+        queue.parallel_for<SwishBackwardKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            const double x = in_ptr[idx];
+            const double g_out = grad_out_ptr[idx];
+
+            const double sigmoid = 1.0 / (1.0 + sycl::exp(-x));
+            const double swish_grad = sigmoid + x * sigmoid * (1.0 - sigmoid);
+
+            grad_in_ptr[idx] = g_out * swish_grad;
+        }).wait();
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for swish_backward");
     }
 
     return grad_input;

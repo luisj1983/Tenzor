@@ -1,0 +1,47 @@
+#version 450
+
+// Comparison operations: eq, ne, lt, le, gt, ge
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer InputA { float a[]; };
+layout(binding = 1) buffer InputB { float b[]; };
+layout(binding = 2) buffer Output { float result[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;          // Number of elements
+    uint op;         // Operation: 0=eq, 1=ne, 2=lt, 3=le, 4=gt, 5=ge
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.n) {
+        return;
+    }
+
+    float val_a = a[idx];
+    float val_b = b[idx];
+
+    // Output boolean as float (0.0 or 1.0)
+    // Vulkan doesn't support boolean buffers well, so we use floats
+    switch (params.op) {
+        case 0: // eq (equal)
+            result[idx] = (val_a == val_b) ? 1.0 : 0.0;
+            break;
+        case 1: // ne (not equal)
+            result[idx] = (val_a != val_b) ? 1.0 : 0.0;
+            break;
+        case 2: // lt (less than)
+            result[idx] = (val_a < val_b) ? 1.0 : 0.0;
+            break;
+        case 3: // le (less than or equal)
+            result[idx] = (val_a <= val_b) ? 1.0 : 0.0;
+            break;
+        case 4: // gt (greater than)
+            result[idx] = (val_a > val_b) ? 1.0 : 0.0;
+            break;
+        case 5: // ge (greater than or equal)
+            result[idx] = (val_a >= val_b) ? 1.0 : 0.0;
+            break;
+    }
+}

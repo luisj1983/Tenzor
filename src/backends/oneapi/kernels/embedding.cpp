@@ -1,5 +1,5 @@
 #include "tenzor/core/tensor.hpp"
-#include <CL/sycl.hpp>
+#include <sycl/sycl.hpp>
 #include <stdexcept>
 #include <cmath>
 

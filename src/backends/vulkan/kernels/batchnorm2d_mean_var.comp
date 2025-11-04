@@ -1,0 +1,84 @@
+#version 450
+#extension GL_EXT_shader_atomic_float : enable
+
+// Batch Normalization 2D - Compute Mean and Variance
+// Computes running mean and variance across batch and spatial dimensions
+//
+// Input shape: (N, C, H, W)
+// Output shapes: mean (C), variance (C)
+//
+// For each channel c:
+// mean[c] = sum(input[n, c, h, w]) / (N * H * W)
+// var[c] = sum((input[n, c, h, w] - mean[c])^2) / (N * H * W)
+
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Input { float input_data[]; };      // (N, C, H, W)
+layout(binding = 1) buffer Mean { float mean_data[]; };        // (C) - output
+layout(binding = 2) buffer Variance { float var_data[]; };     // (C) - output
+layout(binding = 3) buffer TempSum { float temp_sum[]; };      // (C) - temporary for two-pass algorithm
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;     // Total elements (N * C * H * W)
+    uint batch;          // N
+    uint channels;       // C
+    uint spatial_size;   // H * W
+    uint pass_id;        // 0 = compute mean, 1 = compute variance
+} params;
+
+// Shared memory for workgroup-level reduction
+shared float s_channel_sums[256];
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint local_id = gl_LocalInvocationID.x;
+
+    // Initialize shared memory
+    if (local_id < params.channels && local_id < 256) {
+        s_channel_sums[local_id] = 0.0;
+    }
+    barrier();
+
+    // Bounds check
+    if (idx >= params.n_elements) {
+        return;
+    }
+
+    // Decode flat index to (b, c, h, w)
+    uint temp = idx;
+    uint w = temp % params.spatial_size;
+    temp /= params.spatial_size;
+    uint c = temp % params.channels;
+    uint b = temp / params.channels;
+
+    float value = input_data[idx];
+
+    if (params.pass_id == 0) {
+        // First pass: compute sum for mean
+        // Accumulate in shared memory per channel
+        atomicAdd(s_channel_sums[c % 256], value);
+    } else {
+        // Second pass: compute sum of squared differences for variance
+        float mean = mean_data[c];
+        float diff = value - mean;
+        atomicAdd(s_channel_sums[c % 256], diff * diff);
+    }
+
+    // Wait for all threads in workgroup
+    barrier();
+
+    // First thread writes accumulated results to global memory
+    if (local_id == 0) {
+        for (uint i = 0; i < params.channels && i < 256; i++) {
+            if (s_channel_sums[i] != 0.0) {
+                if (params.pass_id == 0) {
+                    // Accumulate sum for mean computation
+                    atomicAdd(temp_sum[i], s_channel_sums[i]);
+                } else {
+                    // Accumulate sum of squared differences for variance
+                    atomicAdd(var_data[i], s_channel_sums[i]);
+                }
+            }
+        }
+    }
+}

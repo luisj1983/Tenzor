@@ -1,0 +1,64 @@
+#version 450
+
+// Batch Normalization 2D Forward Pass
+// Normalizes input using precomputed mean and variance, then applies affine transformation
+//
+// Formula: y = (x - mean) / sqrt(var + eps) * gamma + beta
+// Input shape: (N, C, H, W)
+// Statistics shape: (C) - one mean/var per channel
+
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Input { float input_data[]; };      // (N, C, H, W)
+layout(binding = 1) buffer Mean { float mean_data[]; };        // (C)
+layout(binding = 2) buffer Variance { float var_data[]; };     // (C)
+layout(binding = 3) buffer Gamma { float gamma_data[]; };      // (C) - scale parameter
+layout(binding = 4) buffer Beta { float beta_data[]; };        // (C) - shift parameter
+layout(binding = 5) buffer Output { float output_data[]; };    // (N, C, H, W)
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;     // Total elements (N * C * H * W)
+    uint batch;          // N
+    uint channels;       // C
+    uint spatial_size;   // H * W
+    float eps;           // Epsilon for numerical stability
+    uint has_affine;     // 1 if gamma/beta are provided, 0 otherwise
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    // Bounds check
+    if (idx >= params.n_elements) {
+        return;
+    }
+
+    // Decode flat index to (b, c, h, w)
+    // Layout: batch -> channel -> height -> width
+    uint temp = idx;
+    uint w = temp % params.spatial_size;
+    temp /= params.spatial_size;
+    uint c = temp % params.channels;
+    uint b = temp / params.channels;
+
+    // Get input value
+    float x = input_data[idx];
+
+    // Get channel statistics
+    float mean = mean_data[c];
+    float variance = var_data[c];
+
+    // Normalize: (x - mean) / sqrt(var + eps)
+    float normalized = (x - mean) / sqrt(variance + params.eps);
+
+    // Apply affine transformation if provided
+    float result = normalized;
+    if (params.has_affine != 0) {
+        float gamma = gamma_data[c];
+        float beta = beta_data[c];
+        result = normalized * gamma + beta;
+    }
+
+    // Write output
+    output_data[idx] = result;
+}

@@ -1,5 +1,5 @@
 #include "tenzor/backend/backend.hpp"
-#include <CL/sycl.hpp>
+#include <sycl/sycl.hpp>
 #include <vector>
 #include <unordered_map>
 #include <stdexcept>
@@ -44,6 +44,8 @@ namespace oneapi {
     auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, int64_t dim, sycl::queue& queue) -> Tensor;
     auto leaky_relu_kernel(const Tensor& input, float alpha, sycl::queue& queue) -> Tensor;
     auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, float alpha, sycl::queue& queue) -> Tensor;
+    auto swish_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::queue& queue) -> Tensor;
 
     // Reduction operations
     auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor;
@@ -103,6 +105,43 @@ namespace oneapi {
     auto embedding_renorm_kernel(Tensor& weights, const Tensor& indices,
                                 double max_norm, double norm_type,
                                 sycl::queue& queue) -> void;
+
+    // Im2col/Col2im operations
+    auto im2col_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
+    auto col2im_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
+
+    // Expand operation
+    auto expand_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
+
+    // Pooling operations
+    auto avg_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
+    auto max_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
+    auto adaptive_avg_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
+    auto adaptive_max_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
+    auto avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
+    auto max_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
+
+    // Statistical operations
+    auto std_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
+    auto var_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
+    auto prod_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
+
+    // Argmax/Argmin operations
+    auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor;
+    auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor;
+
+    // Comparison operations
+    auto eq_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
+    auto ne_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
+    auto lt_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
+    auto le_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
+    auto gt_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
+    auto ge_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
+
+    // Utility operations
+    auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, sycl::queue& queue) -> Tensor;
+    auto clamp_kernel(const Tensor& input, float min_val, float max_val, sycl::queue& queue) -> Tensor;
+    auto sign_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
 } // namespace oneapi
 
 /**
@@ -460,6 +499,14 @@ public:
                 float alpha = attrs.contains("alpha") ? std::stof(attrs.at("alpha")) : 0.01f;
                 return {oneapi::leaky_relu_backward_kernel(inputs[0], inputs[1], alpha, queue)};
             }
+            else if (op_name == "swish") {
+                if (inputs.size() != 1) throw std::invalid_argument("swish requires 1 input");
+                return {oneapi::swish_kernel(inputs[0], queue)};
+            }
+            else if (op_name == "swish_backward") {
+                if (inputs.size() != 2) throw std::invalid_argument("swish_backward requires 2 inputs");
+                return {oneapi::swish_backward_kernel(inputs[0], inputs[1], queue)};
+            }
 
             // Reduction operations
             else if (op_name == "sum") {
@@ -624,6 +671,57 @@ public:
                     compute_grad_input, compute_grad_weight, compute_grad_bias, queue);
                 return {grad_input, grad_weight, grad_bias};
             }
+            else if (op_name == "conv2d_backward_input") {
+                // Computes gradient with respect to input
+                if (inputs.size() != 3) throw std::invalid_argument("conv2d_backward_input requires 3 inputs: grad_output, input, weight");
+
+                // Extract attributes
+                int64_t stride = attrs.contains("stride") ? std::stoll(attrs.at("stride")) : 1;
+                int64_t padding = attrs.contains("padding") ? std::stoll(attrs.at("padding")) : 0;
+                int64_t dilation = attrs.contains("dilation") ? std::stoll(attrs.at("dilation")) : 1;
+                int64_t groups = attrs.contains("groups") ? std::stoll(attrs.at("groups")) : 1;
+
+                // Call conv2d_backward with compute_grad_input=true, others=false
+                auto [grad_input, grad_weight, grad_bias] = oneapi::conv2d_backward(
+                    inputs[0], inputs[1], inputs[2],
+                    stride, padding, dilation, groups,
+                    true, false, false, queue);
+                return {grad_input};  // Return only grad_input
+            }
+            else if (op_name == "conv2d_backward_weight") {
+                // Computes gradient with respect to weight
+                if (inputs.size() != 3) throw std::invalid_argument("conv2d_backward_weight requires 3 inputs: grad_output, input, weight");
+
+                // Extract attributes
+                int64_t stride = attrs.contains("stride") ? std::stoll(attrs.at("stride")) : 1;
+                int64_t padding = attrs.contains("padding") ? std::stoll(attrs.at("padding")) : 0;
+                int64_t dilation = attrs.contains("dilation") ? std::stoll(attrs.at("dilation")) : 1;
+                int64_t groups = attrs.contains("groups") ? std::stoll(attrs.at("groups")) : 1;
+
+                // Call conv2d_backward with compute_grad_weight=true, others=false
+                auto [grad_input, grad_weight, grad_bias] = oneapi::conv2d_backward(
+                    inputs[0], inputs[1], inputs[2],
+                    stride, padding, dilation, groups,
+                    false, true, false, queue);
+                return {grad_weight};  // Return only grad_weight
+            }
+            else if (op_name == "conv2d_backward_bias") {
+                // Computes gradient with respect to bias
+                if (inputs.size() != 3) throw std::invalid_argument("conv2d_backward_bias requires 3 inputs: grad_output, input, weight");
+
+                // Extract attributes (bias gradient doesn't depend on conv params, but we pass them anyway)
+                int64_t stride = attrs.contains("stride") ? std::stoll(attrs.at("stride")) : 1;
+                int64_t padding = attrs.contains("padding") ? std::stoll(attrs.at("padding")) : 0;
+                int64_t dilation = attrs.contains("dilation") ? std::stoll(attrs.at("dilation")) : 1;
+                int64_t groups = attrs.contains("groups") ? std::stoll(attrs.at("groups")) : 1;
+
+                // Call conv2d_backward with compute_grad_bias=true, others=false
+                auto [grad_input, grad_weight, grad_bias] = oneapi::conv2d_backward(
+                    inputs[0], inputs[1], inputs[2],
+                    stride, padding, dilation, groups,
+                    false, false, true, queue);
+                return {grad_bias};  // Return only grad_bias
+            }
 
             // Embedding operations
             else if (op_name == "embedding_lookup") {
@@ -642,6 +740,122 @@ public:
                 std::string mode = attrs.contains("mode") ? attrs.at("mode") : "mean";
                 bool include_last_offset = attrs.contains("include_last_offset") && attrs.at("include_last_offset") == "1";
                 return {oneapi::embedding_bag_forward_kernel(inputs[0], inputs[1], mode, include_last_offset, queue)};
+            }
+
+            // Comparison operations
+            else if (op_name == "eq") {
+                if (inputs.size() != 2) throw std::invalid_argument("eq requires 2 inputs");
+                return {oneapi::eq_kernel(inputs[0], inputs[1], queue)};
+            }
+            else if (op_name == "ne") {
+                if (inputs.size() != 2) throw std::invalid_argument("ne requires 2 inputs");
+                return {oneapi::ne_kernel(inputs[0], inputs[1], queue)};
+            }
+            else if (op_name == "lt") {
+                if (inputs.size() != 2) throw std::invalid_argument("lt requires 2 inputs");
+                return {oneapi::lt_kernel(inputs[0], inputs[1], queue)};
+            }
+            else if (op_name == "le") {
+                if (inputs.size() != 2) throw std::invalid_argument("le requires 2 inputs");
+                return {oneapi::le_kernel(inputs[0], inputs[1], queue)};
+            }
+            else if (op_name == "gt") {
+                if (inputs.size() != 2) throw std::invalid_argument("gt requires 2 inputs");
+                return {oneapi::gt_kernel(inputs[0], inputs[1], queue)};
+            }
+            else if (op_name == "ge") {
+                if (inputs.size() != 2) throw std::invalid_argument("ge requires 2 inputs");
+                return {oneapi::ge_kernel(inputs[0], inputs[1], queue)};
+            }
+
+            // Utility operations
+            else if (op_name == "cat") {
+                if (inputs.empty()) throw std::invalid_argument("cat requires at least one input");
+                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : 0;
+                return {oneapi::cat_kernel(inputs, dim, queue)};
+            }
+            else if (op_name == "clamp") {
+                if (inputs.size() != 1) throw std::invalid_argument("clamp requires 1 input");
+                if (!attrs.contains("min") || !attrs.contains("max")) {
+                    throw std::invalid_argument("clamp requires 'min' and 'max' attributes");
+                }
+                float min_val = std::stof(attrs.at("min"));
+                float max_val = std::stof(attrs.at("max"));
+                return {oneapi::clamp_kernel(inputs[0], min_val, max_val, queue)};
+            }
+            else if (op_name == "sign") {
+                if (inputs.size() != 1) throw std::invalid_argument("sign requires 1 input");
+                return {oneapi::sign_kernel(inputs[0], queue)};
+            }
+
+            // Im2col/Col2im operations
+            else if (op_name == "im2col") {
+                if (inputs.size() != 1) throw std::invalid_argument("im2col requires 1 input");
+                return {oneapi::im2col_kernel(inputs[0], attrs, queue)};
+            }
+            else if (op_name == "col2im") {
+                if (inputs.size() != 1) throw std::invalid_argument("col2im requires 1 input");
+                return {oneapi::col2im_kernel(inputs[0], attrs, queue)};
+            }
+
+            // Expand operation
+            else if (op_name == "expand") {
+                if (inputs.size() != 1) throw std::invalid_argument("expand requires 1 input");
+                return {oneapi::expand_kernel(inputs[0], attrs, queue)};
+            }
+
+            // Pooling operations
+            else if (op_name == "avg_pool2d") {
+                if (inputs.size() != 1) throw std::invalid_argument("avg_pool2d requires 1 input");
+                return {oneapi::avg_pool2d_kernel(inputs[0], attrs, queue)};
+            }
+            else if (op_name == "max_pool2d") {
+                if (inputs.size() != 1) throw std::invalid_argument("max_pool2d requires 1 input");
+                return {oneapi::max_pool2d_kernel(inputs[0], attrs, queue)};
+            }
+            else if (op_name == "adaptive_avg_pool2d") {
+                if (inputs.size() != 1) throw std::invalid_argument("adaptive_avg_pool2d requires 1 input");
+                return {oneapi::adaptive_avg_pool2d_kernel(inputs[0], attrs, queue)};
+            }
+            else if (op_name == "adaptive_max_pool2d") {
+                if (inputs.size() != 1) throw std::invalid_argument("adaptive_max_pool2d requires 1 input");
+                return {oneapi::adaptive_max_pool2d_kernel(inputs[0], attrs, queue)};
+            }
+            else if (op_name == "avg_pool2d_backward") {
+                if (inputs.size() != 2) throw std::invalid_argument("avg_pool2d_backward requires 2 inputs: grad_output, input");
+                return {oneapi::avg_pool2d_backward_kernel(inputs[0], inputs[1], attrs, queue)};
+            }
+            else if (op_name == "max_pool2d_backward") {
+                if (inputs.size() != 2) throw std::invalid_argument("max_pool2d_backward requires 2 inputs: grad_output, input");
+                return {oneapi::max_pool2d_backward_kernel(inputs[0], inputs[1], attrs, queue)};
+            }
+
+            // Statistical operations
+            else if (op_name == "std") {
+                if (inputs.size() != 1) throw std::invalid_argument("std requires 1 input");
+                return {oneapi::std_kernel(inputs[0], attrs, queue)};
+            }
+            else if (op_name == "var") {
+                if (inputs.size() != 1) throw std::invalid_argument("var requires 1 input");
+                return {oneapi::var_kernel(inputs[0], attrs, queue)};
+            }
+            else if (op_name == "prod") {
+                if (inputs.size() != 1) throw std::invalid_argument("prod requires 1 input");
+                return {oneapi::prod_kernel(inputs[0], attrs, queue)};
+            }
+
+            // Argmax/Argmin operations
+            else if (op_name == "argmax") {
+                if (inputs.size() != 1) throw std::invalid_argument("argmax requires 1 input");
+                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
+                bool keepdim = attrs.contains("keepdim") && attrs.at("keepdim") == "1";
+                return {oneapi::argmax_kernel(inputs[0], dim, keepdim, queue)};
+            }
+            else if (op_name == "argmin") {
+                if (inputs.size() != 1) throw std::invalid_argument("argmin requires 1 input");
+                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
+                bool keepdim = attrs.contains("keepdim") && attrs.at("keepdim") == "1";
+                return {oneapi::argmin_kernel(inputs[0], dim, keepdim, queue)};
             }
 
             else {

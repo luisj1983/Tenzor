@@ -32,6 +32,10 @@ set(ONEAPI_BACKEND_SOURCES
     kernels/pooling.cpp
     kernels/indexing.cpp
     kernels/embedding.cpp
+    kernels/comparison.cpp
+    kernels/im2col.cpp
+    kernels/expand.cpp
+    kernels/statistical.cpp
 )
 
 # Separate SYCL kernel sources from C++ backend source
@@ -47,6 +51,10 @@ set(ONEAPI_SYCL_SOURCES
     kernels/pooling.cpp
     kernels/indexing.cpp
     kernels/embedding.cpp
+    kernels/comparison.cpp
+    kernels/im2col.cpp
+    kernels/expand.cpp
+    kernels/statistical.cpp
 )
 
 set(ONEAPI_BACKEND_SOURCE
@@ -76,8 +84,12 @@ foreach(SRC ${ONEAPI_SYCL_SOURCES})
     # Prepare MKL compile flags
     set(MKL_COMPILE_FLAGS "")
     if(MKL_FOUND)
-        set(MKL_COMPILE_FLAGS "-DTENZOR_HAS_ONEMKL -I/opt/intel/oneapi/2025.2/include")
+        set(MKL_COMPILE_FLAGS "-DTENZOR_HAS_ONEMKL" "-I/opt/intel/oneapi/2025.2/include")
     endif()
+
+    # Note: Coverage is NOT enabled for OneAPI SYCL kernels
+    # icpx doesn't support coverage instrumentation for SYCL/spir64 targets
+    set(COVERAGE_COMPILE_FLAGS "")
 
     add_custom_command(
         OUTPUT ${OBJ_FILE}
@@ -89,6 +101,7 @@ foreach(SRC ${ONEAPI_SYCL_SOURCES})
             -O3
             -I${CMAKE_SOURCE_DIR}/include
             ${MKL_COMPILE_FLAGS}
+            ${COVERAGE_COMPILE_FLAGS}
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${SRC}
         COMMENT "Compiling SYCL kernel: ${SRC}"
         VERBATIM
@@ -142,6 +155,10 @@ target_compile_options(tenzor_backend_oneapi PRIVATE
     -DTENZOR_ONEAPI_BACKEND
 )
 
+# Note: Coverage is NOT enabled for OneAPI backend
+# icpx doesn't support coverage instrumentation for SYCL/spir64 targets
+# This prevents undefined symbol errors (__gcov_merge_add) when loading the backend
+
 # Add MKL definitions if available
 if(MKL_FOUND)
     target_compile_definitions(tenzor_backend_oneapi PRIVATE TENZOR_HAS_ONEMKL)
@@ -161,11 +178,20 @@ target_link_libraries(tenzor_backend_oneapi PRIVATE
     ${SYCL_LIBRARY_DIR}/libsycl.so
 )
 
+# Link with gcov if coverage is enabled (tenzor_core was built with coverage)
+if(TENZOR_ENABLE_COVERAGE)
+    target_link_libraries(tenzor_backend_oneapi PRIVATE gcov)
+endif()
+
 # Add SYCL link options (THIS IS WHERE THE MAGIC HAPPENS)
 target_link_options(tenzor_backend_oneapi PRIVATE
     -fsycl
     -fsycl-targets=${SYCL_TARGET_ARCH}
 )
+
+# Note: Coverage linking is NOT enabled for OneAPI backend
+# icpx doesn't support coverage for SYCL targets, which would cause
+# undefined symbol errors (__gcov_merge_add, etc.) when loading the backend
 
 # Add MKL link options if available
 if(MKL_FOUND)

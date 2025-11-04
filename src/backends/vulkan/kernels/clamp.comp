@@ -1,0 +1,26 @@
+#version 450
+
+// Clamp operation: clamp values to [min, max] range
+// Simple element-wise operation
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Input { float input_data[]; };
+layout(binding = 1) buffer Output { float output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;    // Number of elements
+    float min_value;    // Minimum value
+    float max_value;    // Maximum value
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_elements) return;
+
+    float value = input_data[idx];
+
+    // Clamp value to [min, max] range
+    value = max(params.min_value, min(params.max_value, value));
+
+    output_data[idx] = value;
+}

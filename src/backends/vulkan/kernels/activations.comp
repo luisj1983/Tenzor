@@ -1,6 +1,6 @@
 #version 450
 
-// Activation functions: ReLU, Sigmoid, Tanh, GELU
+// Activation functions: ReLU, Sigmoid, Tanh, GELU, LeakyReLU, Swish
 layout(local_size_x = 256) in;
 
 layout(binding = 0) buffer Input { float input_data[]; };
@@ -8,7 +8,7 @@ layout(binding = 1) buffer Output { float output_data[]; };
 
 layout(push_constant) uniform PushConstants {
     uint n;          // Number of elements
-    uint activation; // 0=ReLU, 1=Sigmoid, 2=Tanh, 3=GELU, 4=LeakyReLU
+    uint activation; // 0=ReLU, 1=Sigmoid, 2=Tanh, 3=GELU, 4=LeakyReLU, 5=Swish
     float alpha;     // Parameter for LeakyReLU
 } params;
 
@@ -30,6 +30,11 @@ float gelu(float x) {
 
 float leaky_relu(float x, float alpha) {
     return x > 0.0 ? x : alpha * x;
+}
+
+float swish(float x) {
+    // Swish/SiLU: x * sigmoid(x) = x / (1 + exp(-x))
+    return x / (1.0 + exp(-x));
 }
 
 void main() {
@@ -57,6 +62,9 @@ void main() {
             break;
         case 4: // LeakyReLU
             result = leaky_relu(x, params.alpha);
+            break;
+        case 5: // Swish
+            result = swish(x);
             break;
         default:
             result = x;

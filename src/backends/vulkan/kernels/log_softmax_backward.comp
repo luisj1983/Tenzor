@@ -1,0 +1,43 @@
+#version 450
+
+// Log softmax backward: grad_input = grad_output - exp(output) * sum(grad_output)
+// This requires reduction along a dimension
+
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer GradOutput { float grad_output[]; };
+layout(binding = 1) buffer OutputBuffer { float output_data[]; };  // log_softmax output
+layout(binding = 2) buffer GradInput { float grad_input[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint outer_size;   // Product of dimensions before reduction dim
+    uint dim_size;     // Size of the reduction dimension
+    uint inner_size;   // Product of dimensions after reduction dim
+} params;
+
+void main() {
+    // Each thread handles one (outer, inner) position
+    uint global_idx = gl_GlobalInvocationID.x;
+    uint total_threads = params.outer_size * params.inner_size;
+
+    if (global_idx >= total_threads) {
+        return;
+    }
+
+    uint outer_idx = global_idx / params.inner_size;
+    uint inner_idx = global_idx % params.inner_size;
+    uint offset = (outer_idx * params.dim_size * params.inner_size) + inner_idx;
+
+    // Compute sum of gradients along dimension
+    float sum_grad = 0.0;
+    for (uint d = 0; d < params.dim_size; ++d) {
+        uint idx = offset + d * params.inner_size;
+        sum_grad += grad_output[idx];
+    }
+
+    // Compute gradient: grad_output - exp(log_softmax) * sum_grad
+    for (uint d = 0; d < params.dim_size; ++d) {
+        uint idx = offset + d * params.inner_size;
+        grad_input[idx] = grad_output[idx] - exp(output_data[idx]) * sum_grad;
+    }
+}

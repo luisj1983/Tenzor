@@ -1,0 +1,51 @@
+#version 450
+
+// Concatenate operation: join tensors along a dimension
+// Each workgroup processes output elements and determines which input tensor to read from
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Input0 { float input0_data[]; };
+layout(binding = 1) buffer Input1 { float input1_data[]; };
+layout(binding = 2) buffer Output { float output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;        // Total output elements
+    uint cat_dim;           // Dimension to concatenate along
+    uint ndim;              // Number of dimensions
+    uint output_shape[8];   // Output shape (max 8 dims)
+    uint input0_dim_size;   // Size of input0 along cat_dim
+    uint input1_dim_size;   // Size of input1 along cat_dim
+    uint outer_size;        // Product of dimensions before cat_dim
+    uint inner_size;        // Product of dimensions after cat_dim
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_elements) return;
+
+    // Calculate position in concatenation dimension
+    // idx = outer * (input0_dim_size + input1_dim_size) * inner_size + cat_pos * inner_size + inner_idx
+    uint inner_idx = idx % params.inner_size;
+    uint temp = idx / params.inner_size;
+    uint cat_pos = temp % (params.input0_dim_size + params.input1_dim_size);
+    uint outer_idx = temp / (params.input0_dim_size + params.input1_dim_size);
+
+    // Determine which input tensor to read from
+    float value;
+    if (cat_pos < params.input0_dim_size) {
+        // Read from input0
+        uint input0_idx = outer_idx * params.input0_dim_size * params.inner_size +
+                         cat_pos * params.inner_size +
+                         inner_idx;
+        value = input0_data[input0_idx];
+    } else {
+        // Read from input1
+        uint cat_pos_in_input1 = cat_pos - params.input0_dim_size;
+        uint input1_idx = outer_idx * params.input1_dim_size * params.inner_size +
+                         cat_pos_in_input1 * params.inner_size +
+                         inner_idx;
+        value = input1_data[input1_idx];
+    }
+
+    output_data[idx] = value;
+}

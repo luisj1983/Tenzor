@@ -84,6 +84,7 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/transform.hpp"
+#include "tenzor/ops/indexing.hpp"
 
 // Automatic differentiation
 #include "tenzor/autograd/variable.hpp"

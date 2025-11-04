@@ -38,6 +38,7 @@ file(MAKE_DIRECTORY ${SHADER_OUTPUT_DIR})
 set(SHADERS
     # Basic operations
     math
+    comparison
     matmul
     activations
     reduction
@@ -46,6 +47,9 @@ set(SHADERS
     batchnorm
     transform
     indexing
+    # Vision operations
+    im2col
+    col2im
     # Advanced pooling
     pooling_backward
     pooling_forward_with_indices
@@ -68,6 +72,36 @@ set(SHADERS
     gather
     scatter
     index_select
+    # Shape operations (NEW - 9 critical operations)
+    fill
+    transpose
+    permute
+    # Backward activation functions
+    activations_backward
+    softmax_backward
+    log_softmax_backward
+    swish_backward
+    # Conv2d backward operations
+    conv2d_backward_input
+    conv2d_backward_weight
+    conv2d_backward_bias
+    # Tensor manipulation operations
+    expand
+    cat
+    clamp
+    # BatchNorm2d operations
+    batchnorm2d_forward
+    batchnorm2d_backward
+    batchnorm2d_mean_var
+    # Pooling operations (new)
+    avg_pool2d
+    max_pool2d
+    avg_pool2d_backward
+    max_pool2d_backward
+    # Final 3 operations for 100% coverage
+    conv2d_forward
+    full
+    ones
 )
 
 # Compile each shader
