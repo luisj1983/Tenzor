@@ -30,6 +30,7 @@ add_executable(tenzor_unit_tests
     unit/test_callbacks.cpp
     unit/test_graph_optimizer.cpp
     unit/test_simd_dispatch.cpp
+    unit/test_simd.cpp
 )
 
 target_link_libraries(tenzor_unit_tests PRIVATE
@@ -1545,6 +1546,42 @@ target_link_libraries(test_repeat_tile PRIVATE
 )
 
 gtest_discover_tests(test_repeat_tile DISCOVERY_TIMEOUT 30)
+
+# Data loading tests (multi-backend)
+add_executable(test_data_loading
+    unit/test_data_loading.cpp
+)
+
+target_link_libraries(test_data_loading PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_data_loading DISCOVERY_TIMEOUT 30)
+
+# SIMD tests (multi-backend)
+add_executable(test_simd
+    unit/test_simd.cpp
+)
+
+target_link_libraries(test_simd PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_simd DISCOVERY_TIMEOUT 30)
+
+# Extended gradcheck tests (multi-backend)
+add_executable(test_gradcheck_extended
+    autograd/test_gradcheck_extended.cpp
+)
+
+target_link_libraries(test_gradcheck_extended PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_gradcheck_extended DISCOVERY_TIMEOUT 30)
 
 # Utility module tests
 add_subdirectory(utils)

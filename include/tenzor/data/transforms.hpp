@@ -56,7 +56,7 @@ public:
 
         // Assume last dimension is channels
         size_t num_channels = mean_.size();
-        if (shape.back() != num_channels && num_channels > 1) {
+        if (static_cast<size_t>(shape.back()) != num_channels && num_channels > 1) {
             throw std::invalid_argument("Input channels must match normalization parameters");
         }
 

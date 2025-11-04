@@ -400,6 +400,8 @@ __global__ void fused_layer_norm_kernel(
     const T* weight,
     const T* bias,
     T* output,
+    T* mean_out,        // Output: saved mean for backward
+    T* inv_std_out,     // Output: saved inv_std for backward
     int64_t batch_size,
     int64_t norm_size,
     T eps
@@ -451,6 +453,12 @@ __global__ void fused_layer_norm_kernel(
     T variance = shared_data[0] / norm_size;
     T inv_std = rsqrtf(variance + eps);
 
+    // Save mean and inv_std for backward pass
+    if (threadIdx.x == 0) {
+        mean_out[b] = mean;
+        inv_std_out[b] = inv_std;
+    }
+
     // Normalize and scale
     for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
         T normalized = (batch_in[i] - mean) * inv_std;
@@ -458,13 +466,23 @@ __global__ void fused_layer_norm_kernel(
     }
 }
 
+/**
+ * @brief Host wrapper for LayerNorm forward CUDA kernel
+ *
+ * @param input Input tensor
+ * @param normalized_shape Shape of normalized dimensions
+ * @param weight Weight (gamma) parameter
+ * @param bias Bias (beta) parameter
+ * @param eps Epsilon for numerical stability
+ * @return Tuple of (output, mean, inv_std) where mean and inv_std are saved for backward
+ */
 auto fused_layer_norm_cuda(
     const Tensor& input,
     const std::vector<int64_t>& normalized_shape,
     const Tensor& weight,
     const Tensor& bias,
     float eps
-) -> Tensor {
+) -> std::tuple<Tensor, Tensor, Tensor> {
     int64_t norm_size = 1;
     for (auto dim : normalized_shape) {
         norm_size *= dim;
@@ -473,6 +491,8 @@ auto fused_layer_norm_cuda(
     int64_t batch_size = input.numel() / norm_size;
 
     Tensor output = zeros(input.shape(), input.dtype(), input.device());
+    Tensor mean = zeros({batch_size}, input.dtype(), input.device());
+    Tensor inv_std = zeros({batch_size}, input.dtype(), input.device());
 
     constexpr int BLOCK_SIZE = 256;
     int blocks = batch_size;
@@ -483,6 +503,8 @@ auto fused_layer_norm_cuda(
             weight.data<float>(),
             bias.data<float>(),
             output.data<float>(),
+            mean.data<float>(),
+            inv_std.data<float>(),
             batch_size,
             norm_size,
             eps
@@ -494,7 +516,142 @@ auto fused_layer_norm_cuda(
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    return output;
+    return std::make_tuple(output, mean, inv_std);
+}
+
+// ==============================================================================
+// Fused Layer Norm Backward CUDA Kernel
+// ==============================================================================
+
+/**
+ * @brief CUDA kernel for LayerNorm backward pass
+ *
+ * Computes gradients for input, weight, and bias given output gradients.
+ * Uses efficient parallel reduction for batch-wise operations.
+ */
+template<typename T, int BLOCK_SIZE>
+__global__ void fused_layer_norm_backward_kernel(
+    const T* grad_output,    // Gradient from next layer
+    const T* input,          // Original input from forward pass
+    const T* weight,         // Weight (gamma) from forward pass
+    const T* mean,           // Saved mean from forward pass
+    const T* inv_std,        // Saved 1/sqrt(var + eps) from forward pass
+    T* grad_input,           // Output: gradient w.r.t. input
+    T* grad_weight,          // Output: gradient w.r.t. weight (accumulated)
+    T* grad_bias,            // Output: gradient w.r.t. bias (accumulated)
+    int64_t batch_size,
+    int64_t norm_size
+) {
+    int64_t b = blockIdx.x;
+    if (b >= batch_size) return;
+
+    const T* batch_grad_out = grad_output + b * norm_size;
+    const T* batch_in = input + b * norm_size;
+    T* batch_grad_in = grad_input + b * norm_size;
+
+    T batch_mean = mean[b];
+    T batch_inv_std = inv_std[b];
+
+    __shared__ T shared_sum1[BLOCK_SIZE];  // For sum(grad_out * weight)
+    __shared__ T shared_sum2[BLOCK_SIZE];  // For sum(grad_out * weight * normalized)
+
+    // Compute sums needed for input gradient
+    T sum_grad_out = 0;
+    T sum_grad_out_normalized = 0;
+
+    for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
+        T normalized = (batch_in[i] - batch_mean) * batch_inv_std;
+        T grad_out_weighted = batch_grad_out[i] * weight[i];
+
+        sum_grad_out += grad_out_weighted;
+        sum_grad_out_normalized += grad_out_weighted * normalized;
+
+        // Accumulate weight and bias gradients atomically
+        atomicAdd(&grad_weight[i], batch_grad_out[i] * normalized);
+        atomicAdd(&grad_bias[i], batch_grad_out[i]);
+    }
+
+    shared_sum1[threadIdx.x] = sum_grad_out;
+    shared_sum2[threadIdx.x] = sum_grad_out_normalized;
+    __syncthreads();
+
+    // Parallel reduction for sums
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if (threadIdx.x < s) {
+            shared_sum1[threadIdx.x] += shared_sum1[threadIdx.x + s];
+            shared_sum2[threadIdx.x] += shared_sum2[threadIdx.x + s];
+        }
+        __syncthreads();
+    }
+
+    T mean_grad_out = shared_sum1[0] / norm_size;
+    T mean_grad_out_normalized = shared_sum2[0] / norm_size;
+
+    // Compute input gradients
+    for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
+        T normalized = (batch_in[i] - batch_mean) * batch_inv_std;
+        T grad_out_weighted = batch_grad_out[i] * weight[i];
+
+        batch_grad_in[i] = (grad_out_weighted - mean_grad_out -
+                           normalized * mean_grad_out_normalized) * batch_inv_std;
+    }
+}
+
+/**
+ * @brief Host wrapper for LayerNorm backward CUDA kernel
+ *
+ * @param grad_output Gradient from next layer
+ * @param input Original input from forward pass
+ * @param weight Weight (gamma) parameter
+ * @param mean Saved mean from forward pass
+ * @param inv_std Saved inverse standard deviation from forward pass
+ * @param normalized_shape Shape of normalized dimensions
+ * @return Tuple of (grad_input, grad_weight, grad_bias)
+ */
+auto fused_layer_norm_backward_cuda(
+    const Tensor& grad_output,
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor& mean,
+    const Tensor& inv_std,
+    const std::vector<int64_t>& normalized_shape
+) -> std::tuple<Tensor, Tensor, Tensor> {
+    int64_t norm_size = 1;
+    for (auto dim : normalized_shape) {
+        norm_size *= dim;
+    }
+
+    int64_t batch_size = input.numel() / norm_size;
+
+    // Allocate output tensors
+    Tensor grad_input = zeros(input.shape(), input.dtype(), input.device());
+    Tensor grad_weight = zeros({norm_size}, input.dtype(), input.device());
+    Tensor grad_bias = zeros({norm_size}, input.dtype(), input.device());
+
+    constexpr int BLOCK_SIZE = 256;
+    int blocks = batch_size;
+
+    if (input.dtype() == DType::Float32) {
+        fused_layer_norm_backward_kernel<float, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
+            grad_output.data<float>(),
+            input.data<float>(),
+            weight.data<float>(),
+            mean.data<float>(),
+            inv_std.data<float>(),
+            grad_input.data<float>(),
+            grad_weight.data<float>(),
+            grad_bias.data<float>(),
+            batch_size,
+            norm_size
+        );
+    } else {
+        throw std::runtime_error("fused_layer_norm_backward_cuda: Only Float32 supported");
+    }
+
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    return std::make_tuple(grad_input, grad_weight, grad_bias);
 }
 
 // ==============================================================================
