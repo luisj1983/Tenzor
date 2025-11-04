@@ -299,6 +299,16 @@ auto initialize() -> void {
             return cpu_backend->dispatch("unsqueeze", inputs, attrs);
         });
 
+    registry.register_kernel("cat", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("cat", inputs, attrs);
+        });
+
+    registry.register_kernel("zeros", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("zeros", inputs, attrs);
+        });
+
     // BatchNorm2d operations
     registry.register_kernel("batchnorm2d_mean_var", Device::Type::CPU,
         [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
@@ -656,6 +666,16 @@ auto initialize() -> void {
                 registry.register_kernel("unsqueeze", Device::Type::CUDA,
                     [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
                         return cuda_backend->dispatch("unsqueeze", inputs, attrs);
+                    });
+
+                registry.register_kernel("cat", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("cat", inputs, attrs);
+                    });
+
+                registry.register_kernel("zeros", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("zeros", inputs, attrs);
                     });
 
                 // BatchNorm2d operations

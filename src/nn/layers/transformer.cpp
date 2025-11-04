@@ -81,16 +81,24 @@ auto PositionalEncoding::forward(const Variable& x) -> Variable {
     // pe_shape for batch_first=true: (1, seq_len, d_model)
     std::vector<int64_t> pe_shape = {1, seq_len, d_model_};
 
-    // Slice and reshape positional encoding
+    // Get input device
+    Device input_device = x.tensor().device();
+
+    // Slice and reshape positional encoding on CPU first (pe_ is always on CPU initially)
     Tensor pe_slice = reshape(pe_, {max_len_, d_model_});
     // Take first seq_len rows
     std::vector<int64_t> slice_shape = {seq_len, d_model_};
-    Tensor pe_for_seq = zeros({seq_len, d_model_}, DType::Float32, pe_.device());
+    Tensor pe_for_seq = zeros({seq_len, d_model_}, DType::Float32, Device::cpu());
     auto* pe_src = pe_.data<float>();
     auto* pe_dst = pe_for_seq.data<float>();
 
     for (int64_t i = 0; i < seq_len * d_model_; ++i) {
         pe_dst[i] = pe_src[i];
+    }
+
+    // Now move to target device if needed
+    if (input_device != Device::cpu()) {
+        pe_for_seq = pe_for_seq.to(input_device);
     }
 
     // Reshape to match input

@@ -14,6 +14,8 @@ class LSTMCellTestFixture : public BackendTest {};
 TEST_P(LSTMCellTestFixture, BasicForward) {
     // Test basic forward pass
     nn::LSTMCell cell(10, 20);
+
+    cell.to(device);
     auto input = Variable(randn({5, 10}, DType::Float32, device), true);
     auto h = Variable(randn({5, 20}, DType::Float32, device), true);
     auto c = Variable(randn({5, 20}, DType::Float32, device), true);
@@ -32,6 +34,8 @@ TEST_P(LSTMCellTestFixture, BasicForward) {
 TEST_P(LSTMCellTestFixture, NoInitialStates) {
     // Test with zero-initialized states
     nn::LSTMCell cell(10, 20);
+
+    cell.to(device);
     auto input = Variable(randn({5, 10}, DType::Float32, device), true);
 
     auto [h_next, c_next] = cell.forward(input, Variable{}, Variable{});
@@ -48,6 +52,8 @@ TEST_P(LSTMCellTestFixture, NoInitialStates) {
 TEST_P(LSTMCellTestFixture, NoBias) {
     // Test without bias
     nn::LSTMCell cell(10, 20, false);
+
+    cell.to(device);
     auto input = Variable(randn({5, 10}, DType::Float32, device), true);
 
     auto [h_next, c_next] = cell.forward(input, Variable{}, Variable{});
@@ -59,6 +65,8 @@ TEST_P(LSTMCellTestFixture, NoBias) {
 TEST_P(LSTMCellTestFixture, CellStateEvolution) {
     // Test that cell state evolves across time steps
     nn::LSTMCell cell(10, 20);
+
+    cell.to(device);
     auto input = Variable(randn({5, 10}, DType::Float32, device), true);
 
     auto [h1, c1] = cell.forward(input, Variable{}, Variable{});
@@ -81,6 +89,8 @@ class LSTMTestFixture : public BackendTest {};
 TEST_P(LSTMTestFixture, BasicForward) {
     // Test basic forward pass
     nn::LSTM lstm(10, 20, 1);
+
+    lstm.to(device);
     auto input = Variable(randn({7, 5, 10}, DType::Float32, device), true);  // (seq_len, batch, features)
 
     auto [output, states] = lstm.forward(input, {Variable{}, Variable{}});
@@ -104,7 +114,9 @@ TEST_P(LSTMTestFixture, BasicForward) {
 
 TEST_P(LSTMTestFixture, MultiLayer) {
     // Test multi-layer LSTM
-    nn::LSTM lstm(10, 20, 3);  // 3 layers
+    nn::LSTM lstm(10, 20, 3);
+
+    lstm.to(device);  // 3 layers
     auto input = Variable(randn({7, 5, 10}, DType::Float32, device), true);
 
     auto [output, states] = lstm.forward(input, {Variable{}, Variable{}});
@@ -120,7 +132,9 @@ TEST_P(LSTMTestFixture, MultiLayer) {
 
 TEST_P(LSTMTestFixture, BatchFirst) {
     // Test with batch_first=true
-    nn::LSTM lstm(10, 20, 1, true, true);  // batch_first=true
+    nn::LSTM lstm(10, 20, 1, true, true);
+
+    lstm.to(device);  // batch_first=true
     auto input = Variable(randn({5, 7, 10}, DType::Float32, device), true);  // (batch, seq_len, features)
 
     auto [output, states] = lstm.forward(input, {Variable{}, Variable{}});
@@ -132,7 +146,9 @@ TEST_P(LSTMTestFixture, BatchFirst) {
 
 TEST_P(LSTMTestFixture, Bidirectional) {
     // Test bidirectional LSTM
-    nn::LSTM lstm(10, 20, 1, true, false, 0.0, true);  // bidirectional=true
+    nn::LSTM lstm(10, 20, 1, true, false, 0.0, true);
+
+    lstm.to(device);  // bidirectional=true
     auto input = Variable(randn({7, 5, 10}, DType::Float32, device), true);
 
     auto [output, states] = lstm.forward(input, {Variable{}, Variable{}});
@@ -152,6 +168,8 @@ TEST_P(LSTMTestFixture, Bidirectional) {
 TEST_P(LSTMTestFixture, BidirectionalMultiLayer) {
     // Test bidirectional multi-layer LSTM
     nn::LSTM lstm(10, 20, 2, true, false, 0.0, true);
+
+    lstm.to(device);
     auto input = Variable(randn({7, 5, 10}, DType::Float32, device), true);
 
     auto [output, states] = lstm.forward(input, {Variable{}, Variable{}});
@@ -164,7 +182,9 @@ TEST_P(LSTMTestFixture, BidirectionalMultiLayer) {
 
 TEST_P(LSTMTestFixture, WithDropout) {
     // Test with dropout between layers
-    nn::LSTM lstm(10, 20, 3, true, false, 0.5);  // 50% dropout
+    nn::LSTM lstm(10, 20, 3, true, false, 0.5);
+
+    lstm.to(device);  // 50% dropout
     auto input = Variable(randn({7, 5, 10}, DType::Float32, device), true);
 
     auto [output, states] = lstm.forward(input, {Variable{}, Variable{}});
@@ -177,6 +197,8 @@ TEST_P(LSTMTestFixture, WithDropout) {
 TEST_P(LSTMTestFixture, InitialStates) {
     // Test with provided initial states
     nn::LSTM lstm(10, 20, 2);
+
+    lstm.to(device);
     auto input = Variable(randn({7, 5, 10}, DType::Float32, device), true);
     auto h0 = Variable(randn({2, 5, 20}, DType::Float32, device), true);
     auto c0 = Variable(randn({2, 5, 20}, DType::Float32, device), true);
@@ -193,6 +215,8 @@ TEST_P(LSTMTestFixture, SequenceLengthVariation) {
     // Test with different sequence lengths
     nn::LSTM lstm(10, 20);
 
+    lstm.to(device);
+
     // Short sequence
     auto input1 = Variable(randn({3, 5, 10}, DType::Float32, device), true);
     auto [output1, states1] = lstm.forward(input1, {Variable{}, Variable{}});
@@ -208,6 +232,8 @@ TEST_P(LSTMTestFixture, BatchSizeVariation) {
     // Test with different batch sizes
     nn::LSTM lstm(10, 20);
 
+    lstm.to(device);
+
     // Small batch
     auto input1 = Variable(randn({7, 2, 10}, DType::Float32, device), true);
     auto [output1, states1] = lstm.forward(input1, {Variable{}, Variable{}});
@@ -222,6 +248,8 @@ TEST_P(LSTMTestFixture, BatchSizeVariation) {
 TEST_P(LSTMTestFixture, SingleTimestep) {
     // Test with single timestep
     nn::LSTM lstm(10, 20);
+
+    lstm.to(device);
     auto input = Variable(randn({1, 5, 10}, DType::Float32, device), true);
 
     auto [output, states] = lstm.forward(input, {Variable{}, Variable{}});
@@ -232,6 +260,8 @@ TEST_P(LSTMTestFixture, SingleTimestep) {
 TEST_P(LSTMTestFixture, OutputConsistency) {
     // Test that output is deterministic
     nn::LSTM lstm(10, 20);
+
+    lstm.to(device);
     auto input = Variable(ones({7, 5, 10}, DType::Float32, device), true);
 
     auto [output1, states1] = lstm.forward(input, {Variable{}, Variable{}});
@@ -246,6 +276,8 @@ TEST_P(LSTMTestFixture, OutputConsistency) {
 TEST_P(LSTMTestFixture, GradientFlow) {
     // Test that gradients can flow through LSTM
     nn::LSTM lstm(10, 20);
+
+    lstm.to(device);
     auto input = Variable(randn({7, 5, 10}, DType::Float32, device), true);
 
     auto [output, states] = lstm.forward(input, {Variable{}, Variable{}});
@@ -266,6 +298,8 @@ TEST_P(LSTMTestFixture, TrainingMode) {
     // Test training/eval mode switching
     nn::LSTM lstm(10, 20, 2, true, false, 0.5);
 
+    lstm.to(device);
+
     EXPECT_TRUE(lstm.is_training()) << "Failed on " << device.to_string();
 
     lstm.eval();
@@ -278,6 +312,8 @@ TEST_P(LSTMTestFixture, TrainingMode) {
 TEST_P(LSTMTestFixture, ParameterCount) {
     // Test parameter counting
     nn::LSTM lstm(10, 20, 2);
+
+    lstm.to(device);
     auto params = lstm.parameters();
 
     // Each layer has 2 combined linear layers (ih and hh) for all 4 gates
@@ -292,6 +328,8 @@ TEST_P(LSTMTestFixture, ParameterCount) {
 TEST_P(LSTMTestFixture, LargeHidden) {
     // Test with large hidden size
     nn::LSTM lstm(10, 512);
+
+    lstm.to(device);
     auto input = Variable(randn({7, 5, 10}, DType::Float32, device), true);
 
     auto [output, states] = lstm.forward(input, {Variable{}, Variable{}});
@@ -302,6 +340,8 @@ TEST_P(LSTMTestFixture, LargeHidden) {
 TEST_P(LSTMTestFixture, VeryDeepNetwork) {
     // Test with many layers
     nn::LSTM lstm(10, 20, 5);
+
+    lstm.to(device);
     auto input = Variable(randn({7, 5, 10}, DType::Float32, device), true);
 
     auto [output, states] = lstm.forward(input, {Variable{}, Variable{}});
@@ -314,6 +354,8 @@ TEST_P(LSTMTestFixture, VeryDeepNetwork) {
 TEST_P(LSTMTestFixture, LongSequence) {
     // Test with very long sequence
     nn::LSTM lstm(10, 20);
+
+    lstm.to(device);
     auto input = Variable(randn({100, 5, 10}, DType::Float32, device), true);
 
     auto [output, states] = lstm.forward(input, {Variable{}, Variable{}});
@@ -325,6 +367,8 @@ TEST_P(LSTMTestFixture, InvalidNumLayers) {
     // Test that invalid num_layers throws
     EXPECT_THROW({
         nn::LSTM lstm(10, 20, 0);
+
+        lstm.to(device);
     }, std::invalid_argument) << "Failed on " << device.to_string();
 }
 
@@ -332,12 +376,16 @@ TEST_P(LSTMTestFixture, InvalidDropout) {
     // Test that invalid dropout throws
     EXPECT_THROW({
         nn::LSTM lstm(10, 20, 2, true, false, 1.5);
+
+        lstm.to(device);
     }, std::invalid_argument) << "Failed on " << device.to_string();
 }
 
 TEST_P(LSTMTestFixture, CellStateMemory) {
     // Test that cell state carries information across timesteps
     nn::LSTM lstm(10, 20);
+
+    lstm.to(device);
     auto input = Variable(randn({10, 5, 10}, DType::Float32, device), true);
 
     auto [output, states] = lstm.forward(input, {Variable{}, Variable{}});
@@ -359,6 +407,8 @@ TEST_P(LSTMTestFixture, CellStateMemory) {
 TEST_P(LSTMTestFixture, BatchFirstBidirectional) {
     // Test combination of batch_first and bidirectional
     nn::LSTM lstm(10, 20, 1, true, true, 0.0, true);
+
+    lstm.to(device);
     auto input = Variable(randn({5, 7, 10}, DType::Float32, device), true);  // (batch, seq, features)
 
     auto [output, states] = lstm.forward(input, {Variable{}, Variable{}});

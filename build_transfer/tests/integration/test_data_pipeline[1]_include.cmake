@@ -1,0 +1,5 @@
+if(EXISTS "/home/lee/Projects/Tenzor/build_transfer/tests/integration/test_data_pipeline[1]_tests.cmake")
+  include("/home/lee/Projects/Tenzor/build_transfer/tests/integration/test_data_pipeline[1]_tests.cmake")
+else()
+  add_test(test_data_pipeline_NOT_BUILT test_data_pipeline_NOT_BUILT)
+endif()

@@ -17,15 +17,18 @@ class PositionalEncodingTest : public BackendTest {};
 TEST_P(PositionalEncodingTest, Construction) {
     EXPECT_NO_THROW({
         PositionalEncoding pe(512);
+        pe.to(device);
     }) << "Failed on " << device.to_string();
 
     EXPECT_NO_THROW({
         PositionalEncoding pe(768, 10000, 0.1);
+        pe.to(device);
     }) << "Failed on " << device.to_string();
 }
 
 TEST_P(PositionalEncodingTest, ForwardShape) {
     PositionalEncoding pe(256, 1000, 0.0);
+    pe.to(device);
 
     int64_t batch_size = 4;
     int64_t seq_len = 20;
@@ -43,6 +46,7 @@ TEST_P(PositionalEncodingTest, ForwardShape) {
 
 TEST_P(PositionalEncodingTest, ExceedsMaxLen) {
     PositionalEncoding pe(128, 100, 0.0);
+    pe.to(device);
 
     Variable input(randn({2, 150, 128}, DType::Float32, device), true);
 
@@ -54,6 +58,7 @@ TEST_P(PositionalEncodingTest, ExceedsMaxLen) {
 
 TEST_P(PositionalEncodingTest, WithDropout) {
     PositionalEncoding pe(256, 1000, 0.5);
+    pe.to(device);
 
     Variable input(randn({2, 10, 256}, DType::Float32, device), true);
 
@@ -72,21 +77,25 @@ class TransformerEncoderLayerTest : public BackendTest {};
 TEST_P(TransformerEncoderLayerTest, Construction) {
     EXPECT_NO_THROW({
         TransformerEncoderLayer layer(512, 8);
+        layer.to(device);
     }) << "Failed on " << device.to_string();
 
     EXPECT_NO_THROW({
         TransformerEncoderLayer layer(768, 12, 3072, 0.1, "gelu", true);
+        layer.to(device);
     }) << "Failed on " << device.to_string();
 }
 
 TEST_P(TransformerEncoderLayerTest, InvalidActivation) {
     EXPECT_THROW({
         TransformerEncoderLayer layer(512, 8, 2048, 0.1, "invalid");
+        layer.to(device);
     }, std::invalid_argument) << "Failed on " << device.to_string();
 }
 
 TEST_P(TransformerEncoderLayerTest, ForwardShape) {
     TransformerEncoderLayer layer(256, 4, 1024, 0.0, "relu", true);
+    layer.to(device);
 
     int64_t batch_size = 2;
     int64_t seq_len = 10;
@@ -103,6 +112,7 @@ TEST_P(TransformerEncoderLayerTest, ForwardShape) {
 
 TEST_P(TransformerEncoderLayerTest, BatchFirstFalse) {
     TransformerEncoderLayer layer(256, 4, 1024, 0.0, "relu", false);
+    layer.to(device);
 
     int64_t seq_len = 10;
     int64_t batch_size = 2;
@@ -118,6 +128,7 @@ TEST_P(TransformerEncoderLayerTest, BatchFirstFalse) {
 
 TEST_P(TransformerEncoderLayerTest, WithMask) {
     TransformerEncoderLayer layer(128, 4, 512, 0.0, "relu", true);
+    layer.to(device);
 
     int64_t batch_size = 2;
     int64_t seq_len = 8;
@@ -132,6 +143,7 @@ TEST_P(TransformerEncoderLayerTest, WithMask) {
 
 TEST_P(TransformerEncoderLayerTest, GeLUActivation) {
     TransformerEncoderLayer layer(256, 8, 1024, 0.0, "gelu", true);
+    layer.to(device);
 
     Variable src(randn({2, 5, 256}, DType::Float32, device), true);
     Variable output = layer.forward(src, Tensor{}, Tensor{});
@@ -152,17 +164,20 @@ TEST_P(TransformerEncoderTest, Construction) {
 
     EXPECT_NO_THROW({
         TransformerEncoder encoder(encoder_layer, 6);
+        encoder.to(device);
     }) << "Failed on " << device.to_string();
 
     auto norm = std::make_shared<LayerNorm>(std::vector<int64_t>{512});
     EXPECT_NO_THROW({
         TransformerEncoder encoder(encoder_layer, 6, norm);
+        encoder.to(device);
     }) << "Failed on " << device.to_string();
 }
 
 TEST_P(TransformerEncoderTest, ForwardShape) {
     auto encoder_layer = std::make_shared<TransformerEncoderLayer>(256, 4, 1024, 0.0, "relu", true);
     TransformerEncoder encoder(encoder_layer, 3);
+    encoder.to(device);
 
     Variable src(randn({2, 10, 256}, DType::Float32, device), true);
     Variable output = encoder.forward(src, Tensor{}, Tensor{});
@@ -175,6 +190,7 @@ TEST_P(TransformerEncoderTest, ForwardShape) {
 TEST_P(TransformerEncoderTest, MultipleLayersProcessing) {
     auto encoder_layer = std::make_shared<TransformerEncoderLayer>(128, 4, 512, 0.0, "relu", true);
     TransformerEncoder encoder(encoder_layer, 6);  // 6 layers
+    encoder.to(device);
 
     Variable src(randn({2, 5, 128}, DType::Float32, device), true);
     Variable output = encoder.forward(src, Tensor{}, Tensor{});
@@ -189,6 +205,7 @@ TEST_P(TransformerEncoderTest, WithNormalization) {
     auto encoder_layer = std::make_shared<TransformerEncoderLayer>(256, 8, 1024, 0.0, "relu", true);
     auto norm = std::make_shared<LayerNorm>(std::vector<int64_t>{256});
     TransformerEncoder encoder(encoder_layer, 6, norm);
+    encoder.to(device);
 
     Variable src(randn({2, 10, 256}, DType::Float32, device), true);
     Variable output = encoder.forward(src, Tensor{}, Tensor{});
@@ -207,15 +224,18 @@ class TransformerDecoderLayerTest : public BackendTest {};
 TEST_P(TransformerDecoderLayerTest, Construction) {
     EXPECT_NO_THROW({
         TransformerDecoderLayer layer(512, 8);
+        layer.to(device);
     }) << "Failed on " << device.to_string();
 
     EXPECT_NO_THROW({
         TransformerDecoderLayer layer(768, 12, 3072, 0.1, "gelu", true);
+        layer.to(device);
     }) << "Failed on " << device.to_string();
 }
 
 TEST_P(TransformerDecoderLayerTest, ForwardShape) {
     TransformerDecoderLayer layer(256, 4, 1024, 0.0, "relu", true);
+    layer.to(device);
 
     int64_t batch_size = 2;
     int64_t tgt_len = 8;
@@ -234,6 +254,7 @@ TEST_P(TransformerDecoderLayerTest, ForwardShape) {
 
 TEST_P(TransformerDecoderLayerTest, WithCausalMask) {
     TransformerDecoderLayer layer(128, 4, 512, 0.0, "relu", true);
+    layer.to(device);
 
     int64_t batch_size = 2;
     int64_t tgt_len = 5;
@@ -251,6 +272,7 @@ TEST_P(TransformerDecoderLayerTest, WithCausalMask) {
 
 TEST_P(TransformerDecoderLayerTest, InvalidSingleInputForward) {
     TransformerDecoderLayer layer(256, 8);
+    layer.to(device);
 
     Variable input(randn({2, 5, 256}, DType::Float32, device), true);
 
@@ -271,17 +293,20 @@ TEST_P(TransformerDecoderTest, Construction) {
 
     EXPECT_NO_THROW({
         TransformerDecoder decoder(decoder_layer, 6);
+        decoder.to(device);
     }) << "Failed on " << device.to_string();
 
     auto norm = std::make_shared<LayerNorm>(std::vector<int64_t>{512});
     EXPECT_NO_THROW({
         TransformerDecoder decoder(decoder_layer, 6, norm);
+        decoder.to(device);
     }) << "Failed on " << device.to_string();
 }
 
 TEST_P(TransformerDecoderTest, ForwardShape) {
     auto decoder_layer = std::make_shared<TransformerDecoderLayer>(256, 4, 1024, 0.0, "relu", true);
     TransformerDecoder decoder(decoder_layer, 3);
+    decoder.to(device);
 
     Variable tgt(randn({2, 8, 256}, DType::Float32, device), true);
     Variable memory(randn({2, 10, 256}, DType::Float32, device), true);
@@ -296,6 +321,7 @@ TEST_P(TransformerDecoderTest, ForwardShape) {
 TEST_P(TransformerDecoderTest, MultipleLayersProcessing) {
     auto decoder_layer = std::make_shared<TransformerDecoderLayer>(128, 4, 512, 0.0, "relu", true);
     TransformerDecoder decoder(decoder_layer, 6);
+    decoder.to(device);
 
     Variable tgt(randn({2, 5, 128}, DType::Float32, device), true);
     Variable memory(randn({2, 7, 128}, DType::Float32, device), true);
@@ -316,15 +342,18 @@ class TransformerTest : public BackendTest {};
 TEST_P(TransformerTest, Construction) {
     EXPECT_NO_THROW({
         Transformer model(512, 8, 6, 6);
+        model.to(device);
     }) << "Failed on " << device.to_string();
 
     EXPECT_NO_THROW({
         Transformer model(768, 12, 12, 12, 3072, 0.1, "gelu", true);
+        model.to(device);
     }) << "Failed on " << device.to_string();
 }
 
 TEST_P(TransformerTest, ForwardShape) {
     Transformer model(256, 4, 3, 3, 1024, 0.0, "relu", true);
+    model.to(device);
 
     int64_t batch_size = 2;
     int64_t src_len = 10;
@@ -344,6 +373,7 @@ TEST_P(TransformerTest, ForwardShape) {
 
 TEST_P(TransformerTest, WithMasks) {
     Transformer model(128, 4, 2, 2, 512, 0.0, "relu", true);
+    model.to(device);
 
     int64_t batch_size = 2;
     int64_t src_len = 10;
@@ -361,6 +391,7 @@ TEST_P(TransformerTest, WithMasks) {
 
 TEST_P(TransformerTest, InvalidSingleInputForward) {
     Transformer model(256, 8);
+    model.to(device);
 
     Variable input(randn({2, 10, 256}, DType::Float32, device), true);
 
@@ -373,6 +404,7 @@ TEST_P(TransformerTest, InvalidSingleInputForward) {
 TEST_P(TransformerTest, BERTConfig) {
     // Test BERT-like configuration: 768 dims, 12 heads, 12 layers
     Transformer model(768, 12, 12, 12, 3072, 0.1, "gelu", true);
+    model.to(device);
 
     Variable src(randn({1, 128, 768}, DType::Float32, device), true);
     Variable tgt(randn({1, 64, 768}, DType::Float32, device), true);
@@ -388,6 +420,7 @@ TEST_P(TransformerTest, BERTConfig) {
 TEST_P(TransformerTest, GPTLikeConfig) {
     // Test GPT-like configuration with causal masking
     Transformer model(512, 8, 6, 6, 2048, 0.1, "gelu", true);
+    model.to(device);
 
     int64_t batch_size = 2;
     int64_t seq_len = 32;
@@ -412,6 +445,7 @@ class TransformerIntegrationTest : public BackendTest {};
 
 TEST_P(TransformerIntegrationTest, ForwardBackward) {
     Transformer model(128, 4, 2, 2, 512, 0.0, "relu", true);
+    model.to(device);
 
     Variable src(randn({2, 5, 128}, DType::Float32, device), true);
     Variable tgt(randn({2, 3, 128}, DType::Float32, device), true);
@@ -429,6 +463,7 @@ TEST_P(TransformerIntegrationTest, ForwardBackward) {
 
 TEST_P(TransformerIntegrationTest, ParameterCount) {
     Transformer model(256, 4, 2, 2, 1024, 0.0, "relu", true);
+    model.to(device);
 
     auto params = model.parameters();
 
@@ -441,6 +476,7 @@ TEST_P(TransformerIntegrationTest, ParameterCount) {
 
 TEST_P(TransformerIntegrationTest, TrainEvalSwitch) {
     Transformer model(128, 4, 2, 2);
+    model.to(device);
 
     EXPECT_TRUE(model.is_training()) << "Failed on " << device.to_string();
 
@@ -454,6 +490,7 @@ TEST_P(TransformerIntegrationTest, TrainEvalSwitch) {
 TEST_P(TransformerIntegrationTest, SmallModelOverfit) {
     // Test that a small model can memorize a tiny dataset (sanity check)
     Transformer model(64, 2, 1, 1, 128, 0.0, "relu", true);
+    model.to(device);
     model.eval();  // Use eval mode for deterministic forward passes
 
     Variable src(ones({1, 3, 64}, DType::Float32, device), true);
@@ -476,6 +513,7 @@ TEST_P(TransformerIntegrationTest, SmallModelOverfit) {
 
 TEST_P(TransformerIntegrationTest, DifferentSequenceLengths) {
     Transformer model(128, 4, 2, 2, 512, 0.0, "relu", true);
+    model.to(device);
 
     // Test with different source and target lengths
     Variable src1(randn({2, 20, 128}, DType::Float32, device), true);

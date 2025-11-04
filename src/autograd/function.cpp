@@ -198,30 +198,17 @@ auto SumBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     auto input_shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
 
     if (!dim_.has_value()) {
-        // Reduced all dimensions - create tensor filled with scalar grad value
-        // Use full() which works natively on all devices
+        // Reduced all dimensions - broadcast scalar tensor back to original shape
+        // Use pure tensor operations (no CPU transfers) - backend agnostic!
+        auto grad = grad_output;
 
-        // Handle different dtypes correctly
-        if (grad_output.device().type == Device::Type::CUDA) {
-            // Transfer scalar to CPU to extract value
-            auto grad_cpu = grad_output.to(Device::cpu());
-
-            if (grad_cpu.dtype() == DType::Float64) {
-                double grad_val = grad_cpu.data<double>()[0];
-                return {full(input_shape_vec, grad_val, input.dtype(), input.device())};
-            } else {
-                float grad_val = grad_cpu.data<float>()[0];
-                return {full(input_shape_vec, grad_val, input.dtype(), input.device())};
-            }
-        } else {
-            if (grad_output.dtype() == DType::Float64) {
-                double grad_val = grad_output.data<double>()[0];
-                return {full(input_shape_vec, grad_val, input.dtype(), input.device())};
-            } else {
-                float grad_val = grad_output.data<float>()[0];
-                return {full(input_shape_vec, grad_val, input.dtype(), input.device())};
-            }
+        // Ensure grad is a 0-d tensor (may be 1-element tensor from some reductions)
+        if (grad.ndim() > 0) {
+            grad = reshape(grad, {});
         }
+
+        // Use expand() to broadcast the scalar to input shape natively on device
+        return {expand(grad, input_shape_vec)};
     } else {
         // Dimension-specific reduction backward using unsqueeze + expand
         // expand() now uses native CUDA implementation - no device transfers!
@@ -260,28 +247,22 @@ auto MeanBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
     auto input_shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
 
     if (!dim_.has_value()) {
-        // Reduced all dimensions - use full() which works natively on all devices
+        // Reduced all dimensions - broadcast scalar tensor back to original shape
+        // Use pure tensor operations (no CPU transfers) - backend agnostic!
+        auto grad = grad_output;
 
-        // Handle different dtypes correctly
-        if (grad_output.device().type == Device::Type::CUDA) {
-            auto grad_cpu = grad_output.to(Device::cpu());
-
-            if (grad_cpu.dtype() == DType::Float64) {
-                double grad_val = grad_cpu.data<double>()[0] * scale;
-                return {full(input_shape_vec, grad_val, input.dtype(), input.device())};
-            } else {
-                float grad_val = grad_cpu.data<float>()[0] * scale;
-                return {full(input_shape_vec, grad_val, input.dtype(), input.device())};
-            }
-        } else {
-            if (grad_output.dtype() == DType::Float64) {
-                double grad_val = grad_output.data<double>()[0] * scale;
-                return {full(input_shape_vec, grad_val, input.dtype(), input.device())};
-            } else {
-                float grad_val = grad_output.data<float>()[0] * scale;
-                return {full(input_shape_vec, grad_val, input.dtype(), input.device())};
-            }
+        // Ensure grad is a 0-d tensor (may be 1-element tensor from some reductions)
+        if (grad.ndim() > 0) {
+            grad = reshape(grad, {});
         }
+
+        // Expand the scalar to input shape natively on device
+        auto expanded = expand(grad, input_shape_vec);
+
+        // Scale by 1/N using backend-agnostic tensor multiplication
+        // Create scalar tensor with same dtype and device as expanded gradient
+        auto scale_tensor = full({}, scale, expanded.dtype(), expanded.device());
+        return {mul(expanded, scale_tensor)};
     } else {
         // Dimension-specific reduction backward
         int64_t dim = dim_.value();

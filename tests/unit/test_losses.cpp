@@ -24,7 +24,8 @@ TEST_P(LossTest, MSELossBasic) {
 
     // Expected: mean((1-2)^2) = mean(1) = 1.0
     EXPECT_EQ(loss.tensor().numel(), 1) << "Failed on " << device.to_string();
-    const float* loss_data = loss.tensor().to(Device::cpu()).data<float>();
+    auto loss_cpu = loss.tensor().to(Device::cpu());  // Store tensor to keep it alive
+    const float* loss_data = loss_cpu.data<float>();
     EXPECT_FLOAT_EQ(loss_data[0], 1.0f) << "Failed on " << device.to_string();
 }
 
@@ -35,7 +36,10 @@ TEST_P(LossTest, MSELossZero) {
 
     auto loss = mse_loss(pred, target, Reduction::Mean);
 
-    const float* loss_data = loss.tensor().to(Device::cpu()).data<float>();
+    auto loss_cpu = loss.tensor().to(Device::cpu());
+
+
+    const float* loss_data = loss_cpu.data<float>();
     EXPECT_NEAR(loss_data[0], 0.0f, 1e-6) << "Failed on " << device.to_string();
 }
 
@@ -46,7 +50,9 @@ TEST_P(LossTest, MSELossSum) {
     auto loss = mse_loss(pred, target, Reduction::Sum);
 
     // Expected: sum((1-2)^2) = sum(1, 1, 1, 1) = 4.0
-    const float* loss_data = loss.tensor().to(Device::cpu()).data<float>();
+    auto loss_cpu = loss.tensor().to(Device::cpu());
+
+    const float* loss_data = loss_cpu.data<float>();
     EXPECT_FLOAT_EQ(loss_data[0], 4.0f) << "Failed on " << device.to_string();
 }
 
@@ -58,7 +64,9 @@ TEST_P(LossTest, MSELossNone) {
 
     // Expected: element-wise (1-2)^2 = [1, 1, 1, 1]
     EXPECT_EQ(loss.tensor().numel(), 4) << "Failed on " << device.to_string();
-    const float* loss_data = loss.tensor().to(Device::cpu()).data<float>();
+    auto loss_cpu = loss.tensor().to(Device::cpu());
+
+    const float* loss_data = loss_cpu.data<float>();
     for (int i = 0; i < 4; i++) {
         EXPECT_FLOAT_EQ(loss_data[i], 1.0f) << "Failed on " << device.to_string();
     }
@@ -72,7 +80,9 @@ TEST_P(LossTest, BCELossBasic) {
     auto loss = bce_loss(pred, target, Reduction::Mean);
 
     // Expected: -[1 * log(0.5) + 0 * log(0.5)] = -log(0.5) ≈ 0.693
-    const float* loss_data = loss.tensor().to(Device::cpu()).data<float>();
+    auto loss_cpu = loss.tensor().to(Device::cpu());
+
+    const float* loss_data = loss_cpu.data<float>();
     EXPECT_GT(loss_data[0], 0.0f) << "Failed on " << device.to_string();
     EXPECT_NEAR(loss_data[0], -std::log(0.5f), 0.01f) << "Failed on " << device.to_string();
 }
@@ -84,7 +94,9 @@ TEST_P(LossTest, BCELossPerfectPrediction) {
     auto loss = bce_loss(pred, target, Reduction::Mean);
 
     // With clamping, we expect a very small loss (not exactly 0)
-    const float* loss_data = loss.tensor().to(Device::cpu()).data<float>();
+    auto loss_cpu = loss.tensor().to(Device::cpu());
+
+    const float* loss_data = loss_cpu.data<float>();
     EXPECT_LT(loss_data[0], 0.001f) << "Failed on " << device.to_string();
 }
 
@@ -96,7 +108,9 @@ TEST_P(LossTest, BCELossMixedTargets) {
     auto loss = bce_loss(pred, target, Reduction::Mean);
 
     // Loss should be positive
-    const float* loss_data = loss.tensor().to(Device::cpu()).data<float>();
+    auto loss_cpu = loss.tensor().to(Device::cpu());
+
+    const float* loss_data = loss_cpu.data<float>();
     EXPECT_GT(loss_data[0], 0.0f) << "Failed on " << device.to_string();
 }
 
@@ -108,7 +122,9 @@ TEST_P(LossTest, L1LossBasic) {
     auto loss = l1_loss(pred, target, Reduction::Mean);
 
     // Expected: mean(|3-1|) = mean(2) = 2.0
-    const float* loss_data = loss.tensor().to(Device::cpu()).data<float>();
+    auto loss_cpu = loss.tensor().to(Device::cpu());
+
+    const float* loss_data = loss_cpu.data<float>();
     EXPECT_FLOAT_EQ(loss_data[0], 2.0f) << "Failed on " << device.to_string();
 }
 
@@ -119,7 +135,9 @@ TEST_P(LossTest, L1LossNegativeDiff) {
     auto loss = l1_loss(pred, target, Reduction::Mean);
 
     // Expected: mean(|1-3|) = mean(2) = 2.0
-    const float* loss_data = loss.tensor().to(Device::cpu()).data<float>();
+    auto loss_cpu = loss.tensor().to(Device::cpu());
+
+    const float* loss_data = loss_cpu.data<float>();
     EXPECT_FLOAT_EQ(loss_data[0], 2.0f) << "Failed on " << device.to_string();
 }
 
@@ -130,7 +148,9 @@ TEST_P(LossTest, L1LossSum) {
     auto loss = l1_loss(pred, target, Reduction::Sum);
 
     // Expected: sum(|5-3|) = sum(2, 2, 2, 2) = 8.0
-    const float* loss_data = loss.tensor().to(Device::cpu()).data<float>();
+    auto loss_cpu = loss.tensor().to(Device::cpu());
+
+    const float* loss_data = loss_cpu.data<float>();
     EXPECT_FLOAT_EQ(loss_data[0], 8.0f) << "Failed on " << device.to_string();
 }
 
@@ -140,7 +160,10 @@ TEST_P(LossTest, L1LossZero) {
 
     auto loss = l1_loss(pred, target, Reduction::Mean);
 
-    const float* loss_data = loss.tensor().to(Device::cpu()).data<float>();
+    auto loss_cpu = loss.tensor().to(Device::cpu());
+
+
+    const float* loss_data = loss_cpu.data<float>();
     EXPECT_FLOAT_EQ(loss_data[0], 0.0f) << "Failed on " << device.to_string();
 }
 
@@ -160,7 +183,9 @@ TEST_P(LossTest, CrossEntropyBasic) {
     auto loss = cross_entropy(logits, targets, Reduction::Mean);
 
     // Loss should be positive
-    const float* loss_data = loss.tensor().to(Device::cpu()).data<float>();
+    auto loss_cpu = loss.tensor().to(Device::cpu());
+
+    const float* loss_data = loss_cpu.data<float>();
     EXPECT_GT(loss_data[0], 0.0f) << "Failed on " << device.to_string();
 }
 
@@ -179,7 +204,10 @@ TEST_P(LossTest, CrossEntropyUniformLogits) {
 
     auto loss = cross_entropy(logits, targets, Reduction::Mean);
 
-    const float* loss_data = loss.tensor().to(Device::cpu()).data<float>();
+    auto loss_cpu = loss.tensor().to(Device::cpu());
+
+
+    const float* loss_data = loss_cpu.data<float>();
     // For uniform probabilities over 3 classes: -log(1/3) ≈ 1.099
     EXPECT_NEAR(loss_data[0], std::log(3.0f), 0.1f) << "Failed on " << device.to_string();
 }
@@ -198,7 +226,10 @@ TEST_P(LossTest, NLLLossBasic) {
 
     auto loss = nll_loss(log_probs, targets, Reduction::Mean);
 
-    const float* loss_data = loss.tensor().to(Device::cpu()).data<float>();
+    auto loss_cpu = loss.tensor().to(Device::cpu());
+
+
+    const float* loss_data = loss_cpu.data<float>();
     EXPECT_GT(loss_data[0], 0.0f) << "Failed on " << device.to_string();
 }
 
@@ -211,7 +242,10 @@ TEST_P(LossTest, MSELossClass) {
 
     auto loss = criterion(pred, target);
 
-    const float* loss_data = loss.tensor().to(Device::cpu()).data<float>();
+    auto loss_cpu = loss.tensor().to(Device::cpu());
+
+
+    const float* loss_data = loss_cpu.data<float>();
     EXPECT_FLOAT_EQ(loss_data[0], 1.0f) << "Failed on " << device.to_string();
 }
 
@@ -223,7 +257,10 @@ TEST_P(LossTest, BCELossClass) {
 
     auto loss = criterion(pred, target);
 
-    const float* loss_data = loss.tensor().to(Device::cpu()).data<float>();
+    auto loss_cpu = loss.tensor().to(Device::cpu());
+
+
+    const float* loss_data = loss_cpu.data<float>();
     EXPECT_GT(loss_data[0], 0.0f) << "Failed on " << device.to_string();
 }
 
@@ -235,7 +272,10 @@ TEST_P(LossTest, L1LossClass) {
 
     auto loss = criterion(pred, target);
 
-    const float* loss_data = loss.tensor().to(Device::cpu()).data<float>();
+    auto loss_cpu = loss.tensor().to(Device::cpu());
+
+
+    const float* loss_data = loss_cpu.data<float>();
     EXPECT_FLOAT_EQ(loss_data[0], 3.0f) << "Failed on " << device.to_string();
 }
 
@@ -253,7 +293,10 @@ TEST_P(LossTest, CrossEntropyLossClass) {
 
     auto loss = criterion(logits, targets);
 
-    const float* loss_data = loss.tensor().to(Device::cpu()).data<float>();
+    auto loss_cpu = loss.tensor().to(Device::cpu());
+
+
+    const float* loss_data = loss_cpu.data<float>();
     EXPECT_GT(loss_data[0], 0.0f) << "Failed on " << device.to_string();
 }
 

@@ -1169,6 +1169,7 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Ten
             );
         }
 
+        cudaStreamSynchronize(stream);
         return result;
     }
 

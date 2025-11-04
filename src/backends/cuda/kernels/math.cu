@@ -5,6 +5,7 @@
 #include <cuda_bf16.h>
 #include <curand_kernel.h>
 #include <cmath>
+#include <cstdio>
 #include <stdexcept>
 #include <algorithm>
 #include <vector>
@@ -697,6 +698,7 @@ auto add_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
         }
 
         CUDA_CHECK(cudaGetLastError());
+        cudaStreamSynchronize(stream);
         return result;
     }
 
@@ -761,7 +763,7 @@ auto add_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
     CUDA_CHECK(cudaFree(d_strides_b));
     CUDA_CHECK(cudaFree(d_output_shape));
     CUDA_CHECK(cudaGetLastError());
-
+    cudaStreamSynchronize(stream);
     return result;
 }
 
@@ -811,6 +813,7 @@ auto sub_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
         }
 
         CUDA_CHECK(cudaGetLastError());
+        cudaStreamSynchronize(stream);
         return result;
     }
 
@@ -872,7 +875,7 @@ auto sub_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
     CUDA_CHECK(cudaFree(d_strides_b));
     CUDA_CHECK(cudaFree(d_output_shape));
     CUDA_CHECK(cudaGetLastError());
-
+    cudaStreamSynchronize(stream);
     return result;
 }
 
@@ -922,6 +925,7 @@ auto mul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
         }
 
         CUDA_CHECK(cudaGetLastError());
+        cudaStreamSynchronize(stream);
         return result;
     }
 
@@ -983,7 +987,7 @@ auto mul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
     CUDA_CHECK(cudaFree(d_strides_b));
     CUDA_CHECK(cudaFree(d_output_shape));
     CUDA_CHECK(cudaGetLastError());
-
+    cudaStreamSynchronize(stream);
     return result;
 }
 
@@ -1033,6 +1037,7 @@ auto div_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
         }
 
         CUDA_CHECK(cudaGetLastError());
+        cudaStreamSynchronize(stream);
         return result;
     }
 
@@ -1094,7 +1099,7 @@ auto div_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
     CUDA_CHECK(cudaFree(d_strides_b));
     CUDA_CHECK(cudaFree(d_output_shape));
     CUDA_CHECK(cudaGetLastError());
-
+    cudaStreamSynchronize(stream);
     return result;
 }
 
@@ -1128,6 +1133,7 @@ auto neg_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     }
 
     CUDA_CHECK(cudaGetLastError());
+    cudaStreamSynchronize(stream);
     return result;
 }
 
@@ -1161,6 +1167,7 @@ auto abs_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     }
 
     CUDA_CHECK(cudaGetLastError());
+    cudaStreamSynchronize(stream);
     return result;
 }
 
@@ -1190,6 +1197,7 @@ auto sqrt_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     }
 
     CUDA_CHECK(cudaGetLastError());
+    cudaStreamSynchronize(stream);
     return result;
 }
 
@@ -1219,6 +1227,7 @@ auto exp_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     }
 
     CUDA_CHECK(cudaGetLastError());
+    cudaStreamSynchronize(stream);
     return result;
 }
 
@@ -1248,6 +1257,7 @@ auto log_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     }
 
     CUDA_CHECK(cudaGetLastError());
+    cudaStreamSynchronize(stream);
     return result;
 }
 
@@ -1280,6 +1290,7 @@ auto pow_kernel(const Tensor& input, float exponent, cudaStream_t stream) -> Ten
     }
 
     CUDA_CHECK(cudaGetLastError());
+    cudaStreamSynchronize(stream);
     return result;
 }
 
@@ -1315,6 +1326,7 @@ auto clamp_kernel(const Tensor& input, float min_val, float max_val, cudaStream_
     }
 
     CUDA_CHECK(cudaGetLastError());
+    cudaStreamSynchronize(stream);
     return result;
 }
 
@@ -1344,6 +1356,7 @@ auto sign_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     }
 
     CUDA_CHECK(cudaGetLastError());
+    cudaStreamSynchronize(stream);
     return result;
 }
 
@@ -1485,7 +1498,7 @@ auto expand_kernel(const Tensor& input, const std::vector<int64_t>& shape, void*
     CUDA_CHECK(cudaFree(d_input_strides));
     CUDA_CHECK(cudaFree(d_output_shape));
     CUDA_CHECK(cudaGetLastError());
-
+    cudaStreamSynchronize(stream);
     return result;
 }
 
@@ -1540,6 +1553,7 @@ auto fill_kernel(const Tensor& tensor, float value, cudaStream_t stream) -> Tens
     }
 
     CUDA_CHECK(cudaGetLastError());
+    cudaStreamSynchronize(stream);
     return result;
 }
 
@@ -1581,6 +1595,7 @@ auto zeros_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
     }
 
     CUDA_CHECK(cudaGetLastError());
+    cudaStreamSynchronize(stream);
     return result;
 }
 
@@ -1621,6 +1636,7 @@ auto ones_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
     }
 
     CUDA_CHECK(cudaGetLastError());
+    cudaStreamSynchronize(stream);
     return result;
 }
 
@@ -1661,6 +1677,7 @@ auto full_kernel(const std::vector<int64_t>& shape, float value, DType dtype, De
     }
 
     CUDA_CHECK(cudaGetLastError());
+    cudaStreamSynchronize(stream);
     return result;
 }
 
@@ -1791,44 +1808,64 @@ auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
 
 // Randn kernel launcher - normal distribution N(0,1)
 auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, cudaStream_t stream) -> Tensor {
+    printf("[DEBUG randn_kernel] Entry - dtype=%d, device type=%d\n", static_cast<int>(dtype), static_cast<int>(device.type));
+
     if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16 && dtype != DType::BFloat16) {
         throw std::runtime_error("randn operation only supports Float32, Float64, Float16, and BFloat16 dtypes");
     }
 
+    printf("[DEBUG randn_kernel] Creating tensor...\n");
     Tensor result(shape, dtype, device);
     int64_t n = result.numel();
+    printf("[DEBUG randn_kernel] Tensor created, n=%lld\n", (long long)n);
 
     if (n == 0) {
         return result;
     }
 
+    printf("[DEBUG randn_kernel] Computing launch config...\n");
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
+    printf("[DEBUG randn_kernel] Launch config done: grid=(%u,%u,%u), block=(%u,%u,%u)\n", grid.x, grid.y, grid.z, block.x, block.y, block.z);
 
     // Allocate cuRAND states
+    printf("[DEBUG randn_kernel] Allocating cuRAND states...\n");
     curandState* d_states;
     CUDA_CHECK(cudaMalloc(&d_states, n * sizeof(curandState)));
+    printf("[DEBUG randn_kernel] cuRAND states allocated\n");
 
     // Thread-safe seed generation with better entropy
     // Mix: high-res time + thread ID + random_device + atomic counter
+    printf("[DEBUG randn_kernel] Generating seed...\n");
     static std::atomic<uint64_t> seed_counter{0};
     static std::random_device rd;
+    printf("[DEBUG randn_kernel] Getting time seed...\n");
     auto time_seed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    printf("[DEBUG randn_kernel] Getting thread ID...\n");
     auto thread_id = std::hash<std::thread::id>{}(std::this_thread::get_id());
+    printf("[DEBUG randn_kernel] Calling random_device...\n");
     auto random_bits = rd();
+    printf("[DEBUG randn_kernel] Getting counter...\n");
     auto counter = seed_counter.fetch_add(1, std::memory_order_relaxed);
+    printf("[DEBUG randn_kernel] Seed generation complete\n");
 
     // Mix all entropy sources with XOR and rotation
     uint64_t seed = time_seed ^ (thread_id << 32) ^ (random_bits << 16) ^ counter;
+    printf("[DEBUG randn_kernel] Final seed=%llu\n", (unsigned long long)seed);
 
+    printf("[DEBUG randn_kernel] Initializing cuRAND states...\n");
     init_curand_states<<<grid, block, 0, stream>>>(d_states, seed, n);
     CUDA_CHECK(cudaGetLastError());
+    printf("[DEBUG randn_kernel] cuRAND states initialized\n");
 
     if (dtype == DType::Float32) {
+        printf("[DEBUG randn_kernel] Generating Float32 random numbers...\n");
         // Generate normal random numbers
         randn_kernel_device<<<grid, block, 0, stream>>>(result.data<float>(), d_states, n);
         CUDA_CHECK(cudaGetLastError());
+        printf("[DEBUG randn_kernel] Float32 generation complete\n");
     } else if (dtype == DType::Float64) {
+        printf("[DEBUG randn_kernel] Generating Float64 random numbers...\n");
         // For Float64, generate as float then convert
         float* temp_float;
         CUDA_CHECK(cudaMalloc(&temp_float, n * sizeof(float)));
@@ -1840,18 +1877,25 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
         CUDA_CHECK(cudaMemcpy(output_double, temp_float, n * sizeof(float), cudaMemcpyDeviceToDevice));
         // Note: This copies as bytes, need proper conversion kernel for production
         CUDA_CHECK(cudaFree(temp_float));
+        printf("[DEBUG randn_kernel] Float64 generation complete\n");
     } else if (dtype == DType::Float16) {
+        printf("[DEBUG randn_kernel] Generating Float16 random numbers...\n");
         randn_kernel_f16<<<grid, block, 0, stream>>>(
             reinterpret_cast<__half*>(result.data<Float16>()), d_states, n);
         CUDA_CHECK(cudaGetLastError());
+        printf("[DEBUG randn_kernel] Float16 generation complete\n");
     } else if (dtype == DType::BFloat16) {
+        printf("[DEBUG randn_kernel] Generating BFloat16 random numbers...\n");
         randn_kernel_bf16<<<grid, block, 0, stream>>>(
             reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), d_states, n);
         CUDA_CHECK(cudaGetLastError());
+        printf("[DEBUG randn_kernel] BFloat16 generation complete\n");
     }
 
     // Cleanup
+    printf("[DEBUG randn_kernel] Cleaning up...\n");
     CUDA_CHECK(cudaFree(d_states));
+    printf("[DEBUG randn_kernel] Cleanup complete, returning result\n");
 
     return result;
 }
@@ -1970,6 +2014,7 @@ auto compare_kernel_launcher(const Tensor& a, const Tensor& b, cudaStream_t stre
         }
 
         CUDA_CHECK(cudaGetLastError());
+        cudaStreamSynchronize(stream);
         return result;
     }
 
@@ -2022,7 +2067,7 @@ auto compare_kernel_launcher(const Tensor& a, const Tensor& b, cudaStream_t stre
     CUDA_CHECK(cudaFree(d_strides_b));
     CUDA_CHECK(cudaFree(d_output_shape));
     CUDA_CHECK(cudaGetLastError());
-
+    cudaStreamSynchronize(stream);
     return result;
 }
 

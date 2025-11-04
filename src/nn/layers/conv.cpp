@@ -8,14 +8,6 @@
 #include <stdexcept>
 #include <iostream>
 
-// Include CUDA kernel headers when available
-#ifdef TENZOR_HAS_CUDA
-#include "tenzor/backends/cuda/conv_kernels.hpp"
-#endif
-
-#ifdef TENZOR_HAS_CUDNN
-#include "tenzor/backend/cudnn_wrapper.hpp"
-#endif
 
 namespace tenzor::nn {
 
@@ -48,7 +40,8 @@ auto im2col(const Tensor& input, int64_t kernel_h, int64_t kernel_w,
 
     // GPU kernels are implemented in conv2d.cu and accessed via backend dispatcher
     // For CPU execution, process directly
-    const bool is_cpu = (input.device().type != Device::Type::CUDA);
+    // Backend-agnostic: check for CPU, not against CUDA (supports OneAPI/Vulkan/ROCm)
+    const bool is_cpu = (input.device().type == Device::Type::CPU);
     Tensor input_cpu = is_cpu ? input : input.to(Device::cpu());
     Tensor col_cpu = is_cpu ? col : col.to(Device::cpu());
 
@@ -116,7 +109,8 @@ auto col2im(const Tensor& col, int64_t channels, int64_t height, int64_t width,
 
     // GPU kernels are implemented in conv2d.cu and accessed via backend dispatcher
     // For CPU execution, process directly
-    const bool is_cpu = (col.device().type != Device::Type::CUDA);
+    // Backend-agnostic: check for CPU, not against CUDA (supports OneAPI/Vulkan/ROCm)
+    const bool is_cpu = (col.device().type == Device::Type::CPU);
     Tensor col_cpu = is_cpu ? col : col.to(Device::cpu());
     Tensor output_cpu = is_cpu ? output : output.to(Device::cpu());
 
@@ -187,14 +181,14 @@ public:
         // saved_tensors_[0]: input [batch, in_channels, in_h, in_w]
         // saved_tensors_[1]: weight [out_channels, in_channels/groups, kernel_h, kernel_w]
 
-        // Detect if we're on CUDA and transfer to CPU for computation
+        // Backend-agnostic: detect non-CPU devices and transfer to CPU for computation
         Device original_device = grad_outputs[0].device();
-        bool use_gpu = (original_device.type == Device::Type::CUDA);
+        bool need_cpu_transfer = (original_device.type != Device::Type::CPU);
 
         // Transfer all tensors to CPU for backward computation
-        const Tensor grad_output = use_gpu ? grad_outputs[0].to(Device::cpu()) : grad_outputs[0];
-        const Tensor input = use_gpu ? saved_tensors_[0].to(Device::cpu()) : saved_tensors_[0];
-        const Tensor weight = use_gpu ? saved_tensors_[1].to(Device::cpu()) : saved_tensors_[1];
+        const Tensor grad_output = need_cpu_transfer ? grad_outputs[0].to(Device::cpu()) : grad_outputs[0];
+        const Tensor input = need_cpu_transfer ? saved_tensors_[0].to(Device::cpu()) : saved_tensors_[0];
+        const Tensor weight = need_cpu_transfer ? saved_tensors_[1].to(Device::cpu()) : saved_tensors_[1];
 
         auto weight_shape = weight.shape();
         int64_t out_channels = weight_shape[0];
@@ -213,7 +207,7 @@ public:
         int64_t out_w = grad_shape[3];
 
         // Gradient w.r.t input
-        Tensor grad_input = zeros({batch, in_channels, height, width});
+        Tensor grad_input = zeros({batch, in_channels, height, width}, DType::Float32, Device::cpu());
 
         int64_t out_channels_per_group = out_channels / groups_;
 
@@ -223,7 +217,7 @@ public:
             int64_t out_start = g * out_channels_per_group;
 
             // Extract grad_output slice for this group [batch, out_channels_per_group, out_h, out_w]
-            auto grad_slice = zeros({batch, out_channels_per_group, out_h, out_w});
+            auto grad_slice = zeros({batch, out_channels_per_group, out_h, out_w}, DType::Float32, Device::cpu());
             const float* grad_data = grad_output.data<float>();
             float* grad_slice_data = grad_slice.data<float>();
 
@@ -244,7 +238,7 @@ public:
             }
 
             // Extract weight slice for this group [out_channels_per_group, in_channels_per_group, k_h, k_w]
-            auto weight_slice = zeros({out_channels_per_group, in_channels_per_group, kernel_h, kernel_w});
+            auto weight_slice = zeros({out_channels_per_group, in_channels_per_group, kernel_h, kernel_w}, DType::Float32, Device::cpu());
             const float* weight_data = weight.data<float>();
             float* weight_slice_data = weight_slice.data<float>();
 
@@ -269,13 +263,13 @@ public:
             auto weight_reshaped = weight_slice.reshape({out_channels_per_group, in_channels_per_group * kernel_h * kernel_w});
 
             // Compute gradient in col format for this group
-            auto grad_col = zeros({batch, in_channels_per_group * kernel_h * kernel_w, out_h * out_w});
+            auto grad_col = zeros({batch, in_channels_per_group * kernel_h * kernel_w, out_h * out_w}, DType::Float32, Device::cpu());
             float* grad_col_data = grad_col.data<float>();
 
             for (int64_t b = 0; b < batch; ++b) {
                 // Manually extract 2D slice [out_channels_per_group, out_h * out_w] for batch b
                 // since operator[] is not implemented
-                auto grad_b = zeros({out_channels_per_group, out_h * out_w});
+                auto grad_b = zeros({out_channels_per_group, out_h * out_w}, DType::Float32, Device::cpu());
                 const float* grad_reshaped_data = grad_reshaped.data<float>();
                 float* grad_b_data = grad_b.data<float>();
 
@@ -318,7 +312,7 @@ public:
         }
 
         // Gradient w.r.t weight
-        Tensor grad_weight = zeros({out_channels, in_channels_per_group, kernel_h, kernel_w});
+        Tensor grad_weight = zeros({out_channels, in_channels_per_group, kernel_h, kernel_w}, DType::Float32, Device::cpu());
         float* grad_weight_data = grad_weight.data<float>();
 
         // Process each group separately
@@ -327,7 +321,7 @@ public:
             int64_t out_start = g * out_channels_per_group;
 
             // Extract input slice for this group [batch, in_channels_per_group, height, width]
-            auto input_slice = zeros({batch, in_channels_per_group, height, width});
+            auto input_slice = zeros({batch, in_channels_per_group, height, width}, DType::Float32, Device::cpu());
             const float* input_data = input.data<float>();
             float* input_slice_data = input_slice.data<float>();
 
@@ -351,7 +345,7 @@ public:
             auto input_col = im2col(input_slice, kernel_h, kernel_w, stride_, padding_, dilation_);
 
             // Extract grad_output slice for this group [batch, out_channels_per_group, out_h, out_w]
-            auto grad_slice = zeros({batch, out_channels_per_group, out_h, out_w});
+            auto grad_slice = zeros({batch, out_channels_per_group, out_h, out_w}, DType::Float32, Device::cpu());
             const float* grad_data = grad_output.data<float>();
             float* grad_slice_data = grad_slice.data<float>();
 
@@ -376,13 +370,13 @@ public:
             auto input_col_reshaped = input_col.reshape({batch, in_channels_per_group * kernel_h * kernel_w, out_h * out_w});
 
             // Initialize gradient weight for this group
-            auto grad_weight_group = zeros({out_channels_per_group, in_channels_per_group * kernel_h * kernel_w});
+            auto grad_weight_group = zeros({out_channels_per_group, in_channels_per_group * kernel_h * kernel_w}, DType::Float32, Device::cpu());
             float* grad_weight_group_data = grad_weight_group.data<float>();
 
             for (int64_t b = 0; b < batch; ++b) {
                 // Manually extract 2D slices since operator[] is not implemented
                 // grad_b: [out_channels_per_group, out_h * out_w]
-                auto grad_b = zeros({out_channels_per_group, out_h * out_w});
+                auto grad_b = zeros({out_channels_per_group, out_h * out_w}, DType::Float32, Device::cpu());
                 const float* grad_reshaped_data = grad_reshaped.data<float>();
                 float* grad_b_data = grad_b.data<float>();
 
@@ -392,7 +386,7 @@ public:
                 }
 
                 // input_col_b: [in_channels_per_group * kernel_h * kernel_w, out_h * out_w]
-                auto input_col_b = zeros({in_channels_per_group * kernel_h * kernel_w, out_h * out_w});
+                auto input_col_b = zeros({in_channels_per_group * kernel_h * kernel_w, out_h * out_w}, DType::Float32, Device::cpu());
                 const float* input_col_reshaped_data = input_col_reshaped.data<float>();
                 float* input_col_b_data = input_col_b.data<float>();
 
@@ -436,7 +430,7 @@ public:
         if (saved_tensors_.size() > 2) {  // bias exists
             // Sum over batch, height, width dimensions
             auto grad_reshaped = grad_output.reshape({batch, out_channels, out_h * out_w});
-            grad_bias = zeros({out_channels});
+            grad_bias = zeros({out_channels}, DType::Float32, Device::cpu());
             float* grad_bias_data = grad_bias.data<float>();
             const float* grad_data = grad_reshaped.data<float>();
 
@@ -451,7 +445,7 @@ public:
         }
 
         // Transfer gradients back to original device if needed
-        if (use_gpu) {
+        if (need_cpu_transfer) {
             grad_input = grad_input.to(original_device);
             grad_weight = grad_weight.to(original_device);
             if (saved_tensors_.size() > 2) {
@@ -503,26 +497,49 @@ Conv2d::Conv2d(int64_t in_channels, int64_t out_channels, int64_t kernel_size,
 }
 
 auto Conv2d::forward(const Variable& input) -> Variable {
+    std::cerr << "[DEBUG Conv2d::forward] Entry!" << std::endl;
     // Input shape: [batch, in_channels, height, width]
+    std::cerr << "[DEBUG Conv2d::forward] Getting input shape..." << std::endl;
     auto input_shape = input.shape();
+    std::cerr << "[DEBUG Conv2d::forward] Got input shape: [" << input_shape.size() << " dims]" << std::endl;
+
+    std::cerr << "[DEBUG] Checking if size == 4..." << std::endl;
     if (input_shape.size() != 4) {
         throw std::invalid_argument("Conv2d expects 4D input [batch, channels, height, width]");
     }
+    std::cerr << "[DEBUG] Size check passed" << std::endl;
 
+    std::cerr << "[DEBUG] Getting batch from input_shape[0]..." << std::endl;
     int64_t batch = input_shape[0];
-    int64_t in_channels = input_shape[1];
-    int64_t height = input_shape[2];
-    int64_t width = input_shape[3];
+    std::cerr << "[DEBUG] batch = " << batch << std::endl;
 
+    std::cerr << "[DEBUG] Getting in_channels from input_shape[1]..." << std::endl;
+    int64_t in_channels = input_shape[1];
+    std::cerr << "[DEBUG] in_channels = " << in_channels << std::endl;
+
+    std::cerr << "[DEBUG] Getting height from input_shape[2]..." << std::endl;
+    int64_t height = input_shape[2];
+    std::cerr << "[DEBUG] height = " << height << std::endl;
+
+    std::cerr << "[DEBUG] Getting width from input_shape[3]..." << std::endl;
+    int64_t width = input_shape[3];
+    std::cerr << "[DEBUG] width = " << width << std::endl;
+
+    std::cerr << "[DEBUG] Checking channel mismatch..." << std::endl;
     if (in_channels != in_channels_) {
         throw std::invalid_argument("Input channels mismatch");
     }
+    std::cerr << "[DEBUG] Channel check passed" << std::endl;
 
     // Calculate output dimensions
+    std::cerr << "[DEBUG] Calculating output dimensions..." << std::endl;
     int64_t out_h = calculate_output_size(height, kernel_size_, stride_, padding_, dilation_);
+    std::cerr << "[DEBUG] out_h = " << out_h << std::endl;
     int64_t out_w = calculate_output_size(width, kernel_size_, stride_, padding_, dilation_);
+    std::cerr << "[DEBUG] out_w = " << out_w << std::endl;
 
     // Validate output dimensions to prevent memory allocation errors
+    std::cerr << "[DEBUG] Validating output dimensions..." << std::endl;
     if (out_h <= 0 || out_w <= 0) {
         throw std::invalid_argument(
             "Invalid Conv2d configuration: output dimensions are non-positive (out_h=" +
@@ -535,187 +552,50 @@ auto Conv2d::forward(const Variable& input) -> Variable {
             ". Try reducing kernel_size, dilation, or increasing input size/padding."
         );
     }
+    std::cerr << "[DEBUG] Output dimensions valid" << std::endl;
 
     // Get weight from parameters
+    std::cerr << "[DEBUG] Getting weight from parameters..." << std::endl;
     auto& weight = *parameters_["weight"];
+    std::cerr << "[DEBUG] Weight retrieved successfully" << std::endl;
 
     // Get weight shape information
+    std::cerr << "[DEBUG] Getting weight shape..." << std::endl;
     auto weight_shape = weight.tensor().shape();
+    std::cerr << "[DEBUG] weight_shape size: " << weight_shape.size() << std::endl;
     int64_t in_channels_per_group = weight_shape[1];
     int64_t out_channels_per_group = out_channels_ / groups_;
+    std::cerr << "[DEBUG] in_channels_per_group = " << in_channels_per_group << ", out_channels_per_group = " << out_channels_per_group << std::endl;
 
-    // Create output tensor on same device as input
-    auto output = zeros({batch, out_channels_, out_h, out_w}, input.tensor().dtype(), input.tensor().device());
+    // Dispatch convolution via OperationRegistry
+    // This automatically routes to the correct backend (CPU, CUDA, ROCm, OneAPI, Vulkan)
+    OpAttributes attrs;
+    attrs["stride"] = std::to_string(stride_);
+    attrs["padding"] = std::to_string(padding_);
+    attrs["dilation"] = std::to_string(dilation_);
+    attrs["groups"] = std::to_string(groups_);
 
-    // Native GPU convolution kernels are implemented in conv2d.cu
-    // Use backend dispatcher for device-agnostic execution
-    #ifdef TENZOR_HAS_CUDA
-    if (input.tensor().device().type == Device::Type::CUDA) {
-        // Use GPU kernels directly via CUDA backend
-        auto bias_it = parameters_.find("bias");
-        const Tensor* bias_ptr = (bias_it != parameters_.end()) ? &(bias_it->second->tensor()) : nullptr;
-
-        #ifdef TENZOR_HAS_CUDNN
-        // Try cuDNN first for optimal performance
-        try {
-            output = cuda::cudnn_conv2d_forward(
-                input.tensor(), weight.tensor(), bias_ptr,
-                stride_, padding_, dilation_, groups_,
-                nullptr
-            );
-        } catch (const std::exception& e) {
-            // Fall back to custom CUDA kernels
-            output = cuda::conv2d_forward_kernel(
-                input.tensor(), weight.tensor(), bias_ptr,
-                stride_, padding_, dilation_, groups_,
-                nullptr
-            );
-        }
-        #else
-        // Use custom CUDA kernels
-        output = cuda::conv2d_forward_kernel(
-            input.tensor(), weight.tensor(), bias_ptr,
-            stride_, padding_, dilation_, groups_,
-            nullptr
-        );
-        #endif
-    } else
-    #endif
-    {
-        // CPU execution path
-        Tensor input_work = input.tensor();
-        Tensor weight_work = weight.tensor();
-        Tensor output_work = output;
-
-    // Process each group separately
-    for (int64_t g = 0; g < groups_; ++g) {
-        // Calculate channel ranges for this group
-        int64_t in_start = g * in_channels_per_group;
-        int64_t in_end = (g + 1) * in_channels_per_group;
-        int64_t out_start = g * out_channels_per_group;
-        int64_t out_end = (g + 1) * out_channels_per_group;
-
-        // Extract input slice for this group [batch, in_channels_per_group, height, width]
-        std::vector<int64_t> input_slice_shape = {batch, in_channels_per_group, height, width};
-        auto input_slice = zeros(input_slice_shape);
-
-        const float* input_data = input_work.data<float>();
-        float* input_slice_data = input_slice.data<float>();
-
-        for (int64_t b = 0; b < batch; ++b) {
-            for (int64_t c = 0; c < in_channels_per_group; ++c) {
-                for (int64_t h = 0; h < height; ++h) {
-                    for (int64_t w = 0; w < width; ++w) {
-                        int64_t src_idx = b * (in_channels_ * height * width) +
-                                         (in_start + c) * (height * width) +
-                                         h * width + w;
-                        int64_t dst_idx = b * (in_channels_per_group * height * width) +
-                                         c * (height * width) +
-                                         h * width + w;
-                        input_slice_data[dst_idx] = input_data[src_idx];
-                    }
-                }
-            }
-        }
-
-        // Apply im2col to this group's input
-        auto input_col = im2col(input_slice, kernel_size_, kernel_size_,
-                               stride_, padding_, dilation_);
-
-        // Extract weight slice for this group [out_channels_per_group, in_channels_per_group, k_h, k_w]
-        std::vector<int64_t> weight_slice_shape = {out_channels_per_group, in_channels_per_group,
-                                                    kernel_size_, kernel_size_};
-        auto weight_slice = zeros(weight_slice_shape);
-
-        const float* weight_data = weight_work.data<float>();
-        float* weight_slice_data = weight_slice.data<float>();
-
-        for (int64_t oc = 0; oc < out_channels_per_group; ++oc) {
-            for (int64_t ic = 0; ic < in_channels_per_group; ++ic) {
-                for (int64_t kh = 0; kh < kernel_size_; ++kh) {
-                    for (int64_t kw = 0; kw < kernel_size_; ++kw) {
-                        int64_t src_idx = (out_start + oc) * (in_channels_per_group * kernel_size_ * kernel_size_) +
-                                         ic * (kernel_size_ * kernel_size_) +
-                                         kh * kernel_size_ + kw;
-                        int64_t dst_idx = oc * (in_channels_per_group * kernel_size_ * kernel_size_) +
-                                         ic * (kernel_size_ * kernel_size_) +
-                                         kh * kernel_size_ + kw;
-                        weight_slice_data[dst_idx] = weight_data[src_idx];
-                    }
-                }
-            }
-        }
-
-        // Reshape weight for matmul: [out_channels_per_group, in_channels_per_group * k_h * k_w]
-        int64_t kernel_size_flat = in_channels_per_group * kernel_size_ * kernel_size_;
-        auto weight_reshaped = weight_slice.reshape({out_channels_per_group, kernel_size_flat});
-
-        // Perform matrix multiplication for this group
-        // input_col: [batch, kernel_size_flat, out_h * out_w]
-        // weight: [out_channels_per_group, kernel_size_flat]
-
-        int64_t spatial_size = out_h * out_w;
-
-        // Process each batch
-        for (int64_t b = 0; b < batch; ++b) {
-            // Extract input_col for this batch: [kernel_size_flat, spatial_size]
-            auto input_col_b = zeros({kernel_size_flat, spatial_size});
-            const float* input_col_data = input_col.data<float>();
-            float* input_col_b_data = input_col_b.data<float>();
-
-            for (int64_t i = 0; i < kernel_size_flat * spatial_size; ++i) {
-                input_col_b_data[i] = input_col_data[b * kernel_size_flat * spatial_size + i];
-            }
-
-            // Matmul: weight @ input_col_b = [out_channels_per_group, kernel_size_flat] @ [kernel_size_flat, spatial_size]
-            // -> [out_channels_per_group, spatial_size]
-            auto output_group = matmul(weight_reshaped, input_col_b);
-
-            // Copy to output tensor at appropriate position
-            const float* output_group_data = output_group.data<float>();
-            float* output_data = output_work.data<float>();
-
-            for (int64_t oc = 0; oc < out_channels_per_group; ++oc) {
-                for (int64_t s = 0; s < spatial_size; ++s) {
-                    int64_t h_idx = s / out_w;
-                    int64_t w_idx = s % out_w;
-                    int64_t dst_idx = b * (out_channels_ * out_h * out_w) +
-                                     (out_start + oc) * (out_h * out_w) +
-                                     h_idx * out_w + w_idx;
-                    int64_t src_idx = oc * spatial_size + s;
-                    output_data[dst_idx] = output_group_data[src_idx];
-                }
-            }
-        }
+    // Prepare input tensors for dispatcher
+    // Ensure weight and bias are on same device as input
+    Device input_device = input.device();
+    Tensor weight_tensor = weight.tensor();
+    if (weight_tensor.device() != input_device) {
+        weight_tensor = weight_tensor.to(input_device);
     }
 
-        // Add bias if present (CPU path only, GPU path handles bias in kernels)
-        auto bias_it = parameters_.find("bias");
-        if (bias_it != parameters_.end()) {
-            auto& bias = *bias_it->second;
-            Tensor bias_work = bias.tensor();
-
-            // Manual broadcasting for bias
-            float* out_data = output_work.data<float>();
-            const float* bias_data = bias_work.data<float>();
-
-            for (int64_t b = 0; b < batch; ++b) {
-                for (int64_t c = 0; c < out_channels_; ++c) {
-                    for (int64_t h = 0; h < out_h; ++h) {
-                        for (int64_t w = 0; w < out_w; ++w) {
-                            int64_t idx = b * (out_channels_ * out_h * out_w) +
-                                         c * (out_h * out_w) +
-                                         h * out_w + w;
-                            out_data[idx] += bias_data[c];
-                        }
-                    }
-                }
-            }
+    std::vector<Tensor> conv_inputs = {input.tensor(), weight_tensor};
+    auto bias_it = parameters_.find("bias");
+    if (bias_it != parameters_.end()) {
+        Tensor bias_tensor = bias_it->second->tensor();
+        if (bias_tensor.device() != input_device) {
+            bias_tensor = bias_tensor.to(input_device);
         }
+        conv_inputs.push_back(bias_tensor);
+    }
 
-        // CPU execution complete
-        output = output_work;
-    } // End of CPU/GPU branch
+    // Dispatch to appropriate backend via OperationRegistry
+    auto outputs = Dispatcher::dispatch("conv2d_forward", conv_inputs, attrs);
+    auto output = outputs[0];
 
     // Create output variable with autograd support
     auto result = Variable(output, input.requires_grad() || weight.requires_grad());
@@ -805,11 +685,11 @@ public:
         // saved_tensors_[1]: weight [out_channels, in_channels/groups, kernel_size]
 
         Device original_device = grad_outputs[0].device();
-        bool use_gpu = (original_device.type == Device::Type::CUDA);
+        bool need_cpu_transfer = (original_device.type != Device::Type::CPU);
 
-        const Tensor grad_output = use_gpu ? grad_outputs[0].to(Device::cpu()) : grad_outputs[0];
-        const Tensor input = use_gpu ? saved_tensors_[0].to(Device::cpu()) : saved_tensors_[0];
-        const Tensor weight = use_gpu ? saved_tensors_[1].to(Device::cpu()) : saved_tensors_[1];
+        const Tensor grad_output = need_cpu_transfer ? grad_outputs[0].to(Device::cpu()) : grad_outputs[0];
+        const Tensor input = need_cpu_transfer ? saved_tensors_[0].to(Device::cpu()) : saved_tensors_[0];
+        const Tensor weight = need_cpu_transfer ? saved_tensors_[1].to(Device::cpu()) : saved_tensors_[1];
 
         auto weight_shape = weight.shape();
         int64_t out_channels = weight_shape[0];
@@ -825,7 +705,7 @@ public:
         int64_t length_out = grad_shape[2];
 
         // Gradient w.r.t input
-        Tensor grad_input = zeros({batch, in_channels, length});
+        Tensor grad_input = zeros({batch, in_channels, length}, DType::Float32, Device::cpu());
         int64_t out_channels_per_group = out_channels / groups_;
 
         // Process each group
@@ -834,7 +714,7 @@ public:
             int64_t out_start = g * out_channels_per_group;
 
             // Extract grad_output slice for this group
-            auto grad_slice = zeros({batch, out_channels_per_group, length_out});
+            auto grad_slice = zeros({batch, out_channels_per_group, length_out}, DType::Float32, Device::cpu());
             const float* grad_data = grad_output.data<float>();
             float* grad_slice_data = grad_slice.data<float>();
 
@@ -851,7 +731,7 @@ public:
             }
 
             // Extract weight slice for this group
-            auto weight_slice = zeros({out_channels_per_group, in_channels_per_group, kernel_size});
+            auto weight_slice = zeros({out_channels_per_group, in_channels_per_group, kernel_size}, DType::Float32, Device::cpu());
             const float* weight_data = weight.data<float>();
             float* weight_slice_data = weight_slice.data<float>();
 
@@ -872,11 +752,11 @@ public:
             auto weight_reshaped = weight_slice.reshape({out_channels_per_group, in_channels_per_group * kernel_size});
 
             // Compute gradient in col format
-            auto grad_col = zeros({batch, in_channels_per_group * kernel_size, length_out});
+            auto grad_col = zeros({batch, in_channels_per_group * kernel_size, length_out}, DType::Float32, Device::cpu());
             float* grad_col_data = grad_col.data<float>();
 
             for (int64_t b = 0; b < batch; ++b) {
-                auto grad_b = zeros({out_channels_per_group, length_out});
+                auto grad_b = zeros({out_channels_per_group, length_out}, DType::Float32, Device::cpu());
                 const float* grad_reshaped_data = grad_reshaped.data<float>();
                 float* grad_b_data = grad_b.data<float>();
 
@@ -919,7 +799,7 @@ public:
         }
 
         // Gradient w.r.t weight
-        Tensor grad_weight = zeros({out_channels, in_channels_per_group, kernel_size});
+        Tensor grad_weight = zeros({out_channels, in_channels_per_group, kernel_size}, DType::Float32, Device::cpu());
         float* grad_weight_data = grad_weight.data<float>();
 
         for (int64_t g = 0; g < groups_; ++g) {
@@ -927,7 +807,7 @@ public:
             int64_t out_start = g * out_channels_per_group;
 
             // Extract input slice
-            auto input_slice = zeros({batch, in_channels_per_group, length});
+            auto input_slice = zeros({batch, in_channels_per_group, length}, DType::Float32, Device::cpu());
             const float* input_data = input.data<float>();
             float* input_slice_data = input_slice.data<float>();
 
@@ -949,7 +829,7 @@ public:
             auto input_col = im2col(input_slice_4d, 1, kernel_size, 1, stride_, 0, padding_, dilation_);
 
             // Extract grad_output slice
-            auto grad_slice = zeros({batch, out_channels_per_group, length_out});
+            auto grad_slice = zeros({batch, out_channels_per_group, length_out}, DType::Float32, Device::cpu());
             const float* grad_data = grad_output.data<float>();
             float* grad_slice_data = grad_slice.data<float>();
 
@@ -970,11 +850,11 @@ public:
             auto input_col_reshaped = input_col.reshape({batch, in_channels_per_group * kernel_size, length_out});
 
             // Initialize gradient weight for this group
-            auto grad_weight_group = zeros({out_channels_per_group, in_channels_per_group * kernel_size});
+            auto grad_weight_group = zeros({out_channels_per_group, in_channels_per_group * kernel_size}, DType::Float32, Device::cpu());
             float* grad_weight_group_data = grad_weight_group.data<float>();
 
             for (int64_t b = 0; b < batch; ++b) {
-                auto grad_b = zeros({out_channels_per_group, length_out});
+                auto grad_b = zeros({out_channels_per_group, length_out}, DType::Float32, Device::cpu());
                 const float* grad_reshaped_data = grad_reshaped.data<float>();
                 float* grad_b_data = grad_b.data<float>();
 
@@ -983,7 +863,7 @@ public:
                     grad_b_data[i] = grad_reshaped_data[b * grad_slice_size + i];
                 }
 
-                auto input_col_b = zeros({in_channels_per_group * kernel_size, length_out});
+                auto input_col_b = zeros({in_channels_per_group * kernel_size, length_out}, DType::Float32, Device::cpu());
                 const float* input_col_reshaped_data = input_col_reshaped.data<float>();
                 float* input_col_b_data = input_col_b.data<float>();
 
@@ -1021,7 +901,7 @@ public:
         // Gradient w.r.t bias
         Tensor grad_bias;
         if (saved_tensors_.size() > 2) {
-            grad_bias = zeros({out_channels});
+            grad_bias = zeros({out_channels}, DType::Float32, Device::cpu());
             float* grad_bias_data = grad_bias.data<float>();
             const float* grad_data = grad_output.data<float>();
 
@@ -1036,7 +916,7 @@ public:
         }
 
         // Transfer back to original device
-        if (use_gpu) {
+        if (need_cpu_transfer) {
             grad_input = grad_input.to(original_device);
             grad_weight = grad_weight.to(original_device);
             if (saved_tensors_.size() > 2) {
@@ -1135,18 +1015,18 @@ auto Conv1d::forward(const Variable& input) -> Variable {
     }
 
     Device original_device = input.tensor().device();
-    bool use_gpu = (original_device.type == Device::Type::CUDA);
+    bool need_cpu_transfer = (original_device.type != Device::Type::CPU);
 
-    Tensor input_work = use_gpu ? input_4d.to(Device::cpu()) : input_4d;
+    Tensor input_work = need_cpu_transfer ? input_4d.to(Device::cpu()) : input_4d;
     auto& weight = *parameters_["weight"];
-    Tensor weight_work = use_gpu ? weight.tensor().to(Device::cpu()) : weight.tensor();
+    Tensor weight_work = need_cpu_transfer ? weight.tensor().to(Device::cpu()) : weight.tensor();
 
     auto weight_shape = weight.tensor().shape();
     int64_t in_channels_per_group = weight_shape[1];
     int64_t out_channels_per_group = out_channels_ / groups_;
 
     auto output = zeros({batch, out_channels_, length_out}, input.tensor().dtype(), input.tensor().device());
-    Tensor output_work = use_gpu ? output.to(Device::cpu()) : output;
+    Tensor output_work = need_cpu_transfer ? output.to(Device::cpu()) : output;
 
     // Process each group
     for (int64_t g = 0; g < groups_; ++g) {
@@ -1154,7 +1034,7 @@ auto Conv1d::forward(const Variable& input) -> Variable {
         int64_t out_start = g * out_channels_per_group;
 
         // Extract input slice [batch, in_channels_per_group, 1, length]
-        auto input_slice = zeros({batch, in_channels_per_group, 1, length});
+        auto input_slice = zeros({batch, in_channels_per_group, 1, length}, DType::Float32, Device::cpu());
         const float* input_data = input_work.data<float>();
         float* input_slice_data = input_slice.data<float>();
 
@@ -1175,7 +1055,7 @@ auto Conv1d::forward(const Variable& input) -> Variable {
         auto input_col = im2col(input_slice, 1, kernel_size_, 1, stride_, 0, padding_, dilation_);
 
         // Extract weight slice [out_channels_per_group, in_channels_per_group, kernel_size]
-        auto weight_slice = zeros({out_channels_per_group, in_channels_per_group, kernel_size_, 1});
+        auto weight_slice = zeros({out_channels_per_group, in_channels_per_group, kernel_size_, 1}, DType::Float32, Device::cpu());
         const float* weight_data = weight_work.data<float>();
         float* weight_slice_data = weight_slice.data<float>();
 
@@ -1197,7 +1077,7 @@ auto Conv1d::forward(const Variable& input) -> Variable {
 
         // Process each batch
         for (int64_t b = 0; b < batch; ++b) {
-            auto input_col_b = zeros({kernel_size_flat, length_out});
+            auto input_col_b = zeros({kernel_size_flat, length_out}, DType::Float32, Device::cpu());
             const float* input_col_data = input_col.data<float>();
             float* input_col_b_data = input_col_b.data<float>();
 
@@ -1226,7 +1106,7 @@ auto Conv1d::forward(const Variable& input) -> Variable {
     auto bias_it = parameters_.find("bias");
     if (bias_it != parameters_.end()) {
         auto& bias = *bias_it->second;
-        Tensor bias_work = use_gpu ? bias.tensor().to(Device::cpu()) : bias.tensor();
+        Tensor bias_work = need_cpu_transfer ? bias.tensor().to(Device::cpu()) : bias.tensor();
         float* out_data = output_work.data<float>();
         const float* bias_data = bias_work.data<float>();
 
@@ -1241,7 +1121,7 @@ auto Conv1d::forward(const Variable& input) -> Variable {
     }
 
     // Transfer back to GPU if needed
-    if (use_gpu) {
+    if (need_cpu_transfer) {
         output = output_work.to(original_device);
     } else {
         output = output_work;
@@ -1331,11 +1211,11 @@ public:
         // saved_tensors_[1]: weight [in_channels, out_channels/groups, kernel_h, kernel_w]
 
         Device original_device = grad_outputs[0].device();
-        bool use_gpu = (original_device.type == Device::Type::CUDA);
+        bool need_cpu_transfer = (original_device.type != Device::Type::CPU);
 
-        const Tensor grad_output = use_gpu ? grad_outputs[0].to(Device::cpu()) : grad_outputs[0];
-        const Tensor input = use_gpu ? saved_tensors_[0].to(Device::cpu()) : saved_tensors_[0];
-        const Tensor weight = use_gpu ? saved_tensors_[1].to(Device::cpu()) : saved_tensors_[1];
+        const Tensor grad_output = need_cpu_transfer ? grad_outputs[0].to(Device::cpu()) : grad_outputs[0];
+        const Tensor input = need_cpu_transfer ? saved_tensors_[0].to(Device::cpu()) : saved_tensors_[0];
+        const Tensor weight = need_cpu_transfer ? saved_tensors_[1].to(Device::cpu()) : saved_tensors_[1];
 
         auto weight_shape = weight.shape();
         int64_t in_channels = weight_shape[0];
@@ -1359,7 +1239,7 @@ public:
                   << batch << ", " << out_channels << ", " << height_out << ", " << width_out << "]" << std::endl;
 
         // Gradient w.r.t input: Apply regular convolution with grad_output and flipped weight
-        Tensor grad_input = zeros({batch, in_channels, height_in, width_in});
+        Tensor grad_input = zeros({batch, in_channels, height_in, width_in}, DType::Float32, Device::cpu());
         int64_t in_channels_per_group = in_channels / groups_;
 
         // For transposed conv backward (= regular conv forward):
@@ -1369,7 +1249,7 @@ public:
             int64_t out_start = g * out_channels_per_group;
 
             // Extract grad_output slice
-            auto grad_slice = zeros({batch, out_channels_per_group, height_out, width_out});
+            auto grad_slice = zeros({batch, out_channels_per_group, height_out, width_out}, DType::Float32, Device::cpu());
             const float* grad_data = grad_output.data<float>();
             float* grad_slice_data = grad_slice.data<float>();
 
@@ -1390,7 +1270,7 @@ public:
             }
 
             // Extract weight slice and flip it
-            auto weight_slice = zeros({out_channels_per_group, in_channels_per_group, kernel_h, kernel_w});
+            auto weight_slice = zeros({out_channels_per_group, in_channels_per_group, kernel_h, kernel_w}, DType::Float32, Device::cpu());
             const float* weight_data = weight.data<float>();
             float* weight_slice_data = weight_slice.data<float>();
 
@@ -1437,12 +1317,12 @@ public:
             // Now compute grad_input by reversing the forward matmul
             // Forward was: output_col = weight_reshaped^T @ input_flat
             // So backward is: grad_input_flat = weight_reshaped @ grad_col
-            auto grad_input_flat = zeros({batch, in_channels_per_group, actual_spatial_size});
+            auto grad_input_flat = zeros({batch, in_channels_per_group, actual_spatial_size}, DType::Float32, Device::cpu());
             float* grad_input_flat_data = grad_input_flat.data<float>();
 
             for (int64_t b = 0; b < batch; ++b) {
                 // Extract grad_col for this batch: [out_channels_per_group * K * K, spatial]
-                auto grad_col_b = zeros({kernel_flat, actual_spatial_size});
+                auto grad_col_b = zeros({kernel_flat, actual_spatial_size}, DType::Float32, Device::cpu());
                 const float* grad_col_ptr = grad_col.data<float>();
                 float* grad_col_b_data = grad_col_b.data<float>();
 
@@ -1487,7 +1367,7 @@ public:
         }
 
         // Gradient w.r.t weight
-        Tensor grad_weight = zeros({in_channels, out_channels_per_group, kernel_h, kernel_w});
+        Tensor grad_weight = zeros({in_channels, out_channels_per_group, kernel_h, kernel_w}, DType::Float32, Device::cpu());
         float* grad_weight_data = grad_weight.data<float>();
 
         for (int64_t g = 0; g < groups_; ++g) {
@@ -1495,7 +1375,7 @@ public:
             int64_t out_start = g * out_channels_per_group;
 
             // Extract input slice
-            auto input_slice = zeros({batch, in_channels_per_group, height_in, width_in});
+            auto input_slice = zeros({batch, in_channels_per_group, height_in, width_in}, DType::Float32, Device::cpu());
             const float* input_data = input.data<float>();
             float* input_slice_data = input_slice.data<float>();
 
@@ -1524,7 +1404,7 @@ public:
             auto input_flat = input_slice.reshape({batch, in_channels_per_group, height_in * width_in});
 
             // Extract grad_output slice
-            auto grad_slice = zeros({batch, out_channels_per_group, height_out, width_out});
+            auto grad_slice = zeros({batch, out_channels_per_group, height_out, width_out}, DType::Float32, Device::cpu());
             const float* grad_data = grad_output.data<float>();
             float* grad_slice_data = grad_slice.data<float>();
 
@@ -1566,12 +1446,12 @@ public:
             // input_flat: [batch, in_channels, spatial]
             // grad_col: [batch, out_channels * K * K, spatial]
             // Result: [in_channels, out_channels * K * K]
-            auto grad_weight_group = zeros({in_channels_per_group, out_channels_per_group * kernel_h * kernel_w});
+            auto grad_weight_group = zeros({in_channels_per_group, out_channels_per_group * kernel_h * kernel_w}, DType::Float32, Device::cpu());
             float* grad_weight_group_data = grad_weight_group.data<float>();
 
             for (int64_t b = 0; b < batch; ++b) {
                 // Extract input for this batch: [in_channels, spatial]
-                auto input_b = zeros({in_channels_per_group, spatial_weight});
+                auto input_b = zeros({in_channels_per_group, spatial_weight}, DType::Float32, Device::cpu());
                 const float* input_data = input_flat.data<float>();
                 float* input_b_data = input_b.data<float>();
 
@@ -1581,7 +1461,7 @@ public:
                 }
 
                 // Extract grad_col for this batch: [out_channels * K * K, spatial]
-                auto grad_col_b = zeros({out_channels_per_group * kernel_h * kernel_w, spatial_weight});
+                auto grad_col_b = zeros({out_channels_per_group * kernel_h * kernel_w, spatial_weight}, DType::Float32, Device::cpu());
                 const float* grad_col_data = grad_col_reshaped.data<float>();
                 float* grad_col_b_data = grad_col_b.data<float>();
 
@@ -1626,7 +1506,7 @@ public:
         // Gradient w.r.t bias
         Tensor grad_bias;
         if (saved_tensors_.size() > 2) {
-            grad_bias = zeros({out_channels});
+            grad_bias = zeros({out_channels}, DType::Float32, Device::cpu());
             float* grad_bias_data = grad_bias.data<float>();
             const float* grad_data = grad_output.data<float>();
 
@@ -1645,7 +1525,7 @@ public:
         }
 
         // Transfer back to original device
-        if (use_gpu) {
+        if (need_cpu_transfer) {
             grad_input = grad_input.to(original_device);
             grad_weight = grad_weight.to(original_device);
             if (saved_tensors_.size() > 2) {
@@ -1742,16 +1622,16 @@ auto ConvTranspose2d::forward(const Variable& input) -> Variable {
     }
 
     Device original_device = input.tensor().device();
-    bool use_gpu = (original_device.type == Device::Type::CUDA);
+    bool need_cpu_transfer = (original_device.type != Device::Type::CPU);
 
-    Tensor input_work = use_gpu ? input.tensor().to(Device::cpu()) : input.tensor();
-    Tensor weight_work = use_gpu ? weight_.tensor().to(Device::cpu()) : weight_.tensor();
+    Tensor input_work = need_cpu_transfer ? input.tensor().to(Device::cpu()) : input.tensor();
+    Tensor weight_work = need_cpu_transfer ? weight_.tensor().to(Device::cpu()) : weight_.tensor();
 
     int64_t in_channels_per_group = in_channels_ / groups_;
     int64_t out_channels_per_group = out_channels_ / groups_;
 
     auto output = zeros({batch, out_channels_, height_out, width_out}, input.tensor().dtype(), input.tensor().device());
-    Tensor output_work = use_gpu ? output.to(Device::cpu()) : output;
+    Tensor output_work = need_cpu_transfer ? output.to(Device::cpu()) : output;
 
     // Transposed convolution = GEMM → col2im (reverse of regular convolution)
     for (int64_t g = 0; g < groups_; ++g) {
@@ -1759,7 +1639,7 @@ auto ConvTranspose2d::forward(const Variable& input) -> Variable {
         int64_t out_start = g * out_channels_per_group;
 
         // Extract input slice [batch, in_channels_per_group, height_in, width_in]
-        auto input_slice = zeros({batch, in_channels_per_group, height_in, width_in});
+        auto input_slice = zeros({batch, in_channels_per_group, height_in, width_in}, DType::Float32, Device::cpu());
         const float* input_data = input_work.data<float>();
         float* input_slice_data = input_slice.data<float>();
 
@@ -1780,7 +1660,7 @@ auto ConvTranspose2d::forward(const Variable& input) -> Variable {
         }
 
         // Extract weight slice [in_channels_per_group, out_channels_per_group, kernel, kernel]
-        auto weight_slice = zeros({in_channels_per_group, out_channels_per_group, kernel_size_, kernel_size_});
+        auto weight_slice = zeros({in_channels_per_group, out_channels_per_group, kernel_size_, kernel_size_}, DType::Float32, Device::cpu());
         const float* weight_data = weight_work.data<float>();
         float* weight_slice_data = weight_slice.data<float>();
 
@@ -1808,12 +1688,12 @@ auto ConvTranspose2d::forward(const Variable& input) -> Variable {
         auto weight_reshaped = weight_slice.reshape({in_channels_per_group, kernel_flat});
 
         // Process each batch: matmul to get col representation
-        auto output_col = zeros({batch, out_channels_per_group * kernel_size_ * kernel_size_, height_in * width_in});
+        auto output_col = zeros({batch, out_channels_per_group * kernel_size_ * kernel_size_, height_in * width_in}, DType::Float32, Device::cpu());
         float* output_col_data = output_col.data<float>();
 
         for (int64_t b = 0; b < batch; ++b) {
             // Extract input for this batch
-            auto input_b = zeros({in_channels_per_group, height_in * width_in});
+            auto input_b = zeros({in_channels_per_group, height_in * width_in}, DType::Float32, Device::cpu());
             const float* input_reshaped_data = input_reshaped.data<float>();
             float* input_b_data = input_b.data<float>();
 
@@ -1861,7 +1741,7 @@ auto ConvTranspose2d::forward(const Variable& input) -> Variable {
     auto bias_it = parameters_.find("bias");
     if (bias_it != parameters_.end()) {
         auto& bias = *bias_it->second;
-        Tensor bias_work = use_gpu ? bias.tensor().to(Device::cpu()) : bias.tensor();
+        Tensor bias_work = need_cpu_transfer ? bias.tensor().to(Device::cpu()) : bias.tensor();
         float* out_data = output_work.data<float>();
         const float* bias_data = bias_work.data<float>();
 
@@ -1880,7 +1760,7 @@ auto ConvTranspose2d::forward(const Variable& input) -> Variable {
     }
 
     // Transfer back to GPU if needed
-    if (use_gpu) {
+    if (need_cpu_transfer) {
         output = output_work.to(original_device);
     } else {
         output = output_work;

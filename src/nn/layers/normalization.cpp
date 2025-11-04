@@ -34,12 +34,25 @@ public:
         auto& rstd_orig = saved[2];  // reciprocal std (1 / sqrt(var + eps))
         auto& weight_orig = saved[3];
 
-        // Make all tensors contiguous for pointer-based access
-        auto grad_output = grad_output_orig.contiguous();
-        auto input = input_orig.contiguous();
-        auto mean = mean_orig.contiguous();
-        auto rstd = rstd_orig.contiguous();
-        auto weight = weight_orig.contiguous();
+        // Save original device before transferring to CPU
+        Device original_device = input_orig.device();
+
+        // Make all tensors contiguous AND transfer to CPU for pointer-based access
+        auto grad_output = (grad_output_orig.device() == Device::cpu())
+                          ? grad_output_orig.contiguous()
+                          : grad_output_orig.contiguous().to(Device::cpu());
+        auto input = (input_orig.device() == Device::cpu())
+                    ? input_orig.contiguous()
+                    : input_orig.contiguous().to(Device::cpu());
+        auto mean = (mean_orig.device() == Device::cpu())
+                   ? mean_orig.contiguous()
+                   : mean_orig.contiguous().to(Device::cpu());
+        auto rstd = (rstd_orig.device() == Device::cpu())
+                   ? rstd_orig.contiguous()
+                   : rstd_orig.contiguous().to(Device::cpu());
+        auto weight = (weight_orig.device() == Device::cpu())
+                     ? weight_orig.contiguous()
+                     : weight_orig.contiguous().to(Device::cpu());
 
         auto shape = input.shape();
         int64_t batch_size = 1;
@@ -103,7 +116,18 @@ public:
             }
         }
 
-        return {grad_input.contiguous(), grad_weight.contiguous(), grad_bias.contiguous()};
+        // Transfer gradients back to original device if needed
+        Tensor grad_input_final = (original_device == Device::cpu())
+                                 ? grad_input.contiguous()
+                                 : grad_input.contiguous().to(original_device);
+        Tensor grad_weight_final = (original_device == Device::cpu())
+                                  ? grad_weight.contiguous()
+                                  : grad_weight.contiguous().to(original_device);
+        Tensor grad_bias_final = (original_device == Device::cpu())
+                                ? grad_bias.contiguous()
+                                : grad_bias.contiguous().to(original_device);
+
+        return {grad_input_final, grad_weight_final, grad_bias_final};
     }
 
 private:
@@ -160,12 +184,22 @@ auto LayerNorm::forward(const Variable& input) -> Variable {
 
     int64_t N = num_features_;
 
-    // Compute mean and variance for each batch element
-    // Using manual computation to ensure correct memory layout
-    auto batch_mean = zeros({batch_size});
-    auto batch_var = zeros({batch_size});
+    // Save original device and move input to CPU for pointer-based computation
+    Device original_device = input.tensor().device();
+    Tensor input_cpu = (original_device == Device::cpu()) ? input.tensor() : input.tensor().to(Device::cpu());
 
-    auto* input_data = input.tensor().data<float>();
+    // Move weight and bias to CPU if needed
+    Tensor weight_cpu = (elementwise_affine_ && weight_.tensor().device() != Device::cpu())
+                        ? weight_.tensor().to(Device::cpu()) : weight_.tensor();
+    Tensor bias_cpu = (elementwise_affine_ && bias_.tensor().device() != Device::cpu())
+                      ? bias_.tensor().to(Device::cpu()) : bias_.tensor();
+
+    // Compute mean and variance for each batch element on CPU
+    // Using manual computation to ensure correct memory layout
+    auto batch_mean = zeros({batch_size}, DType::Float32, Device::cpu());
+    auto batch_var = zeros({batch_size}, DType::Float32, Device::cpu());
+
+    auto* input_data = input_cpu.data<float>();
     auto* mean_data = batch_mean.data<float>();
     auto* var_data = batch_var.data<float>();
 
@@ -190,17 +224,17 @@ auto LayerNorm::forward(const Variable& input) -> Variable {
     }
 
     // Compute reciprocal std (1 / sqrt(var + eps))
-    auto rstd = zeros({batch_size});
+    auto rstd = zeros({batch_size}, DType::Float32, Device::cpu());
     auto* rstd_data = rstd.data<float>();
     for (int64_t b = 0; b < batch_size; b++) {
         rstd_data[b] = 1.0f / std::sqrt(var_data[b] + static_cast<float>(eps_));
     }
 
-    // Normalize: (x - mean) * rstd
-    auto output = zeros_like(input.tensor());
-    auto* output_data = output.data<float>();
-    auto* weight_data = weight_.tensor().data<float>();
-    auto* bias_data = bias_.tensor().data<float>();
+    // Normalize: (x - mean) * rstd on CPU
+    auto output_cpu = zeros_like(input_cpu);
+    auto* output_data = output_cpu.data<float>();
+    auto* weight_data = weight_cpu.data<float>();
+    auto* bias_data = bias_cpu.data<float>();
 
     for (int64_t b = 0; b < batch_size; b++) {
         float mu = mean_data[b];
@@ -217,6 +251,9 @@ auto LayerNorm::forward(const Variable& input) -> Variable {
             }
         }
     }
+
+    // Move output back to original device if needed
+    Tensor output = (original_device == Device::cpu()) ? output_cpu : output_cpu.to(original_device);
 
     // Set up autograd if needed
     if (input.requires_grad() || (elementwise_affine_ && weight_.requires_grad())) {

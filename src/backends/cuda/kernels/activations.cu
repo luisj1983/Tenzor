@@ -210,6 +210,86 @@ extern "C" {
 }
 
 // ============================================================================
+// GELU Activation
+// ============================================================================
+
+// Forward: x * 0.5 * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x³)))
+template<typename T>
+__global__ void gelu_forward_kernel(const T* input, T* output, int64_t n) {
+    CUDA_GRID_STRIDE_LOOP(idx, n) {
+        T x = input[idx];
+        T x_cubed = x * x * x;
+        T tanh_arg = T(0.7978845608) * (x + T(0.044715) * x_cubed);
+        output[idx] = x * T(0.5) * (T(1.0) + tanh(tanh_arg));
+    }
+}
+
+// Backward: grad_out * df/dx
+// where df/dx = 0.5 * (1 + tanh(z)) + 0.5 * x * sech²(z) * dz/dx
+// z = sqrt(2/π) * (x + 0.044715 * x³)
+// dz/dx = sqrt(2/π) * (1 + 0.134145 * x²)
+// sech²(z) = 1 - tanh²(z)
+template<typename T>
+__global__ void gelu_backward_kernel(const T* grad_output, const T* input,
+                                     T* grad_input, int64_t n) {
+    CUDA_GRID_STRIDE_LOOP(idx, n) {
+        T x = input[idx];
+        T x_squared = x * x;
+        T x_cubed = x_squared * x;
+
+        // Constants
+        constexpr T sqrt_2_over_pi = T(0.7978845608);
+        constexpr T coeff = T(0.044715);
+
+        // Compute z and tanh(z)
+        T z = sqrt_2_over_pi * (x + coeff * x_cubed);
+        T tanh_z = tanh(z);
+
+        // Compute dz/dx
+        T dz_dx = sqrt_2_over_pi * (T(1.0) + T(3.0) * coeff * x_squared);
+
+        // Compute sech²(z) = 1 - tanh²(z)
+        T sech2_z = T(1.0) - tanh_z * tanh_z;
+
+        // Compute df/dx
+        T df_dx = T(0.5) * (T(1.0) + tanh_z) + T(0.5) * x * sech2_z * dz_dx;
+
+        grad_input[idx] = grad_output[idx] * df_dx;
+    }
+}
+
+// Host functions
+extern "C" {
+    void gelu_forward_float(const float* input, float* output, int64_t n) {
+        int num_blocks = get_num_blocks(n);
+        gelu_forward_kernel<float><<<num_blocks, BLOCK_SIZE>>>(input, output, n);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+    void gelu_forward_double(const double* input, double* output, int64_t n) {
+        int num_blocks = get_num_blocks(n);
+        gelu_forward_kernel<double><<<num_blocks, BLOCK_SIZE>>>(input, output, n);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+    void gelu_backward_float(const float* grad_output, const float* input,
+                            float* grad_input, int64_t n) {
+        int num_blocks = get_num_blocks(n);
+        gelu_backward_kernel<float><<<num_blocks, BLOCK_SIZE>>>(
+            grad_output, input, grad_input, n);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+    void gelu_backward_double(const double* grad_output, const double* input,
+                             double* grad_input, int64_t n) {
+        int num_blocks = get_num_blocks(n);
+        gelu_backward_kernel<double><<<num_blocks, BLOCK_SIZE>>>(
+            grad_output, input, grad_input, n);
+        CUDA_CHECK(cudaGetLastError());
+    }
+}
+
+// ============================================================================
 // Leaky ReLU Activation
 // ============================================================================
 
@@ -602,6 +682,7 @@ auto relu_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     Tensor result(shape, input.dtype(), input.device());
 
     if (n == 0) {
+        cudaStreamSynchronize(stream);
         return result;  // Handle empty tensors
     }
 
@@ -632,6 +713,7 @@ auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaSt
     Tensor result(shape, input.dtype(), input.device());
 
     if (n == 0) {
+        cudaStreamSynchronize(stream);
         return result;  // Handle empty tensors
     }
 
@@ -662,6 +744,7 @@ auto sigmoid_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     Tensor result(shape, input.dtype(), input.device());
 
     if (n == 0) {
+        cudaStreamSynchronize(stream);
         return result;
     }
 
@@ -692,6 +775,7 @@ auto sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& input, cud
     Tensor result(shape, input.dtype(), input.device());
 
     if (n == 0) {
+        cudaStreamSynchronize(stream);
         return result;
     }
 
@@ -722,6 +806,7 @@ auto tanh_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     Tensor result(shape, input.dtype(), input.device());
 
     if (n == 0) {
+        cudaStreamSynchronize(stream);
         return result;
     }
 
@@ -752,6 +837,7 @@ auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaSt
     Tensor result(shape, input.dtype(), input.device());
 
     if (n == 0) {
+        cudaStreamSynchronize(stream);
         return result;
     }
 
@@ -775,6 +861,68 @@ auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaSt
     return result;
 }
 
+// GELU wrapper
+auto gelu_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+
+    if (n == 0) {
+        cudaStreamSynchronize(stream);
+        return result;
+    }
+
+    if (input.dtype() == DType::Float32) {
+        int num_blocks = get_num_blocks(n);
+        gelu_forward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        int num_blocks = get_num_blocks(n);
+        gelu_forward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            input.data<double>(), result.data<double>(), n);
+    } else {
+        throw std::runtime_error("GELU only supports Float32 and Float64 dtypes");
+    }
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        throw std::runtime_error(std::string("CUDA error in gelu_kernel: ") + cudaGetErrorString(err));
+    }
+
+    return result;
+}
+
+// GELU backward wrapper
+auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+
+    if (n == 0) {
+        cudaStreamSynchronize(stream);
+        return result;
+    }
+
+    if (input.dtype() == DType::Float32) {
+        int num_blocks = get_num_blocks(n);
+        gelu_backward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            grad_output.data<float>(), input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        int num_blocks = get_num_blocks(n);
+        gelu_backward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            grad_output.data<double>(), input.data<double>(), result.data<double>(), n);
+    } else {
+        throw std::runtime_error("GELU backward only supports Float32 and Float64 dtypes");
+    }
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        throw std::runtime_error(std::string("CUDA error in gelu_backward_kernel: ") + cudaGetErrorString(err));
+    }
+
+    return result;
+}
+
 // Leaky ReLU wrapper
 auto leaky_relu_kernel(const Tensor& input, float alpha, cudaStream_t stream) -> Tensor {
     int64_t n = input.numel();
@@ -782,6 +930,7 @@ auto leaky_relu_kernel(const Tensor& input, float alpha, cudaStream_t stream) ->
     Tensor result(shape, input.dtype(), input.device());
 
     if (n == 0) {
+        cudaStreamSynchronize(stream);
         return result;
     }
 
@@ -812,6 +961,7 @@ auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, 
     Tensor result(shape, input.dtype(), input.device());
 
     if (n == 0) {
+        cudaStreamSynchronize(stream);
         return result;
     }
 
@@ -841,6 +991,7 @@ auto softmax_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Te
     Tensor result(shape, input.dtype(), input.device());
 
     if (input.numel() == 0) {
+        cudaStreamSynchronize(stream);
         return result;
     }
 
@@ -890,6 +1041,7 @@ auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, in
     Tensor result(shape, output.dtype(), output.device());
 
     if (output.numel() == 0) {
+        cudaStreamSynchronize(stream);
         return result;
     }
 
@@ -933,6 +1085,7 @@ auto log_softmax_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -
     Tensor result(shape, input.dtype(), input.device());
 
     if (input.numel() == 0) {
+        cudaStreamSynchronize(stream);
         return result;
     }
 
@@ -976,6 +1129,7 @@ auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output
     Tensor result(shape, output.dtype(), output.device());
 
     if (output.numel() == 0) {
+        cudaStreamSynchronize(stream);
         return result;
     }
 

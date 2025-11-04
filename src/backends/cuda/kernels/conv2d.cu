@@ -84,6 +84,52 @@ __device__ __host__ inline Float16 from_cuda_half(const __half& x) {
 }
 
 // ============================================================================
+// NHWC to NCHW Transpose Kernel
+// ============================================================================
+
+/**
+ * @brief Transpose cuBLAS output from NHWC to NCHW layout
+ *
+ * cuBLAS produces output in (batch*out_h*out_w, channels) layout (NHWC)
+ * but we need [batch, channels, out_h, out_w] layout (NCHW)
+ */
+template<typename T>
+__global__ void nhwc_to_nchw_kernel(
+    const T* nhwc_input,       // (batch * out_h * out_w, channels_per_group)
+    T* nchw_output,            // [batch, out_channels, out_h, out_w]
+    int64_t batch,
+    int64_t out_h,
+    int64_t out_w,
+    int64_t out_channels,      // Total output channels
+    int64_t channels_per_group,
+    int64_t channel_offset     // Starting channel index (out_start)
+) {
+    // Each thread handles one element
+    int64_t total_spatial = batch * out_h * out_w;
+
+    CUDA_KERNEL_LOOP(idx, total_spatial * channels_per_group) {
+        // Decode flat index to (spatial_idx, c)
+        int64_t c = idx % channels_per_group;
+        int64_t spatial_idx = idx / channels_per_group;
+
+        // Decode spatial_idx to (b, h, w)
+        int64_t b = spatial_idx / (out_h * out_w);
+        int64_t hw = spatial_idx % (out_h * out_w);
+        int64_t h = hw / out_w;
+        int64_t w = hw % out_w;
+
+        // Global channel index
+        int64_t global_c = channel_offset + c;
+
+        // NCHW index: [b][global_c][h][w]
+        int64_t nchw_idx = ((b * out_channels + global_c) * out_h + h) * out_w + w;
+
+        // Copy from NHWC to NCHW
+        nchw_output[nchw_idx] = nhwc_input[idx];
+    }
+}
+
+// ============================================================================
 // im2col CUDA Kernel
 // ============================================================================
 
@@ -834,7 +880,11 @@ auto conv2d_forward_kernel(
         float beta = 0.0f;
 
         const float* weight_ptr = weight.data<float>() + out_start * in_channels_per_group * kernel_h * kernel_w;
-        float* output_ptr = output.data<float>() + out_start * out_h * out_w;
+
+        // Allocate temporary buffer for cuBLAS output (NHWC layout)
+        // cuBLAS will write (M, N) = (batch*out_h*out_w, out_channels_per_group) in row-major
+        float* temp_output;
+        CUDA_CHECK(cudaMalloc(&temp_output, M * N * sizeof(float)));
 
         // cuBLAS uses column-major ordering
         // We want: C = A @ B^T where A is row-major (M, K), B is row-major (N, K)
@@ -853,11 +903,29 @@ auto conv2d_forward_kernel(
             col_buffer,     // A (M, K) in row-major = (K, M) in col-major
             K,              // leading dimension of A
             &beta,
-            output_ptr,     // C (M, N) in row-major = (N, M) in col-major
+            temp_output,    // C (M, N) in row-major (NHWC layout)
             N               // leading dimension of C
         ));
 
-        // Free col buffer
+        // Transpose from NHWC (temp_output) to NCHW (output tensor)
+        dim3 transpose_grid, transpose_block;
+        int64_t transpose_elements = M * N;
+        compute_launch_config_1d(transpose_elements, transpose_grid, transpose_block);
+
+        nhwc_to_nchw_kernel<<<transpose_grid, transpose_block, 0, stream>>>(
+            temp_output,
+            output.data<float>(),
+            batch,
+            out_h,
+            out_w,
+            out_channels,
+            N,
+            out_start
+        );
+        CUDA_CHECK(cudaGetLastError());
+
+        // Free buffers
+        CUDA_CHECK(cudaFree(temp_output));
         CUDA_CHECK(cudaFree(col_buffer));
     }
 

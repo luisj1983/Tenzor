@@ -35,12 +35,14 @@ TEST_P(GradCheckBackendTest, QuadraticFunction) {
         return x * x;
     };
 
-    // Create small test input
-    Tensor data(std::vector<int64_t>{3}, DType::Float32, device);
-    float* ptr = data.data<float>();
+    // Create test input on target device, modify on CPU, transfer back
+    Tensor data = zeros({3}, DType::Float32, device);
+    auto data_cpu = data.to(Device::cpu());
+    float* ptr = data_cpu.data<float>();
     ptr[0] = 1.0f;
     ptr[1] = 2.0f;
     ptr[2] = 3.0f;
+    data = data_cpu.to(device);
 
     Variable x(data, true);
 
@@ -55,11 +57,13 @@ TEST_P(GradCheckBackendTest, LinearFunction) {
         return x * 2.0f + 3.0f;
     };
 
-    Tensor data(std::vector<int64_t>{4}, DType::Float32, device);
-    float* ptr = data.data<float>();
+    Tensor data = zeros({4}, DType::Float32, device);
+    auto data_cpu = data.to(Device::cpu());
+    float* ptr = data_cpu.data<float>();
     for (int i = 0; i < 4; ++i) {
         ptr[i] = static_cast<float>(i + 1);
     }
+    data = data_cpu.to(device);
 
     Variable x(data, true);
 
@@ -74,11 +78,13 @@ TEST_P(GradCheckBackendTest, SumReduction) {
         return tenzor::sum(x);
     };
 
-    Tensor data(std::vector<int64_t>{5}, DType::Float32, device);
-    float* ptr = data.data<float>();
+    Tensor data = zeros({5}, DType::Float32, device);
+    auto data_cpu = data.to(Device::cpu());
+    float* ptr = data_cpu.data<float>();
     for (int i = 0; i < 5; ++i) {
         ptr[i] = static_cast<float>(i + 1) * 0.5f;
     }
+    data = data_cpu.to(device);
 
     Variable x(data, true);
 
@@ -92,11 +98,13 @@ TEST_P(GradCheckBackendTest, ElementWiseOps) {
         return x * x + x;
     };
 
-    Tensor data(std::vector<int64_t>{3}, DType::Float32, device);
-    float* ptr = data.data<float>();
+    Tensor data = zeros({3}, DType::Float32, device);
+    auto data_cpu = data.to(Device::cpu());
+    float* ptr = data_cpu.data<float>();
     ptr[0] = 0.5f;
     ptr[1] = 1.0f;
     ptr[2] = 1.5f;
+    data = data_cpu.to(device);
 
     Variable x(data, true);
 
@@ -112,11 +120,13 @@ TEST_P(GradCheckBackendTest, MultiDimensional) {
         return tenzor::sum(x_squared);
     };
 
-    Tensor data(std::vector<int64_t>{2, 3}, DType::Float32, device);
-    float* ptr = data.data<float>();
+    Tensor data = zeros({2, 3}, DType::Float32, device);
+    auto data_cpu = data.to(Device::cpu());
+    float* ptr = data_cpu.data<float>();
     for (int i = 0; i < 6; ++i) {
         ptr[i] = static_cast<float>(i + 1) * 0.5f;
     }
+    data = data_cpu.to(device);
 
     Variable x(data, true);
 
@@ -130,11 +140,13 @@ TEST_P(GradCheckBackendTest, DetailedResult) {
         return x * x;
     };
 
-    Tensor data(std::vector<int64_t>{3}, DType::Float32, device);
-    float* ptr = data.data<float>();
+    Tensor data = zeros({3}, DType::Float32, device);
+    auto data_cpu = data.to(Device::cpu());
+    float* ptr = data_cpu.data<float>();
     ptr[0] = 1.0f;
     ptr[1] = 2.0f;
     ptr[2] = 3.0f;
+    data = data_cpu.to(device);
 
     Variable x(data, true);
 
@@ -151,19 +163,21 @@ TEST_P(GradCheckBackendTest, DetailedResult) {
 // Test with Float64 for higher precision (CPU only due to backend support)
 TEST_P(GradCheckBackendTest, Float64Precision) {
     // Skip if not CPU - Float64 support varies by backend
-    if (device.type != Device::Type::CPU) {
-        GTEST_SKIP() << "Float64 test only on CPU backend";
-    }
+    //if (device.type != Device::Type::CPU) {
+    //    GTEST_SKIP() << "Float64 test only on CPU backend";
+    //}
 
     auto f = [](const Variable& x) -> Variable {
         return x * x + x * 2.0;
     };
 
-    Tensor data(std::vector<int64_t>{4}, DType::Float64, device);
-    double* ptr = data.data<double>();
+    Tensor data = zeros({4}, DType::Float64, device);
+    auto data_cpu = data.to(Device::cpu());
+    double* ptr = data_cpu.data<double>();
     for (int i = 0; i < 4; ++i) {
         ptr[i] = static_cast<double>(i + 1) * 0.1;
     }
+    data = data_cpu.to(device);
 
     Variable x(data, true);
 
@@ -201,10 +215,12 @@ TEST_P(GradCheckBackendTest, NumericalGradientComputation) {
         return x * x * 3.0f;
     };
 
-    Tensor data(std::vector<int64_t>{2}, DType::Float32, device);
-    float* ptr = data.data<float>();
+    Tensor data = zeros({2}, DType::Float32, device);
+    auto data_cpu = data.to(Device::cpu());
+    float* ptr = data_cpu.data<float>();
     ptr[0] = 1.0f;
     ptr[1] = 2.0f;
+    data = data_cpu.to(device);
 
     Variable x(data, true);
 
@@ -222,11 +238,15 @@ TEST_P(GradCheckBackendTest, NumericalGradientComputation) {
 
 // Test compare_gradients function
 TEST_P(GradCheckBackendTest, CompareGradients) {
-    Tensor num_grad(std::vector<int64_t>{3}, DType::Float32, device);
-    Tensor ana_grad(std::vector<int64_t>{3}, DType::Float32, device);
+    // Create on target device, modify on CPU
+    Tensor num_grad = zeros({3}, DType::Float32, device);
+    Tensor ana_grad = zeros({3}, DType::Float32, device);
 
-    float* num_ptr = num_grad.data<float>();
-    float* ana_ptr = ana_grad.data<float>();
+    auto num_grad_cpu = num_grad.to(Device::cpu());
+    auto ana_grad_cpu = ana_grad.to(Device::cpu());
+
+    float* num_ptr = num_grad_cpu.data<float>();
+    float* ana_ptr = ana_grad_cpu.data<float>();
 
     // Matching gradients
     num_ptr[0] = 1.0f;
@@ -237,11 +257,17 @@ TEST_P(GradCheckBackendTest, CompareGradients) {
     ana_ptr[1] = 2.0f + 1e-6f;
     ana_ptr[2] = 3.0f + 1e-6f;
 
+    num_grad = num_grad_cpu.to(device);
+    ana_grad = ana_grad_cpu.to(device);
+
     GradCheckResult result = compare_gradients(num_grad, ana_grad, 1e-5, 1e-3);
     EXPECT_TRUE(result.passed);
 
-    // Non-matching gradients
+    // Non-matching gradients - recreate on CPU for modification
+    ana_grad_cpu = ana_grad.to(Device::cpu());
+    ana_ptr = ana_grad_cpu.data<float>();
     ana_ptr[2] = 10.0f;  // Large difference
+    ana_grad = ana_grad_cpu.to(device);
 
     result = compare_gradients(num_grad, ana_grad, 1e-5, 1e-3);
     EXPECT_FALSE(result.passed);
@@ -254,10 +280,12 @@ TEST_P(GradCheckBackendTest, EpsilonSensitivity) {
         return x * x * x;  // f(x) = x^3, gradient = 3*x^2
     };
 
-    Tensor data(std::vector<int64_t>{2}, DType::Float32, device);
-    float* ptr = data.data<float>();
+    Tensor data = zeros({2}, DType::Float32, device);
+    auto data_cpu = data.to(Device::cpu());
+    float* ptr = data_cpu.data<float>();
     ptr[0] = 1.0f;
     ptr[1] = 2.0f;
+    data = data_cpu.to(device);
 
     Variable x(data, true);
 
@@ -277,11 +305,13 @@ TEST_P(GradCheckBackendTest, ScalarOutput) {
         return tenzor::sum(x * x);  // sum(x^2)
     };
 
-    Tensor data(std::vector<int64_t>{3}, DType::Float32, device);
-    float* ptr = data.data<float>();
+    Tensor data = zeros({3}, DType::Float32, device);
+    auto data_cpu = data.to(Device::cpu());
+    float* ptr = data_cpu.data<float>();
     ptr[0] = 1.0f;
     ptr[1] = 2.0f;
     ptr[2] = 3.0f;
+    data = data_cpu.to(device);
 
     Variable x(data, true);
 
@@ -295,11 +325,13 @@ TEST_P(GradCheckBackendTest, PerformanceBenchmark) {
         return x * x + x;
     };
 
-    // Small tensor
-    Tensor data(std::vector<int64_t>{10}, DType::Float32, device);
+    // Create on device, modify on CPU
+    Tensor data = zeros({10}, DType::Float32, device);
+    auto data_cpu = data.to(Device::cpu());
     for (int64_t i = 0; i < 10; ++i) {
-        data.data<float>()[i] = static_cast<float>(i) * 0.1f;
+        data_cpu.data<float>()[i] = static_cast<float>(i) * 0.1f;
     }
+    data = data_cpu.to(device);
 
     Variable x(data, true);
 

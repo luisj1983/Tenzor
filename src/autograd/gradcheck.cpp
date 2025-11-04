@@ -7,6 +7,7 @@
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/core/tensor.hpp"
+#include "tenzor/ops/creation.hpp"
 #include <cmath>
 #include <iostream>
 #include <iomanip>
@@ -20,13 +21,15 @@ namespace {
 
 /**
  * @brief Create a zero tensor with same properties as input.
+ *
+ * Uses backend-agnostic zeros() operation instead of zero_() to avoid
+ * CUDA pointer dereference issues. The zeros() function has native
+ * implementations for all backends (CPU, CUDA, OneAPI, Vulkan, ROCm).
  */
 auto zeros_like_tensor(const Tensor& tensor) -> Tensor {
-    Tensor result(std::vector<int64_t>(tensor.shape().begin(), tensor.shape().end()),
-                  tensor.dtype(),
-                  tensor.device());
-    result.zero_();
-    return result;
+    return zeros(std::vector<int64_t>(tensor.shape().begin(), tensor.shape().end()),
+                 tensor.dtype(),
+                 tensor.device());
 }
 
 /**
@@ -68,6 +71,10 @@ auto numerical_gradient(
     // Get input data pointer and properties
     int64_t total_elements = input.tensor().numel();
 
+    // Transfer num_grad to CPU once for efficient pointer-based writes
+    Device original_grad_device = num_grad.device();
+    Tensor num_grad_cpu = (original_grad_device == Device::cpu()) ? num_grad : num_grad.to(Device::cpu());
+
     // We need to perturb each element individually
     // Create a copy of input for perturbation
     Tensor input_copy = input.tensor().clone();
@@ -78,24 +85,38 @@ auto numerical_gradient(
         Variable x_plus(input_copy.clone(), false);
         Variable x_minus(input_copy.clone(), false);
 
+        // Transfer to CPU for pointer-based computation to avoid CUDA pointer dereference
+        Device original_device = x_plus.tensor().device();
+        Tensor x_plus_cpu = (original_device == Device::cpu()) ? x_plus.tensor() : x_plus.tensor().to(Device::cpu());
+        Tensor x_minus_cpu = (original_device == Device::cpu()) ? x_minus.tensor() : x_minus.tensor().to(Device::cpu());
+
         // Access data based on dtype
         if (input.dtype() == DType::Float32) {
-            float* data_plus = x_plus.tensor().data<float>();
-            float* data_minus = x_minus.tensor().data<float>();
+            float* data_plus = x_plus_cpu.data<float>();
+            float* data_minus = x_minus_cpu.data<float>();
 
             // Perturb element i
             data_plus[i] += static_cast<float>(eps);
             data_minus[i] -= static_cast<float>(eps);
 
         } else if (input.dtype() == DType::Float64) {
-            double* data_plus = x_plus.tensor().data<double>();
-            double* data_minus = x_minus.tensor().data<double>();
+            double* data_plus = x_plus_cpu.data<double>();
+            double* data_minus = x_minus_cpu.data<double>();
 
             data_plus[i] += eps;
             data_minus[i] -= eps;
 
         } else {
             throw std::runtime_error("gradcheck only supports Float32 and Float64 dtypes");
+        }
+
+        // Transfer back to original device if needed
+        if (original_device != Device::cpu()) {
+            x_plus = Variable(x_plus_cpu.to(original_device), false);
+            x_minus = Variable(x_minus_cpu.to(original_device), false);
+        } else {
+            x_plus = Variable(x_plus_cpu, false);
+            x_minus = Variable(x_minus_cpu, false);
         }
 
         // Compute function outputs
@@ -122,16 +143,21 @@ auto numerical_gradient(
             double total_plus = 0.0, total_minus = 0.0;
             int64_t n = sum_plus_tensor.numel();
 
+            // Transfer to CPU for pointer-based computation
+            Device sum_device = sum_plus_tensor.device();
+            Tensor sum_plus_cpu = (sum_device == Device::cpu()) ? sum_plus_tensor : sum_plus_tensor.to(Device::cpu());
+            Tensor sum_minus_cpu = (sum_device == Device::cpu()) ? sum_minus_tensor : sum_minus_tensor.to(Device::cpu());
+
             if (f_plus.dtype() == DType::Float32) {
-                const float* data_p = sum_plus_tensor.data<float>();
-                const float* data_m = sum_minus_tensor.data<float>();
+                const float* data_p = sum_plus_cpu.data<float>();
+                const float* data_m = sum_minus_cpu.data<float>();
                 for (int64_t j = 0; j < n; ++j) {
                     total_plus += data_p[j];
                     total_minus += data_m[j];
                 }
             } else if (f_plus.dtype() == DType::Float64) {
-                const double* data_p = sum_plus_tensor.data<double>();
-                const double* data_m = sum_minus_tensor.data<double>();
+                const double* data_p = sum_plus_cpu.data<double>();
+                const double* data_m = sum_minus_cpu.data<double>();
                 for (int64_t j = 0; j < n; ++j) {
                     total_plus += data_p[j];
                     total_minus += data_m[j];
@@ -145,12 +171,19 @@ auto numerical_gradient(
         // Compute numerical gradient using central differences
         double numerical_grad_i = (val_plus - val_minus) / (2.0 * eps);
 
-        // Store in gradient tensor
+        // Store in gradient tensor (using pre-created CPU tensor)
         if (num_grad.dtype() == DType::Float32) {
-            num_grad.data<float>()[i] = static_cast<float>(numerical_grad_i);
+            num_grad_cpu.data<float>()[i] = static_cast<float>(numerical_grad_i);
         } else if (num_grad.dtype() == DType::Float64) {
-            num_grad.data<double>()[i] = numerical_grad_i;
+            num_grad_cpu.data<double>()[i] = numerical_grad_i;
         }
+    }
+
+    // Transfer gradient tensor back to original device if needed
+    if (original_grad_device != Device::cpu()) {
+        num_grad = num_grad_cpu.to(original_grad_device);
+    } else {
+        num_grad = num_grad_cpu;
     }
 
     return num_grad;
@@ -191,15 +224,20 @@ auto compare_gradients(
 
     const bool is_float32 = numerical.dtype() == DType::Float32;
 
+    // Transfer to CPU for pointer-based computation
+    Device num_device = numerical.device();
+    Tensor numerical_cpu = (num_device == Device::cpu()) ? numerical : numerical.to(Device::cpu());
+    Tensor analytical_cpu = (num_device == Device::cpu()) ? analytical : analytical.to(Device::cpu());
+
     for (int64_t i = 0; i < total; ++i) {
         double num_val, ana_val;
 
         if (is_float32) {
-            num_val = static_cast<double>(numerical.data<float>()[i]);
-            ana_val = static_cast<double>(analytical.data<float>()[i]);
+            num_val = static_cast<double>(numerical_cpu.data<float>()[i]);
+            ana_val = static_cast<double>(analytical_cpu.data<float>()[i]);
         } else {
-            num_val = numerical.data<double>()[i];
-            ana_val = analytical.data<double>()[i];
+            num_val = numerical_cpu.data<double>()[i];
+            ana_val = analytical_cpu.data<double>()[i];
         }
 
         // Compute errors

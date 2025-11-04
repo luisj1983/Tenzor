@@ -1,0 +1,5 @@
+if(EXISTS "/home/lee/Projects/Tenzor/build_transfer/tests/test_comparison_operators[1]_tests.cmake")
+  include("/home/lee/Projects/Tenzor/build_transfer/tests/test_comparison_operators[1]_tests.cmake")
+else()
+  add_test(test_comparison_operators_NOT_BUILT test_comparison_operators_NOT_BUILT)
+endif()

@@ -62,20 +62,30 @@ auto Module::eval() -> void {
 }
 
 auto Module::to(Device device) -> void {
+    std::cerr << "[DEBUG] Module::to() called with device type " << static_cast<int>(device.type) << std::endl;
+
     // Transfer parameters
-    for (auto& [_, param] : parameters_) {
+    std::cerr << "[DEBUG] Transferring " << parameters_.size() << " parameters..." << std::endl;
+    for (auto& [name, param] : parameters_) {
+        std::cerr << "[DEBUG] Transfer parameter '" << name << "' from device "
+                  << static_cast<int>(param->tensor().device().type) << " to " << static_cast<int>(device.type) << std::endl;
         param->tensor() = param->tensor().to(device);
+        std::cerr << "[DEBUG] Parameter '" << name << "' transferred successfully" << std::endl;
     }
 
     // Transfer buffers (running_mean, running_var, etc.)
+    std::cerr << "[DEBUG] Transferring " << buffers_.size() << " buffers..." << std::endl;
     for (auto& [_, buffer] : buffers_) {
         buffer->tensor() = buffer->tensor().to(device);
     }
 
     // Recursively transfer submodules
+    std::cerr << "[DEBUG] Transferring " << submodules_.size() << " submodules..." << std::endl;
     for (auto& [_, module] : submodules_) {
         module->to(device);
     }
+
+    std::cerr << "[DEBUG] Module::to() completed successfully" << std::endl;
 }
 
 auto Module::cuda(int device_id) -> void {

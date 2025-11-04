@@ -1,0 +1,5 @@
+if(EXISTS "/home/lee/Projects/Tenzor/build_transfer/tests/test_repeat_tile[1]_tests.cmake")
+  include("/home/lee/Projects/Tenzor/build_transfer/tests/test_repeat_tile[1]_tests.cmake")
+else()
+  add_test(test_repeat_tile_NOT_BUILT test_repeat_tile_NOT_BUILT)
+endif()

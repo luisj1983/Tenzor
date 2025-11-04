@@ -381,6 +381,8 @@ static void launch_full_reduction_sum(const T* d_input, T* d_output, int64_t n, 
         if (err != cudaSuccess) {
             throw std::runtime_error(std::string("CUDA kernel launch failed in sum_reduce_kernel: ") + cudaGetErrorString(err));
         }
+        // Synchronize to ensure kernel completes
+        cudaStreamSynchronize(stream);
     } else {
         // Phase 1: Reduce to num_blocks intermediate results
         T* d_temp;
@@ -425,6 +427,8 @@ static void launch_full_reduction_max(const T* d_input, T* d_output, int64_t n, 
 
     if (num_blocks == 1) {
         max_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
+        // Synchronize to ensure kernel completes
+        cudaStreamSynchronize(stream);
     } else {
         T* d_temp;
         cudaMalloc(&d_temp, num_blocks * sizeof(T));
@@ -675,6 +679,8 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
             throw std::runtime_error("sum: unsupported dtype");
     }
 
+    cudaStreamSynchronize(stream);
+
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         throw std::runtime_error(std::string("CUDA error in sum_kernel: ") + cudaGetErrorString(err));
@@ -735,6 +741,9 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t st
     if (err != cudaSuccess) {
         throw std::runtime_error(std::string("CUDA error in mean_kernel: ") + cudaGetErrorString(err));
     }
+
+    // Additional device-wide synchronization to ensure all operations complete
+    cudaDeviceSynchronize();
 
     return sum_result;
 }
@@ -820,6 +829,8 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
         default:
             throw std::runtime_error("max: unsupported dtype");
     }
+
+    cudaStreamSynchronize(stream);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
@@ -910,6 +921,8 @@ auto min_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
         default:
             throw std::runtime_error("min: unsupported dtype");
     }
+
+    cudaStreamSynchronize(stream);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {

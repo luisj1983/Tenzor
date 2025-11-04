@@ -15,9 +15,12 @@ bool tensors_close(const Tensor& a, const Tensor& b, float rtol = 1e-5f, float a
         return false;
     }
 
-    const float* a_data = a.data<float>();
-    const float* b_data = b.data<float>();
-    size_t numel = a.numel();
+    // Transfer to CPU before accessing data to avoid SEGFAULT on CUDA
+    Tensor a_cpu = a.to(Device::cpu());
+    Tensor b_cpu = b.to(Device::cpu());
+    const float* a_data = a_cpu.data<float>();
+    const float* b_data = b_cpu.data<float>();
+    size_t numel = a_cpu.numel();
 
     for (size_t i = 0; i < numel; ++i) {
         float diff = std::abs(a_data[i] - b_data[i]);

@@ -246,14 +246,23 @@ auto MultiheadAttention::forward(const Variable& query,
         std::vector<int64_t> mask_shape = {batch_size, 1, 1, seq_len_k};
         Tensor padding_mask = reshape(key_padding_mask, mask_shape);
 
-        // Create -inf tensor for masked positions
-        Tensor neg_inf_tensor = zeros(std::vector<int64_t>(padding_mask.shape().begin(), padding_mask.shape().end()),
-                                      padding_mask.dtype(), padding_mask.device());
-        auto* mask_data = padding_mask.data<float>();
+        // Save original device and move to CPU for pointer-based computation
+        Device original_device = padding_mask.device();
+        Tensor padding_mask_cpu = (original_device == Device::cpu()) ? padding_mask : padding_mask.to(Device::cpu());
+
+        // Create -inf tensor for masked positions on CPU
+        Tensor neg_inf_tensor = zeros(std::vector<int64_t>(padding_mask_cpu.shape().begin(), padding_mask_cpu.shape().end()),
+                                      padding_mask_cpu.dtype(), Device::cpu());
+        auto* mask_data = padding_mask_cpu.data<float>();
         auto* neg_inf_data = neg_inf_tensor.data<float>();
 
-        for (int64_t i = 0; i < padding_mask.numel(); ++i) {
+        for (int64_t i = 0; i < padding_mask_cpu.numel(); ++i) {
             neg_inf_data[i] = mask_data[i] > 0.5f ? -std::numeric_limits<float>::infinity() : 0.0f;
+        }
+
+        // Move result back to original device if needed
+        if (original_device != Device::cpu()) {
+            neg_inf_tensor = neg_inf_tensor.to(original_device);
         }
 
         // Broadcast to full attention shape
@@ -305,7 +314,8 @@ auto MultiheadAttention::forward(const Variable& input) -> Variable {
 
 auto create_causal_mask(int64_t seq_len, Device device) -> Tensor {
     // Create upper triangular matrix with -inf above diagonal
-    Tensor mask = zeros({seq_len, seq_len}, DType::Float32, device);
+    // Always create on CPU first to avoid dereferencing CUDA pointers
+    Tensor mask = zeros({seq_len, seq_len}, DType::Float32, Device::cpu());
     auto* data = mask.data<float>();
 
     for (int64_t i = 0; i < seq_len; ++i) {
@@ -316,6 +326,11 @@ auto create_causal_mask(int64_t seq_len, Device device) -> Tensor {
                 data[i * seq_len + j] = 0.0f;
             }
         }
+    }
+
+    // Move to target device if needed
+    if (device != Device::cpu()) {
+        return mask.to(device);
     }
 
     return mask;

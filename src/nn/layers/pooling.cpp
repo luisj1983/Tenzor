@@ -102,6 +102,14 @@ auto MaxPool2d::forward(const Variable& input) -> Variable {
         throw std::invalid_argument("MaxPool2d expects 4D input [batch, channels, height, width]");
     }
 
+    // Store original device
+    Device original_device = input.tensor().device();
+
+    // Transfer input to CPU if needed (current implementation uses CPU loops)
+    Variable cpu_input = (original_device.type != Device::Type::CPU)
+                        ? Variable(input.tensor().to(Device::cpu()), input.requires_grad())
+                        : input;
+
     int64_t N = input_shape[0];
     int64_t C = input_shape[1];
     int64_t H_in = input_shape[2];
@@ -111,11 +119,11 @@ auto MaxPool2d::forward(const Variable& input) -> Variable {
     int64_t H_out = calculate_pool_output_size(H_in, kernel_size_, stride_, padding_);
     int64_t W_out = calculate_pool_output_size(W_in, kernel_size_, stride_, padding_);
 
-    // Create output tensor and indices tensor on same device as input
-    auto output = zeros({N, C, H_out, W_out}, input.tensor().dtype(), input.tensor().device());
-    auto indices = zeros({N, C, H_out, W_out}, input.tensor().dtype(), input.tensor().device());
+    // Create output tensor and indices tensor on CPU
+    auto output = zeros({N, C, H_out, W_out}, cpu_input.tensor().dtype(), Device::cpu());
+    auto indices = zeros({N, C, H_out, W_out}, cpu_input.tensor().dtype(), Device::cpu());
 
-    const float* input_data = input.tensor().data<float>();
+    const float* input_data = cpu_input.tensor().data<float>();
     float* output_data = output.data<float>();
     float* indices_data = indices.data<float>();
 
@@ -178,6 +186,12 @@ auto MaxPool2d::forward(const Variable& input) -> Variable {
             next_funcs.push_back(input.grad_fn());
         }
         backward_fn->set_next_functions(next_funcs);
+    }
+
+    // Transfer result back to original device if needed
+    if (original_device.type != Device::Type::CPU) {
+        result = Variable(result.tensor().to(original_device), result.requires_grad());
+        // Note: saved_tensors remain on CPU for backward pass compatibility
     }
 
     return result;

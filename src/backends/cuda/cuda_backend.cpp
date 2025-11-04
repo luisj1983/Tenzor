@@ -45,6 +45,8 @@ namespace cuda {
     auto sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaStream_t stream) -> Tensor;
     auto tanh_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
     auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaStream_t stream) -> Tensor;
+    auto gelu_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
+    auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaStream_t stream) -> Tensor;
     auto leaky_relu_kernel(const Tensor& input, float alpha, cudaStream_t stream) -> Tensor;
     auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, float alpha, cudaStream_t stream) -> Tensor;
 
@@ -147,6 +149,7 @@ public:
                 std::string("Failed to allocate device memory: ") + cudaGetErrorString(err)
             );
         }
+
         return ptr;
     }
 
@@ -437,6 +440,18 @@ public:
                     throw std::invalid_argument("tanh_backward operation requires exactly 2 inputs");
                 }
                 return {cuda::tanh_backward_kernel(inputs[0], inputs[1], stream)};
+            }
+            else if (op_name == "gelu") {
+                if (inputs.size() != 1) {
+                    throw std::invalid_argument("gelu operation requires exactly 1 input");
+                }
+                return {cuda::gelu_kernel(inputs[0], stream)};
+            }
+            else if (op_name == "gelu_backward") {
+                if (inputs.size() != 2) {
+                    throw std::invalid_argument("gelu_backward operation requires exactly 2 inputs");
+                }
+                return {cuda::gelu_backward_kernel(inputs[0], inputs[1], stream)};
             }
             else if (op_name == "leaky_relu") {
                 if (inputs.size() != 1) {

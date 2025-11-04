@@ -251,48 +251,84 @@ auto Variable::operator/(const Variable& other) const -> Variable {
 // Scalar operations
 auto Variable::operator+(float scalar) const -> Variable {
     // Create scalar tensor with same dtype and device
-    Tensor scalar_tensor(std::vector<int64_t>{}, impl_->data_.dtype(), impl_->data_.device());
+    Device original_device = impl_->data_.device();
+
+    // Always create scalar tensors on CPU first to avoid CUDA pointer dereference
+    Tensor scalar_tensor(std::vector<int64_t>{}, impl_->data_.dtype(), Device::cpu());
     if (impl_->data_.dtype() == DType::Float64) {
         scalar_tensor.data<double>()[0] = static_cast<double>(scalar);
     } else {
         scalar_tensor.data<float>()[0] = scalar;
     }
+
+    // Transfer to original device if needed
+    if (original_device != Device::cpu()) {
+        scalar_tensor = scalar_tensor.to(original_device);
+    }
+
     Variable scalar_var(scalar_tensor, false);
     return *this + scalar_var;
 }
 
 auto Variable::operator+(double scalar) const -> Variable {
     // Create scalar tensor with same dtype and device
-    Tensor scalar_tensor(std::vector<int64_t>{}, impl_->data_.dtype(), impl_->data_.device());
+    Device original_device = impl_->data_.device();
+
+    // Always create scalar tensors on CPU first to avoid CUDA pointer dereference
+    Tensor scalar_tensor(std::vector<int64_t>{}, impl_->data_.dtype(), Device::cpu());
     if (impl_->data_.dtype() == DType::Float64) {
         scalar_tensor.data<double>()[0] = scalar;
     } else {
         scalar_tensor.data<float>()[0] = static_cast<float>(scalar);
     }
+
+    // Transfer to original device if needed
+    if (original_device != Device::cpu()) {
+        scalar_tensor = scalar_tensor.to(original_device);
+    }
+
     Variable scalar_var(scalar_tensor, false);
     return *this + scalar_var;
 }
 
 auto Variable::operator*(float scalar) const -> Variable {
     // Create scalar tensor with same dtype and device
-    Tensor scalar_tensor(std::vector<int64_t>{}, impl_->data_.dtype(), impl_->data_.device());
+    Device original_device = impl_->data_.device();
+
+    // Always create scalar tensors on CPU first to avoid CUDA pointer dereference
+    Tensor scalar_tensor(std::vector<int64_t>{}, impl_->data_.dtype(), Device::cpu());
     if (impl_->data_.dtype() == DType::Float64) {
         scalar_tensor.data<double>()[0] = static_cast<double>(scalar);
     } else {
         scalar_tensor.data<float>()[0] = scalar;
     }
+
+    // Transfer to original device if needed
+    if (original_device != Device::cpu()) {
+        scalar_tensor = scalar_tensor.to(original_device);
+    }
+
     Variable scalar_var(scalar_tensor, false);
     return *this * scalar_var;
 }
 
 auto Variable::operator*(double scalar) const -> Variable {
     // Create scalar tensor with same dtype and device
-    Tensor scalar_tensor(std::vector<int64_t>{}, impl_->data_.dtype(), impl_->data_.device());
+    Device original_device = impl_->data_.device();
+
+    // Always create scalar tensors on CPU first to avoid CUDA pointer dereference
+    Tensor scalar_tensor(std::vector<int64_t>{}, impl_->data_.dtype(), Device::cpu());
     if (impl_->data_.dtype() == DType::Float64) {
         scalar_tensor.data<double>()[0] = scalar;
     } else {
         scalar_tensor.data<float>()[0] = static_cast<float>(scalar);
     }
+
+    // Transfer to original device if needed
+    if (original_device != Device::cpu()) {
+        scalar_tensor = scalar_tensor.to(original_device);
+    }
+
     Variable scalar_var(scalar_tensor, false);
     return *this * scalar_var;
 }
@@ -303,12 +339,21 @@ auto Variable::operator/(float scalar) const -> Variable {
 }
 
 auto Variable::operator/(double scalar) const -> Variable {
-    Tensor scalar_tensor({}, dtype(), device());
+    Device original_device = device();
+
+    // Always create scalar tensors on CPU first to avoid CUDA pointer dereference
+    Tensor scalar_tensor({}, dtype(), Device::cpu());
     if (dtype() == DType::Float64) {
         scalar_tensor.data<double>()[0] = scalar;
     } else {
         scalar_tensor.data<float>()[0] = static_cast<float>(scalar);
     }
+
+    // Transfer to original device if needed
+    if (original_device != Device::cpu()) {
+        scalar_tensor = scalar_tensor.to(original_device);
+    }
+
     Variable scalar_var(scalar_tensor, false);
     return *this / scalar_var;
 }

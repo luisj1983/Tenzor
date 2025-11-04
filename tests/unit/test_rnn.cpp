@@ -14,6 +14,8 @@ class RNNCellTestFixture : public BackendTest {};
 TEST_P(RNNCellTestFixture, BasicForward) {
     // Test basic forward pass with tanh activation
     nn::RNNCell cell(10, 20, "tanh");
+
+    cell.to(device);
     auto input = Variable(randn({5, 10}, DType::Float32, device), true);
     auto h = Variable(randn({5, 20}, DType::Float32, device), true);
 
@@ -27,6 +29,8 @@ TEST_P(RNNCellTestFixture, BasicForward) {
 TEST_P(RNNCellTestFixture, ReLUActivation) {
     // Test with ReLU activation
     nn::RNNCell cell(10, 20, "relu");
+
+    cell.to(device);
     auto input = Variable(randn({5, 10}, DType::Float32, device), true);
     auto h = Variable(randn({5, 20}, DType::Float32, device), true);
 
@@ -40,6 +44,8 @@ TEST_P(RNNCellTestFixture, ReLUActivation) {
 TEST_P(RNNCellTestFixture, NoInitialHidden) {
     // Test with zero-initialized hidden state
     nn::RNNCell cell(10, 20);
+
+    cell.to(device);
     auto input = Variable(randn({5, 10}, DType::Float32, device), true);
 
     auto output = cell.forward(input);
@@ -52,6 +58,8 @@ TEST_P(RNNCellTestFixture, NoInitialHidden) {
 TEST_P(RNNCellTestFixture, NoBias) {
     // Test without bias
     nn::RNNCell cell(10, 20, "tanh", false);
+
+    cell.to(device);
     auto input = Variable(randn({5, 10}, DType::Float32, device), true);
 
     auto output = cell.forward(input);
@@ -64,6 +72,8 @@ TEST_P(RNNCellTestFixture, InvalidNonlinearity) {
     // Test that invalid activation throws
     EXPECT_THROW({
         nn::RNNCell cell(10, 20, "sigmoid");
+
+        cell.to(device);
     }, std::invalid_argument) << "Failed on " << device.to_string();
 }
 
@@ -78,6 +88,8 @@ class RNNTestFixture : public BackendTest {};
 TEST_P(RNNTestFixture, BasicForward) {
     // Test basic forward pass
     nn::RNN rnn(10, 20, 1);
+
+    rnn.to(device);
     auto input = Variable(randn({7, 5, 10}, DType::Float32, device), true);  // (seq_len, batch, features)
 
     auto [output, h_n] = rnn.forward(input, Variable{});
@@ -95,7 +107,9 @@ TEST_P(RNNTestFixture, BasicForward) {
 
 TEST_P(RNNTestFixture, MultiLayer) {
     // Test multi-layer RNN
-    nn::RNN rnn(10, 20, 3);  // 3 layers
+    nn::RNN rnn(10, 20, 3);
+
+    rnn.to(device);  // 3 layers
     auto input = Variable(randn({7, 5, 10}, DType::Float32, device), true);
 
     auto [output, h_n] = rnn.forward(input, Variable{});
@@ -111,7 +125,9 @@ TEST_P(RNNTestFixture, MultiLayer) {
 
 TEST_P(RNNTestFixture, BatchFirst) {
     // Test with batch_first=true
-    nn::RNN rnn(10, 20, 1, "tanh", true, true);  // batch_first=true
+    nn::RNN rnn(10, 20, 1, "tanh", true, true);
+
+    rnn.to(device);  // batch_first=true
     auto input = Variable(randn({5, 7, 10}, DType::Float32, device), true);  // (batch, seq_len, features)
 
     auto [output, h_n] = rnn.forward(input, Variable{});
@@ -123,7 +139,9 @@ TEST_P(RNNTestFixture, BatchFirst) {
 
 TEST_P(RNNTestFixture, Bidirectional) {
     // Test bidirectional RNN
-    nn::RNN rnn(10, 20, 1, "tanh", true, false, 0.0, true);  // bidirectional=true
+    nn::RNN rnn(10, 20, 1, "tanh", true, false, 0.0, true);
+
+    rnn.to(device);  // bidirectional=true
     auto input = Variable(randn({7, 5, 10}, DType::Float32, device), true);
 
     auto [output, h_n] = rnn.forward(input, Variable{});
@@ -140,6 +158,8 @@ TEST_P(RNNTestFixture, Bidirectional) {
 TEST_P(RNNTestFixture, BidirectionalMultiLayer) {
     // Test bidirectional multi-layer RNN
     nn::RNN rnn(10, 20, 2, "tanh", true, false, 0.0, true);
+
+    rnn.to(device);
     auto input = Variable(randn({7, 5, 10}, DType::Float32, device), true);
 
     auto [output, h_n] = rnn.forward(input, Variable{});
@@ -150,7 +170,9 @@ TEST_P(RNNTestFixture, BidirectionalMultiLayer) {
 
 TEST_P(RNNTestFixture, WithDropout) {
     // Test with dropout between layers
-    nn::RNN rnn(10, 20, 3, "tanh", true, false, 0.5);  // 50% dropout
+    nn::RNN rnn(10, 20, 3, "tanh", true, false, 0.5);
+
+    rnn.to(device);  // 50% dropout
     auto input = Variable(randn({7, 5, 10}, DType::Float32, device), true);
 
     auto [output, h_n] = rnn.forward(input, Variable{});
@@ -163,6 +185,8 @@ TEST_P(RNNTestFixture, WithDropout) {
 TEST_P(RNNTestFixture, InitialHiddenState) {
     // Test with provided initial hidden state
     nn::RNN rnn(10, 20, 2);
+
+    rnn.to(device);
     auto input = Variable(randn({7, 5, 10}, DType::Float32, device), true);
     auto h0 = Variable(randn({2, 5, 20}, DType::Float32, device), true);
 
@@ -175,6 +199,8 @@ TEST_P(RNNTestFixture, InitialHiddenState) {
 TEST_P(RNNTestFixture, SequenceLengthVariation) {
     // Test with different sequence lengths
     nn::RNN rnn(10, 20);
+
+    rnn.to(device);
 
     // Short sequence
     auto input1 = Variable(randn({3, 5, 10}, DType::Float32, device), true);
@@ -191,6 +217,8 @@ TEST_P(RNNTestFixture, BatchSizeVariation) {
     // Test with different batch sizes
     nn::RNN rnn(10, 20);
 
+    rnn.to(device);
+
     // Small batch
     auto input1 = Variable(randn({7, 2, 10}, DType::Float32, device), true);
     auto [output1, h_n1] = rnn.forward(input1, Variable{});
@@ -205,6 +233,8 @@ TEST_P(RNNTestFixture, BatchSizeVariation) {
 TEST_P(RNNTestFixture, SingleTimestep) {
     // Test with single timestep
     nn::RNN rnn(10, 20);
+
+    rnn.to(device);
     auto input = Variable(randn({1, 5, 10}, DType::Float32, device), true);
 
     auto [output, h_n] = rnn.forward(input, Variable{});
@@ -215,6 +245,8 @@ TEST_P(RNNTestFixture, SingleTimestep) {
 TEST_P(RNNTestFixture, OutputConsistency) {
     // Test that output is deterministic
     nn::RNN rnn(10, 20);
+
+    rnn.to(device);
     auto input = Variable(ones({7, 5, 10}, DType::Float32, device), true);
 
     auto [output1, h_n1] = rnn.forward(input, Variable{});
@@ -230,6 +262,8 @@ TEST_P(RNNTestFixture, OutputConsistency) {
 TEST_P(RNNTestFixture, GradientFlow) {
     // Test that gradients can flow through RNN
     nn::RNN rnn(10, 20);
+
+    rnn.to(device);
     auto input = Variable(randn({7, 5, 10}, DType::Float32, device), true);
 
     auto [output, h_n] = rnn.forward(input, Variable{});
@@ -250,6 +284,8 @@ TEST_P(RNNTestFixture, TrainingMode) {
     // Test training/eval mode switching
     nn::RNN rnn(10, 20, 2, "tanh", true, false, 0.5);
 
+    rnn.to(device);
+
     EXPECT_TRUE(rnn.is_training()) << "Failed on " << device.to_string();
 
     rnn.eval();
@@ -262,6 +298,8 @@ TEST_P(RNNTestFixture, TrainingMode) {
 TEST_P(RNNTestFixture, ParameterCount) {
     // Test parameter counting
     nn::RNN rnn(10, 20, 2);
+
+    rnn.to(device);
     auto params = rnn.parameters();
 
     // Each layer has input_layer and hidden_layer, each with weight and bias
@@ -274,6 +312,8 @@ TEST_P(RNNTestFixture, ParameterCount) {
 TEST_P(RNNTestFixture, LargeHidden) {
     // Test with large hidden size
     nn::RNN rnn(10, 512);
+
+    rnn.to(device);
     auto input = Variable(randn({7, 5, 10}, DType::Float32, device), true);
 
     auto [output, h_n] = rnn.forward(input, Variable{});
@@ -286,6 +326,8 @@ TEST_P(RNNTestFixture, InvalidNumLayers) {
     // Test that invalid num_layers throws
     EXPECT_THROW({
         nn::RNN rnn(10, 20, 0);
+
+        rnn.to(device);
     }, std::invalid_argument) << "Failed on " << device.to_string();
 }
 
@@ -293,6 +335,8 @@ TEST_P(RNNTestFixture, InvalidDropout) {
     // Test that invalid dropout throws
     EXPECT_THROW({
         nn::RNN rnn(10, 20, 2, "tanh", true, false, 1.5);
+
+        rnn.to(device);
     }, std::invalid_argument) << "Failed on " << device.to_string();
 }
 

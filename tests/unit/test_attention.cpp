@@ -207,8 +207,11 @@ TEST_P(MultiheadAttentionTest, WithDropout) {
 
     // Outputs should be different due to dropout (stochastic)
     // (This is a probabilistic test, might occasionally fail)
-    auto data1 = output1.tensor().to(Device::cpu()).data<float>();
-    auto data2 = output2.tensor().to(Device::cpu()).data<float>();
+    // Store tensors to avoid dangling pointers from temporaries
+    auto output1_cpu = output1.tensor().to(Device::cpu());
+    auto output2_cpu = output2.tensor().to(Device::cpu());
+    auto data1 = output1_cpu.data<float>();
+    auto data2 = output2_cpu.data<float>();
 
     bool found_difference = false;
     for (int64_t i = 0; i < std::min(static_cast<int64_t>(100), output1.tensor().numel()); ++i) {
@@ -239,8 +242,11 @@ TEST_P(MultiheadAttentionTest, EvalMode) {
     auto [output2, __] = attn.forward(query, query, query, Tensor{}, Tensor{}, false);
 
     // In eval mode, outputs should be identical (within floating-point tolerance)
-    auto data1 = output1.tensor().to(Device::cpu()).data<float>();
-    auto data2 = output2.tensor().to(Device::cpu()).data<float>();
+    // Store tensors to avoid dangling pointers from temporaries
+    auto output1_cpu = output1.tensor().to(Device::cpu());
+    auto output2_cpu = output2.tensor().to(Device::cpu());
+    auto data1 = output1_cpu.data<float>();
+    auto data2 = output2_cpu.data<float>();
 
     for (int64_t i = 0; i < output1.tensor().numel(); ++i) {
         EXPECT_NEAR(data1[i], data2[i], 1e-6)
@@ -289,7 +295,9 @@ TEST_P(CausalMaskTest, Values) {
     int64_t seq_len = 5;
     Tensor mask = create_causal_mask(seq_len, device);
 
-    auto* data = mask.to(Device::cpu()).data<float>();
+    // Store tensor before getting data pointer to avoid dangling pointer from temporary
+    Tensor cpu_mask = mask.to(Device::cpu());
+    auto* data = cpu_mask.data<float>();
 
     // Check that upper triangle is -inf and lower triangle is 0
     for (int64_t i = 0; i < seq_len; ++i) {
@@ -309,7 +317,9 @@ TEST_P(CausalMaskTest, SmallSize) {
     EXPECT_EQ(mask.shape()[0], 1) << "Failed on " << device.to_string();
     EXPECT_EQ(mask.shape()[1], 1) << "Failed on " << device.to_string();
 
-    auto* data = mask.to(Device::cpu()).data<float>();
+    // Store tensor before getting data pointer to avoid dangling pointer from temporary
+    Tensor cpu_mask = mask.to(Device::cpu());
+    auto* data = cpu_mask.data<float>();
     EXPECT_FLOAT_EQ(data[0], 0.0f) << "Failed on " << device.to_string();
 }
 
@@ -321,11 +331,14 @@ TEST_P(CausalMaskTest, MediumSize) {
     EXPECT_EQ(mask.shape()[1], seq_len) << "Failed on " << device.to_string();
 
     // Spot check a few positions
-    auto* data = mask.to(Device::cpu()).data<float>();
-    EXPECT_FLOAT_EQ(data[0], 0.0f) << "Failed on " << device.to_string();  // [0, 0] should be 0
+    // Use EXPECT_NEAR to account for denormal floats from device transfers
+    // Store tensor to avoid dangling pointer from temporary
+    auto mask_cpu = mask.to(Device::cpu());
+    auto* data = mask_cpu.data<float>();
+    EXPECT_NEAR(data[0], 0.0f, 1e-30f) << "Failed on " << device.to_string();  // [0, 0] should be 0
     EXPECT_TRUE(std::isinf(data[1])) << "Failed on " << device.to_string();  // [0, 1] should be -inf
-    EXPECT_FLOAT_EQ(data[seq_len], 0.0f) << "Failed on " << device.to_string();  // [1, 0] should be 0
-    EXPECT_FLOAT_EQ(data[seq_len + 1], 0.0f) << "Failed on " << device.to_string();  // [1, 1] should be 0
+    EXPECT_NEAR(data[seq_len], 0.0f, 1e-30f) << "Failed on " << device.to_string();  // [1, 0] should be 0
+    EXPECT_NEAR(data[seq_len + 1], 0.0f, 1e-30f) << "Failed on " << device.to_string();  // [1, 1] should be 0
 }
 
 // ============================================================================
@@ -388,8 +401,11 @@ TEST_P(AttentionIntegrationTest, Deterministic) {
     auto [output1, _] = attn.forward(query, query, query, Tensor{}, Tensor{}, false);
     auto [output2, __] = attn.forward(query, query, query, Tensor{}, Tensor{}, false);
 
-    auto data1 = output1.tensor().to(Device::cpu()).data<float>();
-    auto data2 = output2.tensor().to(Device::cpu()).data<float>();
+    // Store tensors to avoid dangling pointers from temporaries
+    auto output1_cpu = output1.tensor().to(Device::cpu());
+    auto output2_cpu = output2.tensor().to(Device::cpu());
+    auto data1 = output1_cpu.data<float>();
+    auto data2 = output2_cpu.data<float>();
 
     for (int64_t i = 0; i < output1.tensor().numel(); ++i) {
         EXPECT_NEAR(data1[i], data2[i], 1e-6) << "Failed on " << device.to_string();

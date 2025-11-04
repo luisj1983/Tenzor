@@ -240,10 +240,17 @@ auto Embedding::forward(const Variable& input) -> Variable {
 
 auto Embedding::renorm_embeddings(const Tensor& indices) -> void {
     // Renormalize embeddings that exceed max_norm
-    auto weight_ptr = weight_.tensor().data<float>();
-    auto indices_ptr = indices.data<int64_t>();
+    // Transfer to CPU for pointer-based computation
+    Device weight_device = weight_.tensor().device();
+    Device indices_device = indices.device();
 
-    int64_t num_indices = indices.numel();
+    Tensor weight_cpu = (weight_device == Device::cpu()) ? weight_.tensor() : weight_.tensor().to(Device::cpu());
+    Tensor indices_cpu = (indices_device == Device::cpu()) ? indices : indices.to(Device::cpu());
+
+    auto weight_ptr = weight_cpu.data<float>();
+    auto indices_ptr = indices_cpu.data<int64_t>();
+
+    int64_t num_indices = indices_cpu.numel();
 
     for (int64_t i = 0; i < num_indices; ++i) {
         auto idx = indices_ptr[i];
@@ -276,6 +283,21 @@ auto Embedding::renorm_embeddings(const Tensor& indices) -> void {
             for (int64_t j = 0; j < embedding_dim_; ++j) {
                 weight_ptr[idx * embedding_dim_ + j] *= scale;
             }
+        }
+    }
+
+    // Transfer modified weights back to original device if needed
+    if (weight_device != Device::cpu()) {
+        Tensor weight_device_tensor = weight_cpu.to(weight_device);
+        weight_ = Variable(weight_device_tensor, weight_.requires_grad());
+        if (weight_.grad_fn()) {
+            weight_.set_grad_fn(weight_.grad_fn());
+        }
+    } else if (weight_cpu.data_ptr() != weight_.tensor().data_ptr()) {
+        // Even on CPU, update if we created a copy
+        weight_ = Variable(weight_cpu, weight_.requires_grad());
+        if (weight_.grad_fn()) {
+            weight_.set_grad_fn(weight_.grad_fn());
         }
     }
 }
@@ -342,15 +364,19 @@ auto EmbeddingBag::forward(const Variable& input) -> Variable {
 
 auto EmbeddingBag::aggregate_embeddings(const Variable& embeddings, const Variable& offsets) -> Variable {
     const auto& emb_tensor = embeddings.tensor();
-    auto emb_ptr = emb_tensor.data<float>();
     auto emb_shape = emb_tensor.shape();
 
     int64_t total_elements = emb_shape[0];
     int64_t embedding_dim = emb_shape[1];
 
+    // Save original device and transfer to CPU for pointer-based computation
+    Device original_device = emb_tensor.device();
+    Tensor emb_cpu = (original_device == Device::cpu()) ? emb_tensor : emb_tensor.to(Device::cpu());
+    auto emb_ptr = emb_cpu.data<float>();
+
     // If no offsets, aggregate all embeddings into single vector
     if (!offsets.is_initialized() || offsets.tensor().numel() == 0) {
-        auto output = zeros({1, embedding_dim});
+        auto output = zeros({1, embedding_dim}, DType::Float32, Device::cpu());
         auto output_ptr = output.data<float>();
 
         if (mode_ == "sum" || mode_ == "mean") {
@@ -382,15 +408,21 @@ auto EmbeddingBag::aggregate_embeddings(const Variable& embeddings, const Variab
             }
         }
 
+        // Transfer output back to original device if needed
+        if (original_device != Device::cpu()) {
+            output = output.to(original_device);
+        }
+
         return Variable(output, embeddings.requires_grad());
     }
 
     // With offsets: aggregate each bag separately
     const auto& offsets_tensor = offsets.tensor();
-    auto offsets_ptr = offsets_tensor.data<int64_t>();
-    int64_t num_bags = offsets_tensor.numel();
+    Tensor offsets_cpu = (original_device == Device::cpu()) ? offsets_tensor : offsets_tensor.to(Device::cpu());
+    auto offsets_ptr = offsets_cpu.data<int64_t>();
+    int64_t num_bags = offsets_cpu.numel();
 
-    auto output = zeros({num_bags, embedding_dim});
+    auto output = zeros({num_bags, embedding_dim}, DType::Float32, Device::cpu());
     auto output_ptr = output.data<float>();
 
     for (int64_t bag = 0; bag < num_bags; ++bag) {
@@ -442,6 +474,11 @@ auto EmbeddingBag::aggregate_embeddings(const Variable& embeddings, const Variab
                 }
             }
         }
+    }
+
+    // Transfer output back to original device if needed
+    if (original_device != Device::cpu()) {
+        output = output.to(original_device);
     }
 
     return Variable(output, embeddings.requires_grad());

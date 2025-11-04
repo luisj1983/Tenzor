@@ -1,0 +1,5 @@
+if(EXISTS "/home/lee/Projects/Tenzor/build_transfer/tests/test_dataloader[1]_tests.cmake")
+  include("/home/lee/Projects/Tenzor/build_transfer/tests/test_dataloader[1]_tests.cmake")
+else()
+  add_test(test_dataloader_NOT_BUILT test_dataloader_NOT_BUILT)
+endif()
