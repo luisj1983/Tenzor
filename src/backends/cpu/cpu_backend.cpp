@@ -24,7 +24,12 @@ namespace cpu {
     auto max_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
     auto min_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
     auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
+    auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
     auto argsort_kernel(const Tensor& input, int64_t dim, bool descending) -> Tensor;
+    auto prod_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
+    auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correction) -> Tensor;
+    auto std_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correction) -> Tensor;
+    auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim) -> Tensor;
 
     // Comparison operations
     auto eq_kernel(const Tensor& a, const Tensor& b) -> Tensor;
@@ -33,6 +38,7 @@ namespace cpu {
     auto le_kernel(const Tensor& a, const Tensor& b) -> Tensor;
     auto gt_kernel(const Tensor& a, const Tensor& b) -> Tensor;
     auto ge_kernel(const Tensor& a, const Tensor& b) -> Tensor;
+    auto dot_kernel(const Tensor& a, const Tensor& b) -> Tensor;
 
     // Activation kernels
     auto relu_kernel(const Tensor& input) -> Tensor;
@@ -92,6 +98,11 @@ namespace cpu {
 
     // Indexing kernels
     auto index_select_kernel(const Tensor& input, int64_t dim, const Tensor& index) -> Tensor;
+    auto gather_kernel(const Tensor& input, int64_t dim, const Tensor& index) -> Tensor;
+    auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& src) -> Tensor;
+    auto masked_select_kernel(const Tensor& input, const Tensor& mask) -> Tensor;
+    auto masked_fill_kernel(const Tensor& input, const Tensor& mask, float value) -> Tensor;
+    auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y) -> Tensor;
 } // namespace cpu
 
 class CPUBackend : public Backend {
@@ -266,6 +277,88 @@ public:
                 keepdim = (attrs.at("keepdim") == "1");
             }
             return {cpu::argmax_kernel(inputs[0], dim, keepdim)};
+        }
+        else if (op_name == "argmin") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("argmin operation requires exactly 1 input");
+            }
+            int64_t dim = -1;
+            bool keepdim = false;
+            if (attrs.contains("dim")) {
+                dim = std::stoll(attrs.at("dim"));
+            }
+            if (attrs.contains("keepdim")) {
+                keepdim = (attrs.at("keepdim") == "1");
+            }
+            return {cpu::argmin_kernel(inputs[0], dim, keepdim)};
+        }
+        else if (op_name == "prod") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("prod operation requires exactly 1 input");
+            }
+            int64_t dim = -1;
+            bool keepdim = false;
+            if (attrs.contains("dim")) {
+                dim = std::stoll(attrs.at("dim"));
+            }
+            if (attrs.contains("keepdim")) {
+                keepdim = (attrs.at("keepdim") == "1");
+            }
+            return {cpu::prod_kernel(inputs[0], dim, keepdim)};
+        }
+        else if (op_name == "var") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("var operation requires exactly 1 input");
+            }
+            int64_t dim = -1;
+            bool keepdim = false;
+            int64_t correction = 1;
+            if (attrs.contains("dim")) {
+                dim = std::stoll(attrs.at("dim"));
+            }
+            if (attrs.contains("keepdim")) {
+                keepdim = (attrs.at("keepdim") == "1");
+            }
+            if (attrs.contains("correction")) {
+                correction = std::stoll(attrs.at("correction"));
+            }
+            return {cpu::var_kernel(inputs[0], dim, keepdim, correction)};
+        }
+        else if (op_name == "std") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("std operation requires exactly 1 input");
+            }
+            int64_t dim = -1;
+            bool keepdim = false;
+            int64_t correction = 1;
+            if (attrs.contains("dim")) {
+                dim = std::stoll(attrs.at("dim"));
+            }
+            if (attrs.contains("keepdim")) {
+                keepdim = (attrs.at("keepdim") == "1");
+            }
+            if (attrs.contains("correction")) {
+                correction = std::stoll(attrs.at("correction"));
+            }
+            return {cpu::std_kernel(inputs[0], dim, keepdim, correction)};
+        }
+        else if (op_name == "norm") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("norm operation requires exactly 1 input");
+            }
+            float p = 2.0f;
+            int64_t dim = -1;
+            bool keepdim = false;
+            if (attrs.contains("p")) {
+                p = std::stof(attrs.at("p"));
+            }
+            if (attrs.contains("dim")) {
+                dim = std::stoll(attrs.at("dim"));
+            }
+            if (attrs.contains("keepdim")) {
+                keepdim = (attrs.at("keepdim") == "1");
+            }
+            return {cpu::norm_kernel(inputs[0], p, dim, keepdim)};
         }
         else if (op_name == "argsort") {
             if (inputs.size() != 1) {
@@ -569,6 +662,48 @@ public:
                 dim = std::stoll(attrs.at("dim"));
             }
             return {cpu::index_select_kernel(inputs[0], dim, inputs[1])};
+        }
+        else if (op_name == "gather") {
+            if (inputs.size() != 2) {
+                throw std::invalid_argument("gather operation requires exactly 2 inputs");
+            }
+            int64_t dim = 0;
+            if (attrs.contains("dim")) {
+                dim = std::stoll(attrs.at("dim"));
+            }
+            return {cpu::gather_kernel(inputs[0], dim, inputs[1])};
+        }
+        else if (op_name == "scatter") {
+            if (inputs.size() != 3) {
+                throw std::invalid_argument("scatter operation requires exactly 3 inputs");
+            }
+            int64_t dim = 0;
+            if (attrs.contains("dim")) {
+                dim = std::stoll(attrs.at("dim"));
+            }
+            return {cpu::scatter_kernel(inputs[0], dim, inputs[1], inputs[2])};
+        }
+        else if (op_name == "masked_select") {
+            if (inputs.size() != 2) {
+                throw std::invalid_argument("masked_select operation requires exactly 2 inputs");
+            }
+            return {cpu::masked_select_kernel(inputs[0], inputs[1])};
+        }
+        else if (op_name == "masked_fill") {
+            if (inputs.size() != 2) {
+                throw std::invalid_argument("masked_fill operation requires exactly 2 inputs");
+            }
+            if (!attrs.contains("value")) {
+                throw std::invalid_argument("masked_fill operation requires 'value' attribute");
+            }
+            float value = std::stof(attrs.at("value"));
+            return {cpu::masked_fill_kernel(inputs[0], inputs[1], value)};
+        }
+        else if (op_name == "where") {
+            if (inputs.size() != 3) {
+                throw std::invalid_argument("where operation requires exactly 3 inputs");
+            }
+            return {cpu::where_kernel(inputs[0], inputs[1], inputs[2])};
         }
         else if (op_name == "batchnorm2d_mean_var") {
             if (inputs.size() != 1) {
@@ -942,6 +1077,12 @@ public:
                 throw std::invalid_argument("ge operation requires exactly 2 inputs");
             }
             return {cpu::ge_kernel(inputs[0], inputs[1])};
+        }
+        else if (op_name == "dot") {
+            if (inputs.size() != 2) {
+                throw std::invalid_argument("dot operation requires exactly 2 inputs");
+            }
+            return {cpu::dot_kernel(inputs[0], inputs[1])};
         }
         else {
             throw std::runtime_error("CPUBackend: Unknown operation '" + op_name + "'");

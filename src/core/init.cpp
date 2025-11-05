@@ -105,6 +105,36 @@ auto initialize() -> void {
             return cpu_backend->dispatch("min", inputs, attrs);
         });
 
+    registry.register_kernel("argmax", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("argmax", inputs, attrs);
+        });
+
+    registry.register_kernel("argmin", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("argmin", inputs, attrs);
+        });
+
+    registry.register_kernel("prod", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("prod", inputs, attrs);
+        });
+
+    registry.register_kernel("var", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("var", inputs, attrs);
+        });
+
+    registry.register_kernel("std", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("std", inputs, attrs);
+        });
+
+    registry.register_kernel("norm", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("norm", inputs, attrs);
+        });
+
     // Activation functions
     registry.register_kernel("relu", Device::Type::CPU,
         [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
@@ -222,6 +252,11 @@ auto initialize() -> void {
             return cpu_backend->dispatch("pow", inputs, attrs);
         });
 
+    registry.register_kernel("dot", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("dot", inputs, attrs);
+        });
+
     registry.register_kernel("clamp", Device::Type::CPU,
         [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             return cpu_backend->dispatch("clamp", inputs, attrs);
@@ -297,6 +332,36 @@ auto initialize() -> void {
     registry.register_kernel("unsqueeze", Device::Type::CPU,
         [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             return cpu_backend->dispatch("unsqueeze", inputs, attrs);
+        });
+
+    registry.register_kernel("index_select", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("index_select", inputs, attrs);
+        });
+
+    registry.register_kernel("gather", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("gather", inputs, attrs);
+        });
+
+    registry.register_kernel("scatter", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("scatter", inputs, attrs);
+        });
+
+    registry.register_kernel("masked_select", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("masked_select", inputs, attrs);
+        });
+
+    registry.register_kernel("masked_fill", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("masked_fill", inputs, attrs);
+        });
+
+    registry.register_kernel("where", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("where", inputs, attrs);
         });
 
     registry.register_kernel("cat", Device::Type::CPU,
@@ -469,6 +534,36 @@ auto initialize() -> void {
                         return cuda_backend->dispatch("min", inputs, attrs);
                     });
 
+                registry.register_kernel("argmax", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("argmax", inputs, attrs);
+                    });
+
+                registry.register_kernel("argmin", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("argmin", inputs, attrs);
+                    });
+
+                registry.register_kernel("prod", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("prod", inputs, attrs);
+                    });
+
+                registry.register_kernel("var", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("var", inputs, attrs);
+                    });
+
+                registry.register_kernel("std", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("std", inputs, attrs);
+                    });
+
+                registry.register_kernel("norm", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("norm", inputs, attrs);
+                    });
+
                 // Activation functions
                 registry.register_kernel("relu", Device::Type::CUDA,
                     [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
@@ -586,6 +681,109 @@ auto initialize() -> void {
                         return cuda_backend->dispatch("pow", inputs, attrs);
                     });
 
+                // Trigonometric functions
+                registry.register_kernel("sin", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("sin", inputs, attrs);
+                    });
+
+                registry.register_kernel("cos", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("cos", inputs, attrs);
+                    });
+
+                registry.register_kernel("tan", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("tan", inputs, attrs);
+                    });
+
+                registry.register_kernel("asin", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("asin", inputs, attrs);
+                    });
+
+                registry.register_kernel("acos", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("acos", inputs, attrs);
+                    });
+
+                registry.register_kernel("atan", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("atan", inputs, attrs);
+                    });
+
+                registry.register_kernel("sinh", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("sinh", inputs, attrs);
+                    });
+
+                registry.register_kernel("cosh", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("cosh", inputs, attrs);
+                    });
+
+                // Rounding functions
+                registry.register_kernel("ceil", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("ceil", inputs, attrs);
+                    });
+
+                registry.register_kernel("floor", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("floor", inputs, attrs);
+                    });
+
+                registry.register_kernel("round", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("round", inputs, attrs);
+                    });
+
+                registry.register_kernel("trunc", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("trunc", inputs, attrs);
+                    });
+
+                registry.register_kernel("reciprocal", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("reciprocal", inputs, attrs);
+                    });
+
+                registry.register_kernel("clamp_min", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("clamp_min", inputs, attrs);
+                    });
+
+                registry.register_kernel("clamp_max", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("clamp_max", inputs, attrs);
+                    });
+
+                // In-place operations
+                registry.register_kernel("add_inplace", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("add_inplace", inputs, attrs);
+                    });
+
+                registry.register_kernel("sub_inplace", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("sub_inplace", inputs, attrs);
+                    });
+
+                registry.register_kernel("mul_inplace", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("mul_inplace", inputs, attrs);
+                    });
+
+                registry.register_kernel("div_inplace", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("div_inplace", inputs, attrs);
+                    });
+
+                registry.register_kernel("dot", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("dot", inputs, attrs);
+                    });
+
                 registry.register_kernel("clamp", Device::Type::CUDA,
                     [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
                         return cuda_backend->dispatch("clamp", inputs, attrs);
@@ -628,6 +826,11 @@ auto initialize() -> void {
                         return cuda_backend->dispatch("expand", inputs, attrs);
                     });
 
+                registry.register_kernel("repeat", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("repeat", inputs, attrs);
+                    });
+
                 registry.register_kernel("contiguous", Device::Type::CUDA,
                     [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
                         return cuda_backend->dispatch("contiguous", inputs, attrs);
@@ -666,6 +869,36 @@ auto initialize() -> void {
                 registry.register_kernel("unsqueeze", Device::Type::CUDA,
                     [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
                         return cuda_backend->dispatch("unsqueeze", inputs, attrs);
+                    });
+
+                registry.register_kernel("index_select", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("index_select", inputs, attrs);
+                    });
+
+                registry.register_kernel("gather", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("gather", inputs, attrs);
+                    });
+
+                registry.register_kernel("scatter", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("scatter", inputs, attrs);
+                    });
+
+                registry.register_kernel("masked_select", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("masked_select", inputs, attrs);
+                    });
+
+                registry.register_kernel("masked_fill", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("masked_fill", inputs, attrs);
+                    });
+
+                registry.register_kernel("where", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("where", inputs, attrs);
                     });
 
                 registry.register_kernel("cat", Device::Type::CUDA,
@@ -1146,6 +1379,11 @@ auto initialize() -> void {
                         return oneapi_backend->dispatch("pow", inputs, attrs);
                     });
 
+                registry.register_kernel("dot", Device::Type::OneAPI,
+                    [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return oneapi_backend->dispatch("dot", inputs, attrs);
+                    });
+
                 // Activation functions
                 registry.register_kernel("relu", Device::Type::OneAPI,
                     [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
@@ -1222,6 +1460,36 @@ auto initialize() -> void {
                 registry.register_kernel("unsqueeze", Device::Type::OneAPI,
                     [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
                         return oneapi_backend->dispatch("unsqueeze", inputs, attrs);
+                    });
+
+                registry.register_kernel("index_select", Device::Type::OneAPI,
+                    [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return oneapi_backend->dispatch("index_select", inputs, attrs);
+                    });
+
+                registry.register_kernel("gather", Device::Type::OneAPI,
+                    [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return oneapi_backend->dispatch("gather", inputs, attrs);
+                    });
+
+                registry.register_kernel("scatter", Device::Type::OneAPI,
+                    [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return oneapi_backend->dispatch("scatter", inputs, attrs);
+                    });
+
+                registry.register_kernel("masked_select", Device::Type::OneAPI,
+                    [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return oneapi_backend->dispatch("masked_select", inputs, attrs);
+                    });
+
+                registry.register_kernel("masked_fill", Device::Type::OneAPI,
+                    [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return oneapi_backend->dispatch("masked_fill", inputs, attrs);
+                    });
+
+                registry.register_kernel("where", Device::Type::OneAPI,
+                    [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return oneapi_backend->dispatch("where", inputs, attrs);
                     });
 
                 registry.register_kernel("contiguous", Device::Type::OneAPI,
@@ -1414,6 +1682,11 @@ auto initialize() -> void {
                 registry.register_kernel("std", Device::Type::OneAPI,
                     [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
                         return oneapi_backend->dispatch("std", inputs, attrs);
+                    });
+
+                registry.register_kernel("norm", Device::Type::OneAPI,
+                    [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return oneapi_backend->dispatch("norm", inputs, attrs);
                     });
 
                 registry.register_kernel("var", Device::Type::OneAPI,

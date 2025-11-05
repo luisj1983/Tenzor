@@ -334,11 +334,29 @@ auto prod_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& qu
     int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
     bool keepdim = attrs.contains("keepdim") && attrs.at("keepdim") == "1";
 
-    auto shape = input.shape();
+    auto shape_span = input.shape();
+    std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
+    auto strides_span = input.strides();
+    std::vector<int64_t> strides(strides_span.begin(), strides_span.end());
 
-    // For now, only support reduction over all dimensions
-    if (dim != -1 && dim != static_cast<int64_t>(shape.size()) - 1) {
-        throw std::invalid_argument("prod: only dim=-1 (all dimensions) is currently supported for OneAPI");
+    // Compute output shape
+    std::vector<int64_t> out_shape;
+    if (dim == -1) {
+        // Full reduction
+        out_shape = keepdim ? std::vector<int64_t>(shape.size(), 1) : std::vector<int64_t>{1};
+    } else {
+        // Dimensional reduction
+        if (dim < 0 || dim >= static_cast<int64_t>(shape.size())) {
+            throw std::invalid_argument("prod: dim out of range");
+        }
+        out_shape.reserve(keepdim ? shape.size() : shape.size() - 1);
+        for (size_t i = 0; i < shape.size(); ++i) {
+            if (static_cast<int64_t>(i) == dim) {
+                if (keepdim) out_shape.push_back(1);
+            } else {
+                out_shape.push_back(shape[i]);
+            }
+        }
     }
 
     // Compute total number of elements
@@ -347,65 +365,223 @@ auto prod_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& qu
         total_size *= s;
     }
 
+    // Compute output size
+    int64_t output_size = 1;
+    for (auto s : out_shape) {
+        output_size *= s;
+    }
+
     if (input.dtype() == DType::Float32) {
         const float* in_ptr = get_data_ptr<const float>(input);
 
-        // Use logarithmic reduction for better numerical stability
-        // prod = exp(sum(log(x))) for positive values
-        // For general case, we use sequential multiplication on host
-        float prod_value = 1.0f;
-
-        // Copy to host and compute product sequentially
+        // Copy to host and compute product
         std::vector<float> host_data(total_size);
         queue.memcpy(host_data.data(), in_ptr, total_size * sizeof(float)).wait();
 
-        for (int64_t i = 0; i < total_size; ++i) {
-            prod_value *= host_data[i];
-        }
+        std::vector<float> result(output_size);
 
-        // Create output tensor
-        std::vector<int64_t> out_shape;
-        if (keepdim) {
-            out_shape.resize(shape.size(), 1);
+        if (dim == -1) {
+            // Full reduction
+            float prod_value = 1.0f;
+            for (int64_t i = 0; i < total_size; ++i) {
+                prod_value *= host_data[i];
+            }
+            result[0] = prod_value;
         } else {
-            out_shape = {1};
+            // Dimensional reduction
+            const int64_t ndim = shape.size();
+            const int64_t dim_size = shape[dim];
+
+            for (int64_t out_idx = 0; out_idx < output_size; ++out_idx) {
+                std::vector<int64_t> indices(ndim, 0);
+                int64_t tmp = out_idx;
+
+                // Convert flat output index to multi-dimensional indices
+                for (int64_t d = ndim - 1; d >= 0; --d) {
+                    if (d == dim) continue;
+                    int64_t size = shape[d];
+                    indices[d] = tmp % size;
+                    tmp /= size;
+                }
+
+                // Compute product along the reduction dimension
+                float prod_value = 1.0f;
+                for (int64_t i = 0; i < dim_size; ++i) {
+                    indices[dim] = i;
+                    int64_t in_idx = 0;
+                    for (int64_t d = 0; d < ndim; ++d) {
+                        in_idx += indices[d] * strides[d];
+                    }
+                    prod_value *= host_data[in_idx];
+                }
+                result[out_idx] = prod_value;
+            }
         }
 
+        // Create output tensor and copy result back
         Tensor output(out_shape, input.dtype(), input.device());
         float* out_ptr = get_data_ptr<float>(output);
-        queue.fill(out_ptr, prod_value, 1).wait();
+        queue.memcpy(out_ptr, result.data(), output_size * sizeof(float)).wait();
 
         return output;
     }
     else if (input.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(input);
 
-        // Copy to host and compute product sequentially
-        double prod_value = 1.0;
-
+        // Copy to host and compute product
         std::vector<double> host_data(total_size);
         queue.memcpy(host_data.data(), in_ptr, total_size * sizeof(double)).wait();
 
-        for (int64_t i = 0; i < total_size; ++i) {
-            prod_value *= host_data[i];
-        }
+        std::vector<double> result(output_size);
 
-        // Create output tensor
-        std::vector<int64_t> out_shape;
-        if (keepdim) {
-            out_shape.resize(shape.size(), 1);
+        if (dim == -1) {
+            // Full reduction
+            double prod_value = 1.0;
+            for (int64_t i = 0; i < total_size; ++i) {
+                prod_value *= host_data[i];
+            }
+            result[0] = prod_value;
         } else {
-            out_shape = {1};
+            // Dimensional reduction
+            const int64_t ndim = shape.size();
+            const int64_t dim_size = shape[dim];
+
+            for (int64_t out_idx = 0; out_idx < output_size; ++out_idx) {
+                std::vector<int64_t> indices(ndim, 0);
+                int64_t tmp = out_idx;
+
+                // Convert flat output index to multi-dimensional indices
+                for (int64_t d = ndim - 1; d >= 0; --d) {
+                    if (d == dim) continue;
+                    int64_t size = shape[d];
+                    indices[d] = tmp % size;
+                    tmp /= size;
+                }
+
+                // Compute product along the reduction dimension
+                double prod_value = 1.0;
+                for (int64_t i = 0; i < dim_size; ++i) {
+                    indices[dim] = i;
+                    int64_t in_idx = 0;
+                    for (int64_t d = 0; d < ndim; ++d) {
+                        in_idx += indices[d] * strides[d];
+                    }
+                    prod_value *= host_data[in_idx];
+                }
+                result[out_idx] = prod_value;
+            }
         }
 
+        // Create output tensor and copy result back
         Tensor output(out_shape, input.dtype(), input.device());
         double* out_ptr = get_data_ptr<double>(output);
-        queue.fill(out_ptr, prod_value, 1).wait();
+        queue.memcpy(out_ptr, result.data(), output_size * sizeof(double)).wait();
 
         return output;
     }
     else {
         throw std::runtime_error("Unsupported dtype for prod_kernel");
+    }
+}
+
+// Norm kernel - compute Lp norm
+auto norm_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor {
+    float p = attrs.contains("p") ? std::stof(attrs.at("p")) : 2.0f;
+    int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
+    bool keepdim = attrs.contains("keepdim") && attrs.at("keepdim") == "1";
+
+    auto shape_span = input.shape();
+    std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
+
+    if (dim != -1) {
+        throw std::runtime_error("norm: only full reduction (dim=-1) is currently supported for OneAPI");
+    }
+
+    // Compute output shape
+    std::vector<int64_t> out_shape;
+    if (keepdim) {
+        out_shape.resize(shape.size(), 1);
+    } else {
+        out_shape = {1};
+    }
+
+    int64_t n = input.numel();
+    if (n == 0) {
+        throw std::runtime_error("norm: input tensor is empty");
+    }
+
+    if (input.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(input);
+
+        // Copy to host and compute norm
+        std::vector<float> host_data(n);
+        queue.memcpy(host_data.data(), in_ptr, n * sizeof(float)).wait();
+
+        float norm_value = 0.0f;
+
+        if (p == 1.0f) {
+            // L1 norm
+            for (int64_t i = 0; i < n; ++i) {
+                norm_value += std::abs(host_data[i]);
+            }
+        } else if (p == 2.0f) {
+            // L2 norm
+            for (int64_t i = 0; i < n; ++i) {
+                norm_value += host_data[i] * host_data[i];
+            }
+            norm_value = std::sqrt(norm_value);
+        } else {
+            // General Lp norm
+            for (int64_t i = 0; i < n; ++i) {
+                norm_value += std::pow(std::abs(host_data[i]), p);
+            }
+            norm_value = std::pow(norm_value, 1.0f / p);
+        }
+
+        // Create output and copy result
+        Tensor output(out_shape, input.dtype(), input.device());
+        float* out_ptr = get_data_ptr<float>(output);
+        queue.fill(out_ptr, norm_value, 1).wait();
+
+        return output;
+    }
+    else if (input.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(input);
+
+        // Copy to host and compute norm
+        std::vector<double> host_data(n);
+        queue.memcpy(host_data.data(), in_ptr, n * sizeof(double)).wait();
+
+        double norm_value = 0.0;
+
+        if (p == 1.0) {
+            // L1 norm
+            for (int64_t i = 0; i < n; ++i) {
+                norm_value += std::abs(host_data[i]);
+            }
+        } else if (p == 2.0) {
+            // L2 norm
+            for (int64_t i = 0; i < n; ++i) {
+                norm_value += host_data[i] * host_data[i];
+            }
+            norm_value = std::sqrt(norm_value);
+        } else {
+            // General Lp norm
+            for (int64_t i = 0; i < n; ++i) {
+                norm_value += std::pow(std::abs(host_data[i]), p);
+            }
+            norm_value = std::pow(norm_value, 1.0 / p);
+        }
+
+        // Create output and copy result
+        Tensor output(out_shape, input.dtype(), input.device());
+        double* out_ptr = get_data_ptr<double>(output);
+        queue.fill(out_ptr, norm_value, 1).wait();
+
+        return output;
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for norm_kernel");
     }
 }
 

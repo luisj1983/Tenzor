@@ -1,5 +1,0 @@
-if(EXISTS "/home/lee/Projects/Tenzor/build_transfer/tests/test_ciou_loss[1]_tests.cmake")
-  include("/home/lee/Projects/Tenzor/build_transfer/tests/test_ciou_loss[1]_tests.cmake")
-else()
-  add_test(test_ciou_loss_NOT_BUILT test_ciou_loss_NOT_BUILT)
-endif()

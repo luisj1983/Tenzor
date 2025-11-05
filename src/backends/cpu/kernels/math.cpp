@@ -1242,6 +1242,61 @@ auto matmul_kernel(const Tensor& a, const Tensor& b) -> Tensor {
     Tensor a_contig = a.is_contiguous() ? a : a.contiguous();
     Tensor b_contig = b.is_contiguous() ? b : b.contiguous();
 
+    // Handle 1D vector × 2D matrix (vector-matrix multiplication)
+    if (a_contig.ndim() == 1 && b_contig.ndim() == 2) {
+        auto a_shape = a_contig.shape();
+        auto b_shape = b_contig.shape();
+
+        int64_t N = a_shape[0];  // Vector size
+        int64_t N2 = b_shape[0]; // Matrix rows
+        int64_t K = b_shape[1];  // Matrix cols
+
+        if (N != N2) {
+            throw std::runtime_error(
+                "matmul dimension mismatch: vector(" + std::to_string(N) +
+                ") @ matrix(" + std::to_string(N2) + "×" + std::to_string(K) + ")"
+            );
+        }
+
+        // Treat 1D vector as row vector (1, N) and perform matmul to get (1, K), then return as (K,)
+        int64_t M = 1;
+
+        // Create output tensor with 1D shape
+        Tensor result({K}, a_contig.dtype(), a_contig.device());
+
+        // Dispatch based on dtype
+        if (a_contig.dtype() == DType::Float32 && b_contig.dtype() == DType::Float32) {
+            const float* a_data = a_contig.data<float>();
+            const float* b_data = b_contig.data<float>();
+            float* c_data = result.data<float>();
+
+            matmul_blocked_float32(a_data, b_data, c_data, M, K, N);
+
+        } else if (a_contig.dtype() == DType::Float64 && b_contig.dtype() == DType::Float64) {
+            const double* a_data = a_contig.data<double>();
+            const double* b_data = b_contig.data<double>();
+            double* c_data = result.data<double>();
+
+            matmul_blocked_float64(a_data, b_data, c_data, M, K, N);
+
+        } else if (a_contig.dtype() == DType::Int32 && b_contig.dtype() == DType::Int32) {
+            const int32_t* a_data = a_contig.data<int32_t>();
+            const int32_t* b_data = b_contig.data<int32_t>();
+            int32_t* c_data = result.data<int32_t>();
+
+            matmul_blocked_int32(a_data, b_data, c_data, M, K, N);
+
+        } else {
+            throw std::runtime_error(
+                "matmul unsupported dtype combination: " +
+                std::string(dtype_name(a_contig.dtype())) + " @ " +
+                std::string(dtype_name(b_contig.dtype()))
+            );
+        }
+
+        return result;
+    }
+
     if (a_contig.ndim() != 2 || b_contig.ndim() != 2) {
         throw std::runtime_error("matmul requires 2D tensors (matrices)");
     }
@@ -2089,6 +2144,88 @@ auto ge_kernel(const Tensor& a, const Tensor& b) -> Tensor {
     }
 
     return result;
+}
+
+// Dot product - sum of element-wise multiplication
+auto dot_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+    // Verify both tensors are 1D
+    if (a.ndim() != 1 || b.ndim() != 1) {
+        throw std::invalid_argument("dot: inputs must be 1D tensors");
+    }
+
+    // Verify same shape
+    if (a.shape()[0] != b.shape()[0]) {
+        throw std::invalid_argument("dot: inputs must have the same length");
+    }
+
+    // Verify same dtype
+    if (a.dtype() != b.dtype()) {
+        throw std::invalid_argument("dot: inputs must have the same dtype");
+    }
+
+    int64_t n = a.shape()[0];
+
+    // Create scalar output tensor
+    Tensor output({1}, a.dtype(), a.device());
+
+    switch (a.dtype()) {
+        case DType::Float32: {
+            const float* a_data = a.data<float>();
+            const float* b_data = b.data<float>();
+            float* output_data = output.data<float>();
+
+            float sum = 0.0f;
+            #pragma omp parallel for reduction(+:sum) if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                sum += a_data[i] * b_data[i];
+            }
+            output_data[0] = sum;
+            break;
+        }
+        case DType::Float64: {
+            const double* a_data = a.data<double>();
+            const double* b_data = b.data<double>();
+            double* output_data = output.data<double>();
+
+            double sum = 0.0;
+            #pragma omp parallel for reduction(+:sum) if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                sum += a_data[i] * b_data[i];
+            }
+            output_data[0] = sum;
+            break;
+        }
+        case DType::Int32: {
+            const int32_t* a_data = a.data<int32_t>();
+            const int32_t* b_data = b.data<int32_t>();
+            int32_t* output_data = output.data<int32_t>();
+
+            int32_t sum = 0;
+            #pragma omp parallel for reduction(+:sum) if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                sum += a_data[i] * b_data[i];
+            }
+            output_data[0] = sum;
+            break;
+        }
+        case DType::Int64: {
+            const int64_t* a_data = a.data<int64_t>();
+            const int64_t* b_data = b.data<int64_t>();
+            int64_t* output_data = output.data<int64_t>();
+
+            int64_t sum = 0;
+            #pragma omp parallel for reduction(+:sum) if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                sum += a_data[i] * b_data[i];
+            }
+            output_data[0] = sum;
+            break;
+        }
+        default:
+            throw std::runtime_error("dot: unsupported dtype");
+    }
+
+    return output;
 }
 
 } // namespace cpu

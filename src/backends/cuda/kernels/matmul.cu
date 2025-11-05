@@ -1106,6 +1106,73 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Ten
         throw std::runtime_error("matmul_kernel requires CUDA tensors");
     }
 
+    // Handle 1D vector × 2D matrix (vector-matrix multiplication)
+    if (a_contig.ndim() == 1 && b_contig.ndim() == 2) {
+        auto a_shape = a_contig.shape();
+        auto b_shape = b_contig.shape();
+
+        int64_t N = a_shape[0];  // Vector size
+        int64_t N2 = b_shape[0]; // Matrix rows
+        int64_t K = b_shape[1];  // Matrix cols
+
+        if (N != N2) {
+            throw std::runtime_error(
+                "matmul dimension mismatch: vector(" + std::to_string(N) +
+                ") @ matrix(" + std::to_string(N2) + "×" + std::to_string(K) + ")"
+            );
+        }
+
+        // Treat 1D vector as row vector (1, N) and perform matmul to get (1, K), then squeeze to (K,)
+        int64_t M = 1;
+
+        // Create output tensor with 1D shape
+        Tensor result({K}, a_contig.dtype(), a_contig.device());
+
+        // Dispatch based on dtype
+        if (a_contig.dtype() == DType::Float32 && b_contig.dtype() == DType::Float32) {
+            const float* a_data = a_contig.data<float>();
+            const float* b_data = b_contig.data<float>();
+            float* c_data = result.data<float>();
+
+            matmul_f32(a_data, b_data, c_data, M, K, N, stream);
+
+        } else if (a_contig.dtype() == DType::Float64 && b_contig.dtype() == DType::Float64) {
+            const double* a_data = a_contig.data<double>();
+            const double* b_data = b_contig.data<double>();
+            double* c_data = result.data<double>();
+
+            matmul_f64(a_data, b_data, c_data, M, K, N, stream);
+
+        } else if (a_contig.dtype() == DType::Float16 && b_contig.dtype() == DType::Float16) {
+            const Float16* a_data = a_contig.data<Float16>();
+            const Float16* b_data = b_contig.data<Float16>();
+            Float16* c_data = result.data<Float16>();
+
+            const __half* a_half = reinterpret_cast<const __half*>(a_data);
+            const __half* b_half = reinterpret_cast<const __half*>(b_data);
+            __half* c_half = reinterpret_cast<__half*>(c_data);
+
+            matmul_f16(a_half, b_half, c_half, M, K, N, stream);
+
+        } else if (a_contig.dtype() == DType::Int32 && b_contig.dtype() == DType::Int32) {
+            const int32_t* a_data = a_contig.data<int32_t>();
+            const int32_t* b_data = b_contig.data<int32_t>();
+            int32_t* c_data = result.data<int32_t>();
+
+            matmul_i32(a_data, b_data, c_data, M, K, N, stream);
+
+        } else {
+            throw std::runtime_error(
+                "matmul unsupported dtype combination: " +
+                std::string(dtype_name(a_contig.dtype())) + " @ " +
+                std::string(dtype_name(b_contig.dtype()))
+            );
+        }
+
+        cudaStreamSynchronize(stream);
+        return result;
+    }
+
     // Handle 2D matrices
     if (a_contig.ndim() == 2 && b_contig.ndim() == 2) {
         auto a_shape = a_contig.shape();

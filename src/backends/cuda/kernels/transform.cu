@@ -30,6 +30,18 @@ public:
         } \
     } while(0)
 
+#define CUDA_KERNEL_LOOP(i, n) \
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < (n); i += blockDim.x * gridDim.x)
+
+// Compute optimal grid/block dimensions for 1D kernels
+inline void compute_launch_config_1d(int64_t n, dim3& grid, dim3& block) {
+    constexpr int threads_per_block = 256;
+    block = dim3(threads_per_block);
+    int64_t num_blocks = (n + threads_per_block - 1) / threads_per_block;
+    num_blocks = std::min(num_blocks, static_cast<int64_t>(65535));
+    grid = dim3(static_cast<unsigned int>(num_blocks));
+}
+
 #define CUDA_GRID_STRIDE_LOOP(i, n) \
     for (int64_t i = blockIdx.x * blockDim.x + threadIdx.x; \
          i < (n); \
@@ -446,6 +458,109 @@ auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, cudaStream_t strea
     cudaFree(d_output_shape);
     cudaFree(d_output_strides);
     cudaFree(d_offsets);
+
+    return output;
+}
+
+// Repeat kernel - repeat tensor elements along dimensions
+template<typename T>
+__global__ void repeat_kernel_device(
+    const T* input, T* output,
+    const int64_t* input_shape, const int64_t* input_strides,
+    const int64_t* repeats, int64_t ndim, int64_t n) {
+
+    CUDA_KERNEL_LOOP(out_idx, n) {
+        // Calculate output coordinates
+        int64_t temp = out_idx;
+        int64_t in_idx = 0;
+
+        for (int64_t i = ndim - 1; i >= 0; --i) {
+            int64_t out_shape_i = input_shape[i] * repeats[i];
+            int64_t out_coord = temp % out_shape_i;
+            temp /= out_shape_i;
+
+            // Map output coordinate to input coordinate
+            int64_t in_coord = out_coord / repeats[i];
+            in_idx += in_coord * input_strides[i];
+        }
+
+        output[out_idx] = input[in_idx];
+    }
+}
+
+auto repeat_kernel(const Tensor& input, const std::vector<int64_t>& repeats, cudaStream_t stream) -> Tensor {
+    auto input_shape_span = input.shape();
+    std::vector<int64_t> input_shape(input_shape_span.begin(), input_shape_span.end());
+    int64_t ndim = input_shape.size();
+
+    // Calculate output shape
+    std::vector<int64_t> output_shape(ndim);
+    for (int64_t i = 0; i < ndim; ++i) {
+        output_shape[i] = input_shape[i] * repeats[i];
+    }
+
+    // Create output tensor
+    Tensor output(output_shape, input.dtype(), input.device());
+    int64_t n = output.numel();
+
+    if (n == 0) {
+        return output;
+    }
+
+    // Calculate input strides
+    std::vector<int64_t> input_strides(ndim);
+    int64_t stride = 1;
+    for (int64_t i = ndim - 1; i >= 0; --i) {
+        input_strides[i] = stride;
+        stride *= input_shape[i];
+    }
+
+    // Copy data to device
+    int64_t* d_input_shape;
+    int64_t* d_input_strides;
+    int64_t* d_repeats;
+
+    cudaMalloc(&d_input_shape, ndim * sizeof(int64_t));
+    cudaMalloc(&d_input_strides, ndim * sizeof(int64_t));
+    cudaMalloc(&d_repeats, ndim * sizeof(int64_t));
+
+    cudaMemcpy(d_input_shape, input_shape.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_input_strides, input_strides.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_repeats, repeats.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice);
+
+    // Launch kernel
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (input.dtype() == DType::Float32) {
+        repeat_kernel_device<<<grid, block, 0, stream>>>(
+            input.data<float>(), output.data<float>(),
+            d_input_shape, d_input_strides, d_repeats, ndim, n);
+    } else if (input.dtype() == DType::Float64) {
+        repeat_kernel_device<<<grid, block, 0, stream>>>(
+            input.data<double>(), output.data<double>(),
+            d_input_shape, d_input_strides, d_repeats, ndim, n);
+    } else {
+        cudaFree(d_input_shape);
+        cudaFree(d_input_strides);
+        cudaFree(d_repeats);
+        throw std::runtime_error("repeat operation only supports Float32 and Float64 dtypes");
+    }
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        cudaFree(d_input_shape);
+        cudaFree(d_input_strides);
+        cudaFree(d_repeats);
+        throw std::runtime_error(std::string("CUDA error in repeat_kernel: ") + cudaGetErrorString(err));
+    }
+
+    cudaStreamSynchronize(stream);
+
+    // Free device memory
+    cudaFree(d_input_shape);
+    cudaFree(d_input_strides);
+    cudaFree(d_repeats);
 
     return output;
 }

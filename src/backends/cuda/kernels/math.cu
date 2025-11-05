@@ -1360,6 +1360,295 @@ auto sign_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     return result;
 }
 
+// Trigonometric functions
+template<typename T>
+__global__ void sin_kernel_impl(const T* input, T* output, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = sin(input[idx]);
+    }
+}
+
+template<typename T>
+__global__ void cos_kernel_impl(const T* input, T* output, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = cos(input[idx]);
+    }
+}
+
+template<typename T>
+__global__ void tan_kernel_impl(const T* input, T* output, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = tan(input[idx]);
+    }
+}
+
+template<typename T>
+__global__ void asin_kernel_impl(const T* input, T* output, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = asin(input[idx]);
+    }
+}
+
+template<typename T>
+__global__ void acos_kernel_impl(const T* input, T* output, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = acos(input[idx]);
+    }
+}
+
+template<typename T>
+__global__ void atan_kernel_impl(const T* input, T* output, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = atan(input[idx]);
+    }
+}
+
+template<typename T>
+__global__ void sinh_kernel_impl(const T* input, T* output, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = sinh(input[idx]);
+    }
+}
+
+template<typename T>
+__global__ void cosh_kernel_impl(const T* input, T* output, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = cosh(input[idx]);
+    }
+}
+
+// Rounding functions
+template<typename T>
+__global__ void ceil_kernel_impl(const T* input, T* output, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = ceil(input[idx]);
+    }
+}
+
+template<typename T>
+__global__ void floor_kernel_impl(const T* input, T* output, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = floor(input[idx]);
+    }
+}
+
+template<typename T>
+__global__ void round_kernel_impl(const T* input, T* output, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = round(input[idx]);
+    }
+}
+
+template<typename T>
+__global__ void trunc_kernel_impl(const T* input, T* output, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = trunc(input[idx]);
+    }
+}
+
+template<typename T>
+__global__ void reciprocal_kernel_impl(const T* input, T* output, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = T(1.0) / input[idx];
+    }
+}
+
+// Launcher functions for trigonometric operations
+#define DEFINE_TRIG_KERNEL(name) \
+auto name##_kernel(const Tensor& input, cudaStream_t stream) -> Tensor { \
+    int64_t n = input.numel(); \
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end()); \
+    Tensor result(shape, input.dtype(), input.device()); \
+    dim3 grid, block; \
+    compute_launch_config_1d(n, grid, block); \
+    if (input.dtype() == DType::Float32) { \
+        name##_kernel_impl<<<grid, block, 0, stream>>>(input.data<float>(), result.data<float>(), n); \
+    } else if (input.dtype() == DType::Float64) { \
+        name##_kernel_impl<<<grid, block, 0, stream>>>(input.data<double>(), result.data<double>(), n); \
+    } else { \
+        throw std::runtime_error(#name " operation only supports Float32 and Float64 dtypes"); \
+    } \
+    CUDA_CHECK(cudaGetLastError()); \
+    cudaStreamSynchronize(stream); \
+    return result; \
+}
+
+DEFINE_TRIG_KERNEL(sin)
+DEFINE_TRIG_KERNEL(cos)
+DEFINE_TRIG_KERNEL(tan)
+DEFINE_TRIG_KERNEL(asin)
+DEFINE_TRIG_KERNEL(acos)
+DEFINE_TRIG_KERNEL(atan)
+DEFINE_TRIG_KERNEL(sinh)
+DEFINE_TRIG_KERNEL(cosh)
+DEFINE_TRIG_KERNEL(ceil)
+DEFINE_TRIG_KERNEL(floor)
+DEFINE_TRIG_KERNEL(round)
+DEFINE_TRIG_KERNEL(trunc)
+DEFINE_TRIG_KERNEL(reciprocal)
+
+// Clamp min/max functions
+template<typename T>
+__global__ void clamp_min_kernel_impl(const T* input, T* output, T min_val, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = input[idx] < min_val ? min_val : input[idx];
+    }
+}
+
+template<typename T>
+__global__ void clamp_max_kernel_impl(const T* input, T* output, T max_val, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = input[idx] > max_val ? max_val : input[idx];
+    }
+}
+
+auto clamp_min_kernel(const Tensor& input, float min_val, cudaStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (input.dtype() == DType::Float32) {
+        clamp_min_kernel_impl<<<grid, block, 0, stream>>>(input.data<float>(), result.data<float>(), min_val, n);
+    } else if (input.dtype() == DType::Float64) {
+        clamp_min_kernel_impl<<<grid, block, 0, stream>>>(input.data<double>(), result.data<double>(), static_cast<double>(min_val), n);
+    } else {
+        throw std::runtime_error("clamp_min operation only supports Float32 and Float64 dtypes");
+    }
+
+    CUDA_CHECK(cudaGetLastError());
+    cudaStreamSynchronize(stream);
+    return result;
+}
+
+auto clamp_max_kernel(const Tensor& input, float max_val, cudaStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (input.dtype() == DType::Float32) {
+        clamp_max_kernel_impl<<<grid, block, 0, stream>>>(input.data<float>(), result.data<float>(), max_val, n);
+    } else if (input.dtype() == DType::Float64) {
+        clamp_max_kernel_impl<<<grid, block, 0, stream>>>(input.data<double>(), result.data<double>(), static_cast<double>(max_val), n);
+    } else {
+        throw std::runtime_error("clamp_max operation only supports Float32 and Float64 dtypes");
+    }
+
+    CUDA_CHECK(cudaGetLastError());
+    cudaStreamSynchronize(stream);
+    return result;
+}
+
+// In-place operations
+template<typename T>
+__global__ void add_inplace_kernel_impl(T* data, const T* other, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        data[idx] += other[idx];
+    }
+}
+
+template<typename T>
+__global__ void sub_inplace_kernel_impl(T* data, const T* other, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        data[idx] -= other[idx];
+    }
+}
+
+template<typename T>
+__global__ void mul_inplace_kernel_impl(T* data, const T* other, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        data[idx] *= other[idx];
+    }
+}
+
+template<typename T>
+__global__ void div_inplace_kernel_impl(T* data, const T* other, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        data[idx] /= other[idx];
+    }
+}
+
+auto add_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream) -> Tensor {
+    int64_t n = inout.numel();
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (inout.dtype() == DType::Float32) {
+        add_inplace_kernel_impl<<<grid, block, 0, stream>>>(inout.data<float>(), other.data<float>(), n);
+    } else if (inout.dtype() == DType::Float64) {
+        add_inplace_kernel_impl<<<grid, block, 0, stream>>>(inout.data<double>(), other.data<double>(), n);
+    } else {
+        throw std::runtime_error("add_inplace operation only supports Float32 and Float64 dtypes");
+    }
+
+    CUDA_CHECK(cudaGetLastError());
+    cudaStreamSynchronize(stream);
+    return inout;
+}
+
+auto sub_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream) -> Tensor {
+    int64_t n = inout.numel();
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (inout.dtype() == DType::Float32) {
+        sub_inplace_kernel_impl<<<grid, block, 0, stream>>>(inout.data<float>(), other.data<float>(), n);
+    } else if (inout.dtype() == DType::Float64) {
+        sub_inplace_kernel_impl<<<grid, block, 0, stream>>>(inout.data<double>(), other.data<double>(), n);
+    } else {
+        throw std::runtime_error("sub_inplace operation only supports Float32 and Float64 dtypes");
+    }
+
+    CUDA_CHECK(cudaGetLastError());
+    cudaStreamSynchronize(stream);
+    return inout;
+}
+
+auto mul_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream) -> Tensor {
+    int64_t n = inout.numel();
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (inout.dtype() == DType::Float32) {
+        mul_inplace_kernel_impl<<<grid, block, 0, stream>>>(inout.data<float>(), other.data<float>(), n);
+    } else if (inout.dtype() == DType::Float64) {
+        mul_inplace_kernel_impl<<<grid, block, 0, stream>>>(inout.data<double>(), other.data<double>(), n);
+    } else {
+        throw std::runtime_error("mul_inplace operation only supports Float32 and Float64 dtypes");
+    }
+
+    CUDA_CHECK(cudaGetLastError());
+    cudaStreamSynchronize(stream);
+    return inout;
+}
+
+auto div_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream) -> Tensor {
+    int64_t n = inout.numel();
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+
+    if (inout.dtype() == DType::Float32) {
+        div_inplace_kernel_impl<<<grid, block, 0, stream>>>(inout.data<float>(), other.data<float>(), n);
+    } else if (inout.dtype() == DType::Float64) {
+        div_inplace_kernel_impl<<<grid, block, 0, stream>>>(inout.data<double>(), other.data<double>(), n);
+    } else {
+        throw std::runtime_error("div_inplace operation only supports Float32 and Float64 dtypes");
+    }
+
+    CUDA_CHECK(cudaGetLastError());
+    cudaStreamSynchronize(stream);
+    return inout;
+}
+
 // Expand kernel - replicate tensor along specified dimensions
 template<typename T>
 __global__ void expand_kernel_device(
@@ -1590,6 +1879,9 @@ auto zeros_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
         __nv_bfloat16 zero_bf = __float2bfloat16(0.0f);
         fill_kernel_device<<<grid, block, 0, stream>>>(
             reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), zero_bf, n);
+    } else if (dtype == DType::Bool) {
+        fill_kernel_device<<<grid, block, 0, stream>>>(
+            result.data<bool>(), false, n);
     } else {
         throw std::runtime_error("Unsupported dtype for zeros operation");
     }
@@ -1631,6 +1923,9 @@ auto ones_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
         __nv_bfloat16 one_bf = __float2bfloat16(1.0f);
         fill_kernel_device<<<grid, block, 0, stream>>>(
             reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), one_bf, n);
+    } else if (dtype == DType::Bool) {
+        fill_kernel_device<<<grid, block, 0, stream>>>(
+            result.data<bool>(), true, n);
     } else {
         throw std::runtime_error("Unsupported dtype for ones operation");
     }
@@ -2099,6 +2394,120 @@ auto gt_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor 
 // Greater than or equal kernel launcher
 auto ge_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor {
     return compare_kernel_launcher(a, b, stream, GeOp());
+}
+
+// Dot product kernel - element-wise multiply then sum
+template<typename T>
+__global__ void dot_product_kernel(const T* a, const T* b, T* output, int64_t n) {
+    __shared__ T shared[256];
+
+    int tid = threadIdx.x;
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t grid_size = blockDim.x * gridDim.x;
+
+    // Grid-stride loop for element-wise multiplication
+    T thread_sum = 0;
+    for (int64_t i = idx; i < n; i += grid_size) {
+        thread_sum += a[i] * b[i];
+    }
+
+    shared[tid] = thread_sum;
+    __syncthreads();
+
+    // Block-level reduction
+    for (int stride = blockDim.x / 2; stride >= 32; stride >>= 1) {
+        if (tid < stride) {
+            shared[tid] += shared[tid + stride];
+        }
+        __syncthreads();
+    }
+
+    // Warp-level reduction
+    if (tid < 32) {
+        T val = shared[tid];
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset /= 2) {
+            val += __shfl_down_sync(0xffffffff, val, offset);
+        }
+
+        if (tid == 0) {
+            output[blockIdx.x] = val;
+        }
+    }
+}
+
+// Dot product launcher
+auto dot_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor {
+    // Verify both tensors are 1D
+    if (a.ndim() != 1 || b.ndim() != 1) {
+        throw std::invalid_argument("dot: inputs must be 1D tensors");
+    }
+
+    // Verify same shape
+    if (a.shape()[0] != b.shape()[0]) {
+        throw std::invalid_argument("dot: inputs must have the same length");
+    }
+
+    // Verify same dtype
+    if (a.dtype() != b.dtype()) {
+        throw std::invalid_argument("dot: inputs must have the same dtype");
+    }
+
+    int64_t n = a.shape()[0];
+
+    // Create scalar output tensor
+    Tensor output({1}, a.dtype(), a.device());
+
+    constexpr int block_size = 256;
+    int num_blocks = std::min<int>((n + block_size - 1) / block_size, 1024);
+
+    switch (a.dtype()) {
+        case DType::Float32: {
+            const float* a_data = a.data<float>();
+            const float* b_data = b.data<float>();
+            float* output_data = output.data<float>();
+
+            if (num_blocks == 1) {
+                dot_product_kernel<<<1, block_size, 0, stream>>>(a_data, b_data, output_data, n);
+            } else {
+                // Two-phase reduction for large arrays
+                float* d_temp;
+                cudaMalloc(&d_temp, num_blocks * sizeof(float));
+                dot_product_kernel<<<num_blocks, block_size, 0, stream>>>(a_data, b_data, d_temp, n);
+                dot_product_kernel<<<1, block_size, 0, stream>>>(d_temp, d_temp, output_data, num_blocks);
+                cudaFree(d_temp);
+            }
+            break;
+        }
+        case DType::Float64: {
+            const double* a_data = a.data<double>();
+            const double* b_data = b.data<double>();
+            double* output_data = output.data<double>();
+
+            if (num_blocks == 1) {
+                dot_product_kernel<<<1, block_size, 0, stream>>>(a_data, b_data, output_data, n);
+            } else {
+                // Two-phase reduction for large arrays
+                double* d_temp;
+                cudaMalloc(&d_temp, num_blocks * sizeof(double));
+                dot_product_kernel<<<num_blocks, block_size, 0, stream>>>(a_data, b_data, d_temp, n);
+                dot_product_kernel<<<1, block_size, 0, stream>>>(d_temp, d_temp, output_data, num_blocks);
+                cudaFree(d_temp);
+            }
+            break;
+        }
+        default:
+            throw std::runtime_error("dot: only Float32 and Float64 are supported");
+    }
+
+    cudaStreamSynchronize(stream);
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        throw std::runtime_error(std::string("CUDA error in dot_kernel: ") + cudaGetErrorString(err));
+    }
+
+    return output;
 }
 
 } // namespace cuda

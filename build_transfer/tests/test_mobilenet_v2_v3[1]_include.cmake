@@ -1,5 +1,0 @@
-if(EXISTS "/home/lee/Projects/Tenzor/build_transfer/tests/test_mobilenet_v2_v3[1]_tests.cmake")
-  include("/home/lee/Projects/Tenzor/build_transfer/tests/test_mobilenet_v2_v3[1]_tests.cmake")
-else()
-  add_test(test_mobilenet_v2_v3_NOT_BUILT test_mobilenet_v2_v3_NOT_BUILT)
-endif()

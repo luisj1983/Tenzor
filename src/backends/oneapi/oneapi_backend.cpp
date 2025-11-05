@@ -1,4 +1,5 @@
 #include "tenzor/backend/backend.hpp"
+#include "tenzor/backend/loader.hpp"
 #include <sycl/sycl.hpp>
 #include <vector>
 #include <unordered_map>
@@ -28,6 +29,7 @@ namespace oneapi {
     auto log_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
     auto exp_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
     auto pow_kernel(const Tensor& input, float exponent, sycl::queue& queue) -> Tensor;
+    auto dot_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
 
     // Activation functions
     auto relu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
@@ -59,6 +61,11 @@ namespace oneapi {
     auto permute_kernel(const Tensor& input, const std::vector<int64_t>& dims, sycl::queue& queue) -> Tensor;
     auto squeeze_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Tensor;
     auto unsqueeze_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Tensor;
+    auto index_select_kernel(const Tensor& input, int64_t dim, const Tensor& index, sycl::queue& queue) -> Tensor;
+    auto gather_kernel(const Tensor& input, int64_t dim, const Tensor& index, sycl::queue& queue) -> Tensor;
+    auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& src, sycl::queue& queue) -> Tensor;
+    auto masked_select_kernel(const Tensor& input, const Tensor& mask, sycl::queue& queue) -> Tensor;
+    auto masked_fill_kernel(const Tensor& input, const Tensor& mask, float value, sycl::queue& queue) -> Tensor;
     auto contiguous_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
     auto clone_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
 
@@ -125,6 +132,7 @@ namespace oneapi {
     auto std_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
     auto var_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
     auto prod_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
+    auto norm_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
 
     // Argmax/Argmin operations
     auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor;
@@ -435,6 +443,10 @@ public:
                 float exponent = attrs.contains("exponent") ? std::stof(attrs.at("exponent")) : 2.0f;
                 return {oneapi::pow_kernel(inputs[0], exponent, queue)};
             }
+            else if (op_name == "dot") {
+                if (inputs.size() != 2) throw std::invalid_argument("dot requires 2 inputs");
+                return {oneapi::dot_kernel(inputs[0], inputs[1], queue)};
+            }
 
             // Activation functions
             else if (op_name == "relu") {
@@ -560,6 +572,44 @@ public:
                 if (inputs.size() != 1) throw std::invalid_argument("unsqueeze requires 1 input");
                 int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : 0;
                 return {oneapi::unsqueeze_kernel(inputs[0], dim, queue)};
+            }
+            else if (op_name == "index_select") {
+                if (inputs.size() != 2) throw std::invalid_argument("index_select requires 2 inputs");
+                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : 0;
+                return {oneapi::index_select_kernel(inputs[0], dim, inputs[1], queue)};
+            }
+            else if (op_name == "gather") {
+                if (inputs.size() != 2) throw std::invalid_argument("gather requires 2 inputs");
+                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : 0;
+                return {oneapi::gather_kernel(inputs[0], dim, inputs[1], queue)};
+            }
+            else if (op_name == "scatter") {
+                if (inputs.size() != 3) throw std::invalid_argument("scatter requires 3 inputs");
+                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : 0;
+                return {oneapi::scatter_kernel(inputs[0], dim, inputs[1], inputs[2], queue)};
+            }
+            else if (op_name == "masked_select") {
+                if (inputs.size() != 2) throw std::invalid_argument("masked_select requires 2 inputs");
+                return {oneapi::masked_select_kernel(inputs[0], inputs[1], queue)};
+            }
+            else if (op_name == "masked_fill") {
+                if (inputs.size() != 2) throw std::invalid_argument("masked_fill requires 2 inputs");
+                if (!attrs.contains("value")) throw std::invalid_argument("masked_fill requires value attribute");
+                float value = std::stof(attrs.at("value"));
+                return {oneapi::masked_fill_kernel(inputs[0], inputs[1], value, queue)};
+            }
+            else if (op_name == "where") {
+                // CPU fallback for where
+                if (inputs.size() != 3) throw std::invalid_argument("where requires 3 inputs");
+                auto condition_cpu = inputs[0].to(Device::cpu());
+                auto x_cpu = inputs[1].to(Device::cpu());
+                auto y_cpu = inputs[2].to(Device::cpu());
+
+                auto* cpu_backend = backend_registry().get_backend(Device::Type::CPU);
+                std::vector<Tensor> cpu_inputs = {condition_cpu, x_cpu, y_cpu};
+                auto result = cpu_backend->dispatch("where", cpu_inputs, OpAttributes{});
+
+                return {result[0].to(inputs[0].device())};
             }
             else if (op_name == "contiguous") {
                 if (inputs.size() != 1) throw std::invalid_argument("contiguous requires 1 input");
@@ -834,6 +884,10 @@ public:
             else if (op_name == "std") {
                 if (inputs.size() != 1) throw std::invalid_argument("std requires 1 input");
                 return {oneapi::std_kernel(inputs[0], attrs, queue)};
+            }
+            else if (op_name == "norm") {
+                if (inputs.size() != 1) throw std::invalid_argument("norm requires 1 input");
+                return {oneapi::norm_kernel(inputs[0], attrs, queue)};
             }
             else if (op_name == "var") {
                 if (inputs.size() != 1) throw std::invalid_argument("var requires 1 input");

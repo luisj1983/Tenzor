@@ -192,6 +192,8 @@ private:
     auto dispatchClone(const Tensor& input) -> Tensor;
     auto dispatchFull(const std::vector<int64_t>& shape, float value, DType dtype) -> Tensor;
     auto dispatchOnes(const std::vector<int64_t>& shape, DType dtype) -> Tensor;
+    auto dispatchRand(const std::vector<int64_t>& shape, DType dtype) -> Tensor;
+    auto dispatchRandn(const std::vector<int64_t>& shape, DType dtype) -> Tensor;
 
     // Tensor manipulation operations
     auto dispatchExpand(const Tensor& input, const std::vector<int64_t>& shape) -> Tensor;

@@ -135,18 +135,19 @@ if(TENZOR_BUILD_TESTS)
 endif()
 
 # Debug tests (for investigating specific issues)
-if(TENZOR_BUILD_CUDA AND TENZOR_BUILD_TESTS)
-    add_executable(debug_cuda_transfer
-        ${CMAKE_BINARY_DIR}/debug_cuda_transfer.cpp
-    )
-    target_link_libraries(debug_cuda_transfer PRIVATE tenzor_core)
-    target_include_directories(debug_cuda_transfer PRIVATE
-        ${CMAKE_SOURCE_DIR}/include
-    )
-    set_target_properties(debug_cuda_transfer PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin"
-    )
-endif()
+# Commented out - debug_cuda_transfer.cpp doesn't exist
+#if(TENZOR_BUILD_CUDA AND TENZOR_BUILD_TESTS)
+#    add_executable(debug_cuda_transfer
+#        ${CMAKE_BINARY_DIR}/debug_cuda_transfer.cpp
+#    )
+#    target_link_libraries(debug_cuda_transfer PRIVATE tenzor_core)
+#    target_include_directories(debug_cuda_transfer PRIVATE
+#        ${CMAKE_SOURCE_DIR}/include
+#    )
+#    set_target_properties(debug_cuda_transfer PROPERTIES
+#        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin"
+#    )
+#endif()
 
 # Benchmarks
 if(TENZOR_BUILD_BENCHMARKS)

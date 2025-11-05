@@ -259,6 +259,95 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
     auto a_shape = a.shape();
     auto b_shape = b.shape();
 
+    // Handle 1D vector × 2D matrix (vector-matrix multiplication)
+    if (a_shape.size() == 1 && b_shape.size() == 2) {
+        const int64_t n = a_shape[0];  // Vector size
+        const int64_t k = b_shape[0];  // Matrix rows
+        const int64_t m = b_shape[1];  // Matrix cols
+
+        if (n != k) {
+            throw std::invalid_argument(
+                "matmul dimension mismatch: vector(" + std::to_string(n) +
+                ") @ matrix(" + std::to_string(k) + "×" + std::to_string(m) + ")"
+            );
+        }
+
+        // Treat 1D vector as row vector (1, n) and perform matmul to get (1, m), then return as (m,)
+        Tensor output({m}, a.dtype(), a.device());
+
+#ifdef TENZOR_HAS_ONEMKL
+        if (a.dtype() == DType::Float32) {
+            const float* a_ptr = get_data_ptr<const float>(a);
+            const float* b_ptr = get_data_ptr<const float>(b);
+            float* out_ptr = get_data_ptr<float>(output);
+
+            const float alpha = 1.0f;
+            const float beta = 0.0f;
+
+            // For row-major: result[m] = vector[n] × matrix[n, m]
+            // In oneMKL column-major: C^T[m] = B^T[m, n] × A^T[n]
+            ::oneapi::mkl::blas::column_major::gemm(
+                queue,
+                ::oneapi::mkl::transpose::nontrans,
+                ::oneapi::mkl::transpose::nontrans,
+                m,        // rows of result
+                1,        // cols of result (single vector)
+                n,        // inner dimension
+                alpha,
+                b_ptr, m, // B matrix
+                a_ptr, n, // A vector
+                beta,
+                out_ptr, m // output
+            );
+            queue.wait();
+        }
+        else if (a.dtype() == DType::Float64) {
+            const double* a_ptr = get_data_ptr<const double>(a);
+            const double* b_ptr = get_data_ptr<const double>(b);
+            double* out_ptr = get_data_ptr<double>(output);
+
+            const double alpha = 1.0;
+            const double beta = 0.0;
+
+            ::oneapi::mkl::blas::column_major::gemm(
+                queue,
+                ::oneapi::mkl::transpose::nontrans,
+                ::oneapi::mkl::transpose::nontrans,
+                m, 1, n,
+                alpha,
+                b_ptr, m,
+                a_ptr, n,
+                beta,
+                out_ptr, m
+            );
+            queue.wait();
+        }
+        else {
+            throw std::runtime_error("Unsupported dtype for 1D×2D matmul with oneMKL");
+        }
+#else
+        // Fallback naive implementation
+        if (a.dtype() == DType::Float32) {
+            const float* a_ptr = get_data_ptr<const float>(a);
+            const float* b_ptr = get_data_ptr<const float>(b);
+            float* out_ptr = get_data_ptr<float>(output);
+
+            queue.parallel_for<class MatMulKernelVector>(sycl::range<1>(m), [=](sycl::id<1> idx) {
+                const int64_t j = idx[0];
+                float sum = 0.0f;
+                for (int64_t p = 0; p < n; ++p) {
+                    sum += a_ptr[p] * b_ptr[p * m + j];
+                }
+                out_ptr[j] = sum;
+            }).wait();
+        }
+        else {
+            throw std::runtime_error("Unsupported dtype for 1D×2D matmul fallback");
+        }
+#endif
+        return output;
+    }
+
     // Validate dimensions
     if (a_shape.size() < 2 || b_shape.size() < 2) {
         throw std::invalid_argument("matmul requires at least 2D tensors");
@@ -562,6 +651,75 @@ auto pow_kernel(const Tensor& input, float exponent, sycl::queue& queue) -> Tens
     }
 
     return output;
+}
+
+// Dot product kernel - element-wise multiply then sum
+auto dot_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
+    // Verify both tensors are 1D
+    if (a.ndim() != 1 || b.ndim() != 1) {
+        throw std::invalid_argument("dot: inputs must be 1D tensors");
+    }
+
+    // Verify same shape
+    if (a.shape()[0] != b.shape()[0]) {
+        throw std::invalid_argument("dot: inputs must have the same length");
+    }
+
+    // Verify same dtype
+    if (a.dtype() != b.dtype()) {
+        throw std::invalid_argument("dot: inputs must have the same dtype");
+    }
+
+    int64_t n = a.shape()[0];
+
+    // Create scalar output tensor
+    Tensor output({1}, a.dtype(), a.device());
+
+    if (a.dtype() == DType::Float32) {
+        const float* a_data = get_data_ptr<const float>(a);
+        const float* b_data = get_data_ptr<const float>(b);
+
+        // Copy to host and compute dot product
+        std::vector<float> a_host(n);
+        std::vector<float> b_host(n);
+        queue.memcpy(a_host.data(), a_data, n * sizeof(float)).wait();
+        queue.memcpy(b_host.data(), b_data, n * sizeof(float)).wait();
+
+        float sum = 0.0f;
+        for (int64_t i = 0; i < n; ++i) {
+            sum += a_host[i] * b_host[i];
+        }
+
+        // Copy result back to device
+        float* out_ptr = get_data_ptr<float>(output);
+        queue.fill(out_ptr, sum, 1).wait();
+
+        return output;
+    }
+    else if (a.dtype() == DType::Float64) {
+        const double* a_data = get_data_ptr<const double>(a);
+        const double* b_data = get_data_ptr<const double>(b);
+
+        // Copy to host and compute dot product
+        std::vector<double> a_host(n);
+        std::vector<double> b_host(n);
+        queue.memcpy(a_host.data(), a_data, n * sizeof(double)).wait();
+        queue.memcpy(b_host.data(), b_data, n * sizeof(double)).wait();
+
+        double sum = 0.0;
+        for (int64_t i = 0; i < n; ++i) {
+            sum += a_host[i] * b_host[i];
+        }
+
+        // Copy result back to device
+        double* out_ptr = get_data_ptr<double>(output);
+        queue.fill(out_ptr, sum, 1).wait();
+
+        return output;
+    }
+    else {
+        throw std::runtime_error("dot: only Float32 and Float64 are supported");
+    }
 }
 
 } // namespace oneapi

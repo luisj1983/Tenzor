@@ -1,5 +1,0 @@
-if(EXISTS "/home/lee/Projects/Tenzor/build_transfer/tests/integration/test_model_persistence[1]_tests.cmake")
-  include("/home/lee/Projects/Tenzor/build_transfer/tests/integration/test_model_persistence[1]_tests.cmake")
-else()
-  add_test(test_model_persistence_NOT_BUILT test_model_persistence_NOT_BUILT)
-endif()

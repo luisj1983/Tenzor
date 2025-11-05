@@ -134,7 +134,8 @@ auto CachingAllocator::deallocate(void* ptr) -> void {
 
     size_t size = it->second;
 
-    // Add to free pool instead of freeing immediately
+    // Move from allocated to free pool instead of freeing immediately
+    allocated_blocks_.erase(it);
     free_blocks_.insert({size, ptr});
     total_cached_bytes_ += size;
 }
@@ -188,6 +189,9 @@ auto CachingAllocator::find_free_block(size_t bytes) -> void* {
     // Remove from free blocks
     free_blocks_.erase(it);
     total_cached_bytes_ -= block_size;
+
+    // Add back to allocated_blocks_ since we're reusing it
+    allocated_blocks_[ptr] = block_size;
 
     return ptr;
 }

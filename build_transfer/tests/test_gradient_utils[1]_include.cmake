@@ -1,5 +1,0 @@
-if(EXISTS "/home/lee/Projects/Tenzor/build_transfer/tests/test_gradient_utils[1]_tests.cmake")
-  include("/home/lee/Projects/Tenzor/build_transfer/tests/test_gradient_utils[1]_tests.cmake")
-else()
-  add_test(test_gradient_utils_NOT_BUILT test_gradient_utils_NOT_BUILT)
-endif()

@@ -1,5 +1,6 @@
 #include "tenzor/backend/backend.hpp"
 #include "tenzor/backend/caching_allocator.hpp"
+#include "tenzor/backend/loader.hpp"
 #ifdef TENZOR_HAS_CUDNN
 #include "tenzor/backend/cudnn_wrapper.hpp"
 #endif
@@ -20,6 +21,12 @@ namespace cuda {
     auto div_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor;
     auto matmul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor;
 
+    // In-place operations
+    auto add_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream) -> Tensor;
+    auto sub_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream) -> Tensor;
+    auto mul_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream) -> Tensor;
+    auto div_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream) -> Tensor;
+
     // Unary operations
     auto sqrt_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
     auto neg_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
@@ -28,8 +35,27 @@ namespace cuda {
     auto log_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
     auto exp_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
 
+    // Trigonometric functions
+    auto sin_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
+    auto cos_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
+    auto tan_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
+    auto asin_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
+    auto acos_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
+    auto atan_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
+    auto sinh_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
+    auto cosh_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
+
+    // Rounding functions
+    auto ceil_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
+    auto floor_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
+    auto round_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
+    auto trunc_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
+    auto reciprocal_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
+
     // Operations with parameters
     auto clamp_kernel(const Tensor& input, float min_val, float max_val, cudaStream_t stream) -> Tensor;
+    auto clamp_min_kernel(const Tensor& input, float min_val, cudaStream_t stream) -> Tensor;
+    auto clamp_max_kernel(const Tensor& input, float max_val, cudaStream_t stream) -> Tensor;
     auto pow_kernel(const Tensor& input, float exponent, cudaStream_t stream) -> Tensor;
 
     // Reduction operations
@@ -37,6 +63,12 @@ namespace cuda {
     auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor;
     auto max_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor;
     auto min_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor;
+    auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor;
+    auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor;
+    auto prod_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor;
+    auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correction, cudaStream_t stream) -> Tensor;
+    auto std_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correction, cudaStream_t stream) -> Tensor;
+    auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor;
 
     // Activation functions
     auto relu_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
@@ -65,6 +97,7 @@ namespace cuda {
     auto squeeze_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Tensor;
     auto unsqueeze_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Tensor;
     auto expand_kernel(const Tensor& input, const std::vector<int64_t>& shape, void* stream) -> Tensor;
+    auto repeat_kernel(const Tensor& input, const std::vector<int64_t>& repeats, cudaStream_t stream) -> Tensor;
     auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, cudaStream_t stream) -> Tensor;
 
     // Fill operations
@@ -84,6 +117,7 @@ namespace cuda {
     auto le_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor;
     auto gt_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor;
     auto ge_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor;
+    auto dot_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor;
 
     // BatchNorm2d operations
     auto batchnorm2d_mean_var(const Tensor& input, Tensor& mean, Tensor& variance, cudaStream_t stream) -> void;
@@ -263,11 +297,26 @@ public:
                 }
                 return {cuda::add_kernel(inputs[0], inputs[1], stream)};
             }
+            else if (op_name == "add_inplace") {
+                if (inputs.size() != 2) {
+                    throw std::invalid_argument("add_inplace operation requires exactly 2 inputs");
+                }
+                // Make a mutable copy of the first input
+                Tensor result = inputs[0];
+                return {cuda::add_inplace_kernel(result, inputs[1], stream)};
+            }
             else if (op_name == "sub") {
                 if (inputs.size() != 2) {
                     throw std::invalid_argument("sub operation requires exactly 2 inputs");
                 }
                 return {cuda::sub_kernel(inputs[0], inputs[1], stream)};
+            }
+            else if (op_name == "sub_inplace") {
+                if (inputs.size() != 2) {
+                    throw std::invalid_argument("sub_inplace operation requires exactly 2 inputs");
+                }
+                Tensor result = inputs[0];
+                return {cuda::sub_inplace_kernel(result, inputs[1], stream)};
             }
             else if (op_name == "mul") {
                 if (inputs.size() != 2) {
@@ -275,11 +324,25 @@ public:
                 }
                 return {cuda::mul_kernel(inputs[0], inputs[1], stream)};
             }
+            else if (op_name == "mul_inplace") {
+                if (inputs.size() != 2) {
+                    throw std::invalid_argument("mul_inplace operation requires exactly 2 inputs");
+                }
+                Tensor result = inputs[0];
+                return {cuda::mul_inplace_kernel(result, inputs[1], stream)};
+            }
             else if (op_name == "div") {
                 if (inputs.size() != 2) {
                     throw std::invalid_argument("div operation requires exactly 2 inputs");
                 }
                 return {cuda::div_kernel(inputs[0], inputs[1], stream)};
+            }
+            else if (op_name == "div_inplace") {
+                if (inputs.size() != 2) {
+                    throw std::invalid_argument("div_inplace operation requires exactly 2 inputs");
+                }
+                Tensor result = inputs[0];
+                return {cuda::div_inplace_kernel(result, inputs[1], stream)};
             }
             else if (op_name == "matmul") {
                 if (inputs.size() != 2) {
@@ -344,6 +407,102 @@ public:
                 }
                 return {cuda::min_kernel(inputs[0], dim, keepdim, stream)};
             }
+            else if (op_name == "argmax") {
+                if (inputs.size() != 1) {
+                    throw std::invalid_argument("argmax operation requires exactly 1 input");
+                }
+                int64_t dim = -1;
+                bool keepdim = false;
+                if (attrs.contains("dim")) {
+                    dim = std::stoll(attrs.at("dim"));
+                }
+                if (attrs.contains("keepdim")) {
+                    keepdim = (attrs.at("keepdim") == "1");
+                }
+                return {cuda::argmax_kernel(inputs[0], dim, keepdim, stream)};
+            }
+            else if (op_name == "argmin") {
+                if (inputs.size() != 1) {
+                    throw std::invalid_argument("argmin operation requires exactly 1 input");
+                }
+                int64_t dim = -1;
+                bool keepdim = false;
+                if (attrs.contains("dim")) {
+                    dim = std::stoll(attrs.at("dim"));
+                }
+                if (attrs.contains("keepdim")) {
+                    keepdim = (attrs.at("keepdim") == "1");
+                }
+                return {cuda::argmin_kernel(inputs[0], dim, keepdim, stream)};
+            }
+            else if (op_name == "prod") {
+                if (inputs.size() != 1) {
+                    throw std::invalid_argument("prod operation requires exactly 1 input");
+                }
+                int64_t dim = -1;
+                bool keepdim = false;
+                if (attrs.contains("dim")) {
+                    dim = std::stoll(attrs.at("dim"));
+                }
+                if (attrs.contains("keepdim")) {
+                    keepdim = (attrs.at("keepdim") == "1");
+                }
+                return {cuda::prod_kernel(inputs[0], dim, keepdim, stream)};
+            }
+            else if (op_name == "var") {
+                if (inputs.size() != 1) {
+                    throw std::invalid_argument("var operation requires exactly 1 input");
+                }
+                int64_t dim = -1;
+                bool keepdim = false;
+                int64_t correction = 1;
+                if (attrs.contains("dim")) {
+                    dim = std::stoll(attrs.at("dim"));
+                }
+                if (attrs.contains("keepdim")) {
+                    keepdim = (attrs.at("keepdim") == "1");
+                }
+                if (attrs.contains("correction")) {
+                    correction = std::stoll(attrs.at("correction"));
+                }
+                return {cuda::var_kernel(inputs[0], dim, keepdim, correction, stream)};
+            }
+            else if (op_name == "std") {
+                if (inputs.size() != 1) {
+                    throw std::invalid_argument("std operation requires exactly 1 input");
+                }
+                int64_t dim = -1;
+                bool keepdim = false;
+                int64_t correction = 1;
+                if (attrs.contains("dim")) {
+                    dim = std::stoll(attrs.at("dim"));
+                }
+                if (attrs.contains("keepdim")) {
+                    keepdim = (attrs.at("keepdim") == "1");
+                }
+                if (attrs.contains("correction")) {
+                    correction = std::stoll(attrs.at("correction"));
+                }
+                return {cuda::std_kernel(inputs[0], dim, keepdim, correction, stream)};
+            }
+            else if (op_name == "norm") {
+                if (inputs.size() != 1) {
+                    throw std::invalid_argument("norm operation requires exactly 1 input");
+                }
+                float p = 2.0f;
+                int64_t dim = -1;
+                bool keepdim = false;
+                if (attrs.contains("p")) {
+                    p = std::stof(attrs.at("p"));
+                }
+                if (attrs.contains("dim")) {
+                    dim = std::stoll(attrs.at("dim"));
+                }
+                if (attrs.contains("keepdim")) {
+                    keepdim = (attrs.at("keepdim") == "1");
+                }
+                return {cuda::norm_kernel(inputs[0], p, dim, keepdim, stream)};
+            }
             else if (op_name == "sqrt") {
                 if (inputs.size() != 1) {
                     throw std::invalid_argument("sqrt operation requires exactly 1 input");
@@ -394,6 +553,106 @@ public:
                     throw std::invalid_argument("exp operation requires exactly 1 input");
                 }
                 return {cuda::exp_kernel(inputs[0], stream)};
+            }
+            // Trigonometric functions
+            else if (op_name == "sin") {
+                if (inputs.size() != 1) {
+                    throw std::invalid_argument("sin operation requires exactly 1 input");
+                }
+                return {cuda::sin_kernel(inputs[0], stream)};
+            }
+            else if (op_name == "cos") {
+                if (inputs.size() != 1) {
+                    throw std::invalid_argument("cos operation requires exactly 1 input");
+                }
+                return {cuda::cos_kernel(inputs[0], stream)};
+            }
+            else if (op_name == "tan") {
+                if (inputs.size() != 1) {
+                    throw std::invalid_argument("tan operation requires exactly 1 input");
+                }
+                return {cuda::tan_kernel(inputs[0], stream)};
+            }
+            else if (op_name == "asin") {
+                if (inputs.size() != 1) {
+                    throw std::invalid_argument("asin operation requires exactly 1 input");
+                }
+                return {cuda::asin_kernel(inputs[0], stream)};
+            }
+            else if (op_name == "acos") {
+                if (inputs.size() != 1) {
+                    throw std::invalid_argument("acos operation requires exactly 1 input");
+                }
+                return {cuda::acos_kernel(inputs[0], stream)};
+            }
+            else if (op_name == "atan") {
+                if (inputs.size() != 1) {
+                    throw std::invalid_argument("atan operation requires exactly 1 input");
+                }
+                return {cuda::atan_kernel(inputs[0], stream)};
+            }
+            else if (op_name == "sinh") {
+                if (inputs.size() != 1) {
+                    throw std::invalid_argument("sinh operation requires exactly 1 input");
+                }
+                return {cuda::sinh_kernel(inputs[0], stream)};
+            }
+            else if (op_name == "cosh") {
+                if (inputs.size() != 1) {
+                    throw std::invalid_argument("cosh operation requires exactly 1 input");
+                }
+                return {cuda::cosh_kernel(inputs[0], stream)};
+            }
+            // Rounding functions
+            else if (op_name == "ceil") {
+                if (inputs.size() != 1) {
+                    throw std::invalid_argument("ceil operation requires exactly 1 input");
+                }
+                return {cuda::ceil_kernel(inputs[0], stream)};
+            }
+            else if (op_name == "floor") {
+                if (inputs.size() != 1) {
+                    throw std::invalid_argument("floor operation requires exactly 1 input");
+                }
+                return {cuda::floor_kernel(inputs[0], stream)};
+            }
+            else if (op_name == "round") {
+                if (inputs.size() != 1) {
+                    throw std::invalid_argument("round operation requires exactly 1 input");
+                }
+                return {cuda::round_kernel(inputs[0], stream)};
+            }
+            else if (op_name == "trunc") {
+                if (inputs.size() != 1) {
+                    throw std::invalid_argument("trunc operation requires exactly 1 input");
+                }
+                return {cuda::trunc_kernel(inputs[0], stream)};
+            }
+            else if (op_name == "reciprocal") {
+                if (inputs.size() != 1) {
+                    throw std::invalid_argument("reciprocal operation requires exactly 1 input");
+                }
+                return {cuda::reciprocal_kernel(inputs[0], stream)};
+            }
+            else if (op_name == "clamp_min") {
+                if (inputs.size() != 1) {
+                    throw std::invalid_argument("clamp_min operation requires exactly 1 input");
+                }
+                float min_val = -std::numeric_limits<float>::infinity();
+                if (attrs.contains("min")) {
+                    min_val = std::stof(attrs.at("min"));
+                }
+                return {cuda::clamp_min_kernel(inputs[0], min_val, stream)};
+            }
+            else if (op_name == "clamp_max") {
+                if (inputs.size() != 1) {
+                    throw std::invalid_argument("clamp_max operation requires exactly 1 input");
+                }
+                float max_val = std::numeric_limits<float>::infinity();
+                if (attrs.contains("max")) {
+                    max_val = std::stof(attrs.at("max"));
+                }
+                return {cuda::clamp_max_kernel(inputs[0], max_val, stream)};
             }
             else if (op_name == "pow") {
                 if (inputs.size() != 1) {
@@ -540,6 +799,7 @@ public:
                     else if (dtype_str == "bfloat16") dtype = DType::BFloat16;
                     else if (dtype_str == "int32") dtype = DType::Int32;
                     else if (dtype_str == "int64") dtype = DType::Int64;
+                    else if (dtype_str == "bool") dtype = DType::Bool;
                 }
 
                 Device device = inputs.empty() ? Device::cuda(0) : inputs[0].device();
@@ -569,6 +829,7 @@ public:
                     else if (dtype_str == "bfloat16") dtype = DType::BFloat16;
                     else if (dtype_str == "int32") dtype = DType::Int32;
                     else if (dtype_str == "int64") dtype = DType::Int64;
+                    else if (dtype_str == "bool") dtype = DType::Bool;
                 }
 
                 Device device = inputs.empty() ? Device::cuda(0) : inputs[0].device();
@@ -639,6 +900,26 @@ public:
                 }
 
                 return {cuda::expand_kernel(inputs[0], shape, static_cast<void*>(stream))};
+            }
+            else if (op_name == "repeat") {
+                if (inputs.size() != 1) {
+                    throw std::invalid_argument("repeat operation requires exactly 1 input");
+                }
+                if (!attrs.contains("repeats")) {
+                    throw std::invalid_argument("repeat operation requires 'repeats' attribute");
+                }
+
+                std::vector<int64_t> repeats;
+                std::string repeats_str = attrs.at("repeats");
+                size_t pos = 0;
+                while ((pos = repeats_str.find(',')) != std::string::npos) {
+                    repeats.push_back(std::stoll(repeats_str.substr(0, pos)));
+                    repeats_str.erase(0, pos + 1);
+                }
+                if (!repeats_str.empty()) {
+                    repeats.push_back(std::stoll(repeats_str));
+                }
+                return {cuda::repeat_kernel(inputs[0], repeats, stream)};
             }
             else if (op_name == "rand") {
                 if (!attrs.contains("shape")) {
@@ -788,6 +1069,109 @@ public:
                 }
                 return {cuda::unsqueeze_kernel(inputs[0], dim, stream)};
             }
+            else if (op_name == "index_select") {
+                // CPU fallback for index_select (complex indexing operation)
+                if (inputs.size() != 2) {
+                    throw std::invalid_argument("index_select operation requires exactly 2 inputs");
+                }
+                auto input_cpu = inputs[0].to(Device::cpu());
+                auto index_cpu = inputs[1].to(Device::cpu());
+
+                // Dispatch to CPU backend
+                auto* cpu_backend = backend_registry().get_backend(Device::Type::CPU);
+                OpAttributes cpu_attrs = attrs;
+                std::vector<Tensor> cpu_inputs = {input_cpu, index_cpu};
+                auto result = cpu_backend->dispatch("index_select", cpu_inputs, cpu_attrs);
+
+                // Move result back to CUDA
+                return {result[0].to(inputs[0].device())};
+            }
+            else if (op_name == "gather") {
+                // CPU fallback for gather (complex indexing operation)
+                if (inputs.size() != 2) {
+                    throw std::invalid_argument("gather operation requires exactly 2 inputs");
+                }
+                auto input_cpu = inputs[0].to(Device::cpu());
+                auto index_cpu = inputs[1].to(Device::cpu());
+
+                // Dispatch to CPU backend
+                auto* cpu_backend = backend_registry().get_backend(Device::Type::CPU);
+                OpAttributes cpu_attrs = attrs;
+                std::vector<Tensor> cpu_inputs = {input_cpu, index_cpu};
+                auto result = cpu_backend->dispatch("gather", cpu_inputs, cpu_attrs);
+
+                // Move result back to CUDA
+                return {result[0].to(inputs[0].device())};
+            }
+            else if (op_name == "scatter") {
+                // CPU fallback for scatter (complex indexing operation)
+                if (inputs.size() != 3) {
+                    throw std::invalid_argument("scatter operation requires exactly 3 inputs");
+                }
+                auto input_cpu = inputs[0].to(Device::cpu());
+                auto index_cpu = inputs[1].to(Device::cpu());
+                auto src_cpu = inputs[2].to(Device::cpu());
+
+                // Dispatch to CPU backend
+                auto* cpu_backend = backend_registry().get_backend(Device::Type::CPU);
+                OpAttributes cpu_attrs = attrs;
+                std::vector<Tensor> cpu_inputs = {input_cpu, index_cpu, src_cpu};
+                auto result = cpu_backend->dispatch("scatter", cpu_inputs, cpu_attrs);
+
+                // Move result back to CUDA
+                return {result[0].to(inputs[0].device())};
+            }
+            else if (op_name == "masked_select") {
+                // CPU fallback for masked_select
+                if (inputs.size() != 2) {
+                    throw std::invalid_argument("masked_select operation requires exactly 2 inputs");
+                }
+                auto input_cpu = inputs[0].to(Device::cpu());
+                auto mask_cpu = inputs[1].to(Device::cpu());
+
+                // Dispatch to CPU backend
+                auto* cpu_backend = backend_registry().get_backend(Device::Type::CPU);
+                OpAttributes cpu_attrs = attrs;
+                std::vector<Tensor> cpu_inputs = {input_cpu, mask_cpu};
+                auto result = cpu_backend->dispatch("masked_select", cpu_inputs, cpu_attrs);
+
+                // Move result back to CUDA
+                return {result[0].to(inputs[0].device())};
+            }
+            else if (op_name == "masked_fill") {
+                // CPU fallback for masked_fill
+                if (inputs.size() != 2) {
+                    throw std::invalid_argument("masked_fill operation requires exactly 2 inputs");
+                }
+                auto input_cpu = inputs[0].to(Device::cpu());
+                auto mask_cpu = inputs[1].to(Device::cpu());
+
+                // Dispatch to CPU backend
+                auto* cpu_backend = backend_registry().get_backend(Device::Type::CPU);
+                OpAttributes cpu_attrs = attrs;
+                std::vector<Tensor> cpu_inputs = {input_cpu, mask_cpu};
+                auto result = cpu_backend->dispatch("masked_fill", cpu_inputs, cpu_attrs);
+
+                // Move result back to CUDA
+                return {result[0].to(inputs[0].device())};
+            }
+            else if (op_name == "where") {
+                // CPU fallback for where
+                if (inputs.size() != 3) {
+                    throw std::invalid_argument("where operation requires exactly 3 inputs");
+                }
+                auto condition_cpu = inputs[0].to(Device::cpu());
+                auto x_cpu = inputs[1].to(Device::cpu());
+                auto y_cpu = inputs[2].to(Device::cpu());
+
+                // Dispatch to CPU backend
+                auto* cpu_backend = backend_registry().get_backend(Device::Type::CPU);
+                std::vector<Tensor> cpu_inputs = {condition_cpu, x_cpu, y_cpu};
+                auto result = cpu_backend->dispatch("where", cpu_inputs, OpAttributes{});
+
+                // Move result back to CUDA
+                return {result[0].to(inputs[0].device())};
+            }
             else if (op_name == "cat") {
                 if (inputs.empty()) {
                     throw std::invalid_argument("cat operation requires at least 1 input tensor");
@@ -893,6 +1277,12 @@ public:
                     throw std::invalid_argument("ge operation requires exactly 2 inputs");
                 }
                 return {cuda::ge_kernel(inputs[0], inputs[1], stream)};
+            }
+            else if (op_name == "dot") {
+                if (inputs.size() != 2) {
+                    throw std::invalid_argument("dot operation requires exactly 2 inputs");
+                }
+                return {cuda::dot_kernel(inputs[0], inputs[1], stream)};
             }
             else if (op_name == "conv2d_forward") {
                 // Parse conv2d parameters

@@ -449,8 +449,13 @@ auto Tensor::to(Device device) const -> Tensor {
     }
 
     // Perform the copy
+    // IMPORTANT: Calculate source pointer with offset in bytes, not elements
+    // cont.impl_->offset is in elements, so we multiply by dtype_size() to get bytes
+    const void* src_ptr = static_cast<const uint8_t*>(cont.impl_->storage->data()) +
+                          (cont.impl_->offset * tenzor::dtype_size(cont.impl_->dtype));
+
     backend->copy(result.impl_->storage->data(),
-                  cont.impl_->storage->data(),
+                  const_cast<void*>(src_ptr),
                   size_bytes,
                   copy_kind);
 

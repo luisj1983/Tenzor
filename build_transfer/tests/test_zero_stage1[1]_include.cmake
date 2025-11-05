@@ -1,5 +1,0 @@
-if(EXISTS "/home/lee/Projects/Tenzor/build_transfer/tests/test_zero_stage1[1]_tests.cmake")
-  include("/home/lee/Projects/Tenzor/build_transfer/tests/test_zero_stage1[1]_tests.cmake")
-else()
-  add_test(test_zero_stage1_NOT_BUILT test_zero_stage1_NOT_BUILT)
-endif()

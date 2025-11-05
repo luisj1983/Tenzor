@@ -14,6 +14,7 @@
 #include <cstring>
 #include <iostream>
 #include <limits>
+#include <random>
 #include <stdexcept>
 
 namespace tenzor {
@@ -1098,6 +1099,48 @@ auto VulkanBackend::dispatch(const std::string& op_name,
             // For now, assume Float32
         }
         return {dispatchOnes(shape, dtype)};
+    }
+
+    // Rand operation - create tensor filled with uniform random values [0, 1)
+    if (op_name == "rand") {
+        std::vector<int64_t> shape;
+        if (attrs.contains("shape")) {
+            std::string shape_str = attrs.at("shape");
+            size_t pos = 0;
+            while ((pos = shape_str.find(',')) != std::string::npos) {
+                shape.push_back(std::stoll(shape_str.substr(0, pos)));
+                shape_str.erase(0, pos + 1);
+            }
+            if (!shape_str.empty()) {
+                shape.push_back(std::stoll(shape_str));
+            }
+        }
+        DType dtype = DType::Float32;
+        if (attrs.contains("dtype")) {
+            // Parse dtype if provided
+        }
+        return {dispatchRand(shape, dtype)};
+    }
+
+    // Randn operation - create tensor filled with normal random values
+    if (op_name == "randn") {
+        std::vector<int64_t> shape;
+        if (attrs.contains("shape")) {
+            std::string shape_str = attrs.at("shape");
+            size_t pos = 0;
+            while ((pos = shape_str.find(',')) != std::string::npos) {
+                shape.push_back(std::stoll(shape_str.substr(0, pos)));
+                shape_str.erase(0, pos + 1);
+            }
+            if (!shape_str.empty()) {
+                shape.push_back(std::stoll(shape_str));
+            }
+        }
+        DType dtype = DType::Float32;
+        if (attrs.contains("dtype")) {
+            // Parse dtype if provided
+        }
+        return {dispatchRandn(shape, dtype)};
     }
 
     throw std::runtime_error("VulkanBackend: Operation '" + op_name + "' not implemented");
@@ -4738,6 +4781,56 @@ auto VulkanBackend::dispatchOnes(const std::vector<int64_t>& shape, DType dtype)
     );
 
     endSingleTimeCommands(cmdBuffer, device_id);
+
+    return output;
+}
+
+auto VulkanBackend::dispatchRand(const std::vector<int64_t>& shape, DType dtype) -> Tensor {
+    // Create tensor on first available Vulkan device
+    Device device(Device::Type::Vulkan, 0);
+    Tensor output(shape, dtype, device);
+
+    // Uniform random distribution requires CPU generation, then copy to GPU
+    // Generate random data on CPU
+    size_t numel = output.numel();
+    std::vector<float> cpu_data(numel);
+
+    // Use C++11 random number generation
+    static std::random_device rd;
+    static std::mt19937 gen(rd());
+    static std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+
+    for (size_t i = 0; i < numel; ++i) {
+        cpu_data[i] = dist(gen);
+    }
+
+    // Copy to GPU
+    copy(output.data_ptr(), cpu_data.data(), numel * sizeof(float), CopyKind::HostToDevice);
+
+    return output;
+}
+
+auto VulkanBackend::dispatchRandn(const std::vector<int64_t>& shape, DType dtype) -> Tensor {
+    // Create tensor on first available Vulkan device
+    Device device(Device::Type::Vulkan, 0);
+    Tensor output(shape, dtype, device);
+
+    // Normal random distribution requires CPU generation, then copy to GPU
+    // Generate random data on CPU
+    size_t numel = output.numel();
+    std::vector<float> cpu_data(numel);
+
+    // Use C++11 random number generation
+    static std::random_device rd;
+    static std::mt19937 gen(rd());
+    static std::normal_distribution<float> dist(0.0f, 1.0f);
+
+    for (size_t i = 0; i < numel; ++i) {
+        cpu_data[i] = dist(gen);
+    }
+
+    // Copy to GPU
+    copy(output.data_ptr(), cpu_data.data(), numel * sizeof(float), CopyKind::HostToDevice);
 
     return output;
 }

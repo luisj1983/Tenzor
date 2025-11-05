@@ -1,5 +1,0 @@
-if(EXISTS "/home/lee/Projects/Tenzor/build_transfer/tests/test_deeplabv3plus[1]_tests.cmake")
-  include("/home/lee/Projects/Tenzor/build_transfer/tests/test_deeplabv3plus[1]_tests.cmake")
-else()
-  add_test(test_deeplabv3plus_NOT_BUILT test_deeplabv3plus_NOT_BUILT)
-endif()

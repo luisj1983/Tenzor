@@ -1,5 +1,0 @@
-if(EXISTS "/home/lee/Projects/Tenzor/build_transfer/tests/test_slice_backend_parity[1]_tests.cmake")
-  include("/home/lee/Projects/Tenzor/build_transfer/tests/test_slice_backend_parity[1]_tests.cmake")
-else()
-  add_test(test_slice_backend_parity_NOT_BUILT test_slice_backend_parity_NOT_BUILT)
-endif()
