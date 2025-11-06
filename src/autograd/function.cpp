@@ -448,25 +448,33 @@ auto MaxBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
     if (!dim_.has_value()) {
         // Global max: gradient flows only to the maximum element
         // Create mask where input == output (broadcasted)
-        auto output_expanded = expand(output, input_shape_vec);
 
-        // mask = (input == output) ? 1 : 0
+        // Reshape scalar output to match input dimensions before expanding
+        auto output_reshaped = output;
+        if (output.ndim() == 0) {
+            std::vector<int64_t> ones_shape(input_shape_vec.size(), 1);
+            output_reshaped = reshape(output, ones_shape);
+        }
+        auto output_expanded = expand(output_reshaped, input_shape_vec);
+
+        // Create mask where input == output (within epsilon)
         auto diff = sub(input, output_expanded);
         auto abs_diff = abs(diff);
-
-        // Small epsilon for floating point comparison
         auto epsilon = full(input_shape_vec, 1e-7f, input.dtype(), input.device());
+        auto mask_bool = lt(abs_diff, epsilon);
+        // Convert boolean mask to float for gradient computation
         auto ones_tensor = ones(input_shape_vec, input.dtype(), input.device());
         auto zeros_tensor = zeros(input_shape_vec, input.dtype(), input.device());
-
-        // mask = abs_diff < epsilon ? 1 : 0
-        // Approximate using: 1 - clamp(abs_diff / epsilon, 0, 1)
-        auto scaled_diff = div(abs_diff, epsilon);
-        auto clamped = clamp(scaled_diff, 0.0f, 1.0f);
-        auto mask = sub(ones_tensor, clamped);
+        auto mask = where(mask_bool, ones_tensor, zeros_tensor);
 
         // Broadcast grad_output to input shape
-        auto grad_broadcasted = expand(grad_output, input_shape_vec);
+        // FIX: grad_output is also scalar, need to reshape before expanding
+        auto grad_reshaped = grad_output;
+        if (grad_output.ndim() == 0) {
+            std::vector<int64_t> ones_shape(input_shape_vec.size(), 1);
+            grad_reshaped = reshape(grad_output, ones_shape);
+        }
+        auto grad_broadcasted = expand(grad_reshaped, input_shape_vec);
 
         return {mul(grad_broadcasted, mask)};
     } else {
@@ -622,84 +630,42 @@ auto SliceBackward::forward(std::vector<Variable> inputs) -> std::vector<Variabl
 }
 
 auto SliceBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
-    // Create zero gradient tensor with original input shape
     const auto& grad_output = grad_outputs[0];
+
+    // Create zero gradient tensor with original input shape
     auto grad_input = zeros(input_shape_, grad_output.dtype(), grad_output.device());
 
-    // Scatter grad_output values back to the sliced positions using optimized implementation
-    // This uses efficient memory access patterns and vectorization where possible
+    // Build index tensor for scatter operation
+    // Index tensor must have same shape as grad_output
+    int64_t slice_size = grad_output.shape()[dim_];
+    int64_t total_elements = grad_output.numel();
 
-    // Calculate strides for both tensors
-    auto grad_out_shape = grad_output.shape();
-    auto ndim = input_shape_.size();
+    // Create index tensor with same shape as grad_output
+    auto index_shape = std::vector<int64_t>(grad_output.shape().begin(), grad_output.shape().end());
+    auto index = zeros(index_shape, DType::Int64, Device::cpu());
 
-    std::vector<int64_t> in_strides(ndim);
-    std::vector<int64_t> out_strides(ndim);
+    // Fill index tensor on CPU
+    int64_t* index_ptr = index.data<int64_t>();
 
-    in_strides[ndim - 1] = 1;
-    out_strides[ndim - 1] = 1;
-    for (int64_t i = ndim - 2; i >= 0; --i) {
-        in_strides[i] = in_strides[i + 1] * input_shape_[i + 1];
-        out_strides[i] = out_strides[i + 1] * grad_out_shape[i + 1];
+    // Calculate stride for the sliced dimension
+    int64_t dim_stride = 1;
+    for (int64_t d = dim_ + 1; d < grad_output.ndim(); ++d) {
+        dim_stride *= grad_output.shape()[d];
     }
 
-    // Optimized scatter implementation using native memory operations
-    auto scatter_gradients = [&]<typename T>(const T* grad_out_data, T* grad_in_data) {
-        // Use iterative approach with optimized indexing for better cache locality
-        int64_t total_elements = 1;
-        for (int64_t dim_size : grad_out_shape) {
-            total_elements *= dim_size;
-        }
-
-        // Process elements with optimized scatter pattern
-        for (int64_t linear_idx = 0; linear_idx < total_elements; ++linear_idx) {
-            // Decompose linear index into multi-dimensional indices
-            std::vector<int64_t> out_indices(ndim);
-            int64_t remaining = linear_idx;
-            for (int64_t d = ndim - 1; d >= 0; --d) {
-                out_indices[d] = remaining % grad_out_shape[d];
-                remaining /= grad_out_shape[d];
-            }
-
-            // Map output indices to input indices
-            std::vector<int64_t> in_indices(ndim);
-            for (int64_t d = 0; d < static_cast<int64_t>(ndim); ++d) {
-                if (d == dim_) {
-                    // Sliced dimension: map back using start and step
-                    in_indices[d] = start_ + out_indices[d] * step_;
-                } else {
-                    // Other dimensions: direct mapping
-                    in_indices[d] = out_indices[d];
-                }
-            }
-
-            // Calculate linear input index efficiently
-            int64_t in_linear = 0;
-            for (int64_t d = 0; d < static_cast<int64_t>(ndim); ++d) {
-                in_linear += in_indices[d] * in_strides[d];
-            }
-
-            // Scatter gradient value
-            grad_in_data[in_linear] = grad_out_data[linear_idx];
-        }
-    };
-
-    // Dispatch based on dtype
-    switch (grad_output.dtype()) {
-        case DType::Float32:
-            scatter_gradients(grad_output.data<float>(), grad_input.data<float>());
-            break;
-        case DType::Float64:
-            scatter_gradients(grad_output.data<double>(), grad_input.data<double>());
-            break;
-        case DType::Float16: {
-            // Float16 requires special handling - cast via uint16_t
-            // For now, throw an error and plan for future implementation
-            throw std::runtime_error("SliceBackward: Float16 support requires specialized implementation");
-        }
-        default:
-            throw std::runtime_error("SliceBackward: Unsupported dtype. Supported types: Float32, Float64");
+    // Fill index tensor: each element along dim_ gets mapped to (start_ + pos * step_)
+    for (int64_t i = 0; i < total_elements; ++i) {
+        int64_t pos_in_dim = (i / dim_stride) % slice_size;
+        index_ptr[i] = start_ + pos_in_dim * step_;
     }
+
+    // Transfer to target device if needed
+    if (grad_output.device() != Device::cpu()) {
+        index = index.to(grad_output.device());
+    }
+
+    // Use scatter to place gradients - dispatches to appropriate backend
+    grad_input = scatter(grad_input, dim_, index, grad_output);
 
     return {grad_input};
 }

@@ -517,18 +517,9 @@ auto cat(const std::vector<Variable>& inputs, int64_t dim) -> Variable {
 }
 
 auto slice(const Variable& input, int64_t dim, int64_t start, int64_t end, int64_t step) -> Variable {
-    // Use Dispatcher to call tensor-level slice to avoid name collision
-    OpAttributes attrs;
-    attrs["dim"] = std::to_string(dim);
-    attrs["start"] = std::to_string(start);
-    attrs["end"] = std::to_string(end);
-    attrs["step"] = std::to_string(step);
-
-    std::vector<Tensor> input_tensors = {input.tensor()};
-
     if (!input.requires_grad() || !is_grad_enabled()) {
-        // No gradient needed, just compute using dispatcher
-        auto result = Dispatcher::dispatch("slice", input_tensors, attrs)[0];
+        // No gradient needed, just compute using Tensor::slice() method
+        auto result = input.tensor().slice(dim, start, end, step);
         return Variable(result, false);
     }
 
@@ -549,8 +540,8 @@ auto slice(const Variable& input, int64_t dim, int64_t start, int64_t end, int64
     }
     grad_fn->set_input_variables(input_vars);
 
-    // Compute result using dispatcher to avoid name collision with tensor slice
-    auto result_tensor = Dispatcher::dispatch("slice", input_tensors, attrs)[0];
+    // Compute result using Tensor::slice() method directly
+    auto result_tensor = input.tensor().slice(dim, start, end, step);
 
     Variable output(result_tensor, true);
     output.set_grad_fn(grad_fn);

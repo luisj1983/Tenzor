@@ -353,11 +353,17 @@ TEST_P(AutogradAdditionalTest, AbsBackwardCorrectGradients) {
 }
 
 TEST_P(AutogradAdditionalTest, ClampBackwardCorrectGradients) {
-    auto x_data = ones({4}, DType::Float32, device);
+    // Create tensor on CPU first, fill data, then transfer to target device
+    auto x_data = ones({4}, DType::Float32, Device::cpu());
     x_data.data<float>()[0] = -2.0f;  // Below min
     x_data.data<float>()[1] = 0.0f;   // In range
     x_data.data<float>()[2] = 0.5f;   // In range
     x_data.data<float>()[3] = 2.0f;   // Above max
+
+    // Transfer to target device if needed
+    if (device != Device::cpu()) {
+        x_data = x_data.to(device);
+    }
 
     auto x = Variable(x_data, true);
     auto y = clamp(x, -1.0f, 1.0f);
@@ -584,11 +590,17 @@ TEST_P(AutogradAdditionalTest, MeanBackwardCorrectGradients) {
 }
 
 TEST_P(AutogradAdditionalTest, MaxBackwardSingleMaxElement) {
-    auto x_data = zeros({4}, DType::Float32, device);
+    // Create tensor on CPU first, fill data, then transfer to target device
+    auto x_data = zeros({4}, DType::Float32, Device::cpu());
     x_data.data<float>()[0] = 1.0f;
     x_data.data<float>()[1] = 2.0f;
     x_data.data<float>()[2] = 5.0f;  // Max
     x_data.data<float>()[3] = 3.0f;
+
+    // Transfer to target device if needed
+    if (device != Device::cpu()) {
+        x_data = x_data.to(device);
+    }
 
     auto x = Variable(x_data, true);
     auto y = max(x);
@@ -812,9 +824,6 @@ TEST_P(AutogradAdditionalTest, MultipleHooksAreChained) {
 // =============================================================================
 
 TEST_P(AutogradAdditionalTest, GradcheckSimpleFunction) {
-    if (device.type != Device::Type::CPU) {
-        GTEST_SKIP() << "Gradcheck only supported on CPU";
-    }
 
     auto func = [](const Variable& x) -> Variable {
         return sum(x * x);
@@ -827,9 +836,6 @@ TEST_P(AutogradAdditionalTest, GradcheckSimpleFunction) {
 }
 
 TEST_P(AutogradAdditionalTest, GradcheckComplexFunction) {
-    if (device.type != Device::Type::CPU) {
-        GTEST_SKIP() << "Gradcheck only supported on CPU";
-    }
 
     auto func = [](const Variable& x) -> Variable {
         auto y = exp(x);
@@ -844,9 +850,6 @@ TEST_P(AutogradAdditionalTest, GradcheckComplexFunction) {
 }
 
 TEST_P(AutogradAdditionalTest, GradcheckMatmul) {
-    if (device.type != Device::Type::CPU) {
-        GTEST_SKIP() << "Gradcheck only supported on CPU";
-    }
 
     auto b = ones({4, 5}, DType::Float32, Device::cpu());
 

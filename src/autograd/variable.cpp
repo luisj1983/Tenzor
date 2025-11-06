@@ -72,8 +72,10 @@ auto Variable::retains_grad() const -> bool {
 }
 
 auto Variable::zero_grad() -> void {
-    if (impl_ && impl_->grad_.has_value()) {
-        impl_->grad_ = zeros_like(impl_->grad_.value());
+    if (impl_) {
+        // Reset the gradient optional entirely, not just zero the values
+        // This makes has_grad() return false as expected
+        impl_->grad_.reset();
     }
 }
 

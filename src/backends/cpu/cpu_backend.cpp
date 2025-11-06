@@ -40,6 +40,30 @@ namespace cpu {
     auto ge_kernel(const Tensor& a, const Tensor& b) -> Tensor;
     auto dot_kernel(const Tensor& a, const Tensor& b) -> Tensor;
 
+    // Trigonometric operations
+    auto sin_kernel(const Tensor& input) -> Tensor;
+    auto cos_kernel(const Tensor& input) -> Tensor;
+    auto tan_kernel(const Tensor& input) -> Tensor;
+    auto asin_kernel(const Tensor& input) -> Tensor;
+    auto acos_kernel(const Tensor& input) -> Tensor;
+    auto atan_kernel(const Tensor& input) -> Tensor;
+    auto sinh_kernel(const Tensor& input) -> Tensor;
+    auto cosh_kernel(const Tensor& input) -> Tensor;
+
+    // Rounding operations
+    auto round_kernel(const Tensor& input) -> Tensor;
+    auto floor_kernel(const Tensor& input) -> Tensor;
+    auto ceil_kernel(const Tensor& input) -> Tensor;
+
+    // Other math operations
+    auto reciprocal_kernel(const Tensor& input) -> Tensor;
+
+    // In-place operations
+    auto add_inplace_kernel(Tensor& a, const Tensor& b) -> void;
+    auto mul_inplace_kernel(Tensor& a, const Tensor& b) -> void;
+    auto sub_inplace_kernel(Tensor& a, const Tensor& b) -> void;
+    auto div_inplace_kernel(Tensor& a, const Tensor& b) -> void;
+
     // Activation kernels
     auto relu_kernel(const Tensor& input) -> Tensor;
     auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Tensor;
@@ -412,6 +436,26 @@ public:
                 max_val = std::stof(attrs.at("max"));
             }
             return {cpu::clamp_kernel(inputs[0], min_val, max_val)};
+        }
+        else if (op_name == "clamp_min") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("clamp_min operation requires exactly 1 input");
+            }
+            float min_val = -std::numeric_limits<float>::infinity();
+            if (attrs.contains("min")) {
+                min_val = std::stof(attrs.at("min"));
+            }
+            return {cpu::clamp_kernel(inputs[0], min_val, std::numeric_limits<float>::infinity())};
+        }
+        else if (op_name == "clamp_max") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("clamp_max operation requires exactly 1 input");
+            }
+            float max_val = std::numeric_limits<float>::infinity();
+            if (attrs.contains("max")) {
+                max_val = std::stof(attrs.at("max"));
+            }
+            return {cpu::clamp_kernel(inputs[0], -std::numeric_limits<float>::infinity(), max_val)};
         }
         else if (op_name == "log") {
             if (inputs.size() != 1) {
@@ -1083,6 +1127,114 @@ public:
                 throw std::invalid_argument("dot operation requires exactly 2 inputs");
             }
             return {cpu::dot_kernel(inputs[0], inputs[1])};
+        }
+        // Trigonometric operations
+        else if (op_name == "sin") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("sin operation requires exactly 1 input");
+            }
+            return {cpu::sin_kernel(inputs[0])};
+        }
+        else if (op_name == "cos") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("cos operation requires exactly 1 input");
+            }
+            return {cpu::cos_kernel(inputs[0])};
+        }
+        else if (op_name == "tan") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("tan operation requires exactly 1 input");
+            }
+            return {cpu::tan_kernel(inputs[0])};
+        }
+        else if (op_name == "asin") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("asin operation requires exactly 1 input");
+            }
+            return {cpu::asin_kernel(inputs[0])};
+        }
+        else if (op_name == "acos") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("acos operation requires exactly 1 input");
+            }
+            return {cpu::acos_kernel(inputs[0])};
+        }
+        else if (op_name == "atan") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("atan operation requires exactly 1 input");
+            }
+            return {cpu::atan_kernel(inputs[0])};
+        }
+        else if (op_name == "sinh") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("sinh operation requires exactly 1 input");
+            }
+            return {cpu::sinh_kernel(inputs[0])};
+        }
+        else if (op_name == "cosh") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("cosh operation requires exactly 1 input");
+            }
+            return {cpu::cosh_kernel(inputs[0])};
+        }
+        // Rounding operations
+        else if (op_name == "round") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("round operation requires exactly 1 input");
+            }
+            return {cpu::round_kernel(inputs[0])};
+        }
+        else if (op_name == "floor") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("floor operation requires exactly 1 input");
+            }
+            return {cpu::floor_kernel(inputs[0])};
+        }
+        else if (op_name == "ceil") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("ceil operation requires exactly 1 input");
+            }
+            return {cpu::ceil_kernel(inputs[0])};
+        }
+        // Other math operations
+        else if (op_name == "reciprocal") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("reciprocal operation requires exactly 1 input");
+            }
+            return {cpu::reciprocal_kernel(inputs[0])};
+        }
+        // In-place operations
+        else if (op_name == "add_inplace") {
+            if (inputs.size() != 2) {
+                throw std::invalid_argument("add_inplace operation requires exactly 2 inputs");
+            }
+            Tensor a_copy = inputs[0].clone();
+            cpu::add_inplace_kernel(a_copy, inputs[1]);
+            return {a_copy};
+        }
+        else if (op_name == "mul_inplace") {
+            if (inputs.size() != 2) {
+                throw std::invalid_argument("mul_inplace operation requires exactly 2 inputs");
+            }
+            Tensor a_copy = inputs[0].clone();
+            cpu::mul_inplace_kernel(a_copy, inputs[1]);
+            return {a_copy};
+        }
+        else if (op_name == "sub_inplace") {
+            if (inputs.size() != 2) {
+                throw std::invalid_argument("sub_inplace operation requires exactly 2 inputs");
+            }
+            Tensor a_copy = inputs[0].clone();
+            cpu::sub_inplace_kernel(a_copy, inputs[1]);
+            return {a_copy};
+        }
+        else if (op_name == "div_inplace") {
+            if (inputs.size() != 2) {
+                throw std::invalid_argument("div_inplace operation requires exactly 2 inputs");
+            }
+            Tensor a_copy = inputs[0].clone();
+            cpu::div_inplace_kernel(a_copy, inputs[1]);
+            return {a_copy};
         }
         else {
             throw std::runtime_error("CPUBackend: Unknown operation '" + op_name + "'");

@@ -8,6 +8,13 @@ using namespace tenzor;
 class ComparisonOpsTest : public ::testing::TestWithParam<std::string> {
 protected:
     void SetUp() override {
+        // Initialize library on first test
+        static bool initialized = false;
+        if (!initialized) {
+            tenzor::initialize();
+            initialized = true;
+        }
+
         backend_name = GetParam();
         if (backend_name == "cpu") {
             device = Device::cpu();

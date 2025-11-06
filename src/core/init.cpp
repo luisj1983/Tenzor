@@ -252,6 +252,91 @@ auto initialize() -> void {
             return cpu_backend->dispatch("pow", inputs, attrs);
         });
 
+    // Trigonometric operations
+    registry.register_kernel("sin", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("sin", inputs, attrs);
+        });
+
+    registry.register_kernel("cos", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("cos", inputs, attrs);
+        });
+
+    registry.register_kernel("tan", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("tan", inputs, attrs);
+        });
+
+    registry.register_kernel("asin", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("asin", inputs, attrs);
+        });
+
+    registry.register_kernel("acos", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("acos", inputs, attrs);
+        });
+
+    registry.register_kernel("atan", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("atan", inputs, attrs);
+        });
+
+    // Hyperbolic operations
+    registry.register_kernel("sinh", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("sinh", inputs, attrs);
+        });
+
+    registry.register_kernel("cosh", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("cosh", inputs, attrs);
+        });
+
+    // Rounding operations
+    registry.register_kernel("round", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("round", inputs, attrs);
+        });
+
+    registry.register_kernel("floor", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("floor", inputs, attrs);
+        });
+
+    registry.register_kernel("ceil", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("ceil", inputs, attrs);
+        });
+
+    // Reciprocal operation
+    registry.register_kernel("reciprocal", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("reciprocal", inputs, attrs);
+        });
+
+    // In-place operations
+    registry.register_kernel("add_inplace", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("add_inplace", inputs, attrs);
+        });
+
+    registry.register_kernel("mul_inplace", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("mul_inplace", inputs, attrs);
+        });
+
+    registry.register_kernel("sub_inplace", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("sub_inplace", inputs, attrs);
+        });
+
+    registry.register_kernel("div_inplace", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("div_inplace", inputs, attrs);
+        });
+
     registry.register_kernel("dot", Device::Type::CPU,
         [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             return cpu_backend->dispatch("dot", inputs, attrs);
@@ -260,6 +345,16 @@ auto initialize() -> void {
     registry.register_kernel("clamp", Device::Type::CPU,
         [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             return cpu_backend->dispatch("clamp", inputs, attrs);
+        });
+
+    registry.register_kernel("clamp_min", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("clamp_min", inputs, attrs);
+        });
+
+    registry.register_kernel("clamp_max", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("clamp_max", inputs, attrs);
         });
 
     // Comparison operations

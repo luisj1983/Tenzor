@@ -479,11 +479,9 @@ auto expand(const Tensor& input, std::vector<int64_t> shape) -> Tensor {
 
     // CPU path: Manual implementation
     auto input_shape_vec = std::vector<int64_t>(input_shape.begin(), input_shape.end());
-    const float* input_data = input.data<float>();
 
     // Create output tensor on CPU
     auto output = zeros(shape, input.dtype(), Device::cpu());
-    float* output_data = output.data<float>();
 
     // Calculate strides
     std::vector<int64_t> input_strides(input_shape_vec.size());
@@ -499,30 +497,64 @@ auto expand(const Tensor& input, std::vector<int64_t> shape) -> Tensor {
         total_elements *= s;
     }
 
-    // Fill output by replicating input
-    for (int64_t out_idx = 0; out_idx < total_elements; ++out_idx) {
-        int64_t temp = out_idx;
-        int64_t in_idx = 0;
+    // Fill output by replicating input - dtype-aware implementation
+    if (input.dtype() == DType::Float64) {
+        const double* input_data = input.data<double>();
+        double* output_data = output.data<double>();
 
-        int input_dim_offset = shape.size() - input_shape_vec.size();
+        for (int64_t out_idx = 0; out_idx < total_elements; ++out_idx) {
+            int64_t temp = out_idx;
+            int64_t in_idx = 0;
 
-        for (int i = shape.size() - 1; i >= 0; --i) {
-            int64_t coord = temp % shape[i];
-            temp /= shape[i];
+            int input_dim_offset = shape.size() - input_shape_vec.size();
 
-            int input_dim = i - input_dim_offset;
-            if (input_dim >= 0 && input_dim < static_cast<int>(input_shape_vec.size())) {
-                // Map to input dimension (handle size-1 dimensions)
-                if (input_shape_vec[input_dim] == 1) {
-                    coord = 0;
-                } else if (input_shape_vec[input_dim] != shape[i]) {
-                    throw std::invalid_argument("Cannot expand dimension from non-1 size to different size");
+            for (int i = shape.size() - 1; i >= 0; --i) {
+                int64_t coord = temp % shape[i];
+                temp /= shape[i];
+
+                int input_dim = i - input_dim_offset;
+                if (input_dim >= 0 && input_dim < static_cast<int>(input_shape_vec.size())) {
+                    // Map to input dimension (handle size-1 dimensions)
+                    if (input_shape_vec[input_dim] == 1) {
+                        coord = 0;
+                    } else if (input_shape_vec[input_dim] != shape[i]) {
+                        throw std::invalid_argument("Cannot expand dimension from non-1 size to different size");
+                    }
+                    in_idx += coord * input_strides[input_dim];
                 }
-                in_idx += coord * input_strides[input_dim];
             }
-        }
 
-        output_data[out_idx] = input_data[in_idx];
+            output_data[out_idx] = input_data[in_idx];
+        }
+    } else {
+        // Float32 or other types
+        const float* input_data = input.data<float>();
+        float* output_data = output.data<float>();
+
+        for (int64_t out_idx = 0; out_idx < total_elements; ++out_idx) {
+            int64_t temp = out_idx;
+            int64_t in_idx = 0;
+
+            int input_dim_offset = shape.size() - input_shape_vec.size();
+
+            for (int i = shape.size() - 1; i >= 0; --i) {
+                int64_t coord = temp % shape[i];
+                temp /= shape[i];
+
+                int input_dim = i - input_dim_offset;
+                if (input_dim >= 0 && input_dim < static_cast<int>(input_shape_vec.size())) {
+                    // Map to input dimension (handle size-1 dimensions)
+                    if (input_shape_vec[input_dim] == 1) {
+                        coord = 0;
+                    } else if (input_shape_vec[input_dim] != shape[i]) {
+                        throw std::invalid_argument("Cannot expand dimension from non-1 size to different size");
+                    }
+                    in_idx += coord * input_strides[input_dim];
+                }
+            }
+
+            output_data[out_idx] = input_data[in_idx];
+        }
     }
 
     return output;

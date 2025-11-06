@@ -370,13 +370,19 @@ TEST_P(CachingAllocatorTest, TotalAllocatedBytesTracking) {
 TEST_P(CachingAllocatorTest, CachedBytesTracking) {
     const size_t size = 16384;
     const int count = 3;
-    size_t expected_cached = 0;
 
+    // Allocate multiple blocks first (don't deallocate yet)
+    std::vector<void*> ptrs;
     for (int i = 0; i < count; ++i) {
-        void* ptr = allocator->allocate(size);
-        allocator->deallocate(ptr);
-        expected_cached += size;
+        ptrs.push_back(allocator->allocate(size));
     }
+
+    // Now deallocate all blocks so they all get cached
+    for (void* ptr : ptrs) {
+        allocator->deallocate(ptr);
+    }
+
+    size_t expected_cached = size * count;
 
     // All blocks should be cached
     EXPECT_GE(allocator->total_cached_bytes(), expected_cached);
@@ -812,9 +818,14 @@ TEST_P(CachingAllocatorTest, MultipleCachedBlocksOfSameSize) {
     const size_t size = 1024;
     const int count = 5;
 
-    // Create multiple cached blocks of same size
+    // Allocate multiple blocks first (don't deallocate yet)
+    std::vector<void*> ptrs;
     for (int i = 0; i < count; ++i) {
-        void* ptr = allocator->allocate(size);
+        ptrs.push_back(allocator->allocate(size));
+    }
+
+    // Now deallocate all blocks to create multiple cached blocks of same size
+    for (void* ptr : ptrs) {
         allocator->deallocate(ptr);
     }
 

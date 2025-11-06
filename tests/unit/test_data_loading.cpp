@@ -32,7 +32,8 @@ protected:
         std::vector<int64_t> shape = {static_cast<int64_t>(n_samples)};
         shape.insert(shape.end(), feature_shape.begin(), feature_shape.end());
 
-        auto tensor = zeros(shape, DType::Float32, device);
+        // Create tensor on CPU first to fill with data
+        auto tensor = zeros(shape, DType::Float32, Device::cpu());
         auto* data = tensor.data<float>();
 
         // Fill with sequential values for predictable testing
@@ -40,16 +41,27 @@ protected:
             data[i] = static_cast<float>(i % 100) / 10.0f;
         }
 
+        // Transfer to target device if needed
+        if (device != Device::cpu()) {
+            tensor = tensor.to(device);
+        }
+
         return tensor;
     }
 
     Tensor createTestTargets(size_t n_samples) {
-        auto tensor = zeros({static_cast<int64_t>(n_samples)}, DType::Float32, device);
+        // Create tensor on CPU first to fill with data
+        auto tensor = zeros({static_cast<int64_t>(n_samples)}, DType::Float32, Device::cpu());
         auto* data = tensor.data<float>();
 
         // Fill with class labels (0, 1, 2, ...)
         for (size_t i = 0; i < n_samples; ++i) {
             data[i] = static_cast<float>(i % 10);
+        }
+
+        // Transfer to target device if needed
+        if (device != Device::cpu()) {
+            tensor = tensor.to(device);
         }
 
         return tensor;
@@ -250,9 +262,16 @@ TEST_P(DataLoadingBackendTest, TransformedDatasetTargetTransform) {
     // Transform that modifies target
     auto transform_func = [](const Tensor& input, const Tensor& target)
         -> std::pair<Tensor, Tensor> {
-        auto one_hot = zeros({10}, input.dtype(), input.device());
+        // Create tensor on CPU first, fill data, then transfer to target device
+        auto one_hot = zeros({10}, input.dtype(), Device::cpu());
         int label = static_cast<int>(target.item<float>());
         one_hot.data<float>()[label] = 1.0f;
+
+        // Transfer to target device if needed
+        if (input.device() != Device::cpu()) {
+            one_hot = one_hot.to(input.device());
+        }
+
         return {input, one_hot};
     };
 

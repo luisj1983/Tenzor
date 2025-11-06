@@ -139,7 +139,11 @@ auto full(std::vector<int64_t> shape, float value, DType dtype, Device device) -
 
         OpAttributes attrs;
         attrs["shape"] = shape_to_string(shape);
-        attrs["value"] = std::to_string(value);
+        // FIX: Use scientific notation with full precision to avoid loss of small values
+        // std::to_string() uses fixed precision and loses values like 1e-7
+        std::ostringstream oss;
+        oss << std::scientific << std::setprecision(std::numeric_limits<float>::max_digits10) << value;
+        attrs["value"] = oss.str();
         attrs["dtype"] = dtype_to_string(dtype);
         attrs["device_id"] = std::to_string(device.index);
 

@@ -2228,5 +2228,554 @@ auto dot_kernel(const Tensor& a, const Tensor& b) -> Tensor {
     return output;
 }
 
+// Trigonometric functions
+auto sin_kernel(const Tensor& input) -> Tensor {
+    std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
+    auto output = Tensor(shape_vec, input.dtype(), input.device());
+    int64_t n = input.numel();
+
+    switch (input.dtype()) {
+        case DType::Float32: {
+            const float* in_data = input.data<float>();
+            float* out_data = output.data<float>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                out_data[i] = std::sin(in_data[i]);
+            }
+            break;
+        }
+        case DType::Float64: {
+            const double* in_data = input.data<double>();
+            double* out_data = output.data<double>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                out_data[i] = std::sin(in_data[i]);
+            }
+            break;
+        }
+        default:
+            throw std::runtime_error("sin: unsupported dtype");
+    }
+    return output;
+}
+
+auto cos_kernel(const Tensor& input) -> Tensor {
+    std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
+    auto output = Tensor(shape_vec, input.dtype(), input.device());
+    int64_t n = input.numel();
+
+    switch (input.dtype()) {
+        case DType::Float32: {
+            const float* in_data = input.data<float>();
+            float* out_data = output.data<float>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                out_data[i] = std::cos(in_data[i]);
+            }
+            break;
+        }
+        case DType::Float64: {
+            const double* in_data = input.data<double>();
+            double* out_data = output.data<double>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                out_data[i] = std::cos(in_data[i]);
+            }
+            break;
+        }
+        default:
+            throw std::runtime_error("cos: unsupported dtype");
+    }
+    return output;
+}
+
+auto tan_kernel(const Tensor& input) -> Tensor {
+    std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
+    auto output = Tensor(shape_vec, input.dtype(), input.device());
+    int64_t n = input.numel();
+
+    switch (input.dtype()) {
+        case DType::Float32: {
+            const float* in_data = input.data<float>();
+            float* out_data = output.data<float>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                out_data[i] = std::tan(in_data[i]);
+            }
+            break;
+        }
+        case DType::Float64: {
+            const double* in_data = input.data<double>();
+            double* out_data = output.data<double>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                out_data[i] = std::tan(in_data[i]);
+            }
+            break;
+        }
+        default:
+            throw std::runtime_error("tan: unsupported dtype");
+    }
+    return output;
+}
+
+auto asin_kernel(const Tensor& input) -> Tensor {
+    std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
+    auto output = Tensor(shape_vec, input.dtype(), input.device());
+    int64_t n = input.numel();
+
+    switch (input.dtype()) {
+        case DType::Float32: {
+            const float* in_data = input.data<float>();
+            float* out_data = output.data<float>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                out_data[i] = std::asin(in_data[i]);
+            }
+            break;
+        }
+        case DType::Float64: {
+            const double* in_data = input.data<double>();
+            double* out_data = output.data<double>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                out_data[i] = std::asin(in_data[i]);
+            }
+            break;
+        }
+        default:
+            throw std::runtime_error("asin: unsupported dtype");
+    }
+    return output;
+}
+
+auto acos_kernel(const Tensor& input) -> Tensor {
+    std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
+    auto output = Tensor(shape_vec, input.dtype(), input.device());
+    int64_t n = input.numel();
+
+    switch (input.dtype()) {
+        case DType::Float32: {
+            const float* in_data = input.data<float>();
+            float* out_data = output.data<float>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                out_data[i] = std::acos(in_data[i]);
+            }
+            break;
+        }
+        case DType::Float64: {
+            const double* in_data = input.data<double>();
+            double* out_data = output.data<double>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                out_data[i] = std::acos(in_data[i]);
+            }
+            break;
+        }
+        default:
+            throw std::runtime_error("acos: unsupported dtype");
+    }
+    return output;
+}
+
+auto atan_kernel(const Tensor& input) -> Tensor {
+    std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
+    auto output = Tensor(shape_vec, input.dtype(), input.device());
+    int64_t n = input.numel();
+
+    switch (input.dtype()) {
+        case DType::Float32: {
+            const float* in_data = input.data<float>();
+            float* out_data = output.data<float>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                out_data[i] = std::atan(in_data[i]);
+            }
+            break;
+        }
+        case DType::Float64: {
+            const double* in_data = input.data<double>();
+            double* out_data = output.data<double>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                out_data[i] = std::atan(in_data[i]);
+            }
+            break;
+        }
+        default:
+            throw std::runtime_error("atan: unsupported dtype");
+    }
+    return output;
+}
+
+// Hyperbolic functions
+auto sinh_kernel(const Tensor& input) -> Tensor {
+    std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
+    auto output = Tensor(shape_vec, input.dtype(), input.device());
+    int64_t n = input.numel();
+
+    switch (input.dtype()) {
+        case DType::Float32: {
+            const float* in_data = input.data<float>();
+            float* out_data = output.data<float>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                out_data[i] = std::sinh(in_data[i]);
+            }
+            break;
+        }
+        case DType::Float64: {
+            const double* in_data = input.data<double>();
+            double* out_data = output.data<double>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                out_data[i] = std::sinh(in_data[i]);
+            }
+            break;
+        }
+        default:
+            throw std::runtime_error("sinh: unsupported dtype");
+    }
+    return output;
+}
+
+auto cosh_kernel(const Tensor& input) -> Tensor {
+    std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
+    auto output = Tensor(shape_vec, input.dtype(), input.device());
+    int64_t n = input.numel();
+
+    switch (input.dtype()) {
+        case DType::Float32: {
+            const float* in_data = input.data<float>();
+            float* out_data = output.data<float>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                out_data[i] = std::cosh(in_data[i]);
+            }
+            break;
+        }
+        case DType::Float64: {
+            const double* in_data = input.data<double>();
+            double* out_data = output.data<double>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                out_data[i] = std::cosh(in_data[i]);
+            }
+            break;
+        }
+        default:
+            throw std::runtime_error("cosh: unsupported dtype");
+    }
+    return output;
+}
+
+// Rounding functions
+auto round_kernel(const Tensor& input) -> Tensor {
+    std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
+    auto output = Tensor(shape_vec, input.dtype(), input.device());
+    int64_t n = input.numel();
+
+    switch (input.dtype()) {
+        case DType::Float32: {
+            const float* in_data = input.data<float>();
+            float* out_data = output.data<float>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                out_data[i] = std::round(in_data[i]);
+            }
+            break;
+        }
+        case DType::Float64: {
+            const double* in_data = input.data<double>();
+            double* out_data = output.data<double>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                out_data[i] = std::round(in_data[i]);
+            }
+            break;
+        }
+        default:
+            throw std::runtime_error("round: unsupported dtype");
+    }
+    return output;
+}
+
+auto floor_kernel(const Tensor& input) -> Tensor {
+    std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
+    auto output = Tensor(shape_vec, input.dtype(), input.device());
+    int64_t n = input.numel();
+
+    switch (input.dtype()) {
+        case DType::Float32: {
+            const float* in_data = input.data<float>();
+            float* out_data = output.data<float>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                out_data[i] = std::floor(in_data[i]);
+            }
+            break;
+        }
+        case DType::Float64: {
+            const double* in_data = input.data<double>();
+            double* out_data = output.data<double>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                out_data[i] = std::floor(in_data[i]);
+            }
+            break;
+        }
+        default:
+            throw std::runtime_error("floor: unsupported dtype");
+    }
+    return output;
+}
+
+auto ceil_kernel(const Tensor& input) -> Tensor {
+    std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
+    auto output = Tensor(shape_vec, input.dtype(), input.device());
+    int64_t n = input.numel();
+
+    switch (input.dtype()) {
+        case DType::Float32: {
+            const float* in_data = input.data<float>();
+            float* out_data = output.data<float>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                out_data[i] = std::ceil(in_data[i]);
+            }
+            break;
+        }
+        case DType::Float64: {
+            const double* in_data = input.data<double>();
+            double* out_data = output.data<double>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                out_data[i] = std::ceil(in_data[i]);
+            }
+            break;
+        }
+        default:
+            throw std::runtime_error("ceil: unsupported dtype");
+    }
+    return output;
+}
+
+// Reciprocal
+auto reciprocal_kernel(const Tensor& input) -> Tensor {
+    std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
+    auto output = Tensor(shape_vec, input.dtype(), input.device());
+    int64_t n = input.numel();
+
+    switch (input.dtype()) {
+        case DType::Float32: {
+            const float* in_data = input.data<float>();
+            float* out_data = output.data<float>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                out_data[i] = 1.0f / in_data[i];
+            }
+            break;
+        }
+        case DType::Float64: {
+            const double* in_data = input.data<double>();
+            double* out_data = output.data<double>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                out_data[i] = 1.0 / in_data[i];
+            }
+            break;
+        }
+        default:
+            throw std::runtime_error("reciprocal: unsupported dtype");
+    }
+    return output;
+}
+
+// In-place operations
+auto add_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
+    int64_t n = a.numel();
+
+    switch (a.dtype()) {
+        case DType::Float32: {
+            float* a_data = a.data<float>();
+            const float* b_data = b.data<float>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                a_data[i] += b_data[i];
+            }
+            break;
+        }
+        case DType::Float64: {
+            double* a_data = a.data<double>();
+            const double* b_data = b.data<double>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                a_data[i] += b_data[i];
+            }
+            break;
+        }
+        case DType::Int32: {
+            int32_t* a_data = a.data<int32_t>();
+            const int32_t* b_data = b.data<int32_t>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                a_data[i] += b_data[i];
+            }
+            break;
+        }
+        case DType::Int64: {
+            int64_t* a_data = a.data<int64_t>();
+            const int64_t* b_data = b.data<int64_t>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                a_data[i] += b_data[i];
+            }
+            break;
+        }
+        default:
+            throw std::runtime_error("add_inplace: unsupported dtype");
+    }
+    return a;
+}
+
+auto sub_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
+    int64_t n = a.numel();
+
+    switch (a.dtype()) {
+        case DType::Float32: {
+            float* a_data = a.data<float>();
+            const float* b_data = b.data<float>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                a_data[i] -= b_data[i];
+            }
+            break;
+        }
+        case DType::Float64: {
+            double* a_data = a.data<double>();
+            const double* b_data = b.data<double>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                a_data[i] -= b_data[i];
+            }
+            break;
+        }
+        case DType::Int32: {
+            int32_t* a_data = a.data<int32_t>();
+            const int32_t* b_data = b.data<int32_t>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                a_data[i] -= b_data[i];
+            }
+            break;
+        }
+        case DType::Int64: {
+            int64_t* a_data = a.data<int64_t>();
+            const int64_t* b_data = b.data<int64_t>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                a_data[i] -= b_data[i];
+            }
+            break;
+        }
+        default:
+            throw std::runtime_error("sub_inplace: unsupported dtype");
+    }
+    return a;
+}
+
+auto mul_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
+    int64_t n = a.numel();
+
+    switch (a.dtype()) {
+        case DType::Float32: {
+            float* a_data = a.data<float>();
+            const float* b_data = b.data<float>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                a_data[i] *= b_data[i];
+            }
+            break;
+        }
+        case DType::Float64: {
+            double* a_data = a.data<double>();
+            const double* b_data = b.data<double>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                a_data[i] *= b_data[i];
+            }
+            break;
+        }
+        case DType::Int32: {
+            int32_t* a_data = a.data<int32_t>();
+            const int32_t* b_data = b.data<int32_t>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                a_data[i] *= b_data[i];
+            }
+            break;
+        }
+        case DType::Int64: {
+            int64_t* a_data = a.data<int64_t>();
+            const int64_t* b_data = b.data<int64_t>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                a_data[i] *= b_data[i];
+            }
+            break;
+        }
+        default:
+            throw std::runtime_error("mul_inplace: unsupported dtype");
+    }
+    return a;
+}
+
+auto div_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
+    int64_t n = a.numel();
+
+    switch (a.dtype()) {
+        case DType::Float32: {
+            float* a_data = a.data<float>();
+            const float* b_data = b.data<float>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                a_data[i] /= b_data[i];
+            }
+            break;
+        }
+        case DType::Float64: {
+            double* a_data = a.data<double>();
+            const double* b_data = b.data<double>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                a_data[i] /= b_data[i];
+            }
+            break;
+        }
+        case DType::Int32: {
+            int32_t* a_data = a.data<int32_t>();
+            const int32_t* b_data = b.data<int32_t>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                a_data[i] /= b_data[i];
+            }
+            break;
+        }
+        case DType::Int64: {
+            int64_t* a_data = a.data<int64_t>();
+            const int64_t* b_data = b.data<int64_t>();
+            #pragma omp parallel for if(n > 10000)
+            for (int64_t i = 0; i < n; i++) {
+                a_data[i] /= b_data[i];
+            }
+            break;
+        }
+        default:
+            throw std::runtime_error("div_inplace: unsupported dtype");
+    }
+    return a;
+}
+
 } // namespace cpu
 } // namespace tenzor
