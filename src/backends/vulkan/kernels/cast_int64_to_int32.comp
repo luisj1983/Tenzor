@@ -1,0 +1,32 @@
+#version 450
+
+// Cast Int64 to Int32 on GPU
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer InputInt64 {
+    // In Vulkan, int64_t requires GL_ARB_gpu_shader_int64 extension
+    // We'll treat as two uint32s packed together
+    uvec2 input_data[];  // Each element is a 64-bit value as 2x uint32
+};
+layout(binding = 1) buffer OutputInt32 {
+    int output_data[];
+};
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.n_elements) {
+        return;
+    }
+
+    // Read the lower 32 bits of the 64-bit integer
+    // Assuming little-endian storage (x = low, y = high)
+    uint low_bits = input_data[idx].x;
+
+    // Cast to signed int32
+    output_data[idx] = int(low_bits);
+}

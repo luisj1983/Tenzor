@@ -1,6 +1,6 @@
 #version 450
 
-// Math operations: add, sub, mul, div, sqrt, exp, log, neg, abs, pow, sign
+// Math operations: add, sub, mul, div, sqrt, exp, log, neg, abs, pow, sign, floor, ceil, round, trunc, reciprocal
 layout(local_size_x = 256) in;
 
 layout(binding = 0) buffer InputA { float a[]; };
@@ -9,7 +9,7 @@ layout(binding = 2) buffer Output { float result[]; };
 
 layout(push_constant) uniform PushConstants {
     uint n;          // Number of elements
-    uint op;         // Operation: 0=add, 1=sub, 2=mul, 3=div, 4=sqrt, 5=exp, 6=log, 7=neg, 8=abs, 9=pow, 10=sign
+    uint op;         // Operation: 0=add, 1=sub, 2=mul, 3=div, 4=sqrt, 5=exp, 6=log, 7=neg, 8=abs, 9=pow, 10=sign, 11=floor, 12=ceil, 13=round, 14=trunc, 15=reciprocal
     float param;     // Parameter for operations like pow (exponent)
 } params;
 
@@ -62,6 +62,21 @@ void main() {
             } else {
                 result[idx] = 0.0;
             }
+            break;
+        case 11: // floor (unary)
+            result[idx] = floor(val_a);
+            break;
+        case 12: // ceil (unary)
+            result[idx] = ceil(val_a);
+            break;
+        case 13: // round (unary)
+            result[idx] = round(val_a);
+            break;
+        case 14: // trunc (unary)
+            result[idx] = trunc(val_a);
+            break;
+        case 15: // reciprocal (unary)
+            result[idx] = 1.0 / val_a;
             break;
     }
 }

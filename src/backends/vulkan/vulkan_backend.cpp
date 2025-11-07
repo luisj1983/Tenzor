@@ -718,7 +718,9 @@ auto VulkanBackend::dispatch(const std::string& op_name,
 
     // Unary math operations (use math shader)
     if (op_name == "sqrt" || op_name == "exp" || op_name == "log" ||
-        op_name == "neg" || op_name == "abs" || op_name == "sign") {
+        op_name == "neg" || op_name == "abs" || op_name == "sign" ||
+        op_name == "floor" || op_name == "ceil" || op_name == "round" ||
+        op_name == "trunc" || op_name == "reciprocal") {
         if (inputs.size() != 1) {
             throw std::invalid_argument(op_name + " requires 1 input");
         }
@@ -1591,6 +1593,11 @@ auto VulkanBackend::dispatchUnaryOp(const std::string& op_name,
     else if (op_name == "neg") { shader_name = "math"; opcode = 7; }
     else if (op_name == "abs") { shader_name = "math"; opcode = 8; }
     else if (op_name == "sign") { shader_name = "math"; opcode = 10; }
+    else if (op_name == "floor") { shader_name = "math"; opcode = 11; }
+    else if (op_name == "ceil") { shader_name = "math"; opcode = 12; }
+    else if (op_name == "round") { shader_name = "math"; opcode = 13; }
+    else if (op_name == "trunc") { shader_name = "math"; opcode = 14; }
+    else if (op_name == "reciprocal") { shader_name = "math"; opcode = 15; }
     else throw std::runtime_error("Unknown unary operation: " + op_name);
 
     auto* pipeline = getPipeline(shader_name, device_id);
