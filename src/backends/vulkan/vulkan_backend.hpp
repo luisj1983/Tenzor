@@ -98,10 +98,13 @@ private:
     auto dispatchBinaryOp(const std::string& op_name, const Tensor& a, const Tensor& b) -> Tensor;
     auto dispatchUnaryOp(const std::string& op_name, const Tensor& input) -> Tensor;
     auto dispatchUnaryOpWithParam(const std::string& op_name, const Tensor& input, float param) -> Tensor;
+    auto dispatchTrigonometricOp(const std::string& op_name, const Tensor& input) -> Tensor;
+    auto dispatchHyperbolicOp(const std::string& op_name, const Tensor& input) -> Tensor;
     auto dispatchComparisonOp(const std::string& op_name, const Tensor& a, const Tensor& b) -> Tensor;
     auto dispatchReduction(const std::string& op_name, const Tensor& input,
                           int64_t dim, bool keepdim) -> Tensor;
     auto dispatchMatmul(const Tensor& a, const Tensor& b) -> Tensor;
+    auto dispatchDot(const Tensor& a, const Tensor& b) -> Tensor;
     auto dispatchConv2d(const Tensor& input, const Tensor& weight,
                        const Tensor* bias, int64_t stride, int64_t padding,
                        int64_t dilation, int64_t groups) -> Tensor;

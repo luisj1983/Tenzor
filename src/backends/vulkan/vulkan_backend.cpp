@@ -733,7 +733,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         if (inputs.size() != 1) {
             throw std::invalid_argument(op_name + " requires 1 input");
         }
-        return {dispatchUnaryOp(op_name, inputs[0])};
+        return {dispatchTrigonometricOp(op_name, inputs[0])};
     }
 
     // Hyperbolic operations
@@ -741,7 +741,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         if (inputs.size() != 1) {
             throw std::invalid_argument(op_name + " requires 1 input");
         }
-        return {dispatchUnaryOp(op_name, inputs[0])};
+        return {dispatchHyperbolicOp(op_name, inputs[0])};
     }
 
     // Pow operation (unary with parameter)
@@ -1139,6 +1139,29 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         float min_value = attrs.contains("min") ? std::stof(attrs.at("min")) : -std::numeric_limits<float>::infinity();
         float max_value = attrs.contains("max") ? std::stof(attrs.at("max")) : std::numeric_limits<float>::infinity();
         return {dispatchClamp(inputs[0], min_value, max_value)};
+    }
+
+    if (op_name == "clamp_min") {
+        if (inputs.size() != 1) {
+            throw std::invalid_argument("clamp_min requires 1 input");
+        }
+        float min_value = attrs.contains("min") ? std::stof(attrs.at("min")) : -std::numeric_limits<float>::infinity();
+        return {dispatchClamp(inputs[0], min_value, std::numeric_limits<float>::infinity())};
+    }
+
+    if (op_name == "clamp_max") {
+        if (inputs.size() != 1) {
+            throw std::invalid_argument("clamp_max requires 1 input");
+        }
+        float max_value = attrs.contains("max") ? std::stof(attrs.at("max")) : std::numeric_limits<float>::infinity();
+        return {dispatchClamp(inputs[0], -std::numeric_limits<float>::infinity(), max_value)};
+    }
+
+    if (op_name == "dot") {
+        if (inputs.size() != 2) {
+            throw std::invalid_argument("dot requires 2 inputs");
+        }
+        return {dispatchDot(inputs[0], inputs[1])};
     }
 
     // BatchNorm2d operations
@@ -1730,6 +1753,127 @@ auto VulkanBackend::dispatchUnaryOpWithParam(const std::string& op_name,
     return output;
 }
 
+auto VulkanBackend::dispatchTrigonometricOp(const std::string& op_name,
+                                             const Tensor& input) -> Tensor {
+    // Map operation name to opcode (see trigonometric.comp shader)
+    // 0=sin, 1=cos, 2=tan, 3=asin, 4=acos, 5=atan
+    uint32_t opcode = 0;
+    if (op_name == "sin") opcode = 0;
+    else if (op_name == "cos") opcode = 1;
+    else if (op_name == "tan") opcode = 2;
+    else if (op_name == "asin") opcode = 3;
+    else if (op_name == "acos") opcode = 4;
+    else if (op_name == "atan") opcode = 5;
+    else throw std::runtime_error("Unknown trigonometric operation: " + op_name);
+
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline("trigonometric", device_id);
+
+    auto shape = input.shape();
+    std::vector<int64_t> output_shape(shape.begin(), shape.end());
+    Tensor output(output_shape, input.dtype(), input.device());
+
+    // Prepare push constants
+    struct PushConstants {
+        uint32_t n;   // Number of elements
+        uint32_t op;  // Operation code
+    } push_constants;
+    push_constants.n = static_cast<uint32_t>(input.numel());
+    push_constants.op = opcode;
+
+    // Get VkBuffer handles
+    VkBuffer buffer_in = getVulkanBuffer(input.data_ptr());
+    VkBuffer buffer_out = getVulkanBuffer(output.data_ptr());
+
+    // Calculate buffer sizes
+    size_t buffer_size_in = input.numel() * input.dtype_size();
+    size_t buffer_size_out = output.numel() * output.dtype_size();
+
+    // Allocate and write descriptor set
+    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+        {0, buffer_in}, {1, buffer_out}
+    };
+    std::vector<size_t> sizes = {buffer_size_in, buffer_size_out};
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
+    // Execute compute shader
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(PushConstants), &push_constants);
+
+    uint32_t workgroups = (input.numel() + 255) / 256;
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return output;
+}
+
+auto VulkanBackend::dispatchHyperbolicOp(const std::string& op_name,
+                                          const Tensor& input) -> Tensor {
+    // Map operation name to opcode (see hyperbolic.comp shader)
+    // 0=sinh, 1=cosh, 2=tanh
+    uint32_t opcode = 0;
+    if (op_name == "sinh") opcode = 0;
+    else if (op_name == "cosh") opcode = 1;
+    else if (op_name == "tanh") opcode = 2;
+    else throw std::runtime_error("Unknown hyperbolic operation: " + op_name);
+
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline("hyperbolic", device_id);
+
+    auto shape = input.shape();
+    std::vector<int64_t> output_shape(shape.begin(), shape.end());
+    Tensor output(output_shape, input.dtype(), input.device());
+
+    // Prepare push constants
+    struct PushConstants {
+        uint32_t n;   // Number of elements
+        uint32_t op;  // Operation code
+    } push_constants;
+    push_constants.n = static_cast<uint32_t>(input.numel());
+    push_constants.op = opcode;
+
+    // Get VkBuffer handles
+    VkBuffer buffer_in = getVulkanBuffer(input.data_ptr());
+    VkBuffer buffer_out = getVulkanBuffer(output.data_ptr());
+
+    // Calculate buffer sizes
+    size_t buffer_size_in = input.numel() * input.dtype_size();
+    size_t buffer_size_out = output.numel() * output.dtype_size();
+
+    // Allocate and write descriptor set
+    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+        {0, buffer_in}, {1, buffer_out}
+    };
+    std::vector<size_t> sizes = {buffer_size_in, buffer_size_out};
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
+    // Execute compute shader
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(PushConstants), &push_constants);
+
+    uint32_t workgroups = (input.numel() + 255) / 256;
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return output;
+}
+
 auto VulkanBackend::dispatchComparisonOp(const std::string& op_name,
                                           const Tensor& a, const Tensor& b) -> Tensor {
     auto a_shape = a.shape();
@@ -1995,6 +2139,27 @@ auto VulkanBackend::dispatchMatmul(const Tensor& a, const Tensor& b) -> Tensor {
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return output;
+}
+
+auto VulkanBackend::dispatchDot(const Tensor& a, const Tensor& b) -> Tensor {
+    // Dot product: element-wise multiply followed by sum
+    auto a_shape = a.shape();
+    auto b_shape = b.shape();
+
+    if (a_shape.size() != 1 || b_shape.size() != 1) {
+        throw std::invalid_argument("Dot product requires 1D tensors");
+    }
+    if (a_shape[0] != b_shape[0]) {
+        throw std::invalid_argument("Dot product tensors must have same size");
+    }
+
+    // Element-wise multiply
+    Tensor product = dispatchBinaryOp("mul", a, b);
+
+    // Sum all elements (dim=-1 means all dimensions, keepdim=false for scalar result)
+    Tensor result = dispatchReduction("sum", product, 0, false);
+
+    return result;
 }
 
 auto VulkanBackend::dispatchConv2d(const Tensor& input, const Tensor& weight,

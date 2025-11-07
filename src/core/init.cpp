@@ -2252,6 +2252,16 @@ auto initialize() -> void {
                         return vulkan_backend->dispatch("clamp", inputs, attrs);
                     });
 
+                registry.register_kernel("clamp_min", Device::Type::Vulkan,
+                    [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return vulkan_backend->dispatch("clamp_min", inputs, attrs);
+                    });
+
+                registry.register_kernel("clamp_max", Device::Type::Vulkan,
+                    [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return vulkan_backend->dispatch("clamp_max", inputs, attrs);
+                    });
+
                 // BatchNorm2d operations
                 registry.register_kernel("batchnorm2d_forward", Device::Type::Vulkan,
                     [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
