@@ -1972,6 +1972,40 @@ auto VulkanBackend::dispatchComparisonOp(const std::string& op_name,
 auto VulkanBackend::dispatchReduction(const std::string& op_name,
                                       const Tensor& input,
                                       int64_t dim, bool keepdim) -> Tensor {
+    // Special case: handle empty tensors
+    if (input.numel() == 0) {
+        // For empty tensors, return identity value
+        // sum: 0, mean: 0, max: -inf, min: +inf
+        float identity_value = 0.0f;
+        if (op_name == "max") {
+            identity_value = -std::numeric_limits<float>::infinity();
+        } else if (op_name == "min") {
+            identity_value = std::numeric_limits<float>::infinity();
+        }
+
+        // Calculate output shape
+        std::vector<int64_t> out_shape;
+        if (dim < 0) {
+            out_shape = {1};
+        } else {
+            auto input_shape = input.shape();
+            out_shape = std::vector<int64_t>(input_shape.begin(), input_shape.end());
+            if (keepdim) {
+                out_shape[dim] = 1;
+            } else {
+                out_shape.erase(out_shape.begin() + dim);
+            }
+        }
+
+        // Create result tensor on CPU with identity value
+        Tensor result_cpu(out_shape, input.dtype(), Device::cpu());
+        float* data = result_cpu.data<float>();
+        for (int64_t i = 0; i < result_cpu.numel(); i++) {
+            data[i] = identity_value;
+        }
+        return result_cpu.to(input.device());
+    }
+
     int32_t device_id = input.device().index;
     // Use the generic "reduction" shader which handles all reduction types via push constants
     auto* pipeline = getPipeline("reduction", device_id);
@@ -3589,11 +3623,14 @@ auto VulkanBackend::dispatchVariance(const Tensor& input, int64_t dim, bool unbi
     uint32_t reduce_size = (dim >= 0) ? static_cast<uint32_t>(input_shape[dim]) : static_cast<uint32_t>(input.numel());
     float divisor = unbiased ? static_cast<float>(reduce_size - 1) : static_cast<float>(reduce_size);
 
-    // Create a scalar tensor with the divisor
+    // Create a scalar tensor with the divisor on CPU, then copy to device
     std::vector<int64_t> scalar_shape = {1};
-    Tensor divisor_tensor(scalar_shape, input.dtype(), input.device());
-    float* divisor_data = static_cast<float*>(divisor_tensor.data_ptr());
+    Tensor divisor_tensor_cpu(scalar_shape, input.dtype(), Device::cpu());
+    float* divisor_data = static_cast<float*>(divisor_tensor_cpu.data_ptr());
     *divisor_data = divisor;
+
+    // Copy to device
+    Tensor divisor_tensor = divisor_tensor_cpu.to(input.device());
 
     // Divide variance by divisor
     return dispatchBinaryOp("div", sum_squared, divisor_tensor);
@@ -3931,18 +3968,112 @@ auto VulkanBackend::dispatchScatter(const Tensor& input, int64_t dim, const Tens
 auto VulkanBackend::dispatchIndexSelect(const Tensor& input, int64_t dim, const Tensor& indices) -> Tensor {
     auto input_shape = input.shape();
     int32_t device_id = input.device().index;
+    int32_t ndim = input.ndim();
+
+    // Normalize negative dimension
+    if (dim < 0) dim += ndim;
+    if (dim < 0 || dim >= ndim) {
+        throw std::invalid_argument("Invalid dimension for index_select");
+    }
+
     auto* pipeline = getPipeline("index_select", device_id);
 
+    // Calculate output shape
     std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end());
     out_shape[dim] = indices.numel();
-
     Tensor output(out_shape, input.dtype(), input.device());
 
+    // Convert indices to Int32 if needed (shader expects int32)
+    Tensor indices_int32 = indices;
+    if (indices.dtype() == DType::Int64) {
+        // Convert Int64 to Int32 temporarily
+        Tensor indices_cpu = indices.to(Device::cpu());
+        auto idx64 = indices_cpu.data<int64_t>();
+
+        std::vector<int64_t> idx_shape(indices.shape().begin(), indices.shape().end());
+        Tensor indices_int32_cpu(idx_shape, DType::Int32, Device::cpu());
+        auto idx32 = indices_int32_cpu.data<int32_t>();
+
+        for (int64_t i = 0; i < indices.numel(); i++) {
+            idx32[i] = static_cast<int32_t>(idx64[i]);
+        }
+
+        indices_int32 = indices_int32_cpu.to(input.device());
+    }
+
+    // Calculate strides
+    uint32_t dim_size = static_cast<uint32_t>(input_shape[dim]);
+    uint32_t inner_size = 1;
+    for (int64_t i = dim + 1; i < ndim; i++) {
+        inner_size *= static_cast<uint32_t>(input_shape[i]);
+    }
+    uint32_t outer_size = 1;
+    for (int64_t i = 0; i < dim; i++) {
+        outer_size *= static_cast<uint32_t>(input_shape[i]);
+    }
+
+    // Set up push constants
+    struct PushConstants {
+        uint32_t num_indices;
+        uint32_t dim;
+        uint32_t dim_size;
+        uint32_t inner_size;
+        uint32_t outer_size;
+    } push_constants;
+
+    push_constants.num_indices = static_cast<uint32_t>(indices.numel());
+    push_constants.dim = static_cast<uint32_t>(dim);
+    push_constants.dim_size = dim_size;
+    push_constants.inner_size = inner_size;
+    push_constants.outer_size = outer_size;
+
+    // Get VkBuffer handles
+    VkBuffer buffer_input = getVulkanBuffer(input.data_ptr());
+    VkBuffer buffer_indices = getVulkanBuffer(indices_int32.data_ptr());
+    VkBuffer buffer_output = getVulkanBuffer(output.data_ptr());
+
+    // Calculate buffer sizes
+    size_t input_size = input.numel() * input.dtype_size();
+    size_t indices_size = indices_int32.numel() * indices_int32.dtype_size();
+    size_t output_size = output.numel() * output.dtype_size();
+
+    // Allocate and write descriptor set
+    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+        {0, buffer_input},
+        {1, buffer_indices},
+        {2, buffer_output}
+    };
+    std::vector<size_t> sizes = {input_size, indices_size, output_size};
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
+    // Execute compute shader
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
 
+    // Bind descriptor sets
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+
+    // Set push constants
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(PushConstants), &push_constants);
+
+    // Dispatch compute workgroups
     uint32_t workgroups = (output.numel() + 255) / 256;
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    // Add memory barrier
+    VkMemoryBarrier memoryBarrier{};
+    memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    memoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
+    vkCmdPipelineBarrier(cmdBuffer,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
+                        0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -4402,6 +4533,15 @@ auto VulkanBackend::dispatchContiguous(const Tensor& input) -> Tensor {
 auto VulkanBackend::dispatchZeros(const std::vector<int64_t>& shape, DType dtype, const Device& device) -> Tensor {
     // Create tensor with given shape
     Tensor output(shape, dtype, device);
+
+    // Special case: empty tensors don't need GPU operations
+    int64_t numel = 1;
+    for (auto dim : shape) {
+        numel *= dim;
+    }
+    if (numel == 0) {
+        return output;  // Empty tensor, nothing to fill
+    }
 
     // Fill with zeros using fill operation
     int32_t device_id = device.index;
