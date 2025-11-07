@@ -1858,6 +1858,27 @@ auto initialize() -> void {
                         return vulkan_backend->dispatch("div", inputs, attrs);
                     });
 
+                // In-place operations
+                registry.register_kernel("add_inplace", Device::Type::Vulkan,
+                    [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return vulkan_backend->dispatch("add_inplace", inputs, attrs);
+                    });
+
+                registry.register_kernel("sub_inplace", Device::Type::Vulkan,
+                    [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return vulkan_backend->dispatch("sub_inplace", inputs, attrs);
+                    });
+
+                registry.register_kernel("mul_inplace", Device::Type::Vulkan,
+                    [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return vulkan_backend->dispatch("mul_inplace", inputs, attrs);
+                    });
+
+                registry.register_kernel("div_inplace", Device::Type::Vulkan,
+                    [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return vulkan_backend->dispatch("div_inplace", inputs, attrs);
+                    });
+
                 registry.register_kernel("matmul", Device::Type::Vulkan,
                     [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
                         return vulkan_backend->dispatch("matmul", inputs, attrs);
@@ -1927,6 +1948,48 @@ auto initialize() -> void {
                 registry.register_kernel("sign", Device::Type::Vulkan,
                     [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
                         return vulkan_backend->dispatch("sign", inputs, attrs);
+                    });
+
+                // Trigonometric operations
+                registry.register_kernel("sin", Device::Type::Vulkan,
+                    [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return vulkan_backend->dispatch("sin", inputs, attrs);
+                    });
+
+                registry.register_kernel("cos", Device::Type::Vulkan,
+                    [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return vulkan_backend->dispatch("cos", inputs, attrs);
+                    });
+
+                registry.register_kernel("tan", Device::Type::Vulkan,
+                    [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return vulkan_backend->dispatch("tan", inputs, attrs);
+                    });
+
+                registry.register_kernel("asin", Device::Type::Vulkan,
+                    [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return vulkan_backend->dispatch("asin", inputs, attrs);
+                    });
+
+                registry.register_kernel("acos", Device::Type::Vulkan,
+                    [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return vulkan_backend->dispatch("acos", inputs, attrs);
+                    });
+
+                registry.register_kernel("atan", Device::Type::Vulkan,
+                    [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return vulkan_backend->dispatch("atan", inputs, attrs);
+                    });
+
+                // Hyperbolic operations
+                registry.register_kernel("sinh", Device::Type::Vulkan,
+                    [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return vulkan_backend->dispatch("sinh", inputs, attrs);
+                    });
+
+                registry.register_kernel("cosh", Device::Type::Vulkan,
+                    [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return vulkan_backend->dispatch("cosh", inputs, attrs);
                     });
 
                 // Reduction operations
@@ -2242,7 +2305,66 @@ auto initialize() -> void {
                         return vulkan_backend->dispatch("ones", inputs, attrs);
                     });
 
-                std::cout << "Vulkan operations registered successfully (76 operations - 100% coverage!)" << std::endl;
+                // Additional math operations
+                registry.register_kernel("dot", Device::Type::Vulkan,
+                    [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return vulkan_backend->dispatch("dot", inputs, attrs);
+                    });
+
+                registry.register_kernel("norm", Device::Type::Vulkan,
+                    [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return vulkan_backend->dispatch("norm", inputs, attrs);
+                    });
+
+                registry.register_kernel("reciprocal", Device::Type::Vulkan,
+                    [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return vulkan_backend->dispatch("reciprocal", inputs, attrs);
+                    });
+
+                // Rounding operations
+                registry.register_kernel("round", Device::Type::Vulkan,
+                    [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return vulkan_backend->dispatch("round", inputs, attrs);
+                    });
+
+                registry.register_kernel("floor", Device::Type::Vulkan,
+                    [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return vulkan_backend->dispatch("floor", inputs, attrs);
+                    });
+
+                registry.register_kernel("ceil", Device::Type::Vulkan,
+                    [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return vulkan_backend->dispatch("ceil", inputs, attrs);
+                    });
+
+                // Manipulation operations
+                registry.register_kernel("repeat", Device::Type::Vulkan,
+                    [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return vulkan_backend->dispatch("repeat", inputs, attrs);
+                    });
+
+                registry.register_kernel("roll", Device::Type::Vulkan,
+                    [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return vulkan_backend->dispatch("roll", inputs, attrs);
+                    });
+
+                // Masked operations
+                registry.register_kernel("masked_select", Device::Type::Vulkan,
+                    [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return vulkan_backend->dispatch("masked_select", inputs, attrs);
+                    });
+
+                registry.register_kernel("masked_fill", Device::Type::Vulkan,
+                    [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return vulkan_backend->dispatch("masked_fill", inputs, attrs);
+                    });
+
+                registry.register_kernel("where", Device::Type::Vulkan,
+                    [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return vulkan_backend->dispatch("where", inputs, attrs);
+                    });
+
+                std::cout << "Vulkan operations registered successfully (99 operations - all core operations added!)" << std::endl;
             } else {
                 std::cout << "Vulkan backend loaded but no Vulkan devices available" << std::endl;
             }

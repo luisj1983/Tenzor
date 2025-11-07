@@ -166,6 +166,7 @@ private:
     auto dispatchArgmin(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
     auto dispatchVariance(const Tensor& input, int64_t dim, bool unbiased, bool keepdim) -> Tensor;
     auto dispatchStd(const Tensor& input, int64_t dim, bool unbiased, bool keepdim) -> Tensor;
+    auto dispatchNorm(const Tensor& input, float p, int64_t dim, bool keepdim) -> Tensor;
     auto dispatchProd(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
     auto dispatchAll(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
     auto dispatchAny(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
@@ -230,6 +231,7 @@ private:
 
     // Helper to get VkBuffer from tensor data pointer
     VkBuffer getVulkanBuffer(const void* ptr) const;
+    std::pair<VkBuffer, VkDeviceSize> getVulkanBufferAndOffset(const void* ptr) const;
 
     // Helper to allocate and bind descriptor sets
     VkDescriptorSet allocateAndWriteDescriptorSet(

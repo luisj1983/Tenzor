@@ -1,15 +1,17 @@
 #version 450
 
 // Reduction operations: sum, mean, max, min
+// This shader handles reduction along a specific dimension or full tensor reduction
 layout(local_size_x = 256) in;
 
 layout(binding = 0) buffer Input { float input_data[]; };
 layout(binding = 1) buffer Output { float output_data[]; };
 
 layout(push_constant) uniform PushConstants {
-    uint n;              // Total number of elements
+    uint n;              // Total number of elements in input
     uint reduce_size;    // Size of dimension to reduce
-    uint outer_size;     // Size of outer dimensions
+    uint outer_size;     // Number of output elements
+    uint inner_size;     // Product of dimensions after reduction dim
     uint op;             // 0=sum, 1=mean, 2=max, 3=min
 } params;
 
@@ -17,30 +19,63 @@ shared float shared_data[256];
 
 void main() {
     uint tid = gl_LocalInvocationID.x;
-    uint gid = gl_GlobalInvocationID.x;
-    uint wid = gl_WorkGroupID.x;
+    uint output_idx = gl_WorkGroupID.x;
 
-    // Initialize shared memory
-    float value;
-    if (gid < params.n) {
-        value = input_data[gid];
+    // Each workgroup handles one output element
+    if (output_idx >= params.outer_size) {
+        return;
+    }
+
+    // Initialize accumulator based on operation
+    float accum;
+    if (params.op == 2) { // max
+        accum = -1.0 / 0.0; // -infinity
+    } else if (params.op == 3) { // min
+        accum = 1.0 / 0.0; // +infinity
     } else {
-        // Initialize based on operation
-        if (params.op == 2) { // max
-            value = -1.0 / 0.0; // -infinity
-        } else if (params.op == 3) { // min
-            value = 1.0 / 0.0; // +infinity
-        } else {
-            value = 0.0;
+        accum = 0.0;
+    }
+
+    // For dimensional reduction, we need to compute the proper indices
+    // The input tensor is flattened, but we need to access elements along the reduction dimension
+    // Formula: For output element at flat index output_idx, we need to sum over reduce_size elements
+    //          with stride inner_size between them
+
+    // Calculate the position in output space
+    // outer_idx = output_idx / inner_size (which "outer" slice we're in)
+    // inner_idx = output_idx % inner_size (position within the inner dimensions)
+    uint outer_idx = output_idx / params.inner_size;
+    uint inner_idx = output_idx % params.inner_size;
+
+    // Starting position in input: outer_idx * (reduce_size * inner_size) + inner_idx
+    uint base_idx = outer_idx * params.reduce_size * params.inner_size + inner_idx;
+
+    // Each thread processes multiple elements along the reduction dimension
+    for (uint i = tid; i < params.reduce_size; i += 256) {
+        uint idx = base_idx + i * params.inner_size;
+        if (idx < params.n) {
+            float val = input_data[idx];
+            switch (params.op) {
+                case 0: // sum
+                case 1: // mean
+                    accum += val;
+                    break;
+                case 2: // max
+                    accum = max(accum, val);
+                    break;
+                case 3: // min
+                    accum = min(accum, val);
+                    break;
+            }
         }
     }
-    shared_data[tid] = value;
 
+    shared_data[tid] = accum;
     barrier();
 
     // Parallel reduction in shared memory
     for (uint s = 128; s > 0; s >>= 1) {
-        if (tid < s && (gid + s) < params.n) {
+        if (tid < s) {
             switch (params.op) {
                 case 0: // sum
                 case 1: // mean
@@ -63,6 +98,6 @@ void main() {
         if (params.op == 1) { // mean
             result /= float(params.reduce_size);
         }
-        output_data[wid] = result;
+        output_data[output_idx] = result;
     }
 }

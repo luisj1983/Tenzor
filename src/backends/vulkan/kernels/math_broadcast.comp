@@ -1,0 +1,95 @@
+#version 450
+
+// Broadcasting-aware binary operations for Vulkan
+// Supports NumPy-style broadcasting rules
+// Supports both Float32 and Int32 data types
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer InputA { uint a[]; };
+layout(binding = 1) buffer InputB { uint b[]; };
+layout(binding = 2) buffer Output { uint result[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint output_size;      // Total number of output elements
+    uint op;               // Operation: 0=add, 1=sub, 2=mul, 3=div
+    uint dtype;            // Data type: 0=float32, 1=int32
+    uint ndim_a;           // Number of dimensions in tensor A
+    uint ndim_b;           // Number of dimensions in tensor B
+    uint ndim_out;         // Number of dimensions in output
+    // Strides for tensor A (up to 8 dimensions)
+    uint strides_a[8];
+    // Strides for tensor B (up to 8 dimensions)
+    uint strides_b[8];
+    // Output shape (up to 8 dimensions)
+    uint shape_out[8];
+} params;
+
+void main() {
+    uint out_idx = gl_GlobalInvocationID.x;
+
+    if (out_idx >= params.output_size) {
+        return;
+    }
+
+    // Convert flat output index to multi-dimensional coordinates
+    // Then use broadcasting strides to compute input indices
+    uint idx_a = 0;
+    uint idx_b = 0;
+    uint tmp = out_idx;
+
+    // Iterate from last dimension to first (row-major order)
+    for (uint i = 0; i < params.ndim_out; i++) {
+        uint dim_idx = params.ndim_out - 1 - i;
+        uint coord = tmp % params.shape_out[dim_idx];
+        tmp /= params.shape_out[dim_idx];
+
+        // Add contribution to input indices using broadcasting strides
+        // Broadcasting strides are 0 for broadcasted dimensions
+        idx_a += coord * params.strides_a[dim_idx];
+        idx_b += coord * params.strides_b[dim_idx];
+    }
+
+    if (params.dtype == 0) {
+        // Float32 operations
+        float val_a = uintBitsToFloat(a[idx_a]);
+        float val_b = uintBitsToFloat(b[idx_b]);
+        float res;
+
+        switch (params.op) {
+            case 0: // add
+                res = val_a + val_b;
+                break;
+            case 1: // sub
+                res = val_a - val_b;
+                break;
+            case 2: // mul
+                res = val_a * val_b;
+                break;
+            case 3: // div
+                res = val_a / val_b;
+                break;
+        }
+        result[out_idx] = floatBitsToUint(res);
+    } else {
+        // Int32 operations - reinterpret uint as int
+        int val_a = int(a[idx_a]);
+        int val_b = int(b[idx_b]);
+        int res;
+
+        switch (params.op) {
+            case 0: // add
+                res = val_a + val_b;
+                break;
+            case 1: // sub
+                res = val_a - val_b;
+                break;
+            case 2: // mul
+                res = val_a * val_b;
+                break;
+            case 3: // div
+                res = val_a / val_b;
+                break;
+        }
+        result[out_idx] = uint(res);
+    }
+}

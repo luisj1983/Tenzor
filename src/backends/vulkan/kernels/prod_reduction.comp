@@ -1,35 +1,53 @@
 #version 450
 
-// Product reduction
+// Product reduction along a dimension
 layout(local_size_x = 256) in;
 
 layout(binding = 0) buffer Input { float input_data[]; };
 layout(binding = 1) buffer Output { float output_data[]; };
 
 layout(push_constant) uniform PushConstants {
-    uint n;              // Total number of elements
+    uint n;              // Total number of elements in input
     uint reduce_size;    // Size of dimension to reduce
-    uint outer_size;     // Size of outer dimensions
+    uint outer_size;     // Number of output elements
+    uint inner_size;     // Product of dimensions after reduction dim
 } params;
 
 shared float shared_data[256];
 
 void main() {
     uint tid = gl_LocalInvocationID.x;
-    uint gid = gl_GlobalInvocationID.x;
-    uint wid = gl_WorkGroupID.x;
+    uint output_idx = gl_WorkGroupID.x;
 
-    // Initialize
-    float value = 1.0;
-    if (gid < params.n) {
-        value = input_data[gid];
+    // Each workgroup handles one output element
+    if (output_idx >= params.outer_size) {
+        return;
     }
-    shared_data[tid] = value;
+
+    // Initialize accumulator to 1.0 for product
+    float accum = 1.0;
+
+    // Calculate the position in output space
+    uint outer_idx = output_idx / params.inner_size;
+    uint inner_idx = output_idx % params.inner_size;
+
+    // Starting position in input
+    uint base_idx = outer_idx * params.reduce_size * params.inner_size + inner_idx;
+
+    // Each thread processes multiple elements along the reduction dimension
+    for (uint i = tid; i < params.reduce_size; i += 256) {
+        uint idx = base_idx + i * params.inner_size;
+        if (idx < params.n) {
+            accum *= input_data[idx];
+        }
+    }
+
+    shared_data[tid] = accum;
     barrier();
 
     // Parallel reduction with multiplication
     for (uint s = 128; s > 0; s >>= 1) {
-        if (tid < s && (gid + s) < params.n) {
+        if (tid < s) {
             shared_data[tid] *= shared_data[tid + s];
         }
         barrier();
@@ -37,6 +55,6 @@ void main() {
 
     // Write result
     if (tid == 0) {
-        output_data[wid] = shared_data[0];
+        output_data[output_idx] = shared_data[0];
     }
 }

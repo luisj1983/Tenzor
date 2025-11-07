@@ -1,49 +1,77 @@
 #version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : enable
 
 // Argmax and Argmin operations
 layout(local_size_x = 256) in;
 
 layout(binding = 0) buffer Input { float input_data[]; };
-layout(binding = 1) buffer Output { int output_indices[]; };
+layout(binding = 1) buffer Output { int64_t output_indices[]; };
 
 layout(push_constant) uniform PushConstants {
     uint n;              // Total number of elements
     uint reduce_size;    // Size of dimension to reduce
-    uint outer_size;     // Size of outer dimensions
+    uint outer_size;     // Number of output elements
+    uint inner_size;     // Product of dimensions after reduction dim
     uint op;             // 0=argmax, 1=argmin
 } params;
 
 shared float shared_vals[256];
-shared int shared_indices[256];
+shared int64_t shared_indices[256];
 
 void main() {
     uint tid = gl_LocalInvocationID.x;
-    uint gid = gl_GlobalInvocationID.x;
-    uint wid = gl_WorkGroupID.x;
+    uint output_idx = gl_WorkGroupID.x;
 
-    // Initialize with first element or extreme value
-    float value;
-    int index;
-
-    if (gid < params.n) {
-        value = input_data[gid];
-        index = int(gid % params.reduce_size);
-    } else {
-        if (params.op == 0) { // argmax
-            value = -1.0 / 0.0; // -infinity
-        } else { // argmin
-            value = 1.0 / 0.0; // +infinity
-        }
-        index = -1;
+    // Each workgroup handles one output element
+    if (output_idx >= params.outer_size) {
+        return;
     }
 
-    shared_vals[tid] = value;
-    shared_indices[tid] = index;
+    // Initialize with extreme values
+    float best_value;
+    int64_t best_index = -1;
+
+    if (params.op == 0) { // argmax
+        best_value = -1.0 / 0.0; // -infinity
+    } else { // argmin
+        best_value = 1.0 / 0.0; // +infinity
+    }
+
+    // For dimensional reduction, compute proper indices
+    // Calculate the position in output space
+    uint outer_idx = output_idx / params.inner_size;
+    uint inner_idx = output_idx % params.inner_size;
+
+    // Starting position in input: outer_idx * (reduce_size * inner_size) + inner_idx
+    uint base_idx = outer_idx * params.reduce_size * params.inner_size + inner_idx;
+
+    // Each thread processes multiple elements along the reduction dimension
+    for (uint i = tid; i < params.reduce_size; i += 256) {
+        uint idx = base_idx + i * params.inner_size;
+        if (idx < params.n) {
+            float val = input_data[idx];
+
+            if (params.op == 0) { // argmax
+                if (val > best_value) {
+                    best_value = val;
+                    best_index = int64_t(i);
+                }
+            } else { // argmin
+                if (val < best_value) {
+                    best_value = val;
+                    best_index = int64_t(i);
+                }
+            }
+        }
+    }
+
+    shared_vals[tid] = best_value;
+    shared_indices[tid] = best_index;
     barrier();
 
-    // Parallel reduction
+    // Parallel reduction in shared memory
     for (uint s = 128; s > 0; s >>= 1) {
-        if (tid < s && (gid + s) < params.n) {
+        if (tid < s) {
             if (params.op == 0) { // argmax
                 if (shared_vals[tid + s] > shared_vals[tid]) {
                     shared_vals[tid] = shared_vals[tid + s];
@@ -61,6 +89,6 @@ void main() {
 
     // Write result
     if (tid == 0) {
-        output_indices[wid] = shared_indices[0];
+        output_indices[output_idx] = shared_indices[0];
     }
 }

@@ -3,11 +3,11 @@
 // Fill operation: fill tensor with a scalar value
 layout(local_size_x = 256) in;
 
-layout(binding = 0) buffer Output { float data[]; };
+layout(binding = 0) buffer Output { uint data[]; };
 
 layout(push_constant) uniform PushConstants {
-    uint n;          // Number of elements
-    float value;     // Fill value
+    uint n;              // Number of elements
+    uint value_bits;     // Fill value (as raw bits)
 } params;
 
 void main() {
@@ -17,5 +17,5 @@ void main() {
         return;
     }
 
-    data[idx] = params.value;
+    data[idx] = params.value_bits;
 }

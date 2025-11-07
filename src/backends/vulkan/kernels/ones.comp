@@ -1,12 +1,13 @@
 #version 450
 
-// Ones operation: create tensor filled with 1.0
+// Ones operation: create tensor filled with 1.0 (or 1 for integer types)
 layout(local_size_x = 256) in;
 
-layout(binding = 0) buffer Output { float output_data[]; };
+layout(binding = 0) buffer Output { uint output_data[]; };
 
 layout(push_constant) uniform PushConstants {
-    uint n_elements;   // Number of elements
+    uint n_elements;     // Number of elements
+    uint one_value_bits; // Bits for value 1.0 or 1 (depends on dtype)
 } params;
 
 void main() {
@@ -16,5 +17,5 @@ void main() {
         return;
     }
 
-    output_data[idx] = 1.0;
+    output_data[idx] = params.one_value_bits;
 }

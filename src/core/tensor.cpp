@@ -352,6 +352,9 @@ auto Tensor::to(Device device) const -> Tensor {
             throw std::runtime_error("Backend not available for source device");
         }
 
+        // CRITICAL: Synchronize GPU before reading buffer to ensure all writes complete
+        src_backend->synchronize(impl_->device.index);
+
         // Copy entire GPU buffer to temp (includes padding/non-contiguous data)
         const size_t total_bytes = impl_->storage->size_bytes();
         std::vector<uint8_t> gpu_buffer(total_bytes);

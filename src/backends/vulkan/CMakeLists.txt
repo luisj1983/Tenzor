@@ -38,6 +38,7 @@ file(MAKE_DIRECTORY ${SHADER_OUTPUT_DIR})
 set(SHADERS
     # Basic operations
     math
+    math_broadcast
     comparison
     matmul
     activations
@@ -47,6 +48,9 @@ set(SHADERS
     batchnorm
     transform
     indexing
+    # Math functions
+    trigonometric
+    hyperbolic
     # Vision operations
     im2col
     col2im
@@ -122,14 +126,40 @@ if(GLSLC)
 
     # Custom target for shader compilation
     add_custom_target(vulkan_shaders ALL DEPENDS ${SHADER_OUTPUTS})
+
+    # Generate embedded shaders header and implementation
+    set(EMBEDDED_SHADERS_HEADER ${CMAKE_CURRENT_BINARY_DIR}/embedded_shaders.hpp)
+    set(EMBEDDED_SHADERS_IMPL ${CMAKE_CURRENT_BINARY_DIR}/embedded_shaders.cpp)
+
+    add_custom_command(
+        OUTPUT ${EMBEDDED_SHADERS_HEADER} ${EMBEDDED_SHADERS_IMPL}
+        COMMAND ${CMAKE_COMMAND} -E env python3 ${CMAKE_SOURCE_DIR}/scripts/embed_shaders.py
+                ${SHADER_OUTPUT_DIR} ${EMBEDDED_SHADERS_HEADER}
+        DEPENDS ${SHADER_OUTPUTS} ${CMAKE_SOURCE_DIR}/scripts/embed_shaders.py
+        COMMENT "Embedding Vulkan shaders into C++ source"
+    )
+
+    # Custom target for embedded shaders
+    add_custom_target(vulkan_embedded_shaders ALL
+        DEPENDS ${EMBEDDED_SHADERS_HEADER} ${EMBEDDED_SHADERS_IMPL}
+    )
 endif()
 
 # Vulkan backend library
-add_library(tenzor_backend_vulkan SHARED
-    vulkan_backend.cpp
-    vulkan_backend.hpp
-    vulkan_utils.hpp
-)
+if(GLSLC)
+    add_library(tenzor_backend_vulkan SHARED
+        vulkan_backend.cpp
+        vulkan_backend.hpp
+        vulkan_utils.hpp
+        ${EMBEDDED_SHADERS_IMPL}
+    )
+else()
+    add_library(tenzor_backend_vulkan SHARED
+        vulkan_backend.cpp
+        vulkan_backend.hpp
+        vulkan_utils.hpp
+    )
+endif()
 
 # Set target properties
 set_target_properties(tenzor_backend_vulkan PROPERTIES
@@ -143,6 +173,7 @@ target_include_directories(tenzor_backend_vulkan PRIVATE
     ${CMAKE_SOURCE_DIR}/include
     ${Vulkan_INCLUDE_DIRS}
     ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_BINARY_DIR}  # For embedded_shaders.hpp
 )
 
 target_link_libraries(tenzor_backend_vulkan PRIVATE
@@ -191,9 +222,9 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     )
 endif()
 
-# Dependency on shader compilation
+# Dependency on shader compilation and embedding
 if(GLSLC)
-    add_dependencies(tenzor_backend_vulkan vulkan_shaders)
+    add_dependencies(tenzor_backend_vulkan vulkan_shaders vulkan_embedded_shaders)
 endif()
 
 # Installation

@@ -1,11 +1,12 @@
 #version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : enable
 
 // Comparison operations: eq, ne, lt, le, gt, ge
 layout(local_size_x = 256) in;
 
 layout(binding = 0) buffer InputA { float a[]; };
 layout(binding = 1) buffer InputB { float b[]; };
-layout(binding = 2) buffer Output { float result[]; };
+layout(binding = 2) buffer Output { uint8_t result[]; };
 
 layout(push_constant) uniform PushConstants {
     uint n;          // Number of elements
@@ -22,26 +23,33 @@ void main() {
     float val_a = a[idx];
     float val_b = b[idx];
 
-    // Output boolean as float (0.0 or 1.0)
-    // Vulkan doesn't support boolean buffers well, so we use floats
+    // Output boolean as uint8 (0 or 1)
+    // Boolean values are stored as uint8 in memory (DType::Bool)
+    uint8_t result_val;
     switch (params.op) {
         case 0: // eq (equal)
-            result[idx] = (val_a == val_b) ? 1.0 : 0.0;
+            result_val = (val_a == val_b) ? uint8_t(1) : uint8_t(0);
             break;
         case 1: // ne (not equal)
-            result[idx] = (val_a != val_b) ? 1.0 : 0.0;
+            result_val = (val_a != val_b) ? uint8_t(1) : uint8_t(0);
             break;
         case 2: // lt (less than)
-            result[idx] = (val_a < val_b) ? 1.0 : 0.0;
+            result_val = (val_a < val_b) ? uint8_t(1) : uint8_t(0);
             break;
         case 3: // le (less than or equal)
-            result[idx] = (val_a <= val_b) ? 1.0 : 0.0;
+            result_val = (val_a <= val_b) ? uint8_t(1) : uint8_t(0);
             break;
         case 4: // gt (greater than)
-            result[idx] = (val_a > val_b) ? 1.0 : 0.0;
+            result_val = (val_a > val_b) ? uint8_t(1) : uint8_t(0);
             break;
         case 5: // ge (greater than or equal)
-            result[idx] = (val_a >= val_b) ? 1.0 : 0.0;
+            result_val = (val_a >= val_b) ? uint8_t(1) : uint8_t(0);
+            break;
+        default:
+            result_val = uint8_t(0);
             break;
     }
+
+    // Store as uint8 in memory
+    result[idx] = result_val;
 }

@@ -3,11 +3,11 @@
 // Full operation: create tensor filled with specific value
 layout(local_size_x = 256) in;
 
-layout(binding = 0) buffer Output { float output_data[]; };
+layout(binding = 0) buffer Output { uint output_data[]; };
 
 layout(push_constant) uniform PushConstants {
     uint n_elements;   // Number of elements
-    float fill_value;  // Value to fill with
+    uint fill_value_bits;  // Value to fill with (as raw bits)
 } params;
 
 void main() {
@@ -17,5 +17,6 @@ void main() {
         return;
     }
 
-    output_data[idx] = params.fill_value;
+    // Write raw bits directly - works for both float and int32
+    output_data[idx] = params.fill_value_bits;
 }

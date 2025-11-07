@@ -48,6 +48,9 @@ namespace rocm {
     class HIPKernelAccess;  // Forward declaration for friend access
 }
 
+// Forward declaration for Vulkan backend
+class VulkanBackend;
+
 /**
  * @brief Multi-dimensional array with automatic differentiation support.
  *
@@ -755,6 +758,7 @@ private:
     friend class Variable;
     friend class cuda::CUDAKernelAccess;  // Allow CUDA kernels to access impl_
     friend class rocm::HIPKernelAccess;   // Allow ROCm/HIP kernels to access impl_
+    friend class VulkanBackend;           // Allow Vulkan backend to access impl_
 
     // Friend declarations for backend kernels that need direct access to impl_
     friend auto cpu::clone_kernel(const Tensor& input) -> Tensor;

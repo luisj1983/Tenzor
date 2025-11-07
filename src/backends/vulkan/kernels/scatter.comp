@@ -13,7 +13,8 @@ layout(push_constant) uniform PushConstants {
     uint input_size;       // Size of input/indices
     uint output_size;      // Total output size
     uint dim;              // Dimension to scatter along
-    uint dim_size;         // Size of the dimension being scattered to
+    uint dim_size;         // Size of the dimension being scattered to (output)
+    uint input_dim_size;   // Size of the dimension in input/values tensor
     uint inner_size;       // Product of dimensions after dim
     uint outer_size;       // Product of dimensions before dim
     uint reduction;        // 0=none, 1=add, 2=multiply
@@ -27,9 +28,9 @@ void main() {
         return;
     }
 
-    // Decompose input index
-    uint outer_idx = idx / (params.inner_size * params.dim_size);
-    uint remainder = idx % (params.inner_size * params.dim_size);
+    // Decompose input index based on VALUES tensor shape
+    uint outer_idx = idx / (params.inner_size * params.input_dim_size);
+    uint remainder = idx % (params.inner_size * params.input_dim_size);
     uint inner_idx = remainder % params.inner_size;
 
     // Get the scatter destination index
