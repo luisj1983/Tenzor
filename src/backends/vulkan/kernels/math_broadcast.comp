@@ -74,7 +74,7 @@ void main() {
         // Int32 operations - reinterpret uint as int
         int val_a = int(a[idx_a]);
         int val_b = int(b[idx_b]);
-        int res;
+        int res = 0;  // IMPORTANT: Initialize to avoid undefined behavior
 
         switch (params.op) {
             case 0: // add
@@ -88,6 +88,9 @@ void main() {
                 break;
             case 3: // div
                 res = val_a / val_b;
+                break;
+            default:
+                res = 0;
                 break;
         }
         result[out_idx] = uint(res);
