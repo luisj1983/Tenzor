@@ -199,6 +199,12 @@ private:
     auto dispatchRand(const std::vector<int64_t>& shape, DType dtype) -> Tensor;
     auto dispatchRandn(const std::vector<int64_t>& shape, DType dtype) -> Tensor;
 
+    // Repeat and masked operations
+    auto dispatchRepeat(const Tensor& input, const std::vector<int64_t>& repeats) -> Tensor;
+    auto dispatchMaskedSelect(const Tensor& input, const Tensor& mask) -> Tensor;
+    auto dispatchMaskedFill(const Tensor& input, const Tensor& mask, float value) -> Tensor;
+    auto dispatchWhere(const Tensor& condition, const Tensor& x, const Tensor& y) -> Tensor;
+
     // Tensor manipulation operations
     auto dispatchExpand(const Tensor& input, const std::vector<int64_t>& shape) -> Tensor;
     auto dispatchCat(const std::vector<Tensor>& inputs, int64_t dim) -> Tensor;

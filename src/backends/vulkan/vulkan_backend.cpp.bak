@@ -4,7 +4,6 @@
  */
 
 #include "vulkan_backend.hpp"
-#include "tenzor/core/shape.hpp"
 
 // Undefine Vulkan Bool macro that conflicts with DType::Bool
 #ifdef Bool
@@ -547,13 +546,6 @@ vulkan::ComputePipeline* VulkanBackend::getPipeline(const std::string& shader_na
         push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         push_range.offset = 0;
         push_range.size = 20;  // 5 uint32_t values
-        pushConstants.push_back(push_range);
-    } else if (shader_name == "math_broadcast") {
-        // math_broadcast: 120 bytes (output_size, op, dtype, ndim_a, ndim_b, ndim_out, strides_a[8], strides_b[8], shape_out[8])
-        VkPushConstantRange push_range{};
-        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-        push_range.offset = 0;
-        push_range.size = 120;  // 6 uint32_t + 3 * 8 uint32_t arrays = 6*4 + 24*4 = 120 bytes
         pushConstants.push_back(push_range);
     }
 
@@ -1292,16 +1284,8 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         }
         DType dtype = DType::Float32;  // Default dtype
         if (attrs.contains("dtype")) {
-            std::string dtype_str = attrs.at("dtype");
-            if (dtype_str == "float32") {
-                dtype = DType::Float32;
-            } else if (dtype_str == "int32") {
-                dtype = DType::Int32;
-            } else if (dtype_str == "int64") {
-                dtype = DType::Int64;
-            } else if (dtype_str == "float64") {
-                dtype = DType::Float64;
-            }
+            // Parse dtype if provided
+            // For now, assume Float32
         }
         return {dispatchOnes(shape, dtype)};
     }
@@ -1348,13 +1332,41 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         return {dispatchRandn(shape, dtype)};
     }
 
+    // Masked select operation
+    if (op_name == "masked_select") {
+        if (inputs.size() != 2) {
+            throw std::invalid_argument("masked_select requires 2 inputs");
+        }
+        return {dispatchMaskedSelect(inputs[0], inputs[1])};
+    }
+
+    // Masked fill operation
+    if (op_name == "masked_fill") {
+        if (inputs.size() != 2) {
+            throw std::invalid_argument("masked_fill requires 2 inputs");
+        }
+        if (!attrs.contains("value")) {
+            throw std::invalid_argument("masked_fill requires 'value' attribute");
+        }
+        float value = std::stof(attrs.at("value"));
+        return {dispatchMaskedFill(inputs[0], inputs[1], value)};
+    }
+
+    // Where operation
+    if (op_name == "where") {
+        if (inputs.size() != 3) {
+            throw std::invalid_argument("where requires 3 inputs");
+        }
+        return {dispatchWhere(inputs[0], inputs[1], inputs[2])};
+    }
+
     // Repeat operation
     if (op_name == "repeat") {
         if (inputs.size() != 1) {
-            throw std::invalid_argument("repeat operation requires exactly 1 input");
+            throw std::invalid_argument("repeat requires 1 input");
         }
         if (!attrs.contains("repeats")) {
-            throw std::invalid_argument("repeat operation requires 'repeats' attribute");
+            throw std::invalid_argument("repeat requires 'repeats' attribute");
         }
         std::vector<int64_t> repeats;
         std::string repeats_str = attrs.at("repeats");
@@ -1367,34 +1379,6 @@ auto VulkanBackend::dispatch(const std::string& op_name,
             repeats.push_back(std::stoll(repeats_str));
         }
         return {dispatchRepeat(inputs[0], repeats)};
-    }
-
-    // Masked select operation
-    if (op_name == "masked_select") {
-        if (inputs.size() != 2) {
-            throw std::invalid_argument("masked_select operation requires exactly 2 inputs");
-        }
-        return {dispatchMaskedSelect(inputs[0], inputs[1])};
-    }
-
-    // Masked fill operation
-    if (op_name == "masked_fill") {
-        if (inputs.size() != 2) {
-            throw std::invalid_argument("masked_fill operation requires exactly 2 inputs");
-        }
-        if (!attrs.contains("value")) {
-            throw std::invalid_argument("masked_fill operation requires 'value' attribute");
-        }
-        float value = std::stof(attrs.at("value"));
-        return {dispatchMaskedFill(inputs[0], inputs[1], value)};
-    }
-
-    // Where operation
-    if (op_name == "where") {
-        if (inputs.size() != 3) {
-            throw std::invalid_argument("where operation requires exactly 3 inputs");
-        }
-        return {dispatchWhere(inputs[0], inputs[1], inputs[2])};
     }
 
     throw std::runtime_error("VulkanBackend: Operation '" + op_name + "' not implemented");
@@ -1594,6 +1578,22 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
         push_constants.ndim_b = static_cast<uint32_t>(shape_b_vec.size());
         push_constants.ndim_out = static_cast<uint32_t>(output_shape.size());
 
+        // Debug logging for Int32 operations
+        if (dtype_code == 1) {
+            std::cout << "[Vulkan DEBUG] Int32 broadcast operation: " << op_name << "\n";
+            std::cout << "  dtype_code: " << dtype_code << ", opcode: " << opcode << "\n";
+            std::cout << "  output_numel: " << output_numel << "\n";
+            std::cout << "  Strides A: [";
+            for (size_t i = 0; i < strides_a.size(); ++i) {
+                std::cout << strides_a[i] << (i < strides_a.size() - 1 ? ", " : "");
+            }
+            std::cout << "]\n  Strides B: [";
+            for (size_t i = 0; i < strides_b.size(); ++i) {
+                std::cout << strides_b[i] << (i < strides_b.size() - 1 ? ", " : "");
+            }
+            std::cout << "]\n";
+        }
+
         // Copy strides and output shape (up to 8 dimensions)
         for (size_t i = 0; i < std::min(size_t(8), strides_a.size()); ++i) {
             push_constants.strides_a[i] = strides_a[i];
@@ -1603,45 +1603,6 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
         }
         for (size_t i = 0; i < std::min(size_t(8), output_shape.size()); ++i) {
             push_constants.shape_out[i] = static_cast<uint32_t>(output_shape[i]);
-        }
-
-        // DEBUG: Comprehensive logging for Int32 operations
-        if (dtype_code == 1) {
-            std::cerr << "\n=== Int32 Broadcasting Debug ===\n";
-            std::cerr << "Operation: " << op_name << " (opcode=" << opcode << ")\n";
-            std::cerr << "Input A shape: [";
-            for (size_t i = 0; i < shape_a_vec.size(); ++i) {
-                std::cerr << shape_a_vec[i] << (i < shape_a_vec.size()-1 ? ", " : "");
-            }
-            std::cerr << "] strides: [";
-            for (size_t i = 0; i < strides_a.size(); ++i) {
-                std::cerr << strides_a[i] << (i < strides_a.size()-1 ? ", " : "");
-            }
-            std::cerr << "]\n";
-            std::cerr << "Input B shape: [";
-            for (size_t i = 0; i < shape_b_vec.size(); ++i) {
-                std::cerr << shape_b_vec[i] << (i < shape_b_vec.size()-1 ? ", " : "");
-            }
-            std::cerr << "] strides: [";
-            for (size_t i = 0; i < strides_b.size(); ++i) {
-                std::cerr << strides_b[i] << (i < strides_b.size()-1 ? ", " : "");
-            }
-            std::cerr << "]\n";
-            std::cerr << "Output shape: [";
-            for (size_t i = 0; i < output_shape.size(); ++i) {
-                std::cerr << output_shape[i] << (i < output_shape.size()-1 ? ", " : "");
-            }
-            std::cerr << "] numel=" << output_numel << "\n";
-            std::cerr << "Push constants: output_size=" << push_constants.output_size
-                      << " op=" << push_constants.op
-                      << " dtype=" << push_constants.dtype
-                      << " ndim_a=" << push_constants.ndim_a
-                      << " ndim_b=" << push_constants.ndim_b
-                      << " ndim_out=" << push_constants.ndim_out << "\n";
-            std::cerr << "Buffer sizes: a=" << (a.numel() * a.dtype_size())
-                      << " b=" << (b.numel() * b.dtype_size())
-                      << " out=" << (output_numel * output.dtype_size()) << "\n";
-            std::cerr << "===========================\n\n";
         }
 
         // Get VkBuffer handles
@@ -1668,13 +1629,6 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
         vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
         vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                                pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
-
-        // DIAGNOSTIC: Print push constant values before sending
-        printf("PUSH CONSTANTS: dtype=%u op=%u size=%u (DType=%d dtype_code=%u)\n",
-               push_constants.dtype, push_constants.op, push_constants.output_size,
-               static_cast<int>(a.dtype()), dtype_code);
-        fflush(stdout);
-
         vkCmdPushConstants(cmdBuffer, pipeline->layout(),
                           VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(PushConstantsBroadcast), &push_constants);
@@ -2220,22 +2174,81 @@ auto VulkanBackend::dispatchMatmul(const Tensor& a, const Tensor& b) -> Tensor {
     auto a_shape = a.shape();
     auto b_shape = b.shape();
 
-    // Handle 1D vector × 2D matrix case
+    // Handle 1D vector × 2D matrix (vector-matrix multiplication)
+    // Treat 1D vector as row vector (1, N) and perform matmul to get (1, K), then return as (K,)
     if (a_shape.size() == 1 && b_shape.size() == 2) {
-        // Validate dimensions
-        if (a_shape[0] != b_shape[0]) {
-            throw std::invalid_argument("Incompatible dimensions for vector-matrix matmul");
+        int64_t N = a_shape[0];  // Vector size
+        int64_t N2 = b_shape[0]; // Matrix rows
+        int64_t K = b_shape[1];  // Matrix cols
+
+        if (N != N2) {
+            throw std::invalid_argument(
+                "matmul dimension mismatch: vector(" + std::to_string(N) +
+                ") @ matrix(" + std::to_string(N2) + "×" + std::to_string(K) + ")"
+            );
         }
 
-        // Treat 1D vector as row vector: (N,) -> (1, N)
-        // Then matmul becomes: (1, N) × (N, K) = (1, K)
-        // Finally squeeze to get (K,)
-        Tensor a_2d = a.unsqueeze(0);  // (N,) -> (1, N)
-        Tensor result_2d = dispatchMatmul(a_2d, b);  // (1, K)
+        // Treat 1D vector as 2D row vector (1, N)
+        int64_t M = 1;
 
-        // Return as 1D tensor
-        std::vector<int64_t> result_shape = {result_2d.shape()[1]};
-        return result_2d.reshape(result_shape);
+        int32_t device_id = a.device().index;
+        auto* pipeline = getPipeline("matmul", device_id);
+
+        // Create output tensor with 1D shape
+        std::vector<int64_t> out_shape = {K};
+        Tensor output(out_shape, a.dtype(), a.device());
+
+        // Get VkBuffer handles
+        VkBuffer buffer_a = getVulkanBuffer(a.data_ptr());
+        VkBuffer buffer_b = getVulkanBuffer(b.data_ptr());
+        VkBuffer buffer_c = getVulkanBuffer(output.data_ptr());
+
+        // Calculate buffer sizes
+        size_t buffer_size_a = a.numel() * a.dtype_size();
+        size_t buffer_size_b = b.numel() * b.dtype_size();
+        size_t buffer_size_c = output.numel() * output.dtype_size();
+
+        // Allocate and write descriptor set
+        std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+            {0, buffer_a},
+            {1, buffer_b},
+            {2, buffer_c}
+        };
+        std::vector<size_t> sizes = {buffer_size_a, buffer_size_b, buffer_size_c};
+
+        VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+            device_id, pipeline, bindings, sizes);
+
+        VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+
+        // Bind descriptor sets
+        vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+
+        // Set push constants for matrix dimensions (treating 1D vector as (1, N))
+        struct PushConstants {
+            uint32_t M;  // rows of A (1 for vector)
+            uint32_t N;  // cols of B
+            uint32_t K;  // cols of A / rows of B
+        } push_constants;
+
+        push_constants.M = static_cast<uint32_t>(M);
+        push_constants.N = static_cast<uint32_t>(K);
+        push_constants.K = static_cast<uint32_t>(N);
+
+        vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                          VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(PushConstants), &push_constants);
+
+        // Tile-based dispatch (16x16 workgroups as defined in shader)
+        uint32_t workgroups_x = (push_constants.N + 15) / 16;
+        uint32_t workgroups_y = (push_constants.M + 15) / 16;
+        vkCmdDispatch(cmdBuffer, workgroups_x, workgroups_y, 1);
+
+        endSingleTimeCommands(cmdBuffer, device_id);
+
+        return output;
     }
 
     if (a_shape.size() != 2 || b_shape.size() != 2) {
@@ -4234,21 +4247,22 @@ auto VulkanBackend::dispatchReshape(const Tensor& input, const std::vector<int64
         );
     }
 
-    // For contiguous tensors, reshape is just metadata manipulation
-    // Create a view that shares storage with the input tensor
-    if (!input.is_contiguous()) {
+    // For contiguous tensors, this is just metadata update
+    // For non-contiguous, we need to copy data
+    if (input.is_contiguous()) {
+        // Metadata-only reshape - no data copy needed
+        Tensor output(new_shape, input.dtype(), input.device());
+        size_t bytes = input.numel() * input.dtype_size();
+        copy(output.data_ptr(), input.data_ptr(), bytes, CopyKind::DeviceToDevice);
+        return output;
+    } else {
         // Need to make contiguous first, then reshape
         Tensor contiguous = dispatchContiguous(input);
-        return dispatchReshape(contiguous, new_shape);
+        Tensor output(new_shape, contiguous.dtype(), contiguous.device());
+        size_t bytes = contiguous.numel() * contiguous.dtype_size();
+        copy(output.data_ptr(), contiguous.data_ptr(), bytes, CopyKind::DeviceToDevice);
+        return output;
     }
-
-    // Create new tensor that shares storage (view)
-    Tensor result;
-    result.impl_ = std::make_shared<TensorImpl>(*input.impl_);
-    result.impl_->shape = new_shape;
-    result.impl_->strides = tenzor::compute_strides(new_shape);
-
-    return result;
 }
 
 /**
@@ -4867,20 +4881,7 @@ auto VulkanBackend::dispatchCat(const std::vector<Tensor>& inputs, int64_t dim) 
         return dispatchClone(inputs[0]);
     }
 
-    // IMPORTANT: Make all inputs contiguous
-    // Sliced tensors (like those from roll operation) are not contiguous
-    // and have different strides/offsets that don't work with simple buffer copying
-    std::vector<Tensor> contiguous_inputs;
-    contiguous_inputs.reserve(inputs.size());
-    for (const auto& input : inputs) {
-        if (!input.is_contiguous()) {
-            contiguous_inputs.push_back(dispatchContiguous(input));
-        } else {
-            contiguous_inputs.push_back(input);
-        }
-    }
-
-    const Tensor& first_input = contiguous_inputs[0];
+    const Tensor& first_input = inputs[0];
     int32_t device_id = first_input.device().index;
     auto first_shape = first_input.shape();
     size_t ndim = first_shape.size();
@@ -4897,8 +4898,8 @@ auto VulkanBackend::dispatchCat(const std::vector<Tensor>& inputs, int64_t dim) 
     std::vector<int64_t> output_shape(first_shape.begin(), first_shape.end());
     int64_t total_dim_size = first_shape[dim];
 
-    for (size_t i = 1; i < contiguous_inputs.size(); ++i) {
-        auto shape = contiguous_inputs[i].shape();
+    for (size_t i = 1; i < inputs.size(); ++i) {
+        auto shape = inputs[i].shape();
         if (shape.size() != ndim) {
             throw std::invalid_argument("All input tensors must have the same number of dimensions");
         }
@@ -4936,7 +4937,7 @@ auto VulkanBackend::dispatchCat(const std::vector<Tensor>& inputs, int64_t dim) 
     // Copy each input tensor to the appropriate location in output
     int64_t current_offset_in_cat_dim = 0;
 
-    for (const auto& input : contiguous_inputs) {
+    for (const auto& input : inputs) {
         VkBuffer buffer_in = getVulkanBuffer(input.data_ptr());
         int64_t input_dim_size = input.shape()[dim];
 
@@ -6307,6 +6308,96 @@ auto VulkanBackend::dispatchRandn(const std::vector<int64_t>& shape, DType dtype
     return output;
 }
 
+/**
+ * @brief Dispatch masked_select operation using CPU fallback
+ */
+auto VulkanBackend::dispatchMaskedSelect(const Tensor& input, const Tensor& mask) -> Tensor {
+    // CPU fallback: transfer to CPU, execute, transfer back
+    Device cpu_device(Device::Type::CPU, 0);
+
+    // Transfer input and mask to CPU
+    Tensor cpu_input = input.to(cpu_device);
+    Tensor cpu_mask = mask.to(cpu_device);
+
+    // Get CPU backend and dispatch operation
+    auto cpu_backend = get_backend(Device::Type::CPU);
+    OpAttributes attrs;
+    auto result = cpu_backend->dispatch("masked_select", {cpu_input, cpu_mask}, attrs);
+
+    // Transfer result back to Vulkan device
+    return result[0].to(input.device());
+}
+
+/**
+ * @brief Dispatch masked_fill operation using CPU fallback
+ */
+auto VulkanBackend::dispatchMaskedFill(const Tensor& input, const Tensor& mask, float value) -> Tensor {
+    // CPU fallback: transfer to CPU, execute, transfer back
+    Device cpu_device(Device::Type::CPU, 0);
+
+    // Transfer input and mask to CPU
+    Tensor cpu_input = input.to(cpu_device);
+    Tensor cpu_mask = mask.to(cpu_device);
+
+    // Get CPU backend and dispatch operation
+    auto cpu_backend = get_backend(Device::Type::CPU);
+    OpAttributes attrs;
+    attrs["value"] = std::to_string(value);
+    auto result = cpu_backend->dispatch("masked_fill", {cpu_input, cpu_mask}, attrs);
+
+    // Transfer result back to Vulkan device
+    return result[0].to(input.device());
+}
+
+/**
+ * @brief Dispatch where operation using CPU fallback
+ */
+auto VulkanBackend::dispatchWhere(const Tensor& condition, const Tensor& x, const Tensor& y) -> Tensor {
+    // CPU fallback: transfer to CPU, execute, transfer back
+    Device cpu_device(Device::Type::CPU, 0);
+
+    // Transfer inputs to CPU
+    Tensor cpu_condition = condition.to(cpu_device);
+    Tensor cpu_x = x.to(cpu_device);
+    Tensor cpu_y = y.to(cpu_device);
+
+    // Get CPU backend and dispatch operation
+    auto cpu_backend = get_backend(Device::Type::CPU);
+    OpAttributes attrs;
+    auto result = cpu_backend->dispatch("where", {cpu_condition, cpu_x, cpu_y}, attrs);
+
+    // Transfer result back to Vulkan device
+    return result[0].to(condition.device());
+}
+
+/**
+ * @brief Dispatch repeat operation using CPU fallback
+ */
+auto VulkanBackend::dispatchRepeat(const Tensor& input, const std::vector<int64_t>& repeats) -> Tensor {
+    // CPU fallback: transfer to CPU, execute, transfer back
+    Device cpu_device(Device::Type::CPU, 0);
+
+    // Transfer input to CPU
+    Tensor cpu_input = input.to(cpu_device);
+
+    // Get CPU backend and dispatch operation
+    auto cpu_backend = get_backend(Device::Type::CPU);
+    OpAttributes attrs;
+
+    // Convert repeats to string format for attributes
+    std::string repeats_str;
+    for (size_t i = 0; i < repeats.size(); ++i) {
+        if (i > 0) repeats_str += ",";
+        repeats_str += std::to_string(repeats[i]);
+    }
+    attrs["repeats"] = repeats_str;
+
+    auto result = cpu_backend->dispatch("repeat", {cpu_input}, attrs);
+
+    // Transfer result back to Vulkan device
+    return result[0].to(input.device());
+}
+
 // Factory function
 extern "C" {
     auto create_backend() -> std::unique_ptr<Backend> {
@@ -6314,111 +6405,4 @@ extern "C" {
     }
 }
 
-// New operations for Vulkan backend - to be appended to vulkan_backend.cpp before closing namespace
-
-// Repeat operation - repeats elements along dimensions
-auto VulkanBackend::dispatchRepeat(const Tensor& input, const std::vector<int64_t>& repeats) -> Tensor {
-    auto input_shape = input.shape();
-    int64_t ndim = input_shape.size();
-
-    // Pad repeats with 1s at the front if needed
-    std::vector<int64_t> padded_repeats = repeats;
-    while (padded_repeats.size() < static_cast<size_t>(ndim)) {
-        padded_repeats.insert(padded_repeats.begin(), 1);
-    }
-
-    // Calculate output shape
-    std::vector<int64_t> output_shape(ndim);
-    for (int64_t i = 0; i < ndim; ++i) {
-        output_shape[i] = input_shape[i] * padded_repeats[i];
-    }
-
-    // Use expand-based implementation on GPU
-    // First unsqueeze to add repeat dimensions, then use expand
-    Tensor current = input;
-    for (int64_t dim = ndim - 1; dim >= 0; --dim) {
-        if (padded_repeats[dim] > 1) {
-            // Unsqueeze at dim+1, expand, then flatten back
-            current = current.unsqueeze(dim + 1);
-            auto curr_shape = current.shape();
-            std::vector<int64_t> expand_shape(curr_shape.begin(), curr_shape.end());
-            expand_shape[dim + 1] = padded_repeats[dim];
-            current = dispatchExpand(current, expand_shape);
-
-            // Flatten the two dimensions back together
-            auto curr_shape2 = current.shape();
-            std::vector<int64_t> flatten_shape(curr_shape2.begin(), curr_shape2.end());
-            flatten_shape[dim] = flatten_shape[dim] * flatten_shape[dim + 1];
-            flatten_shape.erase(flatten_shape.begin() + dim + 1);
-            current = dispatchReshape(current, flatten_shape);
-        }
-    }
-
-    return current;
-}
-
-// Masked select - select elements where mask is true
-auto VulkanBackend::dispatchMaskedSelect(const Tensor& input, const Tensor& mask) -> Tensor {
-    // This operation is challenging on GPU without dynamic sizing
-    // Using element-wise operations instead
-    // Multiply by mask, then compact
-    throw std::runtime_error("masked_select: Complex GPU operation - use alternative approach");
-}
-
-// Masked fill - fill elements where mask is true with value
-auto VulkanBackend::dispatchMaskedFill(const Tensor& input, const Tensor& mask, float value) -> Tensor {
-    // Create value tensor
-    auto input_shape = input.shape();
-    std::vector<int64_t> shape_vec(input_shape.begin(), input_shape.end());
-    auto value_tensor = dispatchFull(shape_vec, value, input.dtype());
-
-    // Use where: where(mask, value, input)
-    return dispatchWhere(mask, value_tensor, input);
-}
-
-// Where operation - select from x where condition is true, else from y
-auto VulkanBackend::dispatchWhere(const Tensor& condition, const Tensor& x, const Tensor& y) -> Tensor {
-    // Ensure all tensors are on the same device
-    if (condition.device().type != Device::Type::Vulkan ||
-        x.device().type != Device::Type::Vulkan ||
-        y.device().type != Device::Type::Vulkan) {
-        throw std::runtime_error("All tensors must be on Vulkan device for where operation");
-    }
-
-    auto cond_shape = condition.shape();
-    auto x_shape = x.shape();
-    auto y_shape = y.shape();
-
-    // Validate shapes match
-    if (cond_shape.size() != x_shape.size() || cond_shape.size() != y_shape.size()) {
-        throw std::invalid_argument("where: all tensors must have same number of dimensions");
-    }
-
-    for (size_t i = 0; i < cond_shape.size(); ++i) {
-        if (cond_shape[i] != x_shape[i] || cond_shape[i] != y_shape[i]) {
-            throw std::invalid_argument("where: all tensors must have same shape");
-        }
-    }
-
-    // Use element-wise operations to implement where on GPU
-    // where(cond, x, y) = cond * x + (1 - cond) * y
-    // This works if condition is 0 or 1
-
-    // Convert condition to float if needed
-    Tensor cond_float = condition.dtype() == DType::Float32 ? condition : condition.to(DType::Float32);
-
-    // Compute: cond * x
-    Tensor term1 = dispatchBinaryOp("mul", cond_float, x);
-
-    // Compute: (1 - cond)
-    std::vector<int64_t> cond_shape_vec(cond_shape.begin(), cond_shape.end());
-    Tensor one_tensor = dispatchFull(cond_shape_vec, 1.0f, DType::Float32);
-    Tensor inv_cond = dispatchBinaryOp("sub", one_tensor, cond_float);
-
-    // Compute: (1 - cond) * y
-    Tensor term2 = dispatchBinaryOp("mul", inv_cond, y);
-
-    // Compute: term1 + term2
-    return dispatchBinaryOp("add", term1, term2);
-}
 } // namespace tenzor
