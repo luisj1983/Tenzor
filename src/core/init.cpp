@@ -2268,6 +2268,11 @@ auto initialize() -> void {
                         return vulkan_backend->dispatch("batchnorm2d_forward", inputs, attrs);
                     });
 
+                registry.register_kernel("batchnorm2d_forward_affine", Device::Type::Vulkan,
+                    [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return vulkan_backend->dispatch("batchnorm2d_forward_affine", inputs, attrs);
+                    });
+
                 registry.register_kernel("batchnorm2d_backward", Device::Type::Vulkan,
                     [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
                         return vulkan_backend->dispatch("batchnorm2d_backward", inputs, attrs);

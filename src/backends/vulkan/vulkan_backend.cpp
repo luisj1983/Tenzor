@@ -1070,12 +1070,23 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         // Get dtype and device from attributes or use defaults
         DType dtype = DType::Float32;
         if (attrs.contains("dtype")) {
-            // Parse dtype string (simplified)
+            // Parse dtype string - must handle all dtypes
             std::string dtype_str = attrs.at("dtype");
             if (dtype_str == "float32") dtype = DType::Float32;
             else if (dtype_str == "float64") dtype = DType::Float64;
+            else if (dtype_str == "float16") dtype = DType::Float16;
+            else if (dtype_str == "bfloat16") dtype = DType::BFloat16;
+            else if (dtype_str == "int8") dtype = DType::Int8;
+            else if (dtype_str == "int16") dtype = DType::Int16;
             else if (dtype_str == "int32") dtype = DType::Int32;
             else if (dtype_str == "int64") dtype = DType::Int64;
+            else if (dtype_str == "uint8") dtype = DType::UInt8;
+            else if (dtype_str == "uint16") dtype = DType::UInt16;
+            else if (dtype_str == "uint32") dtype = DType::UInt32;
+            else if (dtype_str == "uint64") dtype = DType::UInt64;
+            else if (dtype_str == "bool") dtype = DType::Bool;
+            else if (dtype_str == "complex64") dtype = DType::Complex64;
+            else if (dtype_str == "complex128") dtype = DType::Complex128;
         }
         int32_t device_id = attrs.contains("device_id") ? std::stoi(attrs.at("device_id")) : 0;
         Device device = Device::vulkan(device_id);
@@ -1181,6 +1192,16 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         const Tensor* beta = (inputs.size() > 4) ? &inputs[4] : nullptr;
         float epsilon = attrs.contains("eps") ? std::stof(attrs.at("eps")) : 1e-5f;
         return {dispatchBatchNorm2dForward(inputs[0], inputs[1], inputs[2], gamma, beta, epsilon)};
+    }
+
+    if (op_name == "batchnorm2d_forward_affine") {
+        // batchnorm2d_forward_affine is the same as batchnorm2d_forward with weight and bias
+        // Inputs: input, mean, var, weight, bias
+        if (inputs.size() < 5) {
+            throw std::invalid_argument("batchnorm2d_forward_affine requires 5 inputs (input, mean, var, weight, bias)");
+        }
+        float epsilon = attrs.contains("eps") ? std::stof(attrs.at("eps")) : 1e-5f;
+        return {dispatchBatchNorm2dForward(inputs[0], inputs[1], inputs[2], &inputs[3], &inputs[4], epsilon)};
     }
 
     if (op_name == "batchnorm2d_backward") {
@@ -4595,23 +4616,40 @@ auto VulkanBackend::dispatchContiguous(const Tensor& input) -> Tensor {
     // Copy data from GPU to CPU using element-wise access with strides
     const int64_t total_elements = input.numel();
     const size_t element_size = input.dtype_size();
+    const int64_t ndims = input.ndim();
+    const int64_t base_offset = input.impl_ ? input.impl_->offset : 0;
 
-    // Allocate temporary CPU buffer for input data
-    std::vector<uint8_t> cpu_input_buffer(total_elements * element_size);
+    // Calculate the size of underlying storage we need to copy
+    // We need to copy enough data to cover all accessed elements considering strides and offset
+    int64_t max_offset = base_offset;
+    if (ndims > 0) {
+        auto strides = input.strides();
+        auto shape = input.shape();
+        for (int64_t dim = 0; dim < ndims; ++dim) {
+            max_offset += (shape[dim] - 1) * std::abs(strides[dim]);
+        }
+    }
+    int64_t storage_elements_needed = max_offset + 1;
+
+    // Allocate temporary CPU buffers
+    std::vector<uint8_t> cpu_input_buffer(storage_elements_needed * element_size);
     std::vector<uint8_t> cpu_output_buffer(total_elements * element_size);
 
     // Download input tensor data from GPU to CPU
-    copy(cpu_input_buffer.data(), input.data_ptr(),
-         total_elements * element_size, CopyKind::DeviceToHost);
+    // Get the base storage pointer (without offset) for copying
+    const void* base_storage_ptr = input.impl_ ? input.impl_->storage->data() : input.data_ptr();
+    copy(cpu_input_buffer.data(), base_storage_ptr,
+         storage_elements_needed * element_size, CopyKind::DeviceToHost);
 
-    // Reorder data on CPU using strides
-    const int64_t ndims = input.ndim();
+    // Reorder data on CPU using strides and offset
 
     if (ndims == 0) {
-        // Scalar tensor - direct copy
-        std::memcpy(cpu_output_buffer.data(), cpu_input_buffer.data(), element_size);
+        // Scalar tensor - direct copy with offset
+        std::memcpy(cpu_output_buffer.data(),
+                   cpu_input_buffer.data() + base_offset * element_size,
+                   element_size);
     } else {
-        // Multi-dimensional copy using stride calculations
+        // Multi-dimensional copy using stride calculations with base offset
         std::vector<int64_t> indices(ndims, 0);
         int64_t dst_offset = 0;
 
@@ -4619,8 +4657,8 @@ auto VulkanBackend::dispatchContiguous(const Tensor& input) -> Tensor {
         auto shape = input.shape();
 
         for (int64_t i = 0; i < total_elements; ++i) {
-            // Calculate source offset using strides
-            int64_t src_offset = 0;
+            // Calculate source offset using strides and add base offset
+            int64_t src_offset = base_offset;
             for (int64_t dim = 0; dim < ndims; ++dim) {
                 src_offset += indices[dim] * strides[dim];
             }

@@ -1,6 +1,7 @@
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/backend/dispatch.hpp"
 #include "tenzor/ops/creation.hpp"
+#include <iostream>
 
 namespace tenzor {
 

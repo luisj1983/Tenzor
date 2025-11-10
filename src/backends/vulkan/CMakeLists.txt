@@ -38,7 +38,9 @@ file(MAKE_DIRECTORY ${SHADER_OUTPUT_DIR})
 set(SHADERS
     # Basic operations
     math
+    math_f64
     math_broadcast
+    math_broadcast_f64
     comparison
     matmul
     activations

@@ -1,0 +1,83 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Math operations with Float64 support
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer InputA { double a[]; };
+layout(binding = 1) buffer InputB { double b[]; };
+layout(binding = 2) buffer Output { double result[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;          // Number of elements
+    uint op;         // Operation: 0=add, 1=sub, 2=mul, 3=div, 4=sqrt, 5=exp, 6=log, 7=neg, 8=abs, 9=pow, 10=sign, 11=floor, 12=ceil, 13=round, 14=trunc, 15=reciprocal
+    double param;    // Parameter for operations like pow (exponent) - now double
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.n) {
+        return;
+    }
+
+    double val_a = a[idx];
+    double val_b = b[idx];
+
+    switch (params.op) {
+        case 0: // add
+            result[idx] = val_a + val_b;
+            break;
+        case 1: // sub
+            result[idx] = val_a - val_b;
+            break;
+        case 2: // mul
+            result[idx] = val_a * val_b;
+            break;
+        case 3: // div
+            result[idx] = val_a / val_b;
+            break;
+        case 4: // sqrt (unary - uses a only)
+            result[idx] = sqrt(val_a);
+            break;
+        case 5: // exp (unary)
+            result[idx] = exp(val_a);
+            break;
+        case 6: // log (unary)
+            result[idx] = log(val_a);
+            break;
+        case 7: // neg (unary)
+            result[idx] = -val_a;
+            break;
+        case 8: // abs (unary)
+            result[idx] = abs(val_a);
+            break;
+        case 9: // pow (unary with parameter)
+            result[idx] = pow(val_a, params.param);
+            break;
+        case 10: // sign (unary)
+            if (val_a < 0.0) {
+                result[idx] = -1.0;
+            } else if (val_a > 0.0) {
+                result[idx] = 1.0;
+            } else {
+                result[idx] = 0.0;
+            }
+            break;
+        case 11: // floor (unary)
+            result[idx] = floor(val_a);
+            break;
+        case 12: // ceil (unary)
+            result[idx] = ceil(val_a);
+            break;
+        case 13: // round (unary)
+            result[idx] = round(val_a);
+            break;
+        case 14: // trunc (unary)
+            result[idx] = trunc(val_a);
+            break;
+        case 15: // reciprocal (unary)
+            result[idx] = 1.0 / val_a;
+            break;
+    }
+}

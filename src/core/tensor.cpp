@@ -49,8 +49,11 @@ auto TensorImpl::numel() const -> int64_t {
 }
 
 auto TensorImpl::is_contiguous() const -> bool {
+    // A tensor is contiguous if:
+    // 1. Its strides match the expected row-major strides for its shape
+    // 2. It starts at offset 0 in the storage buffer (no slicing offset)
     auto expected_strides = compute_strides(shape);
-    return strides == expected_strides;
+    return (strides == expected_strides) && (offset == 0);
 }
 
 // Tensor implementation
