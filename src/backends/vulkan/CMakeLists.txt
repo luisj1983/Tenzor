@@ -44,7 +44,9 @@ set(SHADERS
     comparison
     matmul
     activations
+    activations_f64
     reduction
+    reduction_f64
     conv2d
     pooling
     batchnorm

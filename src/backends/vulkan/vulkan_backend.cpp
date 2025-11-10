@@ -1515,22 +1515,47 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
     // Check if we can use the legacy float-only fast path
     bool same_shape = std::equal(a_shape.begin(), a_shape.end(), b_shape.begin(), b_shape.end());
     bool is_float32 = (a.dtype() == DType::Float32);
+    bool is_float64 = (a.dtype() == DType::Float64);
 
-    if (same_shape && is_float32) {
-        // Fast path: use original math shader for Float32 same-shape operations
-        auto* pipeline = getPipeline("math", device_id);
+    if (same_shape && (is_float32 || is_float64)) {
+        // Fast path: use math shader for same-shape operations
+        // Select shader based on dtype: "math" for Float32, "math_f64" for Float64
+        std::string shader_name = is_float64 ? "math_f64" : "math";
+        auto* pipeline = getPipeline(shader_name, device_id);
 
         Tensor output(output_shape, a.dtype(), a.device());
 
-        // Prepare push constants
-        struct PushConstants {
-            uint32_t n;   // Number of elements
-            uint32_t op;  // Operation code
-            float param;  // Parameter for operations like pow
-        } push_constants;
-        push_constants.n = static_cast<uint32_t>(a.numel());
-        push_constants.op = opcode;
-        push_constants.param = 0.0f;
+        // Prepare push constants - use different structure for Float32 vs Float64
+        struct PushConstantsF32 {
+            uint32_t n;
+            uint32_t op;
+            float param;
+        };
+        struct PushConstantsF64 {
+            uint32_t n;
+            uint32_t op;
+            double param;
+        };
+
+        // Initialize the appropriate structure based on dtype
+        PushConstantsF32 push_constants_f32;
+        PushConstantsF64 push_constants_f64;
+        void* push_constants_ptr;
+        size_t push_constants_size;
+
+        if (is_float64) {
+            push_constants_f64.n = static_cast<uint32_t>(a.numel());
+            push_constants_f64.op = opcode;
+            push_constants_f64.param = 0.0;
+            push_constants_ptr = &push_constants_f64;
+            push_constants_size = sizeof(PushConstantsF64);
+        } else {
+            push_constants_f32.n = static_cast<uint32_t>(a.numel());
+            push_constants_f32.op = opcode;
+            push_constants_f32.param = 0.0f;
+            push_constants_ptr = &push_constants_f32;
+            push_constants_size = sizeof(PushConstantsF32);
+        }
 
         // Get VkBuffer handles
         VkBuffer buffer_a = getVulkanBuffer(a.data_ptr());
@@ -1558,7 +1583,7 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
                                pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
         vkCmdPushConstants(cmdBuffer, pipeline->layout(),
                           VK_SHADER_STAGE_COMPUTE_BIT,
-                          0, sizeof(PushConstants), &push_constants);
+                          0, push_constants_size, push_constants_ptr);
 
         uint32_t workgroups = (a.numel() + 255) / 256;
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
@@ -1576,7 +1601,10 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
         return output;
     } else {
         // Broadcasting path: use math_broadcast shader
-        auto* pipeline = getPipeline("math_broadcast", device_id);
+        // Select shader based on dtype: "math_broadcast" for Float32, "math_broadcast_f64" for Float64
+        bool is_float64 = (a.dtype() == DType::Float64);
+        std::string shader_name = is_float64 ? "math_broadcast_f64" : "math_broadcast";
+        auto* pipeline = getPipeline(shader_name, device_id);
 
         Tensor output(output_shape, a.dtype(), a.device());
 
@@ -1603,9 +1631,13 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
         }
 
         // Determine dtype code
-        uint32_t dtype_code = 0;  // default to float32
-        if (a.dtype() == DType::Int32) {
-            dtype_code = 1;
+        // Note: for Float64, we use separate shader (math_broadcast_f64), so dtype field is unused
+        // But we set it correctly for consistency
+        uint32_t dtype_code = 0;  // 0=float32, 1=float64 (for f64 shader), 1=int32 (for regular shader)
+        if (a.dtype() == DType::Float64) {
+            dtype_code = 1;  // Float64 uses dtype=1 in math_broadcast_f64 shader
+        } else if (a.dtype() == DType::Int32) {
+            dtype_code = 1;  // Int32 uses dtype=1 in math_broadcast shader
         }
 
         push_constants.output_size = static_cast<uint32_t>(output_numel);
@@ -1755,17 +1787,45 @@ auto VulkanBackend::dispatchUnaryOp(const std::string& op_name,
     else if (op_name == "reciprocal") { shader_name = "math"; opcode = 15; }
     else throw std::runtime_error("Unknown unary operation: " + op_name);
 
+    // Select correct pipeline based on dtype for math operations
+    // For Float64, append "_f64" suffix to shader name (only for "math" shader)
+    if (shader_name == "math" && input.dtype() == DType::Float64) {
+        shader_name = "math_f64";
+    }
+
     auto* pipeline = getPipeline(shader_name, device_id);
 
-    // Prepare push constants
-    struct PushConstants {
-        uint32_t n;   // Number of elements
-        uint32_t op;  // Operation code
-        float param;  // Parameter for operations like pow (unused here)
-    } push_constants;
-    push_constants.n = static_cast<uint32_t>(input.numel());
-    push_constants.op = opcode;
-    push_constants.param = 0.0f;  // Not used for these operations
+    // Prepare push constants - use different structure for Float32 vs Float64
+    bool is_float64 = (input.dtype() == DType::Float64);
+    struct PushConstantsF32 {
+        uint32_t n;
+        uint32_t op;
+        float param;
+    };
+    struct PushConstantsF64 {
+        uint32_t n;
+        uint32_t op;
+        double param;
+    };
+
+    PushConstantsF32 push_constants_f32;
+    PushConstantsF64 push_constants_f64;
+    void* push_constants_ptr;
+    size_t push_constants_size;
+
+    if (is_float64) {
+        push_constants_f64.n = static_cast<uint32_t>(input.numel());
+        push_constants_f64.op = opcode;
+        push_constants_f64.param = 0.0;
+        push_constants_ptr = &push_constants_f64;
+        push_constants_size = sizeof(PushConstantsF64);
+    } else {
+        push_constants_f32.n = static_cast<uint32_t>(input.numel());
+        push_constants_f32.op = opcode;
+        push_constants_f32.param = 0.0f;
+        push_constants_ptr = &push_constants_f32;
+        push_constants_size = sizeof(PushConstantsF32);
+    }
 
     // Get VkBuffer handles from tensor data pointers
     VkBuffer buffer_in = getVulkanBuffer(input.data_ptr());
@@ -1810,7 +1870,7 @@ auto VulkanBackend::dispatchUnaryOp(const std::string& op_name,
     // Set push constants
     vkCmdPushConstants(cmdBuffer, pipeline->layout(),
                       VK_SHADER_STAGE_COMPUTE_BIT,
-                      0, sizeof(PushConstants), &push_constants);
+                      0, push_constants_size, push_constants_ptr);
 
     uint32_t workgroups = (input.numel() + 255) / 256;
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
@@ -1824,7 +1884,10 @@ auto VulkanBackend::dispatchUnaryOpWithParam(const std::string& op_name,
                                               const Tensor& input,
                                               float param) -> Tensor {
     int32_t device_id = input.device().index;
-    auto* pipeline = getPipeline("math", device_id);
+
+    // Select correct pipeline based on dtype: "math" for Float32, "math_f64" for Float64
+    std::string shader_name = (input.dtype() == DType::Float64) ? "math_f64" : "math";
+    auto* pipeline = getPipeline(shader_name, device_id);
 
     // Create output tensor (convert span to vector)
     auto input_shape = input.shape();
@@ -1837,15 +1900,37 @@ auto VulkanBackend::dispatchUnaryOpWithParam(const std::string& op_name,
     if (op_name == "pow") opcode = 9;
     else throw std::runtime_error("Unknown parameterized unary operation: " + op_name);
 
-    // Prepare push constants
-    struct PushConstants {
-        uint32_t n;   // Number of elements
-        uint32_t op;  // Operation code
-        float param;  // Parameter for operations like pow
-    } push_constants;
-    push_constants.n = static_cast<uint32_t>(input.numel());
-    push_constants.op = opcode;
-    push_constants.param = param;
+    // Prepare push constants - use different structure for Float32 vs Float64
+    bool is_float64 = (input.dtype() == DType::Float64);
+    struct PushConstantsF32 {
+        uint32_t n;
+        uint32_t op;
+        float param;
+    };
+    struct PushConstantsF64 {
+        uint32_t n;
+        uint32_t op;
+        double param;
+    };
+
+    PushConstantsF32 push_constants_f32;
+    PushConstantsF64 push_constants_f64;
+    void* push_constants_ptr;
+    size_t push_constants_size;
+
+    if (is_float64) {
+        push_constants_f64.n = static_cast<uint32_t>(input.numel());
+        push_constants_f64.op = opcode;
+        push_constants_f64.param = static_cast<double>(param);
+        push_constants_ptr = &push_constants_f64;
+        push_constants_size = sizeof(PushConstantsF64);
+    } else {
+        push_constants_f32.n = static_cast<uint32_t>(input.numel());
+        push_constants_f32.op = opcode;
+        push_constants_f32.param = param;
+        push_constants_ptr = &push_constants_f32;
+        push_constants_size = sizeof(PushConstantsF32);
+    }
 
     // Get VkBuffer handles from tensor data pointers
     VkBuffer buffer_in = getVulkanBuffer(input.data_ptr());
@@ -1875,7 +1960,7 @@ auto VulkanBackend::dispatchUnaryOpWithParam(const std::string& op_name,
 
     vkCmdPushConstants(cmdBuffer, pipeline->layout(),
                       VK_SHADER_STAGE_COMPUTE_BIT,
-                      0, sizeof(PushConstants), &push_constants);
+                      0, push_constants_size, push_constants_ptr);
 
     uint32_t workgroups = (input.numel() + 255) / 256;
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
@@ -2139,8 +2224,10 @@ auto VulkanBackend::dispatchReduction(const std::string& op_name,
     }
 
     int32_t device_id = input.device().index;
-    // Use the generic "reduction" shader which handles all reduction types via push constants
-    auto* pipeline = getPipeline("reduction", device_id);
+    // Select correct pipeline based on dtype
+    bool is_float64 = (input.dtype() == DType::Float64);
+    std::string shader_name = is_float64 ? "reduction_f64" : "reduction";
+    auto* pipeline = getPipeline(shader_name, device_id);
 
     // Map operation name to opcode for push constants
     // 0=sum, 1=mean, 2=max, 3=min (see reduction.comp shader)
@@ -4822,7 +4909,11 @@ auto VulkanBackend::dispatchClone(const Tensor& input) -> Tensor {
  */
 auto VulkanBackend::dispatchExpand(const Tensor& input, const std::vector<int64_t>& shape) -> Tensor {
     int32_t device_id = input.device().index;
-    auto* pipeline = getPipeline("expand", device_id);
+    // Select correct pipeline based on dtype
+    bool is_float64 = (input.dtype() == DType::Float64);
+    std::string shader_name = is_float64 ? "expand_f64" : "expand";
+
+    auto* pipeline = getPipeline(shader_name, device_id);
 
     // Create output tensor with new shape
     Tensor output(shape, input.dtype(), input.device());
@@ -4858,7 +4949,7 @@ auto VulkanBackend::dispatchExpand(const Tensor& input, const std::vector<int64_
         uint32_t input_shape[8];
         uint32_t output_shape[8];
         uint32_t input_strides[8];
-    } push_constants;
+    } push_constants = {}; // Zero-initialize all fields including arrays
 
     push_constants.n_elements = static_cast<uint32_t>(output.numel());
     push_constants.input_ndim = static_cast<uint32_t>(input_shape.size());
@@ -4884,6 +4975,29 @@ auto VulkanBackend::dispatchExpand(const Tensor& input, const std::vector<int64_
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     endSingleTimeCommands(cmdBuffer, device_id);
+
+    // DEBUG: Check input/output values for Float64
+    if (is_float64) {
+        auto input_cpu = input.to(Device::cpu());
+        auto output_cpu = output.to(Device::cpu());
+
+        std::cerr << "=== Expand Float64 Data ===\n";
+        std::cerr << "Input numel: " << input.numel() << ", Output numel: " << output.numel() << "\n";
+        if (input.numel() >= 1) {
+            double* in_data = input_cpu.data<double>();
+            std::cerr << "Input value: " << in_data[0] << "\n";
+        }
+        if (output.numel() >= 1 && output.numel() <= 10) {
+            double* out_data = output_cpu.data<double>();
+            std::cerr << "Output values: [";
+            for (int64_t i = 0; i < output.numel(); i++) {
+                std::cerr << out_data[i];
+                if (i < output.numel() - 1) std::cerr << ", ";
+            }
+            std::cerr << "]\n";
+        }
+        std::cerr << "===========================\n\n";
+    }
 
     return output;
 }
@@ -5079,23 +5193,47 @@ auto VulkanBackend::dispatchActivation(const std::string& op_name,
                                         uint32_t opcode,
                                         float param) -> Tensor {
     int32_t device_id = input.device().index;
-    auto* pipeline = getPipeline("activations", device_id);
+
+    // Select correct pipeline based on dtype
+    bool is_float64 = (input.dtype() == DType::Float64);
+    std::string shader_name = is_float64 ? "activations_f64" : "activations";
+    auto* pipeline = getPipeline(shader_name, device_id);
 
     // Create output tensor
     auto shape = input.shape();
     std::vector<int64_t> output_shape(shape.begin(), shape.end());
     Tensor output(output_shape, input.dtype(), input.device());
 
-    // Prepare push constants
-    struct PushConstants {
-        uint32_t n;          // Number of elements
-        uint32_t activation; // Operation code
-        float alpha;         // For leaky_relu
-    } push_constants;
+    // Prepare push constants - use different structure for Float32 vs Float64
+    struct PushConstantsF32 {
+        uint32_t n;
+        uint32_t activation;
+        float alpha;
+    };
+    struct PushConstantsF64 {
+        uint32_t n;
+        uint32_t activation;
+        double alpha;
+    };
 
-    push_constants.n = static_cast<uint32_t>(input.numel());
-    push_constants.activation = opcode;
-    push_constants.alpha = param;
+    PushConstantsF32 push_constants_f32;
+    PushConstantsF64 push_constants_f64;
+    void* push_constants_ptr;
+    size_t push_constants_size;
+
+    if (is_float64) {
+        push_constants_f64.n = static_cast<uint32_t>(input.numel());
+        push_constants_f64.activation = opcode;
+        push_constants_f64.alpha = static_cast<double>(param);
+        push_constants_ptr = &push_constants_f64;
+        push_constants_size = sizeof(PushConstantsF64);
+    } else {
+        push_constants_f32.n = static_cast<uint32_t>(input.numel());
+        push_constants_f32.activation = opcode;
+        push_constants_f32.alpha = param;
+        push_constants_ptr = &push_constants_f32;
+        push_constants_size = sizeof(PushConstantsF32);
+    }
 
     // Get VkBuffer handles
     VkBuffer buffer_in = getVulkanBuffer(input.data_ptr());
@@ -5123,7 +5261,7 @@ auto VulkanBackend::dispatchActivation(const std::string& op_name,
                            pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
     vkCmdPushConstants(cmdBuffer, pipeline->layout(),
                       VK_SHADER_STAGE_COMPUTE_BIT,
-                      0, sizeof(PushConstants), &push_constants);
+                      0, push_constants_size, push_constants_ptr);
 
     // Dispatch compute workgroups
     uint32_t workgroups = (input.numel() + 255) / 256;
@@ -6154,6 +6292,16 @@ auto VulkanBackend::dispatchConv2dForward(const Tensor& input, const Tensor& wei
 // ============================================================================
 
 auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, float value, DType dtype) -> Tensor {
+    // For Float64, use CPU fallback since full shader only supports 32-bit values
+    if (dtype == DType::Float64) {
+        Tensor cpu_tensor(shape, dtype, Device::cpu());
+        double* data = cpu_tensor.data<double>();
+        for (int64_t i = 0; i < cpu_tensor.numel(); ++i) {
+            data[i] = static_cast<double>(value);
+        }
+        return cpu_tensor.to(Device(Device::Type::Vulkan, 0));
+    }
+
     // Create tensor on first available Vulkan device
     Device device(Device::Type::Vulkan, 0);
     Tensor output(shape, dtype, device);
@@ -6225,6 +6373,11 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, float value,
 // ============================================================================
 
 auto VulkanBackend::dispatchOnes(const std::vector<int64_t>& shape, DType dtype) -> Tensor {
+    // For Float64, use full() instead since ones shader only supports 32-bit values
+    if (dtype == DType::Float64) {
+        return dispatchFull(shape, 1.0, dtype);
+    }
+
     // Create tensor on first available Vulkan device
     Device device(Device::Type::Vulkan, 0);
     Tensor output(shape, dtype, device);

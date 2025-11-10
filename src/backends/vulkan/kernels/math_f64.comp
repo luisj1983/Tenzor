@@ -41,10 +41,10 @@ void main() {
             result[idx] = sqrt(val_a);
             break;
         case 5: // exp (unary)
-            result[idx] = exp(val_a);
+            result[idx] = double(exp(float(val_a)));
             break;
         case 6: // log (unary)
-            result[idx] = log(val_a);
+            result[idx] = double(log(float(val_a)));
             break;
         case 7: // neg (unary)
             result[idx] = -val_a;
@@ -53,7 +53,7 @@ void main() {
             result[idx] = abs(val_a);
             break;
         case 9: // pow (unary with parameter)
-            result[idx] = pow(val_a, params.param);
+            result[idx] = double(pow(float(val_a), float(params.param)));
             break;
         case 10: // sign (unary)
             if (val_a < 0.0) {

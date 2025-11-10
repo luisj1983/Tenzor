@@ -1,0 +1,76 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Activation functions: ReLU, Sigmoid, Tanh, GELU, LeakyReLU, Swish (Float64)
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Input { double input_data[]; };
+layout(binding = 1) buffer Output { double output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;          // Number of elements
+    uint activation; // 0=ReLU, 1=Sigmoid, 2=Tanh, 3=GELU, 4=LeakyReLU, 5=Swish
+    double alpha;    // Parameter for LeakyReLU
+} params;
+
+const double PI = 3.14159265359;
+
+double relu(double x) {
+    return max(0.0, x);
+}
+
+double sigmoid(double x) {
+    return 1.0 / (1.0 + double(exp(float(-x))));
+}
+
+double gelu(double x) {
+    // Approximation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+    double inner = sqrt(2.0 / PI) * (x + 0.044715 * x * x * x);
+    double cdf = 0.5 * (1.0 + double(tanh(float(inner))));
+    return x * cdf;
+}
+
+double leaky_relu(double x, double alpha) {
+    return x > 0.0 ? x : alpha * x;
+}
+
+double swish(double x) {
+    // Swish/SiLU: x * sigmoid(x) = x / (1 + exp(-x))
+    return x / (1.0 + double(exp(float(-x))));
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.n) {
+        return;
+    }
+
+    double x = input_data[idx];
+    double result;
+
+    switch (params.activation) {
+        case 0: // ReLU
+            result = relu(x);
+            break;
+        case 1: // Sigmoid
+            result = sigmoid(x);
+            break;
+        case 2: // Tanh
+            result = double(tanh(float(x)));
+            break;
+        case 3: // GELU
+            result = gelu(x);
+            break;
+        case 4: // LeakyReLU
+            result = leaky_relu(x, params.alpha);
+            break;
+        case 5: // Swish
+            result = swish(x);
+            break;
+        default:
+            result = x;
+    }
+
+    output_data[idx] = result;
+}

@@ -406,17 +406,6 @@ auto gradcheck_detailed(
         // Backward pass
         scalar_output.backward();
 
-        // DEBUG: Check if gradient was computed
-        if (input.dtype() == DType::Float64) {
-            std::cout << "DEBUG: After backward(), input_copy.has_grad() = " << input_copy.has_grad() << std::endl;
-            if (input_copy.has_grad()) {
-                auto grad_tensor = *input_copy.grad();
-                auto grad_cpu = grad_tensor.to(Device::cpu());
-                const double* grad_data = grad_cpu.data<double>();
-                std::cout << "DEBUG: ana_grad[0] = " << grad_data[0] << ", [1] = " << grad_data[1] << std::endl;
-            }
-        }
-
         // Get analytical gradient
         if (!input_copy.has_grad()) {
             // FIX: Still populate result with numerical gradient for verbose output
