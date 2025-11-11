@@ -3,6 +3,7 @@
 #include <unordered_set>
 #include <functional>
 #include <stdexcept>
+#include <iostream>
 
 namespace tenzor {
 

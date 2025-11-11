@@ -2283,6 +2283,11 @@ auto initialize() -> void {
                         return vulkan_backend->dispatch("batchnorm2d_mean_var", inputs, attrs);
                     });
 
+                registry.register_kernel("batchnorm2d_update_running_stats", Device::Type::Vulkan,
+                    [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return vulkan_backend->dispatch("batchnorm2d_update_running_stats", inputs, attrs);
+                    });
+
                 // Pooling operations (new)
                 registry.register_kernel("avg_pool2d_forward", Device::Type::Vulkan,
                     [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {

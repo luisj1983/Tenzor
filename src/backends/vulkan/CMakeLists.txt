@@ -79,6 +79,7 @@ set(SHADERS
     embedding
     gather
     scatter
+    scatter_f64
     index_select
     # Shape operations (NEW - 9 critical operations)
     fill
@@ -95,6 +96,7 @@ set(SHADERS
     conv2d_backward_bias
     # Tensor manipulation operations
     expand
+    expand_f64
     cat
     clamp
     # BatchNorm2d operations
@@ -109,6 +111,7 @@ set(SHADERS
     # Final 3 operations for 100% coverage
     conv2d_forward
     full
+    full_f64
     ones
 )
 

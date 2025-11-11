@@ -1,0 +1,71 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : enable
+
+// Scatter operation for Float64: scatter elements along specified dimension
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Input { float64_t input_data[]; };       // Source data
+layout(binding = 1) buffer Indices { int indices[]; };               // Scatter indices
+layout(binding = 2) buffer Output { float64_t output_data[]; };     // Destination
+layout(binding = 3) buffer Values { float64_t values[]; };           // Values to scatter (optional)
+
+layout(push_constant) uniform PushConstants {
+    uint input_size;       // Size of input/indices
+    uint output_size;      // Total output size
+    uint dim;              // Dimension to scatter along
+    uint dim_size;         // Size of the dimension being scattered to (output)
+    uint input_dim_size;   // Size of the dimension in input/values tensor
+    uint inner_size;       // Product of dimensions after dim
+    uint outer_size;       // Product of dimensions before dim
+    uint reduction;        // 0=none, 1=add, 2=multiply
+    uint use_values;       // 0=use input_data, 1=use values buffer
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.input_size) {
+        return;
+    }
+
+    // Decompose input index based on VALUES tensor shape
+    uint outer_idx = idx / (params.inner_size * params.input_dim_size);
+    uint remainder = idx % (params.inner_size * params.input_dim_size);
+    uint inner_idx = remainder % params.inner_size;
+
+    // Get the scatter destination index
+    int scatter_idx = indices[idx];
+
+    // Bounds check
+    if (scatter_idx < 0 || scatter_idx >= int(params.dim_size)) {
+        return;
+    }
+
+    // Compute output index
+    uint out_idx = outer_idx * (params.dim_size * params.inner_size) +
+                   uint(scatter_idx) * params.inner_size +
+                   inner_idx;
+
+    // Get value to scatter
+    float64_t value;
+    if (params.use_values > 0) {
+        value = values[idx];
+    } else {
+        value = input_data[idx];
+    }
+
+    // Perform scatter with reduction
+    if (params.reduction == 0) {
+        // Direct assignment (may have race conditions with overlapping indices)
+        output_data[out_idx] = value;
+    } else if (params.reduction == 1) {
+        // Add - use atomicAdd if available, otherwise fallback to non-atomic
+        // Note: Vulkan may not support atomic operations on float64_t
+        // For gradient accumulation, we typically use reduction=0 (direct assignment)
+        // So this is a best-effort implementation
+        output_data[out_idx] += value;
+    } else if (params.reduction == 2) {
+        // Multiply (not atomic)
+        output_data[out_idx] *= value;
+    }
+}

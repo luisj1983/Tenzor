@@ -208,7 +208,9 @@ auto SumBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tens
         }
 
         // Use expand() to broadcast the scalar to input shape natively on device
-        return {expand(grad, input_shape_vec)};
+        auto result = expand(grad, input_shape_vec);
+
+        return {result};
     } else {
         // Dimension-specific reduction backward using unsqueeze + expand
         // expand() now uses native CUDA implementation - no device transfers!
