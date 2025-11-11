@@ -108,6 +108,16 @@ target_link_libraries(test_conv2d PRIVATE
     GTest::gtest_main
 )
 
+# Conv2d multi-dtype tests
+add_executable(test_conv2d_multidtype
+    nn/layers/test_conv2d_multidtype.cpp
+)
+
+target_link_libraries(test_conv2d_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
 # Pooling tests
 add_executable(test_pooling
     nn/layers/test_pooling.cpp
@@ -278,6 +288,16 @@ target_link_libraries(test_embedding PRIVATE
     GTest::gtest_main
 )
 
+# Embedding multi-dtype tests
+add_executable(test_embedding_multidtype
+    unit/test_embedding_multidtype.cpp
+)
+
+target_link_libraries(test_embedding_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
 # Extended optimizers tests
 add_executable(test_optimizers_extended
     unit/test_optimizers_extended.cpp
@@ -335,12 +355,32 @@ target_link_libraries(test_rnn PRIVATE
     GTest::gtest_main
 )
 
+# RNN multi-dtype tests
+add_executable(test_rnn_multidtype
+    unit/test_rnn_multidtype.cpp
+)
+
+target_link_libraries(test_rnn_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
 # LSTM tests
 add_executable(test_lstm
     unit/test_lstm.cpp
 )
 
 target_link_libraries(test_lstm PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+# LSTM multi-dtype tests
+add_executable(test_lstm_multidtype
+    unit/test_lstm_multidtype.cpp
+)
+
+target_link_libraries(test_lstm_multidtype PRIVATE
     tenzor_core
     GTest::gtest_main
 )
@@ -355,6 +395,16 @@ target_link_libraries(test_gru PRIVATE
     GTest::gtest_main
 )
 
+# GRU multi-dtype tests
+add_executable(test_gru_multidtype
+    unit/test_gru_multidtype.cpp
+)
+
+target_link_libraries(test_gru_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
 # Attention tests
 add_executable(test_attention
     unit/test_attention.cpp
@@ -365,12 +415,32 @@ target_link_libraries(test_attention PRIVATE
     GTest::gtest_main
 )
 
+# Attention multi-dtype tests
+add_executable(test_attention_multidtype
+    unit/test_attention_multidtype.cpp
+)
+
+target_link_libraries(test_attention_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
 # Transformer tests
 add_executable(test_transformer
     unit/test_transformer.cpp
 )
 
 target_link_libraries(test_transformer PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+# Transformer multi-dtype tests
+add_executable(test_transformer_multidtype
+    unit/test_transformer_multidtype.cpp
+)
+
+target_link_libraries(test_transformer_multidtype PRIVATE
     tenzor_core
     GTest::gtest_main
 )
@@ -405,12 +475,32 @@ target_link_libraries(test_grad_scaler PRIVATE
     GTest::gtest_main
 )
 
+
+# GradScaler multi-dtype tests
+add_executable(test_grad_scaler_multidtype
+    unit/test_grad_scaler_multidtype.cpp
+)
+
+target_link_libraries(test_grad_scaler_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
 # Autocast tests
 add_executable(test_autocast
     unit/test_autocast.cpp
 )
 
 target_link_libraries(test_autocast PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+# Autocast multidtype tests
+add_executable(test_autocast_multidtype
+    unit/test_autocast_multidtype.cpp
+)
+
+target_link_libraries(test_autocast_multidtype PRIVATE
     tenzor_core
     GTest::gtest_main
 )
@@ -465,6 +555,16 @@ target_link_libraries(test_gradient_checkpoint PRIVATE
     GTest::gtest_main
 )
 
+# Gradient checkpoint multi-dtype tests
+add_executable(test_checkpoint_multidtype
+    unit/test_checkpoint_multidtype.cpp
+)
+
+target_link_libraries(test_checkpoint_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
 # Model checkpoint tests
 add_executable(test_model_checkpoint
     unit/test_model_checkpoint.cpp
@@ -515,6 +615,156 @@ target_link_libraries(test_fused_ops PRIVATE
     GTest::gtest_main
 )
 
+# Fused operations multi-dtype tests
+add_executable(test_fused_ops_multidtype
+    unit/test_fused_ops_multidtype.cpp
+)
+
+target_link_libraries(test_fused_ops_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+# ============================================================================
+# Multi-DType Parameterized Tests - Backend × DType Coverage
+# ============================================================================
+
+# Core tensor operations multi-dtype tests
+add_executable(test_tensor_multidtype
+    unit/test_tensor_multidtype.cpp
+)
+
+target_link_libraries(test_tensor_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+# Autograd operations multi-dtype tests
+add_executable(test_autograd_multidtype
+    unit/test_autograd_multidtype.cpp
+)
+
+target_link_libraries(test_autograd_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+# Broadcasting operations multi-dtype tests
+add_executable(test_broadcasting_multidtype
+    unit/test_broadcasting_multidtype.cpp
+)
+
+target_link_libraries(test_broadcasting_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+# Math operations multi-dtype tests
+add_executable(test_ops_multidtype
+    unit/test_ops_multidtype.cpp
+)
+
+target_link_libraries(test_ops_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+# Comparison operations multi-dtype tests
+add_executable(test_comparison_ops_multidtype
+    unit/test_comparison_ops_multidtype.cpp
+)
+
+target_link_libraries(test_comparison_ops_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+# Creation operations multi-dtype tests
+add_executable(test_creation_ops_multidtype
+    test_creation_ops_multidtype.cpp
+)
+
+target_link_libraries(test_creation_ops_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+# Advanced operations multi-dtype tests
+add_executable(test_advanced_ops_multidtype
+    ops/test_advanced_ops_multidtype.cpp
+)
+
+target_link_libraries(test_advanced_ops_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+# Detection operations multi-dtype tests
+add_executable(test_detection_ops_multidtype
+    unit/test_detection_ops_multidtype.cpp
+)
+
+target_link_libraries(test_detection_ops_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+# Optimizer multi-dtype tests
+add_executable(test_optimizers_multidtype
+    unit/test_optimizers_multidtype.cpp
+)
+
+target_link_libraries(test_optimizers_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+# NN Layer Multi-DType Tests
+add_executable(test_pooling_multidtype
+    nn/layers/test_pooling_multidtype.cpp
+)
+
+target_link_libraries(test_pooling_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+add_executable(test_dropout_multidtype
+    nn/layers/test_dropout_multidtype.cpp
+)
+
+target_link_libraries(test_dropout_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+add_executable(test_batchnorm2d_multidtype
+    nn/layers/test_batchnorm2d_multidtype.cpp
+)
+
+target_link_libraries(test_batchnorm2d_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+add_executable(test_normalization_multidtype
+    nn/layers/test_normalization_multidtype.cpp
+)
+
+target_link_libraries(test_normalization_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+add_executable(test_linear_multidtype
+    unit/test_linear_multidtype.cpp
+)
+
+target_link_libraries(test_linear_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
 # Backend operations parameterized tests (runs on ALL backends)
 add_executable(test_backend_ops_parameterized
     unit/test_backend_ops_parameterized.cpp
@@ -531,6 +781,16 @@ add_executable(test_edge_cases
 )
 
 target_link_libraries(test_edge_cases PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+# DType-specific edge case tests (overflow, precision, conversions, special values)
+add_executable(test_dtype_edge_cases
+    unit/test_dtype_edge_cases.cpp
+)
+
+target_link_libraries(test_dtype_edge_cases PRIVATE
     tenzor_core
     GTest::gtest_main
 )
@@ -859,6 +1119,7 @@ gtest_discover_tests(test_cuda_scalar_debug DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_dropout DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_batchnorm2d DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_conv2d DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_conv2d_multidtype DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_pooling DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_conv1d DISCOVERY_TIMEOUT 30)
 # gtest_discover_tests(test_convtranspose2d DISCOVERY_TIMEOUT 30)
@@ -866,23 +1127,32 @@ gtest_discover_tests(test_schedulers DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_normalization DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_serialization DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_embedding DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_embedding_multidtype DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_optimizers_extended DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_schedulers_advanced DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_losses_advanced DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_rnn DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_rnn_multidtype DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_lstm DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_lstm_multidtype DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_gru DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_gru_multidtype DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_attention DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_attention_multidtype DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_transformer DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_transformer_multidtype DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_chunk DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_split_operation DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_bmm_autograd DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_grad_scaler DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_grad_scaler_multidtype DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_autocast DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_autocast_multidtype DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_dataloader DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_fp16 DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_dtype_conversion DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_gradient_checkpoint DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_checkpoint_multidtype DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_model_checkpoint DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_checkpoint DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_gradient_utils DISCOVERY_TIMEOUT 30)
@@ -896,8 +1166,190 @@ gtest_discover_tests(test_zero_stage3_integration DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_zero_profiling DISCOVERY_TIMEOUT 30)
 
 gtest_discover_tests(test_fused_ops DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_fused_ops_multidtype DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_backend_ops_parameterized DISCOVERY_TIMEOUT 30)
 gtest_discover_tests(test_edge_cases DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_dtype_edge_cases DISCOVERY_TIMEOUT 30)
+
+# Loss function multi-dtype tests
+add_executable(test_losses_multidtype
+    unit/test_losses_multidtype.cpp
+)
+
+target_link_libraries(test_losses_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+# Flatten layer multi-dtype tests
+add_executable(test_flatten_multidtype
+    nn/layers/test_flatten_multidtype.cpp
+)
+
+target_link_libraries(test_flatten_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+# Shape operations multi-dtype tests
+add_executable(test_shape_ops_multidtype
+    ops/test_shape_ops_multidtype.cpp
+)
+
+target_link_libraries(test_shape_ops_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+# Segmentation operations multi-dtype tests
+add_executable(test_segmentation_multidtype
+    nn/layers/test_segmentation_multidtype.cpp
+)
+
+target_link_libraries(test_segmentation_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+# Float16 operations multi-dtype tests
+add_executable(test_fp16_multidtype
+    unit/test_fp16_multidtype.cpp
+)
+
+target_link_libraries(test_fp16_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+# Mixed precision training multi-dtype tests
+add_executable(test_mixed_precision_multidtype
+    unit/test_mixed_precision_multidtype.cpp
+)
+
+target_link_libraries(test_mixed_precision_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+# ResNet model multi-dtype tests (duplicate removed - see line 1641)
+
+# BERT model multi-dtype tests
+add_executable(test_bert_multidtype
+    unit/test_bert_multidtype.cpp
+)
+
+target_link_libraries(test_bert_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+# GPT model multi-dtype tests (duplicate removed - see line 1609)
+# Vision Transformer multi-dtype tests
+add_executable(test_vit_multidtype
+    unit/test_vit_multidtype.cpp
+)
+
+target_link_libraries(test_vit_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+# U-Net model multi-dtype tests
+add_executable(test_unet_multidtype
+    unit/test_unet_multidtype.cpp
+)
+
+target_link_libraries(test_unet_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+# YOLO model multi-dtype tests
+add_executable(test_yolo_multidtype
+    unit/test_yolo_multidtype.cpp
+)
+
+target_link_libraries(test_yolo_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+# Mask R-CNN model multi-dtype tests
+add_executable(test_mask_rcnn_multidtype
+    unit/test_mask_rcnn_multidtype.cpp
+)
+
+target_link_libraries(test_mask_rcnn_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+# Faster R-CNN model multi-dtype tests
+add_executable(test_faster_rcnn_multidtype
+    unit/test_faster_rcnn_multidtype.cpp
+)
+
+target_link_libraries(test_faster_rcnn_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+# Swin Transformer multi-dtype tests
+add_executable(test_swin_transformer_multidtype
+    unit/test_swin_transformer_multidtype.cpp
+)
+
+target_link_libraries(test_swin_transformer_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+# EfficientNet model multi-dtype tests
+add_executable(test_efficientnet_multidtype
+    unit/test_efficientnet_multidtype.cpp
+)
+
+target_link_libraries(test_efficientnet_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+# MobileNet model multi-dtype tests (duplicate removed - see line 1748)
+
+# Multi-DType Parameterized Tests Registration
+gtest_discover_tests(test_tensor_multidtype DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_autograd_multidtype DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_broadcasting_multidtype DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_ops_multidtype DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_comparison_ops_multidtype DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_creation_ops_multidtype DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_advanced_ops_multidtype DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_detection_ops_multidtype DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_optimizers_multidtype DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_pooling_multidtype DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_dropout_multidtype DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_batchnorm2d_multidtype DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_normalization_multidtype DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_linear_multidtype DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_losses_multidtype DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_flatten_multidtype DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_shape_ops_multidtype DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_segmentation_multidtype DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_fp16_multidtype DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_mixed_precision_multidtype DISCOVERY_TIMEOUT 30)
+# gtest_discover_tests(test_grad_scaler_multidtype DISCOVERY_TIMEOUT 30)  # Duplicate removed
+# gtest_discover_tests(test_autocast_multidtype DISCOVERY_TIMEOUT 30)  # Duplicate removed
+# gtest_discover_tests(test_resnet_multidtype DISCOVERY_TIMEOUT 30)  # Duplicate removed
+gtest_discover_tests(test_bert_multidtype DISCOVERY_TIMEOUT 30)
+# gtest_discover_tests(test_gpt_multidtype DISCOVERY_TIMEOUT 30)  # Duplicate removed
+gtest_discover_tests(test_vit_multidtype DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_unet_multidtype DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_yolo_multidtype DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_mask_rcnn_multidtype DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_faster_rcnn_multidtype DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_swin_transformer_multidtype DISCOVERY_TIMEOUT 30)
+gtest_discover_tests(test_efficientnet_multidtype DISCOVERY_TIMEOUT 30)
+# gtest_discover_tests(test_mobilenet_multidtype DISCOVERY_TIMEOUT 30)  # Duplicate removed
 
 # SIMD operations tests
 add_executable(test_simd_ops
@@ -1136,6 +1588,18 @@ target_link_libraries(test_gpt PRIVATE
 
 gtest_discover_tests(test_gpt DISCOVERY_TIMEOUT 30)
 
+# GPT model multi-dtype tests
+add_executable(test_gpt_multidtype
+    unit/test_gpt_multidtype.cpp
+)
+
+target_link_libraries(test_gpt_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_gpt_multidtype DISCOVERY_TIMEOUT 30)
+
 # ResNet model tests
 add_executable(test_resnet
     unit/test_resnet.cpp
@@ -1147,6 +1611,18 @@ target_link_libraries(test_resnet PRIVATE
 )
 
 gtest_discover_tests(test_resnet DISCOVERY_TIMEOUT 30)
+
+# ResNet multi-dtype tests
+add_executable(test_resnet_multidtype
+    unit/test_resnet_multidtype.cpp
+)
+
+target_link_libraries(test_resnet_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_resnet_multidtype DISCOVERY_TIMEOUT 30)
 
 # RoBERTa model tests
 add_executable(test_roberta
@@ -1171,6 +1647,18 @@ target_link_libraries(test_electra PRIVATE
 )
 
 gtest_discover_tests(test_electra DISCOVERY_TIMEOUT 30)
+
+# ELECTRA model multi-dtype tests
+add_executable(test_electra_multidtype
+    unit/test_electra_multidtype.cpp
+)
+
+target_link_libraries(test_electra_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_electra_multidtype DISCOVERY_TIMEOUT 30)
 
 # ============================================================================
 # Phase 9 Model Tests - Vision Models
@@ -1223,6 +1711,18 @@ target_link_libraries(test_convnext PRIVATE
 )
 
 gtest_discover_tests(test_convnext DISCOVERY_TIMEOUT 30)
+
+# ConvNeXt multi-dtype tests
+add_executable(test_convnext_multidtype
+    unit/test_convnext_multidtype.cpp
+)
+
+target_link_libraries(test_convnext_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_convnext_multidtype DISCOVERY_TIMEOUT 30)
 
 # MobileNet V2/V3 tests
 add_executable(test_mobilenet_v2_v3
@@ -1340,6 +1840,18 @@ target_link_libraries(test_deeplabv3plus PRIVATE
 
 gtest_discover_tests(test_deeplabv3plus DISCOVERY_TIMEOUT 30 PROPERTIES TIMEOUT 1200)
 
+# DeepLab v3+ multi-dtype tests
+add_executable(test_deeplabv3plus_multidtype
+    unit/test_deeplabv3plus_multidtype.cpp
+)
+
+target_link_libraries(test_deeplabv3plus_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_deeplabv3plus_multidtype DISCOVERY_TIMEOUT 30 PROPERTIES TIMEOUT 1200)
+
 # Detection Operations tests (ROI, NMS, etc.)
 add_executable(test_detection_ops
     unit/test_detection_ops.cpp
@@ -1368,6 +1880,18 @@ target_link_libraries(test_jit PRIVATE
 
 gtest_discover_tests(test_jit DISCOVERY_TIMEOUT 30)
 
+# JIT multi-dtype tests
+add_executable(test_jit_multidtype
+    unit/test_jit_multidtype.cpp
+)
+
+target_link_libraries(test_jit_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_jit_multidtype DISCOVERY_TIMEOUT 30)
+
 # Pruning tests
 add_executable(test_pruning
     unit/test_pruning.cpp
@@ -1379,6 +1903,18 @@ target_link_libraries(test_pruning PRIVATE
 )
 
 gtest_discover_tests(test_pruning DISCOVERY_TIMEOUT 30)
+
+# Pruning multi-dtype tests
+add_executable(test_pruning_multidtype
+    unit/test_pruning_multidtype.cpp
+)
+
+target_link_libraries(test_pruning_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_pruning_multidtype DISCOVERY_TIMEOUT 30)
 
 # Knowledge distillation tests
 add_executable(test_distillation
@@ -1392,6 +1928,54 @@ target_link_libraries(test_distillation PRIVATE
 
 gtest_discover_tests(test_distillation DISCOVERY_TIMEOUT 30)
 
+# Knowledge distillation multi-dtype tests
+add_executable(test_distillation_multidtype
+    unit/test_distillation_multidtype.cpp
+)
+
+target_link_libraries(test_distillation_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_distillation_multidtype DISCOVERY_TIMEOUT 30)
+
+# Callbacks multi-dtype tests
+add_executable(test_callbacks_multidtype
+    unit/test_callbacks_multidtype.cpp
+)
+
+target_link_libraries(test_callbacks_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_callbacks_multidtype DISCOVERY_TIMEOUT 30)
+
+# RoBERTa model multi-dtype tests
+add_executable(test_roberta_multidtype
+    unit/test_roberta_multidtype.cpp
+)
+
+target_link_libraries(test_roberta_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_roberta_multidtype DISCOVERY_TIMEOUT 30)
+
+# Edge cases multi-dtype tests
+add_executable(test_edge_cases_multidtype
+    unit/test_edge_cases_multidtype.cpp
+)
+
+target_link_libraries(test_edge_cases_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_edge_cases_multidtype DISCOVERY_TIMEOUT 30)
+
 # Quantization tests
 add_executable(test_quantization
     test_quantization.cpp
@@ -1403,6 +1987,18 @@ target_link_libraries(test_quantization PRIVATE
 )
 
 gtest_discover_tests(test_quantization DISCOVERY_TIMEOUT 30)
+
+# Quantization multi-dtype tests (Float32/Float64 to Int8)
+add_executable(test_quantization_multidtype
+    unit/test_quantization_multidtype.cpp
+)
+
+target_link_libraries(test_quantization_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_quantization_multidtype DISCOVERY_TIMEOUT 30)
 
 # ============================================================================
 # Phase 11 Tests - Additional Backend Support
@@ -1649,3 +2245,237 @@ add_executable(vulkan_add_debug
 target_link_libraries(vulkan_add_debug PRIVATE
     tenzor_core
 )
+
+# Inplace operations multi-dtype tests
+add_executable(test_inplace_operations_multidtype
+    unit/test_inplace_operations_multidtype.cpp
+)
+
+target_link_libraries(test_inplace_operations_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_inplace_operations_multidtype DISCOVERY_TIMEOUT 30)
+
+# ============================================================================
+# Additional Multi-DType Tests - Option 3 Completion
+# ============================================================================
+
+# NLP Models - ALBERT & T5 multi-dtype tests
+add_executable(test_albert_t5_multidtype
+    unit/test_albert_t5_multidtype.cpp
+)
+
+target_link_libraries(test_albert_t5_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_albert_t5_multidtype DISCOVERY_TIMEOUT 30)
+
+# NLP Models - RoBERTa & ELECTRA combined multi-dtype tests
+add_executable(test_roberta_electra_multidtype
+    unit/test_roberta_electra_multidtype.cpp
+)
+
+target_link_libraries(test_roberta_electra_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_roberta_electra_multidtype DISCOVERY_TIMEOUT 30)
+
+# Vision Models - MobileNet V2/V3 multi-dtype tests
+add_executable(test_mobilenet_v2_v3_multidtype
+    unit/test_mobilenet_v2_v3_multidtype.cpp
+)
+
+target_link_libraries(test_mobilenet_v2_v3_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_mobilenet_v2_v3_multidtype DISCOVERY_TIMEOUT 30)
+
+# Vision Models - Swin Transformer multi-dtype tests
+# Vision Models - Classic models multi-dtype tests
+add_executable(test_classic_models_multidtype
+    unit/test_classic_models_multidtype.cpp
+)
+
+target_link_libraries(test_classic_models_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_classic_models_multidtype DISCOVERY_TIMEOUT 30)
+
+# Vision Components multi-dtype tests
+add_executable(test_vision_components_multidtype
+    unit/test_vision_components_multidtype.cpp
+)
+
+target_link_libraries(test_vision_components_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_vision_components_multidtype DISCOVERY_TIMEOUT 30)
+
+# Detection Components multi-dtype tests
+add_executable(test_detection_components_multidtype
+    unit/test_detection_components_multidtype.cpp
+)
+
+target_link_libraries(test_detection_components_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_detection_components_multidtype DISCOVERY_TIMEOUT 30)
+
+# Training Utilities - Advanced losses multi-dtype tests
+add_executable(test_losses_advanced_multidtype
+    unit/test_losses_advanced_multidtype.cpp
+)
+
+target_link_libraries(test_losses_advanced_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_losses_advanced_multidtype DISCOVERY_TIMEOUT 30)
+
+# Training Utilities - Advanced schedulers multi-dtype tests
+add_executable(test_schedulers_advanced_multidtype
+    unit/test_schedulers_advanced_multidtype.cpp
+)
+
+target_link_libraries(test_schedulers_advanced_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_schedulers_advanced_multidtype DISCOVERY_TIMEOUT 30)
+
+# Training Utilities - Extended optimizers multi-dtype tests
+add_executable(test_optimizers_extended_multidtype
+    unit/test_optimizers_extended_multidtype.cpp
+)
+
+target_link_libraries(test_optimizers_extended_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_optimizers_extended_multidtype DISCOVERY_TIMEOUT 30)
+
+# Operations - Additional NN components multi-dtype tests
+add_executable(test_nn_additional_multidtype
+    unit/test_nn_additional_multidtype.cpp
+)
+
+target_link_libraries(test_nn_additional_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_nn_additional_multidtype DISCOVERY_TIMEOUT 30)
+
+# Operations - Additional ops multi-dtype tests
+add_executable(test_ops_additional_multidtype
+    unit/test_ops_additional_multidtype.cpp
+)
+
+target_link_libraries(test_ops_additional_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_ops_additional_multidtype DISCOVERY_TIMEOUT 30)
+
+# Operations - Chunk multi-dtype tests
+add_executable(test_chunk_multidtype
+    unit/test_chunk_multidtype.cpp
+)
+
+target_link_libraries(test_chunk_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_chunk_multidtype DISCOVERY_TIMEOUT 30)
+
+# Infrastructure - Gradient checkpoint multi-dtype tests
+add_executable(test_gradient_checkpoint_multidtype
+    unit/test_gradient_checkpoint_multidtype.cpp
+)
+
+target_link_libraries(test_gradient_checkpoint_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_gradient_checkpoint_multidtype DISCOVERY_TIMEOUT 30)
+
+# Infrastructure - Model checkpoint multi-dtype tests
+add_executable(test_model_checkpoint_multidtype
+    unit/test_model_checkpoint_multidtype.cpp
+)
+
+target_link_libraries(test_model_checkpoint_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_model_checkpoint_multidtype DISCOVERY_TIMEOUT 30)
+
+# Infrastructure - Transforms multi-dtype tests
+add_executable(test_transforms_multidtype
+    unit/test_transforms_multidtype.cpp
+)
+
+target_link_libraries(test_transforms_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_transforms_multidtype DISCOVERY_TIMEOUT 30)
+
+# Infrastructure - Async operations multi-dtype tests
+add_executable(test_async_ops_multidtype
+    unit/test_async_ops_multidtype.cpp
+)
+
+target_link_libraries(test_async_ops_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_async_ops_multidtype DISCOVERY_TIMEOUT 30)
+
+# Infrastructure - Dataloader multi-dtype tests
+add_executable(test_dataloader_multidtype
+    unit/test_dataloader_multidtype.cpp
+)
+
+target_link_libraries(test_dataloader_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_dataloader_multidtype DISCOVERY_TIMEOUT 30)
+
+# Infrastructure - DType edge cases multi-dtype tests (enhanced)
+add_executable(test_dtype_edge_cases_multidtype
+    unit/test_dtype_edge_cases_multidtype.cpp
+)
+
+target_link_libraries(test_dtype_edge_cases_multidtype PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+gtest_discover_tests(test_dtype_edge_cases_multidtype DISCOVERY_TIMEOUT 30)
+

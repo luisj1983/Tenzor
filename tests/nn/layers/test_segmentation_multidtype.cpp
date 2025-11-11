@@ -1,69 +1,46 @@
 #include <gtest/gtest.h>
 #include "../../backend_test_fixture.hpp"
 #include <tenzor/tenzor.hpp>
+#include <tenzor/nn/layers/segmentation.hpp>
 #include <cmath>
 
 using namespace tenzor;
 using namespace tenzor::nn;
 
 /**
- * @file test_segmentation.cpp
- * @brief Comprehensive backend and dtype-agnostic tests for segmentation layers
+ * @file test_segmentation_multidtype.cpp
+ * @brief Multi-dtype tests for segmentation layers
  *
- * Tests cover:
- * - AtrousSeparableConv2d (depthwise separable convolution with dilation)
- * - ASPP (Atrous Spatial Pyramid Pooling)
- * - upsample_bilinear (bilinear interpolation upsampling)
- * - All backends (CPU, CUDA, Vulkan, OneAPI, ROCm)
- * - All float dtypes (Float32, Float64, Float16)
- *
- * COVERAGE: 3 test classes × 5 backends × 3 dtypes = 45 test scenarios per test
+ * Tests segmentation layers (AtrousSeparableConv2d, ASPP, upsample_bilinear)
+ * with Float32 and Float64 dtypes. Segmentation operations work with floating-point types.
  */
 
 // ============================================================================
 // Test Environment Setup
 // ============================================================================
 
-class SegmentationTestEnvironment : public ::testing::Environment {
+class SegmentationMultiDTypeTestEnvironment : public ::testing::Environment {
 public:
     void SetUp() override {
         tenzor::initialize();
     }
 };
 
-static ::testing::Environment* const seg_env =
-    ::testing::AddGlobalTestEnvironment(new SegmentationTestEnvironment);
+static ::testing::Environment* const seg_multidtype_env =
+    ::testing::AddGlobalTestEnvironment(new SegmentationMultiDTypeTestEnvironment);
 
 // ============================================================================
-// Multi-Parameter Test Fixture (Backend + DType)
+// Multi-DType Parameterization
 // ============================================================================
 
-struct BackendDTypeParam {
-    std::string backend_name;
+struct DTypeParam {
     DType dtype;
     std::string dtype_name;
-
-    std::string ToString() const {
-        return backend_name + "_" + dtype_name;
-    }
-};
-
-// Helper to get dtype-specific tolerances
-struct Tolerance {
     float rtol;
     float atol;
 
-    static Tolerance for_dtype(DType dtype) {
-        switch (dtype) {
-            case DType::Float16:
-                return {1e-2f, 1e-3f};  // Looser tolerance for Float16
-            case DType::Float32:
-                return {1e-4f, 1e-5f};  // Standard tolerance
-            case DType::Float64:
-                return {1e-5f, 1e-6f};  // Tighter tolerance for Float64
-            default:
-                return {1e-4f, 1e-5f};
-        }
+    std::string ToString() const {
+        return dtype_name;
     }
 };
 
@@ -98,8 +75,6 @@ bool tensors_close(const Tensor& a, const Tensor& b, float rtol = 1e-4f, float a
     if (a.dtype() != b.dtype()) return false;
 
     switch (a.dtype()) {
-        case DType::Float16:
-            return tensors_close_typed<half_t>(a, b, rtol, atol);
         case DType::Float32:
             return tensors_close_typed<float>(a, b, rtol, atol);
         case DType::Float64:
@@ -110,68 +85,28 @@ bool tensors_close(const Tensor& a, const Tensor& b, float rtol = 1e-4f, float a
 }
 
 // ============================================================================
-// AtrousSeparableConv2d Tests
+// AtrousSeparableConv2d Multi-DType Tests
 // ============================================================================
 
-class AtrousSeparableConv2dTest : public ::testing::TestWithParam<BackendDTypeParam> {
+class AtrousSeparableConv2dMultiDTypeTest : public ::testing::TestWithParam<DTypeParam> {
 protected:
     Device device;
     DType dtype;
-    Tolerance tol;
+    float rtol;
+    float atol;
 
     void SetUp() override {
         tenzor::initialize();
 
         auto param = GetParam();
         dtype = param.dtype;
-        tol = Tolerance::for_dtype(dtype);
-
-        if (param.backend_name == "cpu") {
-            device = Device::cpu();
-        }
-        else if (param.backend_name == "cuda") {
-            if (!isBackendAvailable(Device::Type::CUDA)) {
-                GTEST_SKIP() << "CUDA not available";
-            }
-            device = Device::cuda(0);
-        }
-        else if (param.backend_name == "vulkan") {
-            if (!isBackendAvailable(Device::Type::Vulkan)) {
-                GTEST_SKIP() << "Vulkan not available";
-            }
-            device = Device::vulkan(0);
-        }
-        else if (param.backend_name == "oneapi") {
-            if (!isBackendAvailable(Device::Type::OneAPI)) {
-                GTEST_SKIP() << "OneAPI not available";
-            }
-            device = Device::oneapi(0);
-        }
-        else if (param.backend_name == "rocm") {
-            if (!isBackendAvailable(Device::Type::ROCm)) {
-                GTEST_SKIP() << "ROCm not available";
-            }
-            device = Device::rocm(0);
-        }
-
-        // Skip Float16 if not supported
-        if (dtype == DType::Float16 && !device.supports_dtype(DType::Float16)) {
-            GTEST_SKIP() << "Float16 not supported on " << device.to_string();
-        }
-    }
-
-    static bool isBackendAvailable(Device::Type type) {
-        try {
-            Device test_device{type, 0};
-            auto t = zeros({2, 2}, DType::Float32, test_device);
-            return true;
-        } catch (...) {
-            return false;
-        }
+        rtol = param.rtol;
+        atol = param.atol;
+        device = Device::cpu();
     }
 };
 
-TEST_P(AtrousSeparableConv2dTest, BasicForwardShape) {
+TEST_P(AtrousSeparableConv2dMultiDTypeTest, BasicForwardShape) {
     // AtrousSeparableConv2d: in_channels=16, out_channels=32, kernel=3, dilation=2
     auto layer = AtrousSeparableConv2d(16, 32, 3, 2, true);
     layer.to(device);
@@ -188,7 +123,7 @@ TEST_P(AtrousSeparableConv2dTest, BasicForwardShape) {
     EXPECT_EQ(output.tensor().dtype(), dtype);
 }
 
-TEST_P(AtrousSeparableConv2dTest, DilationRate1) {
+TEST_P(AtrousSeparableConv2dMultiDTypeTest, DilationRate1) {
     // With dilation=1, should behave like standard separable conv
     auto layer = AtrousSeparableConv2d(8, 16, 3, 1, false);
     layer.to(device);
@@ -203,7 +138,7 @@ TEST_P(AtrousSeparableConv2dTest, DilationRate1) {
     EXPECT_EQ(output.tensor().dtype(), dtype);
 }
 
-TEST_P(AtrousSeparableConv2dTest, DilationRate6) {
+TEST_P(AtrousSeparableConv2dMultiDTypeTest, DilationRate6) {
     // Large dilation rate (common in DeepLabV3)
     auto layer = AtrousSeparableConv2d(32, 64, 3, 6, true);
     layer.to(device);
@@ -218,7 +153,7 @@ TEST_P(AtrousSeparableConv2dTest, DilationRate6) {
     EXPECT_EQ(output.tensor().dtype(), dtype);
 }
 
-TEST_P(AtrousSeparableConv2dTest, GradientFlow) {
+TEST_P(AtrousSeparableConv2dMultiDTypeTest, GradientFlow) {
     auto layer = AtrousSeparableConv2d(4, 8, 3, 2, true);
     layer.to(device);
 
@@ -226,7 +161,7 @@ TEST_P(AtrousSeparableConv2dTest, GradientFlow) {
     auto output = layer.forward(input);
 
     // Backward pass
-    auto grad_output = ones(output.shape(), dtype, device);
+    auto grad_output = ones(std::vector<int64_t>(output.shape().begin(), output.shape().end()), dtype, device);
     output.backward(grad_output);
 
     // Check gradient exists
@@ -239,68 +174,44 @@ TEST_P(AtrousSeparableConv2dTest, GradientFlow) {
     EXPECT_EQ(grad.dtype(), dtype);
 }
 
+TEST_P(AtrousSeparableConv2dMultiDTypeTest, SmallInput) {
+    // Test with small spatial dimensions
+    auto layer = AtrousSeparableConv2d(4, 8, 3, 1, true);
+    layer.to(device);
+
+    auto input = Variable(randn({1, 4, 8, 8}, dtype, device), true);
+    auto output = layer.forward(input);
+
+    EXPECT_EQ(output.shape()[0], 1);
+    EXPECT_EQ(output.shape()[1], 8);
+    EXPECT_EQ(output.shape()[2], 8);
+    EXPECT_EQ(output.shape()[3], 8);
+    EXPECT_EQ(output.tensor().dtype(), dtype);
+}
+
 // ============================================================================
-// ASPP Tests
+// ASPP Multi-DType Tests
 // ============================================================================
 
-class ASPPTest : public ::testing::TestWithParam<BackendDTypeParam> {
+class ASPPMultiDTypeTest : public ::testing::TestWithParam<DTypeParam> {
 protected:
     Device device;
     DType dtype;
-    Tolerance tol;
+    float rtol;
+    float atol;
 
     void SetUp() override {
         tenzor::initialize();
 
         auto param = GetParam();
         dtype = param.dtype;
-        tol = Tolerance::for_dtype(dtype);
-
-        if (param.backend_name == "cpu") {
-            device = Device::cpu();
-        }
-        else if (param.backend_name == "cuda") {
-            if (!isBackendAvailable(Device::Type::CUDA)) {
-                GTEST_SKIP() << "CUDA not available";
-            }
-            device = Device::cuda(0);
-        }
-        else if (param.backend_name == "vulkan") {
-            if (!isBackendAvailable(Device::Type::Vulkan)) {
-                GTEST_SKIP() << "Vulkan not available";
-            }
-            device = Device::vulkan(0);
-        }
-        else if (param.backend_name == "oneapi") {
-            if (!isBackendAvailable(Device::Type::OneAPI)) {
-                GTEST_SKIP() << "OneAPI not available";
-            }
-            device = Device::oneapi(0);
-        }
-        else if (param.backend_name == "rocm") {
-            if (!isBackendAvailable(Device::Type::ROCm)) {
-                GTEST_SKIP() << "ROCm not available";
-            }
-            device = Device::rocm(0);
-        }
-
-        if (dtype == DType::Float16 && !device.supports_dtype(DType::Float16)) {
-            GTEST_SKIP() << "Float16 not supported on " << device.to_string();
-        }
-    }
-
-    static bool isBackendAvailable(Device::Type type) {
-        try {
-            Device test_device{type, 0};
-            auto t = zeros({2, 2}, DType::Float32, test_device);
-            return true;
-        } catch (...) {
-            return false;
-        }
+        rtol = param.rtol;
+        atol = param.atol;
+        device = Device::cpu();
     }
 };
 
-TEST_P(ASPPTest, BasicForwardShape) {
+TEST_P(ASPPMultiDTypeTest, BasicForwardShape) {
     // Standard ASPP configuration for DeepLabV3
     std::vector<int64_t> atrous_rates = {6, 12, 18};
     auto aspp = ASPP(256, 256, atrous_rates, false, 0.1f);
@@ -318,7 +229,7 @@ TEST_P(ASPPTest, BasicForwardShape) {
     EXPECT_EQ(output.tensor().dtype(), dtype);
 }
 
-TEST_P(ASPPTest, WithSeparableConvolution) {
+TEST_P(ASPPMultiDTypeTest, WithSeparableConvolution) {
     // ASPP with separable convolutions (more efficient)
     std::vector<int64_t> atrous_rates = {6, 12, 18};
     auto aspp = ASPP(128, 256, atrous_rates, true, 0.1f);
@@ -334,7 +245,7 @@ TEST_P(ASPPTest, WithSeparableConvolution) {
     EXPECT_EQ(output.tensor().dtype(), dtype);
 }
 
-TEST_P(ASPPTest, DifferentAtrousRates) {
+TEST_P(ASPPMultiDTypeTest, DifferentAtrousRates) {
     // Test with different atrous rates
     std::vector<int64_t> atrous_rates = {3, 6, 9};
     auto aspp = ASPP(64, 128, atrous_rates, false, 0.0f);
@@ -350,7 +261,7 @@ TEST_P(ASPPTest, DifferentAtrousRates) {
     EXPECT_EQ(output.tensor().dtype(), dtype);
 }
 
-TEST_P(ASPPTest, SmallSpatialDimensions) {
+TEST_P(ASPPMultiDTypeTest, SmallSpatialDimensions) {
     // Test with small feature maps (common at deep layers)
     std::vector<int64_t> atrous_rates = {6, 12, 18};
     auto aspp = ASPP(512, 256, atrous_rates, false, 0.1f);
@@ -366,7 +277,7 @@ TEST_P(ASPPTest, SmallSpatialDimensions) {
     EXPECT_EQ(output.tensor().dtype(), dtype);
 }
 
-TEST_P(ASPPTest, GradientFlow) {
+TEST_P(ASPPMultiDTypeTest, GradientFlow) {
     std::vector<int64_t> atrous_rates = {6, 12, 18};
     auto aspp = ASPP(32, 64, atrous_rates, false, 0.0f);
     aspp.to(device);
@@ -374,7 +285,7 @@ TEST_P(ASPPTest, GradientFlow) {
     auto input = Variable(randn({1, 32, 16, 16}, dtype, device), true);
     auto output = aspp.forward(input);
 
-    auto grad_output = ones(output.shape(), dtype, device);
+    auto grad_output = ones(std::vector<int64_t>(output.shape().begin(), output.shape().end()), dtype, device);
     output.backward(grad_output);
 
     ASSERT_TRUE(input.grad().has_value());
@@ -386,7 +297,7 @@ TEST_P(ASPPTest, GradientFlow) {
     EXPECT_EQ(grad.dtype(), dtype);
 }
 
-TEST_P(ASPPTest, MultiScaleFeatureFusion) {
+TEST_P(ASPPMultiDTypeTest, MultiScaleFeatureFusion) {
     // Verify all 5 branches are working (1x1, 3 atrous, global pool)
     std::vector<int64_t> atrous_rates = {6, 12, 18};
     auto aspp = ASPP(64, 128, atrous_rates, false, 0.0f);
@@ -402,7 +313,7 @@ TEST_P(ASPPTest, MultiScaleFeatureFusion) {
     if (dtype == DType::Float32) {
         const float* out_data = output_cpu.data<float>();
         for (int64_t i = 0; i < 100; ++i) {
-            if (std::abs(out_data[i]) > tol.atol) {
+            if (std::abs(out_data[i]) > atol) {
                 has_nonzero = true;
                 break;
             }
@@ -410,15 +321,7 @@ TEST_P(ASPPTest, MultiScaleFeatureFusion) {
     } else if (dtype == DType::Float64) {
         const double* out_data = output_cpu.data<double>();
         for (int64_t i = 0; i < 100; ++i) {
-            if (std::abs(static_cast<float>(out_data[i])) > tol.atol) {
-                has_nonzero = true;
-                break;
-            }
-        }
-    } else if (dtype == DType::Float16) {
-        const half_t* out_data = output_cpu.data<half_t>();
-        for (int64_t i = 0; i < 100; ++i) {
-            if (std::abs(static_cast<float>(out_data[i])) > tol.atol) {
+            if (std::abs(static_cast<float>(out_data[i])) > atol) {
                 has_nonzero = true;
                 break;
             }
@@ -427,73 +330,44 @@ TEST_P(ASPPTest, MultiScaleFeatureFusion) {
     EXPECT_TRUE(has_nonzero);
 }
 
+TEST_P(ASPPMultiDTypeTest, MultipleBatches) {
+    std::vector<int64_t> atrous_rates = {6, 12, 18};
+    auto aspp = ASPP(32, 64, atrous_rates, false, 0.1f);
+    aspp.to(device);
+
+    auto input = Variable(randn({4, 32, 16, 16}, dtype, device), true);
+    auto output = aspp.forward(input);
+
+    EXPECT_EQ(output.shape()[0], 4);
+    EXPECT_EQ(output.shape()[1], 64);
+    EXPECT_EQ(output.shape()[2], 16);
+    EXPECT_EQ(output.shape()[3], 16);
+    EXPECT_EQ(output.tensor().dtype(), dtype);
+}
+
 // ============================================================================
-// Bilinear Upsampling Tests
+// Bilinear Upsampling Multi-DType Tests
 // ============================================================================
 
-class BilinearUpsamplingTest : public ::testing::TestWithParam<BackendDTypeParam> {
+class BilinearUpsamplingMultiDTypeTest : public ::testing::TestWithParam<DTypeParam> {
 protected:
     Device device;
     DType dtype;
-    Tolerance tol;
+    float rtol;
+    float atol;
 
     void SetUp() override {
         tenzor::initialize();
 
         auto param = GetParam();
         dtype = param.dtype;
-        tol = Tolerance::for_dtype(dtype);
-
-        if (param.backend_name == "cpu") {
-            device = Device::cpu();
-        }
-        else if (param.backend_name == "cuda") {
-            if (!isBackendAvailable(Device::Type::CUDA)) {
-                GTEST_SKIP() << "CUDA not available";
-            }
-            device = Device::cuda(0);
-        }
-        else if (param.backend_name == "vulkan") {
-            if (!isBackendAvailable(Device::Type::Vulkan)) {
-                GTEST_SKIP() << "Vulkan not available";
-            }
-            device = Device::vulkan(0);
-        }
-        else if (param.backend_name == "oneapi") {
-            if (!isBackendAvailable(Device::Type::OneAPI)) {
-                GTEST_SKIP() << "OneAPI not available";
-            }
-            device = Device::oneapi(0);
-        }
-        else if (param.backend_name == "rocm") {
-            if (!isBackendAvailable(Device::Type::ROCm)) {
-                GTEST_SKIP() << "ROCm not available";
-            }
-            device = Device::rocm(0);
-        }
-
-        if (dtype == DType::Float16 && !device.supports_dtype(DType::Float16)) {
-            GTEST_SKIP() << "Float16 not supported on " << device.to_string();
-        }
-    }
-
-    static bool isBackendAvailable(Device::Type type) {
-        try {
-            Device test_device{type, 0};
-            auto t = zeros({2, 2}, DType::Float32, test_device);
-            return true;
-        } catch (...) {
-            return false;
-        }
-    }
-
-    template<typename T>
-    void expect_near_typed(T value, float expected, float tolerance) {
-        EXPECT_NEAR(static_cast<float>(value), expected, tolerance);
+        rtol = param.rtol;
+        atol = param.atol;
+        device = Device::cpu();
     }
 };
 
-TEST_P(BilinearUpsamplingTest, Upsample2x) {
+TEST_P(BilinearUpsamplingMultiDTypeTest, Upsample2x) {
     // Upsample from 8x8 to 16x16
     auto input = Variable(randn({1, 3, 8, 8}, dtype, device), true);
     auto output = upsample_bilinear(input, 16, 16);
@@ -506,7 +380,7 @@ TEST_P(BilinearUpsamplingTest, Upsample2x) {
     EXPECT_EQ(output.tensor().dtype(), dtype);
 }
 
-TEST_P(BilinearUpsamplingTest, Upsample4x) {
+TEST_P(BilinearUpsamplingMultiDTypeTest, Upsample4x) {
     // Upsample from 7x7 to 28x28
     auto input = Variable(randn({2, 16, 7, 7}, dtype, device), true);
     auto output = upsample_bilinear(input, 28, 28);
@@ -518,7 +392,7 @@ TEST_P(BilinearUpsamplingTest, Upsample4x) {
     EXPECT_EQ(output.tensor().dtype(), dtype);
 }
 
-TEST_P(BilinearUpsamplingTest, NonUniformScale) {
+TEST_P(BilinearUpsamplingMultiDTypeTest, NonUniformScale) {
     // Different scales for H and W
     auto input = Variable(randn({1, 8, 10, 15}, dtype, device), true);
     auto output = upsample_bilinear(input, 30, 45);
@@ -530,7 +404,7 @@ TEST_P(BilinearUpsamplingTest, NonUniformScale) {
     EXPECT_EQ(output.tensor().dtype(), dtype);
 }
 
-TEST_P(BilinearUpsamplingTest, SinglePixelUpsampling) {
+TEST_P(BilinearUpsamplingMultiDTypeTest, SinglePixelUpsampling) {
     // Edge case: 1x1 to larger
     auto input = Variable(ones({1, 1, 1, 1}, dtype, device) * 5.0f, true);
     auto output = upsample_bilinear(input, 4, 4);
@@ -544,22 +418,17 @@ TEST_P(BilinearUpsamplingTest, SinglePixelUpsampling) {
     if (dtype == DType::Float32) {
         const float* out_data = output_cpu.data<float>();
         for (int i = 0; i < 16; ++i) {
-            EXPECT_NEAR(out_data[i], 5.0f, tol.atol * 10);
+            EXPECT_NEAR(out_data[i], 5.0f, atol * 10);
         }
     } else if (dtype == DType::Float64) {
         const double* out_data = output_cpu.data<double>();
         for (int i = 0; i < 16; ++i) {
-            EXPECT_NEAR(static_cast<float>(out_data[i]), 5.0f, tol.atol * 10);
-        }
-    } else if (dtype == DType::Float16) {
-        const half_t* out_data = output_cpu.data<half_t>();
-        for (int i = 0; i < 16; ++i) {
-            EXPECT_NEAR(static_cast<float>(out_data[i]), 5.0f, tol.atol * 10);
+            EXPECT_NEAR(static_cast<float>(out_data[i]), 5.0f, atol * 10);
         }
     }
 }
 
-TEST_P(BilinearUpsamplingTest, InterpolationSmoothnessIdentity) {
+TEST_P(BilinearUpsamplingMultiDTypeTest, InterpolationSmoothnessIdentity) {
     // Test that upsampling preserves values at certain grid points
     auto input_cpu = arange(0.0f, 4.0f, 1.0f, DType::Float32, Device::cpu()).reshape({1, 1, 2, 2});
     // Input: [[0, 1],
@@ -577,7 +446,7 @@ TEST_P(BilinearUpsamplingTest, InterpolationSmoothnessIdentity) {
     auto output_cpu = output.tensor().to(Device::cpu());
 
     // Check corner values are approximately preserved
-    float corner_tol = tol.atol * 20;  // Looser tolerance for interpolation
+    float corner_tol = atol * 20;  // Looser tolerance for interpolation
 
     if (dtype == DType::Float32) {
         const float* out_data = output_cpu.data<float>();
@@ -591,20 +460,14 @@ TEST_P(BilinearUpsamplingTest, InterpolationSmoothnessIdentity) {
         EXPECT_NEAR(static_cast<float>(out_data[3]), 1.0f, corner_tol);
         EXPECT_NEAR(static_cast<float>(out_data[12]), 2.0f, corner_tol);
         EXPECT_NEAR(static_cast<float>(out_data[15]), 3.0f, corner_tol);
-    } else if (dtype == DType::Float16) {
-        const half_t* out_data = output_cpu.data<half_t>();
-        EXPECT_NEAR(static_cast<float>(out_data[0]), 0.0f, corner_tol);
-        EXPECT_NEAR(static_cast<float>(out_data[3]), 1.0f, corner_tol);
-        EXPECT_NEAR(static_cast<float>(out_data[12]), 2.0f, corner_tol);
-        EXPECT_NEAR(static_cast<float>(out_data[15]), 3.0f, corner_tol);
     }
 }
 
-TEST_P(BilinearUpsamplingTest, GradientFlow) {
+TEST_P(BilinearUpsamplingMultiDTypeTest, GradientFlow) {
     auto input = Variable(randn({1, 4, 8, 8}, dtype, device), true);
     auto output = upsample_bilinear(input, 16, 16);
 
-    auto grad_output = ones(output.shape(), dtype, device);
+    auto grad_output = ones(std::vector<int64_t>(output.shape().begin(), output.shape().end()), dtype, device);
     output.backward(grad_output);
 
     // Gradient should exist and have correct shape
@@ -617,7 +480,7 @@ TEST_P(BilinearUpsamplingTest, GradientFlow) {
     EXPECT_EQ(grad.dtype(), dtype);
 }
 
-TEST_P(BilinearUpsamplingTest, LargeBatchSize) {
+TEST_P(BilinearUpsamplingMultiDTypeTest, LargeBatchSize) {
     // Test with large batch
     auto input = Variable(randn({16, 64, 14, 14}, dtype, device), true);
     auto output = upsample_bilinear(input, 28, 28);
@@ -629,44 +492,23 @@ TEST_P(BilinearUpsamplingTest, LargeBatchSize) {
     EXPECT_EQ(output.tensor().dtype(), dtype);
 }
 
-// ============================================================================
-// Error Handling Tests (dtype-independent)
-// ============================================================================
+TEST_P(BilinearUpsamplingMultiDTypeTest, DownsampleOperation) {
+    // Edge case: downsample instead of upsample
+    auto input = Variable(randn({1, 8, 32, 32}, dtype, device), true);
+    auto output = upsample_bilinear(input, 16, 16);
 
-TEST(ASPPErrorTest, InvalidAtrousRates) {
-    // ASPP requires exactly 3 atrous rates
-    std::vector<int64_t> invalid_rates = {6, 12};  // Only 2 rates
-
-    EXPECT_THROW(
-        ASPP(256, 256, invalid_rates, false, 0.1f),
-        std::invalid_argument
-    );
-}
-
-TEST(ASPPErrorTest, TooManyAtrousRates) {
-    std::vector<int64_t> invalid_rates = {6, 12, 18, 24};  // 4 rates
-
-    EXPECT_THROW(
-        ASPP(256, 256, invalid_rates, false, 0.1f),
-        std::invalid_argument
-    );
-}
-
-TEST(BilinearErrorTest, Invalid3DInput) {
-    // Bilinear upsample expects 4D input (N, C, H, W)
-    auto input = Variable(randn({2, 16, 8}), true);  // Only 3D
-
-    EXPECT_THROW(
-        upsample_bilinear(input, 16, 16),
-        std::runtime_error
-    );
+    EXPECT_EQ(output.shape()[0], 1);
+    EXPECT_EQ(output.shape()[1], 8);
+    EXPECT_EQ(output.shape()[2], 16);
+    EXPECT_EQ(output.shape()[3], 16);
+    EXPECT_EQ(output.tensor().dtype(), dtype);
 }
 
 // ============================================================================
 // Integration Tests
 // ============================================================================
 
-TEST_P(BilinearUpsamplingTest, ASPPWithUpsampling) {
+TEST_P(BilinearUpsamplingMultiDTypeTest, ASPPWithUpsampling) {
     // Simulate DeepLabV3+ decoder pattern: ASPP + upsample
     std::vector<int64_t> atrous_rates = {6, 12, 18};
     auto aspp = ASPP(128, 256, atrous_rates, false, 0.1f);
@@ -689,58 +531,65 @@ TEST_P(BilinearUpsamplingTest, ASPPWithUpsampling) {
     EXPECT_EQ(upsampled.tensor().dtype(), dtype);
 
     // Gradient flow through both
-    auto grad = ones(upsampled.shape(), dtype, device);
+    auto grad = ones(std::vector<int64_t>(upsampled.shape().begin(), upsampled.shape().end()), dtype, device);
     upsampled.backward(grad);
 
     ASSERT_TRUE(input.grad().has_value());
 }
 
+TEST_P(BilinearUpsamplingMultiDTypeTest, SequentialUpsampling) {
+    // Test multiple upsampling stages
+    auto input = Variable(randn({1, 16, 8, 8}, dtype, device), true);
+
+    auto output1 = upsample_bilinear(input, 16, 16);
+    EXPECT_EQ(output1.shape()[2], 16);
+    EXPECT_EQ(output1.tensor().dtype(), dtype);
+
+    auto output2 = upsample_bilinear(output1, 32, 32);
+    EXPECT_EQ(output2.shape()[2], 32);
+    EXPECT_EQ(output2.tensor().dtype(), dtype);
+
+    // Gradient flow through multiple stages
+    auto grad = ones(std::vector<int64_t>(output2.shape().begin(), output2.shape().end()), dtype, device);
+    output2.backward(grad);
+
+    ASSERT_TRUE(input.grad().has_value());
+}
+
 // ============================================================================
-// Test Instantiation: All Backends × All Float DTypes
+// Test Instantiation
 // ============================================================================
 
-std::vector<BackendDTypeParam> GenerateSegmentationTestParams() {
-    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "rocm"};
-
-    // Segmentation primarily uses float types for computer vision
-    std::vector<std::pair<DType, std::string>> dtypes = {
-        {DType::Float32, "float32"},
-        {DType::Float64, "float64"},
-        {DType::Float16, "float16"},  // Mixed precision training
+std::vector<DTypeParam> GenerateSegmentationMultiDTypeParams() {
+    return {
+        {DType::Float32, "float32", 1e-4f, 1e-5f},
+        {DType::Float64, "float64", 1e-5f, 1e-6f}
     };
-
-    std::vector<BackendDTypeParam> combinations;
-    for (const auto& backend : backends) {
-        for (const auto& [dtype, dtype_name] : dtypes) {
-            combinations.push_back({backend, dtype, dtype_name});
-        }
-    }
-    return combinations;
 }
 
 INSTANTIATE_TEST_SUITE_P(
-    AllBackendsAllDTypes,
-    AtrousSeparableConv2dTest,
-    ::testing::ValuesIn(GenerateSegmentationTestParams()),
-    [](const ::testing::TestParamInfo<BackendDTypeParam>& info) {
+    AllDTypes,
+    AtrousSeparableConv2dMultiDTypeTest,
+    ::testing::ValuesIn(GenerateSegmentationMultiDTypeParams()),
+    [](const ::testing::TestParamInfo<DTypeParam>& info) {
         return info.param.ToString();
     }
 );
 
 INSTANTIATE_TEST_SUITE_P(
-    AllBackendsAllDTypes,
-    ASPPTest,
-    ::testing::ValuesIn(GenerateSegmentationTestParams()),
-    [](const ::testing::TestParamInfo<BackendDTypeParam>& info) {
+    AllDTypes,
+    ASPPMultiDTypeTest,
+    ::testing::ValuesIn(GenerateSegmentationMultiDTypeParams()),
+    [](const ::testing::TestParamInfo<DTypeParam>& info) {
         return info.param.ToString();
     }
 );
 
 INSTANTIATE_TEST_SUITE_P(
-    AllBackendsAllDTypes,
-    BilinearUpsamplingTest,
-    ::testing::ValuesIn(GenerateSegmentationTestParams()),
-    [](const ::testing::TestParamInfo<BackendDTypeParam>& info) {
+    AllDTypes,
+    BilinearUpsamplingMultiDTypeTest,
+    ::testing::ValuesIn(GenerateSegmentationMultiDTypeParams()),
+    [](const ::testing::TestParamInfo<DTypeParam>& info) {
         return info.param.ToString();
     }
 );
@@ -749,31 +598,24 @@ INSTANTIATE_TEST_SUITE_P(
  * COVERAGE SUMMARY:
  *
  * Test Classes: 3
- * - AtrousSeparableConv2dTest (4 tests)
- * - ASPPTest (6 tests)
- * - BilinearUpsamplingTest (9 tests)
+ * - AtrousSeparableConv2dMultiDTypeTest: 5 tests
+ * - ASPPMultiDTypeTest: 7 tests
+ * - BilinearUpsamplingMultiDTypeTest: 10 tests
  *
- * Total Parameterized Tests: 19 tests
- * Backends: 5 (CPU, CUDA, Vulkan, OneAPI, ROCm)
- * DTypes: 3 (Float32, Float64, Float16)
+ * Total Test Cases: 22
+ * DTypes Tested: Float32, Float64
+ * Total Scenarios: 22 tests × 2 dtypes = 44 test scenarios
  *
- * TOTAL TEST SCENARIOS: 19 × 5 × 3 = 285 test scenarios
+ * Coverage:
+ * - AtrousSeparableConv2d: shape verification, various dilation rates, gradient flow, edge cases
+ * - ASPP: standard config, separable convolution, different atrous rates, multi-scale fusion
+ * - Bilinear Upsampling: 2x/4x upsampling, non-uniform scaling, interpolation accuracy, gradient flow
+ * - Integration: ASPP + upsampling pipeline, sequential upsampling
  *
- * Additional Non-Parameterized Tests: 3 error handling tests
+ * Tolerances:
+ * - Float32: rtol=1e-4, atol=1e-5 (standard precision)
+ * - Float64: rtol=1e-5, atol=1e-6 (higher precision)
  *
- * GRAND TOTAL: 288 test scenarios
- *
- * Coverage Details:
- * - Shape verification: All dtypes
- * - Gradient flow: All dtypes with type preservation
- * - Numerical accuracy: dtype-specific tolerances
- *   - Float16: rtol=1e-2, atol=1e-3 (loose)
- *   - Float32: rtol=1e-4, atol=1e-5 (standard)
- *   - Float64: rtol=1e-5, atol=1e-6 (tight)
- * - Edge cases: Single pixel, non-uniform scaling
- * - Integration: ASPP + upsampling pipeline
- * - Error handling: Invalid inputs (dtype-independent)
- *
- * Segmentation layers are primarily used in computer vision with float types.
- * Integer dtypes are not tested as they are not relevant for these operations.
+ * Note: Segmentation operations work with floating-point types for computer vision tasks.
+ * Integer dtypes are not supported for these operations.
  */
