@@ -497,49 +497,49 @@ Conv2d::Conv2d(int64_t in_channels, int64_t out_channels, int64_t kernel_size,
 }
 
 auto Conv2d::forward(const Variable& input) -> Variable {
-    std::cerr << "[DEBUG Conv2d::forward] Entry!" << std::endl;
+    // std::cerr << "[DEBUG Conv2d::forward] Entry!" << std::endl;
     // Input shape: [batch, in_channels, height, width]
-    std::cerr << "[DEBUG Conv2d::forward] Getting input shape..." << std::endl;
+    // std::cerr << "[DEBUG Conv2d::forward] Getting input shape..." << std::endl;
     auto input_shape = input.shape();
-    std::cerr << "[DEBUG Conv2d::forward] Got input shape: [" << input_shape.size() << " dims]" << std::endl;
+    // std::cerr << "[DEBUG Conv2d::forward] Got input shape: [" << input_shape.size() << " dims]" << std::endl;
 
-    std::cerr << "[DEBUG] Checking if size == 4..." << std::endl;
+    // std::cerr << "[DEBUG] Checking if size == 4..." << std::endl;
     if (input_shape.size() != 4) {
         throw std::invalid_argument("Conv2d expects 4D input [batch, channels, height, width]");
     }
-    std::cerr << "[DEBUG] Size check passed" << std::endl;
+    // std::cerr << "[DEBUG] Size check passed" << std::endl;
 
-    std::cerr << "[DEBUG] Getting batch from input_shape[0]..." << std::endl;
+    // std::cerr << "[DEBUG] Getting batch from input_shape[0]..." << std::endl;
     int64_t batch = input_shape[0];
-    std::cerr << "[DEBUG] batch = " << batch << std::endl;
+    // std::cerr << "[DEBUG] batch = " << batch << std::endl;
 
-    std::cerr << "[DEBUG] Getting in_channels from input_shape[1]..." << std::endl;
+    // std::cerr << "[DEBUG] Getting in_channels from input_shape[1]..." << std::endl;
     int64_t in_channels = input_shape[1];
-    std::cerr << "[DEBUG] in_channels = " << in_channels << std::endl;
+    // std::cerr << "[DEBUG] in_channels = " << in_channels << std::endl;
 
-    std::cerr << "[DEBUG] Getting height from input_shape[2]..." << std::endl;
+    // std::cerr << "[DEBUG] Getting height from input_shape[2]..." << std::endl;
     int64_t height = input_shape[2];
-    std::cerr << "[DEBUG] height = " << height << std::endl;
+    // std::cerr << "[DEBUG] height = " << height << std::endl;
 
-    std::cerr << "[DEBUG] Getting width from input_shape[3]..." << std::endl;
+    // std::cerr << "[DEBUG] Getting width from input_shape[3]..." << std::endl;
     int64_t width = input_shape[3];
-    std::cerr << "[DEBUG] width = " << width << std::endl;
+    // std::cerr << "[DEBUG] width = " << width << std::endl;
 
-    std::cerr << "[DEBUG] Checking channel mismatch..." << std::endl;
+    // std::cerr << "[DEBUG] Checking channel mismatch..." << std::endl;
     if (in_channels != in_channels_) {
         throw std::invalid_argument("Input channels mismatch");
     }
-    std::cerr << "[DEBUG] Channel check passed" << std::endl;
+    // std::cerr << "[DEBUG] Channel check passed" << std::endl;
 
     // Calculate output dimensions
-    std::cerr << "[DEBUG] Calculating output dimensions..." << std::endl;
+    // std::cerr << "[DEBUG] Calculating output dimensions..." << std::endl;
     int64_t out_h = calculate_output_size(height, kernel_size_, stride_, padding_, dilation_);
-    std::cerr << "[DEBUG] out_h = " << out_h << std::endl;
+    // std::cerr << "[DEBUG] out_h = " << out_h << std::endl;
     int64_t out_w = calculate_output_size(width, kernel_size_, stride_, padding_, dilation_);
-    std::cerr << "[DEBUG] out_w = " << out_w << std::endl;
+    // std::cerr << "[DEBUG] out_w = " << out_w << std::endl;
 
     // Validate output dimensions to prevent memory allocation errors
-    std::cerr << "[DEBUG] Validating output dimensions..." << std::endl;
+    // std::cerr << "[DEBUG] Validating output dimensions..." << std::endl;
     if (out_h <= 0 || out_w <= 0) {
         throw std::invalid_argument(
             "Invalid Conv2d configuration: output dimensions are non-positive (out_h=" +
@@ -552,20 +552,20 @@ auto Conv2d::forward(const Variable& input) -> Variable {
             ". Try reducing kernel_size, dilation, or increasing input size/padding."
         );
     }
-    std::cerr << "[DEBUG] Output dimensions valid" << std::endl;
+    // std::cerr << "[DEBUG] Output dimensions valid" << std::endl;
 
     // Get weight from parameters
-    std::cerr << "[DEBUG] Getting weight from parameters..." << std::endl;
+    // std::cerr << "[DEBUG] Getting weight from parameters..." << std::endl;
     auto& weight = *parameters_["weight"];
-    std::cerr << "[DEBUG] Weight retrieved successfully" << std::endl;
+    // std::cerr << "[DEBUG] Weight retrieved successfully" << std::endl;
 
     // Get weight shape information
-    std::cerr << "[DEBUG] Getting weight shape..." << std::endl;
+    // std::cerr << "[DEBUG] Getting weight shape..." << std::endl;
     auto weight_shape = weight.tensor().shape();
-    std::cerr << "[DEBUG] weight_shape size: " << weight_shape.size() << std::endl;
+    // std::cerr << "[DEBUG] weight_shape size: " << weight_shape.size() << std::endl;
     int64_t in_channels_per_group = weight_shape[1];
     int64_t out_channels_per_group = out_channels_ / groups_;
-    std::cerr << "[DEBUG] in_channels_per_group = " << in_channels_per_group << ", out_channels_per_group = " << out_channels_per_group << std::endl;
+    // std::cerr << "[DEBUG] in_channels_per_group = " << in_channels_per_group << ", out_channels_per_group = " << out_channels_per_group << std::endl;
 
     // Dispatch convolution via OperationRegistry
     // This automatically routes to the correct backend (CPU, CUDA, ROCm, OneAPI, Vulkan)
