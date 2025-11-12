@@ -103,7 +103,7 @@ auto cat(std::span<const Tensor> tensors, int64_t dim) -> Tensor {
     // For CPU, manually concatenate
     if (tensors[0].device().type == Device::Type::CPU) {
         auto output = zeros(out_shape, tensors[0].dtype(), Device::cpu());
-        float* out_data = output.data<float>();
+        auto dtype = tensors[0].dtype();
 
         // Calculate output strides
         std::vector<int64_t> out_strides(ndim);
@@ -114,48 +114,106 @@ auto cat(std::span<const Tensor> tensors, int64_t dim) -> Tensor {
         }
 
         int64_t offset_at_dim = 0;
-        for (const auto& t : tensors) {
-            // Make tensor contiguous to ensure proper data layout
-            auto t_cont = t.is_contiguous() ? t : t.contiguous();
-            const float* in_data = t_cont.data<float>();
-            auto in_shape = t_cont.shape();
 
-            // Calculate input strides (contiguous)
-            std::vector<int64_t> in_strides(ndim);
-            int64_t in_stride = 1;
-            for (int64_t i = ndim - 1; i >= 0; --i) {
-                in_strides[i] = in_stride;
-                in_stride *= in_shape[i];
-            }
+        // Dtype-aware concatenation
+        if (dtype == DType::Float32) {
+            float* out_data = output.data<float>();
+            for (const auto& t : tensors) {
+                auto t_cont = t.is_contiguous() ? t : t.contiguous();
+                const float* in_data = t_cont.data<float>();
+                auto in_shape = t_cont.shape();
 
-            // Copy data element by element
-            int64_t in_size = 1;
-            for (auto s : in_shape) {
-                in_size *= s;
-            }
-
-            for (int64_t in_idx = 0; in_idx < in_size; ++in_idx) {
-                // Calculate coordinates in input (row-major order)
-                int64_t temp = in_idx;
-                std::vector<int64_t> coords(ndim);
-                for (int64_t i = ndim - 1; i >= 0; --i) {
-                    coords[i] = temp % in_shape[i];
-                    temp /= in_shape[i];
+                int64_t in_size = 1;
+                for (auto s : in_shape) {
+                    in_size *= s;
                 }
 
-                // Adjust coordinate at concatenation dimension
-                coords[dim] += offset_at_dim;
+                for (int64_t in_idx = 0; in_idx < in_size; ++in_idx) {
+                    int64_t temp = in_idx;
+                    std::vector<int64_t> coords(ndim);
+                    for (int64_t i = ndim - 1; i >= 0; --i) {
+                        coords[i] = temp % in_shape[i];
+                        temp /= in_shape[i];
+                    }
 
-                // Calculate output index using row-major strides
-                int64_t out_idx = 0;
-                for (int64_t i = 0; i < ndim; ++i) {
-                    out_idx += coords[i] * out_strides[i];
+                    coords[dim] += offset_at_dim;
+
+                    int64_t out_idx = 0;
+                    for (int64_t i = 0; i < ndim; ++i) {
+                        out_idx += coords[i] * out_strides[i];
+                    }
+
+                    out_data[out_idx] = in_data[in_idx];
                 }
 
-                out_data[out_idx] = in_data[in_idx];
+                offset_at_dim += in_shape[dim];
             }
+        } else if (dtype == DType::Float64) {
+            double* out_data = output.data<double>();
+            for (const auto& t : tensors) {
+                auto t_cont = t.is_contiguous() ? t : t.contiguous();
+                const double* in_data = t_cont.data<double>();
+                auto in_shape = t_cont.shape();
 
-            offset_at_dim += in_shape[dim];
+                int64_t in_size = 1;
+                for (auto s : in_shape) {
+                    in_size *= s;
+                }
+
+                for (int64_t in_idx = 0; in_idx < in_size; ++in_idx) {
+                    int64_t temp = in_idx;
+                    std::vector<int64_t> coords(ndim);
+                    for (int64_t i = ndim - 1; i >= 0; --i) {
+                        coords[i] = temp % in_shape[i];
+                        temp /= in_shape[i];
+                    }
+
+                    coords[dim] += offset_at_dim;
+
+                    int64_t out_idx = 0;
+                    for (int64_t i = 0; i < ndim; ++i) {
+                        out_idx += coords[i] * out_strides[i];
+                    }
+
+                    out_data[out_idx] = in_data[in_idx];
+                }
+
+                offset_at_dim += in_shape[dim];
+            }
+        } else if (dtype == DType::Float16) {
+            Float16* out_data = output.data<Float16>();
+            for (const auto& t : tensors) {
+                auto t_cont = t.is_contiguous() ? t : t.contiguous();
+                const Float16* in_data = t_cont.data<Float16>();
+                auto in_shape = t_cont.shape();
+
+                int64_t in_size = 1;
+                for (auto s : in_shape) {
+                    in_size *= s;
+                }
+
+                for (int64_t in_idx = 0; in_idx < in_size; ++in_idx) {
+                    int64_t temp = in_idx;
+                    std::vector<int64_t> coords(ndim);
+                    for (int64_t i = ndim - 1; i >= 0; --i) {
+                        coords[i] = temp % in_shape[i];
+                        temp /= in_shape[i];
+                    }
+
+                    coords[dim] += offset_at_dim;
+
+                    int64_t out_idx = 0;
+                    for (int64_t i = 0; i < ndim; ++i) {
+                        out_idx += coords[i] * out_strides[i];
+                    }
+
+                    out_data[out_idx] = in_data[in_idx];
+                }
+
+                offset_at_dim += in_shape[dim];
+            }
+        } else {
+            throw std::runtime_error("Unsupported dtype for cat operation");
         }
 
         return output;

@@ -1139,6 +1139,18 @@ auto mul_kernel(const Tensor& a, const Tensor& b) -> Tensor {
                 c_data[i] = a_data[i] && b_data[i];
             }
 
+        } else if (a.dtype() == DType::Float16) {
+            const Float16* a_data = a.data<Float16>();
+            const Float16* b_data = b.data<Float16>();
+            Float16* c_data = result.data<Float16>();
+
+            // Float16 multiply with Float32 computation
+            for (size_t i = 0; i < n; ++i) {
+                float a_val = static_cast<float>(a_data[i]);
+                float b_val = static_cast<float>(b_data[i]);
+                c_data[i] = Float16(a_val * b_val);
+            }
+
         } else {
             throw std::runtime_error("Unsupported dtype for mul operation");
         }
@@ -1178,6 +1190,15 @@ auto mul_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             bool* c_data = result.data<bool>();
             detail::broadcast_op(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
                                 [](bool x, bool y) { return x && y; });
+
+        } else if (a.dtype() == DType::Float16) {
+            const Float16* a_data = a.data<Float16>();
+            const Float16* b_data = b.data<Float16>();
+            Float16* c_data = result.data<Float16>();
+            detail::broadcast_op(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](Float16 x, Float16 y) {
+                                    return Float16(static_cast<float>(x) * static_cast<float>(y));
+                                });
 
         } else {
             throw std::runtime_error("Unsupported dtype for mul operation");

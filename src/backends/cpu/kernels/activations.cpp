@@ -106,8 +106,17 @@ auto relu_kernel(const Tensor& input) -> Tensor {
             out_data[i] = std::max(0.0, in_data[i]);
         }
 #endif
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* in_data = input.data<Float16>();
+        Float16* out_data = output.data<Float16>();
+        size_t n = input.numel();
+
+        for (size_t i = 0; i < n; ++i) {
+            float val = static_cast<float>(in_data[i]);
+            out_data[i] = Float16(std::max(0.0f, val));
+        }
     } else {
-        throw std::runtime_error("ReLU only supports Float32 and Float64");
+        throw std::runtime_error("ReLU only supports Float32, Float64, and Float16");
     }
 
     return output;
@@ -169,8 +178,19 @@ auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Ten
         for (size_t i = 0; i < n; ++i) {
             grad_in_data[i] = grad_out_data[i] * (in_data[i] > 0.0 ? 1.0 : 0.0);
         }
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* grad_out_data = grad_output.data<Float16>();
+        const Float16* in_data = input.data<Float16>();
+        Float16* grad_in_data = grad_input.data<Float16>();
+        size_t n = input.numel();
+
+        for (size_t i = 0; i < n; ++i) {
+            float in_val = static_cast<float>(in_data[i]);
+            float grad_out_val = static_cast<float>(grad_out_data[i]);
+            grad_in_data[i] = Float16(grad_out_val * (in_val > 0.0f ? 1.0f : 0.0f));
+        }
     } else {
-        throw std::runtime_error("ReLU backward only supports Float32 and Float64");
+        throw std::runtime_error("ReLU backward only supports Float32, Float64, and Float16");
     }
 
     return grad_input;
