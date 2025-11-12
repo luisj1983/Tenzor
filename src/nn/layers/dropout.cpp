@@ -89,7 +89,14 @@ auto Dropout::forward(const Variable& input) -> Variable {
         void* random_ptr = random_tensor.impl()->storage->data();
         void* mask_ptr = mask_data_cpu.impl()->storage->data();
 
-        if (random_tensor.dtype() == DType::Float32) {
+        if (random_tensor.dtype() == DType::Float16) {
+            Float16* rand_data = static_cast<Float16*>(random_ptr);
+            Float16* mask_out = static_cast<Float16*>(mask_ptr);
+            for (size_t i = 0; i < numel; ++i) {
+                float rand_val = static_cast<float>(rand_data[i]);
+                mask_out[i] = Float16(rand_val > static_cast<float>(p_) ? 1.0f : 0.0f);
+            }
+        } else if (random_tensor.dtype() == DType::Float32) {
             float* rand_data = static_cast<float*>(random_ptr);
             float* mask_out = static_cast<float*>(mask_ptr);
             for (size_t i = 0; i < numel; ++i) {
@@ -102,7 +109,7 @@ auto Dropout::forward(const Variable& input) -> Variable {
                 mask_out[i] = rand_data[i] > p_ ? 1.0 : 0.0;
             }
         } else {
-            throw std::runtime_error("Dropout only supports Float32 and Float64 dtypes");
+            throw std::runtime_error("Dropout only supports Float16, Float32 and Float64 dtypes");
         }
 
         // Transfer mask to target device if needed
@@ -196,7 +203,14 @@ auto Dropout2d::forward(const Variable& input) -> Variable {
     void* random_ptr = random_tensor.impl()->storage->data();
     void* mask_ptr = mask_data.impl()->storage->data();
 
-    if (random_tensor.dtype() == DType::Float32) {
+    if (random_tensor.dtype() == DType::Float16) {
+        Float16* rand_data = static_cast<Float16*>(random_ptr);
+        Float16* mask_out = static_cast<Float16*>(mask_ptr);
+        for (size_t i = 0; i < numel; ++i) {
+            float rand_val = static_cast<float>(rand_data[i]);
+            mask_out[i] = Float16(rand_val > static_cast<float>(p_) ? 1.0f : 0.0f);
+        }
+    } else if (random_tensor.dtype() == DType::Float32) {
         float* rand_data = static_cast<float*>(random_ptr);
         float* mask_out = static_cast<float*>(mask_ptr);
         for (size_t i = 0; i < numel; ++i) {
@@ -209,7 +223,7 @@ auto Dropout2d::forward(const Variable& input) -> Variable {
             mask_out[i] = rand_data[i] > p_ ? 1.0 : 0.0;
         }
     } else {
-        throw std::runtime_error("Dropout2d only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("Dropout2d only supports Float16, Float32 and Float64 dtypes");
     }
 
     // Manually expand mask to input shape for proper channel-wise dropout
@@ -383,7 +397,14 @@ auto AlphaDropout::forward(const Variable& input) -> Variable {
     void* random_ptr = random_tensor.impl()->storage->data();
     void* mask_ptr = mask_data_cpu.impl()->storage->data();
 
-    if (random_tensor.dtype() == DType::Float32) {
+    if (random_tensor.dtype() == DType::Float16) {
+        Float16* rand_data = static_cast<Float16*>(random_ptr);
+        Float16* mask_out = static_cast<Float16*>(mask_ptr);
+        for (size_t i = 0; i < numel; ++i) {
+            float rand_val = static_cast<float>(rand_data[i]);
+            mask_out[i] = Float16(rand_val > static_cast<float>(p_) ? 1.0f : 0.0f);
+        }
+    } else if (random_tensor.dtype() == DType::Float32) {
         float* rand_data = static_cast<float*>(random_ptr);
         float* mask_out = static_cast<float*>(mask_ptr);
         for (size_t i = 0; i < numel; ++i) {
@@ -396,7 +417,7 @@ auto AlphaDropout::forward(const Variable& input) -> Variable {
             mask_out[i] = rand_data[i] > p_ ? 1.0 : 0.0;
         }
     } else {
-        throw std::runtime_error("AlphaDropout only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("AlphaDropout only supports Float16, Float32 and Float64 dtypes");
     }
 
     // Transfer mask to target device if needed

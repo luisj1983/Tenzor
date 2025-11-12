@@ -484,115 +484,23 @@ auto Conv2d::forward(const Variable& input) -> Variable {
     } else
     #endif
     {
-        // CPU implementation using im2col + matmul
-        output = zeros({batch, out_channels_, out_h, out_w}, input.tensor().dtype(), original_device);
+        // Use CPU backend through operation registry for proper dtype support
+        auto& backend = BackendManager::get_backend(original_device);
 
-        auto weight_shape = weight_dtype_matched.tensor().shape();
-        int64_t in_channels_per_group = weight_shape[1];
-        int64_t out_channels_per_group = out_channels_ / groups_;
-
-        for (int64_t g = 0; g < groups_; ++g) {
-            int64_t in_start = g * in_channels_per_group;
-            int64_t out_start = g * out_channels_per_group;
-
-            std::vector<int64_t> input_slice_shape = {batch, in_channels_per_group, height, width};
-            auto input_slice = zeros(input_slice_shape);
-
-            const float* input_data = input.tensor().data<float>();
-            float* input_slice_data = input_slice.data<float>();
-
-            for (int64_t b = 0; b < batch; ++b) {
-                for (int64_t c = 0; c < in_channels_per_group; ++c) {
-                    for (int64_t h = 0; h < height; ++h) {
-                        for (int64_t w = 0; w < width; ++w) {
-                            int64_t src_idx = b * (in_channels_ * height * width) +
-                                             (in_start + c) * (height * width) +
-                                             h * width + w;
-                            int64_t dst_idx = b * (in_channels_per_group * height * width) +
-                                             c * (height * width) +
-                                             h * width + w;
-                            input_slice_data[dst_idx] = input_data[src_idx];
-                        }
-                    }
-                }
-            }
-
-            auto input_col = im2col_cpu(input_slice, kernel_size_, kernel_size_,
-                                        stride_, padding_, dilation_);
-
-            std::vector<int64_t> weight_slice_shape = {out_channels_per_group, in_channels_per_group,
-                                                        kernel_size_, kernel_size_};
-            auto weight_slice = zeros(weight_slice_shape);
-
-            const float* weight_data = weight_dtype_matched.tensor().data<float>();
-            float* weight_slice_data = weight_slice.data<float>();
-
-            for (int64_t oc = 0; oc < out_channels_per_group; ++oc) {
-                for (int64_t ic = 0; ic < in_channels_per_group; ++ic) {
-                    for (int64_t kh = 0; kh < kernel_size_; ++kh) {
-                        for (int64_t kw = 0; kw < kernel_size_; ++kw) {
-                            int64_t src_idx = (out_start + oc) * (in_channels_per_group * kernel_size_ * kernel_size_) +
-                                             ic * (kernel_size_ * kernel_size_) +
-                                             kh * kernel_size_ + kw;
-                            int64_t dst_idx = oc * (in_channels_per_group * kernel_size_ * kernel_size_) +
-                                             ic * (kernel_size_ * kernel_size_) +
-                                             kh * kernel_size_ + kw;
-                            weight_slice_data[dst_idx] = weight_data[src_idx];
-                        }
-                    }
-                }
-            }
-
-            int64_t kernel_size_flat = in_channels_per_group * kernel_size_ * kernel_size_;
-            auto weight_reshaped = weight_slice.reshape({out_channels_per_group, kernel_size_flat});
-
-            int64_t spatial_size = out_h * out_w;
-
-            for (int64_t b = 0; b < batch; ++b) {
-                auto input_col_b = zeros({kernel_size_flat, spatial_size});
-                const float* input_col_data = input_col.data<float>();
-                float* input_col_b_data = input_col_b.data<float>();
-
-                for (int64_t i = 0; i < kernel_size_flat * spatial_size; ++i) {
-                    input_col_b_data[i] = input_col_data[b * kernel_size_flat * spatial_size + i];
-                }
-
-                auto output_group = matmul(weight_reshaped, input_col_b);
-
-                const float* output_group_data = output_group.data<float>();
-                float* output_data = output.data<float>();
-
-                for (int64_t oc = 0; oc < out_channels_per_group; ++oc) {
-                    for (int64_t s = 0; s < spatial_size; ++s) {
-                        int64_t h_idx = s / out_w;
-                        int64_t w_idx = s % out_w;
-                        int64_t dst_idx = b * (out_channels_ * out_h * out_w) +
-                                         (out_start + oc) * (out_h * out_w) +
-                                         h_idx * out_w + w_idx;
-                        int64_t src_idx = oc * spatial_size + s;
-                        output_data[dst_idx] = output_group_data[src_idx];
-                    }
-                }
-            }
-        }
-
+        // Compute output using backend operation
+        // Pass bias as third input if present
+        std::vector<Tensor> inputs_vec = {input.tensor(), weight_dtype_matched.tensor()};
         if (bias_ptr != nullptr) {
-            float* out_data = output.data<float>();
-            const float* bias_data = bias_ptr->data<float>();
-
-            for (int64_t b = 0; b < batch; ++b) {
-                for (int64_t c = 0; c < out_channels_; ++c) {
-                    for (int64_t h = 0; h < out_h; ++h) {
-                        for (int64_t w = 0; w < out_w; ++w) {
-                            int64_t idx = b * (out_channels_ * out_h * out_w) +
-                                         c * (out_h * out_w) +
-                                         h * out_w + w;
-                            out_data[idx] += bias_data[c];
-                        }
-                    }
-                }
-            }
+            inputs_vec.push_back(*bias_ptr);
         }
+
+        auto output_result = backend.execute_operation(
+            "conv2d_forward",
+            inputs_vec,
+            {{"stride", std::to_string(stride_)}, {"padding", std::to_string(padding_)},
+             {"dilation", std::to_string(dilation_)}, {"groups", std::to_string(groups_)}}
+        );
+        output = output_result[0];
     }
 
     auto result = Variable(output, input.requires_grad() || weight.requires_grad());

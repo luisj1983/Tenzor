@@ -158,6 +158,84 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
 
     // Dispatch based on dtype
     switch (dtype) {
+        case DType::Float16: {
+            auto* input_data = input.data<Float16>();
+            auto* output_data = output.data<Float16>();
+
+            if (dim < 0) {
+                // Full reduction - compute in Float32 for precision
+                const int64_t n = input.numel();
+                float sum = 0.0f;
+                float c = 0.0f;  // Kahan summation
+
+                #pragma omp parallel if(n > 10000)
+                {
+                    float local_sum = 0.0f;
+                    float local_c = 0.0f;
+
+                    #pragma omp for nowait
+                    for (int64_t i = 0; i < n; i++) {
+                        float val = static_cast<float>(input_data[i]);
+                        float y = val - local_c;
+                        float t = local_sum + y;
+                        local_c = (t - local_sum) - y;
+                        local_sum = t;
+                    }
+
+                    #pragma omp critical
+                    {
+                        float y = local_sum - c;
+                        float t = sum + y;
+                        c = (t - sum) - y;
+                        sum = t;
+                    }
+                }
+                output_data[0] = Float16(sum);
+            } else {
+                // Dimensional reduction - compute in Float32
+                const int64_t ndim = input_shape.size();
+                const int64_t dim_size = input_shape[dim];
+
+                int64_t output_size = 1;
+                for (int64_t i = 0; i < ndim; i++) {
+                    if (i != dim) {
+                        output_size *= input_shape[i];
+                    }
+                }
+
+                std::fill(output_data, output_data + output_size, Float16(0.0f));
+
+                #pragma omp parallel for if(output_size > 1000)
+                for (int64_t out_idx = 0; out_idx < output_size; out_idx++) {
+                    std::vector<int64_t> indices(ndim, 0);
+                    int64_t tmp = out_idx;
+
+                    for (int64_t d = 0; d < ndim; d++) {
+                        if (d == dim) continue;
+                        int64_t size = input_shape[d];
+                        indices[d] = tmp % size;
+                        tmp /= size;
+                    }
+
+                    // Sum along dimension with Kahan summation
+                    float sum = 0.0f, c = 0.0f;
+                    for (int64_t i = 0; i < dim_size; i++) {
+                        indices[dim] = i;
+                        int64_t in_idx = 0;
+                        for (int64_t d = 0; d < ndim; d++) {
+                            in_idx += indices[d] * input_strides[d];
+                        }
+                        float val = static_cast<float>(input_data[in_idx]);
+                        float y = val - c;
+                        float t = sum + y;
+                        c = (t - sum) - y;
+                        sum = t;
+                    }
+                    output_data[out_idx] = Float16(sum);
+                }
+            }
+            break;
+        }
         case DType::Float32: {
             auto* input_data = input.data<float>();
             auto* output_data = output.data<float>();

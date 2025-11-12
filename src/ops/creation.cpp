@@ -98,6 +98,11 @@ auto ones(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
 
     // Fill with ones based on dtype
     switch (dtype) {
+        case DType::Float16: {
+            Float16* ptr = static_cast<Float16*>(data);
+            std::fill(ptr, ptr + numel, Float16(1.0f));
+            break;
+        }
         case DType::Float32: {
             float* ptr = static_cast<float*>(data);
             std::fill(ptr, ptr + numel, 1.0f);
@@ -159,6 +164,11 @@ auto full(std::vector<int64_t> shape, float value, DType dtype, Device device) -
 
     // Fill with value based on dtype
     switch (dtype) {
+        case DType::Float16: {
+            Float16* ptr = static_cast<Float16*>(data);
+            std::fill(ptr, ptr + numel, Float16(static_cast<float>(value)));
+            break;
+        }
         case DType::Float32: {
             float* ptr = static_cast<float*>(data);
             std::fill(ptr, ptr + numel, static_cast<float>(value));
@@ -243,8 +253,16 @@ auto rand(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
             }
             break;
         }
+        case DType::Float16: {
+            std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+            Float16* ptr = static_cast<Float16*>(data);
+            for (size_t i = 0; i < numel; ++i) {
+                ptr[i] = Float16(dist(gen));
+            }
+            break;
+        }
         default:
-            throw std::runtime_error("Unsupported dtype for rand() - only Float32 and Float64 are supported");
+            throw std::runtime_error("Unsupported dtype for rand() - only Float32, Float64, and Float16 are supported");
     }
     return tensor;
 }
@@ -293,8 +311,16 @@ auto randn(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
             }
             break;
         }
+        case DType::Float16: {
+            std::normal_distribution<float> dist(0.0f, 1.0f);
+            Float16* ptr = static_cast<Float16*>(data);
+            for (size_t i = 0; i < numel; ++i) {
+                ptr[i] = Float16(dist(gen));
+            }
+            break;
+        }
         default:
-            throw std::runtime_error("Unsupported dtype for randn() - only Float32 and Float64 are supported");
+            throw std::runtime_error("Unsupported dtype for randn() - only Float32, Float64, and Float16 are supported");
     }
     return tensor;
 }
