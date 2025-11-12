@@ -274,8 +274,17 @@ auto tanh_kernel(const Tensor& input) -> Tensor {
         for (size_t i = 0; i < n; ++i) {
             out_data[i] = std::tanh(in_data[i]);
         }
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* in_data = input.data<Float16>();
+        Float16* out_data = output.data<Float16>();
+        size_t n = input.numel();
+
+        for (size_t i = 0; i < n; ++i) {
+            float val = static_cast<float>(in_data[i]);
+            out_data[i] = Float16(std::tanh(val));
+        }
     } else {
-        throw std::runtime_error("Tanh only supports Float32 and Float64");
+        throw std::runtime_error("Tanh only supports Float32, Float64, and Float16");
     }
 
     return output;
@@ -304,6 +313,18 @@ auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Ten
         for (size_t i = 0; i < n; ++i) {
             double tanh_x = std::tanh(in_data[i]);
             grad_in_data[i] = grad_out_data[i] * (1.0 - tanh_x * tanh_x);
+        }
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* grad_out_data = grad_output.data<Float16>();
+        const Float16* in_data = input.data<Float16>();
+        Float16* grad_in_data = grad_input.data<Float16>();
+        size_t n = input.numel();
+
+        for (size_t i = 0; i < n; ++i) {
+            float in_val = static_cast<float>(in_data[i]);
+            float grad_out_val = static_cast<float>(grad_out_data[i]);
+            float tanh_x = std::tanh(in_val);
+            grad_in_data[i] = Float16(grad_out_val * (1.0f - tanh_x * tanh_x));
         }
     } else {
         throw std::runtime_error("Tanh backward only supports Float32 and Float64");

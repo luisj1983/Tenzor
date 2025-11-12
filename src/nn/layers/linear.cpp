@@ -58,6 +58,14 @@ auto Linear::forward(const Variable& input) -> Variable {
             input_2d_device.set_grad_fn(input_2d.grad_fn());
         }
 
+        // Handle dtype mismatch: convert weight to input's dtype if needed
+        Variable weight_dtype_matched = weight;
+        if (input_2d_device.dtype() != weight.dtype()) {
+            auto weight_converted = weight.tensor().to(input_2d_device.dtype());
+            weight_dtype_matched = Variable(weight_converted, weight.requires_grad());
+            weight_dtype_matched.set_grad_fn(weight.grad_fn());
+        }
+
         // Compute output = input_2d @ weight.T
         // input_2d: (batch_total, in_features)
         // weight: (out_features, in_features)
@@ -65,7 +73,7 @@ auto Linear::forward(const Variable& input) -> Variable {
         // output: (batch_total, out_features)
 
         // Transpose weight
-        auto weight_t = autograd::permute(weight, {1, 0});  // (in_features, out_features)
+        auto weight_t = autograd::permute(weight_dtype_matched, {1, 0});  // (in_features, out_features)
 
         // Matrix multiplication (use device-matched input)
         auto output_2d = autograd::matmul(input_2d_device, weight_t);  // (batch_total, out_features)
@@ -80,8 +88,17 @@ auto Linear::forward(const Variable& input) -> Variable {
         if (bias_it != parameters_.end()) {
             auto& bias_ptr = bias_it->second;
             auto& bias = *bias_ptr;
+
+            // Convert bias to match input dtype if needed
+            Variable bias_dtype_matched = bias;
+            if (input_2d_device.dtype() != bias.dtype()) {
+                auto bias_converted = bias.tensor().to(input_2d_device.dtype());
+                bias_dtype_matched = Variable(bias_converted, bias.requires_grad());
+                bias_dtype_matched.set_grad_fn(bias.grad_fn());
+            }
+
             // Native broadcasting: bias [out_features] + output [*, out_features]
-            output = output + bias;
+            output = output + bias_dtype_matched;
         }
 
         return output;

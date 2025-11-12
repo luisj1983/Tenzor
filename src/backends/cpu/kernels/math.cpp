@@ -319,6 +319,40 @@ static void matmul_blocked_int32(
     }
 }
 
+// Float16 matrix multiplication (performed in Float32 for CPU)
+static void matmul_blocked_float16(
+    const Float16* A, const Float16* B, Float16* C,
+    int64_t M, int64_t N, int64_t K
+) {
+    // Zero-initialize output
+    std::fill_n(C, M * N, Float16(0.0f));
+
+    // Simple blocked matmul with Float32 accumulation for compatibility
+    for (int64_t ii = 0; ii < M; ii += BLOCK_SIZE_M) {
+        int64_t i_end = std::min(ii + static_cast<int64_t>(BLOCK_SIZE_M), M);
+
+        for (int64_t jj = 0; jj < N; jj += BLOCK_SIZE_N) {
+            int64_t j_end = std::min(jj + static_cast<int64_t>(BLOCK_SIZE_N), N);
+
+            for (int64_t kk = 0; kk < K; kk += BLOCK_SIZE_K) {
+                int64_t k_end = std::min(kk + static_cast<int64_t>(BLOCK_SIZE_K), K);
+
+                // Process block with Float32 accumulation
+                for (int64_t i = ii; i < i_end; ++i) {
+                    for (int64_t k = kk; k < k_end; ++k) {
+                        float a_val = static_cast<float>(A[i * K + k]);
+                        for (int64_t j = jj; j < j_end; ++j) {
+                            float b_val = static_cast<float>(B[k * N + j]);
+                            float c_val = static_cast<float>(C[i * N + j]);
+                            C[i * N + j] = Float16(c_val + a_val * b_val);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ============================================================================
 // Element-wise Operations Helpers
 // ============================================================================
@@ -865,6 +899,18 @@ auto add_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             detail::add_scalar(a_data, b_data, c_data, n);
 #endif
 
+        } else if (a.dtype() == DType::Float16) {
+            const Float16* a_data = a.data<Float16>();
+            const Float16* b_data = b.data<Float16>();
+            Float16* c_data = result.data<Float16>();
+
+            // Float16 add with Float32 computation
+            for (size_t i = 0; i < n; ++i) {
+                float a_val = static_cast<float>(a_data[i]);
+                float b_val = static_cast<float>(b_data[i]);
+                c_data[i] = Float16(a_val + b_val);
+            }
+
         } else {
             throw std::runtime_error("Unsupported dtype for add operation");
         }
@@ -897,6 +943,15 @@ auto add_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             int64_t* c_data = result.data<int64_t>();
             detail::broadcast_op(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
                                 [](int64_t x, int64_t y) { return x + y; });
+
+        } else if (a.dtype() == DType::Float16) {
+            const Float16* a_data = a.data<Float16>();
+            const Float16* b_data = b.data<Float16>();
+            Float16* c_data = result.data<Float16>();
+            detail::broadcast_op(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](Float16 x, Float16 y) {
+                                    return Float16(static_cast<float>(x) + static_cast<float>(y));
+                                });
 
         } else {
             throw std::runtime_error("Unsupported dtype for add operation");
@@ -1286,6 +1341,13 @@ auto matmul_kernel(const Tensor& a, const Tensor& b) -> Tensor {
 
             matmul_blocked_int32(a_data, b_data, c_data, M, K, N);
 
+        } else if (a_contig.dtype() == DType::Float16 && b_contig.dtype() == DType::Float16) {
+            const Float16* a_data = a_contig.data<Float16>();
+            const Float16* b_data = b_contig.data<Float16>();
+            Float16* c_data = result.data<Float16>();
+
+            matmul_blocked_float16(a_data, b_data, c_data, M, K, N);
+
         } else {
             throw std::runtime_error(
                 "matmul unsupported dtype combination: " +
@@ -1342,6 +1404,13 @@ auto matmul_kernel(const Tensor& a, const Tensor& b) -> Tensor {
         int32_t* c_data = result.data<int32_t>();
 
         matmul_blocked_int32(a_data, b_data, c_data, M, N, K);
+
+    } else if (a_contig.dtype() == DType::Float16 && b_contig.dtype() == DType::Float16) {
+        const Float16* a_data = a_contig.data<Float16>();
+        const Float16* b_data = b_contig.data<Float16>();
+        Float16* c_data = result.data<Float16>();
+
+        matmul_blocked_float16(a_data, b_data, c_data, M, N, K);
 
     } else {
         throw std::runtime_error(
@@ -1788,6 +1857,10 @@ auto eq_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             const int64_t* a_data = a.data<int64_t>();
             const int64_t* b_data = b.data<int64_t>();
             for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] == b_data[i]); }
+        } else if (a.dtype() == DType::Bool) {
+            const bool* a_data = a.data<bool>();
+            const bool* b_data = b.data<bool>();
+            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] == b_data[i]); }
         } else {
             throw std::runtime_error("Unsupported dtype for eq operation");
         }
@@ -1813,6 +1886,11 @@ auto eq_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             const int64_t* b_data = b.data<int64_t>();
             detail::broadcast_op<int64_t, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
                                 [](int64_t x, int64_t y) { return x == y; });
+        } else if (a.dtype() == DType::Bool) {
+            const bool* a_data = a.data<bool>();
+            const bool* b_data = b.data<bool>();
+            detail::broadcast_op<bool, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](bool x, bool y) { return x == y; });
         } else {
             throw std::runtime_error("Unsupported dtype for eq operation");
         }
@@ -1853,6 +1931,10 @@ auto ne_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             const int64_t* a_data = a.data<int64_t>();
             const int64_t* b_data = b.data<int64_t>();
             for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] != b_data[i]); }
+        } else if (a.dtype() == DType::Bool) {
+            const bool* a_data = a.data<bool>();
+            const bool* b_data = b.data<bool>();
+            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] != b_data[i]); }
         } else {
             throw std::runtime_error("Unsupported dtype for ne operation");
         }
@@ -1878,6 +1960,11 @@ auto ne_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             const int64_t* b_data = b.data<int64_t>();
             detail::broadcast_op<int64_t, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
                                 [](int64_t x, int64_t y) { return x != y; });
+        } else if (a.dtype() == DType::Bool) {
+            const bool* a_data = a.data<bool>();
+            const bool* b_data = b.data<bool>();
+            detail::broadcast_op<bool, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](bool x, bool y) { return x != y; });
         } else {
             throw std::runtime_error("Unsupported dtype for ne operation");
         }

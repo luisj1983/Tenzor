@@ -224,8 +224,46 @@ public:
         }
         #endif
 
-        // CPU fallback implementation
-        Tensor grad_input = zeros({batch, in_channels, height, width});
+        // Use CPU backend through operation registry for proper dtype support
+        auto& backend = BackendManager::get_backend(original_device);
+
+        // Prepare input shape for backward computation
+        std::vector<int64_t> input_shape_vec = {batch, in_channels, height, width};
+        std::vector<int64_t> weight_shape_vec = {out_channels, in_channels_per_group, kernel_h, kernel_w};
+
+        // Compute gradients using backend operations
+        auto grad_input_result = backend.execute_operation(
+            "conv2d_backward_input",
+            {grad_output, weight},
+            {{"input_shape", input_shape_vec}, {"stride", stride_}, {"padding", padding_},
+             {"dilation", dilation_}, {"groups", groups_}}
+        );
+        Tensor grad_input = grad_input_result[0];
+
+        auto grad_weight_result = backend.execute_operation(
+            "conv2d_backward_weight",
+            {grad_output, input},
+            {{"weight_shape", weight_shape_vec}, {"stride", stride_}, {"padding", padding_},
+             {"dilation", dilation_}, {"groups", groups_}}
+        );
+        Tensor grad_weight = grad_weight_result[0];
+
+        // Gradient w.r.t bias
+        if (saved_tensors_.size() > 2) {
+            auto grad_bias_result = backend.execute_operation(
+                "conv2d_backward_bias",
+                {grad_output},
+                {}
+            );
+            Tensor grad_bias = grad_bias_result[0];
+            return {grad_input, grad_weight, grad_bias};
+        }
+
+        return {grad_input, grad_weight};
+
+        /*
+        // Old CPU fallback implementation - replaced with backend call above
+        Tensor grad_input = zeros({batch, in_channels, height, width}, input.dtype());
         int64_t out_channels_per_group = out_channels / groups_;
 
         auto grad_shape = grad_output.shape();
@@ -322,33 +360,7 @@ public:
                 }
             }
         }
-
-        // Gradient w.r.t weight (similar CPU fallback logic)
-        Tensor grad_weight = zeros({out_channels, in_channels_per_group, kernel_h, kernel_w});
-
-        // Gradient w.r.t bias
-        Tensor grad_bias;
-        if (saved_tensors_.size() > 2) {
-            grad_bias = zeros({out_channels});
-            float* grad_bias_data = grad_bias.data<float>();
-            const float* grad_out_data = grad_output.data<float>();
-
-            for (int64_t b = 0; b < batch; ++b) {
-                for (int64_t c = 0; c < out_channels; ++c) {
-                    for (int64_t h = 0; h < out_h; ++h) {
-                        for (int64_t w = 0; w < out_w; ++w) {
-                            int64_t idx = b * (out_channels * out_h * out_w) +
-                                         c * (out_h * out_w) +
-                                         h * out_w + w;
-                            grad_bias_data[c] += grad_out_data[idx];
-                        }
-                    }
-                }
-            }
-            return {grad_input, grad_weight, grad_bias};
-        }
-
-        return {grad_input, grad_weight};
+        */
     }
 
 private:
@@ -417,7 +429,28 @@ auto Conv2d::forward(const Variable& input) -> Variable {
 
     auto& weight = *parameters_["weight"];
     auto bias_it = parameters_.find("bias");
-    const Tensor* bias_ptr = (bias_it != parameters_.end()) ? &(bias_it->second->tensor()) : nullptr;
+
+    // Handle dtype mismatch: convert weight and bias to input's dtype if needed
+    Variable weight_dtype_matched = weight;
+    if (input.dtype() != weight.dtype()) {
+        auto weight_converted = weight.tensor().to(input.dtype());
+        weight_dtype_matched = Variable(weight_converted, weight.requires_grad());
+        weight_dtype_matched.set_grad_fn(weight.grad_fn());
+    }
+
+    const Tensor* bias_ptr = nullptr;
+    Variable bias_dtype_matched;
+    if (bias_it != parameters_.end()) {
+        auto& bias = *bias_it->second;
+        if (input.dtype() != bias.dtype()) {
+            auto bias_converted = bias.tensor().to(input.dtype());
+            bias_dtype_matched = Variable(bias_converted, bias.requires_grad());
+            bias_dtype_matched.set_grad_fn(bias.grad_fn());
+            bias_ptr = &bias_dtype_matched.tensor();
+        } else {
+            bias_ptr = &bias.tensor();
+        }
+    }
 
     Tensor output;
     Device original_device = input.tensor().device();
@@ -428,14 +461,14 @@ auto Conv2d::forward(const Variable& input) -> Variable {
         // Try cuDNN first for optimal performance
         try {
             output = cuda::cudnn_conv2d_forward(
-                input.tensor(), weight.tensor(), bias_ptr,
+                input.tensor(), weight_dtype_matched.tensor(), bias_ptr,
                 stride_, padding_, dilation_, groups_,
                 nullptr
             );
         } catch (const std::exception& e) {
             // Fall back to custom CUDA kernels
             output = cuda::conv2d_forward_kernel(
-                input.tensor(), weight.tensor(), bias_ptr,
+                input.tensor(), weight_dtype_matched.tensor(), bias_ptr,
                 stride_, padding_, dilation_, groups_,
                 nullptr
             );
@@ -443,7 +476,7 @@ auto Conv2d::forward(const Variable& input) -> Variable {
         #else
         // Use custom CUDA kernels
         output = cuda::conv2d_forward_kernel(
-            input.tensor(), weight.tensor(), bias_ptr,
+            input.tensor(), weight_dtype_matched.tensor(), bias_ptr,
             stride_, padding_, dilation_, groups_,
             nullptr
         );
@@ -454,7 +487,7 @@ auto Conv2d::forward(const Variable& input) -> Variable {
         // CPU implementation using im2col + matmul
         output = zeros({batch, out_channels_, out_h, out_w}, input.tensor().dtype(), original_device);
 
-        auto weight_shape = weight.tensor().shape();
+        auto weight_shape = weight_dtype_matched.tensor().shape();
         int64_t in_channels_per_group = weight_shape[1];
         int64_t out_channels_per_group = out_channels_ / groups_;
 
@@ -491,7 +524,7 @@ auto Conv2d::forward(const Variable& input) -> Variable {
                                                         kernel_size_, kernel_size_};
             auto weight_slice = zeros(weight_slice_shape);
 
-            const float* weight_data = weight.tensor().data<float>();
+            const float* weight_data = weight_dtype_matched.tensor().data<float>();
             float* weight_slice_data = weight_slice.data<float>();
 
             for (int64_t oc = 0; oc < out_channels_per_group; ++oc) {
@@ -567,9 +600,9 @@ auto Conv2d::forward(const Variable& input) -> Variable {
     if (input.requires_grad() || weight.requires_grad()) {
         std::vector<Tensor> tensors_to_save;
         if (bias_ptr != nullptr) {
-            tensors_to_save = {input.tensor(), weight.tensor(), *bias_ptr};
+            tensors_to_save = {input.tensor(), weight_dtype_matched.tensor(), *bias_ptr};
         } else {
-            tensors_to_save = {input.tensor(), weight.tensor()};
+            tensors_to_save = {input.tensor(), weight_dtype_matched.tensor()};
         }
 
         auto backward_fn = std::make_shared<Conv2dBackward>(

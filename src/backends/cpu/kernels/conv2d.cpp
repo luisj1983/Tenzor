@@ -212,16 +212,18 @@ void gemm_transA_cpu(
 // Conv2d Forward CPU Implementation
 // ============================================================================
 
-auto conv2d_forward_kernel(
-    const Tensor& input,         // (batch, in_channels, height, width)
-    const Tensor& weight,        // (out_channels, in_channels, kernel_h, kernel_w)
-    const Tensor* bias,          // (out_channels) or nullptr
+// Template helper for dtype-generic conv2d forward
+template<typename T>
+void conv2d_forward_impl(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias,
+    Tensor& output,
     int64_t stride,
     int64_t padding,
     int64_t dilation,
     int64_t groups
-) -> Tensor {
-    // Extract dimensions
+) {
     auto input_shape = input.shape();
     auto weight_shape = weight.shape();
 
@@ -235,16 +237,12 @@ auto conv2d_forward_kernel(
     int64_t kernel_h = weight_shape[2];
     int64_t kernel_w = weight_shape[3];
 
-    // Calculate output dimensions
-    int64_t out_h = calculate_output_size(height, kernel_h, stride, padding, dilation);
-    int64_t out_w = calculate_output_size(width, kernel_w, stride, padding, dilation);
-
-    // Create output tensor
-    std::vector<int64_t> output_shape = {batch, out_channels, out_h, out_w};
-    Tensor output(output_shape, input.dtype(), input.device());
+    auto out_shape = output.shape();
+    int64_t out_h = out_shape[2];
+    int64_t out_w = out_shape[3];
 
     // Initialize output to zeros
-    std::memset(output.data<float>(), 0, output.numel() * sizeof(float));
+    std::memset(output.data<T>(), 0, output.numel() * sizeof(T));
 
     // Process each group separately
     int64_t out_channels_per_group = out_channels / groups;
@@ -255,13 +253,12 @@ auto conv2d_forward_kernel(
         int64_t out_start = g * out_channels_per_group;
 
         // Allocate im2col buffer for this group
-        // Shape: (batch * out_h * out_w, in_channels_per_group * kernel_h * kernel_w)
         int64_t col_rows = batch * out_h * out_w;
         int64_t col_cols = in_channels_per_group * kernel_h * kernel_w;
-        std::vector<float> col_buffer(col_rows * col_cols);
+        std::vector<T> col_buffer(col_rows * col_cols);
 
         // Apply im2col transformation for this group's input channels
-        const float* input_ptr = input.data<float>() + in_start * height * width;
+        const T* input_ptr = input.data<T>() + in_start * height * width;
         im2col_cpu(
             input_ptr,
             col_buffer.data(),
@@ -279,18 +276,12 @@ auto conv2d_forward_kernel(
         );
 
         // Matrix multiplication
-        // weight_group: (out_channels_per_group, in_channels_per_group * kernel_h * kernel_w)
-        // col_buffer: (batch * out_h * out_w, in_channels_per_group * kernel_h * kernel_w)
-        // output: (batch * out_h * out_w, out_channels_per_group)
-        //
-        // We compute: output = col_buffer @ weight_group^T
-
         int64_t M = col_rows;
         int64_t K = col_cols;
         int64_t N = out_channels_per_group;
 
-        const float* weight_ptr = weight.data<float>() + out_start * in_channels_per_group * kernel_h * kernel_w;
-        float* output_ptr = output.data<float>() + out_start * out_h * out_w;
+        const T* weight_ptr = weight.data<T>() + out_start * in_channels_per_group * kernel_h * kernel_w;
+        T* output_ptr = output.data<T>() + out_start * out_h * out_w;
 
         // Perform GEMM: C = A @ B^T
         gemm_cpu(
@@ -304,10 +295,8 @@ auto conv2d_forward_kernel(
 
     // Add bias if present
     if (bias != nullptr) {
-        // Broadcast bias across spatial dimensions
-        // bias: (out_channels), output: (batch, out_channels, out_h, out_w)
-        const float* bias_data = bias->data<float>();
-        float* output_data = output.data<float>();
+        const T* bias_data = bias->data<T>();
+        T* output_data = output.data<T>();
 
         #pragma omp parallel for collapse(4)
         for (int64_t b = 0; b < batch; ++b) {
@@ -323,6 +312,44 @@ auto conv2d_forward_kernel(
             }
         }
     }
+}
+
+auto conv2d_forward_kernel(
+    const Tensor& input,         // (batch, in_channels, height, width)
+    const Tensor& weight,        // (out_channels, in_channels, kernel_h, kernel_w)
+    const Tensor* bias,          // (out_channels) or nullptr
+    int64_t stride,
+    int64_t padding,
+    int64_t dilation,
+    int64_t groups
+) -> Tensor {
+    // Extract dimensions
+    auto input_shape = input.shape();
+    auto weight_shape = weight.shape();
+
+    int64_t batch = input_shape[0];
+    int64_t out_channels = weight_shape[0];
+    int64_t height = input_shape[2];
+    int64_t width = input_shape[3];
+    int64_t kernel_h = weight_shape[2];
+    int64_t kernel_w = weight_shape[3];
+
+    // Calculate output dimensions
+    int64_t out_h = calculate_output_size(height, kernel_h, stride, padding, dilation);
+    int64_t out_w = calculate_output_size(width, kernel_w, stride, padding, dilation);
+
+    // Create output tensor with correct dtype
+    std::vector<int64_t> output_shape = {batch, out_channels, out_h, out_w};
+    Tensor output(output_shape, input.dtype(), input.device());
+
+    // Dispatch based on dtype
+    if (input.dtype() == DType::Float32) {
+        conv2d_forward_impl<float>(input, weight, bias, output, stride, padding, dilation, groups);
+    } else if (input.dtype() == DType::Float64) {
+        conv2d_forward_impl<double>(input, weight, bias, output, stride, padding, dilation, groups);
+    } else {
+        throw std::runtime_error("Unsupported dtype for conv2d_forward");
+    }
 
     return output;
 }
@@ -331,16 +358,18 @@ auto conv2d_forward_kernel(
 // Conv2d Backward Input CPU Implementation
 // ============================================================================
 
-auto conv2d_backward_input_kernel(
-    const Tensor& grad_output,   // (batch, out_channels, out_h, out_w)
-    const Tensor& weight,        // (out_channels, in_channels, kernel_h, kernel_w)
-    const std::vector<int64_t>& input_shape,  // (batch, in_channels, height, width)
+// Template helper for dtype-generic conv2d backward input
+template<typename T>
+void conv2d_backward_input_impl(
+    const Tensor& grad_output,
+    const Tensor& weight,
+    Tensor& grad_input,
+    const std::vector<int64_t>& input_shape,
     int64_t stride,
     int64_t padding,
     int64_t dilation,
     int64_t groups
-) -> Tensor {
-    // Extract dimensions
+) {
     auto weight_shape = weight.shape();
     auto grad_shape = grad_output.shape();
 
@@ -357,35 +386,29 @@ auto conv2d_backward_input_kernel(
     int64_t out_h = grad_shape[2];
     int64_t out_w = grad_shape[3];
 
-    // Initialize gradient w.r.t input
-    Tensor grad_input(input_shape, grad_output.dtype(), grad_output.device());
-    std::memset(grad_input.data<float>(), 0, grad_input.numel() * sizeof(float));
-
     int64_t out_channels_per_group = out_channels / groups;
     int64_t col_rows = batch * out_h * out_w;
     int64_t col_cols = in_channels_per_group * kernel_h * kernel_w;
+
+    // Zero-initialize gradient input
+    std::memset(grad_input.data<T>(), 0, grad_input.numel() * sizeof(T));
 
     for (int64_t g = 0; g < groups; ++g) {
         int64_t in_start = g * in_channels_per_group;
         int64_t out_start = g * out_channels_per_group;
 
         // Allocate col buffer
-        std::vector<float> grad_col(col_rows * col_cols);
-
-        // Compute grad_col = grad_output @ weight
-        // grad_output: (batch * out_h * out_w, out_channels_per_group)
-        // weight: (out_channels_per_group, in_channels_per_group * kernel_h * kernel_w)
-        // grad_col: (batch * out_h * out_w, in_channels_per_group * kernel_h * kernel_w)
+        std::vector<T> grad_col(col_rows * col_cols);
 
         int64_t M = col_rows;
         int64_t K = out_channels_per_group;
         int64_t N = col_cols;
 
-        const float* grad_out_ptr = grad_output.data<float>() + out_start * out_h * out_w;
-        const float* weight_ptr = weight.data<float>() + out_start * in_channels_per_group * kernel_h * kernel_w;
+        const T* grad_out_ptr = grad_output.data<T>() + out_start * out_h * out_w;
+        const T* weight_ptr = weight.data<T>() + out_start * in_channels_per_group * kernel_h * kernel_w;
 
         // Perform GEMM: C = A @ B (no transpose)
-        gemm_cpu(
+        gemm_cpu<T>(
             grad_out_ptr,       // A: (M, K)
             weight_ptr,         // B: (K, N) - already in correct orientation
             grad_col.data(),    // C: (M, N)
@@ -394,8 +417,8 @@ auto conv2d_backward_input_kernel(
         );
 
         // Apply col2im to accumulate gradients
-        float* grad_input_ptr = grad_input.data<float>() + in_start * height * width;
-        col2im_cpu(
+        T* grad_input_ptr = grad_input.data<T>() + in_start * height * width;
+        col2im_cpu<T>(
             grad_col.data(),
             grad_input_ptr,
             batch,
@@ -411,6 +434,28 @@ auto conv2d_backward_input_kernel(
             out_w
         );
     }
+}
+
+auto conv2d_backward_input_kernel(
+    const Tensor& grad_output,   // (batch, out_channels, out_h, out_w)
+    const Tensor& weight,        // (out_channels, in_channels, kernel_h, kernel_w)
+    const std::vector<int64_t>& input_shape,  // (batch, in_channels, height, width)
+    int64_t stride,
+    int64_t padding,
+    int64_t dilation,
+    int64_t groups
+) -> Tensor {
+    // Initialize gradient w.r.t input with correct dtype
+    Tensor grad_input(input_shape, grad_output.dtype(), grad_output.device());
+
+    // Dispatch based on dtype
+    if (grad_output.dtype() == DType::Float32) {
+        conv2d_backward_input_impl<float>(grad_output, weight, grad_input, input_shape, stride, padding, dilation, groups);
+    } else if (grad_output.dtype() == DType::Float64) {
+        conv2d_backward_input_impl<double>(grad_output, weight, grad_input, input_shape, stride, padding, dilation, groups);
+    } else {
+        throw std::runtime_error("Unsupported dtype for conv2d_backward_input");
+    }
 
     return grad_input;
 }
@@ -419,16 +464,18 @@ auto conv2d_backward_input_kernel(
 // Conv2d Backward Weight CPU Implementation
 // ============================================================================
 
-auto conv2d_backward_weight_kernel(
-    const Tensor& grad_output,   // (batch, out_channels, out_h, out_w)
-    const Tensor& input,         // (batch, in_channels, height, width)
-    const std::vector<int64_t>& weight_shape,  // (out_channels, in_channels, kernel_h, kernel_w)
+// Template helper for dtype-generic conv2d backward weight
+template<typename T>
+void conv2d_backward_weight_impl(
+    const Tensor& grad_output,
+    const Tensor& input,
+    Tensor& grad_weight,
+    const std::vector<int64_t>& weight_shape,
     int64_t stride,
     int64_t padding,
     int64_t dilation,
     int64_t groups
-) -> Tensor {
-    // Extract dimensions
+) {
     auto input_shape = input.shape();
     auto grad_shape = grad_output.shape();
 
@@ -445,23 +492,22 @@ auto conv2d_backward_weight_kernel(
     int64_t out_h = grad_shape[2];
     int64_t out_w = grad_shape[3];
 
-    // Initialize gradient w.r.t weight
-    Tensor grad_weight(weight_shape, grad_output.dtype(), grad_output.device());
-    std::memset(grad_weight.data<float>(), 0, grad_weight.numel() * sizeof(float));
-
     int64_t out_channels_per_group = out_channels / groups;
     int64_t col_rows = batch * out_h * out_w;
     int64_t col_cols = in_channels_per_group * kernel_h * kernel_w;
+
+    // Zero-initialize gradient weight
+    std::memset(grad_weight.data<T>(), 0, grad_weight.numel() * sizeof(T));
 
     for (int64_t g = 0; g < groups; ++g) {
         int64_t in_start = g * in_channels_per_group;
         int64_t out_start = g * out_channels_per_group;
 
         // Apply im2col to input
-        std::vector<float> input_col(col_rows * col_cols);
+        std::vector<T> input_col(col_rows * col_cols);
 
-        const float* input_ptr = input.data<float>() + in_start * height * width;
-        im2col_cpu(
+        const T* input_ptr = input.data<T>() + in_start * height * width;
+        im2col_cpu<T>(
             input_ptr,
             input_col.data(),
             batch,
@@ -477,25 +523,42 @@ auto conv2d_backward_weight_kernel(
             out_w
         );
 
-        // Compute grad_weight = grad_output^T @ input_col
-        // grad_output: (batch * out_h * out_w, out_channels_per_group)
-        // input_col: (batch * out_h * out_w, in_channels_per_group * kernel_h * kernel_w)
-        // grad_weight: (out_channels_per_group, in_channels_per_group * kernel_h * kernel_w)
-
         int64_t M = out_channels_per_group;
         int64_t K = col_rows;
         int64_t N = col_cols;
 
-        const float* grad_out_ptr = grad_output.data<float>() + out_start * out_h * out_w;
-        float* grad_weight_ptr = grad_weight.data<float>() + out_start * in_channels_per_group * kernel_h * kernel_w;
+        const T* grad_out_ptr = grad_output.data<T>() + out_start * out_h * out_w;
+        T* grad_weight_ptr = grad_weight.data<T>() + out_start * in_channels_per_group * kernel_h * kernel_w;
 
         // Perform GEMM: C = A^T @ B
-        gemm_transA_cpu(
+        gemm_transA_cpu<T>(
             grad_out_ptr,       // A: (K, M) - will be transposed
             input_col.data(),   // B: (K, N)
             grad_weight_ptr,    // C: (M, N)
             M, N, K
         );
+    }
+}
+
+auto conv2d_backward_weight_kernel(
+    const Tensor& grad_output,   // (batch, out_channels, out_h, out_w)
+    const Tensor& input,         // (batch, in_channels, height, width)
+    const std::vector<int64_t>& weight_shape,  // (out_channels, in_channels, kernel_h, kernel_w)
+    int64_t stride,
+    int64_t padding,
+    int64_t dilation,
+    int64_t groups
+) -> Tensor {
+    // Initialize gradient w.r.t weight
+    Tensor grad_weight(weight_shape, grad_output.dtype(), grad_output.device());
+
+    // Dispatch based on dtype
+    if (grad_output.dtype() == DType::Float32) {
+        conv2d_backward_weight_impl<float>(grad_output, input, grad_weight, weight_shape, stride, padding, dilation, groups);
+    } else if (grad_output.dtype() == DType::Float64) {
+        conv2d_backward_weight_impl<double>(grad_output, input, grad_weight, weight_shape, stride, padding, dilation, groups);
+    } else {
+        throw std::runtime_error("Unsupported dtype for conv2d_backward_weight");
     }
 
     return grad_weight;
@@ -505,26 +568,27 @@ auto conv2d_backward_weight_kernel(
 // Conv2d Backward Bias CPU Implementation
 // ============================================================================
 
-auto conv2d_backward_bias_kernel(
-    const Tensor& grad_output    // (batch, out_channels, out_h, out_w)
-) -> Tensor {
+// Template helper for dtype-generic conv2d backward bias
+template<typename T>
+void conv2d_backward_bias_impl(
+    const Tensor& grad_output,
+    Tensor& grad_bias
+) {
     auto grad_shape = grad_output.shape();
     int64_t batch = grad_shape[0];
     int64_t out_channels = grad_shape[1];
     int64_t out_h = grad_shape[2];
     int64_t out_w = grad_shape[3];
 
-    // Initialize gradient w.r.t bias
-    Tensor grad_bias({out_channels}, grad_output.dtype(), grad_output.device());
-    float* grad_bias_data = grad_bias.data<float>();
-    std::memset(grad_bias_data, 0, out_channels * sizeof(float));
+    T* grad_bias_data = grad_bias.data<T>();
+    std::memset(grad_bias_data, 0, out_channels * sizeof(T));
 
-    const float* grad_out_data = grad_output.data<float>();
+    const T* grad_out_data = grad_output.data<T>();
 
     // Sum over batch, height, width dimensions
     #pragma omp parallel for
     for (int64_t c = 0; c < out_channels; ++c) {
-        float sum = 0.0f;
+        T sum = T(0);
         for (int64_t b = 0; b < batch; ++b) {
             for (int64_t h = 0; h < out_h; ++h) {
                 for (int64_t w = 0; w < out_w; ++w) {
@@ -536,6 +600,25 @@ auto conv2d_backward_bias_kernel(
             }
         }
         grad_bias_data[c] = sum;
+    }
+}
+
+auto conv2d_backward_bias_kernel(
+    const Tensor& grad_output    // (batch, out_channels, out_h, out_w)
+) -> Tensor {
+    auto grad_shape = grad_output.shape();
+    int64_t out_channels = grad_shape[1];
+
+    // Initialize gradient w.r.t bias
+    Tensor grad_bias({out_channels}, grad_output.dtype(), grad_output.device());
+
+    // Dispatch based on dtype
+    if (grad_output.dtype() == DType::Float32) {
+        conv2d_backward_bias_impl<float>(grad_output, grad_bias);
+    } else if (grad_output.dtype() == DType::Float64) {
+        conv2d_backward_bias_impl<double>(grad_output, grad_bias);
+    } else {
+        throw std::runtime_error("Unsupported dtype for conv2d_backward_bias");
     }
 
     return grad_bias;
