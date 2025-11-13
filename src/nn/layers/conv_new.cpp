@@ -225,14 +225,14 @@ public:
         #endif
 
         // Use CPU backend through operation registry for proper dtype support
-        auto& backend = BackendManager::get_backend(original_device);
+        auto* backend = Dispatcher::get_backend({grad_output});
 
         // Prepare input shape for backward computation
         std::vector<int64_t> input_shape_vec = {batch, in_channels, height, width};
         std::vector<int64_t> weight_shape_vec = {out_channels, in_channels_per_group, kernel_h, kernel_w};
 
         // Compute gradients using backend operations
-        auto grad_input_result = backend.execute_operation(
+        auto grad_input_result = backend->execute_operation(
             "conv2d_backward_input",
             {grad_output, weight},
             {{"input_shape", input_shape_vec}, {"stride", stride_}, {"padding", padding_},
@@ -240,7 +240,7 @@ public:
         );
         Tensor grad_input = grad_input_result[0];
 
-        auto grad_weight_result = backend.execute_operation(
+        auto grad_weight_result = backend->execute_operation(
             "conv2d_backward_weight",
             {grad_output, input},
             {{"weight_shape", weight_shape_vec}, {"stride", stride_}, {"padding", padding_},
@@ -250,7 +250,7 @@ public:
 
         // Gradient w.r.t bias
         if (saved_tensors_.size() > 2) {
-            auto grad_bias_result = backend.execute_operation(
+            auto grad_bias_result = backend->execute_operation(
                 "conv2d_backward_bias",
                 {grad_output},
                 {}
@@ -485,7 +485,7 @@ auto Conv2d::forward(const Variable& input) -> Variable {
     #endif
     {
         // Use CPU backend through operation registry for proper dtype support
-        auto& backend = BackendManager::get_backend(original_device);
+        auto* backend = Dispatcher::get_backend({grad_output});
 
         // Compute output using backend operation
         // Pass bias as third input if present
