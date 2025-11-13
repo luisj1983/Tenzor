@@ -12,6 +12,59 @@ namespace tenzor {
 namespace cpu {
 
 // ============================================================================
+// Float16 Arithmetic Helper Functions
+// ============================================================================
+// These inline helpers allow Float16 to work with template code that uses
+// arithmetic operators. Operations are performed in Float32 precision.
+
+inline Float16 operator+(const Float16& a, const Float16& b) {
+    return Float16(static_cast<float>(a) + static_cast<float>(b));
+}
+
+inline Float16 operator-(const Float16& a, const Float16& b) {
+    return Float16(static_cast<float>(a) - static_cast<float>(b));
+}
+
+inline Float16 operator*(const Float16& a, const Float16& b) {
+    return Float16(static_cast<float>(a) * static_cast<float>(b));
+}
+
+inline Float16 operator/(const Float16& a, const Float16& b) {
+    return Float16(static_cast<float>(a) / static_cast<float>(b));
+}
+
+inline Float16& operator+=(Float16& a, const Float16& b) {
+    a = Float16(static_cast<float>(a) + static_cast<float>(b));
+    return a;
+}
+
+inline Float16& operator-=(Float16& a, const Float16& b) {
+    a = Float16(static_cast<float>(a) - static_cast<float>(b));
+    return a;
+}
+
+inline Float16& operator*=(Float16& a, const Float16& b) {
+    a = Float16(static_cast<float>(a) * static_cast<float>(b));
+    return a;
+}
+
+inline Float16& operator/=(Float16& a, const Float16& b) {
+    a = Float16(static_cast<float>(a) / static_cast<float>(b));
+    return a;
+}
+
+// Math helper templates for Float16 support
+template<typename T>
+inline T safe_sqrt(const T& x) {
+    return std::sqrt(x);
+}
+
+template<>
+inline Float16 safe_sqrt<Float16>(const Float16& x) {
+    return Float16(safe_sqrt(static_cast<float>(x)));
+}
+
+// ============================================================================
 // BatchNorm2d Mean/Variance Computation
 // ============================================================================
 
@@ -38,8 +91,8 @@ void batchnorm_mean_var_impl(const T* input,
     #pragma omp parallel for if(C > 1)
     for (int64_t c = 0; c < C; c++) {
         // Compute mean using Kahan summation for numerical stability
-        T sum = T(0);
-        T compensation = T(0);
+        T sum = T(0.0f);
+        T compensation = T(0.0f);
 
         for (int64_t n = 0; n < N; n++) {
             for (int64_t h = 0; h < H; h++) {
@@ -53,11 +106,11 @@ void batchnorm_mean_var_impl(const T* input,
                 }
             }
         }
-        mean[c] = sum / T(total_elements);
+        mean[c] = sum / T(static_cast<float>(total_elements));
 
         // Compute variance using Kahan summation
-        T sum_sq_diff = T(0);
-        T var_compensation = T(0);
+        T sum_sq_diff = T(0.0f);
+        T var_compensation = T(0.0f);
         T channel_mean = mean[c];
 
         for (int64_t n = 0; n < N; n++) {
@@ -73,7 +126,7 @@ void batchnorm_mean_var_impl(const T* input,
                 }
             }
         }
-        variance[c] = sum_sq_diff / T(total_elements);
+        variance[c] = sum_sq_diff / T(static_cast<float>(total_elements));
     }
 }
 
@@ -106,8 +159,15 @@ auto batchnorm2d_mean_var_kernel(const Tensor& input) -> std::vector<Tensor> {
             variance.data<double>(),
             N, C, H, W
         );
+    } else if (input.dtype() == DType::Float16) {
+        batchnorm_mean_var_impl<Float16>(
+            input.data<Float16>(),
+            mean.data<Float16>(),
+            variance.data<Float16>(),
+            N, C, H, W
+        );
     } else {
-        throw std::runtime_error("BatchNorm2d only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("BatchNorm2d only supports Float32, Float64, and Float16 dtypes");
     }
 
     return {mean, variance};
@@ -140,7 +200,7 @@ void batchnorm_forward_impl(const T* input,
 
         T channel_mean = mean[c];
         T channel_var = variance[c];
-        T invstd = T(1) / std::sqrt(channel_var + epsilon);
+        T invstd = T(1.0f) / safe_sqrt(channel_var + epsilon);
 
         output[idx] = (input[idx] - channel_mean) * invstd;
     }
@@ -177,8 +237,17 @@ auto batchnorm2d_forward_kernel(const Tensor& input,
             static_cast<double>(epsilon),
             N, C, H, W
         );
+    } else if (input.dtype() == DType::Float16) {
+        batchnorm_forward_impl<Float16>(
+            input.data<Float16>(),
+            output.data<Float16>(),
+            mean.data<Float16>(),
+            variance.data<Float16>(),
+            Float16(static_cast<float>(epsilon)),
+            N, C, H, W
+        );
     } else {
-        throw std::runtime_error("BatchNorm2d only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("BatchNorm2d only supports Float32, Float64, and Float16 dtypes");
     }
 
     return output;
@@ -211,7 +280,7 @@ void batchnorm_forward_affine_impl(const T* input,
 
         T channel_mean = mean[c];
         T channel_var = variance[c];
-        T invstd = T(1) / std::sqrt(channel_var + epsilon);
+        T invstd = T(1.0f) / safe_sqrt(channel_var + epsilon);
 
         T normalized = (input[idx] - channel_mean) * invstd;
         output[idx] = gamma[c] * normalized + beta[c];
@@ -255,8 +324,19 @@ auto batchnorm2d_forward_affine_kernel(const Tensor& input,
             static_cast<double>(epsilon),
             N, C, H, W
         );
+    } else if (input.dtype() == DType::Float16) {
+        batchnorm_forward_affine_impl<Float16>(
+            input.data<Float16>(),
+            output.data<Float16>(),
+            mean.data<Float16>(),
+            variance.data<Float16>(),
+            gamma.data<Float16>(),
+            beta.data<Float16>(),
+            Float16(static_cast<float>(epsilon)),
+            N, C, H, W
+        );
     } else {
-        throw std::runtime_error("BatchNorm2d only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("BatchNorm2d only supports Float32, Float64, and Float16 dtypes");
     }
 
     return output;
@@ -276,8 +356,8 @@ void batchnorm_update_running_stats_impl(T* running_mean,
                                          int64_t C) {
     #pragma omp parallel for if(C > 100)
     for (int64_t c = 0; c < C; c++) {
-        running_mean[c] = (T(1) - momentum) * running_mean[c] + momentum * batch_mean[c];
-        running_var[c] = (T(1) - momentum) * running_var[c] + momentum * batch_var[c];
+        running_mean[c] = (T(1.0f) - momentum) * running_mean[c] + momentum * batch_mean[c];
+        running_var[c] = (T(1.0f) - momentum) * running_var[c] + momentum * batch_var[c];
     }
 }
 
@@ -306,8 +386,17 @@ auto batchnorm2d_update_running_stats_kernel(Tensor& running_mean,
             static_cast<double>(momentum),
             C
         );
+    } else if (running_mean.dtype() == DType::Float16) {
+        batchnorm_update_running_stats_impl<Float16>(
+            running_mean.data<Float16>(),
+            running_var.data<Float16>(),
+            batch_mean.data<Float16>(),
+            batch_var.data<Float16>(),
+            Float16(static_cast<float>(momentum)),
+            C
+        );
     } else {
-        throw std::runtime_error("BatchNorm2d only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("BatchNorm2d only supports Float32, Float64, and Float16 dtypes");
     }
 }
 
@@ -343,12 +432,12 @@ void batchnorm_backward_impl(const T* grad_output,
     for (int64_t c = 0; c < C; c++) {
         T channel_mean = mean[c];
         T channel_var = variance[c];
-        T invstd = T(1) / std::sqrt(channel_var + epsilon);
+        T invstd = T(1.0f) / safe_sqrt(channel_var + epsilon);
 
         // Compute grad_gamma = sum(grad_output * normalized)
         // Compute grad_beta = sum(grad_output)
-        T sum_grad_gamma = T(0);
-        T sum_grad_beta = T(0);
+        T sum_grad_gamma = T(0.0f);
+        T sum_grad_beta = T(0.0f);
 
         for (int64_t n = 0; n < N; n++) {
             for (int64_t h = 0; h < H; h++) {
@@ -373,12 +462,12 @@ void batchnorm_backward_impl(const T* grad_output,
     for (int64_t c = 0; c < C; c++) {
         T channel_mean = mean[c];
         T channel_var = variance[c];
-        T invstd = T(1) / std::sqrt(channel_var + epsilon);
+        T invstd = T(1.0f) / safe_sqrt(channel_var + epsilon);
         T channel_gamma = gamma[c];
 
         // Compute auxiliary statistics
-        T sum_grad = T(0);
-        T sum_grad_norm = T(0);
+        T sum_grad = T(0.0f);
+        T sum_grad_norm = T(0.0f);
 
         for (int64_t n = 0; n < N; n++) {
             for (int64_t h = 0; h < H; h++) {
@@ -393,8 +482,8 @@ void batchnorm_backward_impl(const T* grad_output,
             }
         }
 
-        T mean_grad = sum_grad / T(total_elements);
-        T mean_grad_norm = sum_grad_norm / T(total_elements);
+        T mean_grad = sum_grad / T(static_cast<float>(total_elements));
+        T mean_grad_norm = sum_grad_norm / T(static_cast<float>(total_elements));
 
         // Compute gradient w.r.t input
         for (int64_t n = 0; n < N; n++) {
@@ -457,8 +546,21 @@ auto batchnorm2d_backward_kernel(const Tensor& grad_output,
             static_cast<double>(epsilon),
             N, C, H, W
         );
+    } else if (input.dtype() == DType::Float16) {
+        batchnorm_backward_impl<Float16>(
+            grad_output.data<Float16>(),
+            input.data<Float16>(),
+            grad_input.data<Float16>(),
+            grad_gamma.data<Float16>(),
+            grad_beta.data<Float16>(),
+            mean.data<Float16>(),
+            variance.data<Float16>(),
+            gamma.data<Float16>(),
+            Float16(static_cast<float>(epsilon)),
+            N, C, H, W
+        );
     } else {
-        throw std::runtime_error("BatchNorm2d only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("BatchNorm2d only supports Float32, Float64, and Float16 dtypes");
     }
 
     return {grad_input, grad_gamma, grad_beta};

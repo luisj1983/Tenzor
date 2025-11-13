@@ -9,6 +9,43 @@
 namespace tenzor {
 namespace cpu {
 
+// Float16 Arithmetic Helper Functions for LayerNorm
+inline Float16 operator+(const Float16& a, const Float16& b) {
+    return Float16(static_cast<float>(a) + static_cast<float>(b));
+}
+
+inline Float16 operator-(const Float16& a, const Float16& b) {
+    return Float16(static_cast<float>(a) - static_cast<float>(b));
+}
+
+inline Float16 operator*(const Float16& a, const Float16& b) {
+    return Float16(static_cast<float>(a) * static_cast<float>(b));
+}
+
+inline Float16 operator/(const Float16& a, const Float16& b) {
+    return Float16(static_cast<float>(a) / static_cast<float>(b));
+}
+
+inline Float16& operator+=(Float16& a, const Float16& b) {
+    a = Float16(static_cast<float>(a) + static_cast<float>(b));
+    return a;
+}
+
+inline Float16& operator-=(Float16& a, const Float16& b) {
+    a = Float16(static_cast<float>(a) - static_cast<float>(b));
+    return a;
+}
+
+inline Float16& operator*=(Float16& a, const Float16& b) {
+    a = Float16(static_cast<float>(a) * static_cast<float>(b));
+    return a;
+}
+
+inline Float16& operator/=(Float16& a, const Float16& b) {
+    a = Float16(static_cast<float>(a) / static_cast<float>(b));
+    return a;
+}
+
 /**
  * @brief Fused linear + ReLU kernel (CPU implementation)
  *
@@ -482,8 +519,39 @@ auto fused_layer_norm_kernel(
                 batch_out[i] = normalized * weight_data[i] + bias_data[i];
             }
         }
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* in_data = input.data<Float16>();
+        const Float16* weight_data = weight.data<Float16>();
+        const Float16* bias_data = bias.data<Float16>();
+        Float16* out_data = result.data<Float16>();
+
+        for (int64_t b = 0; b < batch_size; ++b) {
+            const Float16* batch_in = in_data + b * norm_size;
+            Float16* batch_out = out_data + b * norm_size;
+
+            // Single-pass mean and variance computation (use float accumulation for stability)
+            float mean = 0.0f;
+            for (int64_t i = 0; i < norm_size; ++i) {
+                mean += static_cast<float>(batch_in[i]);
+            }
+            mean /= static_cast<float>(norm_size);
+
+            float variance = 0.0f;
+            for (int64_t i = 0; i < norm_size; ++i) {
+                float diff = static_cast<float>(batch_in[i]) - mean;
+                variance += diff * diff;
+            }
+            variance /= static_cast<float>(norm_size);
+
+            // Normalize and scale
+            float inv_std = 1.0f / std::sqrt(variance + eps);
+            for (int64_t i = 0; i < norm_size; ++i) {
+                float normalized = (static_cast<float>(batch_in[i]) - mean) * inv_std;
+                batch_out[i] = Float16(normalized * static_cast<float>(weight_data[i]) + static_cast<float>(bias_data[i]));
+            }
+        }
     } else {
-        throw std::runtime_error("fused_layer_norm: Only Float32/Float64 supported");
+        throw std::runtime_error("fused_layer_norm: Only Float32/Float64/Float16 supported");
     }
 
     return result;

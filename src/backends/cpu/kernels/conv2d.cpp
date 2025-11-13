@@ -13,6 +13,48 @@ namespace tenzor {
 namespace cpu {
 
 // ============================================================================
+// Float16 Arithmetic Helper Functions
+// ============================================================================
+// These inline helpers allow Float16 to work with template code that uses
+// arithmetic operators. Operations are performed in Float32 precision.
+
+inline Float16 operator+(const Float16& a, const Float16& b) {
+    return Float16(static_cast<float>(a) + static_cast<float>(b));
+}
+
+inline Float16 operator-(const Float16& a, const Float16& b) {
+    return Float16(static_cast<float>(a) - static_cast<float>(b));
+}
+
+inline Float16 operator*(const Float16& a, const Float16& b) {
+    return Float16(static_cast<float>(a) * static_cast<float>(b));
+}
+
+inline Float16 operator/(const Float16& a, const Float16& b) {
+    return Float16(static_cast<float>(a) / static_cast<float>(b));
+}
+
+inline Float16& operator+=(Float16& a, const Float16& b) {
+    a = Float16(static_cast<float>(a) + static_cast<float>(b));
+    return a;
+}
+
+inline Float16& operator-=(Float16& a, const Float16& b) {
+    a = Float16(static_cast<float>(a) - static_cast<float>(b));
+    return a;
+}
+
+inline Float16& operator*=(Float16& a, const Float16& b) {
+    a = Float16(static_cast<float>(a) * static_cast<float>(b));
+    return a;
+}
+
+inline Float16& operator/=(Float16& a, const Float16& b) {
+    a = Float16(static_cast<float>(a) / static_cast<float>(b));
+    return a;
+}
+
+// ============================================================================
 // Helper Functions
 // ============================================================================
 
@@ -75,7 +117,7 @@ void im2col_cpu(
                                ih * width + iw;
             output[out_idx] = input[input_idx];
         } else {
-            output[out_idx] = T(0);  // Padding with zeros
+            output[out_idx] = T(0.0f);  // Padding with zeros
         }
     }
 }
@@ -116,7 +158,7 @@ void col2im_cpu(
             for (int64_t ih = 0; ih < height; ++ih) {
                 for (int64_t iw = 0; iw < width; ++iw) {
                     // Accumulate from all kernel positions that contribute to this output
-                    T sum = T(0);
+                    T sum = T(0.0f);
 
                     for (int64_t kh = 0; kh < kernel_h; ++kh) {
                         for (int64_t kw = 0; kw < kernel_w; ++kw) {
@@ -169,7 +211,7 @@ void gemm_cpu(
     #pragma omp parallel for collapse(2) if(M * N > 1000)
     for (int64_t i = 0; i < M; ++i) {
         for (int64_t j = 0; j < N; ++j) {
-            T sum = T(0);
+            T sum = T(0.0f);
             if (transpose_B) {
                 // B is (N, K) row-major, access as B[j][k]
                 for (int64_t k = 0; k < K; ++k) {
@@ -198,12 +240,33 @@ void gemm_transA_cpu(
     #pragma omp parallel for collapse(2) if(M * N > 1000)
     for (int64_t i = 0; i < M; ++i) {
         for (int64_t j = 0; j < N; ++j) {
-            T sum = T(0);
+            T sum = T(0.0f);
             // A is (K, M) row-major, access as A[k][i]
             for (int64_t k = 0; k < K; ++k) {
                 sum += A[k * M + i] * B[k * N + j];
             }
             C[i * N + j] = sum;
+        }
+    }
+}
+
+// Specialized version for Float16 (uses Float32 accumulation)
+template<>
+void gemm_transA_cpu<Float16>(
+    const Float16* A, const Float16* B, Float16* C,
+    int64_t M, int64_t N, int64_t K
+) {
+    #pragma omp parallel for collapse(2) if(M * N > 1000)
+    for (int64_t i = 0; i < M; ++i) {
+        for (int64_t j = 0; j < N; ++j) {
+            float sum = 0.0f;
+            // A is (K, M) row-major, access as A[k][i]
+            for (int64_t k = 0; k < K; ++k) {
+                float a_val = static_cast<float>(A[k * M + i]);
+                float b_val = static_cast<float>(B[k * N + j]);
+                sum += a_val * b_val;
+            }
+            C[i * N + j] = Float16(sum);
         }
     }
 }
@@ -347,6 +410,8 @@ auto conv2d_forward_kernel(
         conv2d_forward_impl<float>(input, weight, bias, output, stride, padding, dilation, groups);
     } else if (input.dtype() == DType::Float64) {
         conv2d_forward_impl<double>(input, weight, bias, output, stride, padding, dilation, groups);
+    } else if (input.dtype() == DType::Float16) {
+        conv2d_forward_impl<Float16>(input, weight, bias, output, stride, padding, dilation, groups);
     } else {
         throw std::runtime_error("Unsupported dtype for conv2d_forward");
     }
@@ -453,6 +518,8 @@ auto conv2d_backward_input_kernel(
         conv2d_backward_input_impl<float>(grad_output, weight, grad_input, input_shape, stride, padding, dilation, groups);
     } else if (grad_output.dtype() == DType::Float64) {
         conv2d_backward_input_impl<double>(grad_output, weight, grad_input, input_shape, stride, padding, dilation, groups);
+    } else if (grad_output.dtype() == DType::Float16) {
+        conv2d_backward_input_impl<Float16>(grad_output, weight, grad_input, input_shape, stride, padding, dilation, groups);
     } else {
         throw std::runtime_error("Unsupported dtype for conv2d_backward_input");
     }
@@ -557,6 +624,8 @@ auto conv2d_backward_weight_kernel(
         conv2d_backward_weight_impl<float>(grad_output, input, grad_weight, weight_shape, stride, padding, dilation, groups);
     } else if (grad_output.dtype() == DType::Float64) {
         conv2d_backward_weight_impl<double>(grad_output, input, grad_weight, weight_shape, stride, padding, dilation, groups);
+    } else if (grad_output.dtype() == DType::Float16) {
+        conv2d_backward_weight_impl<Float16>(grad_output, input, grad_weight, weight_shape, stride, padding, dilation, groups);
     } else {
         throw std::runtime_error("Unsupported dtype for conv2d_backward_weight");
     }
@@ -588,7 +657,7 @@ void conv2d_backward_bias_impl(
     // Sum over batch, height, width dimensions
     #pragma omp parallel for
     for (int64_t c = 0; c < out_channels; ++c) {
-        T sum = T(0);
+        T sum = T(0.0f);
         for (int64_t b = 0; b < batch; ++b) {
             for (int64_t h = 0; h < out_h; ++h) {
                 for (int64_t w = 0; w < out_w; ++w) {
@@ -617,6 +686,8 @@ auto conv2d_backward_bias_kernel(
         conv2d_backward_bias_impl<float>(grad_output, grad_bias);
     } else if (grad_output.dtype() == DType::Float64) {
         conv2d_backward_bias_impl<double>(grad_output, grad_bias);
+    } else if (grad_output.dtype() == DType::Float16) {
+        conv2d_backward_bias_impl<Float16>(grad_output, grad_bias);
     } else {
         throw std::runtime_error("Unsupported dtype for conv2d_backward_bias");
     }

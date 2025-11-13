@@ -199,123 +199,338 @@ auto LayerNorm::forward(const Variable& input) -> Variable {
     auto batch_mean = zeros({batch_size}, DType::Float32, Device::cpu());
     auto batch_var = zeros({batch_size}, DType::Float32, Device::cpu());
 
-    auto* input_data = input_cpu.data<float>();
     auto* mean_data = batch_mean.data<float>();
     auto* var_data = batch_var.data<float>();
 
-    // Compute mean for each batch element
-    for (int64_t b = 0; b < batch_size; b++) {
-        double sum = 0.0;
-        for (int64_t i = 0; i < N; i++) {
-            sum += input_data[b * N + i];
-        }
-        mean_data[b] = static_cast<float>(sum / N);
-    }
+    // Dtype-aware computation
+    DType input_dtype = input_cpu.dtype();
 
-    // Compute variance for each batch element
-    for (int64_t b = 0; b < batch_size; b++) {
-        double sum_sq = 0.0;
-        float mu = mean_data[b];
-        for (int64_t i = 0; i < N; i++) {
-            float diff = input_data[b * N + i] - mu;
-            sum_sq += diff * diff;
-        }
-        var_data[b] = static_cast<float>(sum_sq / N);
-    }
+    if (input_dtype == DType::Float16) {
+        auto* input_data = input_cpu.data<Float16>();
 
-    // Compute reciprocal std (1 / sqrt(var + eps))
-    auto rstd = zeros({batch_size}, DType::Float32, Device::cpu());
-    auto* rstd_data = rstd.data<float>();
-    for (int64_t b = 0; b < batch_size; b++) {
-        rstd_data[b] = 1.0f / std::sqrt(var_data[b] + static_cast<float>(eps_));
-    }
-
-    // Normalize: (x - mean) * rstd on CPU
-    auto output_cpu = zeros_like(input_cpu);
-    auto* output_data = output_cpu.data<float>();
-    auto* weight_data = weight_cpu.data<float>();
-    auto* bias_data = bias_cpu.data<float>();
-
-    for (int64_t b = 0; b < batch_size; b++) {
-        float mu = mean_data[b];
-        float inv_std = rstd_data[b];
-
-        for (int64_t i = 0; i < N; i++) {
-            int64_t idx = b * N + i;
-            float normalized = (input_data[idx] - mu) * inv_std;
-
-            if (elementwise_affine_) {
-                output_data[idx] = normalized * weight_data[i] + bias_data[i];
-            } else {
-                output_data[idx] = normalized;
+        // Compute mean for each batch element (use float accumulation)
+        for (int64_t b = 0; b < batch_size; b++) {
+            double sum = 0.0;
+            for (int64_t i = 0; i < N; i++) {
+                sum += static_cast<float>(input_data[b * N + i]);
             }
+            mean_data[b] = static_cast<float>(sum / N);
         }
-    }
 
-    // Move output back to original device if needed
-    Tensor output = (original_device == Device::cpu()) ? output_cpu : output_cpu.to(original_device);
-
-    // Set up autograd if needed
-    if (input.requires_grad() || (elementwise_affine_ && weight_.requires_grad())) {
-        auto result = Variable(output, true);
-
-        // Prepare tensors to save for backward
-        std::vector<Tensor> tensors_to_save = {
-            input.tensor(),
-            batch_mean,
-            rstd,
-            elementwise_affine_ ? weight_.tensor() : ones({N})
-        };
-
-        auto grad_fn = std::make_shared<LayerNormBackward>(
-            elementwise_affine_, eps_, N, std::move(tensors_to_save)
-        );
-
-        result.set_grad_fn(grad_fn);
-
-        // Set next functions to chain backward pass
-        std::vector<std::shared_ptr<Function>> next_funcs;
-        // Only add grad_fn if it exists (not null)
-        if (auto input_grad_fn = input.grad_fn()) {
-            next_funcs.push_back(input_grad_fn);
-        }
-        if (elementwise_affine_) {
-            auto weight_it = parameters_.find("weight");
-            auto bias_it = parameters_.find("bias");
-            if (weight_it != parameters_.end() && weight_it->second->requires_grad()) {
-                if (auto weight_grad_fn = weight_it->second->grad_fn()) {
-                    next_funcs.push_back(weight_grad_fn);
-                }
+        // Compute variance for each batch element
+        for (int64_t b = 0; b < batch_size; b++) {
+            double sum_sq = 0.0;
+            float mu = mean_data[b];
+            for (int64_t i = 0; i < N; i++) {
+                float diff = static_cast<float>(input_data[b * N + i]) - mu;
+                sum_sq += diff * diff;
             }
-            if (bias_it != parameters_.end() && bias_it->second->requires_grad()) {
-                if (auto bias_grad_fn = bias_it->second->grad_fn()) {
-                    next_funcs.push_back(bias_grad_fn);
+            var_data[b] = static_cast<float>(sum_sq / N);
+        }
+
+        // Compute reciprocal std (1 / sqrt(var + eps))
+        auto rstd = zeros({batch_size}, DType::Float32, Device::cpu());
+        auto* rstd_data = rstd.data<float>();
+        for (int64_t b = 0; b < batch_size; b++) {
+            rstd_data[b] = 1.0f / std::sqrt(var_data[b] + static_cast<float>(eps_));
+        }
+
+        // Normalize: (x - mean) * rstd on CPU
+        auto output_cpu = zeros_like(input_cpu);
+        auto* output_data = output_cpu.data<Float16>();
+        auto* weight_data = elementwise_affine_ ? weight_cpu.data<Float16>() : nullptr;
+        auto* bias_data = elementwise_affine_ ? bias_cpu.data<Float16>() : nullptr;
+
+        for (int64_t b = 0; b < batch_size; b++) {
+            float mu = mean_data[b];
+            float inv_std = rstd_data[b];
+
+            for (int64_t i = 0; i < N; i++) {
+                int64_t idx = b * N + i;
+                float normalized = (static_cast<float>(input_data[idx]) - mu) * inv_std;
+
+                if (elementwise_affine_) {
+                    output_data[idx] = Float16(normalized * static_cast<float>(weight_data[i]) + static_cast<float>(bias_data[i]));
+                } else {
+                    output_data[idx] = Float16(normalized);
                 }
             }
         }
-        grad_fn->set_next_functions(next_funcs);
 
-        // Track input variables
-        std::vector<Variable> input_vars;
-        if (input.requires_grad()) {
-            input_vars.push_back(input);
-        }
-        if (elementwise_affine_) {
-            auto weight_it = parameters_.find("weight");
-            auto bias_it = parameters_.find("bias");
-            if (weight_it != parameters_.end() && weight_it->second->requires_grad()) {
-                input_vars.push_back(*weight_it->second);
-            }
-            if (bias_it != parameters_.end() && bias_it->second->requires_grad()) {
-                input_vars.push_back(*bias_it->second);
-            }
-        }
-        grad_fn->set_input_variables(input_vars);
+        // Move output back to original device if needed
+        Tensor output = (original_device == Device::cpu()) ? output_cpu : output_cpu.to(original_device);
 
-        return result;
-    } else {
+        // Set up autograd if needed
+        if (input.requires_grad() || (elementwise_affine_ && weight_.requires_grad())) {
+            auto result = Variable(output, true);
+
+            // Prepare tensors to save for backward
+            std::vector<Tensor> tensors_to_save = {
+                input.tensor(),
+                batch_mean,
+                rstd,
+                elementwise_affine_ ? weight_.tensor() : ones({N})
+            };
+
+            auto grad_fn = std::make_shared<LayerNormBackward>(
+                elementwise_affine_, eps_, N, std::move(tensors_to_save)
+            );
+
+            result.set_grad_fn(grad_fn);
+
+            // Set next functions to chain backward pass
+            std::vector<std::shared_ptr<Function>> next_funcs;
+            // Only add grad_fn if it exists (not null)
+            if (auto input_grad_fn = input.grad_fn()) {
+                next_funcs.push_back(input_grad_fn);
+            }
+            if (elementwise_affine_ && weight_.grad_fn()) {
+                next_funcs.push_back(weight_.grad_fn());
+            }
+
+            grad_fn->set_next_functions(std::move(next_funcs));
+            return result;
+        }
+
         return Variable(output, false);
+
+    } else if (input_dtype == DType::Float32) {
+        auto* input_data = input_cpu.data<float>();
+
+        // Compute mean for each batch element
+        for (int64_t b = 0; b < batch_size; b++) {
+            double sum = 0.0;
+            for (int64_t i = 0; i < N; i++) {
+                sum += input_data[b * N + i];
+            }
+            mean_data[b] = static_cast<float>(sum / N);
+        }
+
+        // Compute variance for each batch element
+        for (int64_t b = 0; b < batch_size; b++) {
+            double sum_sq = 0.0;
+            float mu = mean_data[b];
+            for (int64_t i = 0; i < N; i++) {
+                float diff = input_data[b * N + i] - mu;
+                sum_sq += diff * diff;
+            }
+            var_data[b] = static_cast<float>(sum_sq / N);
+        }
+
+        // Compute reciprocal std (1 / sqrt(var + eps))
+        auto rstd = zeros({batch_size}, DType::Float32, Device::cpu());
+        auto* rstd_data = rstd.data<float>();
+        for (int64_t b = 0; b < batch_size; b++) {
+            rstd_data[b] = 1.0f / std::sqrt(var_data[b] + static_cast<float>(eps_));
+        }
+
+        // Normalize: (x - mean) * rstd on CPU
+        auto output_cpu = zeros_like(input_cpu);
+        auto* output_data = output_cpu.data<float>();
+        auto* weight_data = weight_cpu.data<float>();
+        auto* bias_data = bias_cpu.data<float>();
+
+        for (int64_t b = 0; b < batch_size; b++) {
+            float mu = mean_data[b];
+            float inv_std = rstd_data[b];
+
+            for (int64_t i = 0; i < N; i++) {
+                int64_t idx = b * N + i;
+                float normalized = (input_data[idx] - mu) * inv_std;
+
+                if (elementwise_affine_) {
+                    output_data[idx] = normalized * weight_data[i] + bias_data[i];
+                } else {
+                    output_data[idx] = normalized;
+                }
+            }
+        }
+
+        // Move output back to original device if needed
+        Tensor output = (original_device == Device::cpu()) ? output_cpu : output_cpu.to(original_device);
+
+        // Set up autograd if needed
+        if (input.requires_grad() || (elementwise_affine_ && weight_.requires_grad())) {
+            auto result = Variable(output, true);
+
+            // Prepare tensors to save for backward
+            std::vector<Tensor> tensors_to_save = {
+                input.tensor(),
+                batch_mean,
+                rstd,
+                elementwise_affine_ ? weight_.tensor() : ones({N})
+            };
+
+            auto grad_fn = std::make_shared<LayerNormBackward>(
+                elementwise_affine_, eps_, N, std::move(tensors_to_save)
+            );
+
+            result.set_grad_fn(grad_fn);
+
+            // Set next functions to chain backward pass
+            std::vector<std::shared_ptr<Function>> next_funcs;
+            // Only add grad_fn if it exists (not null)
+            if (auto input_grad_fn = input.grad_fn()) {
+                next_funcs.push_back(input_grad_fn);
+            }
+            if (elementwise_affine_) {
+                auto weight_it = parameters_.find("weight");
+                auto bias_it = parameters_.find("bias");
+                if (weight_it != parameters_.end() && weight_it->second->requires_grad()) {
+                    if (auto weight_grad_fn = weight_it->second->grad_fn()) {
+                        next_funcs.push_back(weight_grad_fn);
+                    }
+                }
+                if (bias_it != parameters_.end() && bias_it->second->requires_grad()) {
+                    if (auto bias_grad_fn = bias_it->second->grad_fn()) {
+                        next_funcs.push_back(bias_grad_fn);
+                    }
+                }
+            }
+            grad_fn->set_next_functions(next_funcs);
+
+            // Track input variables
+            std::vector<Variable> input_vars;
+            if (input.requires_grad()) {
+                input_vars.push_back(input);
+            }
+            if (elementwise_affine_) {
+                auto weight_it = parameters_.find("weight");
+                auto bias_it = parameters_.find("bias");
+                if (weight_it != parameters_.end() && weight_it->second->requires_grad()) {
+                    input_vars.push_back(*weight_it->second);
+                }
+                if (bias_it != parameters_.end() && bias_it->second->requires_grad()) {
+                    input_vars.push_back(*bias_it->second);
+                }
+            }
+
+            // Removed set_inputs call - method doesn't exist
+            return result;
+        }
+
+        return Variable(output, false);
+
+    } else if (input_dtype == DType::Float64) {
+        auto* input_data = input_cpu.data<double>();
+
+        // Use double precision for mean and variance computation
+        auto batch_mean_f64 = zeros({batch_size}, DType::Float64, Device::cpu());
+        auto batch_var_f64 = zeros({batch_size}, DType::Float64, Device::cpu());
+        auto* mean_data_f64 = batch_mean_f64.data<double>();
+        auto* var_data_f64 = batch_var_f64.data<double>();
+
+        // Compute mean for each batch element
+        for (int64_t b = 0; b < batch_size; b++) {
+            double sum = 0.0;
+            for (int64_t i = 0; i < N; i++) {
+                sum += input_data[b * N + i];
+            }
+            mean_data_f64[b] = sum / N;
+        }
+
+        // Compute variance for each batch element
+        for (int64_t b = 0; b < batch_size; b++) {
+            double sum_sq = 0.0;
+            double mu = mean_data_f64[b];
+            for (int64_t i = 0; i < N; i++) {
+                double diff = input_data[b * N + i] - mu;
+                sum_sq += diff * diff;
+            }
+            var_data_f64[b] = sum_sq / N;
+        }
+
+        // Compute reciprocal std (1 / sqrt(var + eps))
+        auto rstd_f64 = zeros({batch_size}, DType::Float64, Device::cpu());
+        auto* rstd_data_f64 = rstd_f64.data<double>();
+        for (int64_t b = 0; b < batch_size; b++) {
+            rstd_data_f64[b] = 1.0 / std::sqrt(var_data_f64[b] + eps_);
+        }
+
+        // Normalize: (x - mean) * rstd on CPU
+        auto output_cpu = zeros_like(input_cpu);
+        auto* output_data = output_cpu.data<double>();
+        auto* weight_data = elementwise_affine_ ? weight_cpu.data<double>() : nullptr;
+        auto* bias_data = elementwise_affine_ ? bias_cpu.data<double>() : nullptr;
+
+        for (int64_t b = 0; b < batch_size; b++) {
+            double mu = mean_data_f64[b];
+            double inv_std = rstd_data_f64[b];
+
+            for (int64_t i = 0; i < N; i++) {
+                int64_t idx = b * N + i;
+                double normalized = (input_data[idx] - mu) * inv_std;
+
+                if (elementwise_affine_) {
+                    output_data[idx] = normalized * weight_data[i] + bias_data[i];
+                } else {
+                    output_data[idx] = normalized;
+                }
+            }
+        }
+
+        // Move output back to original device if needed
+        Tensor output = (original_device == Device::cpu()) ? output_cpu : output_cpu.to(original_device);
+
+        // Set up autograd if needed
+        if (input.requires_grad() || (elementwise_affine_ && weight_.requires_grad())) {
+            auto result = Variable(output, true);
+
+            // Convert mean and rstd to Float32 for backward compatibility
+            auto batch_mean_f32 = zeros({batch_size}, DType::Float32, Device::cpu());
+            auto rstd_f32 = zeros({batch_size}, DType::Float32, Device::cpu());
+            auto* mean_f32_data = batch_mean_f32.data<float>();
+            auto* rstd_f32_data = rstd_f32.data<float>();
+
+            for (int64_t b = 0; b < batch_size; b++) {
+                mean_f32_data[b] = static_cast<float>(mean_data_f64[b]);
+                rstd_f32_data[b] = static_cast<float>(rstd_data_f64[b]);
+            }
+
+            // Prepare tensors to save for backward
+            std::vector<Tensor> tensors_to_save = {
+                input.tensor(),
+                batch_mean_f32,
+                rstd_f32,
+                elementwise_affine_ ? weight_.tensor() : ones({N})
+            };
+
+            auto grad_fn = std::make_shared<LayerNormBackward>(
+                elementwise_affine_, eps_, N, std::move(tensors_to_save)
+            );
+
+            result.set_grad_fn(grad_fn);
+
+            // Set next functions to chain backward pass
+            std::vector<std::shared_ptr<Function>> next_funcs;
+            if (auto input_grad_fn = input.grad_fn()) {
+                next_funcs.push_back(input_grad_fn);
+            }
+            if (elementwise_affine_) {
+                auto weight_it = parameters_.find("weight");
+                auto bias_it = parameters_.find("bias");
+                if (weight_it != parameters_.end() && weight_it->second->requires_grad()) {
+                    if (auto weight_grad_fn = weight_it->second->grad_fn()) {
+                        next_funcs.push_back(weight_grad_fn);
+                    }
+                }
+                if (bias_it != parameters_.end() && bias_it->second->requires_grad()) {
+                    if (auto bias_grad_fn = bias_it->second->grad_fn()) {
+                        next_funcs.push_back(bias_grad_fn);
+                    }
+                }
+            }
+            grad_fn->set_next_functions(next_funcs);
+
+            return result;
+        }
+
+        return Variable(output, false);
+
+    } else {
+        throw std::runtime_error("LayerNorm only supports Float16, Float32, and Float64 dtypes");
     }
+
 }
 
 auto LayerNorm::reset_parameters() -> void {

@@ -382,8 +382,17 @@ auto gelu_kernel(const Tensor& input) -> Tensor {
             double x = in_data[i];
             out_data[i] = 0.5 * x * (1.0 + std::erf(x / sqrt_2_d));
         }
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* in_data = input.data<Float16>();
+        Float16* out_data = output.data<Float16>();
+        size_t n = input.numel();
+
+        for (size_t i = 0; i < n; ++i) {
+            float x = static_cast<float>(in_data[i]);
+            out_data[i] = Float16(0.5f * x * (1.0f + std::erf(x / sqrt_2)));
+        }
     } else {
-        throw std::runtime_error("GELU only supports Float32 and Float64");
+        throw std::runtime_error("GELU only supports Float32/Float64/Float16");
     }
 
     return output;
@@ -421,8 +430,20 @@ auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Ten
             double pdf = (1.0 / sqrt_2_pi_d) * std::exp(-0.5 * x * x);
             grad_in_data[i] = grad_out_data[i] * (cdf + x * pdf);
         }
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* grad_out_data = grad_output.data<Float16>();
+        const Float16* in_data = input.data<Float16>();
+        Float16* grad_in_data = grad_input.data<Float16>();
+        size_t n = input.numel();
+
+        for (size_t i = 0; i < n; ++i) {
+            float x = static_cast<float>(in_data[i]);
+            float cdf = 0.5f * (1.0f + std::erf(x / sqrt_2));
+            float pdf = (1.0f / sqrt_2_pi) * std::exp(-0.5f * x * x);
+            grad_in_data[i] = Float16(static_cast<float>(grad_out_data[i]) * (cdf + x * pdf));
+        }
     } else {
-        throw std::runtime_error("GELU backward only supports Float32 and Float64");
+        throw std::runtime_error("GELU backward only supports Float32/Float64/Float16");
     }
 
     return grad_input;

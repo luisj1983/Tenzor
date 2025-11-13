@@ -81,8 +81,9 @@ auto PositionalEncoding::forward(const Variable& x) -> Variable {
     // pe_shape for batch_first=true: (1, seq_len, d_model)
     std::vector<int64_t> pe_shape = {1, seq_len, d_model_};
 
-    // Get input device
+    // Get input device and dtype
     Device input_device = x.tensor().device();
+    DType input_dtype = x.tensor().dtype();
 
     // Slice and reshape positional encoding on CPU first (pe_ is always on CPU initially)
     Tensor pe_slice = reshape(pe_, {max_len_, d_model_});
@@ -107,6 +108,11 @@ auto PositionalEncoding::forward(const Variable& x) -> Variable {
     // Broadcast positional encoding to match batch size
     std::vector<int64_t> broadcast_shape(shape.begin(), shape.end());
     Tensor pe_broadcast = expand(pe_for_seq, broadcast_shape);
+
+    // Convert to input dtype if needed (e.g., Float16 or Float64)
+    if (input_dtype != DType::Float32) {
+        pe_broadcast = pe_broadcast.to(input_dtype);
+    }
 
     // Add to input
     Variable pe_var(pe_broadcast, false);

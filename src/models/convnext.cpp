@@ -26,7 +26,10 @@ LayerScale::LayerScale(int64_t dim, double init_value) {
 
 auto LayerScale::forward(const Variable& input) -> Variable {
     // Multiply input by learnable scale factor
-    return input * gamma_;
+    // Convert gamma to match input dtype for multi-dtype support
+    auto gamma_tensor_matched = gamma_.tensor().to(input.dtype());
+    auto gamma_matched = Variable(gamma_tensor_matched, gamma_.requires_grad());
+    return input * gamma_matched;
 }
 
 // ============================================================================
