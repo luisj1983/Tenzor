@@ -925,6 +925,12 @@ auto add_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             int8_t* c_data = result.data<int8_t>();
             detail::add_scalar(a_data, b_data, c_data, n);
 
+        } else if (a.dtype() == DType::UInt8) {
+            const uint8_t* a_data = a.data<uint8_t>();
+            const uint8_t* b_data = b.data<uint8_t>();
+            uint8_t* c_data = result.data<uint8_t>();
+            detail::add_scalar(a_data, b_data, c_data, n);
+
         } else {
             throw std::runtime_error("Unsupported dtype for add operation");
         }
@@ -973,6 +979,13 @@ auto add_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             int8_t* c_data = result.data<int8_t>();
             detail::broadcast_op(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
                                 [](int8_t x, int8_t y) { return x + y; });
+
+        } else if (a.dtype() == DType::UInt8) {
+            const uint8_t* a_data = a.data<uint8_t>();
+            const uint8_t* b_data = b.data<uint8_t>();
+            uint8_t* c_data = result.data<uint8_t>();
+            detail::broadcast_op(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](uint8_t x, uint8_t y) { return x + y; });
 
         } else {
             throw std::runtime_error("Unsupported dtype for add operation");
