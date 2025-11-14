@@ -1053,6 +1053,12 @@ auto sub_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             detail::sub_scalar(a_data, b_data, c_data, n);
 #endif
 
+        } else if (a.dtype() == DType::Int8) {
+            const int8_t* a_data = a.data<int8_t>();
+            const int8_t* b_data = b.data<int8_t>();
+            int8_t* c_data = result.data<int8_t>();
+            detail::sub_scalar(a_data, b_data, c_data, n);
+
         } else {
             throw std::runtime_error("Unsupported dtype for sub operation");
         }
@@ -1092,6 +1098,13 @@ auto sub_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             int64_t* c_data = result.data<int64_t>();
             detail::broadcast_op(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
                                 [](int64_t x, int64_t y) { return x - y; });
+
+        } else if (a.dtype() == DType::Int8) {
+            const int8_t* a_data = a.data<int8_t>();
+            const int8_t* b_data = b.data<int8_t>();
+            int8_t* c_data = result.data<int8_t>();
+            detail::broadcast_op(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](int8_t x, int8_t y) { return x - y; });
 
         } else {
             throw std::runtime_error("Unsupported dtype for sub operation");
