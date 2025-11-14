@@ -919,6 +919,12 @@ auto add_kernel(const Tensor& a, const Tensor& b) -> Tensor {
                 c_data[i] = Float16(a_val + b_val);
             }
 
+        } else if (a.dtype() == DType::Int8) {
+            const int8_t* a_data = a.data<int8_t>();
+            const int8_t* b_data = b.data<int8_t>();
+            int8_t* c_data = result.data<int8_t>();
+            detail::add_scalar(a_data, b_data, c_data, n);
+
         } else {
             throw std::runtime_error("Unsupported dtype for add operation");
         }
@@ -960,6 +966,13 @@ auto add_kernel(const Tensor& a, const Tensor& b) -> Tensor {
                                 [](Float16 x, Float16 y) {
                                     return Float16(static_cast<float>(x) + static_cast<float>(y));
                                 });
+
+        } else if (a.dtype() == DType::Int8) {
+            const int8_t* a_data = a.data<int8_t>();
+            const int8_t* b_data = b.data<int8_t>();
+            int8_t* c_data = result.data<int8_t>();
+            detail::broadcast_op(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](int8_t x, int8_t y) { return x + y; });
 
         } else {
             throw std::runtime_error("Unsupported dtype for add operation");

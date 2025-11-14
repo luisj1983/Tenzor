@@ -128,6 +128,11 @@ auto ones(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
             std::fill(ptr, ptr + numel, 1);
             break;
         }
+        case DType::Int8: {
+            int8_t* ptr = static_cast<int8_t*>(data);
+            std::fill(ptr, ptr + numel, 1);
+            break;
+        }
         default:
             throw std::runtime_error("Unsupported dtype for ones()");
     }
