@@ -88,6 +88,23 @@ auto Module::to(Device device) -> void {
     // std::cerr << "[DEBUG] Module::to() completed successfully" << std::endl;
 }
 
+auto Module::to(DType dtype) -> void {
+    // Convert parameters to target dtype
+    for (auto& [name, param] : parameters_) {
+        param->tensor() = param->tensor().to(dtype);
+    }
+
+    // Convert buffers to target dtype
+    for (auto& [_, buffer] : buffers_) {
+        buffer->tensor() = buffer->tensor().to(dtype);
+    }
+
+    // Recursively convert submodules
+    for (auto& [_, module] : submodules_) {
+        module->to(dtype);
+    }
+}
+
 auto Module::cuda(int device_id) -> void {
     to(Device::cuda(device_id));
 }

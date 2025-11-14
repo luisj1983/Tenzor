@@ -134,6 +134,10 @@ TEST_P(ALBERTandT5MultiDTypeTest, ALBERTBaseForwardShape) {
     auto config = AlbertConfig::base();
     config.vocab_size = 30000;
     auto model = std::make_shared<AlbertModel>(config);
+
+    // Convert model to test dtype
+    model->to(dtype);
+
     int64_t batch_size = 2;
     int64_t seq_len = 128;
 

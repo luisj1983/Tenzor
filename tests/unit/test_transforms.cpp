@@ -160,7 +160,16 @@ TEST_P(TransformTest, Squeeze_AllOnes) {
 
 TEST_P(TransformTest, Squeeze_InvalidDim) {
     auto t = zeros({2, 1, 3}, DType::Float32, device);
-    EXPECT_THROW(t.squeeze(0), std::runtime_error) << "Failed on " << device.to_string();  // dim 0 has size 2
+    // PyTorch behavior: squeeze on non-singleton dimension returns unchanged tensor
+    auto squeezed = t.squeeze(0);  // dim 0 has size 2, so no change
+    EXPECT_EQ(squeezed.ndim(), 3) << "Failed on " << device.to_string();
+    EXPECT_EQ(squeezed.shape()[0], 2) << "Failed on " << device.to_string();
+    EXPECT_EQ(squeezed.shape()[1], 1) << "Failed on " << device.to_string();
+    EXPECT_EQ(squeezed.shape()[2], 3) << "Failed on " << device.to_string();
+
+    // Test actual invalid dim (out of bounds)
+    EXPECT_THROW(t.squeeze(5), std::out_of_range) << "Failed on " << device.to_string();
+    EXPECT_THROW(t.squeeze(-10), std::out_of_range) << "Failed on " << device.to_string();
 }
 
 TEST_P(TransformTest, Squeeze_NegativeIndex) {

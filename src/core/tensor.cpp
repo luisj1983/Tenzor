@@ -1003,8 +1003,9 @@ auto Tensor::squeeze(std::optional<int64_t> dim) const -> Tensor {
             throw std::out_of_range("Dimension out of range");
         }
 
+        // If dimension is not singleton, return unchanged tensor (no-op)
         if (impl_->shape[d] != 1) {
-            throw std::runtime_error("Cannot squeeze dimension with size != 1");
+            return *this;
         }
 
         // Remove the dimension

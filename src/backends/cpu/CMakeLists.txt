@@ -43,11 +43,13 @@ endif()
 
 # Platform-specific optimizations
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    # Enable SIMD optimizations
+    # Enable SIMD optimizations with IEEE 754 compliance preserved
     target_compile_options(tenzor_backend_cpu PRIVATE
         -march=native
         -mtune=native
-        -ffast-math
+        -fno-math-errno
+        -fno-trapping-math
+        -fno-finite-math-only  # Preserves NaN/Inf handling for IEEE 754 compliance
     )
 
     # Check for specific SIMD support

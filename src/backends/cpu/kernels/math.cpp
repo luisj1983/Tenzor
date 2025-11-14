@@ -1925,11 +1925,25 @@ auto eq_kernel(const Tensor& a, const Tensor& b) -> Tensor {
         if (a.dtype() == DType::Float32) {
             const float* a_data = a.data<float>();
             const float* b_data = b.data<float>();
-            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] == b_data[i]); }
+            for (size_t i = 0; i < n; ++i) {
+                // IEEE 754: NaN != NaN, so if either is NaN, return false
+                if (std::isnan(a_data[i]) || std::isnan(b_data[i])) {
+                    c_data[i] = false;
+                } else {
+                    c_data[i] = (a_data[i] == b_data[i]);
+                }
+            }
         } else if (a.dtype() == DType::Float64) {
             const double* a_data = a.data<double>();
             const double* b_data = b.data<double>();
-            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] == b_data[i]); }
+            for (size_t i = 0; i < n; ++i) {
+                // IEEE 754: NaN != NaN, so if either is NaN, return false
+                if (std::isnan(a_data[i]) || std::isnan(b_data[i])) {
+                    c_data[i] = false;
+                } else {
+                    c_data[i] = (a_data[i] == b_data[i]);
+                }
+            }
         } else if (a.dtype() == DType::Int32) {
             const int32_t* a_data = a.data<int32_t>();
             const int32_t* b_data = b.data<int32_t>();
@@ -1951,12 +1965,20 @@ auto eq_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             const float* a_data = a.data<float>();
             const float* b_data = b.data<float>();
             detail::broadcast_op<float, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
-                                [](float x, float y) { return x == y; });
+                                [](float x, float y) {
+                                    // IEEE 754: NaN != NaN
+                                    if (std::isnan(x) || std::isnan(y)) return false;
+                                    return x == y;
+                                });
         } else if (a.dtype() == DType::Float64) {
             const double* a_data = a.data<double>();
             const double* b_data = b.data<double>();
             detail::broadcast_op<double, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
-                                [](double x, double y) { return x == y; });
+                                [](double x, double y) {
+                                    // IEEE 754: NaN != NaN
+                                    if (std::isnan(x) || std::isnan(y)) return false;
+                                    return x == y;
+                                });
         } else if (a.dtype() == DType::Int32) {
             const int32_t* a_data = a.data<int32_t>();
             const int32_t* b_data = b.data<int32_t>();

@@ -35,23 +35,39 @@ public:
         const auto& weight = inputs[0];
         const auto& weight_tensor = weight.tensor();
         auto input_ptr = indices_.data<int64_t>();
-        auto weight_ptr = weight_tensor.data<float>();
 
         // Calculate output shape: indices.shape() + [embedding_dim]
         auto indices_shape = indices_.shape();
         std::vector<int64_t> output_shape(indices_shape.begin(), indices_shape.end());
         output_shape.push_back(embedding_dim_);
 
-        // Perform lookup
-        auto output = zeros(output_shape);
-        auto output_ptr = output.data<float>();
+        // Use weight's dtype for output
+        DType weight_dtype = weight_tensor.dtype();
+        auto output = zeros(output_shape, weight_dtype);
 
         int64_t num_indices = indices_.numel();
-        for (int64_t i = 0; i < num_indices; ++i) {
-            auto idx = input_ptr[i];
-            for (int64_t j = 0; j < embedding_dim_; ++j) {
-                output_ptr[i * embedding_dim_ + j] = weight_ptr[idx * embedding_dim_ + j];
+
+        // Perform lookup using weight's dtype
+        if (weight_dtype == DType::Float32) {
+            auto weight_ptr = weight_tensor.data<float>();
+            auto output_ptr = output.data<float>();
+            for (int64_t i = 0; i < num_indices; ++i) {
+                auto idx = input_ptr[i];
+                for (int64_t j = 0; j < embedding_dim_; ++j) {
+                    output_ptr[i * embedding_dim_ + j] = weight_ptr[idx * embedding_dim_ + j];
+                }
             }
+        } else if (weight_dtype == DType::Float64) {
+            auto weight_ptr = weight_tensor.data<double>();
+            auto output_ptr = output.data<double>();
+            for (int64_t i = 0; i < num_indices; ++i) {
+                auto idx = input_ptr[i];
+                for (int64_t j = 0; j < embedding_dim_; ++j) {
+                    output_ptr[i * embedding_dim_ + j] = weight_ptr[idx * embedding_dim_ + j];
+                }
+            }
+        } else {
+            throw std::runtime_error("EmbeddingBackward: Unsupported weight dtype");
         }
 
         return {Variable(output, weight.requires_grad())};
@@ -67,20 +83,34 @@ public:
         }
 
         const auto& grad_output = grad_outputs[0];
-        auto grad_output_ptr = grad_output.data<float>();
         auto input_ptr = indices_.data<int64_t>();
+        int64_t num_indices = indices_.numel();
 
-        // Initialize weight gradient to zeros
-        auto grad_weight = zeros({num_embeddings_, embedding_dim_});
-        auto grad_weight_ptr = grad_weight.data<float>();
+        // Use grad_output's dtype for gradient
+        DType grad_dtype = grad_output.dtype();
+        auto grad_weight = zeros({num_embeddings_, embedding_dim_}, grad_dtype);
 
         // Accumulate gradients for each embedding
-        int64_t num_indices = indices_.numel();
-        for (int64_t i = 0; i < num_indices; ++i) {
-            auto idx = input_ptr[i];
-            for (int64_t j = 0; j < embedding_dim_; ++j) {
-                grad_weight_ptr[idx * embedding_dim_ + j] += grad_output_ptr[i * embedding_dim_ + j];
+        if (grad_dtype == DType::Float32) {
+            auto grad_output_ptr = grad_output.data<float>();
+            auto grad_weight_ptr = grad_weight.data<float>();
+            for (int64_t i = 0; i < num_indices; ++i) {
+                auto idx = input_ptr[i];
+                for (int64_t j = 0; j < embedding_dim_; ++j) {
+                    grad_weight_ptr[idx * embedding_dim_ + j] += grad_output_ptr[i * embedding_dim_ + j];
+                }
             }
+        } else if (grad_dtype == DType::Float64) {
+            auto grad_output_ptr = grad_output.data<double>();
+            auto grad_weight_ptr = grad_weight.data<double>();
+            for (int64_t i = 0; i < num_indices; ++i) {
+                auto idx = input_ptr[i];
+                for (int64_t j = 0; j < embedding_dim_; ++j) {
+                    grad_weight_ptr[idx * embedding_dim_ + j] += grad_output_ptr[i * embedding_dim_ + j];
+                }
+            }
+        } else {
+            throw std::runtime_error("EmbeddingBackward: Unsupported gradient dtype");
         }
 
         return {grad_weight};
@@ -184,15 +214,31 @@ auto Embedding::forward(const Variable& input) -> Variable {
         std::vector<int64_t> output_shape(input_shape.begin(), input_shape.end());
         output_shape.push_back(embedding_dim_);
 
-        auto output = zeros(output_shape);
-        auto output_ptr = output.data<float>();
-        auto weight_ptr = weight_cpu.data<float>();
+        // Use weight's dtype for output (not Float32 hardcoded)
+        DType weight_dtype = weight_cpu.dtype();
+        auto output = zeros(output_shape, weight_dtype);
 
-        for (int64_t i = 0; i < num_indices; ++i) {
-            auto idx = input_ptr[i];
-            for (int64_t j = 0; j < embedding_dim_; ++j) {
-                output_ptr[i * embedding_dim_ + j] = weight_ptr[idx * embedding_dim_ + j];
+        // Perform lookup using weight's dtype
+        if (weight_dtype == DType::Float32) {
+            auto output_ptr = output.data<float>();
+            auto weight_ptr = weight_cpu.data<float>();
+            for (int64_t i = 0; i < num_indices; ++i) {
+                auto idx = input_ptr[i];
+                for (int64_t j = 0; j < embedding_dim_; ++j) {
+                    output_ptr[i * embedding_dim_ + j] = weight_ptr[idx * embedding_dim_ + j];
+                }
             }
+        } else if (weight_dtype == DType::Float64) {
+            auto output_ptr = output.data<double>();
+            auto weight_ptr = weight_cpu.data<double>();
+            for (int64_t i = 0; i < num_indices; ++i) {
+                auto idx = input_ptr[i];
+                for (int64_t j = 0; j < embedding_dim_; ++j) {
+                    output_ptr[i * embedding_dim_ + j] = weight_ptr[idx * embedding_dim_ + j];
+                }
+            }
+        } else {
+            throw std::runtime_error("Embedding: Unsupported weight dtype");
         }
 
         // Transfer back to target device if needed
@@ -247,43 +293,65 @@ auto Embedding::renorm_embeddings(const Tensor& indices) -> void {
     Tensor weight_cpu = (weight_device == Device::cpu()) ? weight_.tensor() : weight_.tensor().to(Device::cpu());
     Tensor indices_cpu = (indices_device == Device::cpu()) ? indices : indices.to(Device::cpu());
 
-    auto weight_ptr = weight_cpu.data<float>();
     auto indices_ptr = indices_cpu.data<int64_t>();
-
     int64_t num_indices = indices_cpu.numel();
 
-    for (int64_t i = 0; i < num_indices; ++i) {
-        auto idx = indices_ptr[i];
+    DType weight_dtype = weight_cpu.dtype();
 
-        // Skip if this is padding_idx
-        if (idx == padding_idx_) {
-            continue;
-        }
+    if (weight_dtype == DType::Float32) {
+        auto weight_ptr = weight_cpu.data<float>();
+        for (int64_t i = 0; i < num_indices; ++i) {
+            auto idx = indices_ptr[i];
+            if (idx == padding_idx_) continue;
 
-        // Compute norm of embedding vector
-        double norm = 0.0;
-        for (int64_t j = 0; j < embedding_dim_; ++j) {
-            double val = weight_ptr[idx * embedding_dim_ + j];
-            if (norm_type_ == 2.0) {
-                norm += val * val;
-            } else {
-                norm += std::pow(std::abs(val), norm_type_);
-            }
-        }
-
-        if (norm_type_ == 2.0) {
-            norm = std::sqrt(norm);
-        } else {
-            norm = std::pow(norm, 1.0 / norm_type_);
-        }
-
-        // Renormalize if exceeds max_norm
-        if (norm > max_norm_) {
-            double scale = max_norm_ / (norm + 1e-8);
+            // Compute norm
+            double norm = 0.0;
             for (int64_t j = 0; j < embedding_dim_; ++j) {
-                weight_ptr[idx * embedding_dim_ + j] *= scale;
+                double val = weight_ptr[idx * embedding_dim_ + j];
+                if (norm_type_ == 2.0) {
+                    norm += val * val;
+                } else {
+                    norm += std::pow(std::abs(val), norm_type_);
+                }
+            }
+            norm = (norm_type_ == 2.0) ? std::sqrt(norm) : std::pow(norm, 1.0 / norm_type_);
+
+            // Renormalize if needed
+            if (norm > max_norm_) {
+                double scale = max_norm_ / (norm + 1e-8);
+                for (int64_t j = 0; j < embedding_dim_; ++j) {
+                    weight_ptr[idx * embedding_dim_ + j] *= scale;
+                }
             }
         }
+    } else if (weight_dtype == DType::Float64) {
+        auto weight_ptr = weight_cpu.data<double>();
+        for (int64_t i = 0; i < num_indices; ++i) {
+            auto idx = indices_ptr[i];
+            if (idx == padding_idx_) continue;
+
+            // Compute norm
+            double norm = 0.0;
+            for (int64_t j = 0; j < embedding_dim_; ++j) {
+                double val = weight_ptr[idx * embedding_dim_ + j];
+                if (norm_type_ == 2.0) {
+                    norm += val * val;
+                } else {
+                    norm += std::pow(std::abs(val), norm_type_);
+                }
+            }
+            norm = (norm_type_ == 2.0) ? std::sqrt(norm) : std::pow(norm, 1.0 / norm_type_);
+
+            // Renormalize if needed
+            if (norm > max_norm_) {
+                double scale = max_norm_ / (norm + 1e-8);
+                for (int64_t j = 0; j < embedding_dim_; ++j) {
+                    weight_ptr[idx * embedding_dim_ + j] *= scale;
+                }
+            }
+        }
+    } else {
+        throw std::runtime_error("Embedding::renorm_embeddings: Unsupported weight dtype");
     }
 
     // Transfer modified weights back to original device if needed

@@ -276,6 +276,7 @@ public:
      * @endcode
      */
     auto to(Device device) -> void;
+    auto to(DType dtype) -> void;
 
     /**
      * @brief Move module to CUDA device.
