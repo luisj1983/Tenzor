@@ -425,6 +425,14 @@ inline void sub_scalar(const T* a, const T* b, T* c, size_t n) {
     }
 }
 
+// Specialization for Float16
+template<>
+inline void sub_scalar<Float16>(const Float16* a, const Float16* b, Float16* c, size_t n) {
+    for (size_t i = 0; i < n; ++i) {
+        c[i] = Float16(static_cast<float>(a[i]) - static_cast<float>(b[i]));
+    }
+}
+
 template<typename T>
 inline void mul_scalar(const T* a, const T* b, T* c, size_t n) {
     for (size_t i = 0; i < n; ++i) {
@@ -978,7 +986,13 @@ auto sub_kernel(const Tensor& a, const Tensor& b) -> Tensor {
         size_t n = static_cast<size_t>(a.numel());
 
         // Dispatch based on dtype and SIMD availability
-        if (a.dtype() == DType::Float32) {
+        if (a.dtype() == DType::Float16) {
+            const Float16* a_data = a.data<Float16>();
+            const Float16* b_data = b.data<Float16>();
+            Float16* c_data = result.data<Float16>();
+            detail::sub_scalar(a_data, b_data, c_data, n);
+
+        } else if (a.dtype() == DType::Float32) {
             const float* a_data = a.data<float>();
             const float* b_data = b.data<float>();
             float* c_data = result.data<float>();
@@ -1031,7 +1045,14 @@ auto sub_kernel(const Tensor& a, const Tensor& b) -> Tensor {
         }
     } else {
         // Broadcasting path
-        if (a.dtype() == DType::Float32) {
+        if (a.dtype() == DType::Float16) {
+            const Float16* a_data = a.data<Float16>();
+            const Float16* b_data = b.data<Float16>();
+            Float16* c_data = result.data<Float16>();
+            detail::broadcast_op(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](Float16 x, Float16 y) { return Float16(static_cast<float>(x) - static_cast<float>(y)); });
+
+        } else if (a.dtype() == DType::Float32) {
             const float* a_data = a.data<float>();
             const float* b_data = b.data<float>();
             float* c_data = result.data<float>();
@@ -2140,7 +2161,11 @@ auto gt_kernel(const Tensor& a, const Tensor& b) -> Tensor {
         size_t n = static_cast<size_t>(a.numel());
         bool* c_data = result.data<bool>();
 
-        if (a.dtype() == DType::Float32) {
+        if (a.dtype() == DType::Float16) {
+            const Float16* a_data = a.data<Float16>();
+            const Float16* b_data = b.data<Float16>();
+            for (size_t i = 0; i < n; ++i) { c_data[i] = (static_cast<float>(a_data[i]) > static_cast<float>(b_data[i])); }
+        } else if (a.dtype() == DType::Float32) {
             const float* a_data = a.data<float>();
             const float* b_data = b.data<float>();
             for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] > b_data[i]); }
@@ -2161,7 +2186,12 @@ auto gt_kernel(const Tensor& a, const Tensor& b) -> Tensor {
         }
     } else {
         bool* c_data = result.data<bool>();
-        if (a.dtype() == DType::Float32) {
+        if (a.dtype() == DType::Float16) {
+            const Float16* a_data = a.data<Float16>();
+            const Float16* b_data = b.data<Float16>();
+            detail::broadcast_op<Float16, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](Float16 x, Float16 y) { return static_cast<float>(x) > static_cast<float>(y); });
+        } else if (a.dtype() == DType::Float32) {
             const float* a_data = a.data<float>();
             const float* b_data = b.data<float>();
             detail::broadcast_op<float, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,

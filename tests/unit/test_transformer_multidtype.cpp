@@ -248,7 +248,7 @@ TEST_P(TransformerEncoderLayerMultiDTypeTest, WithMask) {
     int64_t seq_len = 8;
 
     Variable src(randn({batch_size, seq_len, 128}, dtype, device), true);
-    Tensor mask = create_causal_mask(seq_len, device);
+    Tensor mask = create_causal_mask(seq_len, device, dtype);
 
     EXPECT_NO_THROW({
         Variable output = layer.forward(src, mask);
@@ -398,7 +398,7 @@ TEST_P(TransformerDecoderLayerMultiDTypeTest, WithCausalMask) {
     Variable tgt(randn({batch_size, tgt_len, 128}, dtype, device), true);
     Variable memory(randn({batch_size, src_len, 128}, dtype, device), true);
 
-    Tensor tgt_mask = create_causal_mask(tgt_len, device);
+    Tensor tgt_mask = create_causal_mask(tgt_len, device, dtype);
 
     EXPECT_NO_THROW({
         Variable output = layer.forward(tgt, memory, tgt_mask);
@@ -531,7 +531,7 @@ TEST_P(TransformerMultiDTypeTest, WithMasks) {
     Variable src(randn({batch_size, src_len, 128}, dtype, device), true);
     Variable tgt(randn({batch_size, tgt_len, 128}, dtype, device), true);
 
-    Tensor tgt_mask = create_causal_mask(tgt_len, device);
+    Tensor tgt_mask = create_causal_mask(tgt_len, device, dtype);
 
     EXPECT_NO_THROW({
         Variable output = model.forward(src, tgt, Tensor{}, tgt_mask);
@@ -596,7 +596,7 @@ TEST_P(TransformerMultiDTypeTest, GPTLikeConfig) {
     Variable src(randn({batch_size, seq_len, d_model}, dtype, device), true);
     Variable tgt(randn({batch_size, seq_len, d_model}, dtype, device), true);
 
-    Tensor causal_mask = create_causal_mask(seq_len, device);
+    Tensor causal_mask = create_causal_mask(seq_len, device, dtype);
 
     Variable output = model.forward(src, tgt, Tensor{}, causal_mask);
 

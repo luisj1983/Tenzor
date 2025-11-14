@@ -584,6 +584,34 @@ auto expand(const Tensor& input, std::vector<int64_t> shape) -> Tensor {
 
             output_data[out_idx] = input_data[in_idx];
         }
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* input_data = input.data<Float16>();
+        Float16* output_data = output.data<Float16>();
+
+        for (int64_t out_idx = 0; out_idx < total_elements; ++out_idx) {
+            int64_t temp = out_idx;
+            int64_t in_idx = 0;
+
+            int input_dim_offset = shape.size() - input_shape_vec.size();
+
+            for (int i = shape.size() - 1; i >= 0; --i) {
+                int64_t coord = temp % shape[i];
+                temp /= shape[i];
+
+                int input_dim = i - input_dim_offset;
+                if (input_dim >= 0 && input_dim < static_cast<int>(input_shape_vec.size())) {
+                    // Map to input dimension (handle size-1 dimensions)
+                    if (input_shape_vec[input_dim] == 1) {
+                        coord = 0;
+                    } else if (input_shape_vec[input_dim] != shape[i]) {
+                        throw std::invalid_argument("Cannot expand dimension from non-1 size to different size");
+                    }
+                    in_idx += coord * input_strides[input_dim];
+                }
+            }
+
+            output_data[out_idx] = input_data[in_idx];
+        }
     } else {
         // Float32 or other types
         const float* input_data = input.data<float>();

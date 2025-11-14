@@ -312,9 +312,9 @@ auto MultiheadAttention::forward(const Variable& input) -> Variable {
 // Helper Functions
 // ============================================================================
 
-auto create_causal_mask(int64_t seq_len, Device device) -> Tensor {
+auto create_causal_mask(int64_t seq_len, Device device, DType dtype) -> Tensor {
     // Create upper triangular matrix with -inf above diagonal
-    // Always create on CPU first to avoid dereferencing CUDA pointers
+    // Always create on CPU first as Float32 to avoid dereferencing device pointers
     Tensor mask = zeros({seq_len, seq_len}, DType::Float32, Device::cpu());
     auto* data = mask.data<float>();
 
@@ -326,6 +326,11 @@ auto create_causal_mask(int64_t seq_len, Device device) -> Tensor {
                 data[i * seq_len + j] = 0.0f;
             }
         }
+    }
+
+    // Convert to target dtype if needed
+    if (dtype != DType::Float32) {
+        mask = mask.to(dtype);
     }
 
     // Move to target device if needed

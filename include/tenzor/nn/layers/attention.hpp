@@ -262,7 +262,7 @@ private:
  * auto [output, _] = attn.forward(x, x, x, Tensor{}, mask);
  * @endcode
  */
-auto create_causal_mask(int64_t seq_len, Device device = Device::cpu()) -> Tensor;
+auto create_causal_mask(int64_t seq_len, Device device = Device::cpu(), DType dtype = DType::Float32) -> Tensor;
 
 } // namespace nn
 } // namespace tenzor

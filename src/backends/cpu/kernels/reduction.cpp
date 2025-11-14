@@ -304,8 +304,8 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
     const auto dtype = input.dtype();
 
     // Mean only supports floating point types
-    if (dtype != DType::Float32 && dtype != DType::Float64) {
-        throw std::runtime_error("mean: only Float32 and Float64 are supported");
+    if (dtype != DType::Float16 && dtype != DType::Float32 && dtype != DType::Float64) {
+        throw std::runtime_error("mean: only Float16, Float32, and Float64 are supported");
     }
 
     // Compute sum first
@@ -320,7 +320,16 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
     }
 
     // Divide sum by count
-    if (dtype == DType::Float32) {
+    if (dtype == DType::Float16) {
+        auto* data = sum_result.data<Float16>();
+        const float scale = 1.0f / static_cast<float>(count);
+        const int64_t n = sum_result.numel();
+
+        #pragma omp parallel for if(n > 10000)
+        for (int64_t i = 0; i < n; i++) {
+            data[i] = Float16(static_cast<float>(data[i]) * scale);
+        }
+    } else if (dtype == DType::Float32) {
         auto* data = sum_result.data<float>();
         const float scale = 1.0f / static_cast<float>(count);
         const int64_t n = sum_result.numel();

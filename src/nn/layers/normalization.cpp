@@ -38,21 +38,25 @@ public:
         Device original_device = input_orig.device();
 
         // Make all tensors contiguous AND transfer to CPU for pointer-based access
+        // Save original dtype for conversion back
+        DType original_dtype = grad_output_orig.dtype();
+
+        // Move to CPU and convert to Float32 for computation
         auto grad_output = (grad_output_orig.device() == Device::cpu())
-                          ? grad_output_orig.contiguous()
-                          : grad_output_orig.contiguous().to(Device::cpu());
+                          ? grad_output_orig.contiguous().to(DType::Float32)
+                          : grad_output_orig.contiguous().to(Device::cpu()).to(DType::Float32);
         auto input = (input_orig.device() == Device::cpu())
-                    ? input_orig.contiguous()
-                    : input_orig.contiguous().to(Device::cpu());
+                    ? input_orig.contiguous().to(DType::Float32)
+                    : input_orig.contiguous().to(Device::cpu()).to(DType::Float32);
         auto mean = (mean_orig.device() == Device::cpu())
-                   ? mean_orig.contiguous()
-                   : mean_orig.contiguous().to(Device::cpu());
+                   ? mean_orig.contiguous().to(DType::Float32)
+                   : mean_orig.contiguous().to(Device::cpu()).to(DType::Float32);
         auto rstd = (rstd_orig.device() == Device::cpu())
-                   ? rstd_orig.contiguous()
-                   : rstd_orig.contiguous().to(Device::cpu());
+                   ? rstd_orig.contiguous().to(DType::Float32)
+                   : rstd_orig.contiguous().to(Device::cpu()).to(DType::Float32);
         auto weight = (weight_orig.device() == Device::cpu())
-                     ? weight_orig.contiguous()
-                     : weight_orig.contiguous().to(Device::cpu());
+                     ? weight_orig.contiguous().to(DType::Float32)
+                     : weight_orig.contiguous().to(Device::cpu()).to(DType::Float32);
 
         auto shape = input.shape();
         int64_t batch_size = 1;
@@ -116,16 +120,16 @@ public:
             }
         }
 
-        // Transfer gradients back to original device if needed
+        // Transfer gradients back to original device and dtype if needed
         Tensor grad_input_final = (original_device == Device::cpu())
-                                 ? grad_input.contiguous()
-                                 : grad_input.contiguous().to(original_device);
+                                 ? grad_input.contiguous().to(original_dtype)
+                                 : grad_input.contiguous().to(original_device).to(original_dtype);
         Tensor grad_weight_final = (original_device == Device::cpu())
-                                  ? grad_weight.contiguous()
-                                  : grad_weight.contiguous().to(original_device);
+                                  ? grad_weight.contiguous().to(original_dtype)
+                                  : grad_weight.contiguous().to(original_device).to(original_dtype);
         Tensor grad_bias_final = (original_device == Device::cpu())
-                                ? grad_bias.contiguous()
-                                : grad_bias.contiguous().to(original_device);
+                                ? grad_bias.contiguous().to(original_dtype)
+                                : grad_bias.contiguous().to(original_device).to(original_dtype);
 
         return {grad_input_final, grad_weight_final, grad_bias_final};
     }

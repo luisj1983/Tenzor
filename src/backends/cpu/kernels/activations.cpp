@@ -663,7 +663,52 @@ auto softmax_kernel(const Tensor& input, int64_t dim) -> Tensor {
         throw std::runtime_error("Softmax dimension out of range");
     }
 
-    if (input.dtype() == DType::Float32) {
+    if (input.dtype() == DType::Float16) {
+        const Float16* in_data = input.data<Float16>();
+        Float16* out_data = output.data<Float16>();
+
+        auto shape_span = input.shape();
+        std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
+
+        int64_t outer_size = 1;
+        for (int64_t i = 0; i < dim; ++i) {
+            outer_size *= shape[i];
+        }
+
+        int64_t dim_size = shape[dim];
+
+        int64_t inner_size = 1;
+        for (int64_t i = dim + 1; i < static_cast<int64_t>(shape.size()); ++i) {
+            inner_size *= shape[i];
+        }
+
+        // Use Float32 accumulation for numerical stability
+        for (int64_t i = 0; i < outer_size; ++i) {
+            for (int64_t k = 0; k < inner_size; ++k) {
+                // Find max (Float32 accumulation)
+                float max_val = -std::numeric_limits<float>::infinity();
+                for (int64_t j = 0; j < dim_size; ++j) {
+                    int64_t idx = (i * dim_size + j) * inner_size + k;
+                    max_val = std::max(max_val, static_cast<float>(in_data[idx]));
+                }
+
+                // Compute exp and sum (Float32 accumulation)
+                float sum = 0.0f;
+                for (int64_t j = 0; j < dim_size; ++j) {
+                    int64_t idx = (i * dim_size + j) * inner_size + k;
+                    float exp_val = std::exp(static_cast<float>(in_data[idx]) - max_val);
+                    out_data[idx] = Float16(exp_val);
+                    sum += exp_val;
+                }
+
+                // Normalize (convert back to Float16)
+                for (int64_t j = 0; j < dim_size; ++j) {
+                    int64_t idx = (i * dim_size + j) * inner_size + k;
+                    out_data[idx] = Float16(static_cast<float>(out_data[idx]) / sum);
+                }
+            }
+        }
+    } else if (input.dtype() == DType::Float32) {
         const float* in_data = input.data<float>();
         float* out_data = output.data<float>();
 
@@ -760,7 +805,7 @@ auto softmax_kernel(const Tensor& input, int64_t dim) -> Tensor {
             }
         }
     } else {
-        throw std::runtime_error("Softmax only supports Float32 and Float64");
+        throw std::runtime_error("Softmax only supports Float16, Float32, and Float64");
     }
 
     return output;
@@ -776,7 +821,43 @@ auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, in
         dim += output.ndim();
     }
 
-    if (output.dtype() == DType::Float32) {
+    if (output.dtype() == DType::Float16) {
+        const Float16* grad_out_data = grad_output.data<Float16>();
+        const Float16* out_data = output.data<Float16>();
+        Float16* grad_in_data = grad_input.data<Float16>();
+
+        auto shape_span = output.shape();
+        std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
+
+        int64_t outer_size = 1;
+        for (int64_t i = 0; i < dim; ++i) {
+            outer_size *= shape[i];
+        }
+
+        int64_t dim_size = shape[dim];
+
+        int64_t inner_size = 1;
+        for (int64_t i = dim + 1; i < static_cast<int64_t>(shape.size()); ++i) {
+            inner_size *= shape[i];
+        }
+
+        // Use Float32 accumulation for numerical stability
+        for (int64_t i = 0; i < outer_size; ++i) {
+            for (int64_t k = 0; k < inner_size; ++k) {
+                float sum = 0.0f;
+
+                for (int64_t j = 0; j < dim_size; ++j) {
+                    int64_t idx = (i * dim_size + j) * inner_size + k;
+                    sum += static_cast<float>(grad_out_data[idx]) * static_cast<float>(out_data[idx]);
+                }
+
+                for (int64_t j = 0; j < dim_size; ++j) {
+                    int64_t idx = (i * dim_size + j) * inner_size + k;
+                    grad_in_data[idx] = Float16(static_cast<float>(out_data[idx]) * (static_cast<float>(grad_out_data[idx]) - sum));
+                }
+            }
+        }
+    } else if (output.dtype() == DType::Float32) {
         const float* grad_out_data = grad_output.data<float>();
         const float* out_data = output.data<float>();
         float* grad_in_data = grad_input.data<float>();
@@ -848,7 +929,7 @@ auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, in
             }
         }
     } else {
-        throw std::runtime_error("Softmax backward only supports Float32 and Float64");
+        throw std::runtime_error("Softmax backward only supports Float16, Float32, and Float64");
     }
 
     return grad_input;
@@ -872,7 +953,51 @@ auto log_softmax_kernel(const Tensor& input, int64_t dim) -> Tensor {
         throw std::runtime_error("LogSoftmax dimension out of range");
     }
 
-    if (input.dtype() == DType::Float32) {
+    if (input.dtype() == DType::Float16) {
+        const Float16* in_data = input.data<Float16>();
+        Float16* out_data = output.data<Float16>();
+
+        auto shape_span = input.shape();
+        std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
+
+        int64_t outer_size = 1;
+        for (int64_t i = 0; i < dim; ++i) {
+            outer_size *= shape[i];
+        }
+
+        int64_t dim_size = shape[dim];
+
+        int64_t inner_size = 1;
+        for (int64_t i = dim + 1; i < static_cast<int64_t>(shape.size()); ++i) {
+            inner_size *= shape[i];
+        }
+
+        // Use Float32 accumulation for numerical stability
+        for (int64_t i = 0; i < outer_size; ++i) {
+            for (int64_t k = 0; k < inner_size; ++k) {
+                // Find max (Float32 accumulation)
+                float max_val = -std::numeric_limits<float>::infinity();
+                for (int64_t j = 0; j < dim_size; ++j) {
+                    int64_t idx = (i * dim_size + j) * inner_size + k;
+                    max_val = std::max(max_val, static_cast<float>(in_data[idx]));
+                }
+
+                // Compute log(sum(exp(x - max))) (Float32 accumulation)
+                float sum_exp = 0.0f;
+                for (int64_t j = 0; j < dim_size; ++j) {
+                    int64_t idx = (i * dim_size + j) * inner_size + k;
+                    sum_exp += std::exp(static_cast<float>(in_data[idx]) - max_val);
+                }
+                float log_sum_exp = std::log(sum_exp);
+
+                // Compute log_softmax and convert to Float16
+                for (int64_t j = 0; j < dim_size; ++j) {
+                    int64_t idx = (i * dim_size + j) * inner_size + k;
+                    out_data[idx] = Float16(static_cast<float>(in_data[idx]) - max_val - log_sum_exp);
+                }
+            }
+        }
+    } else if (input.dtype() == DType::Float32) {
         const float* in_data = input.data<float>();
         float* out_data = output.data<float>();
 
@@ -969,7 +1094,7 @@ auto log_softmax_kernel(const Tensor& input, int64_t dim) -> Tensor {
             }
         }
     } else {
-        throw std::runtime_error("LogSoftmax only supports Float32 and Float64");
+        throw std::runtime_error("LogSoftmax only supports Float16, Float32, and Float64");
     }
 
     return output;
@@ -984,7 +1109,43 @@ auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output
         dim += output.ndim();
     }
 
-    if (output.dtype() == DType::Float32) {
+    if (output.dtype() == DType::Float16) {
+        const Float16* grad_out_data = grad_output.data<Float16>();
+        const Float16* out_data = output.data<Float16>();
+        Float16* grad_in_data = grad_input.data<Float16>();
+
+        auto shape_span = output.shape();
+        std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
+
+        int64_t outer_size = 1;
+        for (int64_t i = 0; i < dim; ++i) {
+            outer_size *= shape[i];
+        }
+
+        int64_t dim_size = shape[dim];
+
+        int64_t inner_size = 1;
+        for (int64_t i = dim + 1; i < static_cast<int64_t>(shape.size()); ++i) {
+            inner_size *= shape[i];
+        }
+
+        // Use Float32 accumulation for numerical stability
+        for (int64_t i = 0; i < outer_size; ++i) {
+            for (int64_t k = 0; k < inner_size; ++k) {
+                float sum_grad = 0.0f;
+
+                for (int64_t j = 0; j < dim_size; ++j) {
+                    int64_t idx = (i * dim_size + j) * inner_size + k;
+                    sum_grad += static_cast<float>(grad_out_data[idx]);
+                }
+
+                for (int64_t j = 0; j < dim_size; ++j) {
+                    int64_t idx = (i * dim_size + j) * inner_size + k;
+                    grad_in_data[idx] = Float16(static_cast<float>(grad_out_data[idx]) - std::exp(static_cast<float>(out_data[idx])) * sum_grad);
+                }
+            }
+        }
+    } else if (output.dtype() == DType::Float32) {
         const float* grad_out_data = grad_output.data<float>();
         const float* out_data = output.data<float>();
         float* grad_in_data = grad_input.data<float>();
@@ -1055,7 +1216,7 @@ auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output
             }
         }
     } else {
-        throw std::runtime_error("LogSoftmax backward only supports Float32 and Float64");
+        throw std::runtime_error("LogSoftmax backward only supports Float16, Float32, and Float64");
     }
 
     return grad_input;

@@ -74,9 +74,9 @@ auto bmm(const Tensor& a, const Tensor& b) -> Tensor {
     int64_t p = b.shape()[2];
 
     // Validate dtype support
-    if (a.dtype() != DType::Float32 && a.dtype() != DType::Float64) {
+    if (a.dtype() != DType::Float16 && a.dtype() != DType::Float32 && a.dtype() != DType::Float64) {
         throw std::runtime_error(
-            "bmm currently only supports Float32 and Float64 dtypes, got: " +
+            "bmm currently only supports Float16, Float32, and Float64 dtypes, got: " +
             std::to_string(static_cast<int>(a.dtype())));
     }
 
