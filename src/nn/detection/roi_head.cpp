@@ -200,7 +200,7 @@ auto RoIHead::match_proposals_to_gt(const Tensor& proposals,
 auto RoIHead::sample_rois(const Tensor& labels) -> Tensor {
     // Sample positive and negative ROIs for training
     auto zero_tensor = full(std::vector<int64_t>(labels.shape().begin(), labels.shape().end()),
-                            static_cast<int64_t>(0), labels.dtype(), labels.device());
+                            static_cast<float>(0), labels.dtype(), labels.device());
     auto positive_mask = gt(labels, zero_tensor);
     auto negative_mask = eq(labels, zero_tensor);
 
@@ -469,7 +469,7 @@ auto RoIHead::forward_detections(
 
             // Regression loss (only for foreground)
             auto zero_tensor = full(std::vector<int64_t>(sampled_labels.shape().begin(), sampled_labels.shape().end()),
-                                    static_cast<int64_t>(0), sampled_labels.dtype(), sampled_labels.device());
+                                    static_cast<float>(0), sampled_labels.dtype(), sampled_labels.device());
             auto fg_mask = gt(sampled_labels, zero_tensor);
             auto num_fg = ops::sum(fg_mask.to(DType::Int64)).item<int64_t>();
 

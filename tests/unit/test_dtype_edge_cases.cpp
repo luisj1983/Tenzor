@@ -264,7 +264,13 @@ TEST_P(DTypeEdgeCaseTest, Float32VsFloat64Precision) {
     // Test with value that shows Float32 vs Float64 precision difference
     double precise_value = 1.23456789012345678901234567890;
 
-    auto a_cpu = full({10}, static_cast<float>(precise_value), dtype, Device::cpu());
+    // Use appropriate full() overload based on dtype
+    Tensor a_cpu;
+    if (dtype == DType::Float32) {
+        a_cpu = full({10}, static_cast<float>(precise_value), dtype, Device::cpu());
+    } else {
+        a_cpu = full({10}, precise_value, dtype, Device::cpu());
+    }
     auto a = (device.type == Device::Type::CPU) ? a_cpu : a_cpu.to(device);
     auto a_result = a.to(Device::cpu());
 
@@ -295,8 +301,13 @@ TEST_P(DTypeEdgeCaseTest, DenormalNumbers) {
     float denormal_f32 = std::numeric_limits<float>::denorm_min();
     double denormal_f64 = std::numeric_limits<double>::denorm_min();
 
-    auto a_cpu = full({10}, dtype == DType::Float32 ? denormal_f32 : static_cast<float>(denormal_f64),
-                      dtype, Device::cpu());
+    // Use appropriate full() overload based on dtype to preserve precision
+    Tensor a_cpu;
+    if (dtype == DType::Float32) {
+        a_cpu = full({10}, denormal_f32, dtype, Device::cpu());
+    } else {
+        a_cpu = full({10}, denormal_f64, dtype, Device::cpu());
+    }
     auto a = (device.type == Device::Type::CPU) ? a_cpu : a_cpu.to(device);
 
     // Test that denormals can be added

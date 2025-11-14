@@ -133,6 +133,11 @@ auto ones(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
             std::fill(ptr, ptr + numel, 1);
             break;
         }
+        case DType::Bool: {
+            bool* ptr = static_cast<bool*>(data);
+            std::fill(ptr, ptr + numel, true);
+            break;
+        }
         default:
             throw std::runtime_error("Unsupported dtype for ones()");
     }
@@ -202,6 +207,76 @@ auto full(std::vector<int64_t> shape, float value, DType dtype, Device device) -
         case DType::Bool: {
             bool* ptr = static_cast<bool*>(data);
             std::fill(ptr, ptr + numel, value != 0.0f);
+            break;
+        }
+        default:
+            throw std::runtime_error("Unsupported dtype for full()");
+    }
+    return tensor;
+}
+
+auto full(std::vector<int64_t> shape, double value, DType dtype, Device device) -> Tensor {
+    // Use backend directly for non-CPU devices
+    if (device.type != Device::Type::CPU) {
+        auto backend = backend_registry().get_backend(device.type);
+        if (!backend) {
+            throw std::runtime_error("Backend not available for device type");
+        }
+
+        OpAttributes attrs;
+        attrs["shape"] = shape_to_string(shape);
+        // Use scientific notation with full precision for double values
+        std::ostringstream oss;
+        oss << std::scientific << std::setprecision(std::numeric_limits<double>::max_digits10) << value;
+        attrs["value"] = oss.str();
+        attrs["dtype"] = dtype_to_string(dtype);
+        attrs["device_id"] = std::to_string(device.index);
+
+        return backend->dispatch("full", {}, attrs)[0];
+    }
+
+    // CPU path: create and fill directly
+    auto tensor = empty(std::move(shape), dtype, device);
+    if (!tensor.impl() || !tensor.impl()->storage) return tensor;
+
+    size_t numel = tensor.numel();
+    void* data = tensor.impl()->storage->data();
+
+    // Fill with value based on dtype
+    switch (dtype) {
+        case DType::Float16: {
+            Float16* ptr = static_cast<Float16*>(data);
+            std::fill(ptr, ptr + numel, Float16(static_cast<float>(value)));
+            break;
+        }
+        case DType::Float32: {
+            float* ptr = static_cast<float*>(data);
+            std::fill(ptr, ptr + numel, static_cast<float>(value));
+            break;
+        }
+        case DType::Float64: {
+            double* ptr = static_cast<double*>(data);
+            std::fill(ptr, ptr + numel, value);  // No cast needed, already double
+            break;
+        }
+        case DType::Int32: {
+            int32_t* ptr = static_cast<int32_t*>(data);
+            std::fill(ptr, ptr + numel, static_cast<int32_t>(value));
+            break;
+        }
+        case DType::Int64: {
+            int64_t* ptr = static_cast<int64_t*>(data);
+            std::fill(ptr, ptr + numel, static_cast<int64_t>(value));
+            break;
+        }
+        case DType::UInt8: {
+            uint8_t* ptr = static_cast<uint8_t*>(data);
+            std::fill(ptr, ptr + numel, static_cast<uint8_t>(value));
+            break;
+        }
+        case DType::Bool: {
+            bool* ptr = static_cast<bool*>(data);
+            std::fill(ptr, ptr + numel, value != 0.0);
             break;
         }
         default:

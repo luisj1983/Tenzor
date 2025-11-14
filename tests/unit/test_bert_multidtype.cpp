@@ -168,12 +168,12 @@ private:
     static DType dtype_from_type() {
         if (std::is_same<U, float>::value) return DType::Float32;
         if (std::is_same<U, double>::value) return DType::Float64;
-        if (std::is_same_v<U, uint16_t>) return DType::Float16;
+        if (std::is_same_v<U, Float16>) return DType::Float16;
         return DType::Float32;
     }
 };
 
-using DTypes = ::testing::Types<float, double, uint16_t>;
+using DTypes = ::testing::Types<float, double, Float16>;
 TYPED_TEST_SUITE(BertMultiDtypeTest, DTypes);
 
 // ============================================================================

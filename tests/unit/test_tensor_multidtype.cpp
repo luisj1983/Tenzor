@@ -168,13 +168,13 @@ TEST_P(TensorMultiDTypeTest, FullCreation) {
     } else if (dtype == DType::Float64) {
         t = full({2, 3}, fill_value, dtype, device);
     } else if (dtype == DType::Int32) {
-        t = full({2, 3}, static_cast<int32_t>(fill_value), dtype, device);
+        t = full({2, 3}, static_cast<float>(static_cast<int32_t>(fill_value)), dtype, device);
     } else if (dtype == DType::Int64) {
-        t = full({2, 3}, static_cast<int64_t>(fill_value), dtype, device);
+        t = full({2, 3}, static_cast<float>(static_cast<int64_t>(fill_value)), dtype, device);
     } else if (dtype == DType::UInt8) {
-        t = full({2, 3}, static_cast<uint8_t>(fill_value), dtype, device);
+        t = full({2, 3}, static_cast<float>(static_cast<uint8_t>(fill_value)), dtype, device);
     } else if (dtype == DType::Bool) {
-        t = full({2, 3}, static_cast<bool>(fill_value), dtype, device);
+        t = full({2, 3}, static_cast<float>(static_cast<bool>(fill_value)), dtype, device);
     }
 
     EXPECT_EQ(t.shape()[0], 2);
@@ -349,7 +349,7 @@ TEST_P(TensorMultiDTypeTest, UInt8Range) {
     }
 
     // Test typical image data range [0, 255]
-    auto t = full({10, 10}, static_cast<uint8_t>(255), dtype, device);
+    auto t = full({10, 10}, static_cast<float>(static_cast<uint8_t>(255)), dtype, device);
 
     auto t_cpu = t.to(Device::cpu());
     const uint8_t* data = t_cpu.data<uint8_t>();

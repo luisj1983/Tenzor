@@ -64,28 +64,28 @@ protected:
 
     // Adjust model size based on dtype to manage memory
     int64_t get_hidden_size() const {
-        if (std::is_same<T, uint16_t>::value) return 64;  // Smaller for Float16
+        if (std::is_same<T, Float16>::value) return 64;  // Smaller for Float16
         return 128;
     }
 
     int64_t get_num_layers() const {
-        if (std::is_same<T, uint16_t>::value) return 1;   // Fewer layers for Float16
+        if (std::is_same<T, Float16>::value) return 1;   // Fewer layers for Float16
         return 2;
     }
 
     int64_t get_num_heads() const {
-        if (std::is_same<T, uint16_t>::value) return 2;
+        if (std::is_same<T, Float16>::value) return 2;
         return 4;
     }
 
     int64_t get_intermediate_size() const {
-        if (std::is_same<T, uint16_t>::value) return 256;
+        if (std::is_same<T, Float16>::value) return 256;
         return 512;
     }
 
     float get_tolerance() const {
         if (std::is_same<T, double>::value) return 1e-5f;
-        if (std::is_same<T, uint16_t>::value) return 1e-2f;  // Relaxed for Float16
+        if (std::is_same<T, Float16>::value) return 1e-2f;  // Relaxed for Float16
         return 1e-4f;  // Float32
     }
 
@@ -119,11 +119,14 @@ protected:
         }
 
         if (dtype_ == DType::Float32) {
-            std::copy(mask_data.begin(), mask_data.end(), mask.data<float>());
+            auto* ptr = mask.data<float>();
+            for (size_t i = 0; i < mask_data.size(); ++i) {
+                ptr[i] = static_cast<float>(mask_data[i]);
+            }
         } else if (dtype_ == DType::Float64) {
             auto* ptr = mask.data<double>();
             for (size_t i = 0; i < mask_data.size(); ++i) {
-                ptr[i] = static_cast<double>(mask_data[i]);
+                ptr[i] = static_cast<double>(static_cast<float>(mask_data[i]));
             }
         } else if (dtype_ == DType::Float16) {
             std::copy(mask_data.begin(), mask_data.end(), mask.data<T>());
@@ -179,12 +182,12 @@ private:
     static DType dtype_from_type() {
         if (std::is_same<U, float>::value) return DType::Float32;
         if (std::is_same<U, double>::value) return DType::Float64;
-        if (std::is_same<U, uint16_t>::value) return DType::Float16;
+        if (std::is_same<U, Float16>::value) return DType::Float16;
         return DType::Float32;
     }
 };
 
-using DTypes = ::testing::Types<float, double, uint16_t>;
+using DTypes = ::testing::Types<float, double, Float16>;
 TYPED_TEST_SUITE(RobertaMultiDtypeTest, DTypes);
 
 // ============================================================================
@@ -764,7 +767,7 @@ TYPED_TEST(RobertaMultiDtypeTest, MaxSequenceLength) {
 }
 
 TYPED_TEST(RobertaMultiDtypeTest, LargeBatchSize) {
-    if (std::is_same<TypeParam, uint16_t>::value) {
+    if (std::is_same<TypeParam, Float16>::value) {
         GTEST_SKIP() << "Skipping large batch test for Float16 to avoid memory issues";
     }
 

@@ -213,7 +213,7 @@ TEST_P(DTypeEdgeCaseEnhancedTest, MixedDTypeAddition) {
 
     // Create Float32 and Int32 tensors
     auto a = full({10}, 5.5f, DType::Float32, device);
-    auto b = full({10}, 3, DType::Int32, device);
+    auto b = full({10}, 3.0f, DType::Int32, device);
 
     // Mixed dtype operations should promote to Float32
     auto c = add(a, b.to(DType::Float32));
@@ -278,7 +278,7 @@ TEST_P(DTypeEdgeCaseEnhancedTest, BoolLogicalOps) {
 
 TEST_P(DTypeEdgeCaseEnhancedTest, ConversionRoundtrip) {
     // Test: original -> Float32 -> original
-    auto original = full({10}, 42, dtype, device);
+    auto original = full({10}, 42.0f, dtype, device);
     auto as_float = original.to(DType::Float32);
     auto back = as_float.to(dtype);
 

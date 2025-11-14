@@ -375,7 +375,7 @@ TEST_P(EdgeCaseMultiDTypeTest, ExtremeValues_Max) {
         max_tensor = full({10}, max_val, dtype, device_);
     } else if (dtype == DType::Int32) {
         int32_t max_val = std::numeric_limits<int32_t>::max();
-        max_tensor = full({10}, max_val, dtype, device_);
+        max_tensor = full({10}, static_cast<float>(max_val), dtype, device_);
     } else {
         GTEST_SKIP() << "Unsupported dtype for max value test";
     }
@@ -397,7 +397,7 @@ TEST_P(EdgeCaseMultiDTypeTest, ExtremeValues_Min) {
         min_tensor = full({10}, min_val, dtype, device_);
     } else if (dtype == DType::Int32) {
         int32_t min_val = std::numeric_limits<int32_t>::lowest();
-        min_tensor = full({10}, min_val, dtype, device_);
+        min_tensor = full({10}, static_cast<float>(min_val), dtype, device_);
     } else {
         GTEST_SKIP() << "Unsupported dtype for min value test";
     }
@@ -663,8 +663,8 @@ TEST_P(EdgeCaseMultiDTypeTest, IntegerOverflow_Addition) {
 
     if (dtype == DType::Int32) {
         int32_t max_val = std::numeric_limits<int32_t>::max();
-        auto a = full({10}, max_val, dtype, device_);
-        auto b = full({10}, static_cast<int32_t>(1), dtype, device_);
+        auto a = full({10}, static_cast<float>(max_val), dtype, device_);
+        auto b = full({10}, static_cast<float>(static_cast<int32_t>(1)), dtype, device_);
 
         auto result = add(a, b);
         auto result_cpu = result.to(Device::cpu());
@@ -685,8 +685,8 @@ TEST_P(EdgeCaseMultiDTypeTest, IntegerUnderflow_Subtraction) {
 
     if (dtype == DType::Int32) {
         int32_t min_val = std::numeric_limits<int32_t>::min();
-        auto a = full({10}, min_val, dtype, device_);
-        auto b = full({10}, static_cast<int32_t>(1), dtype, device_);
+        auto a = full({10}, static_cast<float>(min_val), dtype, device_);
+        auto b = full({10}, static_cast<float>(static_cast<int32_t>(1)), dtype, device_);
 
         auto result = sub(a, b);
         auto result_cpu = result.to(Device::cpu());

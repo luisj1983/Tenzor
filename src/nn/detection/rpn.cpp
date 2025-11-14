@@ -238,9 +238,9 @@ auto RegionProposalNetwork::sample_anchors(const Tensor& labels) -> Tensor {
 
     // Sample positive and negative anchors for training
     auto ones_tensor = full(std::vector<int64_t>(labels.shape().begin(), labels.shape().end()),
-                            static_cast<int64_t>(1), labels.dtype(), labels.device());
+                            static_cast<float>(1), labels.dtype(), labels.device());
     auto zeros_tensor = full(std::vector<int64_t>(labels.shape().begin(), labels.shape().end()),
-                             static_cast<int64_t>(0), labels.dtype(), labels.device());
+                             static_cast<float>(0), labels.dtype(), labels.device());
     auto positive_mask = eq(labels, ones_tensor);
     auto negative_mask = eq(labels, zeros_tensor);
 
@@ -480,7 +480,7 @@ auto RegionProposalNetwork::forward_proposals(
 
             // Compute regression loss (smooth L1)
             auto ones_tensor = full(std::vector<int64_t>(sampled_labels.shape().begin(), sampled_labels.shape().end()),
-                                    static_cast<int64_t>(1), sampled_labels.dtype(), sampled_labels.device());
+                                    static_cast<float>(1), sampled_labels.dtype(), sampled_labels.device());
             auto positive_mask = eq(sampled_labels, ones_tensor);
             auto num_positives = ops::sum(
                 positive_mask.to(DType::Int64)

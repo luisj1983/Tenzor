@@ -155,6 +155,21 @@ template<> auto Tensor::item<float>() const -> float {
     return *data<float>();
 }
 
+template<> auto Tensor::item<Float16>() const -> Float16 {
+    if (numel() != 1) {
+        throw std::runtime_error("item() only works for single-element tensors");
+    }
+    if (dtype() != DType::Float16) {
+        throw std::runtime_error("Type mismatch: tensor dtype is not Float16");
+    }
+    // For GPU tensors, copy to CPU first
+    if (device().type != Device::Type::CPU) {
+        auto cpu_tensor = cpu();
+        return *cpu_tensor.data<Float16>();
+    }
+    return *data<Float16>();
+}
+
 template<> auto Tensor::item<double>() const -> double {
     if (numel() != 1) {
         throw std::runtime_error("item() only works for single-element tensors");

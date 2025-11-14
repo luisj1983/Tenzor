@@ -71,6 +71,20 @@ auto full(std::vector<int64_t> shape,
          Device device = Device::cpu()) -> Tensor;
 
 /**
+ * @brief Create tensor filled with specific value (double precision).
+ *
+ * @param shape Tensor dimensions
+ * @param value Fill value (double precision)
+ * @param dtype Element data type
+ * @param device Target device
+ * @return New tensor filled with value
+ */
+auto full(std::vector<int64_t> shape,
+         double value,
+         DType dtype,
+         Device device) -> Tensor;
+
+/**
  * @brief Create uninitialized tensor.
  *
  * Allocates memory without initialization for performance.

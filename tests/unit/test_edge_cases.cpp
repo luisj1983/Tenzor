@@ -268,8 +268,8 @@ TEST_P(EdgeCaseTest, MixedDType_Operations) {
 }
 
 TEST_P(EdgeCaseTest, IntegerOverflow_Addition) {
-    auto a = full({10}, static_cast<int8_t>(127), DType::Int8, device_);
-    auto b = full({10}, static_cast<int8_t>(1), DType::Int8, device_);
+    auto a = full({10}, static_cast<float>(static_cast<int8_t>(127)), DType::Int8, device_);
+    auto b = full({10}, static_cast<float>(static_cast<int8_t>(1)), DType::Int8, device_);
 
     // Integer overflow behavior - wrap around or saturation
     auto result = add(a, b);
@@ -281,8 +281,8 @@ TEST_P(EdgeCaseTest, IntegerOverflow_Addition) {
 }
 
 TEST_P(EdgeCaseTest, IntegerUnderflow_Subtraction) {
-    auto a = full({10}, static_cast<int8_t>(-128), DType::Int8, device_);
-    auto b = full({10}, static_cast<int8_t>(1), DType::Int8, device_);
+    auto a = full({10}, static_cast<float>(static_cast<int8_t>(-128)), DType::Int8, device_);
+    auto b = full({10}, static_cast<float>(static_cast<int8_t>(1)), DType::Int8, device_);
 
     auto result = sub(a, b);
     auto result_cpu = result.to(Device::cpu());
