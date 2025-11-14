@@ -765,9 +765,10 @@ TEST_P(TransformerIntegrationMultiDTypeTest, DTypePrecisionComparison) {
             EXPECT_LE(std::abs(data[i]), 100.0) << "Unexpectedly large value at index " << i;
         }
     } else if (dtype == DType::Float16) {
-        // Float16 has limited range, so we're more lenient
-        auto data = output_cpu.data<float>();
-        for (int64_t i = 0; i < output_cpu.numel(); ++i) {
+        // Float16 requires conversion to Float32 for reading
+        auto output_f32 = output_cpu.to(DType::Float32);
+        auto data = output_f32.data<float>();
+        for (int64_t i = 0; i < output_f32.numel(); ++i) {
             EXPECT_TRUE(std::isfinite(data[i])) << "Non-finite value at index " << i
                 << " on " << device.to_string() << " with Float16";
             EXPECT_LE(std::abs(data[i]), 1000.0f) << "Unexpectedly large value at index " << i;
