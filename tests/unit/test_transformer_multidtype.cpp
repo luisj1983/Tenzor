@@ -700,11 +700,13 @@ TEST_P(TransformerIntegrationMultiDTypeTest, SmallModelConsistency) {
                 << " on " << device.to_string() << " with dtype Float64";
         }
     } else if (dtype == DType::Float16) {
-        // Float16 requires special handling
-        auto data1 = output1_cpu.data<float>();  // Read as float after conversion
-        auto data2 = output2_cpu.data<float>();
+        // Float16 requires conversion to Float32 for reading
+        auto output1_f32 = output1_cpu.to(DType::Float32);
+        auto output2_f32 = output2_cpu.to(DType::Float32);
+        auto data1 = output1_f32.data<float>();
+        auto data2 = output2_f32.data<float>();
         auto tol = get_consistency_tolerance<float>();
-        for (int64_t i = 0; i < output1_cpu.numel(); ++i) {
+        for (int64_t i = 0; i < output1_f32.numel(); ++i) {
             EXPECT_NEAR(data1[i], data2[i], tol) << "Mismatch at index " << i
                 << " on " << device.to_string() << " with dtype Float16";
         }
