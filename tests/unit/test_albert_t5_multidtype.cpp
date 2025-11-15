@@ -176,6 +176,8 @@ TEST_P(ALBERTandT5MultiDTypeTest, ALBERTBaseParameterCount) {
     auto config = AlbertConfig::base();
     config.vocab_size = 30000;
     auto model = std::make_shared<AlbertModel>(config);
+    model->to(dtype);
+    model->to(device);
     auto params = model->parameters();
 
     size_t total_params = 0;

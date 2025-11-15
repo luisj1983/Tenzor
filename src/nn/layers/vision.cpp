@@ -198,11 +198,13 @@ auto WindowAttention::compute_relative_position_index() -> void {
 auto WindowAttention::get_relative_position_bias() const -> Tensor {
     // Gather biases using precomputed indices
     auto bias_table = relative_position_bias_table_->tensor();
+    auto target_dtype = bias_table.dtype();
     int64_t table_size = 2 * window_size_ - 1;
     int64_t num_positions = window_size_ * window_size_;
 
-    // Flatten table for indexing: (table_size * table_size, num_heads)
-    auto bias_flat = bias_table.reshape({table_size * table_size, num_heads_});
+    // Convert to Float32 for computation (numerical stability)
+    auto bias_table_f32 = bias_table.to(DType::Float32);
+    auto bias_flat = bias_table_f32.reshape({table_size * table_size, num_heads_});
 
     // Gather using relative position indices
     auto bias = zeros({num_positions, num_positions, num_heads_}, DType::Float32, bias_table.device());
@@ -220,12 +222,21 @@ auto WindowAttention::get_relative_position_bias() const -> Tensor {
         }
     }
 
-    // Permute to (num_heads, num_positions, num_positions)
-    return bias.permute({2, 0, 1});
+    // Permute to (num_heads, num_positions, num_positions) and convert back to target dtype
+    auto bias_permuted = bias.permute({2, 0, 1});
+    return bias_permuted.to(target_dtype);
 }
 
 auto WindowAttention::forward(const Variable& input, const Tensor& mask) -> Variable {
     auto shape = input.tensor().shape();
+
+    // Validate input shape
+    if (shape.size() != 3) {
+        throw std::runtime_error(
+            "WindowAttention expects 3D input (B, N, C), got " +
+            std::to_string(shape.size()) + "D");
+    }
+
     int64_t B = shape[0];      // num_windows * batch
     int64_t N = shape[1];      // window_size * window_size
     int64_t C = shape[2];      // dim
@@ -365,9 +376,10 @@ auto window_reverse(const Variable& windows, int64_t window_size,
 auto create_shifted_window_mask(int64_t H, int64_t W,
                                  int64_t window_size,
                                  int64_t shift_size,
-                                 Device device) -> Tensor {
+                                 Device device,
+                                 DType dtype) -> Tensor {
     // Create image mask to identify different regions after cyclic shift
-    auto img_mask = zeros({1, H, W, 1}, DType::Float32, device);
+    auto img_mask = zeros({1, H, W, 1}, dtype, device);
     auto mask_data = img_mask.data<float>();
 
     // Partition into regions based on shift
@@ -392,7 +404,7 @@ auto create_shifted_window_mask(int64_t H, int64_t W,
     // Create attention mask
     int64_t num_windows = (H / window_size) * (W / window_size);
     int64_t M = window_size * window_size;
-    auto attn_mask = zeros({num_windows, M, M}, DType::Float32, device);
+    auto attn_mask = zeros({num_windows, M, M}, dtype, device);
     auto attn_data = attn_mask.data<float>();
     auto window_data = mask_windows.tensor().data<float>();
 

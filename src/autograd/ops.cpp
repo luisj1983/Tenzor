@@ -476,6 +476,14 @@ auto cat(const std::vector<Variable>& inputs, int64_t dim) -> Variable {
         return Variable(tenzor::cat(tensors, dim), false);
     }
 
+    // Normalize negative dimension index
+    if (!inputs.empty()) {
+        auto ndim = static_cast<int64_t>(inputs[0].shape().size());
+        if (dim < 0) {
+            dim += ndim;
+        }
+    }
+
     // Collect split sizes (size of each input along concatenation dimension)
     std::vector<int64_t> split_sizes;
     split_sizes.reserve(inputs.size());

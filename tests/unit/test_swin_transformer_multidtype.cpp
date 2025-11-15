@@ -131,7 +131,13 @@ protected:
 
     // For Float16, use smaller image size
     int GetImageSize() {
-        return (dtype_ == DType::Float16) ? 112 : 224;
+        // Image size must satisfy multiple constraints:
+        // 1. (img_size / patch_size) % window_size == 0
+        // 2. img_size / patch_size / 2^(num_stages-1) must be integer
+        // For Swin Tiny: patch_size=4, window_size=7, num_stages=4
+        // Minimum valid size is 224 (224/4=56, 56%7=0, 56/8=7)
+        // Use same size for all dtypes to maintain architectural constraints
+        return 224;
     }
 };
 
@@ -141,7 +147,9 @@ protected:
 
 TEST_P(SwinMultiDTypeTest, SwinTinyForwardShape) {
     int img_size = GetImageSize();
-    auto model = swin_tiny(1000, 224, false);
+    auto model = swin_tiny(1000, img_size, false);
+    model->to(dtype_);
+    model->to(device_);
 
     Variable input(Tensor({2, 3, img_size, img_size}, dtype_, device_), true);
     Variable output = model->forward(input);
@@ -154,7 +162,9 @@ TEST_P(SwinMultiDTypeTest, SwinTinyForwardShape) {
 
 TEST_P(SwinMultiDTypeTest, SwinTinyGradientFlow) {
     int img_size = GetImageSize();
-    auto model = swin_tiny(10, 224, false);
+    auto model = swin_tiny(10, img_size, false);
+    model->to(dtype_);
+    model->to(device_);
     model->train();
 
     Variable input(Tensor({1, 3, img_size, img_size}, dtype_, device_), true);
@@ -187,7 +197,9 @@ TEST_P(SwinMultiDTypeTest, SwinTinyParameterCount) {
 
 TEST_P(SwinMultiDTypeTest, SwinTinyBatchSizeOne) {
     int img_size = GetImageSize();
-    auto model = swin_tiny(10, 224, false);
+    auto model = swin_tiny(10, img_size, false);
+    model->to(dtype_);
+    model->to(device_);
 
     Variable input(Tensor({1, 3, img_size, img_size}, dtype_, device_), true);
     Variable output = model->forward(input);
@@ -200,7 +212,9 @@ TEST_P(SwinMultiDTypeTest, SwinTinyBatchSizeOne) {
 
 TEST_P(SwinMultiDTypeTest, SwinTinyCustomClasses) {
     int img_size = GetImageSize();
-    auto model = swin_tiny(100, 224, false);
+    auto model = swin_tiny(100, img_size, false);
+    model->to(dtype_);
+    model->to(device_);
 
     Variable input(Tensor({2, 3, img_size, img_size}, dtype_, device_), true);
     Variable output = model->forward(input);
@@ -217,7 +231,9 @@ TEST_P(SwinMultiDTypeTest, SwinTinyCustomClasses) {
 
 TEST_P(SwinMultiDTypeTest, SwinSmallForwardShape) {
     int img_size = GetImageSize();
-    auto model = swin_small(1000, 224, false);
+    auto model = swin_small(1000, img_size, false);
+    model->to(dtype_);
+    model->to(device_);
 
     Variable input(Tensor({2, 3, img_size, img_size}, dtype_, device_), true);
     Variable output = model->forward(input);
@@ -230,7 +246,9 @@ TEST_P(SwinMultiDTypeTest, SwinSmallForwardShape) {
 
 TEST_P(SwinMultiDTypeTest, SwinSmallGradientFlow) {
     int img_size = GetImageSize();
-    auto model = swin_small(10, 224, false);
+    auto model = swin_small(10, img_size, false);
+    model->to(dtype_);
+    model->to(device_);
     model->train();
 
     Variable input(Tensor({1, 3, img_size, img_size}, dtype_, device_), true);
@@ -259,7 +277,9 @@ TEST_P(SwinMultiDTypeTest, SwinSmallParameterCount) {
 
 TEST_P(SwinMultiDTypeTest, SwinBaseForwardShape) {
     int img_size = GetImageSize();
-    auto model = swin_base(1000, 224, false);
+    auto model = swin_base(1000, img_size, false);
+    model->to(dtype_);
+    model->to(device_);
 
     Variable input(Tensor({2, 3, img_size, img_size}, dtype_, device_), true);
     Variable output = model->forward(input);
@@ -272,7 +292,9 @@ TEST_P(SwinMultiDTypeTest, SwinBaseForwardShape) {
 
 TEST_P(SwinMultiDTypeTest, SwinBaseGradientFlow) {
     int img_size = GetImageSize();
-    auto model = swin_base(10, 224, false);
+    auto model = swin_base(10, img_size, false);
+    model->to(dtype_);
+    model->to(device_);
     model->train();
 
     Variable input(Tensor({1, 3, img_size, img_size}, dtype_, device_), true);
@@ -301,7 +323,9 @@ TEST_P(SwinMultiDTypeTest, SwinBaseParameterCount) {
 
 TEST_P(SwinMultiDTypeTest, SwinLargeForwardShape) {
     int img_size = GetImageSize();
-    auto model = swin_large(1000, 224, false);
+    auto model = swin_large(1000, img_size, false);
+    model->to(dtype_);
+    model->to(device_);
 
     Variable input(Tensor({1, 3, img_size, img_size}, dtype_, device_), true);
     Variable output = model->forward(input);
@@ -314,7 +338,9 @@ TEST_P(SwinMultiDTypeTest, SwinLargeForwardShape) {
 
 TEST_P(SwinMultiDTypeTest, SwinLargeGradientFlow) {
     int img_size = GetImageSize();
-    auto model = swin_large(10, 224, false);
+    auto model = swin_large(10, img_size, false);
+    model->to(dtype_);
+    model->to(device_);
     model->train();
 
     Variable input(Tensor({1, 3, img_size, img_size}, dtype_, device_), true);
@@ -344,6 +370,8 @@ TEST_P(SwinMultiDTypeTest, SwinLargeParameterCount) {
 TEST_P(SwinMultiDTypeTest, SwinTinyImageSize384) {
     int img_size = GetImageSize();
     auto model = swin_tiny(1000, 384, false);
+    model->to(dtype_);
+    model->to(device_);
 
     Variable input(Tensor({1, 3, 384, 384}, dtype_, device_), true);
     Variable output = model->forward(input);
@@ -357,6 +385,8 @@ TEST_P(SwinMultiDTypeTest, SwinTinyImageSize384) {
 TEST_P(SwinMultiDTypeTest, SwinTinyImageSize448) {
     int img_size = GetImageSize();
     auto model = swin_tiny(1000, 448, false);
+    model->to(dtype_);
+    model->to(device_);
 
     Variable input(Tensor({1, 3, 448, 448}, dtype_, device_), true);
     Variable output = model->forward(input);
@@ -370,6 +400,8 @@ TEST_P(SwinMultiDTypeTest, SwinTinyImageSize448) {
 TEST_P(SwinMultiDTypeTest, SwinSmallImageSize384) {
     int img_size = GetImageSize();
     auto model = swin_small(1000, 384, false);
+    model->to(dtype_);
+    model->to(device_);
 
     Variable input(Tensor({1, 3, 384, 384}, dtype_, device_), true);
     Variable output = model->forward(input);
@@ -383,6 +415,8 @@ TEST_P(SwinMultiDTypeTest, SwinSmallImageSize384) {
 TEST_P(SwinMultiDTypeTest, SwinBaseImageSize512) {
     int img_size = GetImageSize();
     auto model = swin_base(1000, 512, false);
+    model->to(dtype_);
+    model->to(device_);
 
     Variable input(Tensor({1, 3, 512, 512}, dtype_, device_), true);
     Variable output = model->forward(input);
@@ -399,7 +433,9 @@ TEST_P(SwinMultiDTypeTest, SwinBaseImageSize512) {
 
 TEST_P(SwinMultiDTypeTest, SwinTinyPatchMergingFeatures) {
     int img_size = GetImageSize();
-    auto model = swin_tiny(1000, 224, false);
+    auto model = swin_tiny(1000, img_size, false);
+    model->to(dtype_);
+    model->to(device_);
 
     // Test that model processes patches correctly at different scales
     Variable input1(Tensor({1, 3, img_size, img_size}, dtype_, device_), true);
@@ -416,7 +452,9 @@ TEST_P(SwinMultiDTypeTest, SwinTinyPatchMergingFeatures) {
 
 TEST_P(SwinMultiDTypeTest, SwinSmallPatchMergingConsistency) {
     int img_size = GetImageSize();
-    auto model = swin_small(100, 224, false);
+    auto model = swin_small(100, img_size, false);
+    model->to(dtype_);
+    model->to(device_);
     model->eval();
 
     // Same input should give same output (deterministic forward pass)
@@ -440,7 +478,9 @@ TEST_P(SwinMultiDTypeTest, SwinSmallPatchMergingConsistency) {
 
 TEST_P(SwinMultiDTypeTest, SwinTinyShiftedWindowGradients) {
     int img_size = GetImageSize();
-    auto model = swin_tiny(10, 224, false);
+    auto model = swin_tiny(10, img_size, false);
+    model->to(dtype_);
+    model->to(device_);
     model->train();
 
     Variable input(Tensor({1, 3, img_size, img_size}, dtype_, device_), true);
@@ -466,7 +506,9 @@ TEST_P(SwinMultiDTypeTest, SwinTinyShiftedWindowGradients) {
 
 TEST_P(SwinMultiDTypeTest, SwinBaseShiftedWindowAttention) {
     int img_size = GetImageSize();
-    auto model = swin_base(100, 224, false);
+    auto model = swin_base(100, img_size, false);
+    model->to(dtype_);
+    model->to(device_);
     model->train();
 
     Variable input(Tensor({2, 3, img_size, img_size}, dtype_, device_), true);
@@ -493,7 +535,9 @@ TEST_P(SwinMultiDTypeTest, SwinBaseShiftedWindowAttention) {
 
 TEST_P(SwinMultiDTypeTest, SwinTinyHierarchicalFeatures) {
     int img_size = GetImageSize();
-    auto model = swin_tiny(1000, 224, false);
+    auto model = swin_tiny(1000, img_size, false);
+    model->to(dtype_);
+    model->to(device_);
 
     // Test feature extraction at different batch sizes
     Variable input_small(Tensor({1, 3, img_size, img_size}, dtype_, device_), true);
@@ -511,7 +555,9 @@ TEST_P(SwinMultiDTypeTest, SwinTinyHierarchicalFeatures) {
 
 TEST_P(SwinMultiDTypeTest, SwinSmallHierarchicalGradients) {
     int img_size = GetImageSize();
-    auto model = swin_small(50, 224, false);
+    auto model = swin_small(50, img_size, false);
+    model->to(dtype_);
+    model->to(device_);
     model->train();
 
     Variable input(Tensor({2, 3, img_size, img_size}, dtype_, device_), true);
@@ -536,7 +582,9 @@ TEST_P(SwinMultiDTypeTest, SwinSmallHierarchicalGradients) {
 
 TEST_P(SwinMultiDTypeTest, SwinBaseHierarchicalFeatureExtraction) {
     int img_size = GetImageSize();
-    auto model = swin_base(200, 224, false);
+    auto model = swin_base(200, img_size, false);
+    model->to(dtype_);
+    model->to(device_);
     model->eval();
 
     Variable input(Tensor({1, 3, img_size, img_size}, dtype_, device_), false);
@@ -561,7 +609,9 @@ TEST_P(SwinMultiDTypeTest, SwinBaseHierarchicalFeatureExtraction) {
 
 TEST_P(SwinMultiDTypeTest, SwinLargeHierarchicalMultiScale) {
     int img_size = GetImageSize();
-    auto model = swin_large(100, 224, false);
+    auto model = swin_large(100, img_size, false);
+    model->to(dtype_);
+    model->to(device_);
 
     // Test hierarchical features at different stages
     Variable input(Tensor({1, 3, img_size, img_size}, dtype_, device_), true);
@@ -625,7 +675,9 @@ TEST_P(SwinMultiDTypeTest, VariantOutputConsistency) {
 
 TEST_P(SwinMultiDTypeTest, SwinTinyMinimalBatch) {
     int img_size = GetImageSize();
-    auto model = swin_tiny(10, 224, false);
+    auto model = swin_tiny(10, img_size, false);
+    model->to(dtype_);
+    model->to(device_);
 
     // Test with minimal batch size
     Variable input(Tensor({1, 3, img_size, img_size}, dtype_, device_), false);
@@ -637,7 +689,9 @@ TEST_P(SwinMultiDTypeTest, SwinTinyMinimalBatch) {
 
 TEST_P(SwinMultiDTypeTest, SwinSmallLargeBatch) {
     int img_size = GetImageSize();
-    auto model = swin_small(10, 224, false);
+    auto model = swin_small(10, img_size, false);
+    model->to(dtype_);
+    model->to(device_);
 
     // Test with larger batch
     Variable input(Tensor({8, 3, img_size, img_size}, dtype_, device_), false);
@@ -649,7 +703,9 @@ TEST_P(SwinMultiDTypeTest, SwinSmallLargeBatch) {
 
 TEST_P(SwinMultiDTypeTest, SwinBaseNumericalStability) {
     int img_size = GetImageSize();
-    auto model = swin_base(10, 224, false);
+    auto model = swin_base(10, img_size, false);
+    model->to(dtype_);
+    model->to(device_);
     model->train();
 
     Variable input(Tensor({1, 3, img_size, img_size}, dtype_, device_), true);
@@ -677,7 +733,9 @@ TEST_P(SwinMultiDTypeTest, SwinBaseNumericalStability) {
 
 TEST_P(SwinMultiDTypeTest, SwinLargeTrainEvalModeConsistency) {
     int img_size = GetImageSize();
-    auto model = swin_large(50, 224, false);
+    auto model = swin_large(50, img_size, false);
+    model->to(dtype_);
+    model->to(device_);
 
     Variable input(Tensor({1, 3, img_size, img_size}, dtype_, device_), false);
 
@@ -702,7 +760,9 @@ TEST_P(SwinMultiDTypeTest, SwinLargeTrainEvalModeConsistency) {
 
 TEST_P(SwinMultiDTypeTest, SwinTinyDTypePreservation) {
     int img_size = GetImageSize();
-    auto model = swin_tiny(10, 224, false);
+    auto model = swin_tiny(10, img_size, false);
+    model->to(dtype_);
+    model->to(device_);
 
     Variable input(Tensor({1, 3, img_size, img_size}, dtype_, device_), true);
     Variable output = model->forward(input);
@@ -713,7 +773,9 @@ TEST_P(SwinMultiDTypeTest, SwinTinyDTypePreservation) {
 
 TEST_P(SwinMultiDTypeTest, SwinSmallGradientDTypeConsistency) {
     int img_size = GetImageSize();
-    auto model = swin_small(10, 224, false);
+    auto model = swin_small(10, img_size, false);
+    model->to(dtype_);
+    model->to(device_);
     model->train();
 
     Variable input(Tensor({1, 3, img_size, img_size}, dtype_, device_), true);

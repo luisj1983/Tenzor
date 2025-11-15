@@ -112,6 +112,11 @@ auto SwinTransformerBlock::compute_attention_mask() -> void {
 
 auto SwinTransformerBlock::forward(const Variable& input) -> Variable {
     auto shape = input.tensor().shape();
+    if (shape.size() != 3) {
+        throw std::runtime_error(
+            "SwinTransformerBlock expects 3D input (B, L, C), got " +
+            std::to_string(shape.size()) + "D");
+    }
     int64_t B = shape[0];
     int64_t L = shape[1];  // H * W
     int64_t C = shape[2];
@@ -145,8 +150,13 @@ auto SwinTransformerBlock::forward(const Variable& input) -> Variable {
     // Partition windows
     auto x_windows = window_partition(x, window_size_);
 
-    // Window attention
-    Tensor mask = (shift_size_ > 0) ? attn_mask_ : Tensor{};
+    // Window attention - compute mask dynamically with correct device
+    // Keep mask as Float32 for numerical stability
+    Tensor mask;
+    if (shift_size_ > 0) {
+        auto input_device = input.tensor().device();
+        mask = create_shifted_window_mask(H, W, window_size_, shift_size_, input_device, DType::Float32);
+    }
     auto attn_windows = attn_->forward(x_windows, mask);
 
     // Merge windows
@@ -190,6 +200,11 @@ PatchMerging::PatchMerging(const std::pair<int64_t, int64_t>& input_resolution,
 
 auto PatchMerging::forward(const Variable& input) -> Variable {
     auto shape = input.tensor().shape();
+    if (shape.size() != 3) {
+        throw std::runtime_error(
+            "PatchMerging expects 3D input (B, L, C), got " +
+            std::to_string(shape.size()) + "D");
+    }
     int64_t B = shape[0];
     int64_t L = shape[1];
     int64_t C = shape[2];
@@ -334,6 +349,11 @@ PatchEmbed::PatchEmbed(int64_t img_size,
 
 auto PatchEmbed::forward(const Variable& input) -> Variable {
     auto shape = input.tensor().shape();
+    if (shape.size() != 4) {
+        throw std::runtime_error(
+            "PatchEmbed expects 4D input (B, C, H, W), got " +
+            std::to_string(shape.size()) + "D");
+    }
     int64_t B = shape[0];
 
     // Apply convolution: (B, C, H, W) -> (B, embed_dim, H/4, W/4)
@@ -341,7 +361,15 @@ auto PatchEmbed::forward(const Variable& input) -> Variable {
 
     // Flatten: (B, embed_dim, H', W') -> (B, embed_dim, H'*W')
     auto x_shape = x.tensor().shape();
-    x = x.reshape({B, embed_dim_, num_patches_});
+    if (x_shape.size() < 4) {
+        throw std::runtime_error(
+            "Conv2d output has unexpected shape size: " + std::to_string(x_shape.size()) +
+            " (expected 4D tensor)");
+    }
+    int64_t H_out = x_shape[2];
+    int64_t W_out = x_shape[3];
+    int64_t actual_num_patches = H_out * W_out;
+    x = x.reshape({B, embed_dim_, actual_num_patches});
 
     // Transpose: (B, embed_dim, num_patches) -> (B, num_patches, embed_dim)
     x = x.transpose(1, 2);
@@ -475,6 +503,11 @@ auto SwinTransformer::forward(const Variable& input) -> Variable {
     // x shape: (B, num_patches, C)
     // Need to transpose to (B, C, num_patches) for pooling
     auto shape = x.tensor().shape();
+    if (shape.size() != 3) {
+        throw std::runtime_error(
+            "Expected 3D tensor after normalization (B, num_patches, C), got " +
+            std::to_string(shape.size()) + "D");
+    }
     int64_t B = shape[0];
     int64_t C = shape[2];
 
@@ -513,6 +546,11 @@ auto SwinTransformer::forward_features(const Variable& input) -> std::vector<Var
         // Save features before downsampling
         auto resolution = layers_[i]->output_resolution();
         auto shape = x.tensor().shape();
+        if (shape.size() != 3) {
+            throw std::runtime_error(
+                "Expected 3D tensor from layer (B, L, C), got " +
+                std::to_string(shape.size()) + "D");
+        }
         int64_t B = shape[0];
         int64_t C = shape[2];
 

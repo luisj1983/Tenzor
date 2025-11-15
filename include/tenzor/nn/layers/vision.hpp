@@ -320,7 +320,8 @@ auto window_reverse(const Variable& windows, int64_t window_size,
 auto create_shifted_window_mask(int64_t H, int64_t W,
                                  int64_t window_size,
                                  int64_t shift_size,
-                                 Device device = Device::cpu()) -> Tensor;
+                                 Device device = Device::cpu(),
+                                 DType dtype = DType::Float32) -> Tensor;
 
 } // namespace nn
 } // namespace tenzor

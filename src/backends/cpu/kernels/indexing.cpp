@@ -541,6 +541,40 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index, const
 
             output_ptr[output_idx] = src_ptr[flat_idx];
         }
+    } else if (input.dtype() == DType::Float16) {
+        // Convert to Float32 for computation
+        auto input_f32 = input.to(DType::Float32);
+        auto src_f32 = src.to(DType::Float32);
+        Tensor output_f32(input_shape, DType::Float32, input.device());
+
+        const float* input_ptr = input_f32.data<float>();
+        float* output_ptr = output_f32.data<float>();
+        const float* src_ptr = src_f32.data<float>();
+
+        std::memcpy(output_ptr, input_ptr, input_f32.numel() * sizeof(float));
+
+        for (int64_t flat_idx = 0; flat_idx < numel; ++flat_idx) {
+            int64_t temp = flat_idx;
+            int64_t output_idx = 0;
+
+            for (size_t d = 0; d < ndims; ++d) {
+                int64_t coord = temp / index_strides[d];
+                temp %= index_strides[d];
+
+                if (static_cast<int64_t>(d) == dim) {
+                    int64_t idx_val = index_ptr[flat_idx];
+                    if (idx_val < 0) idx_val += input_shape[d];
+                    output_idx += idx_val * input_strides[d];
+                } else {
+                    output_idx += coord * input_strides[d];
+                }
+            }
+
+            output_ptr[output_idx] = src_ptr[flat_idx];
+        }
+
+        // Convert back to Float16
+        output = output_f32.to(DType::Float16);
     } else {
         throw std::runtime_error("scatter: unsupported dtype");
     }
