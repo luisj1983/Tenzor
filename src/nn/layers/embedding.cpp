@@ -9,6 +9,7 @@
 #include "tenzor/autograd/function.hpp"
 #include <stdexcept>
 #include <cmath>
+#include <iostream>
 
 namespace tenzor {
 namespace nn {
@@ -66,6 +67,34 @@ public:
                     output_ptr[i * embedding_dim_ + j] = weight_ptr[idx * embedding_dim_ + j];
                 }
             }
+        } else if (weight_dtype == DType::Float16) {
+            std::cerr << "[EMBED_FWD_F16] Starting Float16 forward, num_indices=" << num_indices
+                      << ", embedding_dim=" << embedding_dim_ << std::endl;
+
+            // Convert to Float32 for computation
+            auto weight_f32 = weight_tensor.to(DType::Float32);
+            std::cerr << "[EMBED_FWD_F16] Converted weight to Float32" << std::endl;
+
+            auto output_f32 = zeros(output_shape, DType::Float32);
+            std::cerr << "[EMBED_FWD_F16] Created output_f32 with shape [";
+            for (size_t i = 0; i < output_shape.size(); ++i) {
+                std::cerr << output_shape[i] << (i < output_shape.size()-1 ? "," : "");
+            }
+            std::cerr << "]" << std::endl;
+
+            auto weight_ptr = weight_f32.data<float>();
+            auto output_ptr = output_f32.data<float>();
+            for (int64_t i = 0; i < num_indices; ++i) {
+                auto idx = input_ptr[i];
+                for (int64_t j = 0; j < embedding_dim_; ++j) {
+                    output_ptr[i * embedding_dim_ + j] = weight_ptr[idx * embedding_dim_ + j];
+                }
+            }
+            std::cerr << "[EMBED_FWD_F16] Completed lookup loop" << std::endl;
+
+            // Convert back to Float16
+            output = output_f32.to(DType::Float16);
+            std::cerr << "[EMBED_FWD_F16] Converted output back to Float16" << std::endl;
         } else {
             throw std::runtime_error("EmbeddingBackward: Unsupported weight dtype");
         }
@@ -109,6 +138,32 @@ public:
                     grad_weight_ptr[idx * embedding_dim_ + j] += grad_output_ptr[i * embedding_dim_ + j];
                 }
             }
+        } else if (grad_dtype == DType::Float16) {
+            std::cerr << "[EMBED_BWD_F16] Starting Float16 backward, num_indices=" << num_indices
+                      << ", num_embeddings=" << num_embeddings_
+                      << ", embedding_dim=" << embedding_dim_ << std::endl;
+
+            // Convert to Float32 for computation
+            auto grad_output_f32 = grad_output.to(DType::Float32);
+            std::cerr << "[EMBED_BWD_F16] Converted grad_output to Float32" << std::endl;
+
+            auto grad_weight_f32 = zeros({num_embeddings_, embedding_dim_}, DType::Float32);
+            std::cerr << "[EMBED_BWD_F16] Created grad_weight_f32 with shape ["
+                      << num_embeddings_ << "," << embedding_dim_ << "]" << std::endl;
+
+            auto grad_weight_ptr = grad_weight_f32.data<float>();
+            auto grad_output_ptr = grad_output_f32.data<float>();
+            for (int64_t i = 0; i < num_indices; ++i) {
+                auto idx = input_ptr[i];
+                for (int64_t j = 0; j < embedding_dim_; ++j) {
+                    grad_weight_ptr[idx * embedding_dim_ + j] += grad_output_ptr[i * embedding_dim_ + j];
+                }
+            }
+            std::cerr << "[EMBED_BWD_F16] Completed gradient accumulation loop" << std::endl;
+
+            // Convert back to Float16
+            grad_weight = grad_weight_f32.to(DType::Float16);
+            std::cerr << "[EMBED_BWD_F16] Converted grad_weight back to Float16" << std::endl;
         } else {
             throw std::runtime_error("EmbeddingBackward: Unsupported gradient dtype");
         }
@@ -216,7 +271,7 @@ auto Embedding::forward(const Variable& input) -> Variable {
 
         // Use weight's dtype for output (not Float32 hardcoded)
         DType weight_dtype = weight_cpu.dtype();
-        auto output = zeros(output_shape, weight_dtype);
+        Tensor output(output_shape, weight_dtype, weight_cpu.device());
 
         // Perform lookup using weight's dtype
         if (weight_dtype == DType::Float32) {
@@ -237,6 +292,22 @@ auto Embedding::forward(const Variable& input) -> Variable {
                     output_ptr[i * embedding_dim_ + j] = weight_ptr[idx * embedding_dim_ + j];
                 }
             }
+        } else if (weight_dtype == DType::Float16) {
+            // Convert to Float32 for computation
+            auto weight_f32 = weight_cpu.to(DType::Float32);
+            auto output_f32 = zeros(output_shape, DType::Float32);
+
+            auto weight_ptr = weight_f32.data<float>();
+            auto output_ptr = output_f32.data<float>();
+            for (int64_t i = 0; i < num_indices; ++i) {
+                auto idx = input_ptr[i];
+                for (int64_t j = 0; j < embedding_dim_; ++j) {
+                    output_ptr[i * embedding_dim_ + j] = weight_ptr[idx * embedding_dim_ + j];
+                }
+            }
+
+            // Convert back to Float16
+            output = output_f32.to(DType::Float16);
         } else {
             throw std::runtime_error("Embedding: Unsupported weight dtype");
         }

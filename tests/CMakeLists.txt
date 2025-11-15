@@ -298,6 +298,39 @@ target_link_libraries(test_embedding_multidtype PRIVATE
     GTest::gtest_main
 )
 
+# Minimal Float16 tests (debugging Float16 corruption)
+add_executable(minimal_float16_test
+    minimal_float16_test.cpp
+)
+
+target_link_libraries(minimal_float16_test PRIVATE
+    tenzor_core
+)
+
+add_executable(minimal_float16_variable_test
+    minimal_float16_variable_test.cpp
+)
+
+target_link_libraries(minimal_float16_variable_test PRIVATE
+    tenzor_core
+)
+
+add_executable(minimal_float16_embedding_test
+    minimal_float16_embedding_test.cpp
+)
+
+target_link_libraries(minimal_float16_embedding_test PRIVATE
+    tenzor_core
+)
+
+add_executable(minimal_float16_attention_test
+    minimal_float16_attention_test.cpp
+)
+
+target_link_libraries(minimal_float16_attention_test PRIVATE
+    tenzor_core
+)
+
 # Extended optimizers tests
 add_executable(test_optimizers_extended
     unit/test_optimizers_extended.cpp

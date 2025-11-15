@@ -5,6 +5,7 @@
 #include "tenzor/autograd/function.hpp"
 #include <cmath>
 #include <stdexcept>
+#include <iostream>
 
 namespace tenzor::nn {
 
@@ -192,11 +193,23 @@ auto LayerNorm::forward(const Variable& input) -> Variable {
     Device original_device = input.tensor().device();
     Tensor input_cpu = (original_device == Device::cpu()) ? input.tensor() : input.tensor().to(Device::cpu());
 
-    // Move weight and bias to CPU if needed
-    Tensor weight_cpu = (elementwise_affine_ && weight_.tensor().device() != Device::cpu())
-                        ? weight_.tensor().to(Device::cpu()) : weight_.tensor();
-    Tensor bias_cpu = (elementwise_affine_ && bias_.tensor().device() != Device::cpu())
-                      ? bias_.tensor().to(Device::cpu()) : bias_.tensor();
+    // Move weight and bias to CPU AND convert to input's dtype if needed
+    Tensor weight_cpu = weight_.tensor();
+    Tensor bias_cpu = bias_.tensor();
+    if (elementwise_affine_) {
+        if (weight_cpu.device() != Device::cpu()) {
+            weight_cpu = weight_cpu.to(Device::cpu());
+        }
+        if (weight_cpu.dtype() != input_cpu.dtype()) {
+            weight_cpu = weight_cpu.to(input_cpu.dtype());
+        }
+        if (bias_cpu.device() != Device::cpu()) {
+            bias_cpu = bias_cpu.to(Device::cpu());
+        }
+        if (bias_cpu.dtype() != input_cpu.dtype()) {
+            bias_cpu = bias_cpu.to(input_cpu.dtype());
+        }
+    }
 
     // Compute mean and variance for each batch element on CPU
     // Using manual computation to ensure correct memory layout
@@ -210,6 +223,8 @@ auto LayerNorm::forward(const Variable& input) -> Variable {
     DType input_dtype = input_cpu.dtype();
 
     if (input_dtype == DType::Float16) {
+        std::cerr << "[LAYERNORM_F16] Starting Float16 forward, batch_size=" << batch_size
+                  << ", num_features=" << N << std::endl;
         auto* input_data = input_cpu.data<Float16>();
 
         // Compute mean for each batch element (use float accumulation)
@@ -240,10 +255,13 @@ auto LayerNorm::forward(const Variable& input) -> Variable {
         }
 
         // Normalize: (x - mean) * rstd on CPU
+        std::cerr << "[LAYERNORM_F16] Creating output tensor" << std::endl;
         auto output_cpu = zeros_like(input_cpu);
+        std::cerr << "[LAYERNORM_F16] Getting data pointers" << std::endl;
         auto* output_data = output_cpu.data<Float16>();
         auto* weight_data = elementwise_affine_ ? weight_cpu.data<Float16>() : nullptr;
         auto* bias_data = elementwise_affine_ ? bias_cpu.data<Float16>() : nullptr;
+        std::cerr << "[LAYERNORM_F16] Starting normalization loop" << std::endl;
 
         for (int64_t b = 0; b < batch_size; b++) {
             float mu = mean_data[b];
@@ -261,8 +279,11 @@ auto LayerNorm::forward(const Variable& input) -> Variable {
             }
         }
 
+        std::cerr << "[LAYERNORM_F16] Completed normalization loop" << std::endl;
+
         // Move output back to original device if needed
         Tensor output = (original_device == Device::cpu()) ? output_cpu : output_cpu.to(original_device);
+        std::cerr << "[LAYERNORM_F16] Completed Float16 forward" << std::endl;
 
         // Set up autograd if needed
         if (input.requires_grad() || (elementwise_affine_ && weight_.requires_grad())) {
