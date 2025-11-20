@@ -795,6 +795,14 @@ auto Tensor::fill_(float value) -> Tensor& {
             }
             break;
         }
+        case DType::Float16: {
+            Float16* ptr = data<Float16>();
+            Float16 f16_value(value);
+            for (int64_t i = 0; i < n; ++i) {
+                ptr[i] = f16_value;
+            }
+            break;
+        }
         default:
             throw std::runtime_error("fill_ not supported for this dtype");
     }

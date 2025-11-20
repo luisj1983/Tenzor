@@ -30,7 +30,8 @@ int main() {
     // Run attention forward pass multiple times
     for (int i = 0; i < 50; ++i) {
         // Self-attention: query, key, value are all the same
-        auto output = attention.forward(query, query, query);
+        auto result = attention.forward(query, query, query);
+        auto output = result.first;  // Extract output from pair
 
         if (i % 10 == 0) {
             std::cout << "Iteration " << i << ": output.shape = ["

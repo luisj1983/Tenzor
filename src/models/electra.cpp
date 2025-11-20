@@ -8,6 +8,7 @@
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/nn/activations/activations.hpp"
+#include <cstring>
 #include "tenzor/ops/creation.hpp"
 #include <random>
 #include <cmath>
@@ -127,32 +128,91 @@ auto ElectraForPreTraining::forward(const Variable& input_ids,
     // Create corrupted input by replacing masked tokens with generator samples
     Tensor generated_tokens = input_ids.tensor().clone();  // Copy original
     auto shape_vec = std::vector<int64_t>(input_ids.shape().begin(), input_ids.shape().end());
-    Tensor is_replaced(shape_vec, DType::Float32, input_ids.tensor().device());
+
+    // Use the same dtype as gen_probs for consistency
+    auto dtype = gen_probs.tensor().dtype();
+    Tensor is_replaced(shape_vec, dtype, input_ids.tensor().device());
     is_replaced.zero_();
 
     const int64_t* mask_data = masked_positions.data<int64_t>();
     const int64_t* orig_data = original_tokens.data<int64_t>();
     int64_t* gen_data = generated_tokens.data<int64_t>();
-    float* repl_data = is_replaced.data<float>();
 
-    // Sample from generator for masked positions
-    auto probs_data = gen_probs.tensor().data<float>();
+    // Sample from generator for masked positions with dtype-specific handling
+    // For sampling, we convert probabilities to float32 as it doesn't require high precision
+    std::vector<float> float_probs(config_.vocab_size);
 
-    for (int64_t b = 0; b < batch_size; ++b) {
-        for (int64_t s = 0; s < seq_len; ++s) {
-            int64_t idx = b * seq_len + s;
+    if (dtype == DType::Float32) {
+        float* repl_data = is_replaced.data<float>();
+        auto probs_data = gen_probs.tensor().data<float>();
 
-            if (mask_data[idx] == 1) {  // This position was masked
-                // Get probability distribution for this position
-                const float* pos_probs = probs_data + idx * config_.vocab_size;
+        for (int64_t b = 0; b < batch_size; ++b) {
+            for (int64_t s = 0; s < seq_len; ++s) {
+                int64_t idx = b * seq_len + s;
 
-                // Sample from generator's distribution
-                int64_t sampled_token = sample_from_distribution(pos_probs, config_.vocab_size);
+                if (mask_data[idx] == 1) {  // This position was masked
+                    const float* pos_probs = probs_data + idx * config_.vocab_size;
+                    int64_t sampled_token = sample_from_distribution(pos_probs, config_.vocab_size);
+                    gen_data[idx] = sampled_token;
+                    repl_data[idx] = (sampled_token != orig_data[idx]) ? 1.0f : 0.0f;
+                }
+            }
+        }
+    } else if (dtype == DType::Float64) {
+        double* repl_data = is_replaced.data<double>();
+        auto probs_data = gen_probs.tensor().data<double>();
 
-                gen_data[idx] = sampled_token;
+        for (int64_t b = 0; b < batch_size; ++b) {
+            for (int64_t s = 0; s < seq_len; ++s) {
+                int64_t idx = b * seq_len + s;
 
-                // Mark as replaced if different from original
-                repl_data[idx] = (sampled_token != orig_data[idx]) ? 1.0f : 0.0f;
+                if (mask_data[idx] == 1) {
+                    // Convert double probabilities to float for sampling
+                    const double* pos_probs = probs_data + idx * config_.vocab_size;
+                    for (int64_t i = 0; i < config_.vocab_size; ++i) {
+                        float_probs[i] = static_cast<float>(pos_probs[i]);
+                    }
+                    int64_t sampled_token = sample_from_distribution(float_probs.data(), config_.vocab_size);
+                    gen_data[idx] = sampled_token;
+                    repl_data[idx] = (sampled_token != orig_data[idx]) ? 1.0 : 0.0;
+                }
+            }
+        }
+    } else if (dtype == DType::Float16) {
+        uint16_t* repl_data = is_replaced.data<uint16_t>();
+        auto probs_data = gen_probs.tensor().data<uint16_t>();
+        uint16_t zero_f16 = 0x0000;  // Float16 representation of 0.0
+        uint16_t one_f16 = 0x3C00;   // Float16 representation of 1.0
+
+        for (int64_t b = 0; b < batch_size; ++b) {
+            for (int64_t s = 0; s < seq_len; ++s) {
+                int64_t idx = b * seq_len + s;
+
+                if (mask_data[idx] == 1) {
+                    // Convert float16 probabilities to float for sampling
+                    const uint16_t* pos_probs = probs_data + idx * config_.vocab_size;
+                    for (int64_t i = 0; i < config_.vocab_size; ++i) {
+                        // Simple float16 to float conversion (proper conversion would use intrinsics)
+                        uint16_t f16 = pos_probs[i];
+                        uint32_t sign = (f16 >> 15) & 0x1;
+                        uint32_t exp = (f16 >> 10) & 0x1F;
+                        uint32_t frac = f16 & 0x3FF;
+
+                        // Convert to float32
+                        uint32_t f32_bits;
+                        if (exp == 0) {
+                            f32_bits = (sign << 31);  // Zero or denormal -> zero
+                        } else if (exp == 31) {
+                            f32_bits = (sign << 31) | 0x7F800000;  // Inf or NaN
+                        } else {
+                            f32_bits = (sign << 31) | ((exp + 112) << 23) | (frac << 13);
+                        }
+                        std::memcpy(&float_probs[i], &f32_bits, sizeof(float));
+                    }
+                    int64_t sampled_token = sample_from_distribution(float_probs.data(), config_.vocab_size);
+                    gen_data[idx] = sampled_token;
+                    repl_data[idx] = (sampled_token != orig_data[idx]) ? one_f16 : zero_f16;
+                }
             }
         }
     }
@@ -350,15 +410,30 @@ auto ElectraForQuestionAnswering::forward(const Variable& input_ids,
     auto reshaped = tenzor::reshape(logits, {batch_size * seq_len, 2});
 
     // Create selection matrices to extract start and end logits
+    // Use the same dtype as logits for consistency
+    auto dtype = logits.tensor().dtype();
+
     // Start logits: multiply by [1, 0]
-    Tensor start_selector(std::vector<int64_t>{2, 1}, DType::Float32, logits.tensor().device());
+    Tensor start_selector(std::vector<int64_t>{2, 1}, dtype, logits.tensor().device());
     start_selector.zero_();
-    start_selector.data<float>()[0] = 1.0f;  // [1; 0]
+    if (dtype == DType::Float32) {
+        start_selector.data<float>()[0] = 1.0f;
+    } else if (dtype == DType::Float64) {
+        start_selector.data<double>()[0] = 1.0;
+    } else if (dtype == DType::Float16) {
+        start_selector.data<uint16_t>()[0] = 0x3C00;  // Float16 representation of 1.0
+    }
 
     // End logits: multiply by [0, 1]
-    Tensor end_selector(std::vector<int64_t>{2, 1}, DType::Float32, logits.tensor().device());
+    Tensor end_selector(std::vector<int64_t>{2, 1}, dtype, logits.tensor().device());
     end_selector.zero_();
-    end_selector.data<float>()[1] = 1.0f;  // [0; 1]
+    if (dtype == DType::Float32) {
+        end_selector.data<float>()[1] = 1.0f;
+    } else if (dtype == DType::Float64) {
+        end_selector.data<double>()[1] = 1.0;
+    } else if (dtype == DType::Float16) {
+        end_selector.data<uint16_t>()[1] = 0x3C00;  // Float16 representation of 1.0
+    }
 
     // Use matmul to select: [batch*seq_len, 2] @ [2, 1] = [batch*seq_len, 1]
     Variable start_selector_var(start_selector, false);

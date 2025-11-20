@@ -123,6 +123,10 @@ protected:
 
 TEST_P(MobileNetMultiDTypeTest, MobileNetV2ForwardShape) {
     auto model = mobilenet_v2(1000, false);
+
+    // Convert model to test dtype
+    model->to(dtype_);
+
     model->eval();
 
     Variable input = createInput({2, 3, 224, 224}, false);
@@ -137,6 +141,10 @@ TEST_P(MobileNetMultiDTypeTest, MobileNetV2ForwardShape) {
 TEST_P(MobileNetMultiDTypeTest, MobileNetV2GradientFlow) {
     // Use smaller model for gradient tests
     auto model = mobilenet_v2(10, false);
+
+    // Convert model to test dtype
+    model->to(dtype_);
+
     model->train();
 
     Variable input = createInput({1, 3, 224, 224}, true);
@@ -167,6 +175,10 @@ TEST_P(MobileNetMultiDTypeTest, MobileNetV2GradientFlow) {
 TEST_P(MobileNetMultiDTypeTest, MobileNetV2WidthMultiplier) {
     // Test with width multiplier 0.5 (50% reduction for Float16)
     auto model_05 = mobilenet_v2_width(1000, 0.5, false);
+
+    // Convert model to test dtype
+    model_05->to(dtype_);
+
     model_05->eval();
 
     Variable input = createInput({2, 3, 224, 224}, false);
@@ -179,6 +191,10 @@ TEST_P(MobileNetMultiDTypeTest, MobileNetV2WidthMultiplier) {
 
 TEST_P(MobileNetMultiDTypeTest, MobileNetV2ParameterCount) {
     auto model = mobilenet_v2(1000, false);
+
+    // Convert model to test dtype
+    model->to(dtype_);
+
     auto params = model->parameters();
 
     size_t total_params = 0;
@@ -197,6 +213,10 @@ TEST_P(MobileNetMultiDTypeTest, MobileNetV2ParameterCount) {
 
 TEST_P(MobileNetMultiDTypeTest, MobileNetV2BatchSizeOne) {
     auto model = mobilenet_v2(10, false);
+
+    // Convert model to test dtype
+    model->to(dtype_);
+
     model->eval();
 
     Variable input = createInput({1, 3, 224, 224}, false);
@@ -212,6 +232,10 @@ TEST_P(MobileNetMultiDTypeTest, MobileNetV2BatchSizeOne) {
 
 TEST_P(MobileNetMultiDTypeTest, MobileNetV3SmallForwardShape) {
     auto model = mobilenet_v3_small(1000, false);
+
+    // Convert model to test dtype
+    model->to(dtype_);
+
     model->eval();
 
     Variable input = createInput({2, 3, 224, 224}, false);
@@ -224,6 +248,10 @@ TEST_P(MobileNetMultiDTypeTest, MobileNetV3SmallForwardShape) {
 
 TEST_P(MobileNetMultiDTypeTest, MobileNetV3SmallGradientFlow) {
     auto model = mobilenet_v3_small(10, false);
+
+    // Convert model to test dtype
+    model->to(dtype_);
+
     model->train();
 
     Variable input = createInput({1, 3, 224, 224}, true);
@@ -238,6 +266,10 @@ TEST_P(MobileNetMultiDTypeTest, MobileNetV3SmallGradientFlow) {
 
 TEST_P(MobileNetMultiDTypeTest, MobileNetV3SmallParameterCount) {
     auto model = mobilenet_v3_small(1000, false);
+
+    // Convert model to test dtype
+    model->to(dtype_);
+
     auto params = model->parameters();
 
     size_t total_params = 0;
@@ -257,6 +289,10 @@ TEST_P(MobileNetMultiDTypeTest, MobileNetV3SmallParameterCount) {
 TEST_P(MobileNetMultiDTypeTest, MobileNetV3SmallHardSwishActivation) {
     // Test that hard-swish activation works with different dtypes
     auto model = mobilenet_v3_small(10, false);
+
+    // Convert model to test dtype
+    model->to(dtype_);
+
     model->eval();
 
     Variable input = createInput({2, 3, 224, 224}, false);
@@ -273,6 +309,10 @@ TEST_P(MobileNetMultiDTypeTest, MobileNetV3SmallHardSwishActivation) {
 
 TEST_P(MobileNetMultiDTypeTest, MobileNetV3LargeForwardShape) {
     auto model = mobilenet_v3_large(1000, false);
+
+    // Convert model to test dtype
+    model->to(dtype_);
+
     model->eval();
 
     Variable input = createInput({2, 3, 224, 224}, false);
@@ -285,6 +325,10 @@ TEST_P(MobileNetMultiDTypeTest, MobileNetV3LargeForwardShape) {
 
 TEST_P(MobileNetMultiDTypeTest, MobileNetV3LargeGradientFlow) {
     auto model = mobilenet_v3_large(10, false);
+
+    // Convert model to test dtype
+    model->to(dtype_);
+
     model->train();
 
     Variable input = createInput({1, 3, 224, 224}, true);
@@ -299,6 +343,10 @@ TEST_P(MobileNetMultiDTypeTest, MobileNetV3LargeGradientFlow) {
 
 TEST_P(MobileNetMultiDTypeTest, MobileNetV3LargeParameterCount) {
     auto model = mobilenet_v3_large(1000, false);
+
+    // Convert model to test dtype
+    model->to(dtype_);
+
     auto params = model->parameters();
 
     size_t total_params = 0;
@@ -318,6 +366,10 @@ TEST_P(MobileNetMultiDTypeTest, MobileNetV3LargeParameterCount) {
 TEST_P(MobileNetMultiDTypeTest, MobileNetV3LargeSqueezeExcitation) {
     // Test squeeze-excitation blocks with different dtypes
     auto model = mobilenet_v3_large(10, false);
+
+    // Convert model to test dtype
+    model->to(dtype_);
+
     model->eval();
 
     Variable input = createInput({2, 3, 224, 224}, false);
@@ -336,6 +388,11 @@ TEST_P(MobileNetMultiDTypeTest, MobileNetCustomClasses) {
     auto model_v2 = mobilenet_v2(100, false);
     auto model_v3s = mobilenet_v3_small(100, false);
     auto model_v3l = mobilenet_v3_large(100, false);
+
+    // Convert all models to test dtype
+    model_v2->to(dtype_);
+    model_v3s->to(dtype_);
+    model_v3l->to(dtype_);
 
     model_v2->eval();
     model_v3s->eval();
@@ -357,6 +414,10 @@ TEST_P(MobileNetMultiDTypeTest, MobileNetCustomClasses) {
 
 TEST_P(MobileNetMultiDTypeTest, MobileNetDifferentInputSizes) {
     auto model = mobilenet_v2(10, false);
+
+    // Convert model to test dtype
+    model->to(dtype_);
+
     model->eval();
 
     std::vector<std::pair<int, int>> sizes = {

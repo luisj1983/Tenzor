@@ -4,6 +4,7 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/backend/dispatch.hpp"
+#include <iostream>
 
 namespace tenzor {
 
@@ -602,7 +603,21 @@ auto matmul(const Variable& a, const Variable& b) -> Variable {
     auto grad_fn = std::make_shared<MatMulBackward>();
 
     // Save input tensors for backward pass
-    grad_fn->save_for_backward({a.tensor(), b.tensor()});
+    auto a_tensor = a.tensor();
+    auto b_tensor = b.tensor();
+
+    // Debug: Check if tensors are zero when saved (Float16)
+    if (a_tensor.dtype() == DType::Float16) {
+        auto a_cpu = a_tensor.to(Device::cpu()).to(DType::Float32);
+        auto* a_data = a_cpu.data<float>();
+        float a_sum = 0.0f;
+        for (int i = 0; i < std::min(10, static_cast<int>(a_cpu.numel())); ++i) {
+            a_sum += std::abs(a_data[i]);
+        }
+        std::cerr << "[MATMUL_SAVE_F16] Saving a_tensor, avg_abs_first10=" << (a_sum / std::min(10, static_cast<int>(a_cpu.numel()))) << std::endl;
+    }
+
+    grad_fn->save_for_backward({a_tensor, b_tensor});
 
     // Set up backward graph - MUST maintain index correspondence with input_grads!
     // Use nullptr for leaf variables to preserve indices
@@ -622,7 +637,8 @@ auto matmul(const Variable& a, const Variable& b) -> Variable {
     grad_fn->set_input_variables(input_vars);
 
     // Compute result
-    auto result_tensor = tenzor::matmul(a.tensor(), b.tensor());
+    auto result_tensor = tenzor::matmul(a_tensor, b_tensor);
+
     Variable output(result_tensor, true);
     output.set_grad_fn(grad_fn);
 

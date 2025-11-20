@@ -84,9 +84,22 @@ auto T5Attention::relative_position_bucket(int64_t relative_position,
 
 auto T5Attention::compute_bias(int64_t query_length, int64_t key_length) -> Tensor {
     // Compute relative position bias matrix
+    // Infer dtype from embedding weights to support multi-dtype models
+    DType dtype = relative_attention_bias_->weight().tensor().dtype();
     Tensor position_bias(std::vector<int64_t>{config_.num_heads, query_length, key_length},
-                         DType::Float32, Device::cpu());
-    position_bias.zero_();
+                         dtype, Device::cpu());
+
+    // Zero-initialize (dtype-aware since zero_() may not support all dtypes)
+    if (dtype == DType::Float16) {
+        auto* data = position_bias.data<Float16>();
+        std::fill_n(data, position_bias.numel(), Float16(0.0f));
+    } else if (dtype == DType::Float32) {
+        auto* data = position_bias.data<float>();
+        std::fill_n(data, position_bias.numel(), 0.0f);
+    } else if (dtype == DType::Float64) {
+        auto* data = position_bias.data<double>();
+        std::fill_n(data, position_bias.numel(), 0.0);
+    }
 
     // Compute bias for each (query_pos, key_pos) pair
     for (int64_t i = 0; i < query_length; ++i) {
@@ -105,11 +118,25 @@ auto T5Attention::compute_bias(int64_t query_length, int64_t key_length) -> Tens
                 Variable(bucket_tensor, false)
             ).tensor();
 
-            // Assign to all heads
-            auto* bias_ptr = position_bias.data<float>();
-            auto* values_ptr = bias_values.data<float>();
-            for (int64_t h = 0; h < config_.num_heads; ++h) {
-                bias_ptr[h * query_length * key_length + i * key_length + j] = values_ptr[h];
+            // Assign to all heads (dtype-generic)
+            if (dtype == DType::Float16) {
+                auto* bias_ptr = position_bias.data<Float16>();
+                auto* values_ptr = bias_values.data<Float16>();
+                for (int64_t h = 0; h < config_.num_heads; ++h) {
+                    bias_ptr[h * query_length * key_length + i * key_length + j] = values_ptr[h];
+                }
+            } else if (dtype == DType::Float32) {
+                auto* bias_ptr = position_bias.data<float>();
+                auto* values_ptr = bias_values.data<float>();
+                for (int64_t h = 0; h < config_.num_heads; ++h) {
+                    bias_ptr[h * query_length * key_length + i * key_length + j] = values_ptr[h];
+                }
+            } else if (dtype == DType::Float64) {
+                auto* bias_ptr = position_bias.data<double>();
+                auto* values_ptr = bias_values.data<double>();
+                for (int64_t h = 0; h < config_.num_heads; ++h) {
+                    bias_ptr[h * query_length * key_length + i * key_length + j] = values_ptr[h];
+                }
             }
         }
     }
@@ -173,12 +200,28 @@ auto T5Attention::forward(const Variable& hidden_states,
     if (bias.numel() > 0) {
         // Expand bias to batch dimension: [num_heads, q_len, kv_len] -> [batch, num_heads, q_len, kv_len]
         Tensor expanded_bias({batch_size, config_.num_heads, seq_len, kv_seq_len},
-                            DType::Float32, bias.device());
-        auto* bias_ptr = bias.data<float>();
-        auto* expanded_ptr = expanded_bias.data<float>();
+                            bias.dtype(), bias.device());
         int64_t bias_size = config_.num_heads * seq_len * kv_seq_len;
-        for (int64_t b = 0; b < batch_size; ++b) {
-            std::copy(bias_ptr, bias_ptr + bias_size, expanded_ptr + b * bias_size);
+
+        // Dtype-generic bias expansion
+        if (bias.dtype() == DType::Float16) {
+            auto* bias_ptr = bias.data<Float16>();
+            auto* expanded_ptr = expanded_bias.data<Float16>();
+            for (int64_t b = 0; b < batch_size; ++b) {
+                std::copy(bias_ptr, bias_ptr + bias_size, expanded_ptr + b * bias_size);
+            }
+        } else if (bias.dtype() == DType::Float32) {
+            auto* bias_ptr = bias.data<float>();
+            auto* expanded_ptr = expanded_bias.data<float>();
+            for (int64_t b = 0; b < batch_size; ++b) {
+                std::copy(bias_ptr, bias_ptr + bias_size, expanded_ptr + b * bias_size);
+            }
+        } else if (bias.dtype() == DType::Float64) {
+            auto* bias_ptr = bias.data<double>();
+            auto* expanded_ptr = expanded_bias.data<double>();
+            for (int64_t b = 0; b < batch_size; ++b) {
+                std::copy(bias_ptr, bias_ptr + bias_size, expanded_ptr + b * bias_size);
+            }
         }
         scores = scores + Variable(expanded_bias, false);
     }
@@ -420,13 +463,31 @@ T5Decoder::T5Decoder(const T5Config& config, std::shared_ptr<nn::Embedding> shar
 
 auto T5Decoder::create_causal_mask(int64_t seq_len, Device device) -> Tensor {
     // Create causal mask: upper triangular matrix with -inf
-    Tensor mask({seq_len, seq_len}, DType::Float32, device);
-    auto* data = mask.data<float>();
+    // Infer dtype from embedding weights to support multi-dtype models
+    DType dtype = shared_embeddings_->weight().tensor().dtype();
+    Tensor mask({seq_len, seq_len}, dtype, device);
 
-    for (int64_t i = 0; i < seq_len; ++i) {
-        for (int64_t j = 0; j < seq_len; ++j) {
-            // Can attend to current and previous positions
-            data[i * seq_len + j] = (j <= i) ? 0.0f : -1e9f;
+    // Dtype-generic mask filling
+    if (dtype == DType::Float16) {
+        auto* data = mask.data<Float16>();
+        for (int64_t i = 0; i < seq_len; ++i) {
+            for (int64_t j = 0; j < seq_len; ++j) {
+                data[i * seq_len + j] = (j <= i) ? Float16(0.0f) : Float16(-1e9f);
+            }
+        }
+    } else if (dtype == DType::Float32) {
+        auto* data = mask.data<float>();
+        for (int64_t i = 0; i < seq_len; ++i) {
+            for (int64_t j = 0; j < seq_len; ++j) {
+                data[i * seq_len + j] = (j <= i) ? 0.0f : -1e9f;
+            }
+        }
+    } else if (dtype == DType::Float64) {
+        auto* data = mask.data<double>();
+        for (int64_t i = 0; i < seq_len; ++i) {
+            for (int64_t j = 0; j < seq_len; ++j) {
+                data[i * seq_len + j] = (j <= i) ? 0.0 : -1e9;
+            }
         }
     }
 
@@ -566,36 +627,97 @@ auto T5ForConditionalGeneration::generate(const Variable& input_ids,
         int64_t vocab_size = last_logits_shape[2];
 
         // Extract last token logits [batch, vocab_size]
-        Tensor last_logits({batch_size, vocab_size}, DType::Float32, device);
-        auto* src = logits.tensor().data<float>();
-        auto* dst = last_logits.data<float>();
-        for (int64_t b = 0; b < batch_size; ++b) {
-            int64_t offset = b * seq_len * vocab_size + (seq_len - 1) * vocab_size;
-            std::copy(src + offset, src + offset + vocab_size, dst + b * vocab_size);
+        Tensor last_logits({batch_size, vocab_size}, logits.tensor().dtype(), device);
+
+        // Dtype-generic last logits extraction
+        DType logits_dtype = logits.tensor().dtype();
+        if (logits_dtype == DType::Float16) {
+            auto* src = logits.tensor().data<Float16>();
+            auto* dst = last_logits.data<Float16>();
+            for (int64_t b = 0; b < batch_size; ++b) {
+                int64_t offset = b * seq_len * vocab_size + (seq_len - 1) * vocab_size;
+                std::copy(src + offset, src + offset + vocab_size, dst + b * vocab_size);
+            }
+        } else if (logits_dtype == DType::Float32) {
+            auto* src = logits.tensor().data<float>();
+            auto* dst = last_logits.data<float>();
+            for (int64_t b = 0; b < batch_size; ++b) {
+                int64_t offset = b * seq_len * vocab_size + (seq_len - 1) * vocab_size;
+                std::copy(src + offset, src + offset + vocab_size, dst + b * vocab_size);
+            }
+        } else if (logits_dtype == DType::Float64) {
+            auto* src = logits.tensor().data<double>();
+            auto* dst = last_logits.data<double>();
+            for (int64_t b = 0; b < batch_size; ++b) {
+                int64_t offset = b * seq_len * vocab_size + (seq_len - 1) * vocab_size;
+                std::copy(src + offset, src + offset + vocab_size, dst + b * vocab_size);
+            }
         }
 
         // Apply temperature
         if (temperature != 1.0) {
-            auto* data = last_logits.data<float>();
-            for (int64_t j = 0; j < batch_size * vocab_size; ++j) {
-                data[j] /= temperature;
+            if (logits_dtype == DType::Float16) {
+                auto* data = last_logits.data<Float16>();
+                for (int64_t j = 0; j < batch_size * vocab_size; ++j) {
+                    data[j] = Float16(float(data[j]) / static_cast<float>(temperature));
+                }
+            } else if (logits_dtype == DType::Float32) {
+                auto* data = last_logits.data<float>();
+                for (int64_t j = 0; j < batch_size * vocab_size; ++j) {
+                    data[j] /= temperature;
+                }
+            } else if (logits_dtype == DType::Float64) {
+                auto* data = last_logits.data<double>();
+                for (int64_t j = 0; j < batch_size * vocab_size; ++j) {
+                    data[j] /= temperature;
+                }
             }
         }
 
         // Greedy: argmax
         Tensor next_tokens({batch_size, 1}, DType::Int64, device);
-        auto* logits_data = last_logits.data<float>();
         auto* tokens_data = next_tokens.data<int64_t>();
-        for (int64_t b = 0; b < batch_size; ++b) {
-            int64_t max_idx = 0;
-            float max_val = logits_data[b * vocab_size];
-            for (int64_t v = 1; v < vocab_size; ++v) {
-                if (logits_data[b * vocab_size + v] > max_val) {
-                    max_val = logits_data[b * vocab_size + v];
-                    max_idx = v;
+
+        if (logits_dtype == DType::Float16) {
+            auto* logits_data = last_logits.data<Float16>();
+            for (int64_t b = 0; b < batch_size; ++b) {
+                int64_t max_idx = 0;
+                float max_val = float(logits_data[b * vocab_size]);
+                for (int64_t v = 1; v < vocab_size; ++v) {
+                    float val = float(logits_data[b * vocab_size + v]);
+                    if (val > max_val) {
+                        max_val = val;
+                        max_idx = v;
+                    }
                 }
+                tokens_data[b] = max_idx;
             }
-            tokens_data[b] = max_idx;
+        } else if (logits_dtype == DType::Float32) {
+            auto* logits_data = last_logits.data<float>();
+            for (int64_t b = 0; b < batch_size; ++b) {
+                int64_t max_idx = 0;
+                float max_val = logits_data[b * vocab_size];
+                for (int64_t v = 1; v < vocab_size; ++v) {
+                    if (logits_data[b * vocab_size + v] > max_val) {
+                        max_val = logits_data[b * vocab_size + v];
+                        max_idx = v;
+                    }
+                }
+                tokens_data[b] = max_idx;
+            }
+        } else if (logits_dtype == DType::Float64) {
+            auto* logits_data = last_logits.data<double>();
+            for (int64_t b = 0; b < batch_size; ++b) {
+                int64_t max_idx = 0;
+                double max_val = logits_data[b * vocab_size];
+                for (int64_t v = 1; v < vocab_size; ++v) {
+                    if (logits_data[b * vocab_size + v] > max_val) {
+                        max_val = logits_data[b * vocab_size + v];
+                        max_idx = v;
+                    }
+                }
+                tokens_data[b] = max_idx;
+            }
         }
 
         // Append to generated

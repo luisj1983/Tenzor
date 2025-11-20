@@ -154,6 +154,8 @@ TEST_P(ALBERTandT5MultiDTypeTest, ALBERTBaseGradientFlow) {
     auto config = AlbertConfig::base();
     config.vocab_size = 30000;
     auto model = std::make_shared<AlbertModel>(config);
+    model->to(dtype);
+    model->to(device);
     model->train();
 
     auto input_ids = create_input_ids(1, 64);
@@ -212,6 +214,11 @@ TEST_P(ALBERTandT5MultiDTypeTest, ALBERTLargeForwardShape) {
     auto config = AlbertConfig::large();
     config.vocab_size = 30000;
     auto model = std::make_shared<AlbertModel>(config);
+
+    // Convert model to test dtype
+    model->to(dtype);
+    model->to(device);
+
     int64_t batch_size = 2;
     int64_t seq_len = 128;
 
@@ -228,6 +235,8 @@ TEST_P(ALBERTandT5MultiDTypeTest, ALBERTLargeGradientFlow) {
     auto config = AlbertConfig::large();
     config.vocab_size = 30000;
     auto model = std::make_shared<AlbertModel>(config);
+    model->to(dtype);
+    model->to(device);
     model->train();
 
     auto input_ids = create_input_ids(1, 64);
@@ -247,6 +256,11 @@ TEST_P(ALBERTandT5MultiDTypeTest, ALBERTXLargeForwardShape) {
     auto config = AlbertConfig::xlarge();
     config.vocab_size = 30000;
     auto model = std::make_shared<AlbertModel>(config);
+
+    // Convert model to test dtype
+    model->to(dtype);
+    model->to(device);
+
     int64_t batch_size = 1;
     int64_t seq_len = 128;
 
@@ -267,6 +281,11 @@ TEST_P(ALBERTandT5MultiDTypeTest, ALBERTXXLargeForwardShape) {
     auto config = AlbertConfig::xxlarge();
     config.vocab_size = 30000;
     auto model = std::make_shared<AlbertModel>(config);
+
+    // Convert model to test dtype
+    model->to(dtype);
+    model->to(device);
+
     int64_t batch_size = 1;
     int64_t seq_len = 64;
 
@@ -296,6 +315,10 @@ TEST_P(ALBERTandT5MultiDTypeTest, T5SmallForwardShape) {
     auto config = T5Config::small();
     config.vocab_size = 32128;
     auto model = std::make_shared<T5Model>(config);
+
+    // Convert model to test dtype
+    model->to(dtype);
+
     int64_t batch_size = 2;
     int64_t seq_len = 128;
 
@@ -314,6 +337,8 @@ TEST_P(ALBERTandT5MultiDTypeTest, T5SmallGradientFlow) {
     auto config = T5Config::small();
     config.vocab_size = 32128;
     auto model = std::make_shared<T5Model>(config);
+    model->to(dtype);
+    model->to(device);
     model->train();
 
     auto input_ids = create_input_ids(1, 64, config.vocab_size);
@@ -344,6 +369,10 @@ TEST_P(ALBERTandT5MultiDTypeTest, T5BaseForwardShape) {
     auto config = T5Config::base();
     config.vocab_size = 32128;
     auto model = std::make_shared<T5Model>(config);
+
+    // Convert model to test dtype
+    model->to(dtype);
+
     int64_t batch_size = 2;
     int64_t seq_len = 128;
 
@@ -362,6 +391,8 @@ TEST_P(ALBERTandT5MultiDTypeTest, T5BaseGradientFlow) {
     auto config = T5Config::base();
     config.vocab_size = 32128;
     auto model = std::make_shared<T5Model>(config);
+    model->to(dtype);
+    model->to(device);
     model->train();
 
     auto input_ids = create_input_ids(1, 64, config.vocab_size);
@@ -383,6 +414,10 @@ TEST_P(ALBERTandT5MultiDTypeTest, T5LargeForwardShape) {
     auto config = T5Config::large();
     config.vocab_size = 32128;
     auto model = std::make_shared<T5Model>(config);
+
+    // Convert model to test dtype
+    model->to(dtype);
+
     int64_t batch_size = 1;
     int64_t seq_len = 128;
 

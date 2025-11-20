@@ -176,13 +176,35 @@ auto AlbertPooler::forward(const Variable& hidden_states) -> Variable {
                               hidden_states.tensor().dtype(),
                               hidden_states.tensor().device());
 
-    // Copy first token data
-    auto* src = hidden_states.tensor().data<float>();
-    auto* dst = first_token_tensor.data<float>();
-    for (int64_t b = 0; b < batch_size; ++b) {
-        int64_t src_offset = b * shape[1] * hidden_size;  // First token of batch b
-        int64_t dst_offset = b * hidden_size;
-        std::copy(src + src_offset, src + src_offset + hidden_size, dst + dst_offset);
+    // Copy first token data with dtype-aware access
+    auto dtype = hidden_states.tensor().dtype();
+
+    if (dtype == DType::Float16) {
+        const auto* src = hidden_states.tensor().data<Float16>();
+        auto* dst = first_token_tensor.data<Float16>();
+        for (int64_t b = 0; b < batch_size; ++b) {
+            int64_t src_offset = b * shape[1] * hidden_size;
+            int64_t dst_offset = b * hidden_size;
+            std::copy(src + src_offset, src + src_offset + hidden_size, dst + dst_offset);
+        }
+    } else if (dtype == DType::Float32) {
+        const auto* src = hidden_states.tensor().data<float>();
+        auto* dst = first_token_tensor.data<float>();
+        for (int64_t b = 0; b < batch_size; ++b) {
+            int64_t src_offset = b * shape[1] * hidden_size;
+            int64_t dst_offset = b * hidden_size;
+            std::copy(src + src_offset, src + src_offset + hidden_size, dst + dst_offset);
+        }
+    } else if (dtype == DType::Float64) {
+        const auto* src = hidden_states.tensor().data<double>();
+        auto* dst = first_token_tensor.data<double>();
+        for (int64_t b = 0; b < batch_size; ++b) {
+            int64_t src_offset = b * shape[1] * hidden_size;
+            int64_t dst_offset = b * hidden_size;
+            std::copy(src + src_offset, src + src_offset + hidden_size, dst + dst_offset);
+        }
+    } else {
+        throw std::runtime_error("Unsupported dtype in AlbertPooler");
     }
 
     Variable first_token(first_token_tensor, hidden_states.requires_grad());

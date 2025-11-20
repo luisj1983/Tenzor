@@ -208,12 +208,30 @@ auto BertPooler::forward(const Variable& hidden_states) -> Variable {
 
     // Alternative: Manually build a selection matrix and use matmul
     // Create selection matrix [batch, batch * seq_len] where each row has 1 at position b*seq_len
+    // Use the same dtype as hidden_states for consistency
+    auto dtype = hidden_states.tensor().dtype();
     Tensor selection_matrix(std::vector<int64_t>{batch_size, batch_size * seq_len},
-                           DType::Float32, hidden_states.tensor().device());
+                           dtype, hidden_states.tensor().device());
     selection_matrix.zero_();
-    float* sel_data = selection_matrix.data<float>();
-    for (int64_t b = 0; b < batch_size; ++b) {
-        sel_data[b * (batch_size * seq_len) + b * seq_len] = 1.0f;
+
+    // Fill the selection matrix with appropriate dtype
+    if (dtype == DType::Float32) {
+        float* sel_data = selection_matrix.data<float>();
+        for (int64_t b = 0; b < batch_size; ++b) {
+            sel_data[b * (batch_size * seq_len) + b * seq_len] = 1.0f;
+        }
+    } else if (dtype == DType::Float64) {
+        double* sel_data = selection_matrix.data<double>();
+        for (int64_t b = 0; b < batch_size; ++b) {
+            sel_data[b * (batch_size * seq_len) + b * seq_len] = 1.0;
+        }
+    } else if (dtype == DType::Float16) {
+        // Float16 data needs special handling
+        auto* sel_data = selection_matrix.data<uint16_t>();
+        uint16_t one_f16 = 0x3C00;  // Float16 representation of 1.0
+        for (int64_t b = 0; b < batch_size; ++b) {
+            sel_data[b * (batch_size * seq_len) + b * seq_len] = one_f16;
+        }
     }
 
     // Now: selection_matrix @ reshaped gives us [batch, hidden_size] with first tokens
@@ -400,15 +418,30 @@ auto BertForQuestionAnswering::forward(const Variable& input_ids,
     auto reshaped = tenzor::reshape(logits, {batch_size * seq_len, 2});
 
     // Create selection matrices to extract start and end logits
+    // Use the same dtype as logits for consistency
+    auto dtype = logits.tensor().dtype();
+
     // Start logits: multiply by [1, 0]
-    Tensor start_selector(std::vector<int64_t>{2, 1}, DType::Float32, logits.tensor().device());
+    Tensor start_selector(std::vector<int64_t>{2, 1}, dtype, logits.tensor().device());
     start_selector.zero_();
-    start_selector.data<float>()[0] = 1.0f;  // [1; 0]
+    if (dtype == DType::Float32) {
+        start_selector.data<float>()[0] = 1.0f;
+    } else if (dtype == DType::Float64) {
+        start_selector.data<double>()[0] = 1.0;
+    } else if (dtype == DType::Float16) {
+        start_selector.data<uint16_t>()[0] = 0x3C00;  // Float16 representation of 1.0
+    }
 
     // End logits: multiply by [0, 1]
-    Tensor end_selector(std::vector<int64_t>{2, 1}, DType::Float32, logits.tensor().device());
+    Tensor end_selector(std::vector<int64_t>{2, 1}, dtype, logits.tensor().device());
     end_selector.zero_();
-    end_selector.data<float>()[1] = 1.0f;  // [0; 1]
+    if (dtype == DType::Float32) {
+        end_selector.data<float>()[1] = 1.0f;
+    } else if (dtype == DType::Float64) {
+        end_selector.data<double>()[1] = 1.0;
+    } else if (dtype == DType::Float16) {
+        end_selector.data<uint16_t>()[1] = 0x3C00;  // Float16 representation of 1.0
+    }
 
     // Use matmul to select: [batch*seq_len, 2] @ [2, 1] = [batch*seq_len, 1]
     Variable start_selector_var(start_selector, false);

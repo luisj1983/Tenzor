@@ -319,6 +319,30 @@ static void matmul_blocked_int32(
     }
 }
 
+// Micro-kernel for Float16 block multiplication using Float32 accumulation
+static void matmul_microkernel_float16(
+    const Float16* A, const Float16* B, Float16* C,
+    int64_t M, int64_t N, int64_t K,
+    int64_t lda, int64_t ldb, int64_t ldc) {
+
+    // Process each row of the block
+    for (int64_t i = 0; i < M; ++i) {
+        for (int64_t j = 0; j < N; ++j) {
+            // Accumulate in Float32 for better numerical accuracy
+            float sum = static_cast<float>(C[i * ldc + j]);
+
+            for (int64_t k = 0; k < K; ++k) {
+                float a_val = static_cast<float>(A[i * lda + k]);
+                float b_val = static_cast<float>(B[k * ldb + j]);
+                sum += a_val * b_val;
+            }
+
+            // Convert back to Float16 once at the end
+            C[i * ldc + j] = Float16(sum);
+        }
+    }
+}
+
 // Float16 matrix multiplication (performed in Float32 for CPU)
 static void matmul_blocked_float16(
     const Float16* A, const Float16* B, Float16* C,
@@ -327,7 +351,7 @@ static void matmul_blocked_float16(
     // Zero-initialize output
     std::fill_n(C, M * N, Float16(0.0f));
 
-    // Simple blocked matmul with Float32 accumulation for compatibility
+    // Cache-friendly blocked algorithm with Float32 accumulation
     for (int64_t ii = 0; ii < M; ii += BLOCK_SIZE_M) {
         int64_t i_end = std::min(ii + static_cast<int64_t>(BLOCK_SIZE_M), M);
 
@@ -337,17 +361,18 @@ static void matmul_blocked_float16(
             for (int64_t kk = 0; kk < K; kk += BLOCK_SIZE_K) {
                 int64_t k_end = std::min(kk + static_cast<int64_t>(BLOCK_SIZE_K), K);
 
-                // Process block with Float32 accumulation
-                for (int64_t i = ii; i < i_end; ++i) {
-                    for (int64_t k = kk; k < k_end; ++k) {
-                        float a_val = static_cast<float>(A[i * K + k]);
-                        for (int64_t j = jj; j < j_end; ++j) {
-                            float b_val = static_cast<float>(B[k * N + j]);
-                            float c_val = static_cast<float>(C[i * N + j]);
-                            C[i * N + j] = Float16(c_val + a_val * b_val);
-                        }
-                    }
-                }
+                // Process block using microkernel
+                int64_t block_m = i_end - ii;
+                int64_t block_n = j_end - jj;
+                int64_t block_k = k_end - kk;
+
+                matmul_microkernel_float16(
+                    A + ii * K + kk,
+                    B + kk * N + jj,
+                    C + ii * N + jj,
+                    block_m, block_n, block_k,
+                    K, N, N
+                );
             }
         }
     }
@@ -1326,6 +1351,19 @@ auto div_kernel(const Tensor& a, const Tensor& b) -> Tensor {
 
             detail::div_scalar(a_data, b_data, c_data, n);
 
+        } else if (a.dtype() == DType::Float16) {
+            const Float16* a_data = a.data<Float16>();
+            const Float16* b_data = b.data<Float16>();
+            Float16* c_data = result.data<Float16>();
+
+            // Float16 division using scalar path (convert to float32)
+            for (size_t i = 0; i < n; ++i) {
+                float a_f32 = static_cast<float>(a_data[i]);
+                float b_f32 = static_cast<float>(b_data[i]);
+                float result_f32 = (b_f32 == 0.0f) ? std::numeric_limits<float>::infinity() : a_f32 / b_f32;
+                c_data[i] = Float16(result_f32);
+            }
+
         } else {
             throw std::runtime_error("Unsupported dtype for div operation");
         }
@@ -1365,6 +1403,18 @@ auto div_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             detail::broadcast_op(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
                                 [](int64_t x, int64_t y) { return (y == 0) ? 0 : x / y; });
 
+        } else if (a.dtype() == DType::Float16) {
+            const Float16* a_data = a.data<Float16>();
+            const Float16* b_data = b.data<Float16>();
+            Float16* c_data = result.data<Float16>();
+            detail::broadcast_op(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](Float16 x, Float16 y) {
+                                    float x_f32 = static_cast<float>(x);
+                                    float y_f32 = static_cast<float>(y);
+                                    if (y_f32 == 0.0f) return Float16(std::numeric_limits<float>::infinity());
+                                    return Float16(x_f32 / y_f32);
+                                });
+
         } else {
             throw std::runtime_error("Unsupported dtype for div operation");
         }
@@ -1401,6 +1451,9 @@ auto matmul_kernel(const Tensor& a, const Tensor& b) -> Tensor {
         Tensor result({K}, a_contig.dtype(), a_contig.device());
 
         // Dispatch based on dtype
+        // For 1D×2D: A is (1, N), B is (N, K), C is (1, K)
+        // Function signature expects (M, N_param, K_param) where:
+        //   M = rows of A/C (=1), N_param = cols of B/C (=K), K_param = shared dim (=N)
         if (a_contig.dtype() == DType::Float32 && b_contig.dtype() == DType::Float32) {
             const float* a_data = a_contig.data<float>();
             const float* b_data = b_contig.data<float>();
@@ -1580,8 +1633,17 @@ auto sqrt_kernel(const Tensor& input) -> Tensor {
         }
 #endif
 
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* in_data = input.data<Float16>();
+        Float16* out_data = result.data<Float16>();
+
+        for (size_t i = 0; i < n; ++i) {
+            float val = static_cast<float>(in_data[i]);
+            out_data[i] = Float16(std::sqrt(val));
+        }
+
     } else {
-        throw std::runtime_error("sqrt operation only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("sqrt operation only supports Float32, Float64, and Float16 dtypes");
     }
 
     return result;
@@ -1640,8 +1702,17 @@ auto neg_kernel(const Tensor& input) -> Tensor {
         }
 #endif
 
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* in_data = input.data<Float16>();
+        Float16* out_data = result.data<Float16>();
+
+        for (size_t i = 0; i < n; ++i) {
+            float val = static_cast<float>(in_data[i]);
+            out_data[i] = Float16(-val);
+        }
+
     } else {
-        throw std::runtime_error("neg operation only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("neg operation only supports Float32, Float64, and Float16 dtypes");
     }
 
     return result;
@@ -1702,8 +1773,17 @@ auto abs_kernel(const Tensor& input) -> Tensor {
         }
 #endif
 
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* in_data = input.data<Float16>();
+        Float16* out_data = result.data<Float16>();
+
+        for (size_t i = 0; i < n; ++i) {
+            float val = static_cast<float>(in_data[i]);
+            out_data[i] = Float16(std::abs(val));
+        }
+
     } else {
-        throw std::runtime_error("abs operation only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("abs operation only supports Float32, Float64, and Float16 dtypes");
     }
 
     return result;
@@ -1772,8 +1852,19 @@ auto clamp_kernel(const Tensor& input, float min_val, float max_val) -> Tensor {
         }
 #endif
 
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* in_data = input.data<Float16>();
+        Float16* out_data = result.data<Float16>();
+
+        // Convert to float, clamp, then convert back
+        for (size_t i = 0; i < n; ++i) {
+            float val = static_cast<float>(in_data[i]);
+            val = std::max(std::min(val, max_val), min_val);
+            out_data[i] = Float16(val);
+        }
+
     } else {
-        throw std::runtime_error("clamp operation only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("clamp operation only supports Float16, Float32 and Float64 dtypes");
     }
 
     return result;
@@ -1802,8 +1893,17 @@ auto log_kernel(const Tensor& input) -> Tensor {
             out_data[i] = std::log(in_data[i]);
         }
 
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* in_data = input.data<Float16>();
+        Float16* out_data = result.data<Float16>();
+
+        for (size_t i = 0; i < n; ++i) {
+            float val = static_cast<float>(in_data[i]);
+            out_data[i] = Float16(std::log(val));
+        }
+
     } else {
-        throw std::runtime_error("log operation only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("log operation only supports Float32, Float64, and Float16 dtypes");
     }
 
     return result;
@@ -1832,8 +1932,17 @@ auto exp_kernel(const Tensor& input) -> Tensor {
             out_data[i] = std::exp(in_data[i]);
         }
 
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* in_data = input.data<Float16>();
+        Float16* out_data = result.data<Float16>();
+
+        for (size_t i = 0; i < n; ++i) {
+            float val = static_cast<float>(in_data[i]);
+            out_data[i] = Float16(std::exp(val));
+        }
+
     } else {
-        throw std::runtime_error("exp operation only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("exp operation only supports Float32, Float64, and Float16 dtypes");
     }
 
     return result;
@@ -1862,8 +1971,19 @@ auto pow_kernel(const Tensor& input, float exponent) -> Tensor {
             out_data[i] = std::pow(in_data[i], exp_d);
         }
 
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* in_data = input.data<Float16>();
+        Float16* out_data = result.data<Float16>();
+
+        for (size_t i = 0; i < n; ++i) {
+            // Convert Float16 to float, compute pow, convert back
+            float f32_val = static_cast<float>(in_data[i]);
+            float f32_result = std::pow(f32_val, exponent);
+            out_data[i] = Float16(f32_result);
+        }
+
     } else {
-        throw std::runtime_error("pow operation only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("pow operation only supports Float32, Float64, and Float16 dtypes");
     }
 
     return result;
@@ -1894,8 +2014,18 @@ auto sign_kernel(const Tensor& input) -> Tensor {
             out_data[i] = (val > 0.0) - (val < 0.0);
         }
 
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* in_data = input.data<Float16>();
+        Float16* out_data = result.data<Float16>();
+
+        for (size_t i = 0; i < n; ++i) {
+            float val = static_cast<float>(in_data[i]);
+            float sign_val = static_cast<float>((val > 0.0f) - (val < 0.0f));
+            out_data[i] = Float16(sign_val);
+        }
+
     } else {
-        throw std::runtime_error("sign operation only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("sign operation only supports Float32, Float64, and Float16 dtypes");
     }
 
     return result;

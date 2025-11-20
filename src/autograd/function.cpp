@@ -170,6 +170,43 @@ auto MatMulBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<T
     const auto& b = saved_tensors_[1];
     const auto& grad_out = grad_outputs[0];
 
+    // Debug for Float16
+    if (a.dtype() == DType::Float16) {
+        std::cerr << "[MATMUL_BACKWARD_F16] a.shape: [";
+        for (size_t i = 0; i < a.shape().size(); ++i) {
+            if (i > 0) std::cerr << ", ";
+            std::cerr << a.shape()[i];
+        }
+        std::cerr << "], b.shape: [";
+        for (size_t i = 0; i < b.shape().size(); ++i) {
+            if (i > 0) std::cerr << ", ";
+            std::cerr << b.shape()[i];
+        }
+        std::cerr << "], grad_out.shape: [";
+        for (size_t i = 0; i < grad_out.shape().size(); ++i) {
+            if (i > 0) std::cerr << ", ";
+            std::cerr << grad_out.shape()[i];
+        }
+        std::cerr << "]" << std::endl;
+
+        // Check if inputs have non-zero values
+        auto a_cpu = a.to(Device::cpu()).to(DType::Float32);
+        auto* a_data = a_cpu.data<float>();
+        float a_sum = 0.0f;
+        for (int i = 0; i < std::min(10, static_cast<int>(a_cpu.numel())); ++i) {
+            a_sum += std::abs(a_data[i]);
+        }
+        std::cerr << "[MATMUL_BACKWARD_F16] a avg_abs_first10=" << (a_sum / std::min(10, static_cast<int>(a_cpu.numel()))) << std::endl;
+
+        auto grad_out_cpu = grad_out.to(Device::cpu()).to(DType::Float32);
+        auto* grad_out_data = grad_out_cpu.data<float>();
+        float grad_sum = 0.0f;
+        for (int i = 0; i < std::min(10, static_cast<int>(grad_out_cpu.numel())); ++i) {
+            grad_sum += std::abs(grad_out_data[i]);
+        }
+        std::cerr << "[MATMUL_BACKWARD_F16] grad_out avg_abs_first10=" << (grad_sum / std::min(10, static_cast<int>(grad_out_cpu.numel()))) << std::endl;
+    }
+
     // Get the number of dimensions
     auto a_ndim = a.shape().size();
     auto b_ndim = b.shape().size();
@@ -180,6 +217,17 @@ auto MatMulBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<T
 
     auto grad_a = matmul(grad_out, b_t);
     auto grad_b = matmul(a_t, grad_out);
+
+    // Debug output gradients for Float16
+    if (a.dtype() == DType::Float16) {
+        auto grad_b_cpu = grad_b.to(Device::cpu()).to(DType::Float32);
+        auto* grad_b_data = grad_b_cpu.data<float>();
+        float grad_b_sum = 0.0f;
+        for (int i = 0; i < std::min(10, static_cast<int>(grad_b_cpu.numel())); ++i) {
+            grad_b_sum += std::abs(grad_b_data[i]);
+        }
+        std::cerr << "[MATMUL_BACKWARD_F16] grad_b avg_abs_first10=" << (grad_b_sum / std::min(10, static_cast<int>(grad_b_cpu.numel()))) << std::endl;
+    }
 
     return {grad_a, grad_b};
 }
@@ -264,7 +312,10 @@ auto MeanBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
         // Scale by 1/N using backend-agnostic tensor multiplication
         // Create scalar tensor with same dtype and device as expanded gradient
         auto scale_tensor = full({}, scale, expanded.dtype(), expanded.device());
-        return {mul(expanded, scale_tensor)};
+
+        auto result = mul(expanded, scale_tensor);
+
+        return {result};
     } else {
         // Dimension-specific reduction backward
         int64_t dim = dim_.value();

@@ -199,15 +199,30 @@ auto RobertaForQuestionAnswering::forward(const Variable& input_ids,
     auto reshaped = tenzor::reshape(logits, {batch_size * seq_len, 2});
 
     // Create selection matrices to extract start and end logits
+    // Use the same dtype as logits for consistency
+    auto dtype = logits.tensor().dtype();
+
     // Start logits: multiply by [1, 0]
-    Tensor start_selector(std::vector<int64_t>{2, 1}, DType::Float32, logits.tensor().device());
+    Tensor start_selector(std::vector<int64_t>{2, 1}, dtype, logits.tensor().device());
     start_selector.zero_();
-    start_selector.data<float>()[0] = 1.0f;  // [1; 0]
+    if (dtype == DType::Float32) {
+        start_selector.data<float>()[0] = 1.0f;
+    } else if (dtype == DType::Float64) {
+        start_selector.data<double>()[0] = 1.0;
+    } else if (dtype == DType::Float16) {
+        start_selector.data<uint16_t>()[0] = 0x3C00;  // Float16 representation of 1.0
+    }
 
     // End logits: multiply by [0, 1]
-    Tensor end_selector(std::vector<int64_t>{2, 1}, DType::Float32, logits.tensor().device());
+    Tensor end_selector(std::vector<int64_t>{2, 1}, dtype, logits.tensor().device());
     end_selector.zero_();
-    end_selector.data<float>()[1] = 1.0f;  // [0; 1]
+    if (dtype == DType::Float32) {
+        end_selector.data<float>()[1] = 1.0f;
+    } else if (dtype == DType::Float64) {
+        end_selector.data<double>()[1] = 1.0;
+    } else if (dtype == DType::Float16) {
+        end_selector.data<uint16_t>()[1] = 0x3C00;  // Float16 representation of 1.0
+    }
 
     // Use matmul to select: [batch*seq_len, 2] @ [2, 1] = [batch*seq_len, 1]
     Variable start_selector_var(start_selector, false);

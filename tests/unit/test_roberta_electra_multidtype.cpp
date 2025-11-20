@@ -134,6 +134,10 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, RoBERTaBaseConfigTest) {
 TEST_P(RoBERTaELECTRAMultiDTypeTest, RoBERTaBaseForwardShape) {
     auto config = RobertaConfig::base();
     auto model = std::make_shared<RobertaModel>(config);
+
+    // Convert model to test dtype
+    model->to(dtype);
+
     int64_t batch_size = 2;
     int64_t seq_len = 128;
 
@@ -149,6 +153,10 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, RoBERTaBaseForwardShape) {
 TEST_P(RoBERTaELECTRAMultiDTypeTest, RoBERTaBaseGradientFlow) {
     auto config = RobertaConfig::base();
     auto model = std::make_shared<RobertaModel>(config);
+
+    // Convert model to test dtype
+    model->to(dtype);
+
     model->train();
 
     auto input_ids = create_input_ids(1, 64, config.vocab_size);

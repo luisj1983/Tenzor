@@ -17,6 +17,29 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient, boo
         gradient = ones_like(root.tensor());
     }
 
+    // Debug: Check initial gradient for Float16
+    if (root.tensor().dtype() == DType::Float16) {
+        std::cerr << "[ENGINE_F16] Initial gradient created" << std::endl;
+        std::cerr << "[ENGINE_F16] Root dtype: " << static_cast<int>(root.tensor().dtype()) << std::endl;
+        std::cerr << "[ENGINE_F16] Gradient dtype: " << static_cast<int>(gradient->dtype()) << std::endl;
+        std::cerr << "[ENGINE_F16] Gradient shape: [";
+        for (size_t i = 0; i < gradient->shape().size(); ++i) {
+            if (i > 0) std::cerr << ", ";
+            std::cerr << gradient->shape()[i];
+        }
+        std::cerr << "]" << std::endl;
+
+        // Check first few gradient values
+        if (gradient->dtype() == DType::Float16) {
+            auto* data = gradient->data<Float16>();
+            std::cerr << "[ENGINE_F16] First 5 gradient values: ";
+            for (int i = 0; i < std::min(5, static_cast<int>(gradient->numel())); ++i) {
+                std::cerr << static_cast<float>(data[i]) << " ";
+            }
+            std::cerr << std::endl;
+        }
+    }
+
     root.grad() = *gradient;
 
     // If no grad_fn, this is a leaf variable, nothing to backprop
@@ -56,6 +79,31 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient, boo
         // Compute gradients for inputs
         auto input_grads = function->backward(grad_outputs);
 
+        // Debug: Check if gradients are computed for Float16
+        if (!grad_outputs.empty() && grad_outputs[0].dtype() == DType::Float16) {
+            std::cerr << "[ENGINE_BACKWARD] Function backward called, input_grads.size=" << input_grads.size() << std::endl;
+            for (size_t i = 0; i < std::min(size_t(2), input_grads.size()); ++i) {
+                std::cerr << "[ENGINE_BACKWARD] input_grads[" << i << "] shape: [";
+                for (size_t j = 0; j < input_grads[i].shape().size(); ++j) {
+                    if (j > 0) std::cerr << ", ";
+                    std::cerr << input_grads[i].shape()[j];
+                }
+                std::cerr << "], dtype=" << static_cast<int>(input_grads[i].dtype());
+
+                // Check first value
+                if (input_grads[i].dtype() == DType::Float16 && input_grads[i].numel() > 0) {
+                    auto grad_cpu = input_grads[i].to(Device::cpu()).to(DType::Float32);
+                    auto* data = grad_cpu.data<float>();
+                    float sum = 0.0f;
+                    for (int j = 0; j < std::min(10, static_cast<int>(grad_cpu.numel())); ++j) {
+                        sum += std::abs(data[j]);
+                    }
+                    std::cerr << ", avg_abs_first10=" << (sum / std::min(10, static_cast<int>(grad_cpu.numel())));
+                }
+                std::cerr << std::endl;
+            }
+        }
+
         // Accumulate gradients to input variables
         const auto& input_vars = function->input_variables();
 
@@ -70,6 +118,12 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient, boo
 
             Tensor grad_to_apply = input_grads[i];
 
+            // Debug: Check gradient before accumulation
+            if (var.tensor().dtype() == DType::Float16 && var.is_leaf()) {
+                std::cerr << "[ENGINE_LEAF] Accumulating to leaf variable, is_leaf=" << var.is_leaf()
+                          << ", has_grad=" << var.has_grad() << std::endl;
+            }
+
             // Apply hooks (access through impl_ for handle pattern)
             if (var.impl_) {
                 for (auto& hook : var.impl_->hooks_) {
@@ -80,9 +134,26 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient, boo
             // Accumulate gradient to leaf variables
             if (var.is_leaf() || var.retains_grad()) {
                 if (var.has_grad()) {
-                    var.grad() = var.grad().value() + grad_to_apply;
+                    // Ensure incoming gradient matches the dtype of existing gradient
+                    auto existing_grad = var.grad().value();
+                    if (grad_to_apply.dtype() != existing_grad.dtype()) {
+                        grad_to_apply = grad_to_apply.to(existing_grad.dtype());
+                    }
+                    var.grad() = existing_grad + grad_to_apply;
                 } else {
                     var.grad() = grad_to_apply;
+                }
+
+                // Debug: Check accumulated gradient
+                if (var.tensor().dtype() == DType::Float16 && var.is_leaf() && var.has_grad()) {
+                    auto grad_cpu = var.grad()->to(Device::cpu()).to(DType::Float32);
+                    auto* data = grad_cpu.data<float>();
+                    float sum = 0.0f;
+                    int count = std::min(10, static_cast<int>(grad_cpu.numel()));
+                    for (int j = 0; j < count; ++j) {
+                        sum += std::abs(data[j]);
+                    }
+                    std::cerr << "[ENGINE_LEAF] After accumulation, avg_abs_first10=" << (sum / count) << std::endl;
                 }
             }
         }
@@ -101,8 +172,20 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient, boo
 
     // Clear computation graph if not retaining
     if (!retain_graph) {
-        // Note: In a full implementation, we would clear grad_fn references here
-        // For now, we just clear the gradient accumulator
+        // Clear grad_fn references to prevent circular shared_ptr references
+        // This is critical to avoid memory leaks and infinite loops in subsequent backward passes
+        for (auto& func : sorted) {
+            if (func) {
+                // Clear input variables which hold circular references
+                func->set_input_variables({});
+                // Clear next functions to break the graph
+                func->set_next_functions({});
+            }
+        }
+        // Also clear the root's grad_fn if it's not a leaf
+        if (root.grad_fn() && !root.is_leaf()) {
+            root.set_grad_fn(nullptr);
+        }
     }
 }
 

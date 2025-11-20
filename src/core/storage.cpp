@@ -18,6 +18,9 @@ CPUStorage::CPUStorage(size_t size_bytes) : size_(size_bytes) {
     if (!data_) {
         throw std::bad_alloc();
     }
+
+    // Initialize memory to zero to prevent uninitialized values
+    std::memset(data_, 0, size_bytes);
 }
 
 CPUStorage::~CPUStorage() {

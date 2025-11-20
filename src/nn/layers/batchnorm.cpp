@@ -224,14 +224,16 @@ auto BatchNorm2d::forward(const Variable& input) -> Variable {
 
         // Prepare tensors to save for backward (already on correct device, no transfers needed)
         // Compute invstd from variance for backward pass
-        auto invstd = pow(batch_var + static_cast<float>(eps_), -0.5f);
+        // Create epsilon tensor with same dtype as batch_var to avoid dtype mismatch
+        auto eps_tensor = full({}, eps_, batch_var.dtype(), batch_var.device());
+        auto invstd = pow(batch_var + eps_tensor, -0.5f);
 
         // Ensure contiguous for backward
         Tensor batch_mean_final = batch_mean.contiguous();
         Tensor invstd_final = invstd.contiguous();
 
         // CRITICAL: Access weight from parameters_ map
-        Tensor weight_tensor = affine_ ? parameters_["weight"]->tensor() : ones({C}, DType::Float32, original_device);
+        Tensor weight_tensor = affine_ ? parameters_["weight"]->tensor() : ones({C}, input.tensor().dtype(), original_device);
         // Ensure all tensors are contiguous before saving
         std::vector<Tensor> tensors_to_save = {
             input.tensor().contiguous(),  // input (original device, made contiguous)
@@ -503,7 +505,8 @@ auto BatchNorm1d::forward(const Variable& input) -> Variable {
     if (shape.size() == 3) {
         auto mean_broadcast = batch_mean.unsqueeze(0).unsqueeze(2).contiguous();
         auto var_broadcast = batch_var.unsqueeze(0).unsqueeze(2).contiguous();
-        auto invstd = pow(var_broadcast + static_cast<float>(eps_), -0.5f).contiguous();
+        auto eps_tensor = full({}, eps_, var_broadcast.dtype(), var_broadcast.device());
+        auto invstd = pow(var_broadcast + eps_tensor, -0.5f).contiguous();
         auto normalized = ((input_work - mean_broadcast) * invstd).contiguous();
 
         if (affine_) {
@@ -518,7 +521,8 @@ auto BatchNorm1d::forward(const Variable& input) -> Variable {
     } else {
         auto mean_broadcast = batch_mean.unsqueeze(0).contiguous();
         auto var_broadcast = batch_var.unsqueeze(0).contiguous();
-        auto invstd = pow(var_broadcast + static_cast<float>(eps_), -0.5f).contiguous();
+        auto eps_tensor = full({}, eps_, var_broadcast.dtype(), var_broadcast.device());
+        auto invstd = pow(var_broadcast + eps_tensor, -0.5f).contiguous();
         auto normalized = ((input_work - mean_broadcast) * invstd).contiguous();
 
         if (affine_) {
@@ -542,12 +546,13 @@ auto BatchNorm1d::forward(const Variable& input) -> Variable {
         auto result = Variable(output, true);
 
         // Compute invstd for backward
-        auto invstd = pow(batch_var + static_cast<float>(eps_), -0.5f);
+        auto eps_tensor = full({}, eps_, batch_var.dtype(), batch_var.device());
+        auto invstd = pow(batch_var + eps_tensor, -0.5f);
 
         Tensor batch_mean_final = batch_mean.contiguous();
         Tensor invstd_final = invstd.contiguous();
 
-        Tensor weight_tensor = affine_ ? parameters_["weight"]->tensor() : ones({C}, DType::Float32, original_device);
+        Tensor weight_tensor = affine_ ? parameters_["weight"]->tensor() : ones({C}, input.tensor().dtype(), original_device);
 
         std::vector<Tensor> tensors_to_save = {
             input.tensor().contiguous(),

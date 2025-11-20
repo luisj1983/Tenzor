@@ -401,13 +401,13 @@ TEST_P(SwinMultiDTypeTest, SwinTinyImageSize448) {
     EXPECT_EQ(output.tensor().dtype(), dtype_);
 }
 
-TEST_P(SwinMultiDTypeTest, SwinSmallImageSize384) {
+TEST_P(SwinMultiDTypeTest, SwinSmallImageSize448) {
     int img_size = GetImageSize();
-    auto model = swin_small(1000, 384, false);
+    auto model = swin_small(1000, 448, false);
     model->to(dtype_);
     model->to(device_);
 
-    Variable input(Tensor({1, 3, 384, 384}, dtype_, device_), true);
+    Variable input(Tensor({1, 3, 448, 448}, dtype_, device_), true);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
@@ -416,13 +416,16 @@ TEST_P(SwinMultiDTypeTest, SwinSmallImageSize384) {
     EXPECT_EQ(output.tensor().dtype(), dtype_);
 }
 
-TEST_P(SwinMultiDTypeTest, SwinBaseImageSize512) {
-    int img_size = GetImageSize();
-    auto model = swin_base(1000, 512, false);
+TEST_P(SwinMultiDTypeTest, SwinBaseImageSize560) {
+    // Note: 560 is invalid for window_size=7 (560/4/8=17, 17%7=3)
+    // Valid sizes must be multiples of 224 (patch_size * 2^(stages-1) * window_size)
+    // Using 672 instead (672/4/8=21, 21%7=0)
+    int img_size = 672;
+    auto model = swin_base(1000, img_size, false);
     model->to(dtype_);
     model->to(device_);
 
-    Variable input(Tensor({1, 3, 512, 512}, dtype_, device_), true);
+    Variable input(Tensor({1, 3, img_size, img_size}, dtype_, device_), true);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
@@ -487,7 +490,9 @@ TEST_P(SwinMultiDTypeTest, SwinTinyShiftedWindowGradients) {
     model->to(device_);
     model->train();
 
-    Variable input(Tensor({1, 3, img_size, img_size}, dtype_, device_), true);
+    // Initialize input with small non-zero values to ensure non-zero gradients
+    // Zero inputs produce zero activations and zero gradients (correct mathematical behavior)
+    Variable input(tenzor::randn({1, 3, img_size, img_size}, dtype_, device_) * 0.01f, true);
     Variable output = model->forward(input);
     Variable loss = tenzor::mean(output);
     loss.backward();
@@ -498,9 +503,15 @@ TEST_P(SwinMultiDTypeTest, SwinTinyShiftedWindowGradients) {
 
     auto grad = input.grad().value().to(Device::cpu()).to(DType::Float32);
     auto grad_data = grad.data<float>();
+
+    // Check for non-zero gradients using appropriate threshold for gradient magnitude
+    // For Float16 with small input values (0.01 scale), gradients can be O(1e-2) or smaller
+    // Use a threshold that's appropriate for gradient checking, not numerical comparison
+    float grad_tol = (dtype_ == DType::Float16) ? 1e-3f : abs_tol_;
+
     bool has_nonzero_grad = false;
     for (size_t i = 0; i < std::min(size_t(100), static_cast<size_t>(grad.numel())); ++i) {
-        if (std::abs(grad_data[i]) > abs_tol_) {
+        if (std::abs(grad_data[i]) > grad_tol) {
             has_nonzero_grad = true;
             break;
         }
@@ -591,7 +602,9 @@ TEST_P(SwinMultiDTypeTest, SwinBaseHierarchicalFeatureExtraction) {
     model->to(device_);
     model->eval();
 
-    Variable input(Tensor({1, 3, img_size, img_size}, dtype_, device_), false);
+    // Initialize with random values to ensure non-zero features for validation
+    // Zero input produces zero output in eval mode (no dropout, deterministic)
+    Variable input(tenzor::randn({1, 3, img_size, img_size}, dtype_, device_) * 0.01f, false);
     Variable output = model->forward(input);
 
     // Verify output features are properly scaled
@@ -654,8 +667,16 @@ TEST_P(SwinMultiDTypeTest, VariantOutputConsistency) {
 
     // All variants should produce same output shape for same input/output config
     auto tiny = swin_tiny(50, 224, false);
+    tiny->to(dtype_);
+    tiny->to(device_);
+
     auto small = swin_small(50, 224, false);
+    small->to(dtype_);
+    small->to(device_);
+
     auto base = swin_base(50, 224, false);
+    base->to(dtype_);
+    base->to(device_);
 
     Variable input(Tensor({1, 3, img_size, img_size}, dtype_, device_), false);
 

@@ -1,0 +1,2 @@
+add_executable(minimal_float16_debug ../tests/minimal_float16_debug.cpp)
+target_link_libraries(minimal_float16_debug PRIVATE tenzor_core gtest)

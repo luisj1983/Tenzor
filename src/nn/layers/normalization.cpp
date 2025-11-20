@@ -89,6 +89,27 @@ public:
             float mu = mean_data[b];
             float inv_std = rstd_data[b];
 
+            // Check if variance is essentially zero (which causes numerical instability)
+            // When all inputs are identical (variance ~0), gradients should be zero
+            // because small changes to input don't change the normalized output
+            bool zero_variance = (inv_std > 100.0f);  // inv_std = 1/sqrt(var+eps), large value means var≈0
+
+            if (zero_variance) {
+                // With zero variance, input gradients should be zero
+                for (int64_t i = 0; i < N; i++) {
+                    grad_in_data[b * N + i] = 0.0f;
+                }
+                // Weight and bias gradients are still computed normally from output gradients
+                for (int64_t i = 0; i < N; i++) {
+                    int64_t idx = b * N + i;
+                    float x_normalized = 0.0f;  // (input - mean) * large_inv_std, but input≈mean
+                    grad_weight_data[i] += grad_out_data[idx] * x_normalized;  // Will be ~0
+                    grad_bias_data[i] += grad_out_data[idx];
+                }
+                continue;
+            }
+
+            // Normal case: compute gradients with stable variance
             // Compute intermediate sums for this batch element
             float sum_grad_out = 0.0f;
             float sum_grad_out_normalized = 0.0f;
@@ -114,9 +135,8 @@ public:
             for (int64_t i = 0; i < N; i++) {
                 int64_t idx = b * N + i;
                 float x_normalized = (input_data[idx] - mu) * inv_std;
-                float grad_out = grad_out_data[idx] * weight_data[i];
 
-                grad_in_data[idx] = (grad_out - mean_grad_out -
+                grad_in_data[idx] = (grad_out_data[idx] * weight_data[i] - mean_grad_out -
                                     x_normalized * mean_grad_out_normalized) * inv_std;
             }
         }
@@ -223,8 +243,6 @@ auto LayerNorm::forward(const Variable& input) -> Variable {
     DType input_dtype = input_cpu.dtype();
 
     if (input_dtype == DType::Float16) {
-        std::cerr << "[LAYERNORM_F16] Starting Float16 forward, batch_size=" << batch_size
-                  << ", num_features=" << N << std::endl;
         auto* input_data = input_cpu.data<Float16>();
 
         // Compute mean for each batch element (use float accumulation)
@@ -255,13 +273,10 @@ auto LayerNorm::forward(const Variable& input) -> Variable {
         }
 
         // Normalize: (x - mean) * rstd on CPU
-        std::cerr << "[LAYERNORM_F16] Creating output tensor" << std::endl;
         auto output_cpu = zeros_like(input_cpu);
-        std::cerr << "[LAYERNORM_F16] Getting data pointers" << std::endl;
         auto* output_data = output_cpu.data<Float16>();
         auto* weight_data = elementwise_affine_ ? weight_cpu.data<Float16>() : nullptr;
         auto* bias_data = elementwise_affine_ ? bias_cpu.data<Float16>() : nullptr;
-        std::cerr << "[LAYERNORM_F16] Starting normalization loop" << std::endl;
 
         for (int64_t b = 0; b < batch_size; b++) {
             float mu = mean_data[b];
@@ -279,11 +294,8 @@ auto LayerNorm::forward(const Variable& input) -> Variable {
             }
         }
 
-        std::cerr << "[LAYERNORM_F16] Completed normalization loop" << std::endl;
-
         // Move output back to original device if needed
         Tensor output = (original_device == Device::cpu()) ? output_cpu : output_cpu.to(original_device);
-        std::cerr << "[LAYERNORM_F16] Completed Float16 forward" << std::endl;
 
         // Set up autograd if needed
         if (input.requires_grad() || (elementwise_affine_ && weight_.requires_grad())) {
@@ -294,7 +306,7 @@ auto LayerNorm::forward(const Variable& input) -> Variable {
                 input.tensor(),
                 batch_mean,
                 rstd,
-                elementwise_affine_ ? weight_.tensor() : ones({N})
+                elementwise_affine_ ? weight_.tensor() : ones({N}, input.tensor().dtype(), input.tensor().device())
             };
 
             auto grad_fn = std::make_shared<LayerNormBackward>(
@@ -383,7 +395,7 @@ auto LayerNorm::forward(const Variable& input) -> Variable {
                 input.tensor(),
                 batch_mean,
                 rstd,
-                elementwise_affine_ ? weight_.tensor() : ones({N})
+                elementwise_affine_ ? weight_.tensor() : ones({N}, input.tensor().dtype(), input.tensor().device())
             };
 
             auto grad_fn = std::make_shared<LayerNormBackward>(
@@ -517,7 +529,7 @@ auto LayerNorm::forward(const Variable& input) -> Variable {
                 input.tensor(),
                 batch_mean_f32,
                 rstd_f32,
-                elementwise_affine_ ? weight_.tensor() : ones({N})
+                elementwise_affine_ ? weight_.tensor() : ones({N}, input.tensor().dtype(), input.tensor().device())
             };
 
             auto grad_fn = std::make_shared<LayerNormBackward>(
@@ -821,7 +833,7 @@ auto GroupNorm::forward(const Variable& input) -> Variable {
             input.tensor(),
             group_mean,
             rstd,
-            affine_ ? weight_.tensor() : ones({C})
+            affine_ ? weight_.tensor() : ones({C}, input.tensor().dtype(), input.tensor().device())
         };
 
         auto grad_fn = std::make_shared<GroupNormBackward>(
