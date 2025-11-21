@@ -85,16 +85,34 @@ auto PositionalEncoding::forward(const Variable& x) -> Variable {
     Device input_device = x.tensor().device();
     DType input_dtype = x.tensor().dtype();
 
-    // Slice and reshape positional encoding on CPU first (pe_ is always on CPU initially)
+    // Slice and reshape positional encoding on CPU first
+    // Use pe_'s current dtype (may have been converted via to(dtype))
+    DType pe_dtype = pe_.dtype();
     Tensor pe_slice = reshape(pe_, {max_len_, d_model_});
-    // Take first seq_len rows
-    std::vector<int64_t> slice_shape = {seq_len, d_model_};
-    Tensor pe_for_seq = zeros({seq_len, d_model_}, DType::Float32, Device::cpu());
-    auto* pe_src = pe_.data<float>();
-    auto* pe_dst = pe_for_seq.data<float>();
 
-    for (int64_t i = 0; i < seq_len * d_model_; ++i) {
-        pe_dst[i] = pe_src[i];
+    // Take first seq_len rows with proper dtype handling
+    std::vector<int64_t> slice_shape = {seq_len, d_model_};
+    Tensor pe_for_seq = zeros({seq_len, d_model_}, pe_dtype, Device::cpu());
+
+    // Copy data using appropriate dtype
+    if (pe_dtype == DType::Float32) {
+        auto* pe_src = pe_.data<float>();
+        auto* pe_dst = pe_for_seq.data<float>();
+        for (int64_t i = 0; i < seq_len * d_model_; ++i) {
+            pe_dst[i] = pe_src[i];
+        }
+    } else if (pe_dtype == DType::Float64) {
+        auto* pe_src = pe_.data<double>();
+        auto* pe_dst = pe_for_seq.data<double>();
+        for (int64_t i = 0; i < seq_len * d_model_; ++i) {
+            pe_dst[i] = pe_src[i];
+        }
+    } else if (pe_dtype == DType::Float16) {
+        auto* pe_src = pe_.data<uint16_t>();
+        auto* pe_dst = pe_for_seq.data<uint16_t>();
+        for (int64_t i = 0; i < seq_len * d_model_; ++i) {
+            pe_dst[i] = pe_src[i];
+        }
     }
 
     // Now move to target device if needed
@@ -109,8 +127,8 @@ auto PositionalEncoding::forward(const Variable& x) -> Variable {
     std::vector<int64_t> broadcast_shape(shape.begin(), shape.end());
     Tensor pe_broadcast = expand(pe_for_seq, broadcast_shape);
 
-    // Convert to input dtype if needed (e.g., Float16 or Float64)
-    if (input_dtype != DType::Float32) {
+    // Convert to input dtype if pe_ dtype differs from input dtype
+    if (pe_dtype != input_dtype) {
         pe_broadcast = pe_broadcast.to(input_dtype);
     }
 

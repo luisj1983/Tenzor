@@ -178,6 +178,10 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, RoBERTaBaseGradientFlow) {
 TEST_P(RoBERTaELECTRAMultiDTypeTest, RoBERTaBaseParameterCount) {
     auto config = RobertaConfig::base();
     auto model = std::make_shared<RobertaModel>(config);
+
+    // Convert model to test dtype
+    model->to(dtype);
+
     auto params = model->parameters();
 
     size_t total_params = 0;
@@ -211,6 +215,10 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, RoBERTaLargeConfigTest) {
 TEST_P(RoBERTaELECTRAMultiDTypeTest, RoBERTaLargeForwardShape) {
     auto config = RobertaConfig::large();
     auto model = std::make_shared<RobertaModel>(config);
+
+    // Convert model to test dtype
+    model->to(dtype);
+
     int64_t batch_size = 2;
     int64_t seq_len = 128;
 
@@ -253,6 +261,10 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, ELECTRASmallConfigTest) {
 TEST_P(RoBERTaELECTRAMultiDTypeTest, ELECTRASmallForwardShape) {
     auto config = ElectraConfig::small();
     auto discriminator = std::make_shared<ElectraDiscriminator>(config);
+
+    // Convert model to test dtype
+    discriminator->to(dtype);
+
     int64_t batch_size = 2;
     int64_t seq_len = 128;
 
@@ -295,6 +307,10 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, ELECTRABaseConfigTest) {
 TEST_P(RoBERTaELECTRAMultiDTypeTest, ELECTRABaseForwardShape) {
     auto config = ElectraConfig::base();
     auto discriminator = std::make_shared<ElectraDiscriminator>(config);
+
+    // Convert model to test dtype
+    discriminator->to(dtype);
+
     int64_t batch_size = 2;
     int64_t seq_len = 128;
 
@@ -328,6 +344,10 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, ELECTRABaseGradientFlow) {
 TEST_P(RoBERTaELECTRAMultiDTypeTest, ELECTRALargeForwardShape) {
     auto config = ElectraConfig::large();
     auto discriminator = std::make_shared<ElectraDiscriminator>(config);
+
+    // Convert model to test dtype
+    discriminator->to(dtype);
+
     int64_t batch_size = 1;
     int64_t seq_len = 128;
 
@@ -361,6 +381,10 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, ELECTRALargeGradientFlow) {
 TEST_P(RoBERTaELECTRAMultiDTypeTest, RoBERTaBatchSizeOne) {
     auto config = RobertaConfig::base();
     auto model = std::make_shared<RobertaModel>(config);
+
+    // Convert model to test dtype
+    model->to(dtype);
+
     auto input_ids = create_input_ids(1, 64, config.vocab_size);
     auto output = model->forward(input_ids, Tensor{}, Variable{}, Variable{});
 
@@ -373,6 +397,9 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, RoBERTaBatchSizeOne) {
 TEST_P(RoBERTaELECTRAMultiDTypeTest, ELECTRAVariableSequenceLength) {
     auto config = ElectraConfig::base();
     auto discriminator = std::make_shared<ElectraDiscriminator>(config);
+
+    // Convert model to test dtype
+    discriminator->to(dtype);
 
     // Test with different sequence lengths
     auto input_32 = create_input_ids(2, 32, 30522);

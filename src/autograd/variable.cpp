@@ -259,6 +259,8 @@ auto Variable::operator+(float scalar) const -> Variable {
     Tensor scalar_tensor(std::vector<int64_t>{}, impl_->data_.dtype(), Device::cpu());
     if (impl_->data_.dtype() == DType::Float64) {
         scalar_tensor.data<double>()[0] = static_cast<double>(scalar);
+    } else if (impl_->data_.dtype() == DType::Float16) {
+        scalar_tensor.data<Float16>()[0] = Float16(scalar);
     } else {
         scalar_tensor.data<float>()[0] = scalar;
     }
@@ -280,6 +282,8 @@ auto Variable::operator+(double scalar) const -> Variable {
     Tensor scalar_tensor(std::vector<int64_t>{}, impl_->data_.dtype(), Device::cpu());
     if (impl_->data_.dtype() == DType::Float64) {
         scalar_tensor.data<double>()[0] = scalar;
+    } else if (impl_->data_.dtype() == DType::Float16) {
+        scalar_tensor.data<Float16>()[0] = Float16(static_cast<float>(scalar));
     } else {
         scalar_tensor.data<float>()[0] = static_cast<float>(scalar);
     }
@@ -301,6 +305,8 @@ auto Variable::operator*(float scalar) const -> Variable {
     Tensor scalar_tensor(std::vector<int64_t>{}, impl_->data_.dtype(), Device::cpu());
     if (impl_->data_.dtype() == DType::Float64) {
         scalar_tensor.data<double>()[0] = static_cast<double>(scalar);
+    } else if (impl_->data_.dtype() == DType::Float16) {
+        scalar_tensor.data<Float16>()[0] = Float16(scalar);
     } else {
         scalar_tensor.data<float>()[0] = scalar;
     }
@@ -322,6 +328,8 @@ auto Variable::operator*(double scalar) const -> Variable {
     Tensor scalar_tensor(std::vector<int64_t>{}, impl_->data_.dtype(), Device::cpu());
     if (impl_->data_.dtype() == DType::Float64) {
         scalar_tensor.data<double>()[0] = scalar;
+    } else if (impl_->data_.dtype() == DType::Float16) {
+        scalar_tensor.data<Float16>()[0] = Float16(static_cast<float>(scalar));
     } else {
         scalar_tensor.data<float>()[0] = static_cast<float>(scalar);
     }
@@ -347,6 +355,8 @@ auto Variable::operator/(double scalar) const -> Variable {
     Tensor scalar_tensor({}, dtype(), Device::cpu());
     if (dtype() == DType::Float64) {
         scalar_tensor.data<double>()[0] = scalar;
+    } else if (dtype() == DType::Float16) {
+        scalar_tensor.data<Float16>()[0] = Float16(static_cast<float>(scalar));
     } else {
         scalar_tensor.data<float>()[0] = static_cast<float>(scalar);
     }

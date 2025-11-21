@@ -232,8 +232,25 @@ auto sigmoid_kernel(const Tensor& input) -> Tensor {
                 out_data[i] = exp_x / (1.0 + exp_x);
             }
         }
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* in_data = input.data<Float16>();
+        Float16* out_data = output.data<Float16>();
+        size_t n = input.numel();
+
+        // Process Float16 by converting to float for computation
+        for (size_t i = 0; i < n; ++i) {
+            float val = static_cast<float>(in_data[i]);
+            float result;
+            if (val >= 0.0f) {
+                result = 1.0f / (1.0f + std::exp(-val));
+            } else {
+                float exp_x = std::exp(val);
+                result = exp_x / (1.0f + exp_x);
+            }
+            out_data[i] = Float16(result);
+        }
     } else {
-        throw std::runtime_error("Sigmoid only supports Float32 and Float64");
+        throw std::runtime_error("Sigmoid only supports Float32, Float64, and Float16");
     }
 
     return output;

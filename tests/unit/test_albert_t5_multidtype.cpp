@@ -440,6 +440,10 @@ TEST_P(ALBERTandT5MultiDTypeTest, ALBERTBatchSizeOne) {
     auto config = AlbertConfig::base();
     config.vocab_size = 30000;
     auto model = std::make_shared<AlbertModel>(config);
+
+    // Convert model to test dtype
+    model->to(dtype);
+
     auto input_ids = create_input_ids(1, 64);
     auto output = model->forward(input_ids, Tensor{}, Variable{}, Variable{});
 
@@ -453,6 +457,9 @@ TEST_P(ALBERTandT5MultiDTypeTest, T5VariableSequenceLength) {
     auto config = T5Config::small();
     config.vocab_size = 32128;
     auto model = std::make_shared<T5Model>(config);
+
+    // Convert model to test dtype
+    model->to(dtype);
 
     // Test with different sequence lengths
     auto input_32 = create_input_ids(2, 32, config.vocab_size);

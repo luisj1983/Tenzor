@@ -104,25 +104,41 @@ auto CrossEntropyLoss::forward(const Variable& input, const Tensor& target) -> V
     // Use the log_softmax function from activations
     auto log_probs = nn::log_softmax(input, 1);  // Compute log_softmax along dim=1
 
-    // Handle both one-hot encoded targets (Float32, shape [N, C]) and class indices (Int64, shape [N])
+    // Handle both one-hot encoded targets (Float32/Float64, shape [N, C]) and class indices (Int64, shape [N])
     Variable one_hot_var;
 
-    if (target.dtype() == DType::Float32 && target.ndim() == 2) {
-        // Target is already one-hot encoded (Float32 with shape [N, C])
-        one_hot_var = Variable(target, false);  // Don't need gradients w.r.t. targets
+    // Check if target is a floating point type (one-hot encoded)
+    bool is_float_target = (target.dtype() == DType::Float32 || target.dtype() == DType::Float64) && target.ndim() == 2;
+
+    if (is_float_target) {
+        // Target is already one-hot encoded (Float32 or Float64 with shape [N, C])
+        // Convert to input dtype if needed for consistency
+        if (target.dtype() != input.tensor().dtype()) {
+            one_hot_var = Variable(target.to(input.tensor().dtype()), false);
+        } else {
+            one_hot_var = Variable(target, false);  // Don't need gradients w.r.t. targets
+        }
     } else {
         // Target contains class indices (Int64), need to create one-hot encoding
         auto batch_size = input.tensor().shape()[0];
         auto num_classes = input.tensor().shape()[1];
 
-        // Create one-hot tensor
+        // Create one-hot tensor with proper dtype handling
         auto one_hot = tenzor::zeros({batch_size, num_classes}, input.tensor().dtype(), input.tensor().device());
-        auto* one_hot_data = one_hot.data<float>();
         const int64_t* target_data = target.data<int64_t>();
 
-        for (int64_t i = 0; i < batch_size; ++i) {
-            int64_t class_idx = target_data[i];
-            one_hot_data[i * num_classes + class_idx] = 1.0f;
+        if (input.tensor().dtype() == DType::Float32) {
+            auto* one_hot_data = one_hot.data<float>();
+            for (int64_t i = 0; i < batch_size; ++i) {
+                int64_t class_idx = target_data[i];
+                one_hot_data[i * num_classes + class_idx] = 1.0f;
+            }
+        } else if (input.tensor().dtype() == DType::Float64) {
+            auto* one_hot_data = one_hot.data<double>();
+            for (int64_t i = 0; i < batch_size; ++i) {
+                int64_t class_idx = target_data[i];
+                one_hot_data[i * num_classes + class_idx] = 1.0;
+            }
         }
 
         // Convert to Variable for autograd
