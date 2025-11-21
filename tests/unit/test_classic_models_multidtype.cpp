@@ -140,6 +140,10 @@ protected:
 
 TEST_P(ClassicModelsMultiDTypeTest, VGG11ForwardShape) {
     auto model = vgg11(10, true, false);
+
+    // Convert model to test dtype
+    model->to(dtype_);
+
     model->eval();
 
     Variable input = createInput({2, 3, 224, 224}, false);
@@ -153,6 +157,10 @@ TEST_P(ClassicModelsMultiDTypeTest, VGG11ForwardShape) {
 
 TEST_P(ClassicModelsMultiDTypeTest, VGG11GradientFlow) {
     auto model = vgg11(10, true, false);
+
+    // Convert model to test dtype
+    model->to(dtype_);
+
     model->train();
 
     Variable input = createInput({1, 3, 224, 224}, true);

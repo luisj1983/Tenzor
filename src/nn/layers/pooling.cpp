@@ -60,26 +60,63 @@ public:
         int64_t W_out = grad_shape[3];
 
         // Initialize gradient w.r.t input with zeros on same device
-        auto grad_input = zeros({N, C, H_in, W_in}, grad_output.dtype(), grad_output.device());
-        float* grad_input_data = grad_input.data<float>();
-        const float* grad_output_data = grad_output.data<float>();
-        const float* indices_data = indices.data<float>();
+        auto dtype = grad_output.dtype();
+        auto grad_input = zeros({N, C, H_in, W_in}, dtype, grad_output.device());
 
-        // Distribute gradients to max element positions
-        for (int64_t n = 0; n < N; ++n) {
-            for (int64_t c = 0; c < C; ++c) {
-                for (int64_t h_out = 0; h_out < H_out; ++h_out) {
-                    for (int64_t w_out = 0; w_out < W_out; ++w_out) {
-                        int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
+        // Distribute gradients to max element positions with proper dtype handling
+        if (dtype == DType::Float32) {
+            float* grad_input_data = grad_input.data<float>();
+            const float* grad_output_data = grad_output.data<float>();
+            const float* indices_data = indices.data<float>();
 
-                        // Get the index of max element in input
-                        int64_t max_idx = static_cast<int64_t>(indices_data[out_idx]);
-
-                        // Add gradient to the position of max element
-                        grad_input_data[max_idx] += grad_output_data[out_idx];
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t c = 0; c < C; ++c) {
+                    for (int64_t h_out = 0; h_out < H_out; ++h_out) {
+                        for (int64_t w_out = 0; w_out < W_out; ++w_out) {
+                            int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
+                            int64_t max_idx = static_cast<int64_t>(indices_data[out_idx]);
+                            grad_input_data[max_idx] += grad_output_data[out_idx];
+                        }
                     }
                 }
             }
+        } else if (dtype == DType::Float64) {
+            double* grad_input_data = grad_input.data<double>();
+            const double* grad_output_data = grad_output.data<double>();
+            const double* indices_data = indices.data<double>();
+
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t c = 0; c < C; ++c) {
+                    for (int64_t h_out = 0; h_out < H_out; ++h_out) {
+                        for (int64_t w_out = 0; w_out < W_out; ++w_out) {
+                            int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
+                            int64_t max_idx = static_cast<int64_t>(indices_data[out_idx]);
+                            grad_input_data[max_idx] += grad_output_data[out_idx];
+                        }
+                    }
+                }
+            }
+        } else if (dtype == DType::Float16) {
+            Float16* grad_input_data = grad_input.data<Float16>();
+            const Float16* grad_output_data = grad_output.data<Float16>();
+            const Float16* indices_data = indices.data<Float16>();
+
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t c = 0; c < C; ++c) {
+                    for (int64_t h_out = 0; h_out < H_out; ++h_out) {
+                        for (int64_t w_out = 0; w_out < W_out; ++w_out) {
+                            int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
+                            int64_t max_idx = static_cast<int64_t>(static_cast<float>(indices_data[out_idx]));
+                            // Accumulate in float then convert back
+                            float current = static_cast<float>(grad_input_data[max_idx]);
+                            current += static_cast<float>(grad_output_data[out_idx]);
+                            grad_input_data[max_idx] = Float16(current);
+                        }
+                    }
+                }
+            }
+        } else {
+            throw std::runtime_error("MaxPool2dBackward: Unsupported dtype");
         }
 
         return {grad_input};
@@ -120,47 +157,123 @@ auto MaxPool2d::forward(const Variable& input) -> Variable {
     int64_t W_out = calculate_pool_output_size(W_in, kernel_size_, stride_, padding_);
 
     // Create output tensor and indices tensor on CPU
-    auto output = zeros({N, C, H_out, W_out}, cpu_input.tensor().dtype(), Device::cpu());
-    auto indices = zeros({N, C, H_out, W_out}, cpu_input.tensor().dtype(), Device::cpu());
+    auto dtype = cpu_input.tensor().dtype();
+    auto output = zeros({N, C, H_out, W_out}, dtype, Device::cpu());
+    // Indices stored as same dtype for simplicity
+    auto indices = zeros({N, C, H_out, W_out}, dtype, Device::cpu());
 
-    const float* input_data = cpu_input.tensor().data<float>();
-    float* output_data = output.data<float>();
-    float* indices_data = indices.data<float>();
+    // Perform max pooling with proper dtype handling
+    if (dtype == DType::Float32) {
+        const float* input_data = cpu_input.tensor().data<float>();
+        float* output_data = output.data<float>();
+        float* indices_data = indices.data<float>();
 
-    // Perform max pooling
-    for (int64_t n = 0; n < N; ++n) {
-        for (int64_t c = 0; c < C; ++c) {
-            for (int64_t h_out = 0; h_out < H_out; ++h_out) {
-                for (int64_t w_out = 0; w_out < W_out; ++w_out) {
-                    // Calculate input window boundaries
-                    int64_t h_start = h_out * stride_ - padding_;
-                    int64_t w_start = w_out * stride_ - padding_;
-                    int64_t h_end = h_start + kernel_size_;
-                    int64_t w_end = w_start + kernel_size_;
+        for (int64_t n = 0; n < N; ++n) {
+            for (int64_t c = 0; c < C; ++c) {
+                for (int64_t h_out = 0; h_out < H_out; ++h_out) {
+                    for (int64_t w_out = 0; w_out < W_out; ++w_out) {
+                        int64_t h_start = h_out * stride_ - padding_;
+                        int64_t w_start = w_out * stride_ - padding_;
+                        int64_t h_end = h_start + kernel_size_;
+                        int64_t w_end = w_start + kernel_size_;
 
-                    // Find max value in window
-                    float max_val = -std::numeric_limits<float>::infinity();
-                    int64_t max_idx = 0;
+                        float max_val = -std::numeric_limits<float>::infinity();
+                        int64_t max_idx = 0;
 
-                    for (int64_t h = h_start; h < h_end; ++h) {
-                        for (int64_t w = w_start; w < w_end; ++w) {
-                            // Check bounds and apply padding (padding is treated as -inf)
-                            if (h >= 0 && h < H_in && w >= 0 && w < W_in) {
-                                int64_t input_idx = ((n * C + c) * H_in + h) * W_in + w;
-                                if (input_data[input_idx] > max_val) {
-                                    max_val = input_data[input_idx];
-                                    max_idx = input_idx;
+                        for (int64_t h = h_start; h < h_end; ++h) {
+                            for (int64_t w = w_start; w < w_end; ++w) {
+                                if (h >= 0 && h < H_in && w >= 0 && w < W_in) {
+                                    int64_t input_idx = ((n * C + c) * H_in + h) * W_in + w;
+                                    if (input_data[input_idx] > max_val) {
+                                        max_val = input_data[input_idx];
+                                        max_idx = input_idx;
+                                    }
                                 }
                             }
                         }
-                    }
 
-                    int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
-                    output_data[out_idx] = max_val;
-                    indices_data[out_idx] = static_cast<float>(max_idx);
+                        int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
+                        output_data[out_idx] = max_val;
+                        indices_data[out_idx] = static_cast<float>(max_idx);
+                    }
                 }
             }
         }
+    } else if (dtype == DType::Float64) {
+        const double* input_data = cpu_input.tensor().data<double>();
+        double* output_data = output.data<double>();
+        double* indices_data = indices.data<double>();
+
+        for (int64_t n = 0; n < N; ++n) {
+            for (int64_t c = 0; c < C; ++c) {
+                for (int64_t h_out = 0; h_out < H_out; ++h_out) {
+                    for (int64_t w_out = 0; w_out < W_out; ++w_out) {
+                        int64_t h_start = h_out * stride_ - padding_;
+                        int64_t w_start = w_out * stride_ - padding_;
+                        int64_t h_end = h_start + kernel_size_;
+                        int64_t w_end = w_start + kernel_size_;
+
+                        double max_val = -std::numeric_limits<double>::infinity();
+                        int64_t max_idx = 0;
+
+                        for (int64_t h = h_start; h < h_end; ++h) {
+                            for (int64_t w = w_start; w < w_end; ++w) {
+                                if (h >= 0 && h < H_in && w >= 0 && w < W_in) {
+                                    int64_t input_idx = ((n * C + c) * H_in + h) * W_in + w;
+                                    if (input_data[input_idx] > max_val) {
+                                        max_val = input_data[input_idx];
+                                        max_idx = input_idx;
+                                    }
+                                }
+                            }
+                        }
+
+                        int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
+                        output_data[out_idx] = max_val;
+                        indices_data[out_idx] = static_cast<double>(max_idx);
+                    }
+                }
+            }
+        }
+    } else if (dtype == DType::Float16) {
+        const Float16* input_data = cpu_input.tensor().data<Float16>();
+        Float16* output_data = output.data<Float16>();
+        Float16* indices_data = indices.data<Float16>();
+
+        for (int64_t n = 0; n < N; ++n) {
+            for (int64_t c = 0; c < C; ++c) {
+                for (int64_t h_out = 0; h_out < H_out; ++h_out) {
+                    for (int64_t w_out = 0; w_out < W_out; ++w_out) {
+                        int64_t h_start = h_out * stride_ - padding_;
+                        int64_t w_start = w_out * stride_ - padding_;
+                        int64_t h_end = h_start + kernel_size_;
+                        int64_t w_end = w_start + kernel_size_;
+
+                        float max_val = -std::numeric_limits<float>::infinity();
+                        int64_t max_idx = 0;
+
+                        for (int64_t h = h_start; h < h_end; ++h) {
+                            for (int64_t w = w_start; w < w_end; ++w) {
+                                if (h >= 0 && h < H_in && w >= 0 && w < W_in) {
+                                    int64_t input_idx = ((n * C + c) * H_in + h) * W_in + w;
+                                    float val = static_cast<float>(input_data[input_idx]);
+                                    if (val > max_val) {
+                                        max_val = val;
+                                        max_idx = input_idx;
+                                    }
+                                }
+                            }
+                        }
+
+                        int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
+                        output_data[out_idx] = Float16(max_val);
+                        indices_data[out_idx] = Float16(static_cast<float>(max_idx));
+                    }
+                }
+            }
+        }
+    } else {
+        throw std::runtime_error("MaxPool2d: Unsupported dtype");
     }
 
     // Create output variable with autograd support

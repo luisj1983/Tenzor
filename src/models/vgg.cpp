@@ -67,11 +67,15 @@ auto VGG::forward(const Variable& x) -> Variable {
     // Adaptive pooling
     auto pooled = avgpool_->forward(features);
 
-    // Flatten
+    // Flatten using autograd-aware reshape to preserve gradient flow
     auto& pooled_tensor = pooled.tensor();
     auto batch_size = pooled_tensor.shape()[0];
-    auto flat_tensor = flatten(pooled_tensor, 1);
-    Variable flat(flat_tensor, pooled.requires_grad());
+    // Calculate flattened size: all dimensions after batch
+    int64_t flat_size = 1;
+    for (size_t i = 1; i < pooled_tensor.shape().size(); ++i) {
+        flat_size *= pooled_tensor.shape()[i];
+    }
+    auto flat = pooled.reshape({batch_size, flat_size});
 
     // Classify
     return classifier_->forward(flat);
