@@ -204,6 +204,11 @@ auto full(std::vector<int64_t> shape, float value, DType dtype, Device device) -
             std::fill(ptr, ptr + numel, static_cast<uint8_t>(value));
             break;
         }
+        case DType::Int8: {
+            int8_t* ptr = static_cast<int8_t*>(data);
+            std::fill(ptr, ptr + numel, static_cast<int8_t>(value));
+            break;
+        }
         case DType::Bool: {
             bool* ptr = static_cast<bool*>(data);
             std::fill(ptr, ptr + numel, value != 0.0f);
@@ -272,6 +277,11 @@ auto full(std::vector<int64_t> shape, double value, DType dtype, Device device) 
         case DType::UInt8: {
             uint8_t* ptr = static_cast<uint8_t*>(data);
             std::fill(ptr, ptr + numel, static_cast<uint8_t>(value));
+            break;
+        }
+        case DType::Int8: {
+            int8_t* ptr = static_cast<int8_t*>(data);
+            std::fill(ptr, ptr + numel, static_cast<int8_t>(value));
             break;
         }
         case DType::Bool: {

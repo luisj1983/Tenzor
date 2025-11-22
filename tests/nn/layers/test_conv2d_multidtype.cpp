@@ -178,7 +178,10 @@ protected:
         } else if (dtype == DType::Float64) {
             return tensors_close_typed<double>(a, b, rtol_override, atol_override);
         } else if (dtype == DType::Float16) {
-            return tensors_close_typed<float>(a, b, rtol_override, atol_override);
+            // Convert Float16 to Float32 for comparison since we can't directly access Float16 data as float
+            auto a_f32 = a.to(DType::Float32);
+            auto b_f32 = b.to(DType::Float32);
+            return tensors_close_typed<float>(a_f32, b_f32, rtol_override, atol_override);
         }
         return false;
     }
@@ -231,10 +234,11 @@ protected:
 
 private:
     bool SupportsFloat16(const std::string& backend_name) {
-        // Float16 support varies by backend
-        if (backend_name == "cpu") return false;  // CPU typically doesn't support Float16
+        // Float16 should be supported on all backends for consistency
+        if (backend_name == "cpu") return true;   // CPU supports Float16 in software
         if (backend_name == "cuda") return true;  // CUDA supports Float16
         if (backend_name == "vulkan") return true;  // Vulkan supports Float16
+        if (backend_name == "oneapi") return true;  // OneAPI supports Float16
         return false;
     }
 };
@@ -1097,10 +1101,10 @@ INSTANTIATE_TEST_SUITE_P(
  * - ✓ Real-world CNN architecture patterns tested
  *
  * Backend Support:
- * - CPU: Float32, Float64 (Float16 typically not hardware-accelerated)
+ * - CPU: Float32, Float64, Float16 (software emulation)
  * - CUDA: Float32, Float64, Float16 (with Tensor Cores)
  * - Vulkan: Float32, Float64, Float16 (backend-dependent)
- * - OneAPI: Float32, Float64 (Float16 support varies)
+ * - OneAPI: Float32, Float64, Float16
  *
  * Coverage Impact:
  * - Original file: 65 tests × 4 backends × 1 dtype = 260 scenarios

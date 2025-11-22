@@ -238,11 +238,18 @@ public:
             // Parse attributes
             int64_t dim = -1;
             bool keepdim = false;
+            bool dim_specified = false;
             if (attrs.contains("dim")) {
                 dim = std::stoll(attrs.at("dim"));
+                dim_specified = true;
             }
             if (attrs.contains("keepdim")) {
                 keepdim = (attrs.at("keepdim") == "1");
+            }
+            // Convert negative dim to positive when explicitly specified
+            if (dim_specified && dim < 0) {
+                int64_t ndim = static_cast<int64_t>(inputs[0].shape().size());
+                dim = ndim + dim;
             }
             return {cpu::sum_kernel(inputs[0], dim, keepdim)};
         }

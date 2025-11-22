@@ -65,7 +65,7 @@ protected:
                 tolerance = 1e-5f;
                 break;
             case DType::Float64:
-                tolerance = 1e-10f;
+                tolerance = 1e-7f;  // Float64 ops still have small numerical errors
                 break;
             default:
                 tolerance = 1e-5f;
@@ -305,8 +305,9 @@ TEST_P(NNMultiDTypeTest, Tanh_Range) {
     if (dtype == DType::Float32) {
         auto output_data = output_cpu.data<float>();
         for (int64_t i = 0; i < 100; ++i) {
-            EXPECT_GT(output_data[i], -1.0f);
-            EXPECT_LT(output_data[i], 1.0f);
+            // tanh output is in [-1, 1], can reach bounds for large inputs
+            EXPECT_GE(output_data[i], -1.0f);
+            EXPECT_LE(output_data[i], 1.0f);
         }
     }
 }

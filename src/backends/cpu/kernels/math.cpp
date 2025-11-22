@@ -956,6 +956,15 @@ auto add_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             uint8_t* c_data = result.data<uint8_t>();
             detail::add_scalar(a_data, b_data, c_data, n);
 
+        } else if (a.dtype() == DType::Bool) {
+            // Bool add uses numeric semantics (int(a) + int(b) -> bool)
+            const bool* a_data = a.data<bool>();
+            const bool* b_data = b.data<bool>();
+            bool* c_data = result.data<bool>();
+            for (size_t i = 0; i < n; ++i) {
+                c_data[i] = (static_cast<int>(a_data[i]) + static_cast<int>(b_data[i])) != 0;
+            }
+
         } else {
             throw std::runtime_error("Unsupported dtype for add operation");
         }
@@ -1011,6 +1020,14 @@ auto add_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             uint8_t* c_data = result.data<uint8_t>();
             detail::broadcast_op(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
                                 [](uint8_t x, uint8_t y) { return x + y; });
+
+        } else if (a.dtype() == DType::Bool) {
+            // Bool add uses numeric semantics (int(a) + int(b) -> bool)
+            const bool* a_data = a.data<bool>();
+            const bool* b_data = b.data<bool>();
+            bool* c_data = result.data<bool>();
+            detail::broadcast_op(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](bool x, bool y) { return (static_cast<int>(x) + static_cast<int>(y)) != 0; });
 
         } else {
             throw std::runtime_error("Unsupported dtype for add operation");
@@ -1097,6 +1114,15 @@ auto sub_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             int8_t* c_data = result.data<int8_t>();
             detail::sub_scalar(a_data, b_data, c_data, n);
 
+        } else if (a.dtype() == DType::Bool) {
+            // Bool sub uses numeric semantics (int(a) - int(b) -> bool)
+            const bool* a_data = a.data<bool>();
+            const bool* b_data = b.data<bool>();
+            bool* c_data = result.data<bool>();
+            for (size_t i = 0; i < n; ++i) {
+                c_data[i] = (static_cast<int>(a_data[i]) - static_cast<int>(b_data[i])) != 0;
+            }
+
         } else {
             throw std::runtime_error("Unsupported dtype for sub operation");
         }
@@ -1143,6 +1169,14 @@ auto sub_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             int8_t* c_data = result.data<int8_t>();
             detail::broadcast_op(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
                                 [](int8_t x, int8_t y) { return x - y; });
+
+        } else if (a.dtype() == DType::Bool) {
+            // Bool sub uses numeric semantics (int(a) - int(b) -> bool)
+            const bool* a_data = a.data<bool>();
+            const bool* b_data = b.data<bool>();
+            bool* c_data = result.data<bool>();
+            detail::broadcast_op(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](bool x, bool y) { return (static_cast<int>(x) - static_cast<int>(y)) != 0; });
 
         } else {
             throw std::runtime_error("Unsupported dtype for sub operation");
@@ -1711,8 +1745,16 @@ auto neg_kernel(const Tensor& input) -> Tensor {
             out_data[i] = Float16(-val);
         }
 
+    } else if (input.dtype() == DType::Int32) {
+        const int32_t* in_data = input.data<int32_t>();
+        int32_t* out_data = result.data<int32_t>();
+
+        for (size_t i = 0; i < n; ++i) {
+            out_data[i] = -in_data[i];
+        }
+
     } else {
-        throw std::runtime_error("neg operation only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("neg operation only supports Float32, Float64, Float16, and Int32 dtypes");
     }
 
     return result;
@@ -1782,8 +1824,16 @@ auto abs_kernel(const Tensor& input) -> Tensor {
             out_data[i] = Float16(std::abs(val));
         }
 
+    } else if (input.dtype() == DType::Int32) {
+        const int32_t* in_data = input.data<int32_t>();
+        int32_t* out_data = result.data<int32_t>();
+
+        for (size_t i = 0; i < n; ++i) {
+            out_data[i] = std::abs(in_data[i]);
+        }
+
     } else {
-        throw std::runtime_error("abs operation only supports Float32, Float64, and Float16 dtypes");
+        throw std::runtime_error("abs operation only supports Float32, Float64, Float16, and Int32 dtypes");
     }
 
     return result;

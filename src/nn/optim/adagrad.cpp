@@ -54,11 +54,19 @@ auto Adagrad::initialize_buffers() -> void {
             sum_.push_back(zeros_like(param_data));
         } else {
             auto accumulator = zeros_like(param_data);
-            auto acc_ptr = accumulator.data<float>();
             int64_t numel = accumulator.numel();
+            DType dtype = param_data.dtype();
 
-            for (int64_t i = 0; i < numel; ++i) {
-                acc_ptr[i] = initial_accumulator_value_;
+            if (dtype == DType::Float64) {
+                auto acc_ptr = accumulator.data<double>();
+                for (int64_t i = 0; i < numel; ++i) {
+                    acc_ptr[i] = initial_accumulator_value_;
+                }
+            } else {
+                auto acc_ptr = accumulator.data<float>();
+                for (int64_t i = 0; i < numel; ++i) {
+                    acc_ptr[i] = static_cast<float>(initial_accumulator_value_);
+                }
             }
 
             sum_.push_back(accumulator);
@@ -87,25 +95,49 @@ auto Adagrad::step() -> void {
         const auto& grad = param->grad().value();
         const auto& param_data = param->tensor();
 
-        auto grad_ptr = const_cast<float*>(grad.data<float>());
-        auto param_ptr = const_cast<float*>(param_data.data<float>());
-        auto sum_ptr = sum_[i].data<float>();
-
         int64_t numel = param_data.numel();
+        DType dtype = param_data.dtype();
 
-        // Apply weight decay if specified
-        if (weight_decay_ > 0.0) {
-            for (int64_t j = 0; j < numel; ++j) {
-                grad_ptr[j] += weight_decay_ * param_ptr[j];
+        // Handle different dtypes
+        if (dtype == DType::Float64) {
+            auto grad_ptr = const_cast<double*>(grad.data<double>());
+            auto param_ptr = const_cast<double*>(param_data.data<double>());
+            auto sum_ptr = sum_[i].data<double>();
+
+            // Apply weight decay if specified
+            if (weight_decay_ > 0.0) {
+                for (int64_t j = 0; j < numel; ++j) {
+                    grad_ptr[j] += weight_decay_ * param_ptr[j];
+                }
             }
-        }
 
-        // Update accumulator: G_t = G_{t-1} + g_t^2
-        // Update parameters: theta_t = theta_{t-1} - lr / (sqrt(G_t) + eps) * g_t
-        for (int64_t j = 0; j < numel; ++j) {
-            sum_ptr[j] += grad_ptr[j] * grad_ptr[j];
-            float std_dev = std::sqrt(sum_ptr[j]) + eps_;
-            param_ptr[j] -= current_lr * grad_ptr[j] / std_dev;
+            // Update accumulator: G_t = G_{t-1} + g_t^2
+            // Update parameters: theta_t = theta_{t-1} - lr / (sqrt(G_t) + eps) * g_t
+            for (int64_t j = 0; j < numel; ++j) {
+                sum_ptr[j] += grad_ptr[j] * grad_ptr[j];
+                double std_dev = std::sqrt(sum_ptr[j]) + eps_;
+                param_ptr[j] -= current_lr * grad_ptr[j] / std_dev;
+            }
+        } else {
+            // Float32 path (default)
+            auto grad_ptr = const_cast<float*>(grad.data<float>());
+            auto param_ptr = const_cast<float*>(param_data.data<float>());
+            auto sum_ptr = sum_[i].data<float>();
+
+            // Apply weight decay if specified
+            if (weight_decay_ > 0.0) {
+                for (int64_t j = 0; j < numel; ++j) {
+                    grad_ptr[j] += weight_decay_ * param_ptr[j];
+                }
+            }
+
+            // Update accumulator: G_t = G_{t-1} + g_t^2
+            // Update parameters: theta_t = theta_{t-1} - lr / (sqrt(G_t) + eps) * g_t
+            for (int64_t j = 0; j < numel; ++j) {
+                sum_ptr[j] += grad_ptr[j] * grad_ptr[j];
+                float std_dev = std::sqrt(sum_ptr[j]) + static_cast<float>(eps_);
+                param_ptr[j] -= static_cast<float>(current_lr) * grad_ptr[j] / std_dev;
+            }
         }
     }
 }

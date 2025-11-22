@@ -57,6 +57,8 @@ protected:
 
         if (param.backend_name == "cpu") {
             device = Device::cpu();
+            // Explicitly initialize the library for CPU tests
+            tenzor::initialize();
         }
         else if (param.backend_name == "cuda") {
             if (!isBackendAvailable(Device::Type::CUDA)) {
@@ -507,11 +509,12 @@ TEST_P(SchedulerAdvancedMultiDTypeTest, ReduceLROnPlateau_PrecisionTest) {
     std::vector<std::shared_ptr<Variable>> params{param};
     auto optimizer = Adam(params, 0.1);
 
-    auto scheduler = ReduceLROnPlateau(optimizer, "min", 0.1, 2, 1e-6, "abs");
+    // Use threshold of 1e-8 so improvement of 1e-7 (from 1.0 to 0.9999999) is detected
+    auto scheduler = ReduceLROnPlateau(optimizer, "min", 0.1, 2, 1e-8, "abs");
 
     // Test with very small metric differences
     scheduler.step(1.0);
-    scheduler.step(0.9999999);  // Very small improvement
+    scheduler.step(0.9999999);  // Improvement of 1e-7, exceeds threshold of 1e-8
 
     // Float64 should detect this small improvement better than Float32
     if (dtype == DType::Float64) {

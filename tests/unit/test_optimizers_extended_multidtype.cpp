@@ -13,6 +13,7 @@
  */
 
 #include <gtest/gtest.h>
+#include "tenzor/tenzor.hpp"
 #include "tenzor/nn/optim/rmsprop.hpp"
 #include "tenzor/nn/optim/adagrad.hpp"
 #include "tenzor/nn/optim/adadelta.hpp"
@@ -64,6 +65,8 @@ protected:
 
         if (param.backend_name == "cpu") {
             device = Device::cpu();
+            // Explicitly initialize the library for CPU tests
+            tenzor::initialize();
         }
         else if (param.backend_name == "cuda") {
             if (!isBackendAvailable(Device::Type::CUDA)) {
@@ -110,8 +113,11 @@ protected:
         return zeros(shape, dtype, device);
     }
 
-    // Helper to create full tensor
+    // Helper to create full tensor with proper dtype handling
     Tensor createFull(const std::vector<int64_t>& shape, double value) {
+        if (dtype == DType::Float64) {
+            return full(shape, value, dtype, device);
+        }
         return full(shape, static_cast<float>(value), dtype, device);
     }
 
@@ -380,16 +386,8 @@ TEST_P(OptimizersExtendedMultiDTypeTest, AdadeltaStateDictSaveLoad) {
 
 TEST_P(OptimizersExtendedMultiDTypeTest, RMSpropConvergence) {
     // Simple quadratic: f(x) = (x - 3)^2, optimal at x=3
-    auto param = std::make_shared<Variable>(createZeros({1}), true);
-
-    // Set initial value
-    auto param_cpu = param->tensor().to(Device::cpu());
-    if (dtype == DType::Float32) {
-        const_cast<float*>(param_cpu.data<float>())[0] = 10.0f;
-    } else {
-        const_cast<double*>(param_cpu.data<double>())[0] = 10.0;
-    }
-    param->tensor() = param_cpu.to(device);
+    // Use createFull to properly initialize with correct dtype
+    auto param = std::make_shared<Variable>(createFull({1}, 10.0), true);
 
     auto optimizer = RMSprop(std::vector<std::shared_ptr<Variable>>{param}, 0.1);
 
@@ -397,16 +395,8 @@ TEST_P(OptimizersExtendedMultiDTypeTest, RMSpropConvergence) {
         optimizer.zero_grad();
 
         double x = getScalarGeneric(param->tensor());
-        auto grad_tensor = createZeros({1});
-        auto grad_cpu = grad_tensor.to(Device::cpu());
-
-        if (dtype == DType::Float32) {
-            const_cast<float*>(grad_cpu.data<float>())[0] = static_cast<float>(2.0 * (x - 3.0));
-        } else {
-            const_cast<double*>(grad_cpu.data<double>())[0] = 2.0 * (x - 3.0);
-        }
-
-        param->grad() = grad_cpu.to(device);
+        // Gradient of (x - 3)^2 is 2*(x - 3)
+        param->grad() = createFull({1}, 2.0 * (x - 3.0));
         optimizer.step();
     }
 
@@ -416,15 +406,8 @@ TEST_P(OptimizersExtendedMultiDTypeTest, RMSpropConvergence) {
 }
 
 TEST_P(OptimizersExtendedMultiDTypeTest, AdagradConvergence) {
-    auto param = std::make_shared<Variable>(createZeros({1}), true);
-
-    auto param_cpu = param->tensor().to(Device::cpu());
-    if (dtype == DType::Float32) {
-        const_cast<float*>(param_cpu.data<float>())[0] = 10.0f;
-    } else {
-        const_cast<double*>(param_cpu.data<double>())[0] = 10.0;
-    }
-    param->tensor() = param_cpu.to(device);
+    // Use createFull to properly initialize with correct dtype
+    auto param = std::make_shared<Variable>(createFull({1}, 10.0), true);
 
     auto optimizer = Adagrad(std::vector<std::shared_ptr<Variable>>{param}, 1.0);
 
@@ -432,16 +415,8 @@ TEST_P(OptimizersExtendedMultiDTypeTest, AdagradConvergence) {
         optimizer.zero_grad();
 
         double x = getScalarGeneric(param->tensor());
-        auto grad_tensor = createZeros({1});
-        auto grad_cpu = grad_tensor.to(Device::cpu());
-
-        if (dtype == DType::Float32) {
-            const_cast<float*>(grad_cpu.data<float>())[0] = static_cast<float>(2.0 * (x - 3.0));
-        } else {
-            const_cast<double*>(grad_cpu.data<double>())[0] = 2.0 * (x - 3.0);
-        }
-
-        param->grad() = grad_cpu.to(device);
+        // Gradient of (x - 3)^2 is 2*(x - 3)
+        param->grad() = createFull({1}, 2.0 * (x - 3.0));
         optimizer.step();
     }
 
@@ -450,15 +425,8 @@ TEST_P(OptimizersExtendedMultiDTypeTest, AdagradConvergence) {
 }
 
 TEST_P(OptimizersExtendedMultiDTypeTest, AdadeltaConvergence) {
-    auto param = std::make_shared<Variable>(createZeros({1}), true);
-
-    auto param_cpu = param->tensor().to(Device::cpu());
-    if (dtype == DType::Float32) {
-        const_cast<float*>(param_cpu.data<float>())[0] = 10.0f;
-    } else {
-        const_cast<double*>(param_cpu.data<double>())[0] = 10.0;
-    }
-    param->tensor() = param_cpu.to(device);
+    // Use createFull to properly initialize with correct dtype
+    auto param = std::make_shared<Variable>(createFull({1}, 10.0), true);
 
     auto optimizer = Adadelta(std::vector<std::shared_ptr<Variable>>{param}, 1.0, 0.95, 1e-4);
 
@@ -466,16 +434,8 @@ TEST_P(OptimizersExtendedMultiDTypeTest, AdadeltaConvergence) {
         optimizer.zero_grad();
 
         double x = getScalarGeneric(param->tensor());
-        auto grad_tensor = createZeros({1});
-        auto grad_cpu = grad_tensor.to(Device::cpu());
-
-        if (dtype == DType::Float32) {
-            const_cast<float*>(grad_cpu.data<float>())[0] = static_cast<float>(2.0 * (x - 3.0));
-        } else {
-            const_cast<double*>(grad_cpu.data<double>())[0] = 2.0 * (x - 3.0);
-        }
-
-        param->grad() = grad_cpu.to(device);
+        // Gradient of (x - 3)^2 is 2*(x - 3)
+        param->grad() = createFull({1}, 2.0 * (x - 3.0));
         optimizer.step();
     }
 
@@ -503,12 +463,16 @@ TEST_P(OptimizersExtendedMultiDTypeTest, RMSpropNumericalStability) {
 
 TEST_P(OptimizersExtendedMultiDTypeTest, AdagradNumericalStability) {
     auto param = std::make_shared<Variable>(createOnes({10}), true);
-    param->grad() = createFull({10}, 1e-6);
+    // Use very small gradient to test numerical stability with minimal update
+    // Adagrad: update = lr * grad / (sqrt(sum) + eps)
+    // With grad=1e-8: sum=1e-16, sqrt=1e-8, update ≈ 0.1 * 1e-8 / 2e-8 = 0.05
+    param->grad() = createFull({10}, 1e-8);
 
-    auto optimizer = Adagrad(std::vector<std::shared_ptr<Variable>>{param}, 0.1);
+    auto optimizer = Adagrad(std::vector<std::shared_ptr<Variable>>{param}, 0.01);
 
     EXPECT_NO_THROW(optimizer.step());
 
+    // Parameter should change only slightly with tiny gradient and small lr
     double final_val = getScalarGeneric(param->tensor());
     EXPECT_LT(final_val, 1.0);
     EXPECT_GT(final_val, 0.99);

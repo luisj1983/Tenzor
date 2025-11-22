@@ -212,6 +212,38 @@ auto cat(std::span<const Tensor> tensors, int64_t dim) -> Tensor {
 
                 offset_at_dim += in_shape[dim];
             }
+        } else if (dtype == DType::Int32) {
+            int32_t* out_data = output.data<int32_t>();
+            for (const auto& t : tensors) {
+                auto t_cont = t.is_contiguous() ? t : t.contiguous();
+                const int32_t* in_data = t_cont.data<int32_t>();
+                auto in_shape = t_cont.shape();
+
+                int64_t in_size = 1;
+                for (auto s : in_shape) {
+                    in_size *= s;
+                }
+
+                for (int64_t in_idx = 0; in_idx < in_size; ++in_idx) {
+                    int64_t temp = in_idx;
+                    std::vector<int64_t> coords(ndim);
+                    for (int64_t i = ndim - 1; i >= 0; --i) {
+                        coords[i] = temp % in_shape[i];
+                        temp /= in_shape[i];
+                    }
+
+                    coords[dim] += offset_at_dim;
+
+                    int64_t out_idx = 0;
+                    for (int64_t i = 0; i < ndim; ++i) {
+                        out_idx += coords[i] * out_strides[i];
+                    }
+
+                    out_data[out_idx] = in_data[in_idx];
+                }
+
+                offset_at_dim += in_shape[dim];
+            }
         } else {
             throw std::runtime_error("Unsupported dtype for cat operation");
         }

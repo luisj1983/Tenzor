@@ -259,17 +259,15 @@ TEST_P(DTypeEdgeCaseEnhancedTest, BoolLogicalOps) {
     EXPECT_FALSE(c_and_data[2]);
     EXPECT_TRUE(c_and_data[3]);
 
-    // Test OR (using: a OR b = NOT((NOT a) AND (NOT b)) = a + b - a*b for bool)
-    auto a_plus_b = add(a, b);
-    auto a_mul_b = mul(a, b);
-    auto c_or = sub(a_plus_b, a_mul_b);
+    // Test OR (bool add with numeric semantics gives OR: non-zero result = true)
+    auto c_or = add(a, b);
     auto c_or_cpu = c_or.to(Device::cpu());
     auto c_or_data = reinterpret_cast<const bool*>(c_or_cpu.data_ptr());
 
-    EXPECT_FALSE(c_or_data[0]);
-    EXPECT_TRUE(c_or_data[1]);
-    EXPECT_TRUE(c_or_data[2]);
-    EXPECT_TRUE(c_or_data[3]);
+    EXPECT_FALSE(c_or_data[0]);  // false + false = 0 -> false
+    EXPECT_TRUE(c_or_data[1]);   // false + true = 1 -> true
+    EXPECT_TRUE(c_or_data[2]);   // true + false = 1 -> true
+    EXPECT_TRUE(c_or_data[3]);   // true + true = 2 -> true
 }
 
 // ============================================================================

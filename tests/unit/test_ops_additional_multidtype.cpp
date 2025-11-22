@@ -215,6 +215,11 @@ TEST_P(OpsAdditionalMultiDTypeTest, ArgMaxArgMin) {
         for (int i = 0; i < 12; i++) {
             data[i] = static_cast<float>(i);
         }
+    } else if (dtype == DType::Float64) {
+        auto data = t_cpu.data<double>();
+        for (int i = 0; i < 12; i++) {
+            data[i] = static_cast<double>(i);
+        }
     } else if (dtype == DType::Int32) {
         auto data = t_cpu.data<int32_t>();
         for (int i = 0; i < 12; i++) {
@@ -534,6 +539,9 @@ TEST_P(OpsAdditionalMultiDTypeTest, EqualityComparison) {
     if (dtype == DType::Float32) {
         auto a_data = a_cpu.data<float>();
         a_data[0] = 1.0f; a_data[1] = 2.0f; a_data[2] = 3.0f; a_data[3] = 4.0f;
+    } else if (dtype == DType::Float64) {
+        auto a_data = a_cpu.data<double>();
+        a_data[0] = 1.0; a_data[1] = 2.0; a_data[2] = 3.0; a_data[3] = 4.0;
     } else if (dtype == DType::Int32) {
         auto a_data = a_cpu.data<int32_t>();
         a_data[0] = 1; a_data[1] = 2; a_data[2] = 3; a_data[3] = 4;
@@ -546,6 +554,9 @@ TEST_P(OpsAdditionalMultiDTypeTest, EqualityComparison) {
     if (dtype == DType::Float32) {
         auto b_data = b_cpu.data<float>();
         b_data[0] = 1.0f; b_data[1] = 2.5f; b_data[2] = 3.0f; b_data[3] = 3.5f;
+    } else if (dtype == DType::Float64) {
+        auto b_data = b_cpu.data<double>();
+        b_data[0] = 1.0; b_data[1] = 2.5; b_data[2] = 3.0; b_data[3] = 3.5;
     } else if (dtype == DType::Int32) {
         auto b_data = b_cpu.data<int32_t>();
         b_data[0] = 1; b_data[1] = 3; b_data[2] = 3; b_data[3] = 4;
@@ -568,6 +579,9 @@ TEST_P(OpsAdditionalMultiDTypeTest, InequalityComparisons) {
     if (dtype == DType::Float32) {
         auto a_data = a_cpu.data<float>();
         a_data[0] = 1.0f; a_data[1] = 2.0f; a_data[2] = 3.0f; a_data[3] = 4.0f;
+    } else if (dtype == DType::Float64) {
+        auto a_data = a_cpu.data<double>();
+        a_data[0] = 1.0; a_data[1] = 2.0; a_data[2] = 3.0; a_data[3] = 4.0;
     } else if (dtype == DType::Int32) {
         auto a_data = a_cpu.data<int32_t>();
         a_data[0] = 1; a_data[1] = 2; a_data[2] = 3; a_data[3] = 4;
@@ -581,7 +595,12 @@ TEST_P(OpsAdditionalMultiDTypeTest, InequalityComparisons) {
     auto lt_cpu = lt_result.to(Device::cpu());
     auto lt_data = lt_cpu.data<bool>();
     EXPECT_TRUE(lt_data[0]) << "Failed on " << device.to_string();
-    EXPECT_TRUE(lt_data[1]) << "Failed on " << device.to_string();
+    // For Int32, 2.5f truncates to 2, so 2 < 2 is false
+    if (dtype == DType::Int32) {
+        EXPECT_FALSE(lt_data[1]) << "Failed on " << device.to_string();
+    } else {
+        EXPECT_TRUE(lt_data[1]) << "Failed on " << device.to_string();
+    }
     EXPECT_FALSE(lt_data[2]) << "Failed on " << device.to_string();
     EXPECT_FALSE(lt_data[3]) << "Failed on " << device.to_string();
 }

@@ -287,6 +287,7 @@ TEST_P(VisionComponentsMultiDTypeTest, MBConvBlockKernel5) {
 
 TEST_P(VisionComponentsMultiDTypeTest, MBConvBlockGradientFlow) {
     auto mbconv = std::make_shared<MBConvBlock>(16, 24, 6, 3, 1, true, 0.25, 0.0);
+    mbconv->to(dtype);  // Convert model to test dtype
 
     auto input_tensor = randn({1, 16, 56, 56}, DType::Float32, device);
     input_tensor = toTestDType(input_tensor);

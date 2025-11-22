@@ -63,47 +63,81 @@ auto Adadelta::step() -> void {
         const auto& grad = param->grad().value();
         const auto& param_data = param->tensor();
 
-        auto grad_ptr = const_cast<float*>(grad.data<float>());
-        auto param_ptr = const_cast<float*>(param_data.data<float>());
-        auto square_avg_ptr = square_avg_[i].data<float>();
-        auto acc_delta_ptr = acc_delta_[i].data<float>();
-
         int64_t numel = param_data.numel();
+        DType dtype = param_data.dtype();
 
-        // Apply weight decay if specified
-        if (weight_decay_ > 0.0) {
-            for (int64_t j = 0; j < numel; ++j) {
-                grad_ptr[j] += weight_decay_ * param_ptr[j];
+        // Handle different dtypes
+        if (dtype == DType::Float64) {
+            auto grad_ptr = const_cast<double*>(grad.data<double>());
+            auto param_ptr = const_cast<double*>(param_data.data<double>());
+            auto square_avg_ptr = square_avg_[i].data<double>();
+            auto acc_delta_ptr = acc_delta_[i].data<double>();
+
+            // Apply weight decay if specified
+            if (weight_decay_ > 0.0) {
+                for (int64_t j = 0; j < numel; ++j) {
+                    grad_ptr[j] += weight_decay_ * param_ptr[j];
+                }
             }
-        }
 
-        // Adadelta update:
-        // accumulate_grad = rho * accumulate_grad + (1 - rho) * grad^2
-        // std = sqrt(accumulate_grad + epsilon)
-        // delta = - (sqrt(accumulate_update + epsilon) / std) * grad
-        // accumulate_update = rho * accumulate_update + (1 - rho) * delta^2
-        // param = param + lr * delta
+            // Adadelta update
+            for (int64_t j = 0; j < numel; ++j) {
+                // Accumulate squared gradient
+                square_avg_ptr[j] = rho_ * square_avg_ptr[j] +
+                                    (1.0 - rho_) * grad_ptr[j] * grad_ptr[j];
 
-        for (int64_t j = 0; j < numel; ++j) {
-            // Accumulate squared gradient
-            square_avg_ptr[j] = rho_ * square_avg_ptr[j] +
-                                (1.0 - rho_) * grad_ptr[j] * grad_ptr[j];
+                // Compute std of gradients
+                double std_grad = std::sqrt(square_avg_ptr[j] + eps_);
 
-            // Compute std of gradients
-            float std_grad = std::sqrt(square_avg_ptr[j] + eps_);
+                // Compute std of updates (using previous accumulator)
+                double std_delta = std::sqrt(acc_delta_ptr[j] + eps_);
 
-            // Compute std of updates (using previous accumulator)
-            float std_delta = std::sqrt(acc_delta_ptr[j] + eps_);
+                // Compute parameter update
+                double delta = -(std_delta / std_grad) * grad_ptr[j];
 
-            // Compute parameter update
-            float delta = -(std_delta / std_grad) * grad_ptr[j];
+                // Apply update to parameter
+                param_ptr[j] += lr_ * delta;
 
-            // Apply update to parameter
-            param_ptr[j] += lr_ * delta;
+                // Accumulate squared update (after applying delta)
+                acc_delta_ptr[j] = rho_ * acc_delta_ptr[j] +
+                                   (1.0 - rho_) * delta * delta;
+            }
+        } else {
+            // Float32 path (default)
+            auto grad_ptr = const_cast<float*>(grad.data<float>());
+            auto param_ptr = const_cast<float*>(param_data.data<float>());
+            auto square_avg_ptr = square_avg_[i].data<float>();
+            auto acc_delta_ptr = acc_delta_[i].data<float>();
 
-            // Accumulate squared update (after applying delta)
-            acc_delta_ptr[j] = rho_ * acc_delta_ptr[j] +
-                               (1.0 - rho_) * delta * delta;
+            // Apply weight decay if specified
+            if (weight_decay_ > 0.0) {
+                for (int64_t j = 0; j < numel; ++j) {
+                    grad_ptr[j] += weight_decay_ * param_ptr[j];
+                }
+            }
+
+            // Adadelta update
+            for (int64_t j = 0; j < numel; ++j) {
+                // Accumulate squared gradient
+                square_avg_ptr[j] = rho_ * square_avg_ptr[j] +
+                                    (1.0f - rho_) * grad_ptr[j] * grad_ptr[j];
+
+                // Compute std of gradients
+                float std_grad = std::sqrt(square_avg_ptr[j] + eps_);
+
+                // Compute std of updates (using previous accumulator)
+                float std_delta = std::sqrt(acc_delta_ptr[j] + eps_);
+
+                // Compute parameter update
+                float delta = -(std_delta / std_grad) * grad_ptr[j];
+
+                // Apply update to parameter
+                param_ptr[j] += lr_ * delta;
+
+                // Accumulate squared update (after applying delta)
+                acc_delta_ptr[j] = rho_ * acc_delta_ptr[j] +
+                                   (1.0f - rho_) * delta * delta;
+            }
         }
     }
 }

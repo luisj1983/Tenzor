@@ -77,65 +77,126 @@ auto RMSprop::step() -> void {
         const auto& grad = param->grad().value();
         const auto& param_data = param->tensor();
 
-        auto grad_ptr = const_cast<float*>(grad.data<float>());
-        auto param_ptr = const_cast<float*>(param_data.data<float>());
-        auto square_avg_ptr = square_avg_[i].data<float>();
-
         int64_t numel = param_data.numel();
+        DType dtype = param_data.dtype();
 
-        // Apply weight decay if specified
-        if (weight_decay_ > 0.0) {
-            for (int64_t j = 0; j < numel; ++j) {
-                grad_ptr[j] += weight_decay_ * param_ptr[j];
-            }
-        }
+        // Handle different dtypes
+        if (dtype == DType::Float64) {
+            auto grad_ptr = const_cast<double*>(grad.data<double>());
+            auto param_ptr = const_cast<double*>(param_data.data<double>());
+            auto square_avg_ptr = square_avg_[i].data<double>();
 
-        // Update square_avg: v_t = alpha * v_{t-1} + (1 - alpha) * g_t^2
-        for (int64_t j = 0; j < numel; ++j) {
-            square_avg_ptr[j] = alpha_ * square_avg_ptr[j] +
-                                (1.0 - alpha_) * grad_ptr[j] * grad_ptr[j];
-        }
-
-        float* avg_ptr = nullptr;
-
-        if (centered_) {
-            // Update grad_avg: m_t = alpha * m_{t-1} + (1 - alpha) * g_t
-            avg_ptr = grad_avg_[i].data<float>();
-            for (int64_t j = 0; j < numel; ++j) {
-                avg_ptr[j] = alpha_ * avg_ptr[j] + (1.0 - alpha_) * grad_ptr[j];
-            }
-        }
-
-        if (momentum_ > 0.0) {
-            // With momentum: buf_t = momentum * buf_{t-1} + g_t / (sqrt(v_t) + eps)
-            auto buf_ptr = momentum_buffer_[i].data<float>();
-
-            for (int64_t j = 0; j < numel; ++j) {
-                float denom;
-                if (centered_) {
-                    // Centered: sqrt(v_t - m_t^2 + eps)
-                    float centered_var = square_avg_ptr[j] - avg_ptr[j] * avg_ptr[j];
-                    denom = std::sqrt(centered_var + eps_);
-                } else {
-                    // Standard: sqrt(v_t + eps)
-                    denom = std::sqrt(square_avg_ptr[j] + eps_);
+            // Apply weight decay if specified
+            if (weight_decay_ > 0.0) {
+                for (int64_t j = 0; j < numel; ++j) {
+                    grad_ptr[j] += weight_decay_ * param_ptr[j];
                 }
+            }
 
-                buf_ptr[j] = momentum_ * buf_ptr[j] + grad_ptr[j] / denom;
-                param_ptr[j] -= lr_ * buf_ptr[j];
+            // Update square_avg: v_t = alpha * v_{t-1} + (1 - alpha) * g_t^2
+            for (int64_t j = 0; j < numel; ++j) {
+                square_avg_ptr[j] = alpha_ * square_avg_ptr[j] +
+                                    (1.0 - alpha_) * grad_ptr[j] * grad_ptr[j];
+            }
+
+            double* avg_ptr = nullptr;
+
+            if (centered_) {
+                // Update grad_avg: m_t = alpha * m_{t-1} + (1 - alpha) * g_t
+                avg_ptr = grad_avg_[i].data<double>();
+                for (int64_t j = 0; j < numel; ++j) {
+                    avg_ptr[j] = alpha_ * avg_ptr[j] + (1.0 - alpha_) * grad_ptr[j];
+                }
+            }
+
+            if (momentum_ > 0.0) {
+                // With momentum: buf_t = momentum * buf_{t-1} + g_t / (sqrt(v_t) + eps)
+                auto buf_ptr = momentum_buffer_[i].data<double>();
+
+                for (int64_t j = 0; j < numel; ++j) {
+                    double denom;
+                    if (centered_) {
+                        double centered_var = square_avg_ptr[j] - avg_ptr[j] * avg_ptr[j];
+                        denom = std::sqrt(centered_var + eps_);
+                    } else {
+                        denom = std::sqrt(square_avg_ptr[j] + eps_);
+                    }
+
+                    buf_ptr[j] = momentum_ * buf_ptr[j] + grad_ptr[j] / denom;
+                    param_ptr[j] -= lr_ * buf_ptr[j];
+                }
+            } else {
+                // Without momentum: theta_t = theta_{t-1} - lr * g_t / (sqrt(v_t) + eps)
+                for (int64_t j = 0; j < numel; ++j) {
+                    double denom;
+                    if (centered_) {
+                        double centered_var = square_avg_ptr[j] - avg_ptr[j] * avg_ptr[j];
+                        denom = std::sqrt(centered_var + eps_);
+                    } else {
+                        denom = std::sqrt(square_avg_ptr[j] + eps_);
+                    }
+
+                    param_ptr[j] -= lr_ * grad_ptr[j] / denom;
+                }
             }
         } else {
-            // Without momentum: theta_t = theta_{t-1} - lr * g_t / (sqrt(v_t) + eps)
-            for (int64_t j = 0; j < numel; ++j) {
-                float denom;
-                if (centered_) {
-                    float centered_var = square_avg_ptr[j] - avg_ptr[j] * avg_ptr[j];
-                    denom = std::sqrt(centered_var + eps_);
-                } else {
-                    denom = std::sqrt(square_avg_ptr[j] + eps_);
-                }
+            // Float32 path (default)
+            auto grad_ptr = const_cast<float*>(grad.data<float>());
+            auto param_ptr = const_cast<float*>(param_data.data<float>());
+            auto square_avg_ptr = square_avg_[i].data<float>();
 
-                param_ptr[j] -= lr_ * grad_ptr[j] / denom;
+            // Apply weight decay if specified
+            if (weight_decay_ > 0.0) {
+                for (int64_t j = 0; j < numel; ++j) {
+                    grad_ptr[j] += weight_decay_ * param_ptr[j];
+                }
+            }
+
+            // Update square_avg: v_t = alpha * v_{t-1} + (1 - alpha) * g_t^2
+            for (int64_t j = 0; j < numel; ++j) {
+                square_avg_ptr[j] = alpha_ * square_avg_ptr[j] +
+                                    (1.0f - alpha_) * grad_ptr[j] * grad_ptr[j];
+            }
+
+            float* avg_ptr = nullptr;
+
+            if (centered_) {
+                // Update grad_avg: m_t = alpha * m_{t-1} + (1 - alpha) * g_t
+                avg_ptr = grad_avg_[i].data<float>();
+                for (int64_t j = 0; j < numel; ++j) {
+                    avg_ptr[j] = alpha_ * avg_ptr[j] + (1.0f - alpha_) * grad_ptr[j];
+                }
+            }
+
+            if (momentum_ > 0.0) {
+                // With momentum: buf_t = momentum * buf_{t-1} + g_t / (sqrt(v_t) + eps)
+                auto buf_ptr = momentum_buffer_[i].data<float>();
+
+                for (int64_t j = 0; j < numel; ++j) {
+                    float denom;
+                    if (centered_) {
+                        float centered_var = square_avg_ptr[j] - avg_ptr[j] * avg_ptr[j];
+                        denom = std::sqrt(centered_var + eps_);
+                    } else {
+                        denom = std::sqrt(square_avg_ptr[j] + eps_);
+                    }
+
+                    buf_ptr[j] = momentum_ * buf_ptr[j] + grad_ptr[j] / denom;
+                    param_ptr[j] -= lr_ * buf_ptr[j];
+                }
+            } else {
+                // Without momentum: theta_t = theta_{t-1} - lr * g_t / (sqrt(v_t) + eps)
+                for (int64_t j = 0; j < numel; ++j) {
+                    float denom;
+                    if (centered_) {
+                        float centered_var = square_avg_ptr[j] - avg_ptr[j] * avg_ptr[j];
+                        denom = std::sqrt(centered_var + eps_);
+                    } else {
+                        denom = std::sqrt(square_avg_ptr[j] + eps_);
+                    }
+
+                    param_ptr[j] -= lr_ * grad_ptr[j] / denom;
+                }
             }
         }
     }
