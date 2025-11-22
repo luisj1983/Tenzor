@@ -495,8 +495,18 @@ auto swish_kernel(const Tensor& input) -> Tensor {
             double sigmoid_x = 1.0 / (1.0 + std::exp(-x));
             out_data[i] = x * sigmoid_x;
         }
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* in_data = input.data<Float16>();
+        Float16* out_data = output.data<Float16>();
+        size_t n = input.numel();
+
+        for (size_t i = 0; i < n; ++i) {
+            float x = static_cast<float>(in_data[i]);
+            float sigmoid_x = 1.0f / (1.0f + std::exp(-x));
+            out_data[i] = Float16(x * sigmoid_x);
+        }
     } else {
-        throw std::runtime_error("Swish only supports Float32 and Float64");
+        throw std::runtime_error("Swish only supports Float32, Float64, and Float16");
     }
 
     return output;
@@ -529,8 +539,20 @@ auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Te
             double sigmoid_x = 1.0 / (1.0 + std::exp(-x));
             grad_in_data[i] = grad_out_data[i] * (sigmoid_x * (1.0 + x * (1.0 - sigmoid_x)));
         }
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* grad_out_data = grad_output.data<Float16>();
+        const Float16* in_data = input.data<Float16>();
+        Float16* grad_in_data = grad_input.data<Float16>();
+        size_t n = input.numel();
+
+        for (size_t i = 0; i < n; ++i) {
+            float x = static_cast<float>(in_data[i]);
+            float sigmoid_x = 1.0f / (1.0f + std::exp(-x));
+            float grad = static_cast<float>(grad_out_data[i]) * (sigmoid_x * (1.0f + x * (1.0f - sigmoid_x)));
+            grad_in_data[i] = Float16(grad);
+        }
     } else {
-        throw std::runtime_error("Swish backward only supports Float32 and Float64");
+        throw std::runtime_error("Swish backward only supports Float32, Float64, and Float16");
     }
 
     return grad_input;

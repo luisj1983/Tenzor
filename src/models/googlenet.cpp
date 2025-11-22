@@ -5,6 +5,7 @@
 
 #include "../../include/tenzor/models/googlenet.hpp"
 #include "../../include/tenzor/ops/transform.hpp"
+#include "../../include/tenzor/autograd/ops.hpp"
 #include <stdexcept>
 #include <vector>
 
@@ -83,14 +84,9 @@ auto InceptionModule::forward(const Variable& x) -> Variable {
     b4 = branch4_bn_->forward(b4);
     b4 = nn::relu(b4);
 
-    // Concatenate along channel dimension (dim=1)
-    std::vector<Tensor> outputs = {
-        b1.tensor(), b2.tensor(), b3.tensor(), b4.tensor()
-    };
-    auto concat_tensor = cat(outputs, 1);
-
-    // Preserve gradient tracking
-    return Variable(concat_tensor, x.requires_grad());
+    // Concatenate along channel dimension (dim=1) using Variable-level cat for autograd
+    std::vector<Variable> outputs = {b1, b2, b3, b4};
+    return tenzor::cat(outputs, 1);
 }
 
 // ============================================================================
@@ -127,9 +123,14 @@ auto InceptionAux::forward(const Variable& x) -> Variable {
     conv_out = bn_->forward(conv_out);
     conv_out = nn::relu(conv_out);
 
-    // Flatten
-    auto flat_tensor = flatten(conv_out.tensor(), 1);
-    Variable flat(flat_tensor, conv_out.requires_grad());
+    // Flatten using autograd-aware reshape
+    auto& conv_out_tensor = conv_out.tensor();
+    auto batch_size = conv_out_tensor.shape()[0];
+    int64_t flat_size = 1;
+    for (size_t i = 1; i < conv_out_tensor.shape().size(); ++i) {
+        flat_size *= conv_out_tensor.shape()[i];
+    }
+    auto flat = conv_out.reshape({batch_size, flat_size});
 
     // FC1
     auto fc1_out = fc1_->forward(flat);
@@ -197,9 +198,14 @@ auto GoogLeNet::forward(const Variable& x) -> Variable {
     // Global average pooling
     out = avgpool_->forward(out);
 
-    // Flatten
-    auto flat_tensor = flatten(out.tensor(), 1);
-    Variable flat(flat_tensor, out.requires_grad());
+    // Flatten using autograd-aware reshape
+    auto& out_tensor = out.tensor();
+    auto batch_size = out_tensor.shape()[0];
+    int64_t flat_size = 1;
+    for (size_t i = 1; i < out_tensor.shape().size(); ++i) {
+        flat_size *= out_tensor.shape()[i];
+    }
+    auto flat = out.reshape({batch_size, flat_size});
 
     // Dropout and FC
     flat = dropout_->forward(flat);
@@ -257,9 +263,14 @@ auto GoogLeNet::forward_with_aux(const Variable& x) -> std::tuple<Variable, Vari
     // Global average pooling
     out = avgpool_->forward(out);
 
-    // Flatten
-    auto flat_tensor = flatten(out.tensor(), 1);
-    Variable flat(flat_tensor, out.requires_grad());
+    // Flatten using autograd-aware reshape
+    auto& out_tensor = out.tensor();
+    auto batch_size = out_tensor.shape()[0];
+    int64_t flat_size = 1;
+    for (size_t i = 1; i < out_tensor.shape().size(); ++i) {
+        flat_size *= out_tensor.shape()[i];
+    }
+    auto flat = out.reshape({batch_size, flat_size});
 
     // Dropout and FC
     flat = dropout_->forward(flat);

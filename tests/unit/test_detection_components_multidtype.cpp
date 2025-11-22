@@ -211,8 +211,8 @@ TEST_P(DetectionComponentsMultiDTypeTest, NMSOverlappingBoxes) {
         box_data[8] = 20.0f; box_data[9] = 20.0f; box_data[10] = 30.0f; box_data[11] = 30.0f;
         score_data[2] = 0.7f;
 
-        // Box 3: (2, 2, 12, 12), score: 0.6 (overlaps with box 0)
-        box_data[12] = 2.0f; box_data[13] = 2.0f; box_data[14] = 12.0f; box_data[15] = 12.0f;
+        // Box 3: (1, 1, 10, 10), score: 0.6 (overlaps with box 0, IoU=0.81)
+        box_data[12] = 1.0f; box_data[13] = 1.0f; box_data[14] = 10.0f; box_data[15] = 10.0f;
         score_data[3] = 0.6f;
     } else if (dtype == DType::Float64) {
         double* box_data = boxes_cpu.data<double>();
@@ -227,7 +227,8 @@ TEST_P(DetectionComponentsMultiDTypeTest, NMSOverlappingBoxes) {
         box_data[8] = 20.0; box_data[9] = 20.0; box_data[10] = 30.0; box_data[11] = 30.0;
         score_data[2] = 0.7;
 
-        box_data[12] = 2.0; box_data[13] = 2.0; box_data[14] = 12.0; box_data[15] = 12.0;
+        // Box 3: (1, 1, 10, 10), IoU with box 0 = 0.81
+        box_data[12] = 1.0; box_data[13] = 1.0; box_data[14] = 10.0; box_data[15] = 10.0;
         score_data[3] = 0.6;
     }
 

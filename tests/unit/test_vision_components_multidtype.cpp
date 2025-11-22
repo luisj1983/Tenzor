@@ -179,6 +179,7 @@ TEST_P(VisionComponentsMultiDTypeTest, PatchEmbeddingBatchSizeOne) {
 
 TEST_P(VisionComponentsMultiDTypeTest, SqueezeExcitationForwardShape) {
     auto se = std::make_shared<tenzor::models::EfficientNetSqueezeExcitation>(64, 0.25);
+    se->to(dtype);
 
     auto input_tensor = randn({2, 64, 14, 14}, DType::Float32, device);
     input_tensor = toTestDType(input_tensor);
@@ -192,6 +193,7 @@ TEST_P(VisionComponentsMultiDTypeTest, SqueezeExcitationForwardShape) {
 
 TEST_P(VisionComponentsMultiDTypeTest, SqueezeExcitationDifferentReduction) {
     auto se_025 = std::make_shared<tenzor::models::EfficientNetSqueezeExcitation>(128, 0.25);
+    se_025->to(dtype);
 
     auto input_tensor = randn({1, 128, 7, 7}, DType::Float32, device);
     input_tensor = toTestDType(input_tensor);
@@ -204,6 +206,7 @@ TEST_P(VisionComponentsMultiDTypeTest, SqueezeExcitationDifferentReduction) {
 
 TEST_P(VisionComponentsMultiDTypeTest, SqueezeExcitationGradientFlow) {
     auto se = std::make_shared<tenzor::models::EfficientNetSqueezeExcitation>(32, 0.25);
+    se->to(dtype);
 
     auto input_tensor = randn({1, 32, 14, 14}, DType::Float32, device);
     input_tensor = toTestDType(input_tensor);
@@ -227,6 +230,7 @@ TEST_P(VisionComponentsMultiDTypeTest, SEBlockDifferentChannels) {
 
     for (auto channels : channel_sizes) {
         auto se = std::make_shared<tenzor::models::EfficientNetSqueezeExcitation>(channels, 0.25);
+        se->to(dtype);
 
         auto input_tensor = randn({1, channels, 7, 7}, DType::Float32, device);
         input_tensor = toTestDType(input_tensor);

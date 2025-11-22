@@ -178,6 +178,7 @@ TEST_P(ClassicModelsMultiDTypeTest, VGG11GradientFlow) {
 
 TEST_P(ClassicModelsMultiDTypeTest, VGG13ForwardShape) {
     auto model = vgg13(10, true, false);
+    model->to(dtype_);
     model->eval();
 
     Variable input = createInput({2, 3, 224, 224}, false);
@@ -190,6 +191,7 @@ TEST_P(ClassicModelsMultiDTypeTest, VGG13ForwardShape) {
 
 TEST_P(ClassicModelsMultiDTypeTest, VGG16ForwardShape) {
     auto model = vgg16(1000, true, false);
+    model->to(dtype_);
     model->eval();
 
     Variable input = createInput({1, 3, 224, 224}, false);
@@ -202,6 +204,7 @@ TEST_P(ClassicModelsMultiDTypeTest, VGG16ForwardShape) {
 
 TEST_P(ClassicModelsMultiDTypeTest, VGG16GradientFlow) {
     auto model = vgg16(10, true, false);
+    model->to(dtype_);
     model->train();
 
     Variable input = createInput({1, 3, 224, 224}, true);
@@ -215,6 +218,7 @@ TEST_P(ClassicModelsMultiDTypeTest, VGG16GradientFlow) {
 
 TEST_P(ClassicModelsMultiDTypeTest, VGG19ForwardShape) {
     auto model = vgg19(100, true, false);
+    model->to(dtype_);
     model->eval();
 
     Variable input = createInput({4, 3, 224, 224}, false);
@@ -227,6 +231,7 @@ TEST_P(ClassicModelsMultiDTypeTest, VGG19ForwardShape) {
 
 TEST_P(ClassicModelsMultiDTypeTest, VGGWithoutBatchNorm) {
     auto model = vgg11(10, false, false);
+    model->to(dtype_);
     model->eval();
 
     Variable input = createInput({1, 3, 224, 224}, false);
@@ -239,6 +244,7 @@ TEST_P(ClassicModelsMultiDTypeTest, VGGWithoutBatchNorm) {
 
 TEST_P(ClassicModelsMultiDTypeTest, VGGCustomDropout) {
     auto model = std::make_shared<VGG>(VGGConfig::vgg11(), 10, true, 0.3);
+    model->to(dtype_);
     model->eval();
 
     Variable input = createInput({1, 3, 224, 224}, false);
@@ -338,6 +344,7 @@ TEST_P(ClassicModelsMultiDTypeTest, AlexNetCustomDropout) {
 
 TEST_P(ClassicModelsMultiDTypeTest, GoogLeNetForwardShape) {
     auto model = googlenet(1000, false, false);  // No aux classifiers
+    model->to(dtype_);
     model->eval();
 
     Variable input = createInput({1, 3, 224, 224}, false);
@@ -350,6 +357,7 @@ TEST_P(ClassicModelsMultiDTypeTest, GoogLeNetForwardShape) {
 
 TEST_P(ClassicModelsMultiDTypeTest, GoogLeNetGradientFlow) {
     auto model = googlenet(10, false, false);
+    model->to(dtype_);
     model->train();
 
     Variable input = createInput({1, 3, 224, 224}, true);
@@ -364,6 +372,7 @@ TEST_P(ClassicModelsMultiDTypeTest, GoogLeNetGradientFlow) {
 
 TEST_P(ClassicModelsMultiDTypeTest, GoogLeNetWithAuxiliaryClassifiers) {
     auto model = googlenet(10, false, true);  // With aux classifiers
+    model->to(dtype_);
     model->train();
 
     Variable input = createInput({2, 3, 224, 224}, false);
@@ -387,6 +396,7 @@ TEST_P(ClassicModelsMultiDTypeTest, GoogLeNetWithAuxiliaryClassifiers) {
 
 TEST_P(ClassicModelsMultiDTypeTest, GoogLeNetInferenceMode) {
     auto model = googlenet(1000, false, true);
+    model->to(dtype_);
     model->eval();
 
     Variable input = createInput({1, 3, 224, 224}, false);
@@ -404,6 +414,7 @@ TEST_P(ClassicModelsMultiDTypeTest, InceptionModuleForward) {
         16, 32,     // reduce_5x5, out_5x5
         32          // out_pool_proj
     );
+    inception->to(dtype_);
 
     Variable input = createInput({1, 192, 28, 28}, false);
     Variable output = inception->forward(input);
@@ -416,6 +427,7 @@ TEST_P(ClassicModelsMultiDTypeTest, InceptionModuleForward) {
 
 TEST_P(ClassicModelsMultiDTypeTest, GoogLeNetCustomDropout) {
     auto model = std::make_shared<GoogLeNet>(10, false, 0.2);
+    model->to(dtype_);
     model->eval();
 
     Variable input = createInput({1, 3, 224, 224}, false);

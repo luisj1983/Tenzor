@@ -341,40 +341,114 @@ public:
 
         // Initialize gradient w.r.t input with zeros on same device
         auto grad_input = zeros({N, C, H_in_, W_in_}, grad_output.dtype(), grad_output.device());
-        float* grad_input_data = grad_input.data<float>();
-        const float* grad_output_data = grad_output.data<float>();
 
-        // Distribute gradients evenly across pooling windows
-        for (int64_t n = 0; n < N; ++n) {
-            for (int64_t c = 0; c < C; ++c) {
-                for (int64_t h_out = 0; h_out < H_out; ++h_out) {
-                    for (int64_t w_out = 0; w_out < W_out; ++w_out) {
-                        // Calculate input window boundaries
-                        int64_t h_start = h_out * stride_ - padding_;
-                        int64_t w_start = w_out * stride_ - padding_;
-                        int64_t h_end = h_start + kernel_size_;
-                        int64_t w_end = w_start + kernel_size_;
+        auto dtype = grad_output.dtype();
+        if (dtype == DType::Float32) {
+            float* grad_input_data = grad_input.data<float>();
+            const float* grad_output_data = grad_output.data<float>();
 
-                        // Count valid elements in window (for proper averaging)
-                        int64_t count = 0;
-                        for (int64_t h = h_start; h < h_end; ++h) {
-                            for (int64_t w = w_start; w < w_end; ++w) {
-                                if (h >= 0 && h < H_in_ && w >= 0 && w < W_in_) {
-                                    count++;
+            // Distribute gradients evenly across pooling windows
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t c = 0; c < C; ++c) {
+                    for (int64_t h_out = 0; h_out < H_out; ++h_out) {
+                        for (int64_t w_out = 0; w_out < W_out; ++w_out) {
+                            int64_t h_start = h_out * stride_ - padding_;
+                            int64_t w_start = w_out * stride_ - padding_;
+                            int64_t h_end = h_start + kernel_size_;
+                            int64_t w_end = w_start + kernel_size_;
+
+                            int64_t count = 0;
+                            for (int64_t h = h_start; h < h_end; ++h) {
+                                for (int64_t w = w_start; w < w_end; ++w) {
+                                    if (h >= 0 && h < H_in_ && w >= 0 && w < W_in_) {
+                                        count++;
+                                    }
+                                }
+                            }
+
+                            int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
+                            float grad_val = grad_output_data[out_idx] / static_cast<float>(count);
+
+                            for (int64_t h = h_start; h < h_end; ++h) {
+                                for (int64_t w = w_start; w < w_end; ++w) {
+                                    if (h >= 0 && h < H_in_ && w >= 0 && w < W_in_) {
+                                        int64_t input_idx = ((n * C + c) * H_in_ + h) * W_in_ + w;
+                                        grad_input_data[input_idx] += grad_val;
+                                    }
                                 }
                             }
                         }
+                    }
+                }
+            }
+        } else if (dtype == DType::Float64) {
+            double* grad_input_data = grad_input.data<double>();
+            const double* grad_output_data = grad_output.data<double>();
 
-                        // Get gradient for this output position
-                        int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
-                        float grad_val = grad_output_data[out_idx] / static_cast<float>(count);
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t c = 0; c < C; ++c) {
+                    for (int64_t h_out = 0; h_out < H_out; ++h_out) {
+                        for (int64_t w_out = 0; w_out < W_out; ++w_out) {
+                            int64_t h_start = h_out * stride_ - padding_;
+                            int64_t w_start = w_out * stride_ - padding_;
+                            int64_t h_end = h_start + kernel_size_;
+                            int64_t w_end = w_start + kernel_size_;
 
-                        // Distribute gradient evenly to all elements in window
-                        for (int64_t h = h_start; h < h_end; ++h) {
-                            for (int64_t w = w_start; w < w_end; ++w) {
-                                if (h >= 0 && h < H_in_ && w >= 0 && w < W_in_) {
-                                    int64_t input_idx = ((n * C + c) * H_in_ + h) * W_in_ + w;
-                                    grad_input_data[input_idx] += grad_val;
+                            int64_t count = 0;
+                            for (int64_t h = h_start; h < h_end; ++h) {
+                                for (int64_t w = w_start; w < w_end; ++w) {
+                                    if (h >= 0 && h < H_in_ && w >= 0 && w < W_in_) {
+                                        count++;
+                                    }
+                                }
+                            }
+
+                            int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
+                            double grad_val = grad_output_data[out_idx] / static_cast<double>(count);
+
+                            for (int64_t h = h_start; h < h_end; ++h) {
+                                for (int64_t w = w_start; w < w_end; ++w) {
+                                    if (h >= 0 && h < H_in_ && w >= 0 && w < W_in_) {
+                                        int64_t input_idx = ((n * C + c) * H_in_ + h) * W_in_ + w;
+                                        grad_input_data[input_idx] += grad_val;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else if (dtype == DType::Float16) {
+            Float16* grad_input_data = grad_input.data<Float16>();
+            const Float16* grad_output_data = grad_output.data<Float16>();
+
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t c = 0; c < C; ++c) {
+                    for (int64_t h_out = 0; h_out < H_out; ++h_out) {
+                        for (int64_t w_out = 0; w_out < W_out; ++w_out) {
+                            int64_t h_start = h_out * stride_ - padding_;
+                            int64_t w_start = w_out * stride_ - padding_;
+                            int64_t h_end = h_start + kernel_size_;
+                            int64_t w_end = w_start + kernel_size_;
+
+                            int64_t count = 0;
+                            for (int64_t h = h_start; h < h_end; ++h) {
+                                for (int64_t w = w_start; w < w_end; ++w) {
+                                    if (h >= 0 && h < H_in_ && w >= 0 && w < W_in_) {
+                                        count++;
+                                    }
+                                }
+                            }
+
+                            int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
+                            float grad_val = static_cast<float>(grad_output_data[out_idx]) / static_cast<float>(count);
+
+                            for (int64_t h = h_start; h < h_end; ++h) {
+                                for (int64_t w = w_start; w < w_end; ++w) {
+                                    if (h >= 0 && h < H_in_ && w >= 0 && w < W_in_) {
+                                        int64_t input_idx = ((n * C + c) * H_in_ + h) * W_in_ + w;
+                                        grad_input_data[input_idx] = Float16(static_cast<float>(grad_input_data[input_idx]) + grad_val);
+                                    }
                                 }
                             }
                         }
@@ -417,37 +491,101 @@ auto AvgPool2d::forward(const Variable& input) -> Variable {
     // Create output tensor on same device as input
     auto output = zeros({N, C, H_out, W_out}, input.tensor().dtype(), input.tensor().device());
 
-    const float* input_data = input.tensor().data<float>();
-    float* output_data = output.data<float>();
+    auto dtype = input.tensor().dtype();
+    if (dtype == DType::Float32) {
+        const float* input_data = input.tensor().data<float>();
+        float* output_data = output.data<float>();
 
-    // Perform average pooling
-    for (int64_t n = 0; n < N; ++n) {
-        for (int64_t c = 0; c < C; ++c) {
-            for (int64_t h_out = 0; h_out < H_out; ++h_out) {
-                for (int64_t w_out = 0; w_out < W_out; ++w_out) {
-                    // Calculate input window boundaries
-                    int64_t h_start = h_out * stride_ - padding_;
-                    int64_t w_start = w_out * stride_ - padding_;
-                    int64_t h_end = h_start + kernel_size_;
-                    int64_t w_end = w_start + kernel_size_;
+        // Perform average pooling
+        for (int64_t n = 0; n < N; ++n) {
+            for (int64_t c = 0; c < C; ++c) {
+                for (int64_t h_out = 0; h_out < H_out; ++h_out) {
+                    for (int64_t w_out = 0; w_out < W_out; ++w_out) {
+                        int64_t h_start = h_out * stride_ - padding_;
+                        int64_t w_start = w_out * stride_ - padding_;
+                        int64_t h_end = h_start + kernel_size_;
+                        int64_t w_end = w_start + kernel_size_;
 
-                    // Compute average in window
-                    float sum = 0.0f;
-                    int64_t count = 0;
+                        float sum = 0.0f;
+                        int64_t count = 0;
 
-                    for (int64_t h = h_start; h < h_end; ++h) {
-                        for (int64_t w = w_start; w < w_end; ++w) {
-                            // Check bounds and apply padding (padding is treated as 0)
-                            if (h >= 0 && h < H_in && w >= 0 && w < W_in) {
-                                int64_t input_idx = ((n * C + c) * H_in + h) * W_in + w;
-                                sum += input_data[input_idx];
-                                count++;
+                        for (int64_t h = h_start; h < h_end; ++h) {
+                            for (int64_t w = w_start; w < w_end; ++w) {
+                                if (h >= 0 && h < H_in && w >= 0 && w < W_in) {
+                                    int64_t input_idx = ((n * C + c) * H_in + h) * W_in + w;
+                                    sum += input_data[input_idx];
+                                    count++;
+                                }
                             }
                         }
-                    }
 
-                    int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
-                    output_data[out_idx] = sum / static_cast<float>(count);
+                        int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
+                        output_data[out_idx] = sum / static_cast<float>(count);
+                    }
+                }
+            }
+        }
+    } else if (dtype == DType::Float64) {
+        const double* input_data = input.tensor().data<double>();
+        double* output_data = output.data<double>();
+
+        for (int64_t n = 0; n < N; ++n) {
+            for (int64_t c = 0; c < C; ++c) {
+                for (int64_t h_out = 0; h_out < H_out; ++h_out) {
+                    for (int64_t w_out = 0; w_out < W_out; ++w_out) {
+                        int64_t h_start = h_out * stride_ - padding_;
+                        int64_t w_start = w_out * stride_ - padding_;
+                        int64_t h_end = h_start + kernel_size_;
+                        int64_t w_end = w_start + kernel_size_;
+
+                        double sum = 0.0;
+                        int64_t count = 0;
+
+                        for (int64_t h = h_start; h < h_end; ++h) {
+                            for (int64_t w = w_start; w < w_end; ++w) {
+                                if (h >= 0 && h < H_in && w >= 0 && w < W_in) {
+                                    int64_t input_idx = ((n * C + c) * H_in + h) * W_in + w;
+                                    sum += input_data[input_idx];
+                                    count++;
+                                }
+                            }
+                        }
+
+                        int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
+                        output_data[out_idx] = sum / static_cast<double>(count);
+                    }
+                }
+            }
+        }
+    } else if (dtype == DType::Float16) {
+        const Float16* input_data = input.tensor().data<Float16>();
+        Float16* output_data = output.data<Float16>();
+
+        for (int64_t n = 0; n < N; ++n) {
+            for (int64_t c = 0; c < C; ++c) {
+                for (int64_t h_out = 0; h_out < H_out; ++h_out) {
+                    for (int64_t w_out = 0; w_out < W_out; ++w_out) {
+                        int64_t h_start = h_out * stride_ - padding_;
+                        int64_t w_start = w_out * stride_ - padding_;
+                        int64_t h_end = h_start + kernel_size_;
+                        int64_t w_end = w_start + kernel_size_;
+
+                        float sum = 0.0f;
+                        int64_t count = 0;
+
+                        for (int64_t h = h_start; h < h_end; ++h) {
+                            for (int64_t w = w_start; w < w_end; ++w) {
+                                if (h >= 0 && h < H_in && w >= 0 && w < W_in) {
+                                    int64_t input_idx = ((n * C + c) * H_in + h) * W_in + w;
+                                    sum += static_cast<float>(input_data[input_idx]);
+                                    count++;
+                                }
+                            }
+                        }
+
+                        int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
+                        output_data[out_idx] = Float16(sum / static_cast<float>(count));
+                    }
                 }
             }
         }

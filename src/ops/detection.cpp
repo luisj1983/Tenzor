@@ -349,13 +349,13 @@ auto nms(const Tensor& boxes, const Tensor& scores, double iou_threshold) -> Ten
         return tenzor::empty({0}, DType::Int64, boxes.device());
     }
 
-    // Move to CPU for processing
-    auto boxes_cpu = boxes.to(Device::cpu());
-    auto scores_cpu = scores.to(Device::cpu());
+    // Move to CPU and convert to Float32 for processing
+    auto boxes_cpu = boxes.to(Device::cpu()).to(DType::Float32);
+    auto scores_cpu = scores.to(Device::cpu()).to(DType::Float32);
 
     // Get data pointers
-    const float* boxes_data = static_cast<const float*>(boxes_cpu.data_ptr());
-    const float* scores_data = static_cast<const float*>(scores_cpu.data_ptr());
+    const float* boxes_data = boxes_cpu.data<float>();
+    const float* scores_data = scores_cpu.data<float>();
 
     // Sort indices by score (descending)
     std::vector<int64_t> indices(N);
