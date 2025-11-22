@@ -254,6 +254,10 @@ TEST_P(ClassicModelsMultiDTypeTest, VGGCustomDropout) {
 
 TEST_P(ClassicModelsMultiDTypeTest, AlexNetForwardShape) {
     auto model = alexnet(1000, false);
+
+    // Convert model to test dtype
+    model->to(dtype_);
+
     model->eval();
 
     Variable input = createInput({2, 3, 224, 224}, false);
@@ -266,6 +270,10 @@ TEST_P(ClassicModelsMultiDTypeTest, AlexNetForwardShape) {
 
 TEST_P(ClassicModelsMultiDTypeTest, AlexNetGradientFlow) {
     auto model = alexnet(10, false);
+
+    // Convert model to test dtype
+    model->to(dtype_);
+
     model->train();
 
     Variable input = createInput({1, 3, 224, 224}, true);
@@ -280,6 +288,10 @@ TEST_P(ClassicModelsMultiDTypeTest, AlexNetGradientFlow) {
 
 TEST_P(ClassicModelsMultiDTypeTest, AlexNetCustomClasses) {
     auto model = alexnet(10, false);
+
+    // Convert model to test dtype
+    model->to(dtype_);
+
     model->eval();
 
     Variable input = createInput({1, 3, 224, 224}, false);
@@ -291,6 +303,10 @@ TEST_P(ClassicModelsMultiDTypeTest, AlexNetCustomClasses) {
 
 TEST_P(ClassicModelsMultiDTypeTest, AlexNetBatchProcessing) {
     auto model = alexnet(100, false);
+
+    // Convert model to test dtype
+    model->to(dtype_);
+
     model->eval();
 
     Variable input = createInput({8, 3, 224, 224}, false);
@@ -303,6 +319,10 @@ TEST_P(ClassicModelsMultiDTypeTest, AlexNetBatchProcessing) {
 
 TEST_P(ClassicModelsMultiDTypeTest, AlexNetCustomDropout) {
     auto model = std::make_shared<AlexNet>(10, 0.3);
+
+    // Convert model to test dtype
+    model->to(dtype_);
+
     model->eval();
 
     Variable input = createInput({1, 3, 224, 224}, false);
