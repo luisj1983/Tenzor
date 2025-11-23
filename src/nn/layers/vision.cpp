@@ -15,6 +15,11 @@
 #include <cmath>
 #include <random>
 
+// Include CUDA kernel headers when available
+#ifdef TENZOR_HAS_CUDA
+#include "tenzor/backends/cuda/vision_kernels.hpp"
+#endif
+
 namespace tenzor::nn {
 
 // ============================================================================
@@ -199,18 +204,37 @@ auto WindowAttention::get_relative_position_bias() const -> Tensor {
     // Gather biases using precomputed indices
     auto bias_table = relative_position_bias_table_->tensor();
     auto target_dtype = bias_table.dtype();
+    auto target_device = bias_table.device();
     int64_t table_size = 2 * window_size_ - 1;
     int64_t num_positions = window_size_ * window_size_;
 
-    // Convert to Float32 for computation (numerical stability)
-    auto bias_table_f32 = bias_table.to(DType::Float32);
+    #ifdef TENZOR_HAS_CUDA
+    // Use CUDA kernel for GPU tensors
+    if (target_device.type == Device::Type::CUDA) {
+        // Reshape table for gather: [table_size*table_size, num_heads]
+        auto bias_flat = bias_table.reshape({table_size * table_size, num_heads_});
+
+        // Use CUDA gather kernel
+        auto bias = cuda::gather_relative_position_bias(
+            bias_flat, relative_position_index_, num_positions, num_heads_);
+
+        // Permute to (num_heads, num_positions, num_positions)
+        return bias.permute({2, 0, 1});
+    }
+    #endif
+
+    // CPU fallback
+    auto bias_table_f32 = bias_table.to(DType::Float32).to(Device::cpu());
     auto bias_flat = bias_table_f32.reshape({table_size * table_size, num_heads_});
 
-    // Gather using relative position indices
-    auto bias = zeros({num_positions, num_positions, num_heads_}, DType::Float32, bias_table.device());
+    auto bias = zeros({num_positions, num_positions, num_heads_}, DType::Float32, Device::cpu());
     auto bias_data = bias.data<float>();
     auto table_data = bias_flat.data<float>();
-    auto index_data = relative_position_index_.data<int64_t>();
+
+    auto index_cpu = relative_position_index_.device().type == Device::Type::CPU
+                     ? relative_position_index_
+                     : relative_position_index_.to(Device::cpu());
+    auto index_data = index_cpu.data<int64_t>();
 
     for (int64_t i = 0; i < num_positions; ++i) {
         for (int64_t j = 0; j < num_positions; ++j) {
@@ -222,9 +246,8 @@ auto WindowAttention::get_relative_position_bias() const -> Tensor {
         }
     }
 
-    // Permute to (num_heads, num_positions, num_positions) and convert back to target dtype
     auto bias_permuted = bias.permute({2, 0, 1});
-    return bias_permuted.to(target_dtype);
+    return bias_permuted.to(target_dtype).to(target_device);
 }
 
 auto WindowAttention::forward(const Variable& input, const Tensor& mask) -> Variable {
@@ -378,8 +401,9 @@ auto create_shifted_window_mask(int64_t H, int64_t W,
                                  int64_t shift_size,
                                  Device device,
                                  DType dtype) -> Tensor {
-    // Create image mask to identify different regions after cyclic shift
-    auto img_mask = zeros({1, H, W, 1}, dtype, device);
+    // Create image mask on CPU to identify different regions after cyclic shift
+    // (direct memory access requires CPU tensors)
+    auto img_mask = zeros({1, H, W, 1}, DType::Float32, Device::cpu());
     auto mask_data = img_mask.data<float>();
 
     // Partition into regions based on shift
@@ -401,10 +425,10 @@ auto create_shifted_window_mask(int64_t H, int64_t W,
     // Reshape: (num_windows, M*M, 1) -> (num_windows, M*M)
     mask_windows = mask_windows.squeeze(-1);
 
-    // Create attention mask
+    // Create attention mask on CPU
     int64_t num_windows = (H / window_size) * (W / window_size);
     int64_t M = window_size * window_size;
-    auto attn_mask = zeros({num_windows, M, M}, dtype, device);
+    auto attn_mask = zeros({num_windows, M, M}, DType::Float32, Device::cpu());
     auto attn_data = attn_mask.data<float>();
     auto window_data = mask_windows.tensor().data<float>();
 
@@ -419,7 +443,8 @@ auto create_shifted_window_mask(int64_t H, int64_t W,
         }
     }
 
-    return attn_mask;
+    // Convert to target dtype and device
+    return attn_mask.to(dtype).to(device);
 }
 
 } // namespace tenzor::nn

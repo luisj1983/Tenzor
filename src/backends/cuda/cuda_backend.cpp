@@ -879,6 +879,13 @@ public:
                     else if (dtype_str == "bfloat16") dtype = DType::BFloat16;
                     else if (dtype_str == "int32") dtype = DType::Int32;
                     else if (dtype_str == "int64") dtype = DType::Int64;
+                    else if (dtype_str == "int8") dtype = DType::Int8;
+                    else if (dtype_str == "int16") dtype = DType::Int16;
+                    else if (dtype_str == "uint8") dtype = DType::UInt8;
+                    else if (dtype_str == "uint16") dtype = DType::UInt16;
+                    else if (dtype_str == "uint32") dtype = DType::UInt32;
+                    else if (dtype_str == "uint64") dtype = DType::UInt64;
+                    else if (dtype_str == "bool") dtype = DType::Bool;
                 }
 
                 Device device = inputs.empty() ? Device::cuda(0) : inputs[0].device();

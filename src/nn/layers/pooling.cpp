@@ -7,6 +7,11 @@
 #include <limits>
 #include <vector>
 
+// Include CUDA kernel headers when available
+#ifdef TENZOR_HAS_CUDA
+#include "tenzor/backends/cuda/vision_kernels.hpp"
+#endif
+
 namespace tenzor::nn {
 
 // Helper namespace for pooling operations
@@ -645,15 +650,26 @@ public:
         int64_t N = grad_shape[0];
         int64_t C = grad_shape[1];
 
-        // Initialize gradient w.r.t input with zeros on same device
-        auto grad_input = zeros({N, C, H_in_, W_in_}, grad_output.dtype(), grad_output.device());
+        // Save target device for later
+        auto target_device = grad_output.device();
+        auto target_dtype = grad_output.dtype();
 
-        auto dtype = grad_output.dtype();
+        #ifdef TENZOR_HAS_CUDA
+        // Use CUDA kernel for GPU tensors
+        if (target_device.type == Device::Type::CUDA) {
+            return {cuda::adaptive_avg_pool2d_backward(grad_output, H_in_, W_in_)};
+        }
+        #endif
+
+        // CPU fallback
+        auto grad_output_cpu = grad_output.to(Device::cpu());
+        auto grad_input = zeros({N, C, H_in_, W_in_}, target_dtype, Device::cpu());
+
+        auto dtype = target_dtype;
         if (dtype == DType::Float32) {
             float* grad_input_data = grad_input.data<float>();
-            const float* grad_output_data = grad_output.data<float>();
+            const float* grad_output_data = grad_output_cpu.data<float>();
 
-            // Distribute gradients based on adaptive pooling windows
             for (int64_t n = 0; n < N; ++n) {
                 for (int64_t c = 0; c < C; ++c) {
                     for (int64_t h_out = 0; h_out < H_out_; ++h_out) {
@@ -679,7 +695,7 @@ public:
             }
         } else if (dtype == DType::Float64) {
             double* grad_input_data = grad_input.data<double>();
-            const double* grad_output_data = grad_output.data<double>();
+            const double* grad_output_data = grad_output_cpu.data<double>();
 
             for (int64_t n = 0; n < N; ++n) {
                 for (int64_t c = 0; c < C; ++c) {
@@ -705,9 +721,8 @@ public:
                 }
             }
         } else if (dtype == DType::Float16) {
-            // Convert to Float32 for computation
-            auto grad_output_f32 = grad_output.to(DType::Float32);
-            auto grad_input_f32 = zeros({N, C, H_in_, W_in_}, DType::Float32, grad_output.device());
+            auto grad_output_f32 = grad_output_cpu.to(DType::Float32);
+            auto grad_input_f32 = zeros({N, C, H_in_, W_in_}, DType::Float32, Device::cpu());
 
             float* grad_input_data = grad_input_f32.data<float>();
             const float* grad_output_data = grad_output_f32.data<float>();
@@ -736,7 +751,6 @@ public:
                 }
             }
 
-            // Convert back to Float16
             grad_input = grad_input_f32.to(DType::Float16);
         } else {
             throw std::runtime_error("AdaptiveAvgPool2dBackward: Unsupported dtype");
@@ -771,114 +785,122 @@ auto AdaptiveAvgPool2d::forward(const Variable& input) -> Variable {
     int64_t H_out = output_h_;
     int64_t W_out = output_w_;
 
-    // Create output tensor on same device as input
-    auto output = zeros({N, C, H_out, W_out}, input.tensor().dtype(), input.tensor().device());
+    // Save original device and dtype for later
+    auto target_device = input.tensor().device();
+    auto target_dtype = input.tensor().dtype();
 
-    // Use CPU backend's adaptive_avg_pool2d operation which handles all dtypes correctly
-    // This delegates to the backend-specific implementation
-    auto dtype = input.tensor().dtype();
-    if (dtype == DType::Float32) {
-        const float* input_data = input.tensor().data<float>();
-        float* output_data = output.data<float>();
+    Tensor output;
 
-        // Perform adaptive average pooling
-        for (int64_t n = 0; n < N; ++n) {
-            for (int64_t c = 0; c < C; ++c) {
-                for (int64_t h_out = 0; h_out < H_out; ++h_out) {
-                    for (int64_t w_out = 0; w_out < W_out; ++w_out) {
-                        // Calculate adaptive pooling window
-                        int64_t h_start = (h_out * H_in) / H_out;
-                        int64_t h_end = ((h_out + 1) * H_in) / H_out;
-                        int64_t w_start = (w_out * W_in) / W_out;
-                        int64_t w_end = ((w_out + 1) * W_in) / W_out;
+    #ifdef TENZOR_HAS_CUDA
+    // Use CUDA kernel for GPU tensors
+    if (target_device.type == Device::Type::CUDA) {
+        output = cuda::adaptive_avg_pool2d_forward(input.tensor(), H_out, W_out);
+    } else
+    #endif
+    {
+        // CPU fallback
+        auto input_cpu = input.tensor().to(Device::cpu());
+        output = zeros({N, C, H_out, W_out}, target_dtype, Device::cpu());
 
-                        // Compute average in adaptive window
-                        float sum = 0.0f;
-                        int64_t count = 0;
+        auto dtype = target_dtype;
+        if (dtype == DType::Float32) {
+            const float* input_data = input_cpu.data<float>();
+            float* output_data = output.data<float>();
 
-                        for (int64_t h = h_start; h < h_end; ++h) {
-                            for (int64_t w = w_start; w < w_end; ++w) {
-                                int64_t input_idx = ((n * C + c) * H_in + h) * W_in + w;
-                                sum += input_data[input_idx];
-                                count++;
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t c = 0; c < C; ++c) {
+                    for (int64_t h_out = 0; h_out < H_out; ++h_out) {
+                        for (int64_t w_out = 0; w_out < W_out; ++w_out) {
+                            int64_t h_start = (h_out * H_in) / H_out;
+                            int64_t h_end = ((h_out + 1) * H_in) / H_out;
+                            int64_t w_start = (w_out * W_in) / W_out;
+                            int64_t w_end = ((w_out + 1) * W_in) / W_out;
+
+                            float sum = 0.0f;
+                            int64_t count = 0;
+
+                            for (int64_t h = h_start; h < h_end; ++h) {
+                                for (int64_t w = w_start; w < w_end; ++w) {
+                                    int64_t input_idx = ((n * C + c) * H_in + h) * W_in + w;
+                                    sum += input_data[input_idx];
+                                    count++;
+                                }
                             }
-                        }
 
-                        int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
-                        output_data[out_idx] = sum / static_cast<float>(count);
+                            int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
+                            output_data[out_idx] = sum / static_cast<float>(count);
+                        }
                     }
                 }
             }
-        }
-    } else if (dtype == DType::Float64) {
-        const double* input_data = input.tensor().data<double>();
-        double* output_data = output.data<double>();
+        } else if (dtype == DType::Float64) {
+            const double* input_data = input_cpu.data<double>();
+            double* output_data = output.data<double>();
 
-        for (int64_t n = 0; n < N; ++n) {
-            for (int64_t c = 0; c < C; ++c) {
-                for (int64_t h_out = 0; h_out < H_out; ++h_out) {
-                    for (int64_t w_out = 0; w_out < W_out; ++w_out) {
-                        int64_t h_start = (h_out * H_in) / H_out;
-                        int64_t h_end = ((h_out + 1) * H_in) / H_out;
-                        int64_t w_start = (w_out * W_in) / W_out;
-                        int64_t w_end = ((w_out + 1) * W_in) / W_out;
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t c = 0; c < C; ++c) {
+                    for (int64_t h_out = 0; h_out < H_out; ++h_out) {
+                        for (int64_t w_out = 0; w_out < W_out; ++w_out) {
+                            int64_t h_start = (h_out * H_in) / H_out;
+                            int64_t h_end = ((h_out + 1) * H_in) / H_out;
+                            int64_t w_start = (w_out * W_in) / W_out;
+                            int64_t w_end = ((w_out + 1) * W_in) / W_out;
 
-                        double sum = 0.0;
-                        int64_t count = 0;
+                            double sum = 0.0;
+                            int64_t count = 0;
 
-                        for (int64_t h = h_start; h < h_end; ++h) {
-                            for (int64_t w = w_start; w < w_end; ++w) {
-                                int64_t input_idx = ((n * C + c) * H_in + h) * W_in + w;
-                                sum += input_data[input_idx];
-                                count++;
+                            for (int64_t h = h_start; h < h_end; ++h) {
+                                for (int64_t w = w_start; w < w_end; ++w) {
+                                    int64_t input_idx = ((n * C + c) * H_in + h) * W_in + w;
+                                    sum += input_data[input_idx];
+                                    count++;
+                                }
                             }
-                        }
 
-                        int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
-                        output_data[out_idx] = sum / static_cast<double>(count);
+                            int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
+                            output_data[out_idx] = sum / static_cast<double>(count);
+                        }
                     }
                 }
             }
-        }
-    } else if (dtype == DType::Float16) {
-        // Convert to Float32 for computation, then back to Float16
-        auto input_f32 = input.tensor().to(DType::Float32);
-        auto output_f32 = zeros({N, C, H_out, W_out}, DType::Float32, input.tensor().device());
+        } else if (dtype == DType::Float16) {
+            auto input_f32 = input_cpu.to(DType::Float32);
+            auto output_f32 = zeros({N, C, H_out, W_out}, DType::Float32, Device::cpu());
 
-        const float* input_data = input_f32.data<float>();
-        float* output_data = output_f32.data<float>();
+            const float* input_data = input_f32.data<float>();
+            float* output_data = output_f32.data<float>();
 
-        for (int64_t n = 0; n < N; ++n) {
-            for (int64_t c = 0; c < C; ++c) {
-                for (int64_t h_out = 0; h_out < H_out; ++h_out) {
-                    for (int64_t w_out = 0; w_out < W_out; ++w_out) {
-                        int64_t h_start = (h_out * H_in) / H_out;
-                        int64_t h_end = ((h_out + 1) * H_in) / H_out;
-                        int64_t w_start = (w_out * W_in) / W_out;
-                        int64_t w_end = ((w_out + 1) * W_in) / W_out;
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t c = 0; c < C; ++c) {
+                    for (int64_t h_out = 0; h_out < H_out; ++h_out) {
+                        for (int64_t w_out = 0; w_out < W_out; ++w_out) {
+                            int64_t h_start = (h_out * H_in) / H_out;
+                            int64_t h_end = ((h_out + 1) * H_in) / H_out;
+                            int64_t w_start = (w_out * W_in) / W_out;
+                            int64_t w_end = ((w_out + 1) * W_in) / W_out;
 
-                        float sum = 0.0f;
-                        int64_t count = 0;
+                            float sum = 0.0f;
+                            int64_t count = 0;
 
-                        for (int64_t h = h_start; h < h_end; ++h) {
-                            for (int64_t w = w_start; w < w_end; ++w) {
-                                int64_t input_idx = ((n * C + c) * H_in + h) * W_in + w;
-                                sum += input_data[input_idx];
-                                count++;
+                            for (int64_t h = h_start; h < h_end; ++h) {
+                                for (int64_t w = w_start; w < w_end; ++w) {
+                                    int64_t input_idx = ((n * C + c) * H_in + h) * W_in + w;
+                                    sum += input_data[input_idx];
+                                    count++;
+                                }
                             }
-                        }
 
-                        int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
-                        output_data[out_idx] = sum / static_cast<float>(count);
+                            int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
+                            output_data[out_idx] = sum / static_cast<float>(count);
+                        }
                     }
                 }
             }
-        }
 
-        // Convert result back to Float16
-        output = output_f32.to(DType::Float16);
-    } else {
-        throw std::runtime_error("AdaptiveAvgPool2d: Unsupported dtype");
+            output = output_f32.to(DType::Float16);
+        } else {
+            throw std::runtime_error("AdaptiveAvgPool2d: Unsupported dtype");
+        }
     }
 
     // Create output variable with autograd support
