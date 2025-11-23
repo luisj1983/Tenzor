@@ -829,6 +829,18 @@ auto sub_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
                 reinterpret_cast<const __nv_bfloat16*>(a.data<BFloat16>()),
                 reinterpret_cast<const __nv_bfloat16*>(b.data<BFloat16>()),
                 reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), n);
+        } else if (a.dtype() == DType::Int8) {
+            sub_kernel_device<<<grid, block, 0, stream>>>(a.data<int8_t>(), b.data<int8_t>(), result.data<int8_t>(), n);
+        } else if (a.dtype() == DType::UInt8) {
+            sub_kernel_device<<<grid, block, 0, stream>>>(a.data<uint8_t>(), b.data<uint8_t>(), result.data<uint8_t>(), n);
+        } else if (a.dtype() == DType::Int16) {
+            sub_kernel_device<<<grid, block, 0, stream>>>(a.data<int16_t>(), b.data<int16_t>(), result.data<int16_t>(), n);
+        } else if (a.dtype() == DType::UInt16) {
+            sub_kernel_device<<<grid, block, 0, stream>>>(a.data<uint16_t>(), b.data<uint16_t>(), result.data<uint16_t>(), n);
+        } else if (a.dtype() == DType::UInt32) {
+            sub_kernel_device<<<grid, block, 0, stream>>>(a.data<uint32_t>(), b.data<uint32_t>(), result.data<uint32_t>(), n);
+        } else if (a.dtype() == DType::UInt64) {
+            sub_kernel_device<<<grid, block, 0, stream>>>(a.data<uint64_t>(), b.data<uint64_t>(), result.data<uint64_t>(), n);
         } else {
             throw std::runtime_error("Unsupported dtype for sub operation");
         }
@@ -887,6 +899,30 @@ auto sub_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
             reinterpret_cast<const __nv_bfloat16*>(a.data<BFloat16>()),
             reinterpret_cast<const __nv_bfloat16*>(b.data<BFloat16>()),
             reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, SubOp());
+    } else if (a.dtype() == DType::Int8) {
+        broadcast_kernel<<<grid, block, 0, stream>>>(
+            a.data<int8_t>(), b.data<int8_t>(), result.data<int8_t>(),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, SubOp());
+    } else if (a.dtype() == DType::UInt8) {
+        broadcast_kernel<<<grid, block, 0, stream>>>(
+            a.data<uint8_t>(), b.data<uint8_t>(), result.data<uint8_t>(),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, SubOp());
+    } else if (a.dtype() == DType::Int16) {
+        broadcast_kernel<<<grid, block, 0, stream>>>(
+            a.data<int16_t>(), b.data<int16_t>(), result.data<int16_t>(),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, SubOp());
+    } else if (a.dtype() == DType::UInt16) {
+        broadcast_kernel<<<grid, block, 0, stream>>>(
+            a.data<uint16_t>(), b.data<uint16_t>(), result.data<uint16_t>(),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, SubOp());
+    } else if (a.dtype() == DType::UInt32) {
+        broadcast_kernel<<<grid, block, 0, stream>>>(
+            a.data<uint32_t>(), b.data<uint32_t>(), result.data<uint32_t>(),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, SubOp());
+    } else if (a.dtype() == DType::UInt64) {
+        broadcast_kernel<<<grid, block, 0, stream>>>(
+            a.data<uint64_t>(), b.data<uint64_t>(), result.data<uint64_t>(),
             d_strides_a, d_strides_b, d_output_shape, ndim, n, SubOp());
     } else {
         throw std::runtime_error("Unsupported dtype for sub operation");
@@ -2404,6 +2440,9 @@ auto compare_kernel_launcher(const Tensor& a, const Tensor& b, cudaStream_t stre
                 reinterpret_cast<const __half*>(a.data_ptr()),
                 reinterpret_cast<const __half*>(b.data_ptr()),
                 result.data<bool>(), n, op);
+        } else if (a.dtype() == DType::Bool) {
+            compare_kernel_device<<<grid, block, 0, stream>>>(
+                a.data<bool>(), b.data<bool>(), result.data<bool>(), n, op);
         } else {
             throw std::runtime_error("Unsupported dtype for comparison operation");
         }
@@ -2458,6 +2497,10 @@ auto compare_kernel_launcher(const Tensor& a, const Tensor& b, cudaStream_t stre
             reinterpret_cast<const __half*>(a.data_ptr()),
             reinterpret_cast<const __half*>(b.data_ptr()),
             result.data<bool>(),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, op);
+    } else if (a.dtype() == DType::Bool) {
+        broadcast_compare_kernel<<<grid, block, 0, stream>>>(
+            a.data<bool>(), b.data<bool>(), result.data<bool>(),
             d_strides_a, d_strides_b, d_output_shape, ndim, n, op);
     } else {
         throw std::runtime_error("Unsupported dtype for comparison operation");

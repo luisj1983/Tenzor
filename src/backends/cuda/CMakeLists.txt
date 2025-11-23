@@ -138,6 +138,7 @@ target_compile_options(tenzor_backend_cuda PRIVATE
         --expt-relaxed-constexpr
         --expt-extended-lambda
         --use_fast_math
+        --ftz=false
         --generate-line-info
     >
 )
