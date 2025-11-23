@@ -1058,6 +1058,23 @@ auto initialize() -> void {
                         return cuda_backend->dispatch("conv2d_backward_weight", inputs, attrs);
                     });
 
+                // Pooling operations
+                registry.register_kernel("adaptive_avg_pool2d", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("adaptive_avg_pool2d", inputs, attrs);
+                    });
+
+                registry.register_kernel("adaptive_avg_pool2d_backward", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("adaptive_avg_pool2d_backward", inputs, attrs);
+                    });
+
+                // Vision operations
+                registry.register_kernel("gather_relative_position_bias", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("gather_relative_position_bias", inputs, attrs);
+                    });
+
                 std::cout << "CUDA operations registered successfully" << std::endl;
             } else {
                 std::cout << "CUDA backend loaded but no CUDA devices available" << std::endl;

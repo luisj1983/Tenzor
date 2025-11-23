@@ -2,15 +2,11 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/autograd/function.hpp"
+#include "tenzor/backend/registry.hpp"
 #include <cmath>
 #include <stdexcept>
 #include <limits>
 #include <vector>
-
-// Include CUDA kernel headers when available
-#ifdef TENZOR_HAS_CUDA
-#include "tenzor/backends/cuda/vision_kernels.hpp"
-#endif
 
 namespace tenzor::nn {
 
@@ -654,12 +650,14 @@ public:
         auto target_device = grad_output.device();
         auto target_dtype = grad_output.dtype();
 
-        #ifdef TENZOR_HAS_CUDA
-        // Use CUDA kernel for GPU tensors
-        if (target_device.type == Device::Type::CUDA) {
-            return {cuda::adaptive_avg_pool2d_backward(grad_output, H_in_, W_in_)};
+        // Use operation registry to dispatch to appropriate backend
+        if (target_device.type != Device::Type::CPU) {
+            OpAttributes attrs;
+            attrs["H_in"] = std::to_string(H_in_);
+            attrs["W_in"] = std::to_string(W_in_);
+            std::vector<Tensor> inputs = {grad_output};
+            return operation_registry().dispatch("adaptive_avg_pool2d_backward", inputs, attrs);
         }
-        #endif
 
         // CPU fallback
         auto grad_output_cpu = grad_output.to(Device::cpu());
@@ -791,13 +789,15 @@ auto AdaptiveAvgPool2d::forward(const Variable& input) -> Variable {
 
     Tensor output;
 
-    #ifdef TENZOR_HAS_CUDA
-    // Use CUDA kernel for GPU tensors
-    if (target_device.type == Device::Type::CUDA) {
-        output = cuda::adaptive_avg_pool2d_forward(input.tensor(), H_out, W_out);
-    } else
-    #endif
-    {
+    // Use operation registry to dispatch to appropriate backend
+    if (target_device.type != Device::Type::CPU) {
+        OpAttributes attrs;
+        attrs["output_h"] = std::to_string(H_out);
+        attrs["output_w"] = std::to_string(W_out);
+        std::vector<Tensor> inputs = {input.tensor()};
+        auto results = operation_registry().dispatch("adaptive_avg_pool2d", inputs, attrs);
+        output = results[0];
+    } else {
         // CPU fallback
         auto input_cpu = input.tensor().to(Device::cpu());
         output = zeros({N, C, H_out, W_out}, target_dtype, Device::cpu());

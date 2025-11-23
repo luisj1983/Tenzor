@@ -136,6 +136,13 @@ namespace cuda {
     auto lstm_cell_forward_kernel(const Tensor& gates, const Tensor& c_prev, int64_t batch_size, int64_t hidden_size, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
     auto lstm_cell_backward_kernel(const Tensor& grad_h, const Tensor& grad_c, const Tensor& gates, const Tensor& c_prev, const Tensor& c_out, int64_t batch_size, int64_t hidden_size, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
 
+    // Pooling operations
+    auto adaptive_avg_pool2d_forward(const Tensor& input, int64_t output_h, int64_t output_w) -> Tensor;
+    auto adaptive_avg_pool2d_backward(const Tensor& grad_output, int64_t H_in, int64_t W_in) -> Tensor;
+
+    // Vision operations
+    auto gather_relative_position_bias(const Tensor& table, const Tensor& indices, int64_t num_positions, int64_t num_heads) -> Tensor;
+
     // Fused operations (disabled - CUDA kernels not yet implemented)
     // auto fused_linear_relu_cuda(const Tensor& input, const Tensor& weight, const Tensor* bias) -> Tensor;
     // auto fused_batchnorm_relu_cuda(const Tensor& input, const Tensor& running_mean, const Tensor& running_var, const Tensor& weight, const Tensor& bias, float eps) -> Tensor;
@@ -1542,6 +1549,47 @@ public:
                     inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], batch_size, hidden_size, stream
                 );
                 return {grad_gates, grad_c_prev};
+            }
+            // Pooling operations
+            else if (op_name == "adaptive_avg_pool2d") {
+                if (inputs.size() != 1) {
+                    throw std::invalid_argument("adaptive_avg_pool2d operation requires exactly 1 input");
+                }
+                int64_t output_h = 1, output_w = 1;
+                if (attrs.contains("output_h")) {
+                    output_h = std::stoll(attrs.at("output_h"));
+                }
+                if (attrs.contains("output_w")) {
+                    output_w = std::stoll(attrs.at("output_w"));
+                }
+                return {cuda::adaptive_avg_pool2d_forward(inputs[0], output_h, output_w)};
+            }
+            else if (op_name == "adaptive_avg_pool2d_backward") {
+                if (inputs.size() != 1) {
+                    throw std::invalid_argument("adaptive_avg_pool2d_backward operation requires exactly 1 input");
+                }
+                int64_t H_in = 0, W_in = 0;
+                if (attrs.contains("H_in")) {
+                    H_in = std::stoll(attrs.at("H_in"));
+                }
+                if (attrs.contains("W_in")) {
+                    W_in = std::stoll(attrs.at("W_in"));
+                }
+                return {cuda::adaptive_avg_pool2d_backward(inputs[0], H_in, W_in)};
+            }
+            // Vision operations
+            else if (op_name == "gather_relative_position_bias") {
+                if (inputs.size() != 2) {
+                    throw std::invalid_argument("gather_relative_position_bias operation requires exactly 2 inputs");
+                }
+                int64_t num_positions = 0, num_heads = 0;
+                if (attrs.contains("num_positions")) {
+                    num_positions = std::stoll(attrs.at("num_positions"));
+                }
+                if (attrs.contains("num_heads")) {
+                    num_heads = std::stoll(attrs.at("num_heads"));
+                }
+                return {cuda::gather_relative_position_bias(inputs[0], inputs[1], num_positions, num_heads)};
             }
             // Fused operations disabled - CUDA kernels not yet implemented
             // Fall back to CPU fused operations for now

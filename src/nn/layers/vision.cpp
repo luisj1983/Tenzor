@@ -11,14 +11,10 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/transform.hpp"
+#include "tenzor/backend/registry.hpp"
 #include <stdexcept>
 #include <cmath>
 #include <random>
-
-// Include CUDA kernel headers when available
-#ifdef TENZOR_HAS_CUDA
-#include "tenzor/backends/cuda/vision_kernels.hpp"
-#endif
 
 namespace tenzor::nn {
 
@@ -208,20 +204,27 @@ auto WindowAttention::get_relative_position_bias() const -> Tensor {
     int64_t table_size = 2 * window_size_ - 1;
     int64_t num_positions = window_size_ * window_size_;
 
-    #ifdef TENZOR_HAS_CUDA
-    // Use CUDA kernel for GPU tensors
-    if (target_device.type == Device::Type::CUDA) {
+    // Use operation registry to dispatch to appropriate backend
+    if (target_device.type != Device::Type::CPU) {
         // Reshape table for gather: [table_size*table_size, num_heads]
         auto bias_flat = bias_table.reshape({table_size * table_size, num_heads_});
 
-        // Use CUDA gather kernel
-        auto bias = cuda::gather_relative_position_bias(
-            bias_flat, relative_position_index_, num_positions, num_heads_);
+        // Move index tensor to target device if needed
+        auto index_on_device = relative_position_index_.device().type == target_device.type
+                               ? relative_position_index_
+                               : relative_position_index_.to(target_device);
+
+        // Use registered gather kernel
+        OpAttributes attrs;
+        attrs["num_positions"] = std::to_string(num_positions);
+        attrs["num_heads"] = std::to_string(num_heads_);
+        std::vector<Tensor> inputs = {bias_flat, index_on_device};
+        auto results = operation_registry().dispatch("gather_relative_position_bias", inputs, attrs);
+        auto bias = results[0];
 
         // Permute to (num_heads, num_positions, num_positions)
         return bias.permute({2, 0, 1});
     }
-    #endif
 
     // CPU fallback
     auto bias_table_f32 = bias_table.to(DType::Float32).to(Device::cpu());
