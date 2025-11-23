@@ -448,31 +448,51 @@ auto Conv2d::forward(const Variable& input) -> Variable {
 
     auto& weight = *parameters_["weight"];
     auto bias_it = parameters_.find("bias");
+    Device original_device = input.tensor().device();
 
-    // Handle dtype mismatch: convert weight and bias to input's dtype if needed
-    Variable weight_dtype_matched = weight;
-    if (input.dtype() != weight.dtype()) {
-        auto weight_converted = weight.tensor().to(input.dtype());
-        weight_dtype_matched = Variable(weight_converted, weight.requires_grad());
-        weight_dtype_matched.set_grad_fn(weight.grad_fn());
+    // Handle dtype and device mismatch: convert weight and bias to input's dtype and device if needed
+    Variable weight_matched = weight;
+    bool weight_needs_conversion = (input.dtype() != weight.dtype()) ||
+                                   (input.tensor().device().type != weight.tensor().device().type);
+    if (weight_needs_conversion) {
+        auto weight_converted = weight.tensor();
+        // Convert device first if needed
+        if (input.tensor().device().type != weight.tensor().device().type) {
+            weight_converted = weight_converted.to(original_device);
+        }
+        // Convert dtype if needed
+        if (input.dtype() != weight_converted.dtype()) {
+            weight_converted = weight_converted.to(input.dtype());
+        }
+        weight_matched = Variable(weight_converted, weight.requires_grad());
+        weight_matched.set_grad_fn(weight.grad_fn());
     }
 
     const Tensor* bias_ptr = nullptr;
-    Variable bias_dtype_matched;
+    Variable bias_matched;
     if (bias_it != parameters_.end()) {
         auto& bias = *bias_it->second;
-        if (input.dtype() != bias.dtype()) {
-            auto bias_converted = bias.tensor().to(input.dtype());
-            bias_dtype_matched = Variable(bias_converted, bias.requires_grad());
-            bias_dtype_matched.set_grad_fn(bias.grad_fn());
-            bias_ptr = &bias_dtype_matched.tensor();
+        bool bias_needs_conversion = (input.dtype() != bias.dtype()) ||
+                                     (input.tensor().device().type != bias.tensor().device().type);
+        if (bias_needs_conversion) {
+            auto bias_converted = bias.tensor();
+            // Convert device first if needed
+            if (input.tensor().device().type != bias.tensor().device().type) {
+                bias_converted = bias_converted.to(original_device);
+            }
+            // Convert dtype if needed
+            if (input.dtype() != bias_converted.dtype()) {
+                bias_converted = bias_converted.to(input.dtype());
+            }
+            bias_matched = Variable(bias_converted, bias.requires_grad());
+            bias_matched.set_grad_fn(bias.grad_fn());
+            bias_ptr = &bias_matched.tensor();
         } else {
             bias_ptr = &bias.tensor();
         }
     }
 
     Tensor output;
-    Device original_device = input.tensor().device();
 
     #ifdef TENZOR_HAS_CUDA
     if (original_device.type == Device::Type::CUDA) {
@@ -480,14 +500,14 @@ auto Conv2d::forward(const Variable& input) -> Variable {
         // Try cuDNN first for optimal performance
         try {
             output = cuda::cudnn_conv2d_forward(
-                input.tensor(), weight_dtype_matched.tensor(), bias_ptr,
+                input.tensor(), weight_matched.tensor(), bias_ptr,
                 stride_, padding_, dilation_, groups_,
                 nullptr
             );
         } catch (const std::exception& e) {
             // Fall back to custom CUDA kernels
             output = cuda::conv2d_forward_kernel(
-                input.tensor(), weight_dtype_matched.tensor(), bias_ptr,
+                input.tensor(), weight_matched.tensor(), bias_ptr,
                 stride_, padding_, dilation_, groups_,
                 nullptr
             );
@@ -495,7 +515,7 @@ auto Conv2d::forward(const Variable& input) -> Variable {
         #else
         // Use custom CUDA kernels
         output = cuda::conv2d_forward_kernel(
-            input.tensor(), weight_dtype_matched.tensor(), bias_ptr,
+            input.tensor(), weight_matched.tensor(), bias_ptr,
             stride_, padding_, dilation_, groups_,
             nullptr
         );
@@ -509,7 +529,7 @@ auto Conv2d::forward(const Variable& input) -> Variable {
 
         // Compute output using backend operation
         // Pass bias as third input if present
-        std::vector<Tensor> inputs_vec = {input.tensor(), weight_dtype_matched.tensor()};
+        std::vector<Tensor> inputs_vec = {input.tensor(), weight_matched.tensor()};
         if (bias_ptr != nullptr) {
             inputs_vec.push_back(*bias_ptr);
         }
@@ -533,9 +553,9 @@ auto Conv2d::forward(const Variable& input) -> Variable {
     if (input.requires_grad() || weight.requires_grad()) {
         std::vector<Tensor> tensors_to_save;
         if (bias_ptr != nullptr) {
-            tensors_to_save = {input.tensor(), weight_dtype_matched.tensor(), *bias_ptr};
+            tensors_to_save = {input.tensor(), weight_matched.tensor(), *bias_ptr};
         } else {
-            tensors_to_save = {input.tensor(), weight_dtype_matched.tensor()};
+            tensors_to_save = {input.tensor(), weight_matched.tensor()};
         }
 
         auto backward_fn = std::make_shared<Conv2dBackward>(

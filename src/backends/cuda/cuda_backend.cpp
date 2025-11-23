@@ -1,6 +1,7 @@
 #include "tenzor/backend/backend.hpp"
 #include "tenzor/backend/caching_allocator.hpp"
 #include "tenzor/backend/loader.hpp"
+#include "tenzor/ops/creation.hpp"
 #ifdef TENZOR_HAS_CUDNN
 #include "tenzor/backend/cudnn_wrapper.hpp"
 #endif
@@ -8,6 +9,7 @@
 #include <stdexcept>
 #include <limits>
 #include <cstdlib>
+#include <sstream>
 
 namespace tenzor {
 
@@ -1352,6 +1354,143 @@ public:
                     compute_grad_input, compute_grad_weight, compute_grad_bias, stream
                 );
                 return {grad_input, grad_weight, grad_bias};
+                #endif
+            }
+            else if (op_name == "conv2d_backward_input") {
+                // Parse conv2d parameters
+                int64_t stride = 1, padding = 0, dilation = 1, groups = 1;
+                if (attrs.contains("stride")) stride = std::stoll(attrs.at("stride"));
+                if (attrs.contains("padding")) padding = std::stoll(attrs.at("padding"));
+                if (attrs.contains("dilation")) dilation = std::stoll(attrs.at("dilation"));
+                if (attrs.contains("groups")) groups = std::stoll(attrs.at("groups"));
+
+                if (inputs.size() != 2) {
+                    throw std::invalid_argument("conv2d_backward_input requires 2 inputs (grad_output, weight)");
+                }
+
+                // Parse input_shape from comma-separated string
+                std::vector<int64_t> input_shape;
+                if (attrs.contains("input_shape")) {
+                    std::string shape_str = attrs.at("input_shape");
+                    std::stringstream ss(shape_str);
+                    std::string item;
+                    while (std::getline(ss, item, ',')) {
+                        input_shape.push_back(std::stoll(item));
+                    }
+                }
+
+                // Create a dummy input tensor with the correct shape for the backward kernel
+                auto dummy_input = zeros(input_shape, inputs[0].dtype(), inputs[0].device());
+
+                #ifdef TENZOR_HAS_CUDNN
+                try {
+                    auto [grad_input, grad_weight, grad_bias] = cuda::cudnn_conv2d_backward(
+                        inputs[0], dummy_input, inputs[1], stride, padding, dilation, groups,
+                        true, false, false, stream
+                    );
+                    return std::vector<Tensor>{grad_input};
+                } catch (const std::exception& e) {
+                    auto [grad_input, grad_weight, grad_bias] = cuda::conv2d_backward_kernel(
+                        inputs[0], dummy_input, inputs[1], stride, padding, dilation, groups,
+                        true, false, false, stream
+                    );
+                    return std::vector<Tensor>{grad_input};
+                }
+                #else
+                auto [grad_input, grad_weight, grad_bias] = cuda::conv2d_backward_kernel(
+                    inputs[0], dummy_input, inputs[1], stride, padding, dilation, groups,
+                    true, false, false, stream
+                );
+                return std::vector<Tensor>{grad_input};
+                #endif
+            }
+            else if (op_name == "conv2d_backward_weight") {
+                // Parse conv2d parameters
+                int64_t stride = 1, padding = 0, dilation = 1, groups = 1;
+                if (attrs.contains("stride")) stride = std::stoll(attrs.at("stride"));
+                if (attrs.contains("padding")) padding = std::stoll(attrs.at("padding"));
+                if (attrs.contains("dilation")) dilation = std::stoll(attrs.at("dilation"));
+                if (attrs.contains("groups")) groups = std::stoll(attrs.at("groups"));
+
+                if (inputs.size() != 2) {
+                    throw std::invalid_argument("conv2d_backward_weight requires 2 inputs (grad_output, input)");
+                }
+
+                // Parse weight_shape from comma-separated string
+                std::vector<int64_t> weight_shape;
+                if (attrs.contains("weight_shape")) {
+                    std::string shape_str = attrs.at("weight_shape");
+                    std::stringstream ss(shape_str);
+                    std::string item;
+                    while (std::getline(ss, item, ',')) {
+                        weight_shape.push_back(std::stoll(item));
+                    }
+                }
+
+                // Create a dummy weight tensor with the correct shape for the backward kernel
+                auto dummy_weight = zeros(weight_shape, inputs[0].dtype(), inputs[0].device());
+
+                #ifdef TENZOR_HAS_CUDNN
+                try {
+                    auto [grad_input, grad_weight, grad_bias] = cuda::cudnn_conv2d_backward(
+                        inputs[0], inputs[1], dummy_weight, stride, padding, dilation, groups,
+                        false, true, false, stream
+                    );
+                    return std::vector<Tensor>{grad_weight};
+                } catch (const std::exception& e) {
+                    auto [grad_input, grad_weight, grad_bias] = cuda::conv2d_backward_kernel(
+                        inputs[0], inputs[1], dummy_weight, stride, padding, dilation, groups,
+                        false, true, false, stream
+                    );
+                    return std::vector<Tensor>{grad_weight};
+                }
+                #else
+                auto [grad_input, grad_weight, grad_bias] = cuda::conv2d_backward_kernel(
+                    inputs[0], inputs[1], dummy_weight, stride, padding, dilation, groups,
+                    false, true, false, stream
+                );
+                return std::vector<Tensor>{grad_weight};
+                #endif
+            }
+            else if (op_name == "conv2d_backward_bias") {
+                if (inputs.size() != 1) {
+                    throw std::invalid_argument("conv2d_backward_bias requires 1 input (grad_output)");
+                }
+
+                // Gradient w.r.t. bias is just sum over batch and spatial dimensions
+                // Sum over dimensions: (batch, out_channels, out_h, out_w) -> (out_channels)
+                auto grad_output_shape = inputs[0].shape();
+                int64_t out_channels = grad_output_shape[1];
+
+                // Create output tensor for bias gradient
+                auto grad_bias = zeros({out_channels}, inputs[0].dtype(), inputs[0].device());
+
+                // Use a simple sum reduction - sum over batch (0), height (2), width (3)
+                // For now, use the unified backward kernel with dummy tensors
+                // Create minimal dummy tensors
+                auto dummy_input = zeros({1, 1, 1, 1}, inputs[0].dtype(), inputs[0].device());
+                auto dummy_weight = zeros({static_cast<int64_t>(out_channels), 1, 1, 1}, inputs[0].dtype(), inputs[0].device());
+
+                #ifdef TENZOR_HAS_CUDNN
+                try {
+                    auto [gi, gw, gb] = cuda::cudnn_conv2d_backward(
+                        inputs[0], dummy_input, dummy_weight, 1, 0, 1, 1,
+                        false, false, true, stream
+                    );
+                    return std::vector<Tensor>{gb};
+                } catch (const std::exception& e) {
+                    auto [gi, gw, gb] = cuda::conv2d_backward_kernel(
+                        inputs[0], dummy_input, dummy_weight, 1, 0, 1, 1,
+                        false, false, true, stream
+                    );
+                    return std::vector<Tensor>{gb};
+                }
+                #else
+                auto [gi, gw, gb] = cuda::conv2d_backward_kernel(
+                    inputs[0], dummy_input, dummy_weight, 1, 0, 1, 1,
+                    false, false, true, stream
+                );
+                return std::vector<Tensor>{gb};
                 #endif
             }
             else if (op_name == "lstm_cell_forward") {

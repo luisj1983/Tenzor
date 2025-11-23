@@ -1,5 +1,6 @@
 #include "tenzor/core/tensor.hpp"
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
 #include <device_launch_parameters.h>
 #include <cfloat>
 #include <cmath>
@@ -15,6 +16,30 @@ constexpr int MAX_BLOCK_SIZE = 1024;
 constexpr int REDUCTION_BLOCK_SIZE = 256;
 
 // ============================================================================
+// Type helpers for __half support
+// ============================================================================
+
+// Device-side helpers
+template<typename T>
+__device__ __forceinline__ T cuda_zero() { return T(0); }
+
+template<>
+__device__ __forceinline__ __half cuda_zero<__half>() { return __float2half(0.0f); }
+
+template<typename T>
+__device__ __forceinline__ T cuda_add(T a, T b) { return a + b; }
+
+template<>
+__device__ __forceinline__ __half cuda_add<__half>(__half a, __half b) { return __hadd(a, b); }
+
+// Host-side helpers
+template<typename T>
+inline T host_zero() { return T(0); }
+
+template<>
+inline __half host_zero<__half>() { return __float2half(0.0f); }
+
+// ============================================================================
 // Warp-level reduction primitives
 // ============================================================================
 
@@ -23,6 +48,16 @@ __device__ __forceinline__ T warp_reduce_sum(T val) {
     #pragma unroll
     for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
         val += __shfl_down_sync(0xffffffff, val, offset);
+    }
+    return val;
+}
+
+// Specialization for __half
+template<>
+__device__ __forceinline__ __half warp_reduce_sum(__half val) {
+    #pragma unroll
+    for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
+        val = __hadd(val, __shfl_down_sync(0xffffffff, val, offset));
     }
     return val;
 }
@@ -60,9 +95,9 @@ __global__ void sum_reduce_kernel(const T* input, T* output, int64_t n) {
     int64_t grid_size = blockDim.x * gridDim.x;
 
     // Grid-stride loop for better occupancy
-    T thread_sum = 0;
+    T thread_sum = cuda_zero<T>();
     for (int64_t i = idx; i < n; i += grid_size) {
-        thread_sum += input[i];
+        thread_sum = cuda_add(thread_sum, input[i]);
     }
 
     shared[tid] = thread_sum;
@@ -71,7 +106,7 @@ __global__ void sum_reduce_kernel(const T* input, T* output, int64_t n) {
     // Block-level reduction in shared memory
     for (int stride = blockDim.x / 2; stride >= WARP_SIZE; stride >>= 1) {
         if (tid < stride) {
-            shared[tid] += shared[tid + stride];
+            shared[tid] = cuda_add(shared[tid], shared[tid + stride]);
         }
         __syncthreads();
     }
@@ -215,7 +250,7 @@ __global__ void sum_along_dim_kernel(
     }
 
     // Sum along the reduction dimension
-    T sum = 0;
+    T sum = cuda_zero<T>();
     for (int64_t i = 0; i < dim_size; i++) {
         indices[dim] = i;
 
@@ -225,7 +260,7 @@ __global__ void sum_along_dim_kernel(
             in_idx += indices[d] * input_strides[d];
         }
 
-        sum += input[in_idx];
+        sum = cuda_add(sum, input[in_idx]);
     }
 
     output[out_idx] = sum;
@@ -361,7 +396,7 @@ static auto compute_reduction_shape(
 template<typename T>
 static void launch_full_reduction_sum(const T* d_input, T* d_output, int64_t n, cudaStream_t stream = nullptr) {
     if (n == 0) {
-        T zero = 0;
+        T zero = host_zero<T>();
         cudaMemcpyAsync(d_output, &zero, sizeof(T), cudaMemcpyHostToDevice, stream);
         return;
     }
@@ -675,6 +710,22 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
             }
             break;
         }
+        case DType::Float16: {
+            auto* input_data = reinterpret_cast<const __half*>(input.data_ptr());
+            auto* output_data = reinterpret_cast<__half*>(output.data_ptr());
+
+            if (dim < 0) {
+                launch_full_reduction_sum(input_data, output_data, input.numel(), stream);
+            } else {
+                launch_dim_reduction_sum(
+                    input_data, output_data,
+                    std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                    std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                    dim
+                );
+            }
+            break;
+        }
         default:
             throw std::runtime_error("sum: unsupported dtype");
     }
@@ -698,11 +749,20 @@ __global__ void scale_kernel(T* data, int64_t n, T scale) {
     }
 }
 
+// Specialization for __half (no *= operator)
+template<>
+__global__ void scale_kernel<__half>(__half* data, int64_t n, __half scale) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        data[idx] = __float2half(__half2float(data[idx]) * __half2float(scale));
+    }
+}
+
 auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
     const auto dtype = input.dtype();
 
-    if (dtype != DType::Float32 && dtype != DType::Float64) {
-        throw std::runtime_error("mean: only Float32 and Float64 are supported");
+    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16) {
+        throw std::runtime_error("mean: only Float32, Float64, and Float16 are supported");
     }
 
     // Compute sum first
@@ -729,9 +789,13 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t st
         auto* data = sum_result.data<float>();
         const float scale = 1.0f / static_cast<float>(count);
         scale_kernel<<<grid_size, block_size, 0, stream>>>(data, n, scale);
-    } else {  // Float64
+    } else if (dtype == DType::Float64) {
         auto* data = sum_result.data<double>();
         const double scale = 1.0 / static_cast<double>(count);
+        scale_kernel<<<grid_size, block_size, 0, stream>>>(data, n, scale);
+    } else {  // Float16
+        auto* data = reinterpret_cast<__half*>(sum_result.data_ptr());
+        const __half scale = __float2half(1.0f / static_cast<float>(count));
         scale_kernel<<<grid_size, block_size, 0, stream>>>(data, n, scale);
     }
 

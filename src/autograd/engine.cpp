@@ -29,11 +29,13 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient, boo
         }
         std::cerr << "]" << std::endl;
 
-        // Check first few gradient values
+        // Check first few gradient values (copy to CPU first if on GPU)
         if (gradient->dtype() == DType::Float16) {
-            auto* data = gradient->data<Float16>();
             std::cerr << "[ENGINE_F16] First 5 gradient values: ";
-            for (int i = 0; i < std::min(5, static_cast<int>(gradient->numel())); ++i) {
+            // Copy gradient to CPU for safe access
+            Tensor cpu_grad = gradient->to(Device::cpu());
+            auto* data = cpu_grad.data<Float16>();
+            for (int i = 0; i < std::min(5, static_cast<int>(cpu_grad.numel())); ++i) {
                 std::cerr << static_cast<float>(data[i]) << " ";
             }
             std::cerr << std::endl;

@@ -208,6 +208,14 @@ __global__ void tanh_forward_kernel(const T* input, T* output, int64_t n) {
     }
 }
 
+// Specialization for __half
+template<>
+__global__ void tanh_forward_kernel<__half>(const __half* input, __half* output, int64_t n) {
+    CUDA_GRID_STRIDE_LOOP(idx, n) {
+        output[idx] = __float2half(tanhf(__half2float(input[idx])));
+    }
+}
+
 // Backward: grad_out * (1 - tanh(x)^2)
 template<typename T>
 __global__ void tanh_backward_kernel(const T* grad_output, const T* input,
@@ -215,6 +223,16 @@ __global__ void tanh_backward_kernel(const T* grad_output, const T* input,
     CUDA_GRID_STRIDE_LOOP(idx, n) {
         T tanh_x = tanh(input[idx]);
         grad_input[idx] = grad_output[idx] * (T(1) - tanh_x * tanh_x);
+    }
+}
+
+// Specialization for __half
+template<>
+__global__ void tanh_backward_kernel<__half>(const __half* grad_output, const __half* input,
+                                            __half* grad_input, int64_t n) {
+    CUDA_GRID_STRIDE_LOOP(idx, n) {
+        float tanh_x = tanhf(__half2float(input[idx]));
+        grad_input[idx] = __float2half(__half2float(grad_output[idx]) * (1.0f - tanh_x * tanh_x));
     }
 }
 
@@ -264,6 +282,17 @@ __global__ void gelu_forward_kernel(const T* input, T* output, int64_t n) {
     }
 }
 
+// Specialization for __half
+template<>
+__global__ void gelu_forward_kernel<__half>(const __half* input, __half* output, int64_t n) {
+    CUDA_GRID_STRIDE_LOOP(idx, n) {
+        float x = __half2float(input[idx]);
+        float x_cubed = x * x * x;
+        float tanh_arg = 0.7978845608f * (x + 0.044715f * x_cubed);
+        output[idx] = __float2half(x * 0.5f * (1.0f + tanhf(tanh_arg)));
+    }
+}
+
 // Backward: grad_out * df/dx
 // where df/dx = 0.5 * (1 + tanh(z)) + 0.5 * x * sech²(z) * dz/dx
 // z = sqrt(2/π) * (x + 0.044715 * x³)
@@ -295,6 +324,36 @@ __global__ void gelu_backward_kernel(const T* grad_output, const T* input,
         T df_dx = T(0.5) * (T(1.0) + tanh_z) + T(0.5) * x * sech2_z * dz_dx;
 
         grad_input[idx] = grad_output[idx] * df_dx;
+    }
+}
+
+// Specialization for __half
+template<>
+__global__ void gelu_backward_kernel<__half>(const __half* grad_output, const __half* input,
+                                              __half* grad_input, int64_t n) {
+    CUDA_GRID_STRIDE_LOOP(idx, n) {
+        float x = __half2float(input[idx]);
+        float x_squared = x * x;
+        float x_cubed = x_squared * x;
+
+        // Constants
+        constexpr float sqrt_2_over_pi = 0.7978845608f;
+        constexpr float coeff = 0.044715f;
+
+        // Compute z and tanh(z)
+        float z = sqrt_2_over_pi * (x + coeff * x_cubed);
+        float tanh_z = tanhf(z);
+
+        // Compute dz/dx
+        float dz_dx = sqrt_2_over_pi * (1.0f + 3.0f * coeff * x_squared);
+
+        // Compute sech²(z) = 1 - tanh²(z)
+        float sech2_z = 1.0f - tanh_z * tanh_z;
+
+        // Compute df/dx
+        float df_dx = 0.5f * (1.0f + tanh_z) + 0.5f * x * sech2_z * dz_dx;
+
+        grad_input[idx] = __float2half(__half2float(grad_output[idx]) * df_dx);
     }
 }
 
@@ -393,6 +452,22 @@ extern "C" {
 // Shared memory size for reductions
 constexpr int SOFTMAX_BLOCK_SIZE = 256;
 
+// Type-appropriate minimum value for max reduction initialization
+template<typename T>
+__device__ __forceinline__ T numeric_min() {
+    return -FLT_MAX;  // Default for float
+}
+
+template<>
+__device__ __forceinline__ double numeric_min<double>() {
+    return -DBL_MAX;
+}
+
+template<>
+__device__ __forceinline__ __half numeric_min<__half>() {
+    return __float2half(-65504.0f);
+}
+
 // Warp-level reduction using shuffle instructions
 template<typename T>
 __device__ __forceinline__ T warp_reduce_max(T val) {
@@ -423,7 +498,7 @@ __device__ T block_reduce_max(T val, T* shared) {
     }
     __syncthreads();
 
-    val = (threadIdx.x < blockDim.x / 32) ? shared[lane] : T(-65504.0f);
+    val = (threadIdx.x < blockDim.x / 32) ? shared[lane] : numeric_min<T>();
     if (wid == 0) {
         val = warp_reduce_max(val);
     }
@@ -466,7 +541,7 @@ __global__ void softmax_forward_kernel(const T* input, T* output,
     T* output_row = output + row * dim_size;
 
     // Step 1: Find max value for numerical stability
-    T max_val = -FLT_MAX;
+    T max_val = numeric_min<T>();
     for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
         max_val = device_max(max_val, input_row[i]);
     }
@@ -599,7 +674,7 @@ __global__ void log_softmax_forward_kernel(const T* input, T* output,
     T* output_row = output + row * dim_size;
 
     // Step 1: Find max value for numerical stability
-    T max_val = -FLT_MAX;
+    T max_val = numeric_min<T>();
     for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
         max_val = device_max(max_val, input_row[i]);
     }
@@ -869,8 +944,13 @@ auto tanh_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
         int num_blocks = get_num_blocks(n);
         tanh_forward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        int num_blocks = get_num_blocks(n);
+        tanh_forward_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<const __half*>(input.data_ptr()),
+            reinterpret_cast<__half*>(result.data_ptr()), n);
     } else {
-        throw std::runtime_error("Tanh only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("Tanh only supports Float32, Float64, and Float16 dtypes");
     }
 
     cudaError_t err = cudaGetLastError();
@@ -900,8 +980,14 @@ auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaSt
         int num_blocks = get_num_blocks(n);
         tanh_backward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             grad_output.data<double>(), input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        int num_blocks = get_num_blocks(n);
+        tanh_backward_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<const __half*>(grad_output.data_ptr()),
+            reinterpret_cast<const __half*>(input.data_ptr()),
+            reinterpret_cast<__half*>(result.data_ptr()), n);
     } else {
-        throw std::runtime_error("Tanh backward only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("Tanh backward only supports Float32, Float64, and Float16 dtypes");
     }
 
     cudaError_t err = cudaGetLastError();
@@ -931,8 +1017,13 @@ auto gelu_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
         int num_blocks = get_num_blocks(n);
         gelu_forward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        int num_blocks = get_num_blocks(n);
+        gelu_forward_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<const __half*>(input.data_ptr()),
+            reinterpret_cast<__half*>(result.data_ptr()), n);
     } else {
-        throw std::runtime_error("GELU only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("GELU only supports Float32, Float64, and Float16 dtypes");
     }
 
     cudaError_t err = cudaGetLastError();
@@ -962,8 +1053,14 @@ auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaSt
         int num_blocks = get_num_blocks(n);
         gelu_backward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             grad_output.data<double>(), input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        int num_blocks = get_num_blocks(n);
+        gelu_backward_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<const __half*>(grad_output.data_ptr()),
+            reinterpret_cast<const __half*>(input.data_ptr()),
+            reinterpret_cast<__half*>(result.data_ptr()), n);
     } else {
-        throw std::runtime_error("GELU backward only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("GELU backward only supports Float32, Float64, and Float16 dtypes");
     }
 
     cudaError_t err = cudaGetLastError();

@@ -2034,6 +2034,13 @@ __global__ void randn_kernel_bf16(__nv_bfloat16* output, curandState* states, in
     }
 }
 
+// Float-to-double conversion kernel for proper type conversion
+__global__ void convert_float_to_double_kernel(const float* input, double* output, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        output[idx] = static_cast<double>(input[idx]);
+    }
+}
+
 // Rand kernel launcher - uniform random [0, 1)
 auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, cudaStream_t stream) -> Tensor {
     if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16 && dtype != DType::BFloat16) {
@@ -2074,16 +2081,16 @@ auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
         rand_kernel_device<<<grid, block, 0, stream>>>(result.data<float>(), d_states, n);
         CUDA_CHECK(cudaGetLastError());
     } else if (dtype == DType::Float64) {
-        // For Float64, generate as float then convert
+        // For Float64, generate as float then convert properly
         float* temp_float;
         CUDA_CHECK(cudaMalloc(&temp_float, n * sizeof(float)));
         rand_kernel_device<<<grid, block, 0, stream>>>(temp_float, d_states, n);
         CUDA_CHECK(cudaGetLastError());
 
-        // Convert float to double
+        // Convert float to double using proper conversion kernel
         double* output_double = result.data<double>();
-        CUDA_CHECK(cudaMemcpy(output_double, temp_float, n * sizeof(float), cudaMemcpyDeviceToDevice));
-        // Note: This copies as bytes, need proper conversion kernel for production
+        convert_float_to_double_kernel<<<grid, block, 0, stream>>>(temp_float, output_double, n);
+        CUDA_CHECK(cudaGetLastError());
         CUDA_CHECK(cudaFree(temp_float));
     } else if (dtype == DType::Float16) {
         rand_kernel_f16<<<grid, block, 0, stream>>>(
@@ -2161,16 +2168,16 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
         printf("[DEBUG randn_kernel] Float32 generation complete\n");
     } else if (dtype == DType::Float64) {
         printf("[DEBUG randn_kernel] Generating Float64 random numbers...\n");
-        // For Float64, generate as float then convert
+        // For Float64, generate as float then convert properly
         float* temp_float;
         CUDA_CHECK(cudaMalloc(&temp_float, n * sizeof(float)));
         randn_kernel_device<<<grid, block, 0, stream>>>(temp_float, d_states, n);
         CUDA_CHECK(cudaGetLastError());
 
-        // Convert float to double
+        // Convert float to double using proper conversion kernel
         double* output_double = result.data<double>();
-        CUDA_CHECK(cudaMemcpy(output_double, temp_float, n * sizeof(float), cudaMemcpyDeviceToDevice));
-        // Note: This copies as bytes, need proper conversion kernel for production
+        convert_float_to_double_kernel<<<grid, block, 0, stream>>>(temp_float, output_double, n);
+        CUDA_CHECK(cudaGetLastError());
         CUDA_CHECK(cudaFree(temp_float));
         printf("[DEBUG randn_kernel] Float64 generation complete\n");
     } else if (dtype == DType::Float16) {
@@ -2205,30 +2212,61 @@ struct EqOp {
     __device__ bool operator()(T a, T b) const { return a == b; }
 };
 
+// Specialization for __half
+template<>
+__device__ inline bool EqOp::operator()<__half>(__half a, __half b) const {
+    return __heq(a, b);
+}
+
 struct NeOp {
     template<typename T>
     __device__ bool operator()(T a, T b) const { return a != b; }
 };
+
+template<>
+__device__ inline bool NeOp::operator()<__half>(__half a, __half b) const {
+    return __hne(a, b);
+}
 
 struct LtOp {
     template<typename T>
     __device__ bool operator()(T a, T b) const { return a < b; }
 };
 
+template<>
+__device__ inline bool LtOp::operator()<__half>(__half a, __half b) const {
+    return __hlt(a, b);
+}
+
 struct LeOp {
     template<typename T>
     __device__ bool operator()(T a, T b) const { return a <= b; }
 };
+
+template<>
+__device__ inline bool LeOp::operator()<__half>(__half a, __half b) const {
+    return __hle(a, b);
+}
 
 struct GtOp {
     template<typename T>
     __device__ bool operator()(T a, T b) const { return a > b; }
 };
 
+template<>
+__device__ inline bool GtOp::operator()<__half>(__half a, __half b) const {
+    return __hgt(a, b);
+}
+
 struct GeOp {
     template<typename T>
     __device__ bool operator()(T a, T b) const { return a >= b; }
 };
+
+template<>
+__device__ inline bool GeOp::operator()<__half>(__half a, __half b) const {
+    return __hge(a, b);
+}
 
 // Fast path: element-wise comparison (same shape)
 template<typename T, typename Op>
@@ -2304,6 +2342,11 @@ auto compare_kernel_launcher(const Tensor& a, const Tensor& b, cudaStream_t stre
         } else if (a.dtype() == DType::Int64) {
             compare_kernel_device<<<grid, block, 0, stream>>>(
                 a.data<int64_t>(), b.data<int64_t>(), result.data<bool>(), n, op);
+        } else if (a.dtype() == DType::Float16) {
+            compare_kernel_device<<<grid, block, 0, stream>>>(
+                reinterpret_cast<const __half*>(a.data_ptr()),
+                reinterpret_cast<const __half*>(b.data_ptr()),
+                result.data<bool>(), n, op);
         } else {
             throw std::runtime_error("Unsupported dtype for comparison operation");
         }
@@ -2352,6 +2395,12 @@ auto compare_kernel_launcher(const Tensor& a, const Tensor& b, cudaStream_t stre
     } else if (a.dtype() == DType::Int64) {
         broadcast_compare_kernel<<<grid, block, 0, stream>>>(
             a.data<int64_t>(), b.data<int64_t>(), result.data<bool>(),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, op);
+    } else if (a.dtype() == DType::Float16) {
+        broadcast_compare_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __half*>(a.data_ptr()),
+            reinterpret_cast<const __half*>(b.data_ptr()),
+            result.data<bool>(),
             d_strides_a, d_strides_b, d_output_shape, ndim, n, op);
     } else {
         throw std::runtime_error("Unsupported dtype for comparison operation");
