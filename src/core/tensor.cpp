@@ -129,6 +129,14 @@ template auto Tensor::data<int64_t>() -> int64_t*;
 template auto Tensor::data<int64_t>() const -> const int64_t*;
 template auto Tensor::data<uint8_t>() -> uint8_t*;
 template auto Tensor::data<uint8_t>() const -> const uint8_t*;
+template auto Tensor::data<int16_t>() -> int16_t*;
+template auto Tensor::data<int16_t>() const -> const int16_t*;
+template auto Tensor::data<uint16_t>() -> uint16_t*;
+template auto Tensor::data<uint16_t>() const -> const uint16_t*;
+template auto Tensor::data<uint32_t>() -> uint32_t*;
+template auto Tensor::data<uint32_t>() const -> const uint32_t*;
+template auto Tensor::data<uint64_t>() -> uint64_t*;
+template auto Tensor::data<uint64_t>() const -> const uint64_t*;
 template auto Tensor::data<bool>() -> bool*;
 template auto Tensor::data<bool>() const -> const bool*;
 

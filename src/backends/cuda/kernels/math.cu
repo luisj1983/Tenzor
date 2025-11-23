@@ -693,6 +693,15 @@ auto add_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
                 reinterpret_cast<const __nv_bfloat16*>(a.data<BFloat16>()),
                 reinterpret_cast<const __nv_bfloat16*>(b.data<BFloat16>()),
                 reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), n);
+        } else if (a.dtype() == DType::Int8) {
+            add_kernel_device<<<grid, block, 0, stream>>>(
+                a.data<int8_t>(), b.data<int8_t>(), result.data<int8_t>(), n);
+        } else if (a.dtype() == DType::UInt8) {
+            add_kernel_device<<<grid, block, 0, stream>>>(
+                a.data<uint8_t>(), b.data<uint8_t>(), result.data<uint8_t>(), n);
+        } else if (a.dtype() == DType::Int16) {
+            add_kernel_device<<<grid, block, 0, stream>>>(
+                a.data<int16_t>(), b.data<int16_t>(), result.data<int16_t>(), n);
         } else {
             throw std::runtime_error("Unsupported dtype for add operation");
         }
@@ -753,6 +762,18 @@ auto add_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
             reinterpret_cast<const __nv_bfloat16*>(a.data<BFloat16>()),
             reinterpret_cast<const __nv_bfloat16*>(b.data<BFloat16>()),
             reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, AddOp());
+    } else if (a.dtype() == DType::Int8) {
+        broadcast_kernel<<<grid, block, 0, stream>>>(
+            a.data<int8_t>(), b.data<int8_t>(), result.data<int8_t>(),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, AddOp());
+    } else if (a.dtype() == DType::UInt8) {
+        broadcast_kernel<<<grid, block, 0, stream>>>(
+            a.data<uint8_t>(), b.data<uint8_t>(), result.data<uint8_t>(),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, AddOp());
+    } else if (a.dtype() == DType::Int16) {
+        broadcast_kernel<<<grid, block, 0, stream>>>(
+            a.data<int16_t>(), b.data<int16_t>(), result.data<int16_t>(),
             d_strides_a, d_strides_b, d_output_shape, ndim, n, AddOp());
     } else {
         throw std::runtime_error("Unsupported dtype for add operation");
@@ -1882,6 +1903,24 @@ auto zeros_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
     } else if (dtype == DType::Bool) {
         fill_kernel_device<<<grid, block, 0, stream>>>(
             result.data<bool>(), false, n);
+    } else if (dtype == DType::Int8) {
+        fill_kernel_device<<<grid, block, 0, stream>>>(
+            result.data<int8_t>(), static_cast<int8_t>(0), n);
+    } else if (dtype == DType::UInt8) {
+        fill_kernel_device<<<grid, block, 0, stream>>>(
+            result.data<uint8_t>(), static_cast<uint8_t>(0), n);
+    } else if (dtype == DType::Int16) {
+        fill_kernel_device<<<grid, block, 0, stream>>>(
+            result.data<int16_t>(), static_cast<int16_t>(0), n);
+    } else if (dtype == DType::UInt16) {
+        fill_kernel_device<<<grid, block, 0, stream>>>(
+            result.data<uint16_t>(), static_cast<uint16_t>(0), n);
+    } else if (dtype == DType::UInt32) {
+        fill_kernel_device<<<grid, block, 0, stream>>>(
+            result.data<uint32_t>(), static_cast<uint32_t>(0), n);
+    } else if (dtype == DType::UInt64) {
+        fill_kernel_device<<<grid, block, 0, stream>>>(
+            result.data<uint64_t>(), static_cast<uint64_t>(0), n);
     } else {
         throw std::runtime_error("Unsupported dtype for zeros operation");
     }
@@ -1926,6 +1965,24 @@ auto ones_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
     } else if (dtype == DType::Bool) {
         fill_kernel_device<<<grid, block, 0, stream>>>(
             result.data<bool>(), true, n);
+    } else if (dtype == DType::Int8) {
+        fill_kernel_device<<<grid, block, 0, stream>>>(
+            result.data<int8_t>(), static_cast<int8_t>(1), n);
+    } else if (dtype == DType::UInt8) {
+        fill_kernel_device<<<grid, block, 0, stream>>>(
+            result.data<uint8_t>(), static_cast<uint8_t>(1), n);
+    } else if (dtype == DType::Int16) {
+        fill_kernel_device<<<grid, block, 0, stream>>>(
+            result.data<int16_t>(), static_cast<int16_t>(1), n);
+    } else if (dtype == DType::UInt16) {
+        fill_kernel_device<<<grid, block, 0, stream>>>(
+            result.data<uint16_t>(), static_cast<uint16_t>(1), n);
+    } else if (dtype == DType::UInt32) {
+        fill_kernel_device<<<grid, block, 0, stream>>>(
+            result.data<uint32_t>(), static_cast<uint32_t>(1), n);
+    } else if (dtype == DType::UInt64) {
+        fill_kernel_device<<<grid, block, 0, stream>>>(
+            result.data<uint64_t>(), static_cast<uint64_t>(1), n);
     } else {
         throw std::runtime_error("Unsupported dtype for ones operation");
     }

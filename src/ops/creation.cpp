@@ -41,9 +41,14 @@ static auto dtype_to_string(DType dtype) -> std::string {
         case DType::Float64: return "float64";
         case DType::Float16: return "float16";
         case DType::BFloat16: return "bfloat16";
+        case DType::Int8: return "int8";
+        case DType::Int16: return "int16";
         case DType::Int32: return "int32";
         case DType::Int64: return "int64";
         case DType::UInt8: return "uint8";
+        case DType::UInt16: return "uint16";
+        case DType::UInt32: return "uint32";
+        case DType::UInt64: return "uint64";
         case DType::Bool: return "bool";
         default: return "unknown";
     }
