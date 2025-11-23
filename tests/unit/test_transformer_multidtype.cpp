@@ -314,6 +314,7 @@ TEST_P(TransformerEncoderMultiDTypeTest, MultipleLayersProcessing) {
     auto encoder_layer = std::make_shared<TransformerEncoderLayer>(128, 4, 512, 0.0, "relu", true);
     TransformerEncoder encoder(encoder_layer, 6);  // 6 layers
     encoder.to(device);
+    encoder.to(dtype);  // Convert model to test dtype
 
     Variable src(randn({2, 5, 128}, dtype, device), true);
     Variable output = encoder.forward(src, Tensor{}, Tensor{});

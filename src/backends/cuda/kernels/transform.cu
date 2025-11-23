@@ -1,4 +1,5 @@
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/core/shape.hpp"
@@ -112,6 +113,11 @@ auto contiguous_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
         contiguous_kernel_impl<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             input.data<double>(), result.data<double>(),
             d_strides, d_shape, ndim, total_elements);
+    } else if (input.dtype() == DType::Float16) {
+        contiguous_kernel_impl<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<const __half*>(input.data_ptr()),
+            reinterpret_cast<__half*>(result.data_ptr()),
+            d_strides, d_shape, ndim, total_elements);
     } else if (input.dtype() == DType::Int32) {
         contiguous_kernel_impl<int32_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             input.data<int32_t>(), result.data<int32_t>(),
@@ -120,10 +126,23 @@ auto contiguous_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
         contiguous_kernel_impl<int64_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             input.data<int64_t>(), result.data<int64_t>(),
             d_strides, d_shape, ndim, total_elements);
+    } else if (input.dtype() == DType::Int8) {
+        contiguous_kernel_impl<int8_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            input.data<int8_t>(), result.data<int8_t>(),
+            d_strides, d_shape, ndim, total_elements);
+    } else if (input.dtype() == DType::UInt8) {
+        contiguous_kernel_impl<uint8_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            input.data<uint8_t>(), result.data<uint8_t>(),
+            d_strides, d_shape, ndim, total_elements);
+    } else if (input.dtype() == DType::Bool) {
+        contiguous_kernel_impl<bool><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<const bool*>(input.data_ptr()),
+            reinterpret_cast<bool*>(result.data_ptr()),
+            d_strides, d_shape, ndim, total_elements);
     } else {
         cudaFree(d_strides);
         cudaFree(d_shape);
-        throw std::runtime_error("Contiguous only supports Float32, Float64, Int32, and Int64 dtypes");
+        throw std::runtime_error("Contiguous: unsupported dtype");
     }
 
     cudaError_t err = cudaGetLastError();
@@ -433,13 +452,33 @@ auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, cudaStream_t strea
             reinterpret_cast<int64_t**>(d_input_ptrs), output.data<int64_t>(),
             d_input_shapes, d_output_shape, d_output_strides, d_offsets,
             num_tensors, ndim, dim, total_elements);
+    } else if (tensors[0].dtype() == DType::Float16) {
+        cat_kernel_impl<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<__half**>(d_input_ptrs), reinterpret_cast<__half*>(output.data_ptr()),
+            d_input_shapes, d_output_shape, d_output_strides, d_offsets,
+            num_tensors, ndim, dim, total_elements);
+    } else if (tensors[0].dtype() == DType::Int8) {
+        cat_kernel_impl<int8_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<int8_t**>(d_input_ptrs), output.data<int8_t>(),
+            d_input_shapes, d_output_shape, d_output_strides, d_offsets,
+            num_tensors, ndim, dim, total_elements);
+    } else if (tensors[0].dtype() == DType::UInt8) {
+        cat_kernel_impl<uint8_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<uint8_t**>(d_input_ptrs), output.data<uint8_t>(),
+            d_input_shapes, d_output_shape, d_output_strides, d_offsets,
+            num_tensors, ndim, dim, total_elements);
+    } else if (tensors[0].dtype() == DType::Bool) {
+        cat_kernel_impl<bool><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<bool**>(d_input_ptrs), reinterpret_cast<bool*>(output.data_ptr()),
+            d_input_shapes, d_output_shape, d_output_strides, d_offsets,
+            num_tensors, ndim, dim, total_elements);
     } else {
         cudaFree(d_input_ptrs);
         cudaFree(d_input_shapes);
         cudaFree(d_output_shape);
         cudaFree(d_output_strides);
         cudaFree(d_offsets);
-        throw std::runtime_error("Concatenation only supports Float32, Float64, Int32, and Int64 dtypes");
+        throw std::runtime_error("Concatenation: unsupported dtype");
     }
 
     cudaError_t err = cudaGetLastError();

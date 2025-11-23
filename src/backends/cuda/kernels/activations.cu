@@ -41,6 +41,46 @@ inline int get_num_blocks(int64_t n, int block_size = BLOCK_SIZE) {
 }
 
 // ============================================================================
+// Half-precision (Float16) Device Helper Functions
+// ============================================================================
+
+// Generic device max function
+template<typename T>
+__device__ __forceinline__ T device_max(T a, T b) {
+    return a > b ? a : b;
+}
+
+// Specialization for __half
+template<>
+__device__ __forceinline__ __half device_max(__half a, __half b) {
+    return __hgt(a, b) ? a : b;
+}
+
+// Generic device exp function
+template<typename T>
+__device__ __forceinline__ T device_exp(T x) {
+    return exp(x);
+}
+
+// Specialization for __half
+template<>
+__device__ __forceinline__ __half device_exp(__half x) {
+    return hexp(x);
+}
+
+// Generic device log function
+template<typename T>
+__device__ __forceinline__ T device_log(T x) {
+    return log(x);
+}
+
+// Specialization for __half
+template<>
+__device__ __forceinline__ __half device_log(__half x) {
+    return hlog(x);
+}
+
+// ============================================================================
 // ReLU Activation
 // ============================================================================
 
@@ -357,7 +397,7 @@ constexpr int SOFTMAX_BLOCK_SIZE = 256;
 template<typename T>
 __device__ __forceinline__ T warp_reduce_max(T val) {
     for (int offset = 16; offset > 0; offset /= 2) {
-        val = max(val, __shfl_down_sync(0xffffffff, val, offset));
+        val = device_max(val, __shfl_down_sync(0xffffffff, val, offset));
     }
     return val;
 }
@@ -383,7 +423,7 @@ __device__ T block_reduce_max(T val, T* shared) {
     }
     __syncthreads();
 
-    val = (threadIdx.x < blockDim.x / 32) ? shared[lane] : -FLT_MAX;
+    val = (threadIdx.x < blockDim.x / 32) ? shared[lane] : T(-65504.0f);
     if (wid == 0) {
         val = warp_reduce_max(val);
     }
@@ -428,7 +468,7 @@ __global__ void softmax_forward_kernel(const T* input, T* output,
     // Step 1: Find max value for numerical stability
     T max_val = -FLT_MAX;
     for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
-        max_val = max(max_val, input_row[i]);
+        max_val = device_max(max_val, input_row[i]);
     }
     max_val = block_reduce_max(max_val, shared);
     __syncthreads();
@@ -443,7 +483,7 @@ __global__ void softmax_forward_kernel(const T* input, T* output,
     // Step 2: Compute exp(x - max) and sum
     T sum_exp = T(0);
     for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
-        T exp_val = exp(input_row[i] - max_val);
+        T exp_val = device_exp(input_row[i] - max_val);
         output_row[i] = exp_val;
         sum_exp += exp_val;
     }
@@ -561,7 +601,7 @@ __global__ void log_softmax_forward_kernel(const T* input, T* output,
     // Step 1: Find max value for numerical stability
     T max_val = -FLT_MAX;
     for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
-        max_val = max(max_val, input_row[i]);
+        max_val = device_max(max_val, input_row[i]);
     }
     max_val = block_reduce_max(max_val, shared);
     __syncthreads();
@@ -576,14 +616,14 @@ __global__ void log_softmax_forward_kernel(const T* input, T* output,
     // Step 2: Compute sum(exp(x - max))
     T sum_exp = T(0);
     for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
-        sum_exp += exp(input_row[i] - max_val);
+        sum_exp += device_exp(input_row[i] - max_val);
     }
     sum_exp = block_reduce_sum(sum_exp, shared);
     __syncthreads();
 
     // Broadcast sum to all threads
     if (threadIdx.x == 0) {
-        shared[0] = log(sum_exp);
+        shared[0] = device_log(sum_exp);
     }
     __syncthreads();
     T log_sum_exp = shared[0];
@@ -626,7 +666,7 @@ __global__ void log_softmax_backward_kernel(const T* grad_output, const T* outpu
 
     // Compute gradient: grad_output - exp(log_softmax) * sum_grad
     for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
-        grad_in_row[i] = grad_out_row[i] - exp(out_row[i]) * sum_grad;
+        grad_in_row[i] = grad_out_row[i] - device_exp(out_row[i]) * sum_grad;
     }
 }
 
@@ -694,8 +734,13 @@ auto relu_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
         int num_blocks = get_num_blocks(n);
         relu_forward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        int num_blocks = get_num_blocks(n);
+        relu_forward_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<const __half*>(input.data_ptr()),
+            reinterpret_cast<__half*>(result.data_ptr()), n);
     } else {
-        throw std::runtime_error("ReLU only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("ReLU only supports Float32, Float64, and Float16 dtypes");
     }
 
     cudaError_t err = cudaGetLastError();
@@ -725,8 +770,14 @@ auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaSt
         int num_blocks = get_num_blocks(n);
         relu_backward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             grad_output.data<double>(), input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        int num_blocks = get_num_blocks(n);
+        relu_backward_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<const __half*>(grad_output.data_ptr()),
+            reinterpret_cast<const __half*>(input.data_ptr()),
+            reinterpret_cast<__half*>(result.data_ptr()), n);
     } else {
-        throw std::runtime_error("ReLU backward only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("ReLU backward only supports Float32, Float64, and Float16 dtypes");
     }
 
     cudaError_t err = cudaGetLastError();
@@ -1023,8 +1074,15 @@ auto softmax_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Te
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(double);
         softmax_forward_kernel<double><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             input.data<double>(), result.data<double>(), batch_size, dim_size);
+    } else if (input.dtype() == DType::Float16) {
+        int num_blocks = batch_size;
+        int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(__half);
+        softmax_forward_kernel<__half><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
+            reinterpret_cast<const __half*>(input.data_ptr()),
+            reinterpret_cast<__half*>(result.data_ptr()),
+            batch_size, dim_size);
     } else {
-        throw std::runtime_error("Softmax only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("Softmax only supports Float32, Float64, and Float16 dtypes");
     }
 
     cudaError_t err = cudaGetLastError();
@@ -1067,8 +1125,16 @@ auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, in
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(double);
         softmax_backward_kernel<double><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             grad_output.data<double>(), output.data<double>(), result.data<double>(), batch_size, dim_size);
+    } else if (output.dtype() == DType::Float16) {
+        int num_blocks = batch_size;
+        int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(__half);
+        softmax_backward_kernel<__half><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
+            reinterpret_cast<const __half*>(grad_output.data_ptr()),
+            reinterpret_cast<const __half*>(output.data_ptr()),
+            reinterpret_cast<__half*>(result.data_ptr()),
+            batch_size, dim_size);
     } else {
-        throw std::runtime_error("Softmax backward only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("Softmax backward only supports Float32, Float64, and Float16 dtypes");
     }
 
     cudaError_t err = cudaGetLastError();
@@ -1111,8 +1177,15 @@ auto log_softmax_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(double);
         log_softmax_forward_kernel<double><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             input.data<double>(), result.data<double>(), batch_size, dim_size);
+    } else if (input.dtype() == DType::Float16) {
+        int num_blocks = batch_size;
+        int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(__half);
+        log_softmax_forward_kernel<__half><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
+            reinterpret_cast<const __half*>(input.data_ptr()),
+            reinterpret_cast<__half*>(result.data_ptr()),
+            batch_size, dim_size);
     } else {
-        throw std::runtime_error("Log Softmax only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("Log Softmax only supports Float32, Float64, and Float16 dtypes");
     }
 
     cudaError_t err = cudaGetLastError();
@@ -1155,8 +1228,16 @@ auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output
         int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(double);
         log_softmax_backward_kernel<double><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
             grad_output.data<double>(), output.data<double>(), result.data<double>(), batch_size, dim_size);
+    } else if (output.dtype() == DType::Float16) {
+        int num_blocks = batch_size;
+        int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(__half);
+        log_softmax_backward_kernel<__half><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size, stream>>>(
+            reinterpret_cast<const __half*>(grad_output.data_ptr()),
+            reinterpret_cast<const __half*>(output.data_ptr()),
+            reinterpret_cast<__half*>(result.data_ptr()),
+            batch_size, dim_size);
     } else {
-        throw std::runtime_error("Log Softmax backward only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("Log Softmax backward only supports Float32, Float64, and Float16 dtypes");
     }
 
     cudaError_t err = cudaGetLastError();
