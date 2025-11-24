@@ -93,6 +93,8 @@ public:
         float memory_fraction{0.9f};                            ///< GPU memory threshold for auto-offload (0.0-1.0)
         size_t cpu_memory_limit{16ULL * 1024 * 1024 * 1024};   ///< CPU memory limit (16 GB)
         size_t gpu_memory_limit{8ULL * 1024 * 1024 * 1024};    ///< GPU memory limit (8 GB)
+        bool enable_auto_monitoring{true};                      ///< Enable automatic memory monitoring
+        int monitoring_interval_ms{100};                        ///< Monitoring check interval in milliseconds
 
         Config() = default;
     };
@@ -271,9 +273,19 @@ public:
     /**
      * @brief Get current GPU memory pressure (0.0-1.0)
      *
+     * Uses the default GPU device type for pressure calculation.
+     *
      * @return Memory pressure value (0.0 = empty, 1.0 = full)
      */
     auto get_gpu_memory_pressure() const -> float;
+
+    /**
+     * @brief Get GPU memory pressure for a specific device type (0.0-1.0)
+     *
+     * @param device_type The device type to check pressure for
+     * @return Memory pressure value (0.0 = empty, 1.0 = full)
+     */
+    auto get_gpu_memory_pressure(Device::Type device_type) const -> float;
 
     /**
      * @brief Check if GPU memory pressure is over threshold
@@ -377,6 +389,10 @@ private:
     std::atomic<bool> stop_prefetch_worker_{false};
     std::thread prefetch_worker_thread_;
 
+    // Monitoring thread for automatic offload
+    std::thread monitoring_thread_;
+    std::atomic<bool> stop_monitoring_{false};
+
     // Statistics
     std::atomic<size_t> offload_count_{0};
     std::atomic<size_t> load_count_{0};
@@ -385,6 +401,9 @@ private:
 
     // Worker thread for prefetch processing
     auto prefetch_worker() -> void;
+
+    // Worker thread for automatic memory monitoring
+    auto monitoring_worker() -> void;
 
     // Helper to get GPU device from tensor or use default
     auto get_gpu_device(const Tensor& tensor) const -> Device;

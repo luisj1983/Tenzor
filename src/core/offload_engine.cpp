@@ -62,6 +62,12 @@ OffloadEngine::OffloadEngine(const Config& config)
             prefetch_worker_thread_ = std::thread(&OffloadEngine::prefetch_worker, this);
         }
 
+        // Start monitoring worker thread if enabled
+        if (config_.enable_auto_monitoring) {
+            stop_monitoring_.store(false);
+            monitoring_thread_ = std::thread(&OffloadEngine::monitoring_worker, this);
+        }
+
     } catch (const std::exception& e) {
         throw std::runtime_error(
             std::string("OffloadEngine initialization failed: ") + e.what()
@@ -70,6 +76,12 @@ OffloadEngine::OffloadEngine(const Config& config)
 }
 
 OffloadEngine::~OffloadEngine() {
+    // Stop monitoring worker
+    if (config_.enable_auto_monitoring && monitoring_thread_.joinable()) {
+        stop_monitoring_.store(true);
+        monitoring_thread_.join();
+    }
+
     // Stop prefetch worker
     if (config_.enable_prefetch && prefetch_worker_thread_.joinable()) {
         stop_prefetch_worker_.store(true);
@@ -340,11 +352,22 @@ auto OffloadEngine::check_and_offload() -> size_t {
             continue;  // Already on CPU
         }
 
-        // Offload to CPU asynchronously
+        // Offload to CPU
         try {
             auto handle = transfer_engine_->gpu_to_cpu_async(*tensor);
-            // Note: In a real implementation, we'd need to handle the result
-            // and update the tensor pointer. For now, we just trigger the transfer.
+
+            // Wait for the transfer to complete
+            handle.wait();
+
+            // Get the resulting CPU tensor and update the original tensor
+            Tensor cpu_tensor = handle.get_tensor();
+            *tensor = cpu_tensor;
+
+            // Update memory manager to reflect the new location
+            if (memory_manager_) {
+                memory_manager_->update_tensor_location(tensor, Device::cpu());
+            }
+
             offloaded++;
             auto_offload_count_.fetch_add(1, std::memory_order_relaxed);
         } catch (const std::exception& e) {
@@ -361,8 +384,16 @@ auto OffloadEngine::get_gpu_memory_pressure() const -> float {
         return 0.0f;
     }
 
-    // Get pressure for CUDA device (could be extended for other GPU types)
-    return memory_manager_->get_memory_pressure(Device::Type::CUDA);
+    // Use default GPU device type instead of hardcoding CUDA
+    return memory_manager_->get_memory_pressure(default_gpu_device_.type);
+}
+
+auto OffloadEngine::get_gpu_memory_pressure(Device::Type device_type) const -> float {
+    if (!memory_manager_) {
+        return 0.0f;
+    }
+
+    return memory_manager_->get_memory_pressure(device_type);
 }
 
 auto OffloadEngine::is_over_threshold() const -> bool {
@@ -476,6 +507,25 @@ auto OffloadEngine::prefetch_worker() -> void {
                 // Silently skip on error
                 continue;
             }
+        }
+    }
+}
+
+auto OffloadEngine::monitoring_worker() -> void {
+    while (!stop_monitoring_.load(std::memory_order_relaxed)) {
+        // Sleep for the configured interval
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(config_.monitoring_interval_ms)
+        );
+
+        // Check if we should stop
+        if (stop_monitoring_.load(std::memory_order_relaxed)) {
+            break;
+        }
+
+        // Check memory pressure and trigger auto-offload if needed
+        if (is_over_threshold()) {
+            check_and_offload();
         }
     }
 }

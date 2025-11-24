@@ -20,8 +20,13 @@ MemoryManager::MemoryManager(const Config& config)
     // Initialize CPU memory limits
     cpu_memory_.memory_limit = config_.cpu_memory_limit;
 
-    // Initialize GPU memory limits (unified across all GPU types)
-    gpu_memory_.memory_limit = config_.gpu_memory_limit;
+    // Initialize per-device GPU memory limits
+    cuda_memory_.memory_limit = config_.cuda_memory_limit;
+    rocm_memory_.memory_limit = config_.rocm_memory_limit;
+    oneapi_memory_.memory_limit = config_.oneapi_memory_limit;
+    metal_memory_.memory_limit = config_.metal_memory_limit;
+    vulkan_memory_.memory_limit = config_.vulkan_memory_limit;
+    webgpu_memory_.memory_limit = config_.webgpu_memory_limit;
 
     // Initialize statistics
     stats_ = MemoryStats{};
@@ -58,17 +63,49 @@ auto MemoryManager::register_tensor(Tensor* tensor) -> void {
 
     // Update statistics
     stats_.total_tensors++;
-    if (location.type == Device::Type::CPU) {
-        stats_.cpu_tensors++;
-        stats_.cpu_memory_used += size_bytes;
-    } else {
-        // All GPU types (CUDA, ROCm, OneAPI, etc.)
-        stats_.gpu_tensors++;
-        stats_.gpu_memory_used += size_bytes;
-        if (location.type == Device::Type::CUDA) {
+    switch (location.type) {
+        case Device::Type::CPU:
+            stats_.cpu_tensors++;
+            stats_.cpu_memory_used += size_bytes;
+            break;
+        case Device::Type::CUDA:
             stats_.cuda_tensors++;
             stats_.cuda_memory_used += size_bytes;
-        }
+            stats_.gpu_tensors++;
+            stats_.gpu_memory_used += size_bytes;
+            break;
+        case Device::Type::ROCm:
+            stats_.rocm_tensors++;
+            stats_.rocm_memory_used += size_bytes;
+            stats_.gpu_tensors++;
+            stats_.gpu_memory_used += size_bytes;
+            break;
+        case Device::Type::OneAPI:
+            stats_.oneapi_tensors++;
+            stats_.oneapi_memory_used += size_bytes;
+            stats_.gpu_tensors++;
+            stats_.gpu_memory_used += size_bytes;
+            break;
+        case Device::Type::Metal:
+            stats_.metal_tensors++;
+            stats_.metal_memory_used += size_bytes;
+            stats_.gpu_tensors++;
+            stats_.gpu_memory_used += size_bytes;
+            break;
+        case Device::Type::Vulkan:
+            stats_.vulkan_tensors++;
+            stats_.vulkan_memory_used += size_bytes;
+            stats_.gpu_tensors++;
+            stats_.gpu_memory_used += size_bytes;
+            break;
+        case Device::Type::WebGPU:
+            stats_.webgpu_tensors++;
+            stats_.webgpu_memory_used += size_bytes;
+            stats_.gpu_tensors++;
+            stats_.gpu_memory_used += size_bytes;
+            break;
+        default:
+            break;
     }
 
     update_stats(location.type);
@@ -97,16 +134,49 @@ auto MemoryManager::unregister_tensor(Tensor* tensor) -> void {
 
     // Update statistics
     stats_.total_tensors--;
-    if (location.type == Device::Type::CPU) {
-        stats_.cpu_tensors--;
-        stats_.cpu_memory_used -= size_bytes;
-    } else {
-        stats_.gpu_tensors--;
-        stats_.gpu_memory_used -= size_bytes;
-        if (location.type == Device::Type::CUDA) {
+    switch (location.type) {
+        case Device::Type::CPU:
+            stats_.cpu_tensors--;
+            stats_.cpu_memory_used -= size_bytes;
+            break;
+        case Device::Type::CUDA:
             stats_.cuda_tensors--;
             stats_.cuda_memory_used -= size_bytes;
-        }
+            stats_.gpu_tensors--;
+            stats_.gpu_memory_used -= size_bytes;
+            break;
+        case Device::Type::ROCm:
+            stats_.rocm_tensors--;
+            stats_.rocm_memory_used -= size_bytes;
+            stats_.gpu_tensors--;
+            stats_.gpu_memory_used -= size_bytes;
+            break;
+        case Device::Type::OneAPI:
+            stats_.oneapi_tensors--;
+            stats_.oneapi_memory_used -= size_bytes;
+            stats_.gpu_tensors--;
+            stats_.gpu_memory_used -= size_bytes;
+            break;
+        case Device::Type::Metal:
+            stats_.metal_tensors--;
+            stats_.metal_memory_used -= size_bytes;
+            stats_.gpu_tensors--;
+            stats_.gpu_memory_used -= size_bytes;
+            break;
+        case Device::Type::Vulkan:
+            stats_.vulkan_tensors--;
+            stats_.vulkan_memory_used -= size_bytes;
+            stats_.gpu_tensors--;
+            stats_.gpu_memory_used -= size_bytes;
+            break;
+        case Device::Type::WebGPU:
+            stats_.webgpu_tensors--;
+            stats_.webgpu_memory_used -= size_bytes;
+            stats_.gpu_tensors--;
+            stats_.gpu_memory_used -= size_bytes;
+            break;
+        default:
+            break;
     }
 
     // Remove from tracking
@@ -157,16 +227,49 @@ auto MemoryManager::update_tensor_location(Tensor* tensor, Device new_location) 
     remove_from_lru(tensor, old_device_mem);
 
     // Update statistics for old location
-    if (old_location.type == Device::Type::CPU) {
-        stats_.cpu_tensors--;
-        stats_.cpu_memory_used -= size_bytes;
-    } else {
-        stats_.gpu_tensors--;
-        stats_.gpu_memory_used -= size_bytes;
-        if (old_location.type == Device::Type::CUDA) {
+    switch (old_location.type) {
+        case Device::Type::CPU:
+            stats_.cpu_tensors--;
+            stats_.cpu_memory_used -= size_bytes;
+            break;
+        case Device::Type::CUDA:
             stats_.cuda_tensors--;
             stats_.cuda_memory_used -= size_bytes;
-        }
+            stats_.gpu_tensors--;
+            stats_.gpu_memory_used -= size_bytes;
+            break;
+        case Device::Type::ROCm:
+            stats_.rocm_tensors--;
+            stats_.rocm_memory_used -= size_bytes;
+            stats_.gpu_tensors--;
+            stats_.gpu_memory_used -= size_bytes;
+            break;
+        case Device::Type::OneAPI:
+            stats_.oneapi_tensors--;
+            stats_.oneapi_memory_used -= size_bytes;
+            stats_.gpu_tensors--;
+            stats_.gpu_memory_used -= size_bytes;
+            break;
+        case Device::Type::Metal:
+            stats_.metal_tensors--;
+            stats_.metal_memory_used -= size_bytes;
+            stats_.gpu_tensors--;
+            stats_.gpu_memory_used -= size_bytes;
+            break;
+        case Device::Type::Vulkan:
+            stats_.vulkan_tensors--;
+            stats_.vulkan_memory_used -= size_bytes;
+            stats_.gpu_tensors--;
+            stats_.gpu_memory_used -= size_bytes;
+            break;
+        case Device::Type::WebGPU:
+            stats_.webgpu_tensors--;
+            stats_.webgpu_memory_used -= size_bytes;
+            stats_.gpu_tensors--;
+            stats_.gpu_memory_used -= size_bytes;
+            break;
+        default:
+            break;
     }
 
     // Add to new device tracking
@@ -175,16 +278,49 @@ auto MemoryManager::update_tensor_location(Tensor* tensor, Device new_location) 
     add_to_lru(tensor, new_device_mem);
 
     // Update statistics for new location
-    if (new_location.type == Device::Type::CPU) {
-        stats_.cpu_tensors++;
-        stats_.cpu_memory_used += size_bytes;
-    } else {
-        stats_.gpu_tensors++;
-        stats_.gpu_memory_used += size_bytes;
-        if (new_location.type == Device::Type::CUDA) {
+    switch (new_location.type) {
+        case Device::Type::CPU:
+            stats_.cpu_tensors++;
+            stats_.cpu_memory_used += size_bytes;
+            break;
+        case Device::Type::CUDA:
             stats_.cuda_tensors++;
             stats_.cuda_memory_used += size_bytes;
-        }
+            stats_.gpu_tensors++;
+            stats_.gpu_memory_used += size_bytes;
+            break;
+        case Device::Type::ROCm:
+            stats_.rocm_tensors++;
+            stats_.rocm_memory_used += size_bytes;
+            stats_.gpu_tensors++;
+            stats_.gpu_memory_used += size_bytes;
+            break;
+        case Device::Type::OneAPI:
+            stats_.oneapi_tensors++;
+            stats_.oneapi_memory_used += size_bytes;
+            stats_.gpu_tensors++;
+            stats_.gpu_memory_used += size_bytes;
+            break;
+        case Device::Type::Metal:
+            stats_.metal_tensors++;
+            stats_.metal_memory_used += size_bytes;
+            stats_.gpu_tensors++;
+            stats_.gpu_memory_used += size_bytes;
+            break;
+        case Device::Type::Vulkan:
+            stats_.vulkan_tensors++;
+            stats_.vulkan_memory_used += size_bytes;
+            stats_.gpu_tensors++;
+            stats_.gpu_memory_used += size_bytes;
+            break;
+        case Device::Type::WebGPU:
+            stats_.webgpu_tensors++;
+            stats_.webgpu_memory_used += size_bytes;
+            stats_.gpu_tensors++;
+            stats_.gpu_memory_used += size_bytes;
+            break;
+        default:
+            break;
     }
 
     // Update tensor info
@@ -347,19 +483,44 @@ auto MemoryManager::get_tensor_count(Device::Type device) const -> size_t {
 // ============================================================================
 
 auto MemoryManager::get_device_memory(Device::Type device) -> DeviceMemory& {
-    if (device == Device::Type::CPU) {
-        return cpu_memory_;
-    } else {
-        // All GPU types use unified GPU memory tracking
-        return gpu_memory_;
+    switch (device) {
+        case Device::Type::CPU:
+            return cpu_memory_;
+        case Device::Type::CUDA:
+            return cuda_memory_;
+        case Device::Type::ROCm:
+            return rocm_memory_;
+        case Device::Type::OneAPI:
+            return oneapi_memory_;
+        case Device::Type::Metal:
+            return metal_memory_;
+        case Device::Type::Vulkan:
+            return vulkan_memory_;
+        case Device::Type::WebGPU:
+            return webgpu_memory_;
+        default:
+            return cpu_memory_;  // Fallback to CPU
     }
 }
 
 auto MemoryManager::get_device_memory(Device::Type device) const -> const DeviceMemory& {
-    if (device == Device::Type::CPU) {
-        return cpu_memory_;
-    } else {
-        return gpu_memory_;
+    switch (device) {
+        case Device::Type::CPU:
+            return cpu_memory_;
+        case Device::Type::CUDA:
+            return cuda_memory_;
+        case Device::Type::ROCm:
+            return rocm_memory_;
+        case Device::Type::OneAPI:
+            return oneapi_memory_;
+        case Device::Type::Metal:
+            return metal_memory_;
+        case Device::Type::Vulkan:
+            return vulkan_memory_;
+        case Device::Type::WebGPU:
+            return webgpu_memory_;
+        default:
+            return cpu_memory_;  // Fallback to CPU
     }
 }
 
@@ -382,32 +543,93 @@ auto MemoryManager::update_stats(Device::Type device) -> void {
 
     const auto& device_mem = get_device_memory(device);
 
-    // Update memory pressure
-    if (device == Device::Type::CPU) {
-        if (device_mem.memory_limit > 0) {
-            stats_.cpu_memory_pressure = static_cast<float>(device_mem.memory_used) /
-                                        static_cast<float>(device_mem.memory_limit);
-        }
+    // Update memory pressure and peak memory based on device type
+    switch (device) {
+        case Device::Type::CPU:
+            if (device_mem.memory_limit > 0) {
+                stats_.cpu_memory_pressure = static_cast<float>(device_mem.memory_used) /
+                                            static_cast<float>(device_mem.memory_limit);
+            }
+            if (device_mem.memory_used > stats_.peak_cpu_memory) {
+                stats_.peak_cpu_memory = device_mem.memory_used;
+            }
+            break;
+        case Device::Type::CUDA:
+            if (device_mem.memory_limit > 0) {
+                stats_.cuda_memory_pressure = static_cast<float>(device_mem.memory_used) /
+                                             static_cast<float>(device_mem.memory_limit);
+            }
+            if (device_mem.memory_used > stats_.peak_cuda_memory) {
+                stats_.peak_cuda_memory = device_mem.memory_used;
+            }
+            break;
+        case Device::Type::ROCm:
+            if (device_mem.memory_limit > 0) {
+                stats_.rocm_memory_pressure = static_cast<float>(device_mem.memory_used) /
+                                             static_cast<float>(device_mem.memory_limit);
+            }
+            if (device_mem.memory_used > stats_.peak_rocm_memory) {
+                stats_.peak_rocm_memory = device_mem.memory_used;
+            }
+            break;
+        case Device::Type::OneAPI:
+            if (device_mem.memory_limit > 0) {
+                stats_.oneapi_memory_pressure = static_cast<float>(device_mem.memory_used) /
+                                               static_cast<float>(device_mem.memory_limit);
+            }
+            if (device_mem.memory_used > stats_.peak_oneapi_memory) {
+                stats_.peak_oneapi_memory = device_mem.memory_used;
+            }
+            break;
+        case Device::Type::Metal:
+            if (device_mem.memory_limit > 0) {
+                stats_.metal_memory_pressure = static_cast<float>(device_mem.memory_used) /
+                                              static_cast<float>(device_mem.memory_limit);
+            }
+            if (device_mem.memory_used > stats_.peak_metal_memory) {
+                stats_.peak_metal_memory = device_mem.memory_used;
+            }
+            break;
+        case Device::Type::Vulkan:
+            if (device_mem.memory_limit > 0) {
+                stats_.vulkan_memory_pressure = static_cast<float>(device_mem.memory_used) /
+                                               static_cast<float>(device_mem.memory_limit);
+            }
+            if (device_mem.memory_used > stats_.peak_vulkan_memory) {
+                stats_.peak_vulkan_memory = device_mem.memory_used;
+            }
+            break;
+        case Device::Type::WebGPU:
+            if (device_mem.memory_limit > 0) {
+                stats_.webgpu_memory_pressure = static_cast<float>(device_mem.memory_used) /
+                                               static_cast<float>(device_mem.memory_limit);
+            }
+            if (device_mem.memory_used > stats_.peak_webgpu_memory) {
+                stats_.peak_webgpu_memory = device_mem.memory_used;
+            }
+            break;
+        default:
+            break;
+    }
 
-        // Update peak CPU memory
-        if (device_mem.memory_used > stats_.peak_cpu_memory) {
-            stats_.peak_cpu_memory = device_mem.memory_used;
-        }
-    } else {
-        if (device_mem.memory_limit > 0) {
-            stats_.gpu_memory_pressure = static_cast<float>(device_mem.memory_used) /
-                                        static_cast<float>(device_mem.memory_limit);
-        }
+    // Update overall GPU memory pressure (max across all GPU types)
+    if (device != Device::Type::CPU) {
+        float max_gpu_pressure = std::max({
+            stats_.cuda_memory_pressure,
+            stats_.rocm_memory_pressure,
+            stats_.oneapi_memory_pressure,
+            stats_.metal_memory_pressure,
+            stats_.vulkan_memory_pressure,
+            stats_.webgpu_memory_pressure
+        });
+        stats_.gpu_memory_pressure = max_gpu_pressure;
 
-        // Update CUDA-specific pressure if CUDA device
-        if (device == Device::Type::CUDA && device_mem.memory_limit > 0) {
-            stats_.cuda_memory_pressure = static_cast<float>(device_mem.memory_used) /
-                                         static_cast<float>(device_mem.memory_limit);
-        }
-
-        // Update peak GPU memory
-        if (device_mem.memory_used > stats_.peak_gpu_memory) {
-            stats_.peak_gpu_memory = device_mem.memory_used;
+        // Update peak GPU memory (sum across all GPU types)
+        size_t total_gpu_peak = stats_.peak_cuda_memory + stats_.peak_rocm_memory +
+                               stats_.peak_oneapi_memory + stats_.peak_metal_memory +
+                               stats_.peak_vulkan_memory + stats_.peak_webgpu_memory;
+        if (total_gpu_peak > stats_.peak_gpu_memory) {
+            stats_.peak_gpu_memory = total_gpu_peak;
         }
     }
 }

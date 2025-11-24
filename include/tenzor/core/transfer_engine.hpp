@@ -23,6 +23,27 @@
 #include <cuda_runtime.h>
 #endif
 
+#ifdef TENZOR_USE_ROCM
+#include <hip/hip_runtime.h>
+#endif
+
+#ifdef TENZOR_USE_WEBGPU
+#include <webgpu/webgpu.h>
+#endif
+
+#ifdef TENZOR_USE_ONEAPI
+#include <sycl/sycl.hpp>
+#endif
+
+#ifdef TENZOR_USE_METAL
+// Forward declarations for Metal types (Objective-C objects wrapped in C++ containers)
+// Actual Metal includes are in the .mm/.cpp implementation file
+#endif
+
+#ifdef TENZOR_USE_VULKAN
+#include <vulkan/vulkan.h>
+#endif
+
 namespace tenzor {
 namespace core {
 
@@ -289,6 +310,21 @@ private:
     auto return_event(cudaEvent_t event) -> void;
 #endif
 
+#ifdef TENZOR_USE_ROCM
+    // HIP streams for parallel transfers
+    std::vector<hipStream_t> hip_streams_;
+
+    // HIP events pool for tracking completion
+    std::vector<hipEvent_t> hip_event_pool_;
+    std::mutex hip_event_pool_mutex_;
+
+    // Get HIP event from pool or create new one
+    auto get_hip_event() -> hipEvent_t;
+
+    // Return HIP event to pool
+    auto return_hip_event(hipEvent_t event) -> void;
+#endif
+
     // Pinned memory pool for fast transfers
     struct PinnedBuffer {
         void* ptr{nullptr};
@@ -338,6 +374,92 @@ private:
 
     // Cleanup CUDA resources
     auto cleanup_cuda_resources() -> void;
+
+    // Initialize ROCm resources
+    auto initialize_rocm_resources() -> void;
+
+    // Cleanup ROCm resources
+    auto cleanup_rocm_resources() -> void;
+
+#ifdef TENZOR_USE_WEBGPU
+    // WebGPU device and queue
+    WGPUDevice wgpu_device_{nullptr};
+    WGPUQueue wgpu_queue_{nullptr};
+
+    // Initialize WebGPU resources
+    auto initialize_webgpu_resources() -> void;
+
+    // Cleanup WebGPU resources
+    auto cleanup_webgpu_resources() -> void;
+#endif
+
+#ifdef TENZOR_USE_ONEAPI
+    // SYCL queues for parallel transfers
+    std::vector<sycl::queue> sycl_queues_;
+
+    // Stream counter for round-robin selection
+    std::atomic<int> next_stream_{0};
+
+    // Get SYCL queue by index
+    auto get_sycl_queue(int idx) -> sycl::queue&;
+
+    // Initialize OneAPI resources
+    auto initialize_oneapi_resources() -> void;
+
+    // Cleanup OneAPI resources
+    auto cleanup_oneapi_resources() -> void;
+#endif
+
+#ifdef TENZOR_USE_METAL
+    // Opaque pointer to Metal resources (defined in .cpp/.mm)
+    struct MetalResources;
+    std::unique_ptr<MetalResources> metal_resources_;
+
+    // Initialize Metal resources
+    auto initialize_metal_resources() -> void;
+
+    // Cleanup Metal resources
+    auto cleanup_metal_resources() -> void;
+#endif
+
+#ifdef TENZOR_USE_VULKAN
+    // Vulkan device and queue for transfers
+    VkDevice vk_device_{VK_NULL_HANDLE};
+    VkPhysicalDevice vk_physical_device_{VK_NULL_HANDLE};
+    VkQueue vk_transfer_queue_{VK_NULL_HANDLE};
+    uint32_t vk_transfer_queue_family_index_{0};
+    VkCommandPool vk_command_pool_{VK_NULL_HANDLE};
+
+    // Vulkan command buffers and fences pool
+    std::vector<VkCommandBuffer> vk_command_buffers_;
+    std::vector<VkFence> vk_fences_;
+    std::mutex vk_fence_mutex_;
+    std::mutex vk_command_buffer_mutex_;
+
+    // Initialize Vulkan resources
+    auto initialize_vulkan_resources() -> void;
+
+    // Cleanup Vulkan resources
+    auto cleanup_vulkan_resources() -> void;
+
+    // Get fence from pool or create new one
+    auto get_vk_fence() -> VkFence;
+
+    // Return fence to pool
+    auto return_vk_fence(VkFence fence) -> void;
+
+    // Get command buffer from pool or allocate new one
+    auto get_vk_command_buffer() -> VkCommandBuffer;
+
+    // Return command buffer to pool
+    auto return_vk_command_buffer(VkCommandBuffer cmd_buffer) -> void;
+
+    // Find memory type for Vulkan allocation
+    auto find_memory_type(uint32_t type_filter, VkMemoryPropertyFlags properties) -> uint32_t;
+
+    // Create staging buffer for Vulkan transfers
+    auto create_staging_buffer(VkDeviceSize size, VkBuffer& buffer, VkDeviceMemory& memory) -> void;
+#endif
 };
 
 /**
@@ -366,6 +488,14 @@ public:
     cudaStream_t stream{nullptr};
 #endif
 
+#ifdef TENZOR_USE_ROCM
+    // HIP event for async completion tracking
+    hipEvent_t hip_event{nullptr};
+
+    // HIP stream used for transfer
+    hipStream_t hip_stream{nullptr};
+#endif
+
     // Pinned buffer (if used)
     void* pinned_buffer{nullptr};
     TransferEngine* engine{nullptr};  // For returning resources
@@ -373,6 +503,43 @@ public:
     // Error state
     bool has_error{false};
     std::string error_message;
+
+#ifdef TENZOR_USE_WEBGPU
+    // WebGPU transfer tracking
+    WGPUBuffer wgpu_staging_buffer{nullptr};
+    bool wgpu_map_complete{false};
+    std::atomic<bool> wgpu_transfer_done{false};
+    bool has_webgpu_transfer{false};
+#endif
+
+#ifdef TENZOR_USE_ONEAPI
+    // SYCL event for async completion tracking
+    sycl::event sycl_event;
+    bool has_sycl_event{false};
+#endif
+
+#ifdef TENZOR_USE_METAL
+    // Metal command buffer for async completion tracking (id<MTLCommandBuffer>)
+    void* metal_command_buffer{nullptr};
+
+    // Flag indicating this transfer uses Metal
+    bool has_metal_transfer{false};
+#endif
+
+#ifdef TENZOR_USE_VULKAN
+    // Vulkan fence for async completion tracking
+    VkFence vk_fence{VK_NULL_HANDLE};
+
+    // Vulkan command buffer used for transfer
+    VkCommandBuffer vk_command_buffer{VK_NULL_HANDLE};
+
+    // Vulkan staging buffer handle
+    VkBuffer vk_staging_buffer{VK_NULL_HANDLE};
+    VkDeviceMemory vk_staging_memory{VK_NULL_HANDLE};
+
+    // Flag to indicate this is a Vulkan transfer
+    bool has_vulkan_transfer{false};
+#endif
 };
 
 } // namespace core

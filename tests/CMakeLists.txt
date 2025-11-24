@@ -860,7 +860,7 @@ if(TENZOR_BUILD_CUDA)
     )
 
     target_compile_definitions(test_memory_manager PRIVATE
-        TENZOR_CUDA_ENABLED
+        TENZOR_USE_CUDA
     )
 
     # Transfer Engine tests (ZeRO Phase 1)
@@ -879,7 +879,7 @@ if(TENZOR_BUILD_CUDA)
     )
 
     target_compile_definitions(test_transfer_engine PRIVATE
-        TENZOR_CUDA_ENABLED
+        TENZOR_USE_CUDA
     )
 
     # Pinned Allocator tests (ZeRO Phase 1)
@@ -898,7 +898,7 @@ if(TENZOR_BUILD_CUDA)
     )
 
     target_compile_definitions(test_pinned_allocator PRIVATE
-        TENZOR_CUDA_ENABLED
+        TENZOR_USE_CUDA
     )
 
     # Transfer Bandwidth Benchmark (ZeRO Phase 1)
@@ -917,7 +917,7 @@ if(TENZOR_BUILD_CUDA)
     )
 
     target_compile_definitions(test_transfer_benchmark PRIVATE
-        TENZOR_CUDA_ENABLED
+        TENZOR_USE_CUDA
     )
 
     # Phase 2: Offload Engine tests
@@ -936,7 +936,7 @@ if(TENZOR_BUILD_CUDA)
     )
 
     target_compile_definitions(test_offload_engine PRIVATE
-        TENZOR_CUDA_ENABLED
+        TENZOR_USE_CUDA
     )
 
     # Phase 2: Parameter Offloading API tests
@@ -955,7 +955,7 @@ if(TENZOR_BUILD_CUDA)
     )
 
     target_compile_definitions(test_parameter_offload PRIVATE
-        TENZOR_CUDA_ENABLED
+        TENZOR_USE_CUDA
     )
 
     # DataParallel tests (requires CUDA)

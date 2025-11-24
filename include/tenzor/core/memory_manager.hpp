@@ -30,12 +30,22 @@ struct MemoryStats {
     size_t total_tensors{0};           ///< Total tensors tracked
     size_t cpu_tensors{0};             ///< Tensors on CPU
     size_t cuda_tensors{0};            ///< Tensors on CUDA
-    size_t gpu_tensors{0};             ///< Tensors on GPU (CUDA/ROCm/OneAPI)
+    size_t rocm_tensors{0};            ///< Tensors on ROCm
+    size_t oneapi_tensors{0};          ///< Tensors on OneAPI
+    size_t metal_tensors{0};           ///< Tensors on Metal
+    size_t vulkan_tensors{0};          ///< Tensors on Vulkan
+    size_t webgpu_tensors{0};          ///< Tensors on WebGPU
+    size_t gpu_tensors{0};             ///< Tensors on GPU (all types combined)
     size_t pinned_tensors{0};          ///< Tensors in pinned memory
 
     size_t cpu_memory_used{0};         ///< Bytes used on CPU
     size_t cuda_memory_used{0};        ///< Bytes used on CUDA
-    size_t gpu_memory_used{0};         ///< Total GPU memory used
+    size_t rocm_memory_used{0};        ///< Bytes used on ROCm
+    size_t oneapi_memory_used{0};      ///< Bytes used on OneAPI
+    size_t metal_memory_used{0};       ///< Bytes used on Metal
+    size_t vulkan_memory_used{0};      ///< Bytes used on Vulkan
+    size_t webgpu_memory_used{0};      ///< Bytes used on WebGPU
+    size_t gpu_memory_used{0};         ///< Total GPU memory used (all types)
     size_t pinned_memory_used{0};      ///< Bytes in pinned memory
 
     size_t total_evictions{0};         ///< Total eviction operations
@@ -44,10 +54,21 @@ struct MemoryStats {
 
     float cpu_memory_pressure{0.0f};   ///< CPU memory pressure (0.0-1.0)
     float cuda_memory_pressure{0.0f};  ///< CUDA memory pressure (0.0-1.0)
+    float rocm_memory_pressure{0.0f};  ///< ROCm memory pressure (0.0-1.0)
+    float oneapi_memory_pressure{0.0f}; ///< OneAPI memory pressure (0.0-1.0)
+    float metal_memory_pressure{0.0f}; ///< Metal memory pressure (0.0-1.0)
+    float vulkan_memory_pressure{0.0f}; ///< Vulkan memory pressure (0.0-1.0)
+    float webgpu_memory_pressure{0.0f}; ///< WebGPU memory pressure (0.0-1.0)
     float gpu_memory_pressure{0.0f};   ///< Overall GPU memory pressure (0.0-1.0)
 
     size_t peak_cpu_memory{0};         ///< Peak CPU memory usage
-    size_t peak_gpu_memory{0};         ///< Peak GPU memory usage
+    size_t peak_cuda_memory{0};        ///< Peak CUDA memory usage
+    size_t peak_rocm_memory{0};        ///< Peak ROCm memory usage
+    size_t peak_oneapi_memory{0};      ///< Peak OneAPI memory usage
+    size_t peak_metal_memory{0};       ///< Peak Metal memory usage
+    size_t peak_vulkan_memory{0};      ///< Peak Vulkan memory usage
+    size_t peak_webgpu_memory{0};      ///< Peak WebGPU memory usage
+    size_t peak_gpu_memory{0};         ///< Peak GPU memory usage (all types)
 };
 
 /**
@@ -81,11 +102,17 @@ public:
      * @brief Configuration for memory manager.
      */
     struct Config {
-        size_t cpu_memory_limit{16ULL * 1024 * 1024 * 1024};  ///< CPU memory limit (16 GB)
-        size_t gpu_memory_limit{8ULL * 1024 * 1024 * 1024};   ///< GPU memory limit (8 GB)
-        float eviction_threshold{0.9f};                        ///< Eviction threshold (0.0-1.0)
-        bool track_statistics{true};                           ///< Enable statistics tracking
-        bool enable_cache{true};                               ///< Enable cache tracking
+        size_t cpu_memory_limit{16ULL * 1024 * 1024 * 1024};    ///< CPU memory limit (16 GB)
+        size_t cuda_memory_limit{8ULL * 1024 * 1024 * 1024};    ///< CUDA memory limit (8 GB)
+        size_t rocm_memory_limit{8ULL * 1024 * 1024 * 1024};    ///< ROCm memory limit (8 GB)
+        size_t oneapi_memory_limit{8ULL * 1024 * 1024 * 1024};  ///< OneAPI memory limit (8 GB)
+        size_t metal_memory_limit{8ULL * 1024 * 1024 * 1024};   ///< Metal memory limit (8 GB)
+        size_t vulkan_memory_limit{8ULL * 1024 * 1024 * 1024};  ///< Vulkan memory limit (8 GB)
+        size_t webgpu_memory_limit{8ULL * 1024 * 1024 * 1024};  ///< WebGPU memory limit (8 GB)
+        size_t gpu_memory_limit{8ULL * 1024 * 1024 * 1024};     ///< Default GPU memory limit (backward compat)
+        float eviction_threshold{0.9f};                         ///< Eviction threshold (0.0-1.0)
+        bool track_statistics{true};                            ///< Enable statistics tracking
+        bool enable_cache{true};                                ///< Enable cache tracking
     };
 
     /**
@@ -302,7 +329,12 @@ private:
 
     // Per-device memory tracking
     DeviceMemory cpu_memory_;                      ///< CPU memory tracking
-    DeviceMemory gpu_memory_;                      ///< GPU memory tracking (unified for all GPU types)
+    DeviceMemory cuda_memory_;                     ///< CUDA memory tracking
+    DeviceMemory rocm_memory_;                     ///< ROCm memory tracking
+    DeviceMemory oneapi_memory_;                   ///< OneAPI memory tracking
+    DeviceMemory metal_memory_;                    ///< Metal memory tracking
+    DeviceMemory vulkan_memory_;                   ///< Vulkan memory tracking
+    DeviceMemory webgpu_memory_;                   ///< WebGPU memory tracking
 
     // Statistics
     MemoryStats stats_;                            ///< Runtime statistics
