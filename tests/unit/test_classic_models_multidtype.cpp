@@ -106,8 +106,10 @@ protected:
     }
 
     Variable createInput(const std::vector<int64_t>& shape, bool requires_grad = true) {
-        Tensor tensor(shape, dtype_, device_);
-        tensor.fill_(0.5f);  // Initialize with non-zero values
+        // Create on CPU, fill, then transfer to device
+        Tensor tensor_cpu(shape, dtype_, Device::cpu());
+        tensor_cpu.fill_(0.5f);  // Initialize with non-zero values
+        Tensor tensor = (device_ == Device::cpu()) ? tensor_cpu : tensor_cpu.to(device_);
         return Variable(tensor, requires_grad);
     }
 
@@ -141,8 +143,9 @@ protected:
 TEST_P(ClassicModelsMultiDTypeTest, VGG11ForwardShape) {
     auto model = vgg11(10, true, false);
 
-    // Convert model to test dtype
+    // Convert model to test dtype and device
     model->to(dtype_);
+    model->to(device_);
 
     model->eval();
 
@@ -158,8 +161,9 @@ TEST_P(ClassicModelsMultiDTypeTest, VGG11ForwardShape) {
 TEST_P(ClassicModelsMultiDTypeTest, VGG11GradientFlow) {
     auto model = vgg11(10, true, false);
 
-    // Convert model to test dtype
+    // Convert model to test dtype and device
     model->to(dtype_);
+    model->to(device_);
 
     model->train();
 
@@ -261,8 +265,9 @@ TEST_P(ClassicModelsMultiDTypeTest, VGGCustomDropout) {
 TEST_P(ClassicModelsMultiDTypeTest, AlexNetForwardShape) {
     auto model = alexnet(1000, false);
 
-    // Convert model to test dtype
+    // Convert model to test dtype and device
     model->to(dtype_);
+    model->to(device_);
 
     model->eval();
 
@@ -277,8 +282,9 @@ TEST_P(ClassicModelsMultiDTypeTest, AlexNetForwardShape) {
 TEST_P(ClassicModelsMultiDTypeTest, AlexNetGradientFlow) {
     auto model = alexnet(10, false);
 
-    // Convert model to test dtype
+    // Convert model to test dtype and device
     model->to(dtype_);
+    model->to(device_);
 
     model->train();
 
@@ -295,8 +301,9 @@ TEST_P(ClassicModelsMultiDTypeTest, AlexNetGradientFlow) {
 TEST_P(ClassicModelsMultiDTypeTest, AlexNetCustomClasses) {
     auto model = alexnet(10, false);
 
-    // Convert model to test dtype
+    // Convert model to test dtype and device
     model->to(dtype_);
+    model->to(device_);
 
     model->eval();
 
@@ -310,8 +317,9 @@ TEST_P(ClassicModelsMultiDTypeTest, AlexNetCustomClasses) {
 TEST_P(ClassicModelsMultiDTypeTest, AlexNetBatchProcessing) {
     auto model = alexnet(100, false);
 
-    // Convert model to test dtype
+    // Convert model to test dtype and device
     model->to(dtype_);
+    model->to(device_);
 
     model->eval();
 
@@ -326,8 +334,9 @@ TEST_P(ClassicModelsMultiDTypeTest, AlexNetBatchProcessing) {
 TEST_P(ClassicModelsMultiDTypeTest, AlexNetCustomDropout) {
     auto model = std::make_shared<AlexNet>(10, 0.3);
 
-    // Convert model to test dtype
+    // Convert model to test dtype and device
     model->to(dtype_);
+    model->to(device_);
 
     model->eval();
 
