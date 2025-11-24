@@ -495,8 +495,20 @@ auto batchnorm2d_mean_var(const Tensor& input,
         batchnorm_variance_kernel<double><<<C, BATCHNORM_BLOCK_SIZE, shared_mem_size, stream>>>(
             input.data<double>(), mean.data<double>(), variance.data<double>(), N, C, H, W);
         CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::Float16) {
+        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / 32) * sizeof(__half);
+        batchnorm_mean_kernel<__half><<<C, BATCHNORM_BLOCK_SIZE, shared_mem_size, stream>>>(
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(mean.data<Float16>()), N, C, H, W);
+        CUDA_CHECK(cudaGetLastError());
+
+        batchnorm_variance_kernel<__half><<<C, BATCHNORM_BLOCK_SIZE, shared_mem_size, stream>>>(
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<const __half*>(mean.data<Float16>()),
+            reinterpret_cast<__half*>(variance.data<Float16>()), N, C, H, W);
+        CUDA_CHECK(cudaGetLastError());
     } else {
-        throw std::runtime_error("BatchNorm2D only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("BatchNorm2D only supports Float32, Float64, and Float16 dtypes");
     }
 }
 
@@ -530,8 +542,17 @@ auto batchnorm2d_forward(const Tensor& input,
             mean.data<double>(), variance.data<double>(),
             epsilon, N, C, H, W);
         CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::Float16) {
+        int num_blocks = get_num_blocks(total_size);
+        batchnorm_normalize_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(output.data<Float16>()),
+            reinterpret_cast<const __half*>(mean.data<Float16>()),
+            reinterpret_cast<const __half*>(variance.data<Float16>()),
+            __float2half(epsilon), N, C, H, W);
+        CUDA_CHECK(cudaGetLastError());
     } else {
-        throw std::runtime_error("BatchNorm2D only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("BatchNorm2D only supports Float32, Float64, and Float16 dtypes");
     }
 
     return output;
@@ -571,8 +592,19 @@ auto batchnorm2d_forward_affine(const Tensor& input,
             gamma.data<double>(), beta.data<double>(),
             epsilon, N, C, H, W);
         CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::Float16) {
+        int num_blocks = get_num_blocks(total_size);
+        batchnorm_forward_affine_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(output.data<Float16>()),
+            reinterpret_cast<const __half*>(mean.data<Float16>()),
+            reinterpret_cast<const __half*>(variance.data<Float16>()),
+            reinterpret_cast<const __half*>(gamma.data<Float16>()),
+            reinterpret_cast<const __half*>(beta.data<Float16>()),
+            __float2half(epsilon), N, C, H, W);
+        CUDA_CHECK(cudaGetLastError());
     } else {
-        throw std::runtime_error("BatchNorm2D only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("BatchNorm2D only supports Float32, Float64, and Float16 dtypes");
     }
 
     return output;
@@ -601,8 +633,17 @@ auto batchnorm2d_update_running_stats(Tensor& running_mean,
             batch_mean.data<double>(), batch_var.data<double>(),
             momentum, C);
         CUDA_CHECK(cudaGetLastError());
+    } else if (running_mean.dtype() == DType::Float16) {
+        int num_blocks = get_num_blocks(C);
+        batchnorm_update_running_stats_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<__half*>(running_mean.data<Float16>()),
+            reinterpret_cast<__half*>(running_var.data<Float16>()),
+            reinterpret_cast<const __half*>(batch_mean.data<Float16>()),
+            reinterpret_cast<const __half*>(batch_var.data<Float16>()),
+            __float2half(momentum), C);
+        CUDA_CHECK(cudaGetLastError());
     } else {
-        throw std::runtime_error("BatchNorm2D only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("BatchNorm2D only supports Float32, Float64, and Float16 dtypes");
     }
 }
 
@@ -667,8 +708,30 @@ auto batchnorm2d_backward(const Tensor& grad_output,
             mean.data<double>(), variance.data<double>(), gamma.data<double>(),
             epsilon, N, C, H, W);
         CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::Float16) {
+        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / 32) * sizeof(__half);
+
+        // Compute grad_gamma and grad_beta
+        batchnorm_backward_gamma_beta_kernel<__half><<<C, BATCHNORM_BLOCK_SIZE, shared_mem_size, stream>>>(
+            reinterpret_cast<const __half*>(grad_output.data<Float16>()),
+            reinterpret_cast<const __half*>(normalized.data<Float16>()),
+            reinterpret_cast<__half*>(grad_gamma.data<Float16>()),
+            reinterpret_cast<__half*>(grad_beta.data<Float16>()),
+            N, C, H, W);
+        CUDA_CHECK(cudaGetLastError());
+
+        // Compute grad_input
+        batchnorm_backward_input_kernel<__half><<<C, BATCHNORM_BLOCK_SIZE, shared_mem_size, stream>>>(
+            reinterpret_cast<const __half*>(grad_output.data<Float16>()),
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(grad_input.data<Float16>()),
+            reinterpret_cast<const __half*>(mean.data<Float16>()),
+            reinterpret_cast<const __half*>(variance.data<Float16>()),
+            reinterpret_cast<const __half*>(gamma.data<Float16>()),
+            __float2half(epsilon), N, C, H, W);
+        CUDA_CHECK(cudaGetLastError());
     } else {
-        throw std::runtime_error("BatchNorm2D only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("BatchNorm2D only supports Float32, Float64, and Float16 dtypes");
     }
 
     return std::make_tuple(grad_input, grad_gamma, grad_beta);
