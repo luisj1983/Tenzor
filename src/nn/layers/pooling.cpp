@@ -3,6 +3,7 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/autograd/function.hpp"
 #include "tenzor/backend/registry.hpp"
+#include "tenzor/backend/dispatch.hpp"
 #include <cmath>
 #include <stdexcept>
 #include <limits>
@@ -44,7 +45,7 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
         // grad_outputs[0]: gradient w.r.t output [N, C, H_out, W_out]
         // saved_tensors_[0]: input [N, C, H_in, W_in]
-        // saved_tensors_[1]: indices (flattened max positions) [N, C, H_out, W_out]
+        // saved_tensors_[1]: indices [N, C, H_out, W_out]
 
         const auto& grad_output = grad_outputs[0];
         const auto& input = saved_tensors_[0];
@@ -56,13 +57,26 @@ public:
         int64_t H_in = input_shape[2];
         int64_t W_in = input_shape[3];
 
+        // Use CUDA backend if on GPU
+        if (grad_output.device().type == Device::Type::CUDA) {
+            std::vector<Tensor> tensors_for_dispatch = {grad_output};
+            auto* backend = Dispatcher::get_backend(tensors_for_dispatch);
+            std::vector<Tensor> inputs = {grad_output, indices};
+            auto result = backend->dispatch(
+                "max_pool2d_backward",
+                inputs,
+                {{"H_in", std::to_string(H_in)}, {"W_in", std::to_string(W_in)}}
+            );
+            return {result[0]};
+        }
+
+        // CPU path
         auto grad_shape = grad_output.shape();
         int64_t H_out = grad_shape[2];
         int64_t W_out = grad_shape[3];
 
-        // Initialize gradient w.r.t input with zeros on same device
         auto dtype = grad_output.dtype();
-        auto grad_input = zeros({N, C, H_in, W_in}, dtype, grad_output.device());
+        auto grad_input = zeros({N, C, H_in, W_in}, dtype, Device::cpu());
 
         // Distribute gradients to max element positions with proper dtype handling
         if (dtype == DType::Float32) {
@@ -140,142 +154,154 @@ auto MaxPool2d::forward(const Variable& input) -> Variable {
         throw std::invalid_argument("MaxPool2d expects 4D input [batch, channels, height, width]");
     }
 
-    // Store original device
     Device original_device = input.tensor().device();
-
-    // Transfer input to CPU if needed (current implementation uses CPU loops)
-    Variable cpu_input = (original_device.type != Device::Type::CPU)
-                        ? Variable(input.tensor().to(Device::cpu()), input.requires_grad())
-                        : input;
-
     int64_t N = input_shape[0];
     int64_t C = input_shape[1];
     int64_t H_in = input_shape[2];
     int64_t W_in = input_shape[3];
 
-    // Calculate output dimensions
-    int64_t H_out = calculate_pool_output_size(H_in, kernel_size_, stride_, padding_);
-    int64_t W_out = calculate_pool_output_size(W_in, kernel_size_, stride_, padding_);
+    Tensor output, indices;
 
-    // Create output tensor and indices tensor on CPU
-    auto dtype = cpu_input.tensor().dtype();
-    auto output = zeros({N, C, H_out, W_out}, dtype, Device::cpu());
-    // Indices stored as same dtype for simplicity
-    auto indices = zeros({N, C, H_out, W_out}, dtype, Device::cpu());
-
-    // Perform max pooling with proper dtype handling
-    if (dtype == DType::Float32) {
-        const float* input_data = cpu_input.tensor().data<float>();
-        float* output_data = output.data<float>();
-        float* indices_data = indices.data<float>();
-
-        for (int64_t n = 0; n < N; ++n) {
-            for (int64_t c = 0; c < C; ++c) {
-                for (int64_t h_out = 0; h_out < H_out; ++h_out) {
-                    for (int64_t w_out = 0; w_out < W_out; ++w_out) {
-                        int64_t h_start = h_out * stride_ - padding_;
-                        int64_t w_start = w_out * stride_ - padding_;
-                        int64_t h_end = h_start + kernel_size_;
-                        int64_t w_end = w_start + kernel_size_;
-
-                        float max_val = -std::numeric_limits<float>::infinity();
-                        int64_t max_idx = 0;
-
-                        for (int64_t h = h_start; h < h_end; ++h) {
-                            for (int64_t w = w_start; w < w_end; ++w) {
-                                if (h >= 0 && h < H_in && w >= 0 && w < W_in) {
-                                    int64_t input_idx = ((n * C + c) * H_in + h) * W_in + w;
-                                    if (input_data[input_idx] > max_val) {
-                                        max_val = input_data[input_idx];
-                                        max_idx = input_idx;
-                                    }
-                                }
-                            }
-                        }
-
-                        int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
-                        output_data[out_idx] = max_val;
-                        indices_data[out_idx] = static_cast<float>(max_idx);
-                    }
-                }
-            }
-        }
-    } else if (dtype == DType::Float64) {
-        const double* input_data = cpu_input.tensor().data<double>();
-        double* output_data = output.data<double>();
-        double* indices_data = indices.data<double>();
-
-        for (int64_t n = 0; n < N; ++n) {
-            for (int64_t c = 0; c < C; ++c) {
-                for (int64_t h_out = 0; h_out < H_out; ++h_out) {
-                    for (int64_t w_out = 0; w_out < W_out; ++w_out) {
-                        int64_t h_start = h_out * stride_ - padding_;
-                        int64_t w_start = w_out * stride_ - padding_;
-                        int64_t h_end = h_start + kernel_size_;
-                        int64_t w_end = w_start + kernel_size_;
-
-                        double max_val = -std::numeric_limits<double>::infinity();
-                        int64_t max_idx = 0;
-
-                        for (int64_t h = h_start; h < h_end; ++h) {
-                            for (int64_t w = w_start; w < w_end; ++w) {
-                                if (h >= 0 && h < H_in && w >= 0 && w < W_in) {
-                                    int64_t input_idx = ((n * C + c) * H_in + h) * W_in + w;
-                                    if (input_data[input_idx] > max_val) {
-                                        max_val = input_data[input_idx];
-                                        max_idx = input_idx;
-                                    }
-                                }
-                            }
-                        }
-
-                        int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
-                        output_data[out_idx] = max_val;
-                        indices_data[out_idx] = static_cast<double>(max_idx);
-                    }
-                }
-            }
-        }
-    } else if (dtype == DType::Float16) {
-        const Float16* input_data = cpu_input.tensor().data<Float16>();
-        Float16* output_data = output.data<Float16>();
-        Float16* indices_data = indices.data<Float16>();
-
-        for (int64_t n = 0; n < N; ++n) {
-            for (int64_t c = 0; c < C; ++c) {
-                for (int64_t h_out = 0; h_out < H_out; ++h_out) {
-                    for (int64_t w_out = 0; w_out < W_out; ++w_out) {
-                        int64_t h_start = h_out * stride_ - padding_;
-                        int64_t w_start = w_out * stride_ - padding_;
-                        int64_t h_end = h_start + kernel_size_;
-                        int64_t w_end = w_start + kernel_size_;
-
-                        float max_val = -std::numeric_limits<float>::infinity();
-                        int64_t max_idx = 0;
-
-                        for (int64_t h = h_start; h < h_end; ++h) {
-                            for (int64_t w = w_start; w < w_end; ++w) {
-                                if (h >= 0 && h < H_in && w >= 0 && w < W_in) {
-                                    int64_t input_idx = ((n * C + c) * H_in + h) * W_in + w;
-                                    float val = static_cast<float>(input_data[input_idx]);
-                                    if (val > max_val) {
-                                        max_val = val;
-                                        max_idx = input_idx;
-                                    }
-                                }
-                            }
-                        }
-
-                        int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
-                        output_data[out_idx] = Float16(max_val);
-                        indices_data[out_idx] = Float16(static_cast<float>(max_idx));
-                    }
-                }
-            }
-        }
+    // Use CUDA backend if on GPU
+    if (original_device.type == Device::Type::CUDA) {
+        std::vector<Tensor> tensors_for_dispatch = {input.tensor()};
+        auto* backend = Dispatcher::get_backend(tensors_for_dispatch);
+        std::vector<Tensor> inputs = {input.tensor()};
+        auto result = backend->dispatch(
+            "max_pool2d",
+            inputs,
+            {{"kernel_size", std::to_string(kernel_size_)},
+             {"stride", std::to_string(stride_)},
+             {"padding", std::to_string(padding_)}}
+        );
+        output = result[0];
+        indices = result[1];
     } else {
-        throw std::runtime_error("MaxPool2d: Unsupported dtype");
-    }
+        // CPU path
+        // Calculate output dimensions
+        int64_t H_out = calculate_pool_output_size(H_in, kernel_size_, stride_, padding_);
+        int64_t W_out = calculate_pool_output_size(W_in, kernel_size_, stride_, padding_);
+
+        // Create output tensor and indices tensor on CPU
+        auto dtype = input.tensor().dtype();
+        output = zeros({N, C, H_out, W_out}, dtype, Device::cpu());
+        // Indices stored as same dtype for simplicity
+        indices = zeros({N, C, H_out, W_out}, dtype, Device::cpu());
+
+        // Perform max pooling with proper dtype handling
+        if (dtype == DType::Float32) {
+            const float* input_data = input.tensor().data<float>();
+            float* output_data = output.data<float>();
+            float* indices_data = indices.data<float>();
+
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t c = 0; c < C; ++c) {
+                    for (int64_t h_out = 0; h_out < H_out; ++h_out) {
+                        for (int64_t w_out = 0; w_out < W_out; ++w_out) {
+                            int64_t h_start = h_out * stride_ - padding_;
+                            int64_t w_start = w_out * stride_ - padding_;
+                            int64_t h_end = h_start + kernel_size_;
+                            int64_t w_end = w_start + kernel_size_;
+
+                            float max_val = -std::numeric_limits<float>::infinity();
+                            int64_t max_idx = 0;
+
+                            for (int64_t h = h_start; h < h_end; ++h) {
+                                for (int64_t w = w_start; w < w_end; ++w) {
+                                    if (h >= 0 && h < H_in && w >= 0 && w < W_in) {
+                                        int64_t input_idx = ((n * C + c) * H_in + h) * W_in + w;
+                                        if (input_data[input_idx] > max_val) {
+                                            max_val = input_data[input_idx];
+                                            max_idx = input_idx;
+                                        }
+                                    }
+                                }
+                            }
+
+                            int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
+                            output_data[out_idx] = max_val;
+                            indices_data[out_idx] = static_cast<float>(max_idx);
+                        }
+                    }
+                }
+            }
+        } else if (dtype == DType::Float64) {
+            const double* input_data = input.tensor().data<double>();
+            double* output_data = output.data<double>();
+            double* indices_data = indices.data<double>();
+
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t c = 0; c < C; ++c) {
+                    for (int64_t h_out = 0; h_out < H_out; ++h_out) {
+                        for (int64_t w_out = 0; w_out < W_out; ++w_out) {
+                            int64_t h_start = h_out * stride_ - padding_;
+                            int64_t w_start = w_out * stride_ - padding_;
+                            int64_t h_end = h_start + kernel_size_;
+                            int64_t w_end = w_start + kernel_size_;
+
+                            double max_val = -std::numeric_limits<double>::infinity();
+                            int64_t max_idx = 0;
+
+                            for (int64_t h = h_start; h < h_end; ++h) {
+                                for (int64_t w = w_start; w < w_end; ++w) {
+                                    if (h >= 0 && h < H_in && w >= 0 && w < W_in) {
+                                        int64_t input_idx = ((n * C + c) * H_in + h) * W_in + w;
+                                        if (input_data[input_idx] > max_val) {
+                                            max_val = input_data[input_idx];
+                                            max_idx = input_idx;
+                                        }
+                                    }
+                                }
+                            }
+
+                            int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
+                            output_data[out_idx] = max_val;
+                            indices_data[out_idx] = static_cast<double>(max_idx);
+                        }
+                    }
+                }
+            }
+        } else if (dtype == DType::Float16) {
+            const Float16* input_data = input.tensor().data<Float16>();
+            Float16* output_data = output.data<Float16>();
+            Float16* indices_data = indices.data<Float16>();
+
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t c = 0; c < C; ++c) {
+                    for (int64_t h_out = 0; h_out < H_out; ++h_out) {
+                        for (int64_t w_out = 0; w_out < W_out; ++w_out) {
+                            int64_t h_start = h_out * stride_ - padding_;
+                            int64_t w_start = w_out * stride_ - padding_;
+                            int64_t h_end = h_start + kernel_size_;
+                            int64_t w_end = w_start + kernel_size_;
+
+                            float max_val = -std::numeric_limits<float>::infinity();
+                            int64_t max_idx = 0;
+
+                            for (int64_t h = h_start; h < h_end; ++h) {
+                                for (int64_t w = w_start; w < w_end; ++w) {
+                                    if (h >= 0 && h < H_in && w >= 0 && w < W_in) {
+                                        int64_t input_idx = ((n * C + c) * H_in + h) * W_in + w;
+                                        float val = static_cast<float>(input_data[input_idx]);
+                                        if (val > max_val) {
+                                            max_val = val;
+                                            max_idx = input_idx;
+                                        }
+                                    }
+                                }
+                            }
+
+                            int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
+                            output_data[out_idx] = Float16(max_val);
+                            indices_data[out_idx] = Float16(static_cast<float>(max_idx));
+                        }
+                    }
+                }
+            }
+        } else {
+            throw std::runtime_error("MaxPool2d: Unsupported dtype");
+        }
+    } // end CPU path
 
     // Create output variable with autograd support
     auto result = Variable(output, input.requires_grad());
@@ -300,12 +326,6 @@ auto MaxPool2d::forward(const Variable& input) -> Variable {
             next_funcs.push_back(input.grad_fn());
         }
         backward_fn->set_next_functions(next_funcs);
-    }
-
-    // Transfer result back to original device if needed
-    if (original_device.type != Device::Type::CPU) {
-        result = Variable(result.tensor().to(original_device), result.requires_grad());
-        // Note: saved_tensors remain on CPU for backward pass compatibility
     }
 
     return result;

@@ -2833,6 +2833,161 @@ auto adaptive_avg_pool2d_backward(const Tensor& grad_output, int64_t H_in, int64
 }
 
 // ============================================================================
+// Max Pooling 2D
+// ============================================================================
+
+// Forward kernel for max pooling - returns output and indices
+template<typename T>
+__global__ void max_pool2d_forward_kernel(
+    const T* input, T* output, int64_t* indices,
+    int64_t N, int64_t C, int64_t H_in, int64_t W_in,
+    int64_t H_out, int64_t W_out,
+    int64_t kernel_size, int64_t stride, int64_t padding) {
+
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = N * C * H_out * W_out;
+
+    if (idx >= total) return;
+
+    // Decode output index
+    int64_t w_out = idx % W_out;
+    int64_t h_out = (idx / W_out) % H_out;
+    int64_t c = (idx / (W_out * H_out)) % C;
+    int64_t n = idx / (W_out * H_out * C);
+
+    // Calculate pooling window bounds
+    int64_t h_start = h_out * stride - padding;
+    int64_t w_start = w_out * stride - padding;
+    int64_t h_end = h_start + kernel_size;
+    int64_t w_end = w_start + kernel_size;
+
+    // Find max value and its index
+    T max_val = T(-1e38);  // Use large negative number for initialization
+    int64_t max_idx = 0;
+
+    for (int64_t h = h_start; h < h_end; ++h) {
+        for (int64_t w = w_start; w < w_end; ++w) {
+            if (h >= 0 && h < H_in && w >= 0 && w < W_in) {
+                int64_t input_idx = ((n * C + c) * H_in + h) * W_in + w;
+                T val = input[input_idx];
+                if (val > max_val) {
+                    max_val = val;
+                    max_idx = input_idx;
+                }
+            }
+        }
+    }
+
+    output[idx] = max_val;
+    indices[idx] = max_idx;
+}
+
+// Backward kernel for max pooling
+template<typename T>
+__global__ void max_pool2d_backward_kernel(
+    const T* grad_output, const int64_t* indices, T* grad_input,
+    int64_t total_output, int64_t total_input) {
+
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (idx >= total_output) return;
+
+    int64_t max_idx = indices[idx];
+    if (max_idx >= 0 && max_idx < total_input) {
+        atomicAdd(&grad_input[max_idx], grad_output[idx]);
+    }
+}
+
+// Launcher for max pool 2d forward
+auto max_pool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding, cudaStream_t stream) -> std::pair<Tensor, Tensor> {
+    auto shape = input.shape();
+    int64_t N = shape[0];
+    int64_t C = shape[1];
+    int64_t H_in = shape[2];
+    int64_t W_in = shape[3];
+
+    // Calculate output dimensions
+    int64_t H_out = (H_in + 2 * padding - kernel_size) / stride + 1;
+    int64_t W_out = (W_in + 2 * padding - kernel_size) / stride + 1;
+
+    Tensor output({N, C, H_out, W_out}, input.dtype(), input.device());
+    Tensor indices({N, C, H_out, W_out}, DType::Int64, input.device());
+
+    int64_t total = N * C * H_out * W_out;
+    dim3 grid, block;
+    compute_launch_config_1d(total, grid, block);
+
+    if (input.dtype() == DType::Float32) {
+        max_pool2d_forward_kernel<<<grid, block, 0, stream>>>(
+            input.data<float>(), output.data<float>(), indices.data<int64_t>(),
+            N, C, H_in, W_in, H_out, W_out, kernel_size, stride, padding);
+    } else if (input.dtype() == DType::Float64) {
+        max_pool2d_forward_kernel<<<grid, block, 0, stream>>>(
+            input.data<double>(), output.data<double>(), indices.data<int64_t>(),
+            N, C, H_in, W_in, H_out, W_out, kernel_size, stride, padding);
+    } else if (input.dtype() == DType::Float16) {
+        max_pool2d_forward_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __half*>(input.data_ptr()),
+            reinterpret_cast<__half*>(output.data_ptr()),
+            indices.data<int64_t>(),
+            N, C, H_in, W_in, H_out, W_out, kernel_size, stride, padding);
+    } else {
+        throw std::runtime_error("max_pool2d_forward: unsupported dtype");
+    }
+
+    CUDA_CHECK(cudaGetLastError());
+    return {output, indices};
+}
+
+// Launcher for max pool 2d backward
+auto max_pool2d_backward(const Tensor& grad_output, const Tensor& indices,
+                         int64_t H_in, int64_t W_in, cudaStream_t stream) -> Tensor {
+    auto shape = grad_output.shape();
+    int64_t N = shape[0];
+    int64_t C = shape[1];
+
+    Tensor grad_input({N, C, H_in, W_in}, grad_output.dtype(), grad_output.device());
+
+    // Initialize to zeros
+    cudaMemsetAsync(grad_input.data_ptr(), 0, grad_input.numel() * dtype_size(grad_input.dtype()), stream);
+
+    int64_t total_output = grad_output.numel();
+    int64_t total_input = grad_input.numel();
+    dim3 grid, block;
+    compute_launch_config_1d(total_output, grid, block);
+
+    if (grad_output.dtype() == DType::Float32) {
+        max_pool2d_backward_kernel<<<grid, block, 0, stream>>>(
+            grad_output.data<float>(), indices.data<int64_t>(), grad_input.data<float>(),
+            total_output, total_input);
+    } else if (grad_output.dtype() == DType::Float64) {
+        max_pool2d_backward_kernel<<<grid, block, 0, stream>>>(
+            grad_output.data<double>(), indices.data<int64_t>(), grad_input.data<double>(),
+            total_output, total_input);
+    } else if (grad_output.dtype() == DType::Float16) {
+        max_pool2d_backward_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __half*>(grad_output.data_ptr()),
+            indices.data<int64_t>(),
+            reinterpret_cast<__half*>(grad_input.data_ptr()),
+            total_output, total_input);
+    } else {
+        throw std::runtime_error("max_pool2d_backward: unsupported dtype");
+    }
+
+    CUDA_CHECK(cudaGetLastError());
+    return grad_input;
+}
+
+// Public API wrappers without stream
+auto max_pool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding) -> std::pair<Tensor, Tensor> {
+    return max_pool2d_forward(input, kernel_size, stride, padding, nullptr);
+}
+
+auto max_pool2d_backward(const Tensor& grad_output, const Tensor& indices, int64_t H_in, int64_t W_in) -> Tensor {
+    return max_pool2d_backward(grad_output, indices, H_in, W_in, nullptr);
+}
+
+// ============================================================================
 // Gather operation for relative position bias
 // ============================================================================
 

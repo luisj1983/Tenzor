@@ -139,6 +139,8 @@ namespace cuda {
     // Pooling operations
     auto adaptive_avg_pool2d_forward(const Tensor& input, int64_t output_h, int64_t output_w) -> Tensor;
     auto adaptive_avg_pool2d_backward(const Tensor& grad_output, int64_t H_in, int64_t W_in) -> Tensor;
+    auto max_pool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding) -> std::pair<Tensor, Tensor>;
+    auto max_pool2d_backward(const Tensor& grad_output, const Tensor& indices, int64_t H_in, int64_t W_in) -> Tensor;
 
     // Vision operations
     auto gather_relative_position_bias(const Tensor& table, const Tensor& indices, int64_t num_positions, int64_t num_heads) -> Tensor;
@@ -1576,6 +1578,36 @@ public:
                     W_in = std::stoll(attrs.at("W_in"));
                 }
                 return {cuda::adaptive_avg_pool2d_backward(inputs[0], H_in, W_in)};
+            }
+            else if (op_name == "max_pool2d") {
+                if (inputs.size() != 1) {
+                    throw std::invalid_argument("max_pool2d operation requires exactly 1 input");
+                }
+                int64_t kernel_size = 2, stride = 2, padding = 0;
+                if (attrs.contains("kernel_size")) {
+                    kernel_size = std::stoll(attrs.at("kernel_size"));
+                }
+                if (attrs.contains("stride")) {
+                    stride = std::stoll(attrs.at("stride"));
+                }
+                if (attrs.contains("padding")) {
+                    padding = std::stoll(attrs.at("padding"));
+                }
+                auto [output, indices] = cuda::max_pool2d_forward(inputs[0], kernel_size, stride, padding);
+                return {output, indices};
+            }
+            else if (op_name == "max_pool2d_backward") {
+                if (inputs.size() != 2) {
+                    throw std::invalid_argument("max_pool2d_backward operation requires exactly 2 inputs (grad_output, indices)");
+                }
+                int64_t H_in = 0, W_in = 0;
+                if (attrs.contains("H_in")) {
+                    H_in = std::stoll(attrs.at("H_in"));
+                }
+                if (attrs.contains("W_in")) {
+                    W_in = std::stoll(attrs.at("W_in"));
+                }
+                return {cuda::max_pool2d_backward(inputs[0], inputs[1], H_in, W_in)};
             }
             // Vision operations
             else if (op_name == "gather_relative_position_bias") {
