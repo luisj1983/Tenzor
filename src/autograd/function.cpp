@@ -597,6 +597,17 @@ auto TransposeBackward::backward(std::vector<Tensor> grad_outputs) -> std::vecto
     return {grad_input};
 }
 
+// RollBackward implementation
+auto RollBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
+    throw std::runtime_error("RollBackward::forward should not be called");
+}
+
+auto RollBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    // Roll backward is roll with negative shift
+    auto grad_input = roll(grad_outputs[0], -shifts_, dim_);
+    return {grad_input};
+}
+
 // SqueezeBackward implementation
 auto SqueezeBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
     throw std::runtime_error("SqueezeBackward::forward should not be called");

@@ -457,6 +457,29 @@ auto squeeze(const Variable& input, int64_t dim) -> Variable {
     return output;
 }
 
+auto roll(const Variable& input, int64_t shifts, int64_t dim) -> Variable {
+    if (!input.requires_grad() || !is_grad_enabled()) {
+        return Variable(tenzor::roll(input.tensor(), shifts, dim), false);
+    }
+
+    auto grad_fn = std::make_shared<RollBackward>(shifts, dim);
+    std::vector<std::shared_ptr<Function>> next_funcs;
+    next_funcs.push_back(input.grad_fn());
+    grad_fn->set_next_functions(next_funcs);
+
+    std::vector<Variable> input_vars;
+    if (input.requires_grad()) {
+        input_vars.push_back(input);
+    }
+    grad_fn->set_input_variables(input_vars);
+
+    auto result_tensor = tenzor::roll(input.tensor(), shifts, dim);
+    Variable output(result_tensor, true);
+    output.set_grad_fn(grad_fn);
+
+    return output;
+}
+
 auto cat(const std::vector<Variable>& inputs, int64_t dim) -> Variable {
     // Check if any input requires grad
     bool any_requires_grad = false;
@@ -605,17 +628,6 @@ auto matmul(const Variable& a, const Variable& b) -> Variable {
     // Save input tensors for backward pass
     auto a_tensor = a.tensor();
     auto b_tensor = b.tensor();
-
-    // Debug: Check if tensors are zero when saved (Float16)
-    if (a_tensor.dtype() == DType::Float16) {
-        auto a_cpu = a_tensor.to(Device::cpu()).to(DType::Float32);
-        auto* a_data = a_cpu.data<float>();
-        float a_sum = 0.0f;
-        for (int i = 0; i < std::min(10, static_cast<int>(a_cpu.numel())); ++i) {
-            a_sum += std::abs(a_data[i]);
-        }
-        std::cerr << "[MATMUL_SAVE_F16] Saving a_tensor, avg_abs_first10=" << (a_sum / std::min(10, static_cast<int>(a_cpu.numel()))) << std::endl;
-    }
 
     grad_fn->save_for_backward({a_tensor, b_tensor});
 

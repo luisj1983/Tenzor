@@ -301,6 +301,26 @@ auto transpose(const Variable& input, int64_t dim0, int64_t dim1) -> Variable;
 auto squeeze(const Variable& input, int64_t dim) -> Variable;
 
 /**
+ * @brief Roll tensor elements along dimension with gradient tracking.
+ *
+ * Rolls elements of input variable along the specified dimension.
+ * Gradients are rolled back in opposite direction during backpropagation.
+ *
+ * @param input Input variable
+ * @param shifts Number of positions to roll (positive = forward, negative = backward)
+ * @param dim Dimension along which to roll
+ * @return Variable containing rolled tensor with gradient function
+ *
+ * @code
+ * Variable x(Tensor({3, 4}, DType::Float32, Device::cpu()), true);
+ * Variable y = roll(x, 2, 1);  // Roll along dim 1 by 2 positions
+ * @endcode
+ *
+ * @see RollBackward for gradient implementation
+ */
+auto roll(const Variable& input, int64_t shifts, int64_t dim) -> Variable;
+
+/**
  * @brief Concatenate variables along dimension with gradient tracking.
  *
  * Concatenates a sequence of variables along the specified dimension.

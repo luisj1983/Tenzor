@@ -141,10 +141,9 @@ auto SwinTransformerBlock::forward(const Variable& input) -> Variable {
     // Cyclic shift for SW-MSA
     if (shift_size_ > 0) {
         // Roll operation: shift by (-shift_size, -shift_size)
-        auto x_tensor = x.tensor();
-        x_tensor = roll(x_tensor, -shift_size_, 1);  // shift height
-        x_tensor = roll(x_tensor, -shift_size_, 2);  // shift width
-        x = Variable(x_tensor, x.requires_grad());
+        // Use autograd-aware roll to preserve gradient flow
+        x = tenzor::roll(x, -shift_size_, 1);  // shift height
+        x = tenzor::roll(x, -shift_size_, 2);  // shift width
     }
 
     // Partition windows
@@ -164,10 +163,9 @@ auto SwinTransformerBlock::forward(const Variable& input) -> Variable {
 
     // Reverse cyclic shift
     if (shift_size_ > 0) {
-        auto x_tensor = x.tensor();
-        x_tensor = roll(x_tensor, shift_size_, 1);  // reverse shift height
-        x_tensor = roll(x_tensor, shift_size_, 2);  // reverse shift width
-        x = Variable(x_tensor, x.requires_grad());
+        // Use autograd-aware roll to preserve gradient flow
+        x = tenzor::roll(x, shift_size_, 1);  // reverse shift height
+        x = tenzor::roll(x, shift_size_, 2);  // reverse shift width
     }
 
     // Reshape to (B, H*W, C)

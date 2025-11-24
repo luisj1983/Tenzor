@@ -537,6 +537,24 @@ private:
 };
 
 /**
+ * @brief Roll gradient function.
+ *
+ * Forward: y = roll(x, shifts, dim)
+ * Backward: dL/dx = roll(dL/dy, -shifts, dim)
+ *
+ * @note Rolling is reversed by rolling in the opposite direction.
+ */
+class RollBackward : public Function {
+public:
+    RollBackward(int64_t shifts, int64_t dim) : shifts_(shifts), dim_(dim) {}
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+private:
+    int64_t shifts_;
+    int64_t dim_;
+};
+
+/**
  * @brief Squeeze gradient function.
  *
  * Forward: y = squeeze(x, dim)
