@@ -2988,6 +2988,190 @@ auto max_pool2d_backward(const Tensor& grad_output, const Tensor& indices, int64
 }
 
 // ============================================================================
+// Average Pooling 2D
+// ============================================================================
+
+// Forward kernel for average pooling
+template<typename T>
+__global__ void avg_pool2d_forward_kernel(
+    const T* input, T* output,
+    int64_t N, int64_t C, int64_t H_in, int64_t W_in,
+    int64_t H_out, int64_t W_out,
+    int64_t kernel_size, int64_t stride, int64_t padding) {
+
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = N * C * H_out * W_out;
+
+    if (idx >= total) return;
+
+    // Decode output index
+    int64_t w_out = idx % W_out;
+    int64_t h_out = (idx / W_out) % H_out;
+    int64_t c = (idx / (W_out * H_out)) % C;
+    int64_t n = idx / (W_out * H_out * C);
+
+    // Calculate pooling window bounds
+    int64_t h_start = h_out * stride - padding;
+    int64_t w_start = w_out * stride - padding;
+    int64_t h_end = h_start + kernel_size;
+    int64_t w_end = w_start + kernel_size;
+
+    // Compute average value
+    T sum = T(0);
+    int64_t count = 0;
+
+    for (int64_t h = h_start; h < h_end; ++h) {
+        for (int64_t w = w_start; w < w_end; ++w) {
+            if (h >= 0 && h < H_in && w >= 0 && w < W_in) {
+                int64_t input_idx = ((n * C + c) * H_in + h) * W_in + w;
+                sum += input[input_idx];
+                count++;
+            }
+        }
+    }
+
+    output[idx] = count > 0 ? sum / T(count) : T(0);
+}
+
+// Backward kernel for average pooling
+template<typename T>
+__global__ void avg_pool2d_backward_kernel(
+    const T* grad_output, T* grad_input,
+    int64_t N, int64_t C, int64_t H_in, int64_t W_in,
+    int64_t H_out, int64_t W_out,
+    int64_t kernel_size, int64_t stride, int64_t padding) {
+
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = N * C * H_out * W_out;
+
+    if (idx >= total) return;
+
+    // Decode output index
+    int64_t w_out = idx % W_out;
+    int64_t h_out = (idx / W_out) % H_out;
+    int64_t c = (idx / (W_out * H_out)) % C;
+    int64_t n = idx / (W_out * H_out * C);
+
+    // Calculate pooling window bounds
+    int64_t h_start = h_out * stride - padding;
+    int64_t w_start = w_out * stride - padding;
+    int64_t h_end = h_start + kernel_size;
+    int64_t w_end = w_start + kernel_size;
+
+    // Count valid elements in pooling window
+    int64_t count = 0;
+    for (int64_t h = h_start; h < h_end; ++h) {
+        for (int64_t w = w_start; w < w_end; ++w) {
+            if (h >= 0 && h < H_in && w >= 0 && w < W_in) {
+                count++;
+            }
+        }
+    }
+
+    if (count == 0) return;
+
+    T grad = grad_output[idx] / T(count);
+
+    // Distribute gradient to input elements
+    for (int64_t h = h_start; h < h_end; ++h) {
+        for (int64_t w = w_start; w < w_end; ++w) {
+            if (h >= 0 && h < H_in && w >= 0 && w < W_in) {
+                int64_t input_idx = ((n * C + c) * H_in + h) * W_in + w;
+                atomicAdd(&grad_input[input_idx], grad);
+            }
+        }
+    }
+}
+
+// Launcher for avg pool 2d forward
+auto avg_pool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding, cudaStream_t stream) -> Tensor {
+    auto shape = input.shape();
+    int64_t N = shape[0];
+    int64_t C = shape[1];
+    int64_t H_in = shape[2];
+    int64_t W_in = shape[3];
+
+    // Calculate output dimensions
+    int64_t H_out = (H_in + 2 * padding - kernel_size) / stride + 1;
+    int64_t W_out = (W_in + 2 * padding - kernel_size) / stride + 1;
+
+    Tensor output({N, C, H_out, W_out}, input.dtype(), input.device());
+
+    int64_t total = N * C * H_out * W_out;
+    dim3 grid, block;
+    compute_launch_config_1d(total, grid, block);
+
+    if (input.dtype() == DType::Float32) {
+        avg_pool2d_forward_kernel<<<grid, block, 0, stream>>>(
+            input.data<float>(), output.data<float>(),
+            N, C, H_in, W_in, H_out, W_out, kernel_size, stride, padding);
+    } else if (input.dtype() == DType::Float64) {
+        avg_pool2d_forward_kernel<<<grid, block, 0, stream>>>(
+            input.data<double>(), output.data<double>(),
+            N, C, H_in, W_in, H_out, W_out, kernel_size, stride, padding);
+    } else if (input.dtype() == DType::Float16) {
+        avg_pool2d_forward_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __half*>(input.data_ptr()),
+            reinterpret_cast<__half*>(output.data_ptr()),
+            N, C, H_in, W_in, H_out, W_out, kernel_size, stride, padding);
+    } else {
+        throw std::runtime_error("avg_pool2d_forward: unsupported dtype");
+    }
+
+    CUDA_CHECK(cudaGetLastError());
+    return output;
+}
+
+// Launcher for avg pool 2d backward
+auto avg_pool2d_backward(const Tensor& grad_output, int64_t H_in, int64_t W_in,
+                         int64_t kernel_size, int64_t stride, int64_t padding, cudaStream_t stream) -> Tensor {
+    auto shape = grad_output.shape();
+    int64_t N = shape[0];
+    int64_t C = shape[1];
+    int64_t H_out = shape[2];
+    int64_t W_out = shape[3];
+
+    Tensor grad_input({N, C, H_in, W_in}, grad_output.dtype(), grad_output.device());
+
+    // Initialize to zeros
+    cudaMemsetAsync(grad_input.data_ptr(), 0, grad_input.numel() * dtype_size(grad_input.dtype()), stream);
+
+    int64_t total_output = grad_output.numel();
+    dim3 grid, block;
+    compute_launch_config_1d(total_output, grid, block);
+
+    if (grad_output.dtype() == DType::Float32) {
+        avg_pool2d_backward_kernel<<<grid, block, 0, stream>>>(
+            grad_output.data<float>(), grad_input.data<float>(),
+            N, C, H_in, W_in, H_out, W_out, kernel_size, stride, padding);
+    } else if (grad_output.dtype() == DType::Float64) {
+        avg_pool2d_backward_kernel<<<grid, block, 0, stream>>>(
+            grad_output.data<double>(), grad_input.data<double>(),
+            N, C, H_in, W_in, H_out, W_out, kernel_size, stride, padding);
+    } else if (grad_output.dtype() == DType::Float16) {
+        avg_pool2d_backward_kernel<<<grid, block, 0, stream>>>(
+            reinterpret_cast<const __half*>(grad_output.data_ptr()),
+            reinterpret_cast<__half*>(grad_input.data_ptr()),
+            N, C, H_in, W_in, H_out, W_out, kernel_size, stride, padding);
+    } else {
+        throw std::runtime_error("avg_pool2d_backward: unsupported dtype");
+    }
+
+    CUDA_CHECK(cudaGetLastError());
+    return grad_input;
+}
+
+// Public API wrappers without stream
+auto avg_pool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding) -> Tensor {
+    return avg_pool2d_forward(input, kernel_size, stride, padding, nullptr);
+}
+
+auto avg_pool2d_backward(const Tensor& grad_output, int64_t H_in, int64_t W_in,
+                         int64_t kernel_size, int64_t stride, int64_t padding) -> Tensor {
+    return avg_pool2d_backward(grad_output, H_in, W_in, kernel_size, stride, padding, nullptr);
+}
+
+// ============================================================================
 // Gather operation for relative position bias
 // ============================================================================
 
