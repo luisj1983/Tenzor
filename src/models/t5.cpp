@@ -84,8 +84,11 @@ auto T5Attention::relative_position_bucket(int64_t relative_position,
 
 auto T5Attention::compute_bias(int64_t query_length, int64_t key_length) -> Tensor {
     // Compute relative position bias matrix
-    // Infer dtype from embedding weights to support multi-dtype models
+    // Infer dtype and device from embedding weights to support multi-dtype and multi-device models
     DType dtype = relative_attention_bias_->weight().tensor().dtype();
+    Device target_device = relative_attention_bias_->weight().tensor().device();
+
+    // Create on CPU for data filling, then transfer to target device
     Tensor position_bias(std::vector<int64_t>{config_.num_heads, query_length, key_length},
                          dtype, Device::cpu());
 
@@ -139,6 +142,11 @@ auto T5Attention::compute_bias(int64_t query_length, int64_t key_length) -> Tens
                 }
             }
         }
+    }
+
+    // Transfer to target device if needed
+    if (target_device != Device::cpu()) {
+        position_bias = position_bias.to(target_device);
     }
 
     return position_bias;
@@ -199,30 +207,38 @@ auto T5Attention::forward(const Variable& hidden_states,
 
     if (bias.numel() > 0) {
         // Expand bias to batch dimension: [num_heads, q_len, kv_len] -> [batch, num_heads, q_len, kv_len]
-        Tensor expanded_bias({batch_size, config_.num_heads, seq_len, kv_seq_len},
-                            bias.dtype(), bias.device());
+        // Create on CPU for data filling, then transfer to target device
+        Device bias_device = bias.device();
+        Tensor bias_cpu = (bias_device == Device::cpu()) ? bias : bias.to(Device::cpu());
+
+        Tensor expanded_bias_cpu({batch_size, config_.num_heads, seq_len, kv_seq_len},
+                                  bias.dtype(), Device::cpu());
         int64_t bias_size = config_.num_heads * seq_len * kv_seq_len;
 
         // Dtype-generic bias expansion
         if (bias.dtype() == DType::Float16) {
-            auto* bias_ptr = bias.data<Float16>();
-            auto* expanded_ptr = expanded_bias.data<Float16>();
+            auto* bias_ptr = bias_cpu.data<Float16>();
+            auto* expanded_ptr = expanded_bias_cpu.data<Float16>();
             for (int64_t b = 0; b < batch_size; ++b) {
                 std::copy(bias_ptr, bias_ptr + bias_size, expanded_ptr + b * bias_size);
             }
         } else if (bias.dtype() == DType::Float32) {
-            auto* bias_ptr = bias.data<float>();
-            auto* expanded_ptr = expanded_bias.data<float>();
+            auto* bias_ptr = bias_cpu.data<float>();
+            auto* expanded_ptr = expanded_bias_cpu.data<float>();
             for (int64_t b = 0; b < batch_size; ++b) {
                 std::copy(bias_ptr, bias_ptr + bias_size, expanded_ptr + b * bias_size);
             }
         } else if (bias.dtype() == DType::Float64) {
-            auto* bias_ptr = bias.data<double>();
-            auto* expanded_ptr = expanded_bias.data<double>();
+            auto* bias_ptr = bias_cpu.data<double>();
+            auto* expanded_ptr = expanded_bias_cpu.data<double>();
             for (int64_t b = 0; b < batch_size; ++b) {
                 std::copy(bias_ptr, bias_ptr + bias_size, expanded_ptr + b * bias_size);
             }
         }
+
+        // Transfer to target device if needed
+        Tensor expanded_bias = (bias_device == Device::cpu()) ?
+                                expanded_bias_cpu : expanded_bias_cpu.to(bias_device);
         scores = scores + Variable(expanded_bias, false);
     }
 
@@ -465,25 +481,27 @@ auto T5Decoder::create_causal_mask(int64_t seq_len, Device device) -> Tensor {
     // Create causal mask: upper triangular matrix with -inf
     // Infer dtype from embedding weights to support multi-dtype models
     DType dtype = shared_embeddings_->weight().tensor().dtype();
-    Tensor mask({seq_len, seq_len}, dtype, device);
+
+    // Create on CPU for data filling, then transfer to target device
+    Tensor mask_cpu({seq_len, seq_len}, dtype, Device::cpu());
 
     // Dtype-generic mask filling
     if (dtype == DType::Float16) {
-        auto* data = mask.data<Float16>();
+        auto* data = mask_cpu.data<Float16>();
         for (int64_t i = 0; i < seq_len; ++i) {
             for (int64_t j = 0; j < seq_len; ++j) {
                 data[i * seq_len + j] = (j <= i) ? Float16(0.0f) : Float16(-1e9f);
             }
         }
     } else if (dtype == DType::Float32) {
-        auto* data = mask.data<float>();
+        auto* data = mask_cpu.data<float>();
         for (int64_t i = 0; i < seq_len; ++i) {
             for (int64_t j = 0; j < seq_len; ++j) {
                 data[i * seq_len + j] = (j <= i) ? 0.0f : -1e9f;
             }
         }
     } else if (dtype == DType::Float64) {
-        auto* data = mask.data<double>();
+        auto* data = mask_cpu.data<double>();
         for (int64_t i = 0; i < seq_len; ++i) {
             for (int64_t j = 0; j < seq_len; ++j) {
                 data[i * seq_len + j] = (j <= i) ? 0.0 : -1e9;
@@ -491,7 +509,8 @@ auto T5Decoder::create_causal_mask(int64_t seq_len, Device device) -> Tensor {
         }
     }
 
-    return mask;
+    // Transfer to target device if needed
+    return (device == Device::cpu()) ? mask_cpu : mask_cpu.to(device);
 }
 
 auto T5Decoder::forward(const Variable& decoder_input_ids,

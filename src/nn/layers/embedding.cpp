@@ -112,6 +112,12 @@ public:
         }
 
         const auto& grad_output = grad_outputs[0];
+
+        // Save original device and transfer to CPU for computation
+        Device original_device = grad_output.device();
+        Tensor grad_output_cpu = (original_device == Device::cpu()) ?
+                                  grad_output : grad_output.to(Device::cpu());
+
         auto input_ptr = indices_.data<int64_t>();
         int64_t num_indices = indices_.numel();
 
@@ -121,7 +127,7 @@ public:
 
         // Accumulate gradients for each embedding
         if (grad_dtype == DType::Float32) {
-            auto grad_output_ptr = grad_output.data<float>();
+            auto grad_output_ptr = grad_output_cpu.data<float>();
             auto grad_weight_ptr = grad_weight.data<float>();
             for (int64_t i = 0; i < num_indices; ++i) {
                 auto idx = input_ptr[i];
@@ -130,7 +136,7 @@ public:
                 }
             }
         } else if (grad_dtype == DType::Float64) {
-            auto grad_output_ptr = grad_output.data<double>();
+            auto grad_output_ptr = grad_output_cpu.data<double>();
             auto grad_weight_ptr = grad_weight.data<double>();
             for (int64_t i = 0; i < num_indices; ++i) {
                 auto idx = input_ptr[i];
@@ -144,7 +150,7 @@ public:
                       << ", embedding_dim=" << embedding_dim_ << std::endl;
 
             // Convert to Float32 for computation
-            auto grad_output_f32 = grad_output.to(DType::Float32);
+            auto grad_output_f32 = grad_output_cpu.to(DType::Float32);
             std::cerr << "[EMBED_BWD_F16] Converted grad_output to Float32" << std::endl;
 
             auto grad_weight_f32 = zeros({num_embeddings_, embedding_dim_}, DType::Float32);
@@ -166,6 +172,11 @@ public:
             std::cerr << "[EMBED_BWD_F16] Converted grad_weight back to Float16" << std::endl;
         } else {
             throw std::runtime_error("EmbeddingBackward: Unsupported gradient dtype");
+        }
+
+        // Transfer gradient back to original device if needed
+        if (original_device != Device::cpu()) {
+            grad_weight = grad_weight.to(original_device);
         }
 
         return {grad_weight};

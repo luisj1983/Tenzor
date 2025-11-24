@@ -49,28 +49,28 @@ auto BertEmbeddings::create_position_ids(const Tensor& input_ids) -> Tensor {
     auto shape = input_ids.shape();
     int64_t batch_size = shape[0];
     int64_t seq_len = shape[1];
+    auto target_device = input_ids.device();
 
-    // Create position IDs: [0, 1, 2, ..., seq_len-1]
+    // Create position IDs on CPU first: [0, 1, 2, ..., seq_len-1]
     std::vector<int64_t> pos_data(seq_len);
     for (int64_t i = 0; i < seq_len; ++i) {
         pos_data[i] = i;
     }
 
-    Tensor position_ids(std::vector<int64_t>{seq_len}, DType::Int64, input_ids.device());
-    std::copy(pos_data.begin(), pos_data.end(), position_ids.data<int64_t>());
+    Tensor position_ids_cpu(std::vector<int64_t>{seq_len}, DType::Int64, Device::cpu());
+    std::copy(pos_data.begin(), pos_data.end(), position_ids_cpu.data<int64_t>());
 
-    // Expand to [batch_size, seq_len]
-    position_ids = position_ids.unsqueeze(0);  // [1, seq_len]
-    // Use repeat to expand - broadcast_to doesn't allocate new memory
-    Tensor expanded(std::vector<int64_t>{batch_size, seq_len}, DType::Int64, input_ids.device());
-    auto pos_data_ptr = position_ids.data<int64_t>();
-    auto expanded_ptr = expanded.data<int64_t>();
+    // Expand to [batch_size, seq_len] on CPU
+    position_ids_cpu = position_ids_cpu.unsqueeze(0);  // [1, seq_len]
+    Tensor expanded_cpu(std::vector<int64_t>{batch_size, seq_len}, DType::Int64, Device::cpu());
+    auto pos_data_ptr = position_ids_cpu.data<int64_t>();
+    auto expanded_ptr = expanded_cpu.data<int64_t>();
     for (int64_t b = 0; b < batch_size; ++b) {
         std::copy(pos_data_ptr, pos_data_ptr + seq_len, expanded_ptr + b * seq_len);
     }
-    position_ids = expanded;
 
-    return position_ids;
+    // Move to target device
+    return (target_device == Device::cpu()) ? expanded_cpu : expanded_cpu.to(target_device);
 }
 
 auto BertEmbeddings::forward(const Variable& input_ids,
@@ -95,10 +95,12 @@ auto BertEmbeddings::forward(const Variable& input_ids,
     // Get token type embeddings
     Variable type_ids = token_type_ids;
     if (!token_type_ids.is_initialized() || token_type_ids.tensor().numel() == 0) {
-        // Create default token type IDs (all zeros)
-        Tensor zeros(std::vector<int64_t>{batch_size, seq_len}, DType::Int64, input_ids.tensor().device());
-        zeros.zero_();
-        type_ids = Variable(zeros, false);  // Indices don't need gradients
+        // Create default token type IDs (all zeros) on CPU then move to device
+        auto target_device = input_ids.tensor().device();
+        Tensor zeros_cpu(std::vector<int64_t>{batch_size, seq_len}, DType::Int64, Device::cpu());
+        zeros_cpu.zero_();
+        auto zeros_tensor = (target_device == Device::cpu()) ? zeros_cpu : zeros_cpu.to(target_device);
+        type_ids = Variable(zeros_tensor, false);  // Indices don't need gradients
     }
     auto token_type_embeddings = token_type_embeddings_->forward(type_ids);
 
@@ -210,29 +212,36 @@ auto BertPooler::forward(const Variable& hidden_states) -> Variable {
     // Create selection matrix [batch, batch * seq_len] where each row has 1 at position b*seq_len
     // Use the same dtype as hidden_states for consistency
     auto dtype = hidden_states.tensor().dtype();
-    Tensor selection_matrix(std::vector<int64_t>{batch_size, batch_size * seq_len},
-                           dtype, hidden_states.tensor().device());
-    selection_matrix.zero_();
+    auto target_device = hidden_states.tensor().device();
+
+    // Create on CPU for data filling, then transfer to device
+    Tensor selection_matrix_cpu(std::vector<int64_t>{batch_size, batch_size * seq_len},
+                                dtype, Device::cpu());
+    selection_matrix_cpu.zero_();
 
     // Fill the selection matrix with appropriate dtype
     if (dtype == DType::Float32) {
-        float* sel_data = selection_matrix.data<float>();
+        float* sel_data = selection_matrix_cpu.data<float>();
         for (int64_t b = 0; b < batch_size; ++b) {
             sel_data[b * (batch_size * seq_len) + b * seq_len] = 1.0f;
         }
     } else if (dtype == DType::Float64) {
-        double* sel_data = selection_matrix.data<double>();
+        double* sel_data = selection_matrix_cpu.data<double>();
         for (int64_t b = 0; b < batch_size; ++b) {
             sel_data[b * (batch_size * seq_len) + b * seq_len] = 1.0;
         }
     } else if (dtype == DType::Float16) {
         // Float16 data needs special handling
-        auto* sel_data = selection_matrix.data<uint16_t>();
+        auto* sel_data = selection_matrix_cpu.data<uint16_t>();
         uint16_t one_f16 = 0x3C00;  // Float16 representation of 1.0
         for (int64_t b = 0; b < batch_size; ++b) {
             sel_data[b * (batch_size * seq_len) + b * seq_len] = one_f16;
         }
     }
+
+    // Transfer to target device if needed
+    Tensor selection_matrix = (target_device == Device::cpu()) ?
+                               selection_matrix_cpu : selection_matrix_cpu.to(target_device);
 
     // Now: selection_matrix @ reshaped gives us [batch, hidden_size] with first tokens
     Variable selection_var(selection_matrix, false);  // No grad needed for constant matrix

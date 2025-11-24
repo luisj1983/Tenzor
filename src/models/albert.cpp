@@ -50,27 +50,28 @@ auto AlbertEmbeddings::create_position_ids(const Tensor& input_ids) -> Tensor {
     auto shape = input_ids.shape();
     int64_t batch_size = shape[0];
     int64_t seq_len = shape[1];
+    auto target_device = input_ids.device();
 
-    // Create position IDs: [0, 1, 2, ..., seq_len-1]
+    // Create position IDs on CPU first: [0, 1, 2, ..., seq_len-1]
     std::vector<int64_t> pos_data(seq_len);
     for (int64_t i = 0; i < seq_len; ++i) {
         pos_data[i] = i;
     }
 
-    Tensor position_ids(std::vector<int64_t>{seq_len}, DType::Int64, input_ids.device());
-    std::copy(pos_data.begin(), pos_data.end(), position_ids.data<int64_t>());
+    Tensor position_ids_cpu(std::vector<int64_t>{seq_len}, DType::Int64, Device::cpu());
+    std::copy(pos_data.begin(), pos_data.end(), position_ids_cpu.data<int64_t>());
 
-    // Expand to [batch_size, seq_len]
-    position_ids = position_ids.unsqueeze(0);  // [1, seq_len]
-    Tensor expanded(std::vector<int64_t>{batch_size, seq_len}, DType::Int64, input_ids.device());
-    auto pos_data_ptr = position_ids.data<int64_t>();
-    auto expanded_ptr = expanded.data<int64_t>();
+    // Expand to [batch_size, seq_len] on CPU
+    position_ids_cpu = position_ids_cpu.unsqueeze(0);  // [1, seq_len]
+    Tensor expanded_cpu(std::vector<int64_t>{batch_size, seq_len}, DType::Int64, Device::cpu());
+    auto pos_data_ptr = position_ids_cpu.data<int64_t>();
+    auto expanded_ptr = expanded_cpu.data<int64_t>();
     for (int64_t b = 0; b < batch_size; ++b) {
         std::copy(pos_data_ptr, pos_data_ptr + seq_len, expanded_ptr + b * seq_len);
     }
-    position_ids = expanded;
 
-    return position_ids;
+    // Move to target device
+    return (target_device == Device::cpu()) ? expanded_cpu : expanded_cpu.to(target_device);
 }
 
 auto AlbertEmbeddings::forward(const Variable& input_ids,
@@ -94,9 +95,12 @@ auto AlbertEmbeddings::forward(const Variable& input_ids,
     // Get token type embeddings (T×E)
     Variable type_ids = token_type_ids;
     if (!token_type_ids.is_initialized() || token_type_ids.tensor().numel() == 0) {
-        Tensor zeros(std::vector<int64_t>{batch_size, seq_len}, DType::Int64, input_ids.tensor().device());
-        zeros.zero_();
-        type_ids = Variable(zeros, false);
+        auto target_device = input_ids.tensor().device();
+        // Create zeros on CPU then move to device
+        Tensor zeros_cpu({batch_size, seq_len}, DType::Int64, Device::cpu());
+        zeros_cpu.zero_();
+        auto zeros_tensor = (target_device == Device::cpu()) ? zeros_cpu : zeros_cpu.to(target_device);
+        type_ids = Variable(zeros_tensor, false);
     }
     auto token_type_embeddings = token_type_embeddings_->forward(type_ids);
 
@@ -167,46 +171,10 @@ AlbertPooler::AlbertPooler(const AlbertConfig& config) {
 auto AlbertPooler::forward(const Variable& hidden_states) -> Variable {
     // Extract [CLS] token (first token) representation
     // hidden_states: [batch, seq_len, hidden_size]
-    auto shape = hidden_states.shape();
-    int64_t batch_size = shape[0];
-    int64_t hidden_size = shape[2];
+    // Use tensor slicing instead of manual memory copies for device compatibility
 
-    // Create a slice for the first token
-    Tensor first_token_tensor(std::vector<int64_t>{batch_size, hidden_size},
-                              hidden_states.tensor().dtype(),
-                              hidden_states.tensor().device());
-
-    // Copy first token data with dtype-aware access
-    auto dtype = hidden_states.tensor().dtype();
-
-    if (dtype == DType::Float16) {
-        const auto* src = hidden_states.tensor().data<Float16>();
-        auto* dst = first_token_tensor.data<Float16>();
-        for (int64_t b = 0; b < batch_size; ++b) {
-            int64_t src_offset = b * shape[1] * hidden_size;
-            int64_t dst_offset = b * hidden_size;
-            std::copy(src + src_offset, src + src_offset + hidden_size, dst + dst_offset);
-        }
-    } else if (dtype == DType::Float32) {
-        const auto* src = hidden_states.tensor().data<float>();
-        auto* dst = first_token_tensor.data<float>();
-        for (int64_t b = 0; b < batch_size; ++b) {
-            int64_t src_offset = b * shape[1] * hidden_size;
-            int64_t dst_offset = b * hidden_size;
-            std::copy(src + src_offset, src + src_offset + hidden_size, dst + dst_offset);
-        }
-    } else if (dtype == DType::Float64) {
-        const auto* src = hidden_states.tensor().data<double>();
-        auto* dst = first_token_tensor.data<double>();
-        for (int64_t b = 0; b < batch_size; ++b) {
-            int64_t src_offset = b * shape[1] * hidden_size;
-            int64_t dst_offset = b * hidden_size;
-            std::copy(src + src_offset, src + src_offset + hidden_size, dst + dst_offset);
-        }
-    } else {
-        throw std::runtime_error("Unsupported dtype in AlbertPooler");
-    }
-
+    // Slice first token: [batch, seq_len, hidden_size] -> [batch, 1, hidden_size] -> [batch, hidden_size]
+    auto first_token_tensor = hidden_states.tensor().slice(1, 0, 1).squeeze(1);
     Variable first_token(first_token_tensor, hidden_states.requires_grad());
 
     // Apply linear transformation and tanh activation

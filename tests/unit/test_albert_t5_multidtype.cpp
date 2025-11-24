@@ -82,14 +82,18 @@ protected:
 
     // Helper to create input token IDs with valid values
     auto create_input_ids(int64_t batch_size, int64_t seq_len, int64_t vocab_size = 30000) -> Variable {
-        Tensor input_ids({batch_size, seq_len}, DType::Int64, device);
+        // Create on CPU first, then move to target device
+        Tensor input_ids_cpu({batch_size, seq_len}, DType::Int64, Device::cpu());
 
         // Fill with valid token IDs within vocabulary range
         std::vector<int64_t> data(batch_size * seq_len);
         for (size_t i = 0; i < data.size(); ++i) {
             data[i] = i % vocab_size;
         }
-        std::copy(data.begin(), data.end(), input_ids.data<int64_t>());
+        std::copy(data.begin(), data.end(), input_ids_cpu.data<int64_t>());
+
+        // Move to target device
+        Tensor input_ids = (device == Device::cpu()) ? input_ids_cpu : input_ids_cpu.to(device);
 
         return Variable(input_ids, true);
     }
@@ -135,8 +139,9 @@ TEST_P(ALBERTandT5MultiDTypeTest, ALBERTBaseForwardShape) {
     config.vocab_size = 30000;
     auto model = std::make_shared<AlbertModel>(config);
 
-    // Convert model to test dtype
+    // Convert model to test dtype and device
     model->to(dtype);
+    model->to(device);
 
     int64_t batch_size = 2;
     int64_t seq_len = 128;
@@ -316,8 +321,9 @@ TEST_P(ALBERTandT5MultiDTypeTest, T5SmallForwardShape) {
     config.vocab_size = 32128;
     auto model = std::make_shared<T5Model>(config);
 
-    // Convert model to test dtype
+    // Convert model to test dtype and device
     model->to(dtype);
+    model->to(device);
 
     int64_t batch_size = 2;
     int64_t seq_len = 128;
@@ -370,8 +376,9 @@ TEST_P(ALBERTandT5MultiDTypeTest, T5BaseForwardShape) {
     config.vocab_size = 32128;
     auto model = std::make_shared<T5Model>(config);
 
-    // Convert model to test dtype
+    // Convert model to test dtype and device
     model->to(dtype);
+    model->to(device);
 
     int64_t batch_size = 2;
     int64_t seq_len = 128;
@@ -415,8 +422,9 @@ TEST_P(ALBERTandT5MultiDTypeTest, T5LargeForwardShape) {
     config.vocab_size = 32128;
     auto model = std::make_shared<T5Model>(config);
 
-    // Convert model to test dtype
+    // Convert model to test dtype and device
     model->to(dtype);
+    model->to(device);
 
     int64_t batch_size = 1;
     int64_t seq_len = 128;
@@ -441,8 +449,9 @@ TEST_P(ALBERTandT5MultiDTypeTest, ALBERTBatchSizeOne) {
     config.vocab_size = 30000;
     auto model = std::make_shared<AlbertModel>(config);
 
-    // Convert model to test dtype
+    // Convert model to test dtype and device
     model->to(dtype);
+    model->to(device);
 
     auto input_ids = create_input_ids(1, 64);
     auto output = model->forward(input_ids, Tensor{}, Variable{}, Variable{});
@@ -458,8 +467,9 @@ TEST_P(ALBERTandT5MultiDTypeTest, T5VariableSequenceLength) {
     config.vocab_size = 32128;
     auto model = std::make_shared<T5Model>(config);
 
-    // Convert model to test dtype
+    // Convert model to test dtype and device
     model->to(dtype);
+    model->to(device);
 
     // Test with different sequence lengths
     auto input_32 = create_input_ids(2, 32, config.vocab_size);

@@ -82,14 +82,18 @@ protected:
 
     // Helper to create input token IDs with valid values
     auto create_input_ids(int64_t batch_size, int64_t seq_len, int64_t vocab_size = 50265) -> Variable {
-        Tensor input_ids({batch_size, seq_len}, DType::Int64, device);
+        // Create on CPU first, then move to target device
+        Tensor input_ids_cpu({batch_size, seq_len}, DType::Int64, Device::cpu());
 
         // Fill with valid token IDs within vocabulary range
         std::vector<int64_t> data(batch_size * seq_len);
         for (size_t i = 0; i < data.size(); ++i) {
             data[i] = i % vocab_size;
         }
-        std::copy(data.begin(), data.end(), input_ids.data<int64_t>());
+        std::copy(data.begin(), data.end(), input_ids_cpu.data<int64_t>());
+
+        // Move to target device
+        Tensor input_ids = (device == Device::cpu()) ? input_ids_cpu : input_ids_cpu.to(device);
 
         return Variable(input_ids, true);
     }
@@ -135,8 +139,9 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, RoBERTaBaseForwardShape) {
     auto config = RobertaConfig::base();
     auto model = std::make_shared<RobertaModel>(config);
 
-    // Convert model to test dtype
+    // Convert model to test dtype and device
     model->to(dtype);
+    model->to(device);
 
     int64_t batch_size = 2;
     int64_t seq_len = 128;
@@ -154,8 +159,9 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, RoBERTaBaseGradientFlow) {
     auto config = RobertaConfig::base();
     auto model = std::make_shared<RobertaModel>(config);
 
-    // Convert model to test dtype
+    // Convert model to test dtype and device
     model->to(dtype);
+    model->to(device);
 
     model->train();
 
@@ -179,8 +185,9 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, RoBERTaBaseParameterCount) {
     auto config = RobertaConfig::base();
     auto model = std::make_shared<RobertaModel>(config);
 
-    // Convert model to test dtype
+    // Convert model to test dtype and device
     model->to(dtype);
+    model->to(device);
 
     auto params = model->parameters();
 
@@ -216,8 +223,9 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, RoBERTaLargeForwardShape) {
     auto config = RobertaConfig::large();
     auto model = std::make_shared<RobertaModel>(config);
 
-    // Convert model to test dtype
+    // Convert model to test dtype and device
     model->to(dtype);
+    model->to(device);
 
     int64_t batch_size = 2;
     int64_t seq_len = 128;
@@ -234,6 +242,8 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, RoBERTaLargeForwardShape) {
 TEST_P(RoBERTaELECTRAMultiDTypeTest, RoBERTaLargeGradientFlow) {
     auto config = RobertaConfig::large();
     auto model = std::make_shared<RobertaModel>(config);
+    model->to(dtype);
+    model->to(device);
     model->train();
 
     auto input_ids = create_input_ids(1, 64, config.vocab_size);
@@ -262,8 +272,9 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, ELECTRASmallForwardShape) {
     auto config = ElectraConfig::small();
     auto discriminator = std::make_shared<ElectraDiscriminator>(config);
 
-    // Convert model to test dtype
+    // Convert model to test dtype and device
     discriminator->to(dtype);
+    discriminator->to(device);
 
     int64_t batch_size = 2;
     int64_t seq_len = 128;
@@ -280,6 +291,8 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, ELECTRASmallForwardShape) {
 TEST_P(RoBERTaELECTRAMultiDTypeTest, ELECTRASmallGradientFlow) {
     auto config = ElectraConfig::small();
     auto discriminator = std::make_shared<ElectraDiscriminator>(config);
+    discriminator->to(dtype);
+    discriminator->to(device);
     discriminator->train();
 
     auto input_ids = create_input_ids(1, 64, 30522);
@@ -308,8 +321,9 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, ELECTRABaseForwardShape) {
     auto config = ElectraConfig::base();
     auto discriminator = std::make_shared<ElectraDiscriminator>(config);
 
-    // Convert model to test dtype
+    // Convert model to test dtype and device
     discriminator->to(dtype);
+    discriminator->to(device);
 
     int64_t batch_size = 2;
     int64_t seq_len = 128;
@@ -326,6 +340,8 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, ELECTRABaseForwardShape) {
 TEST_P(RoBERTaELECTRAMultiDTypeTest, ELECTRABaseGradientFlow) {
     auto config = ElectraConfig::base();
     auto discriminator = std::make_shared<ElectraDiscriminator>(config);
+    discriminator->to(dtype);
+    discriminator->to(device);
     discriminator->train();
 
     auto input_ids = create_input_ids(1, 64, 30522);
@@ -345,8 +361,9 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, ELECTRALargeForwardShape) {
     auto config = ElectraConfig::large();
     auto discriminator = std::make_shared<ElectraDiscriminator>(config);
 
-    // Convert model to test dtype
+    // Convert model to test dtype and device
     discriminator->to(dtype);
+    discriminator->to(device);
 
     int64_t batch_size = 1;
     int64_t seq_len = 128;
@@ -363,6 +380,8 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, ELECTRALargeForwardShape) {
 TEST_P(RoBERTaELECTRAMultiDTypeTest, ELECTRALargeGradientFlow) {
     auto config = ElectraConfig::large();
     auto discriminator = std::make_shared<ElectraDiscriminator>(config);
+    discriminator->to(dtype);
+    discriminator->to(device);
     discriminator->train();
 
     auto input_ids = create_input_ids(1, 64, 30522);
@@ -382,8 +401,9 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, RoBERTaBatchSizeOne) {
     auto config = RobertaConfig::base();
     auto model = std::make_shared<RobertaModel>(config);
 
-    // Convert model to test dtype
+    // Convert model to test dtype and device
     model->to(dtype);
+    model->to(device);
 
     auto input_ids = create_input_ids(1, 64, config.vocab_size);
     auto output = model->forward(input_ids, Tensor{}, Variable{}, Variable{});
@@ -398,8 +418,9 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, ELECTRAVariableSequenceLength) {
     auto config = ElectraConfig::base();
     auto discriminator = std::make_shared<ElectraDiscriminator>(config);
 
-    // Convert model to test dtype
+    // Convert model to test dtype and device
     discriminator->to(dtype);
+    discriminator->to(device);
 
     // Test with different sequence lengths
     auto input_32 = create_input_ids(2, 32, 30522);
