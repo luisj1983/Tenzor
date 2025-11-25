@@ -386,6 +386,8 @@ TEST_P(VisionComponentsMultiDTypeTest, ConvNeXtBlockDifferentChannels) {
 
 TEST_P(VisionComponentsMultiDTypeTest, LayerScaleForwardShape) {
     auto layer_scale = std::make_shared<LayerScale>(96, 1e-6);
+    layer_scale->to(dtype);
+    layer_scale->to(device);
 
     auto input_tensor = randn({2, 96, 56, 56}, DType::Float32, device);
     input_tensor = toTestDType(input_tensor);
@@ -399,6 +401,8 @@ TEST_P(VisionComponentsMultiDTypeTest, LayerScaleForwardShape) {
 
 TEST_P(VisionComponentsMultiDTypeTest, LayerScaleGradientFlow) {
     auto layer_scale = std::make_shared<LayerScale>(96, 1e-6);
+    layer_scale->to(dtype);
+    layer_scale->to(device);
 
     auto input_tensor = randn({1, 96, 56, 56}, DType::Float32, device);
     input_tensor = toTestDType(input_tensor);

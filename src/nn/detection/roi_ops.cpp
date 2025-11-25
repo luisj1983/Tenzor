@@ -68,13 +68,16 @@ auto ROIAlignOp::apply(const Tensor& features, const Tensor& rois,
     const int64_t feat_height = features.shape()[2];
     const int64_t feat_width = features.shape()[3];
 
-    // Create output tensor
-    auto output = tenzor::zeros({num_rois, channels, output_h, output_w},
-                                 features.dtype(), features.device());
+    // Remember original device
+    Device original_device = features.device();
 
     // Process on CPU
     auto features_cpu = features.to(Device::cpu());
     auto rois_cpu = rois.to(Device::cpu());
+
+    // Create output tensor on CPU for processing
+    auto output = tenzor::zeros({num_rois, channels, output_h, output_w},
+                                 features.dtype(), Device::cpu());
 
     const float* features_data = features_cpu.data<float>();
     const float* rois_data = rois_cpu.data<float>();
@@ -159,7 +162,8 @@ auto ROIAlignOp::apply(const Tensor& features, const Tensor& rois,
         }
     }
 
-    return output;
+    // Move output back to original device
+    return output.to(original_device);
 }
 
 // CPU backward implementation
@@ -173,12 +177,16 @@ auto ROIAlignOp::apply_backward(const Tensor& grad_output, const Tensor& feature
     const int64_t output_h = grad_output.shape()[2];
     const int64_t output_w = grad_output.shape()[3];
 
-    // Create gradient tensor (same shape as features)
-    auto grad_features = tenzor::zeros_like(features);
+    // Remember original device
+    Device original_device = features.device();
 
     // Move to CPU for processing
     auto grad_output_cpu = grad_output.to(Device::cpu());
     auto rois_cpu = rois.to(Device::cpu());
+
+    // Create gradient tensor on CPU (same shape as features)
+    auto grad_features = tenzor::zeros({features.shape()[0], channels, feat_height, feat_width},
+                                       features.dtype(), Device::cpu());
 
     const float* grad_output_data = grad_output_cpu.data<float>();
     const float* rois_data = rois_cpu.data<float>();
@@ -275,7 +283,8 @@ auto ROIAlignOp::apply_backward(const Tensor& grad_output, const Tensor& feature
         }
     }
 
-    return grad_features;
+    // Move gradient back to original device
+    return grad_features.to(original_device);
 }
 
 // ROIAlign module implementation
