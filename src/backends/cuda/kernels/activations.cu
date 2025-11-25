@@ -148,6 +148,16 @@ __device__ __forceinline__ T sigmoid_stable(T x) {
     }
 }
 
+// Specialization for __half
+__device__ __forceinline__ __half sigmoid_stable(__half x) {
+    if (__hge(x, __float2half(0.0f))) {
+        return __hdiv(__float2half(1.0f), __hadd(__float2half(1.0f), hexp(__hneg(x))));
+    } else {
+        __half exp_x = hexp(x);
+        return __hdiv(exp_x, __hadd(__float2half(1.0f), exp_x));
+    }
+}
+
 template<typename T>
 __global__ void sigmoid_forward_kernel(const T* input, T* output, int64_t n) {
     CUDA_GRID_STRIDE_LOOP(idx, n) {
@@ -162,6 +172,15 @@ __global__ void sigmoid_backward_kernel(const T* grad_output, const T* input,
     CUDA_GRID_STRIDE_LOOP(idx, n) {
         T sigmoid_x = sigmoid_stable(input[idx]);
         grad_input[idx] = grad_output[idx] * sigmoid_x * (T(1) - sigmoid_x);
+    }
+}
+
+// Swish activation: swish(x) = x * sigmoid(x)
+template<typename T>
+__global__ void swish_forward_kernel(const T* input, T* output, int64_t n) {
+    CUDA_GRID_STRIDE_LOOP(idx, n) {
+        T x = input[idx];
+        output[idx] = x * sigmoid_stable(x);
     }
 }
 
@@ -920,6 +939,42 @@ auto sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& input, cud
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         throw std::runtime_error(std::string("CUDA error in sigmoid_backward_kernel: ") + cudaGetErrorString(err));
+    }
+
+    return result;
+}
+
+// Swish wrapper
+auto swish_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+
+    if (n == 0) {
+        cudaStreamSynchronize(stream);
+        return result;
+    }
+
+    if (input.dtype() == DType::Float32) {
+        int num_blocks = get_num_blocks(n);
+        swish_forward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        int num_blocks = get_num_blocks(n);
+        swish_forward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        int num_blocks = get_num_blocks(n);
+        swish_forward_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<const __half*>(input.data_ptr()),
+            reinterpret_cast<__half*>(result.data_ptr()), n);
+    } else {
+        throw std::runtime_error("Swish only supports Float32, Float64, and Float16 dtypes");
+    }
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        throw std::runtime_error(std::string("CUDA error in swish_kernel: ") + cudaGetErrorString(err));
     }
 
     return result;

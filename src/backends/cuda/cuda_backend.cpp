@@ -77,6 +77,7 @@ namespace cuda {
     auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaStream_t stream) -> Tensor;
     auto sigmoid_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
     auto sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaStream_t stream) -> Tensor;
+    auto swish_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
     auto tanh_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
     auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaStream_t stream) -> Tensor;
     auto gelu_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
@@ -700,6 +701,12 @@ public:
                     throw std::invalid_argument("sigmoid_backward operation requires exactly 2 inputs");
                 }
                 return {cuda::sigmoid_backward_kernel(inputs[0], inputs[1], stream)};
+            }
+            else if (op_name == "swish") {
+                if (inputs.size() != 1) {
+                    throw std::invalid_argument("swish operation requires exactly 1 input");
+                }
+                return {cuda::swish_kernel(inputs[0], stream)};
             }
             else if (op_name == "tanh") {
                 if (inputs.size() != 1) {

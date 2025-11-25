@@ -250,6 +250,8 @@ TEST_P(VisionComponentsMultiDTypeTest, SEBlockDifferentChannels) {
 
 TEST_P(VisionComponentsMultiDTypeTest, MBConvBlockExpand1Shape) {
     auto mbconv = std::make_shared<MBConvBlock>(32, 32, 1, 3, 1, true, 0.25, 0.0);
+    mbconv->to(dtype);
+    mbconv->to(device);
 
     auto input_tensor = randn({2, 32, 28, 28}, DType::Float32, device);
     input_tensor = toTestDType(input_tensor);
@@ -262,6 +264,8 @@ TEST_P(VisionComponentsMultiDTypeTest, MBConvBlockExpand1Shape) {
 
 TEST_P(VisionComponentsMultiDTypeTest, MBConvBlockExpand6Shape) {
     auto mbconv = std::make_shared<MBConvBlock>(24, 40, 6, 3, 2, true, 0.25, 0.0);
+    mbconv->to(dtype);
+    mbconv->to(device);
 
     auto input_tensor = randn({2, 24, 56, 56}, DType::Float32, device);
     input_tensor = toTestDType(input_tensor);
@@ -275,6 +279,8 @@ TEST_P(VisionComponentsMultiDTypeTest, MBConvBlockExpand6Shape) {
 
 TEST_P(VisionComponentsMultiDTypeTest, MBConvBlockKernel5) {
     auto mbconv = std::make_shared<MBConvBlock>(40, 80, 6, 5, 2, true, 0.25, 0.0);
+    mbconv->to(dtype);
+    mbconv->to(device);
 
     auto input_tensor = randn({1, 40, 28, 28}, DType::Float32, device);
     input_tensor = toTestDType(input_tensor);
@@ -288,6 +294,7 @@ TEST_P(VisionComponentsMultiDTypeTest, MBConvBlockKernel5) {
 TEST_P(VisionComponentsMultiDTypeTest, MBConvBlockGradientFlow) {
     auto mbconv = std::make_shared<MBConvBlock>(16, 24, 6, 3, 1, true, 0.25, 0.0);
     mbconv->to(dtype);  // Convert model to test dtype
+    mbconv->to(device);
 
     auto input_tensor = randn({1, 16, 56, 56}, DType::Float32, device);
     input_tensor = toTestDType(input_tensor);
@@ -312,6 +319,8 @@ TEST_P(VisionComponentsMultiDTypeTest, MBConvBlockGradientFlow) {
 
 TEST_P(VisionComponentsMultiDTypeTest, ConvNeXtBlockForwardShape) {
     auto block = std::make_shared<ConvNeXtBlock>(96, 0.0, 1e-6);
+    block->to(dtype);
+    block->to(device);
 
     auto input_tensor = randn({2, 96, 56, 56}, DType::Float32, device);
     input_tensor = toTestDType(input_tensor);
@@ -325,6 +334,8 @@ TEST_P(VisionComponentsMultiDTypeTest, ConvNeXtBlockForwardShape) {
 
 TEST_P(VisionComponentsMultiDTypeTest, ConvNeXtBlockGradientFlow) {
     auto block = std::make_shared<ConvNeXtBlock>(96, 0.1, 1e-6);
+    block->to(dtype);
+    block->to(device);
 
     auto input_tensor = randn({1, 96, 56, 56}, DType::Float32, device);
     input_tensor = toTestDType(input_tensor);
@@ -345,6 +356,8 @@ TEST_P(VisionComponentsMultiDTypeTest, ConvNeXtBlockGradientFlow) {
 
 TEST_P(VisionComponentsMultiDTypeTest, ConvNeXtBlockDifferentChannels) {
     auto block_96 = std::make_shared<ConvNeXtBlock>(96, 0.0, 1e-6);
+    block_96->to(dtype);
+    block_96->to(device);
     auto input_tensor_96 = randn({1, 96, 56, 56}, DType::Float32, device);
     input_tensor_96 = toTestDType(input_tensor_96);
     Variable input_96(input_tensor_96, true);
@@ -355,6 +368,8 @@ TEST_P(VisionComponentsMultiDTypeTest, ConvNeXtBlockDifferentChannels) {
     EXPECT_EQ(output_96.tensor().dtype(), dtype);
 
     auto block_192 = std::make_shared<ConvNeXtBlock>(192, 0.0, 1e-6);
+    block_192->to(dtype);
+    block_192->to(device);
     auto input_tensor_192 = randn({1, 192, 28, 28}, DType::Float32, device);
     input_tensor_192 = toTestDType(input_tensor_192);
     Variable input_192(input_tensor_192, true);
