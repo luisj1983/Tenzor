@@ -735,12 +735,21 @@ auto GroupNorm::forward(const Variable& input) -> Variable {
 
     int64_t group_size = num_channels_ / num_groups_;
 
+    // Save original device and move to CPU for computation
+    auto original_device = input.tensor().device();
+    Variable input_cpu = (original_device.type == Device::Type::CPU) ?
+                         input : Variable(input.tensor().cpu(), input.requires_grad());
+    Variable weight_cpu = (weight_.tensor().device().type == Device::Type::CPU) ?
+                          weight_ : Variable(weight_.tensor().cpu(), weight_.requires_grad());
+    Variable bias_cpu = (bias_.tensor().device().type == Device::Type::CPU) ?
+                        bias_ : Variable(bias_.tensor().cpu(), bias_.requires_grad());
+
     // Compute mean and variance for each group
     // Shape: [N, num_groups]
     auto group_mean = zeros({N * num_groups_});
     auto group_var = zeros({N * num_groups_});
 
-    auto* input_data = input.tensor().data<float>();
+    auto* input_data = input_cpu.tensor().data<float>();
     auto* mean_data = group_mean.data<float>();
     auto* var_data = group_var.data<float>();
 
@@ -796,10 +805,10 @@ auto GroupNorm::forward(const Variable& input) -> Variable {
     }
 
     // Normalize and apply affine transformation
-    auto output = zeros_like(input.tensor());
+    auto output = zeros_like(input_cpu.tensor());
     auto* output_data = output.data<float>();
-    auto* weight_data = weight_.tensor().data<float>();
-    auto* bias_data = bias_.tensor().data<float>();
+    auto* weight_data = weight_cpu.tensor().data<float>();
+    auto* bias_data = bias_cpu.tensor().data<float>();
 
     for (int64_t n = 0; n < N; n++) {
         for (int64_t g = 0; g < num_groups_; g++) {
@@ -825,9 +834,13 @@ auto GroupNorm::forward(const Variable& input) -> Variable {
         }
     }
 
+    // Move output back to original device if needed
+    Tensor output_final = (original_device.type == Device::Type::CPU) ?
+                          output : output.to(original_device);
+
     // Set up autograd if needed
     if (input.requires_grad() || (affine_ && weight_.requires_grad())) {
-        auto result = Variable(output, true);
+        auto result = Variable(output_final, true);
 
         std::vector<Tensor> tensors_to_save = {
             input.tensor(),
@@ -884,7 +897,7 @@ auto GroupNorm::forward(const Variable& input) -> Variable {
 
         return result;
     } else {
-        return Variable(output, false);
+        return Variable(output_final, false);
     }
 }
 
