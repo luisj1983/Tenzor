@@ -95,7 +95,7 @@ public:
      * @param x Input tensor of shape (N, in_channels, H, W)
      * @return Concatenated output of all branches
      */
-    auto forward(const Variable& x) -> Variable override;
+    auto forward_impl(const Variable& x) -> Variable override;
 
 private:
     // Branch 1: 1x1 convolution
@@ -160,7 +160,7 @@ public:
      * @param x Input tensor from intermediate layer
      * @return Classification logits
      */
-    auto forward(const Variable& x) -> Variable override;
+    auto forward_impl(const Variable& x) -> Variable override;
 
 private:
     std::shared_ptr<nn::AvgPool2d> avgpool_;
@@ -238,7 +238,7 @@ public:
      * @param x Input tensor of shape (N, 3, 224, 224)
      * @return Output logits of shape (N, num_classes)
      */
-    auto forward(const Variable& x) -> Variable override;
+    auto forward_impl(const Variable& x) -> Variable override;
 
     /**
      * @brief Forward pass with auxiliary outputs

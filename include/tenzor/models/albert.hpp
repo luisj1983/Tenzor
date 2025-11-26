@@ -124,7 +124,7 @@ public:
     /**
      * @brief Required by Module base class
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     AlbertConfig config_;
@@ -175,7 +175,7 @@ public:
     /**
      * @brief Required by Module base class
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     AlbertConfig config_;
@@ -203,7 +203,7 @@ public:
      * @param hidden_states Encoder output [batch, seq_len, hidden_size]
      * @return Pooled output [batch, hidden_size]
      */
-    auto forward(const Variable& hidden_states) -> Variable override;
+    auto forward_impl(const Variable& hidden_states) -> Variable override;
 
 private:
     std::shared_ptr<nn::Linear> dense_;
@@ -260,7 +260,7 @@ public:
     /**
      * @brief Required by Module base class (returns sequence_output only)
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
     /**
      * @brief Get model configuration
@@ -304,7 +304,7 @@ public:
     /**
      * @brief Required by Module base class
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     AlbertConfig config_;
@@ -345,7 +345,7 @@ public:
     /**
      * @brief Required by Module base class
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     AlbertConfig config_;
@@ -392,7 +392,7 @@ public:
     /**
      * @brief Required by Module base class (returns mlm_logits only)
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     AlbertConfig config_;

@@ -97,7 +97,7 @@ public:
      * @return Output variable on master device
      * @throws std::runtime_error if batch_size < num_devices
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
     /**
      * @brief Get underlying module.

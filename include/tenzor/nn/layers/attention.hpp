@@ -71,6 +71,9 @@ namespace nn {
  */
 class MultiheadAttention : public Module {
 public:
+    // Bring base class forward into scope (avoid hiding by multi-param forward)
+    using Module::forward;
+
     /**
      * @brief Construct multi-head attention layer.
      *
@@ -162,7 +165,7 @@ public:
      * @param input Input variable for self-attention
      * @return Output variable (attention weights not returned)
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
     /**
      * @brief Get embedding dimension.

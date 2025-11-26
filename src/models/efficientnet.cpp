@@ -141,7 +141,7 @@ EfficientNetSqueezeExcitation::EfficientNetSqueezeExcitation(int64_t channels, d
     register_module("fc2", fc2_);
 }
 
-auto EfficientNetSqueezeExcitation::forward(const Variable& input) -> Variable {
+auto EfficientNetSqueezeExcitation::forward_impl(const Variable& input) -> Variable {
     // Global average pooling: (N, C, H, W) → (N, C, 1, 1)
     auto pooled = pool_->forward(input);
 
@@ -210,7 +210,7 @@ MBConvBlock::MBConvBlock(int64_t in_channels,
     register_module("project_bn", project_bn_);
 }
 
-auto MBConvBlock::forward(const Variable& input) -> Variable {
+auto MBConvBlock::forward_impl(const Variable& input) -> Variable {
     auto x = input;
 
     // Expansion phase
@@ -352,7 +352,7 @@ void EfficientNet::make_head(int64_t final_stage_channels, int64_t head_channels
     register_module("fc", fc_);
 }
 
-auto EfficientNet::forward(const Variable& input) -> Variable {
+auto EfficientNet::forward_impl(const Variable& input) -> Variable {
     // Stem
     auto x = stem_conv_->forward(input);
     x = stem_bn_->forward(x);

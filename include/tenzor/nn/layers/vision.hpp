@@ -78,7 +78,7 @@ public:
      *
      * @throws std::runtime_error if input dimensions not divisible by patch_size
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
     /**
      * @brief Get number of patches produced.
@@ -152,6 +152,9 @@ private:
  */
 class WindowAttention : public Module {
 public:
+    // Bring base class forward into scope (avoid hiding by 2-param forward)
+    using Module::forward;
+
     /**
      * @brief Construct window attention layer.
      *
@@ -202,7 +205,7 @@ public:
     /**
      * @brief Default forward for Module interface.
      */
-    auto forward(const Variable& input) -> Variable override {
+    auto forward_impl(const Variable& input) -> Variable override {
         return forward(input, Tensor{});
     }
 

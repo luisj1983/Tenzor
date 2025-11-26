@@ -41,7 +41,7 @@ public:
         register_module("fc2", fc2_);
     }
 
-    Variable forward(const Variable& x) override {
+    Variable forward_impl(const Variable& x) override {
         auto out = fc1_->forward(x);
         out = fc2_->forward(out);
         return out;
@@ -119,7 +119,7 @@ TEST_F(JITTest, TraceConvolutionalModel) {
             register_module("conv2", conv2_);
         }
 
-        Variable forward(const Variable& x) override {
+        Variable forward_impl(const Variable& x) override {
             auto out = conv1_->forward(x);
             out = conv2_->forward(out);
             return out;
@@ -158,7 +158,7 @@ TEST_F(JITTest, TraceWithBatchNorm) {
             register_module("relu", relu_);
         }
 
-        Variable forward(const Variable& x) override {
+        Variable forward_impl(const Variable& x) override {
             auto out = conv_->forward(x);
             out = bn_->forward(out);
             out = relu_->forward(out);
@@ -194,7 +194,7 @@ TEST_F(JITTest, TraceWithMultipleInputs) {
         }
 
         // Required by Module base class (pure virtual)
-        Variable forward(const Variable& input) override {
+        Variable forward_impl(const Variable& input) override {
             // This single-input version is required by Module interface
             // but not used in this test - the multi-input version below is used
             return fc_->forward(input);
@@ -244,7 +244,7 @@ TEST_F(JITTest, OptimizeFusion_ConvBNReLU) {
             register_module("relu", relu_);
         }
 
-        Variable forward(const Variable& x) override {
+        Variable forward_impl(const Variable& x) override {
             return relu_->forward(bn_->forward(conv_->forward(x)));
         }
 
@@ -276,7 +276,7 @@ TEST_F(JITTest, OptimizeFusion_ConvBNReLU) {
 TEST_F(JITTest, OptimizeConstantFolding) {
     class ModelWithConstants : public Module {
     public:
-        Variable forward(const Variable& x) override {
+        Variable forward_impl(const Variable& x) override {
             // Add a constant tensor
             Tensor constant({1, 10}, DType::Float32, Device::cpu());
             constant.fill_(1.0f);
@@ -313,7 +313,7 @@ TEST_F(JITTest, OptimizeDeadCodeElimination) {
             register_module("fc2", fc2_);
         }
 
-        Variable forward(const Variable& x) override {
+        Variable forward_impl(const Variable& x) override {
             // Only use fc1, fc2 is dead code
             return fc1_->forward(x);
         }
@@ -386,7 +386,7 @@ TEST_F(JITTest, SaveAndLoadConvModel) {
             register_module("fc", fc_);
         }
 
-        Variable forward(const Variable& x) override {
+        Variable forward_impl(const Variable& x) override {
             auto out = conv1_->forward(x);
             auto flattened = out.tensor().reshape({x.tensor().shape()[0], -1});
             return fc_->forward(Variable(flattened, out.requires_grad()));
@@ -476,7 +476,7 @@ TEST_F(JITTest, GetNodesByType) {
             register_module("relu", relu_);
         }
 
-        Variable forward(const Variable& x) override {
+        Variable forward_impl(const Variable& x) override {
             auto out = relu_->forward(conv1_->forward(x));
             out = relu_->forward(conv2_->forward(out));
             return out;
@@ -541,7 +541,7 @@ TEST_F(JITTest, TraceDynamicBatchSize) {
 TEST_F(JITTest, TraceInvalidModel) {
     class BrokenModel : public Module {
     public:
-        Variable forward(const Variable& x) override {
+        Variable forward_impl(const Variable& x) override {
             throw std::runtime_error("Model is broken");
         }
     };

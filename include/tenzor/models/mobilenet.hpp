@@ -63,7 +63,7 @@ namespace models {
 class HardSwish : public nn::Module {
 public:
     HardSwish() = default;
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 };
 
 /**
@@ -85,7 +85,7 @@ public:
 class HardSigmoid : public nn::Module {
 public:
     HardSigmoid() = default;
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 };
 
 /**
@@ -128,7 +128,7 @@ public:
                                int64_t reduction = 4,
                                bool use_hard_sigmoid = true);
 
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     std::shared_ptr<nn::AdaptiveAvgPool2d> pool_;
@@ -196,7 +196,7 @@ public:
                      bool use_se = false,
                      bool use_hs = false);
 
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     bool use_residual_;  ///< Whether to use skip connection
@@ -226,7 +226,7 @@ public:
                 double width_mult = 1.0,
                 double dropout = 0.2);
 
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
     auto forward_features(const Variable& input) -> Variable;
     auto load_pretrained(const std::string& path) -> void;
 
@@ -270,7 +270,7 @@ public:
                 double width_mult = 1.0,
                 double dropout = 0.2);
 
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
     auto load_pretrained(const std::string& path) -> void;
 
 private:

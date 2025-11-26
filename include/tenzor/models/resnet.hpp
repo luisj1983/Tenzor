@@ -61,7 +61,7 @@ public:
                int64_t base_width = 64,
                std::shared_ptr<nn::Module> downsample = nullptr);
 
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     std::shared_ptr<nn::Conv2d> conv1_;
@@ -109,7 +109,7 @@ public:
                int64_t base_width = 64,
                std::shared_ptr<nn::Module> downsample = nullptr);
 
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     std::shared_ptr<nn::Conv2d> conv1_;
@@ -162,7 +162,7 @@ public:
      * @param input Input image tensor of shape (N, 3, H, W)
      * @return Output logits of shape (N, num_classes)
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
     /**
      * @brief Extract feature maps for detection tasks.

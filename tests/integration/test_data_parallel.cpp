@@ -104,7 +104,7 @@ public:
         register_module("fc2", fc2_);
     }
 
-    auto forward(const Variable& input) -> Variable override {
+    auto forward_impl(const Variable& input) -> Variable override {
         auto h = fc1_->forward(input);
         h = relu_->forward(h);
         return fc2_->forward(h);
@@ -141,7 +141,7 @@ public:
         register_module("fc2", fc2_);
     }
 
-    auto forward(const Variable& input) -> Variable override {
+    auto forward_impl(const Variable& input) -> Variable override {
         auto x = conv1_->forward(input);
         x = relu1_->forward(x);
         x = pool1_->forward(x);

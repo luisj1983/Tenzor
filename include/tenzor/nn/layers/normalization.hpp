@@ -70,7 +70,7 @@ public:
      *
      * @throws std::runtime_error if input shape doesn't match normalized_shape
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     std::vector<int64_t> normalized_shape_;  ///< Dimensions to normalize over
@@ -150,7 +150,7 @@ public:
      *
      * @throws std::runtime_error if input channels don't match num_channels
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     int64_t num_groups_;    ///< Number of groups

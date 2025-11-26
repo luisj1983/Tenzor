@@ -61,7 +61,7 @@ DataParallel::DataParallel(
     validate_devices();
 }
 
-auto DataParallel::forward(const Variable& input) -> Variable {
+auto DataParallel::forward_impl(const Variable& input) -> Variable {
     // Single device optimization
     if (device_ids_.size() == 1) {
         return module_->forward(input);

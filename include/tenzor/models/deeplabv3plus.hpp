@@ -78,19 +78,19 @@ public:
                          bool pretrained = false);
 
     /**
-     * @brief Forward pass through encoder.
+     * @brief Forward pass through encoder returning both outputs.
      *
      * @param input Input image of shape (N, 3, H, W)
      * @return Pair of (ASPP features, low-level features)
      *         - ASPP features: (N, 256, H/16, W/16)
      *         - Low-level features: (N, C_low, H/4, W/4)
      */
-    auto forward_impl(const Variable& input)
+    auto forward_multi(const Variable& input)
         -> std::pair<Variable, Variable>;
 
     // Module interface implementation - returns ASPP features only
-    auto forward(const Variable& input) -> Variable override {
-        auto [aspp_feat, low_feat] = forward_impl(input);
+    auto forward_impl(const Variable& input) -> Variable override {
+        auto [aspp_feat, low_feat] = forward_multi(input);
         return aspp_feat;
     }
 
@@ -167,7 +167,7 @@ public:
                 const Variable& low_level_features) -> Variable;
 
     // Module interface implementation (not used - decoder requires 2 inputs)
-    auto forward(const Variable& input) -> Variable override {
+    auto forward_impl(const Variable& input) -> Variable override {
         // This shouldn't be called - decoder requires both aspp and low-level features
         // Return input as dummy implementation
         return input;
@@ -239,7 +239,7 @@ public:
      *
      * @note Apply softmax for probabilities, argmax for class predictions
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
     /**
      * @brief Predict segmentation map.

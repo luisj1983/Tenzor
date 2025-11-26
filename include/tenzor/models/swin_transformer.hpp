@@ -51,7 +51,7 @@ public:
             int64_t out_features = 0,
             double drop = 0.0);
 
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     std::shared_ptr<nn::Linear> fc1_;
@@ -109,7 +109,7 @@ public:
                         double attn_drop = 0.0,
                         double drop_path = 0.0);
 
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     int64_t dim_;
@@ -161,7 +161,7 @@ public:
     PatchMerging(const std::pair<int64_t, int64_t>& input_resolution,
                 int64_t dim);
 
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     std::pair<int64_t, int64_t> input_resolution_;
@@ -213,7 +213,7 @@ public:
               const std::vector<double>& drop_path = {},
               std::shared_ptr<nn::Module> downsample = nullptr);
 
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
     /**
      * @brief Get output resolution after this stage.
@@ -264,7 +264,7 @@ public:
               int64_t embed_dim = 96,
               bool norm_layer = false);
 
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
     /**
      * @brief Get patch grid size.
@@ -374,7 +374,7 @@ public:
      * @param input Input image tensor of shape (N, 3, H, W)
      * @return Output logits of shape (N, num_classes)
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
     /**
      * @brief Extract hierarchical features from all stages.

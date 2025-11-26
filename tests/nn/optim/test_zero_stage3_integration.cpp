@@ -48,7 +48,7 @@ public:
         register_module("fc", fc_);
     }
 
-    auto forward(const Variable& x) -> Variable override {
+    auto forward_impl(const Variable& x) -> Variable override {
         return fc_->forward(x);
     }
 
@@ -82,7 +82,7 @@ public:
         register_module("layer_" + std::to_string(num_layers - 1), layer_out);
     }
 
-    auto forward(const Variable& x) -> Variable override {
+    auto forward_impl(const Variable& x) -> Variable override {
         Variable out = x;
         for (size_t i = 0; i < layers_.size() - 1; ++i) {
             out = layers_[i]->forward(out);
@@ -118,7 +118,7 @@ public:
         register_module("fc2", fc2_);
     }
 
-    auto forward(const Variable& x) -> Variable override {
+    auto forward_impl(const Variable& x) -> Variable override {
         // Simplified attention (for testing only)
         auto qkv = qkv_->forward(x);
         auto attn_out = out_proj_->forward(qkv);

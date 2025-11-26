@@ -200,24 +200,37 @@ auto OffloadContext::get_cpu_memory_usage() const -> size_t {
 // ============================================================================
 
 auto OffloadContext::register_hooks() -> void {
-    // Register hooks on the main module
-    model_.register_forward_pre_hook([this](Module* m) {
+    // Register hooks on ALL modules (root and all submodules).
+    // With the updated Module::forward() that automatically calls hooks,
+    // each module's hooks will fire when its forward() is called,
+    // enabling true layer-by-layer offloading.
+    register_hooks_recursive(&model_);
+}
+
+auto OffloadContext::register_hooks_recursive(Module* module) -> void {
+    if (!module) return;
+
+    // Register hooks on this module
+    module->register_forward_pre_hook([this](Module* m) {
         this->forward_pre_hook(m);
     });
 
-    model_.register_forward_post_hook([this](Module* m) {
+    module->register_forward_post_hook([this](Module* m) {
         this->forward_post_hook(m);
     });
 
-    model_.register_backward_pre_hook([this](Module* m) {
+    module->register_backward_pre_hook([this](Module* m) {
         this->backward_pre_hook(m);
     });
 
-    model_.register_backward_post_hook([this](Module* m) {
+    module->register_backward_post_hook([this](Module* m) {
         this->backward_post_hook(m);
     });
 
-    // Gradients are offloaded in backward_post_hook after each layer's backward pass
+    // Recursively register on all submodules
+    for (auto& [name, submodule] : module->get_submodules()) {
+        register_hooks_recursive(submodule.get());
+    }
 }
 
 auto OffloadContext::build_layer_order() -> void {
@@ -283,6 +296,7 @@ auto OffloadContext::initialize_tensor_info(Tensor* tensor, Module* layer) -> vo
 
     TensorInfo info;
     info.tensor = tensor;
+    info.original_device = tensor->device();  // Save original device for later restoration
     info.is_offloaded = false;
     info.is_pinned = false;
     info.use_count = 0;
@@ -374,8 +388,17 @@ auto OffloadContext::offload_tensor(Tensor* tensor_ptr) -> bool {
     auto start = std::chrono::high_resolution_clock::now();
 
     try {
+        // Save the original device before offloading
+        info.original_device = tensor_ptr->device();
+
         // Transfer to CPU
         info.cpu_copy = transfer_engine_->gpu_to_cpu(*tensor_ptr);
+
+        // CRITICAL: Replace the GPU tensor with the CPU copy to actually free GPU memory.
+        // The original GPU tensor's memory will be released when we assign the CPU tensor to it.
+        // This is the key to actually reducing GPU memory usage during offloading.
+        *tensor_ptr = info.cpu_copy;
+
         info.is_offloaded = true;
 
         // Update statistics
@@ -413,8 +436,8 @@ auto OffloadContext::prefetch_tensor(Tensor* tensor_ptr) -> bool {
     auto start = std::chrono::high_resolution_clock::now();
 
     try {
-        // Transfer back to GPU
-        Tensor gpu_tensor = transfer_engine_->cpu_to_gpu(info.cpu_copy, Device::cuda(0));
+        // Transfer back to GPU using the original device
+        Tensor gpu_tensor = transfer_engine_->cpu_to_gpu(info.cpu_copy, info.original_device);
         *tensor_ptr = gpu_tensor;
         info.is_offloaded = false;
 
@@ -458,8 +481,9 @@ auto OffloadContext::should_offload(const TensorInfo& info) const -> bool {
 auto OffloadContext::forward_pre_hook(Module* layer) -> void {
     if (!is_enabled()) return;
 
-    // Load parameters for this layer back to GPU if they were offloaded
-    auto params = layer->parameters();
+    // Load ONLY this layer's own parameters back to GPU if they were offloaded
+    // Using own_parameters() instead of parameters() to avoid loading submodule params
+    auto params = layer->own_parameters();
     for (auto& param_ptr : params) {
         if (param_ptr) {
             Tensor* tensor_ptr = &(param_ptr->tensor());
@@ -467,9 +491,9 @@ auto OffloadContext::forward_pre_hook(Module* layer) -> void {
             std::lock_guard<std::mutex> lock(tensor_map_mutex_);
             auto it = tensor_map_.find(tensor_ptr);
             if (it != tensor_map_.end() && it->second.is_offloaded) {
-                // Load back to GPU
+                // Load back to GPU using the stored original device
                 try {
-                    Tensor gpu_tensor = transfer_engine_->cpu_to_gpu(it->second.cpu_copy, tensor_ptr->device());
+                    Tensor gpu_tensor = transfer_engine_->cpu_to_gpu(it->second.cpu_copy, it->second.original_device);
                     *tensor_ptr = gpu_tensor;
                     it->second.is_offloaded = false;
 

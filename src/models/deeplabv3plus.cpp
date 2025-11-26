@@ -100,7 +100,7 @@ auto DeepLabV3PlusEncoder::create_resnet_backbone(const std::string& name,
     return backbone;
 }
 
-auto DeepLabV3PlusEncoder::forward_impl(const Variable& input)
+auto DeepLabV3PlusEncoder::forward_multi(const Variable& input)
     -> std::pair<Variable, Variable>
 {
     Variable high_level_features;
@@ -164,7 +164,7 @@ DeepLabV3PlusDecoder::DeepLabV3PlusDecoder(int64_t num_classes,
             register_module("conv2", conv2_);
         }
 
-        auto forward(const Variable& input) -> Variable override {
+        auto forward_impl(const Variable& input) -> Variable override {
             auto x = conv1_->forward(input);
             x = conv2_->forward(x);
             return x;
@@ -244,9 +244,9 @@ DeepLabV3Plus::DeepLabV3Plus(int64_t num_classes,
     register_module("decoder", decoder_);
 }
 
-auto DeepLabV3Plus::forward(const Variable& input) -> Variable {
+auto DeepLabV3Plus::forward_impl(const Variable& input) -> Variable {
     // Encode
-    auto [aspp_features, low_level_features] = encoder_->forward_impl(input);
+    auto [aspp_features, low_level_features] = encoder_->forward_multi(input);
 
     // Decode
     auto output = decoder_->forward(aspp_features, low_level_features);

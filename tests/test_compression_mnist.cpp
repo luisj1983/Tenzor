@@ -30,7 +30,7 @@ public:
         register_module("fc3", fc3_);
     }
 
-    Variable forward(const Variable& x) override {
+    Variable forward_impl(const Variable& x) override {
         auto h1 = fc1_->forward(x).relu();
         auto h2 = fc2_->forward(h1).relu();
         return fc3_->forward(h2);

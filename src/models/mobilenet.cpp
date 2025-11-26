@@ -16,7 +16,7 @@ namespace models {
 // Hard-Swish and Hard-Sigmoid Implementations
 // ============================================================================
 
-auto HardSwish::forward(const Variable& input) -> Variable {
+auto HardSwish::forward_impl(const Variable& input) -> Variable {
     // h-swish(x) = x * ReLU6(x + 3) / 6
     // ReLU6(x) = min(max(x, 0), 6)
     auto x_plus_3 = input + 3.0;
@@ -24,7 +24,7 @@ auto HardSwish::forward(const Variable& input) -> Variable {
     return input * relu6_result / 6.0;
 }
 
-auto HardSigmoid::forward(const Variable& input) -> Variable {
+auto HardSigmoid::forward_impl(const Variable& input) -> Variable {
     // h-sigmoid(x) = ReLU6(x + 3) / 6
     auto x_plus_3 = input + 3.0;
     return tenzor::clamp(x_plus_3, 0.0, 6.0) / 6.0;
@@ -53,7 +53,7 @@ MobileNetSqueezeExcitation::MobileNetSqueezeExcitation(int64_t channels,
     register_module("fc2", fc2_);
 }
 
-auto MobileNetSqueezeExcitation::forward(const Variable& input) -> Variable {
+auto MobileNetSqueezeExcitation::forward_impl(const Variable& input) -> Variable {
     auto shape = input.tensor().shape();
     int64_t batch = shape[0];
     int64_t channels = shape[1];
@@ -154,7 +154,7 @@ InvertedResidual::InvertedResidual(int64_t in_channels,
     register_module("conv", conv_);
 }
 
-auto InvertedResidual::forward(const Variable& input) -> Variable {
+auto InvertedResidual::forward_impl(const Variable& input) -> Variable {
     auto x = conv_->forward(input);
 
     if (use_residual_) {
@@ -246,7 +246,7 @@ MobileNetV2::MobileNetV2(int64_t num_classes, double width_mult, double dropout)
     register_module("classifier", classifier_);
 }
 
-auto MobileNetV2::forward(const Variable& input) -> Variable {
+auto MobileNetV2::forward_impl(const Variable& input) -> Variable {
     auto x = features_->forward(input);
 
     // Global average pooling
@@ -411,7 +411,7 @@ MobileNetV3::MobileNetV3(int64_t num_classes,
     register_module("classifier", classifier_);
 }
 
-auto MobileNetV3::forward(const Variable& input) -> Variable {
+auto MobileNetV3::forward_impl(const Variable& input) -> Variable {
     auto x = features_->forward(input);
 
     // Classifier (includes pooling)

@@ -88,7 +88,7 @@ public:
      *
      * @throws std::runtime_error if input shape is invalid
      */
-    auto forward(const Variable& x) -> Variable override;
+    auto forward_impl(const Variable& x) -> Variable override;
 
 private:
     /**

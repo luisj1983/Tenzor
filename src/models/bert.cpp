@@ -114,7 +114,7 @@ auto BertEmbeddings::forward(const Variable& input_ids,
     return embeddings;
 }
 
-auto BertEmbeddings::forward(const Variable& input) -> Variable {
+auto BertEmbeddings::forward_impl(const Variable& input) -> Variable {
     return forward(input, Variable{}, Variable{});
 }
 
@@ -176,7 +176,7 @@ auto BertEncoder::forward(const Variable& hidden_states,
     return encoder_->forward(hidden_states, mask, Tensor{});
 }
 
-auto BertEncoder::forward(const Variable& input) -> Variable {
+auto BertEncoder::forward_impl(const Variable& input) -> Variable {
     return forward(input, Tensor{});
 }
 
@@ -190,7 +190,7 @@ BertPooler::BertPooler(const BertConfig& config) {
     register_module("dense", dense_);
 }
 
-auto BertPooler::forward(const Variable& hidden_states) -> Variable {
+auto BertPooler::forward_impl(const Variable& hidden_states) -> Variable {
     // Extract [CLS] token (first token) representation
     // hidden_states: [batch, seq_len, hidden_size]
     // We need to extract the first token while preserving gradients
@@ -302,7 +302,7 @@ auto BertModel::forward(const Variable& input_ids,
     return BertOutput{sequence_output, pooled_output};
 }
 
-auto BertModel::forward(const Variable& input) -> Variable {
+auto BertModel::forward_impl(const Variable& input) -> Variable {
     auto outputs = forward(input, Tensor{}, Variable{}, Variable{});
     return outputs.sequence_output;
 }
@@ -344,7 +344,7 @@ auto BertForSequenceClassification::forward(const Variable& input_ids,
     return logits;
 }
 
-auto BertForSequenceClassification::forward(const Variable& input) -> Variable {
+auto BertForSequenceClassification::forward_impl(const Variable& input) -> Variable {
     return forward(input, Tensor{}, Variable{});
 }
 
@@ -385,7 +385,7 @@ auto BertForTokenClassification::forward(const Variable& input_ids,
     return logits;
 }
 
-auto BertForTokenClassification::forward(const Variable& input) -> Variable {
+auto BertForTokenClassification::forward_impl(const Variable& input) -> Variable {
     return forward(input, Tensor{}, Variable{});
 }
 
@@ -466,7 +466,7 @@ auto BertForQuestionAnswering::forward(const Variable& input_ids,
     return BertQAOutput{start_logits, end_logits};
 }
 
-auto BertForQuestionAnswering::forward(const Variable& input) -> Variable {
+auto BertForQuestionAnswering::forward_impl(const Variable& input) -> Variable {
     auto outputs = forward(input, Tensor{}, Variable{});
     return outputs.start_logits;
 }

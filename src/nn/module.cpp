@@ -33,6 +33,27 @@ auto Module::parameters() -> std::vector<std::shared_ptr<Variable>> {
     return params;
 }
 
+auto Module::own_parameters() -> std::vector<std::shared_ptr<Variable>> {
+    std::vector<std::shared_ptr<Variable>> params;
+
+    // Add ONLY this module's direct parameters, not submodules'
+    // Order: weight, bias, then others
+    if (parameters_.find("weight") != parameters_.end()) {
+        params.push_back(parameters_["weight"]);
+    }
+    if (parameters_.find("bias") != parameters_.end()) {
+        params.push_back(parameters_["bias"]);
+    }
+
+    for (auto& [name, param] : parameters_) {
+        if (name != "weight" && name != "bias") {
+            params.push_back(param);
+        }
+    }
+
+    return params;
+}
+
 auto Module::named_parameters() -> std::vector<std::pair<std::string, std::shared_ptr<Variable>>> {
     std::vector<std::pair<std::string, std::shared_ptr<Variable>>> params;
 
@@ -266,7 +287,7 @@ auto Sequential::add_module(std::shared_ptr<Module> module) -> Sequential& {
     return *this;
 }
 
-auto Sequential::forward(const Variable& input) -> Variable {
+auto Sequential::forward_impl(const Variable& input) -> Variable {
     auto output = input;
     for (auto& module : modules_) {
         output = module->forward(output);
@@ -336,11 +357,13 @@ auto Sequential::load_state_dict(const std::unordered_map<std::string, Tensor>& 
 
 auto Module::register_forward_pre_hook(ForwardPreHook hook) -> size_t {
     forward_pre_hooks_.push_back(std::move(hook));
+    has_forward_hooks_ = true;  // Enable hook calling in forward()
     return next_hook_id_++;
 }
 
 auto Module::register_forward_post_hook(ForwardPostHook hook) -> size_t {
     forward_post_hooks_.push_back(std::move(hook));
+    has_forward_hooks_ = true;  // Enable hook calling in forward()
     return next_hook_id_++;
 }
 

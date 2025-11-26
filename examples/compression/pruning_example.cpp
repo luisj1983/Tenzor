@@ -48,7 +48,7 @@ public:
         register_module("fc2", fc2_);
     }
 
-    auto forward(const Variable& x) -> Variable override {
+    auto forward_impl(const Variable& x) -> Variable override {
         auto h = conv1_->forward(x).relu();
         h = pool2d(h, 2);  // Max pooling
 

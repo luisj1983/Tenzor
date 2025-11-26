@@ -27,7 +27,7 @@ public:
         register_module("fc2", fc2_);
     }
 
-    auto forward(const Variable& input) -> Variable override {
+    auto forward_impl(const Variable& input) -> Variable override {
         auto h = fc1_->forward(input);
         // Simple ReLU
         auto h_relu = Variable(h.tensor() * (h.tensor() > 0.0f));

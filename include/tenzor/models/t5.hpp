@@ -148,7 +148,7 @@ public:
     /**
      * @brief Required by Module base class
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     T5Config config_;
@@ -190,7 +190,7 @@ public:
     /**
      * @brief Forward pass (required by Module base class)
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     std::shared_ptr<nn::LayerNorm> layer_norm_;
@@ -213,7 +213,7 @@ public:
     /**
      * @brief Forward pass (required by Module base class)
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     T5Config config_;
@@ -260,7 +260,7 @@ public:
     /**
      * @brief Required by Module base class
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     T5Config config_;
@@ -300,7 +300,7 @@ public:
     /**
      * @brief Required by Module base class
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     T5Config config_;
@@ -340,7 +340,7 @@ public:
     /**
      * @brief Required by Module base class
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     T5Config config_;
@@ -406,7 +406,7 @@ public:
     /**
      * @brief Required by Module base class (encoder-only mode)
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
     /**
      * @brief Get model configuration
@@ -455,7 +455,7 @@ public:
     /**
      * @brief Required by Module base class
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
     /**
      * @brief Generate text autoregressively

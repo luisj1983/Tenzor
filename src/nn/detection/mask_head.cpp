@@ -81,7 +81,7 @@ MaskHead::MaskHead(int64_t in_channels,
     register_module("mask_pred", mask_pred_);
 }
 
-auto MaskHead::forward(const Variable& roi_features) -> Variable {
+auto MaskHead::forward_impl(const Variable& roi_features) -> Variable {
     // roi_features: (num_rois, in_channels, H, W)
     // Expected: (num_rois, 256, 14, 14) for 28×28 output masks
 

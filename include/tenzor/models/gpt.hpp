@@ -186,7 +186,7 @@ public:
     /**
      * @brief Default forward (uses input_ids only).
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     std::shared_ptr<nn::Embedding> token_embedding_;      ///< Token embeddings
@@ -232,7 +232,7 @@ public:
     /**
      * @brief Default forward.
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     std::shared_ptr<nn::LayerNorm> ln_1_;           ///< First layer norm (before attention)
@@ -279,7 +279,7 @@ public:
     /**
      * @brief Default forward (uses input_ids only).
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
     /**
      * @brief Get model configuration.
@@ -333,7 +333,7 @@ public:
     /**
      * @brief Default forward.
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     std::shared_ptr<nn::Linear> lm_head_;  ///< Linear layer to vocabulary

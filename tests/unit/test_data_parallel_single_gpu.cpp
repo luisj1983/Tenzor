@@ -92,7 +92,7 @@ class ScaleModule : public Module {
 public:
     explicit ScaleModule(float scale = 2.0f) : scale_(scale) {}
 
-    auto forward(const Variable& input) -> Variable override {
+    auto forward_impl(const Variable& input) -> Variable override {
         // Preserve requires_grad from input
         auto result = input.tensor() * scale_;
         return Variable(result, input.requires_grad());
@@ -127,7 +127,7 @@ public:
         register_parameter("bias", bias_);
     }
 
-    auto forward(const Variable& input) -> Variable override {
+    auto forward_impl(const Variable& input) -> Variable override {
         // y = xW^T + b (proper matrix multiplication)
         // Input: [batch, in_features], Weight: [out_features, in_features]
         // Need: [batch, in_features] @ [in_features, out_features] = [batch, out_features]
@@ -153,7 +153,7 @@ class CountingModule : public Module {
 public:
     CountingModule() : call_count_(0) {}
 
-    auto forward(const Variable& input) -> Variable override {
+    auto forward_impl(const Variable& input) -> Variable override {
         ++call_count_;
         return input;
     }

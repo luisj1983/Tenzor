@@ -85,7 +85,7 @@ public:
      *
      * @throws std::runtime_error if input channels don't match
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     int64_t in_channels_;   ///< Number of input channels
@@ -155,7 +155,7 @@ public:
      * @param input Input variable of shape (N, C_in, L)
      * @return Output variable of shape (N, C_out, L_out)
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     int64_t in_channels_;   ///< Number of input channels
@@ -238,7 +238,7 @@ public:
      *
      * @throws std::runtime_error if input channels don't match
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     int64_t in_channels_;       ///< Number of input channels

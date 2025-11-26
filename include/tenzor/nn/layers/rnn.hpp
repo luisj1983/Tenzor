@@ -46,6 +46,9 @@ namespace nn {
  */
 class RNNCell : public Module {
 public:
+    // Bring base class forward into scope (avoid hiding by 2-param forward)
+    using Module::forward;
+
     /**
      * @brief Construct RNN cell.
      *
@@ -70,7 +73,7 @@ public:
     /**
      * @brief Override base Module forward (single parameter).
      */
-    auto forward(const Variable& input) -> Variable override {
+    auto forward_impl(const Variable& input) -> Variable override {
         return forward(input, Variable{});
     }
 
@@ -109,6 +112,9 @@ private:
  */
 class RNN : public Module {
 public:
+    // Bring base class forward into scope (avoid hiding by 2-param forward)
+    using Module::forward;
+
     /**
      * @brief Construct multi-layer RNN.
      *
@@ -140,7 +146,7 @@ public:
     /**
      * @brief Override base Module forward (single parameter).
      */
-    auto forward(const Variable& input) -> Variable override {
+    auto forward_impl(const Variable& input) -> Variable override {
         return forward(input, Variable{}).first;
     }
 
@@ -189,6 +195,9 @@ private:
  */
 class LSTMCell : public Module {
 public:
+    // Bring base class forward into scope (avoid hiding by 3-param forward)
+    using Module::forward;
+
     /**
      * @brief Construct LSTM cell.
      *
@@ -212,7 +221,7 @@ public:
     /**
      * @brief Override base Module forward (single parameter).
      */
-    auto forward(const Variable& input) -> Variable override {
+    auto forward_impl(const Variable& input) -> Variable override {
         return forward(input, Variable{}, Variable{}).first;
     }
 
@@ -249,6 +258,9 @@ private:
  */
 class LSTM : public Module {
 public:
+    // Bring base class forward into scope (avoid hiding by 2-param forward)
+    using Module::forward;
+
     /**
      * @brief Construct multi-layer LSTM.
      *
@@ -281,7 +293,7 @@ public:
     /**
      * @brief Override base Module forward (single parameter).
      */
-    auto forward(const Variable& input) -> Variable override {
+    auto forward_impl(const Variable& input) -> Variable override {
         return forward(input, {Variable{}, Variable{}}).first;
     }
 
@@ -326,6 +338,9 @@ private:
  */
 class GRUCell : public Module {
 public:
+    // Bring base class forward into scope (avoid hiding by 2-param forward)
+    using Module::forward;
+
     /**
      * @brief Construct GRU cell.
      *
@@ -347,7 +362,7 @@ public:
     /**
      * @brief Override base Module forward (single parameter).
      */
-    auto forward(const Variable& input) -> Variable override {
+    auto forward_impl(const Variable& input) -> Variable override {
         return forward(input, Variable{});
     }
 
@@ -386,6 +401,9 @@ private:
  */
 class GRU : public Module {
 public:
+    // Bring base class forward into scope (avoid hiding by 2-param forward)
+    using Module::forward;
+
     /**
      * @brief Construct multi-layer GRU.
      *
@@ -415,7 +433,7 @@ public:
     /**
      * @brief Override base Module forward (single parameter).
      */
-    auto forward(const Variable& input) -> Variable override {
+    auto forward_impl(const Variable& input) -> Variable override {
         return forward(input, Variable{}).first;
     }
 

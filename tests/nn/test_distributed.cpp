@@ -24,7 +24,7 @@ public:
         register_module("fc2", fc2_);
     }
 
-    auto forward(const Variable& input) -> Variable override {
+    auto forward_impl(const Variable& input) -> Variable override {
         auto x = fc1_->forward(input);
         x = nn::relu(x);
         x = fc2_->forward(x);

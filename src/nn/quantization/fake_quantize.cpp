@@ -50,7 +50,7 @@ FakeQuantize::FakeQuantize(
     }
 }
 
-auto FakeQuantize::forward(const Variable& input) -> Variable {
+auto FakeQuantize::forward_impl(const Variable& input) -> Variable {
     if (!fake_quant_enabled_) {
         return input;  // Pass through
     }

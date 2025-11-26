@@ -118,7 +118,7 @@ public:
      */
     EfficientNetSqueezeExcitation(int64_t channels, double reduction_ratio = 0.25);
 
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     std::shared_ptr<nn::AdaptiveAvgPool2d> pool_;
@@ -183,7 +183,7 @@ public:
                 double se_ratio = 0.25,
                 double drop_connect_rate = 0.0);
 
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     bool has_expansion_;
@@ -249,7 +249,7 @@ public:
      * @param input Input tensor of shape (N, 3, H, W)
      * @return Output logits of shape (N, num_classes)
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
     /**
      * @brief Load pretrained weights from file

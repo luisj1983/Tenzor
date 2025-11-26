@@ -186,7 +186,7 @@ LayerNorm::LayerNorm(std::vector<int64_t> normalized_shape,
     reset_parameters();
 }
 
-auto LayerNorm::forward(const Variable& input) -> Variable {
+auto LayerNorm::forward_impl(const Variable& input) -> Variable {
     auto shape = input.shape();
 
     // Verify that input shape matches normalized_shape at the end
@@ -715,7 +715,7 @@ GroupNorm::GroupNorm(int64_t num_groups,
     reset_parameters();
 }
 
-auto GroupNorm::forward(const Variable& input) -> Variable {
+auto GroupNorm::forward_impl(const Variable& input) -> Variable {
     auto shape = input.shape();
     if (shape.size() != 4) {
         throw std::runtime_error("GroupNorm expects 4D input (got " +

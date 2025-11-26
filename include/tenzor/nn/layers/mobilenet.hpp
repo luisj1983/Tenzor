@@ -67,7 +67,7 @@ public:
      * @param input Input features of shape (N, C, H, W)
      * @return Channel-wise rescaled features of shape (N, C, H, W)
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     int64_t channels_;          ///< Number of channels
@@ -145,7 +145,7 @@ public:
      * @param input Input features of shape (N, in_channels, H, W)
      * @return Output features of shape (N, out_channels, H/stride, W/stride)
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     int64_t in_channels_;       ///< Input channels
@@ -207,7 +207,7 @@ public:
      * @param input Input features of shape (N, in_channels, H, W)
      * @return Output features of shape (N, out_channels, H/stride, W/stride)
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     int64_t in_channels_;       ///< Input channels

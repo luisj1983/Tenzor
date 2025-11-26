@@ -66,7 +66,7 @@ public:
     /**
      * @brief Module forward (required by base class).
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     int64_t num_classes_;
@@ -151,7 +151,7 @@ public:
     /**
      * @brief Module forward (required by base class).
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
     /**
      * @brief Get ROI head losses.

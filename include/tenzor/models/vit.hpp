@@ -183,7 +183,7 @@ public:
      * @param x Input images [batch, channels, height, width]
      * @return Patch embeddings [batch, num_patches, hidden_size]
      */
-    auto forward(const Variable& x) -> Variable override;
+    auto forward_impl(const Variable& x) -> Variable override;
 
     /**
      * @brief Get number of patches
@@ -235,7 +235,7 @@ public:
      * @return Embeddings [batch, seq_len, hidden_size]
      *         where seq_len = num_patches + 1 (for [CLS] token)
      */
-    auto forward(const Variable& pixel_values) -> Variable override;
+    auto forward_impl(const Variable& pixel_values) -> Variable override;
 
 private:
     ViTConfig config_;
@@ -270,7 +270,7 @@ public:
      * @param hidden_states Input embeddings [batch, seq_len, hidden_size]
      * @return Encoded sequence [batch, seq_len, hidden_size]
      */
-    auto forward(const Variable& hidden_states) -> Variable override;
+    auto forward_impl(const Variable& hidden_states) -> Variable override;
 
 private:
     ViTConfig config_;
@@ -322,7 +322,7 @@ public:
     auto forward_vit(const Variable& pixel_values) -> ViTOutput;
 
     // Module interface implementation - returns pooler output
-    auto forward(const Variable& input) -> Variable override {
+    auto forward_impl(const Variable& input) -> Variable override {
         auto output = forward_vit(input);
         return output.pooler_output;
     }
@@ -375,7 +375,7 @@ public:
      * @param pixel_values Input images [batch, channels, height, width]
      * @return Classification logits [batch, num_labels]
      */
-    auto forward(const Variable& pixel_values) -> Variable override;
+    auto forward_impl(const Variable& pixel_values) -> Variable override;
 
 private:
     ViTConfig config_;

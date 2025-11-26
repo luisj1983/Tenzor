@@ -51,7 +51,7 @@ PatchEmbedding::PatchEmbedding(int64_t image_size, int64_t patch_size,
     register_module("projection", projection_);
 }
 
-auto PatchEmbedding::forward(const Variable& x) -> Variable {
+auto PatchEmbedding::forward_impl(const Variable& x) -> Variable {
     // Input shape: [batch, channels, height, width]
     auto shape = x.shape();
     int64_t batch_size = shape[0];
@@ -142,7 +142,7 @@ auto ViTEmbeddings::initialize_parameters() -> void {
     register_parameter("position_embeddings", position_embeddings_);
 }
 
-auto ViTEmbeddings::forward(const Variable& pixel_values) -> Variable {
+auto ViTEmbeddings::forward_impl(const Variable& pixel_values) -> Variable {
     auto shape = pixel_values.shape();
     int64_t batch_size = shape[0];
 
@@ -210,7 +210,7 @@ ViTEncoder::ViTEncoder(const ViTConfig& config)
     register_module("encoder", encoder_);
 }
 
-auto ViTEncoder::forward(const Variable& hidden_states) -> Variable {
+auto ViTEncoder::forward_impl(const Variable& hidden_states) -> Variable {
     // Pass through encoder layers
     // No attention mask needed for ViT (all patches attend to all patches)
     return encoder_->forward(hidden_states, Tensor{}, Tensor{});
@@ -306,7 +306,7 @@ ViTForImageClassification::ViTForImageClassification(
     register_module("classifier", classifier_);
 }
 
-auto ViTForImageClassification::forward(const Variable& pixel_values) -> Variable {
+auto ViTForImageClassification::forward_impl(const Variable& pixel_values) -> Variable {
     // Get ViT outputs
     auto outputs = vit_->forward_vit(pixel_values);
     auto sequence_output = outputs.last_hidden_state;

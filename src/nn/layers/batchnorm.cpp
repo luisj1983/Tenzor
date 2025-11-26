@@ -115,7 +115,7 @@ BatchNorm2d::BatchNorm2d(int64_t num_features, double eps, double momentum,
     reset_parameters();
 }
 
-auto BatchNorm2d::forward(const Variable& input) -> Variable {
+auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
     // Input shape: [N, C, H, W]
     auto shape = input.shape();
     if (shape.size() != 4) {
@@ -429,7 +429,7 @@ BatchNorm1d::BatchNorm1d(int64_t num_features, double eps, double momentum,
     reset_parameters();
 }
 
-auto BatchNorm1d::forward(const Variable& input) -> Variable {
+auto BatchNorm1d::forward_impl(const Variable& input) -> Variable {
     // Input shape: [N, C] or [N, C, L]
     auto shape = input.shape();
     if (shape.size() != 2 && shape.size() != 3) {

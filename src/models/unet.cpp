@@ -44,7 +44,7 @@ DoubleConv::DoubleConv(int64_t in_channels, int64_t out_channels, int64_t mid_ch
     register_module("relu2", relu2_);
 }
 
-auto DoubleConv::forward(const Variable& input) -> Variable
+auto DoubleConv::forward_impl(const Variable& input) -> Variable
 {
     // First conv block: Conv -> BN -> ReLU
     auto x = conv1_->forward(input);
@@ -75,7 +75,7 @@ Down::Down(int64_t in_channels, int64_t out_channels)
     register_module("conv", conv_);
 }
 
-auto Down::forward(const Variable& input) -> Variable
+auto Down::forward_impl(const Variable& input) -> Variable
 {
     // Downsample then convolve
     auto x = pool_->forward(input);
@@ -189,7 +189,7 @@ UNet::UNet(int64_t in_channels, int64_t num_classes, bool bilinear)
     register_module("outc", outc_);
 }
 
-auto UNet::forward(const Variable& input) -> Variable
+auto UNet::forward_impl(const Variable& input) -> Variable
 {
     // Validate input shape
     auto input_shape = input.tensor().shape();

@@ -270,7 +270,7 @@ auto T5Attention::forward(const Variable& hidden_states,
     return {output, bias};
 }
 
-auto T5Attention::forward(const Variable& input) -> Variable {
+auto T5Attention::forward_impl(const Variable& input) -> Variable {
     auto [output, bias] = forward(input, Variable{}, Tensor{}, Tensor{});
     return output;
 }
@@ -285,7 +285,7 @@ T5LayerNorm::T5LayerNorm(int64_t d_model, double eps) {
     register_module("layer_norm", layer_norm_);
 }
 
-auto T5LayerNorm::forward(const Variable& input) -> Variable {
+auto T5LayerNorm::forward_impl(const Variable& input) -> Variable {
     return layer_norm_->forward(input);
 }
 
@@ -304,7 +304,7 @@ T5DenseActDense::T5DenseActDense(const T5Config& config)
     register_module("dropout", dropout_);
 }
 
-auto T5DenseActDense::forward(const Variable& input) -> Variable {
+auto T5DenseActDense::forward_impl(const Variable& input) -> Variable {
     auto h = wi_->forward(input);
 
     // Apply activation (ReLU for standard T5)
@@ -395,7 +395,7 @@ auto T5Block::forward(const Variable& hidden_states,
     return {hidden_states_mut, self_attn_bias, cross_attn_bias};
 }
 
-auto T5Block::forward(const Variable& input) -> Variable {
+auto T5Block::forward_impl(const Variable& input) -> Variable {
     auto [output, self_bias, cross_bias] = forward(
         input, Variable{}, Tensor{}, Tensor{}, Tensor{}, Tensor{}
     );
@@ -450,7 +450,7 @@ auto T5Encoder::forward(const Variable& input_ids,
     return hidden_states;
 }
 
-auto T5Encoder::forward(const Variable& input) -> Variable {
+auto T5Encoder::forward_impl(const Variable& input) -> Variable {
     return forward(input, Tensor{});
 }
 
@@ -554,7 +554,7 @@ auto T5Decoder::forward(const Variable& decoder_input_ids,
     return hidden_states;
 }
 
-auto T5Decoder::forward(const Variable& input) -> Variable {
+auto T5Decoder::forward_impl(const Variable& input) -> Variable {
     // Decoder requires encoder outputs - use forward_with_encoder() instead
     throw std::runtime_error("T5Decoder::forward(input) requires encoder_hidden_states");
 }
@@ -593,7 +593,7 @@ auto T5Model::forward(const Variable& input_ids,
     return T5Output{encoder_output, decoder_output};
 }
 
-auto T5Model::forward(const Variable& input) -> Variable {
+auto T5Model::forward_impl(const Variable& input) -> Variable {
     // Encoder-only mode
     return encoder_->forward(input, Tensor{});
 }
@@ -621,7 +621,7 @@ auto T5ForConditionalGeneration::forward(const Variable& input_ids,
     return logits;
 }
 
-auto T5ForConditionalGeneration::forward(const Variable& input) -> Variable {
+auto T5ForConditionalGeneration::forward_impl(const Variable& input) -> Variable {
     throw std::runtime_error("T5ForConditionalGeneration::forward requires decoder_input_ids");
 }
 

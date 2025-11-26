@@ -47,7 +47,7 @@ public:
         register_module("fc2", fc2);
     }
 
-    auto forward(const Variable& x) -> Variable override {
+    auto forward_impl(const Variable& x) -> Variable override {
         auto out = fc1->forward(x);
         out = relu(out);
         out = fc2->forward(out);
@@ -72,7 +72,7 @@ public:
         register_module("fc1", fc1);
     }
 
-    auto forward(const Variable& x) -> Variable override {
+    auto forward_impl(const Variable& x) -> Variable override {
         auto out = conv1->forward(x);
         out = relu(out);
         out = conv2->forward(out);
@@ -632,7 +632,7 @@ TEST(ModelPersistence, LargeModelSaveLoadPerformance) {
             register_module("fc3", fc3);
         }
 
-        auto forward(const Variable& x) -> Variable override {
+        auto forward_impl(const Variable& x) -> Variable override {
             auto out = fc1->forward(x);
             out = relu(out);
             out = fc2->forward(out);

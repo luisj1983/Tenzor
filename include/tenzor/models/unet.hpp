@@ -63,7 +63,7 @@ public:
      * @param input Input variable of shape (N, in_channels, H, W)
      * @return Output variable of shape (N, out_channels, H, W)
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     std::shared_ptr<nn::Conv2d> conv1_;
@@ -108,7 +108,7 @@ public:
      * @param input Input variable of shape (N, in_channels, H, W)
      * @return Output variable of shape (N, out_channels, H/2, W/2)
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     std::shared_ptr<nn::MaxPool2d> pool_;
@@ -165,7 +165,7 @@ public:
     auto forward(const Variable& input, const Variable& skip) -> Variable;
 
     // Override base forward for Module interface
-    auto forward(const Variable& input) -> Variable override {
+    auto forward_impl(const Variable& input) -> Variable override {
         throw std::runtime_error("Up layer requires skip connection. Use forward(input, skip)");
     }
 
@@ -261,7 +261,7 @@ public:
      *
      * @throws std::runtime_error if input dimensions are invalid
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
     /**
      * @brief Get number of input channels

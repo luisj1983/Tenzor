@@ -26,7 +26,7 @@ AlexNet::AlexNet(int64_t num_classes, double dropout) {
     initialize_weights();
 }
 
-auto AlexNet::forward(const Variable& x) -> Variable {
+auto AlexNet::forward_impl(const Variable& x) -> Variable {
     // Feature extraction
     auto features = features_->forward(x);
 

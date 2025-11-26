@@ -174,7 +174,7 @@ public:
     /**
      * @brief Required by Module base class
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     ElectraConfig config_;
@@ -213,7 +213,7 @@ public:
     /**
      * @brief Required by Module base class
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
     /**
      * @brief Get the underlying BERT model (for downstream tasks)
@@ -285,7 +285,7 @@ public:
     /**
      * @brief Required by Module base class (simplified interface)
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
     /**
      * @brief Compute combined loss for pre-training
@@ -368,7 +368,7 @@ public:
     /**
      * @brief Required by Module base class
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     ElectraConfig config_;
@@ -417,7 +417,7 @@ public:
     /**
      * @brief Required by Module base class
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     ElectraConfig config_;
@@ -475,7 +475,7 @@ public:
     /**
      * @brief Required by Module base class (returns start_logits only)
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     ElectraConfig config_;

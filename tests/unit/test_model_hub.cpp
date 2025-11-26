@@ -475,7 +475,7 @@ TEST_F(ModelHubTest, LoadPretrainedWeights_FileNotFound) {
     // Create a dummy module
     class DummyModule : public nn::Module {
     public:
-        auto forward(const Variable& input) -> Variable override {
+        auto forward_impl(const Variable& input) -> Variable override {
             return input;
         }
 
@@ -501,7 +501,7 @@ TEST_F(ModelHubTest, LoadPretrainedWeights_Strict) {
         bool load_called = false;
         bool strict_mode = false;
 
-        auto forward(const Variable& input) -> Variable override {
+        auto forward_impl(const Variable& input) -> Variable override {
             return input;
         }
 
@@ -534,7 +534,7 @@ TEST_F(ModelHubTest, LoadPretrainedWeights_NonStrict) {
         bool load_called = false;
         bool strict_mode = true;
 
-        auto forward(const Variable& input) -> Variable override {
+        auto forward_impl(const Variable& input) -> Variable override {
             return input;
         }
 

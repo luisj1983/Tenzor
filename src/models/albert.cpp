@@ -117,7 +117,7 @@ auto AlbertEmbeddings::forward(const Variable& input_ids,
     return embeddings;
 }
 
-auto AlbertEmbeddings::forward(const Variable& input) -> Variable {
+auto AlbertEmbeddings::forward_impl(const Variable& input) -> Variable {
     return forward(input, Variable{}, Variable{});
 }
 
@@ -154,7 +154,7 @@ auto AlbertEncoder::forward(const Variable& hidden_states,
     return output;
 }
 
-auto AlbertEncoder::forward(const Variable& input) -> Variable {
+auto AlbertEncoder::forward_impl(const Variable& input) -> Variable {
     return forward(input, Tensor{});
 }
 
@@ -168,7 +168,7 @@ AlbertPooler::AlbertPooler(const AlbertConfig& config) {
     register_module("dense", dense_);
 }
 
-auto AlbertPooler::forward(const Variable& hidden_states) -> Variable {
+auto AlbertPooler::forward_impl(const Variable& hidden_states) -> Variable {
     // Extract [CLS] token (first token) representation
     // hidden_states: [batch, seq_len, hidden_size]
     // Use tensor slicing instead of manual memory copies for device compatibility
@@ -215,7 +215,7 @@ auto AlbertModel::forward(const Variable& input_ids,
     return AlbertOutput{sequence_output, pooled_output};
 }
 
-auto AlbertModel::forward(const Variable& input) -> Variable {
+auto AlbertModel::forward_impl(const Variable& input) -> Variable {
     auto outputs = forward(input, Tensor{}, Variable{}, Variable{});
     return outputs.sequence_output;
 }
@@ -248,7 +248,7 @@ auto AlbertForSequenceClassification::forward(const Variable& input_ids,
     return logits;
 }
 
-auto AlbertForSequenceClassification::forward(const Variable& input) -> Variable {
+auto AlbertForSequenceClassification::forward_impl(const Variable& input) -> Variable {
     return forward(input, Tensor{}, Variable{});
 }
 
@@ -280,7 +280,7 @@ auto AlbertForTokenClassification::forward(const Variable& input_ids,
     return logits;
 }
 
-auto AlbertForTokenClassification::forward(const Variable& input) -> Variable {
+auto AlbertForTokenClassification::forward_impl(const Variable& input) -> Variable {
     return forward(input, Tensor{}, Variable{});
 }
 
@@ -318,7 +318,7 @@ auto AlbertForPreTraining::forward(const Variable& input_ids,
     return {mlm_logits, sop_logits};
 }
 
-auto AlbertForPreTraining::forward(const Variable& input) -> Variable {
+auto AlbertForPreTraining::forward_impl(const Variable& input) -> Variable {
     auto [mlm_logits, sop_logits] = forward(input, Tensor{}, Variable{});
     return mlm_logits;  // Return MLM logits as default
 }

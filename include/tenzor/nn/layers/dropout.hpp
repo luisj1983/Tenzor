@@ -66,7 +66,7 @@ public:
      * @param input Input variable of any shape
      * @return Output variable (same shape)
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     double p_;  ///< Dropout probability
@@ -111,7 +111,7 @@ public:
      * @param input Input variable of shape (N, C, H, W)
      * @return Output variable with some channels zeroed
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     double p_;  ///< Channel dropout probability
@@ -157,7 +157,7 @@ public:
      * @param input Input variable (typically after SELU activation)
      * @return Output variable with self-normalizing property preserved
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     double p_;  ///< Dropout probability

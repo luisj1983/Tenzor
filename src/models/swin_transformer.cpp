@@ -41,7 +41,7 @@ SwinMLP::SwinMLP(int64_t in_features,
     register_module("drop2", drop2_);
 }
 
-auto SwinMLP::forward(const Variable& input) -> Variable {
+auto SwinMLP::forward_impl(const Variable& input) -> Variable {
     auto x = fc1_->forward(input);
     x = gelu_.forward(x);
     x = drop1_->forward(x);
@@ -110,7 +110,7 @@ auto SwinTransformerBlock::compute_attention_mask() -> void {
     attn_mask_ = create_shifted_window_mask(H, W, window_size_, shift_size_);
 }
 
-auto SwinTransformerBlock::forward(const Variable& input) -> Variable {
+auto SwinTransformerBlock::forward_impl(const Variable& input) -> Variable {
     auto shape = input.tensor().shape();
     if (shape.size() != 3) {
         throw std::runtime_error(
@@ -196,7 +196,7 @@ PatchMerging::PatchMerging(const std::pair<int64_t, int64_t>& input_resolution,
     register_module("reduction", reduction_);
 }
 
-auto PatchMerging::forward(const Variable& input) -> Variable {
+auto PatchMerging::forward_impl(const Variable& input) -> Variable {
     auto shape = input.tensor().shape();
     if (shape.size() != 3) {
         throw std::runtime_error(
@@ -294,7 +294,7 @@ BasicLayer::BasicLayer(int64_t dim,
     }
 }
 
-auto BasicLayer::forward(const Variable& input) -> Variable {
+auto BasicLayer::forward_impl(const Variable& input) -> Variable {
     auto x = input;
 
     // Apply all blocks
@@ -345,7 +345,7 @@ PatchEmbed::PatchEmbed(int64_t img_size,
     }
 }
 
-auto PatchEmbed::forward(const Variable& input) -> Variable {
+auto PatchEmbed::forward_impl(const Variable& input) -> Variable {
     auto shape = input.tensor().shape();
     if (shape.size() != 4) {
         throw std::runtime_error(
@@ -482,7 +482,7 @@ SwinTransformer::SwinTransformer(int64_t img_size,
     register_module("head", head_);
 }
 
-auto SwinTransformer::forward(const Variable& input) -> Variable {
+auto SwinTransformer::forward_impl(const Variable& input) -> Variable {
     // Patch embedding
     auto x = patch_embed_->forward(input);
 

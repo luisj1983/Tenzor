@@ -63,7 +63,7 @@ public:
      * @param input Input variable of shape (N, C, H, W)
      * @return Pooled output of shape (N, C, H_out, W_out)
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     int64_t kernel_size_;  ///< Pooling window size
@@ -109,7 +109,7 @@ public:
      * @param input Input variable of shape (N, C, H, W)
      * @return Pooled output of shape (N, C, H_out, W_out)
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     int64_t kernel_size_;  ///< Pooling window size
@@ -179,7 +179,7 @@ public:
      * @param input Input variable of shape (N, C, H_in, W_in)
      * @return Pooled output of shape (N, C, output_h, output_w)
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     int64_t output_h_;  ///< Target output height

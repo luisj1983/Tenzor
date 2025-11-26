@@ -236,7 +236,7 @@ auto Embedding::initialize_weights() -> void {
     }
 }
 
-auto Embedding::forward(const Variable& input) -> Variable {
+auto Embedding::forward_impl(const Variable& input) -> Variable {
     // Input shape: any (e.g., [batch, seq_len])
     // Output shape: input.shape() + [embedding_dim]
 
@@ -507,7 +507,7 @@ auto EmbeddingBag::forward(const Variable& input, const Variable& offsets) -> Va
     return aggregate_embeddings(embeddings, offsets);
 }
 
-auto EmbeddingBag::forward(const Variable& input) -> Variable {
+auto EmbeddingBag::forward_impl(const Variable& input) -> Variable {
     // Default forward: treat entire input as single bag
     return forward(input, Variable{});
 }

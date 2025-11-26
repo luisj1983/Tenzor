@@ -57,7 +57,7 @@ Dropout::Dropout(double p) : p_(p) {
     }
 }
 
-auto Dropout::forward(const Variable& input) -> Variable {
+auto Dropout::forward_impl(const Variable& input) -> Variable {
     // During inference, return input unchanged
     if (!is_training()) {
         return input;
@@ -159,7 +159,7 @@ Dropout2d::Dropout2d(double p) : p_(p) {
     }
 }
 
-auto Dropout2d::forward(const Variable& input) -> Variable {
+auto Dropout2d::forward_impl(const Variable& input) -> Variable {
     // During inference, return input unchanged
     if (!is_training()) {
         return input;
@@ -364,7 +364,7 @@ AlphaDropout::AlphaDropout(double p) : p_(p) {
     }
 }
 
-auto AlphaDropout::forward(const Variable& input) -> Variable {
+auto AlphaDropout::forward_impl(const Variable& input) -> Variable {
     // During inference, return input unchanged
     if (!is_training()) {
         return input;

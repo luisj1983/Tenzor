@@ -402,7 +402,7 @@ Conv2d::Conv2d(int64_t in_channels, int64_t out_channels, int64_t kernel_size,
     }
 }
 
-auto Conv2d::forward(const Variable& input) -> Variable {
+auto Conv2d::forward_impl(const Variable& input) -> Variable {
     auto input_shape = input.shape();
     if (input_shape.size() != 4) {
         throw std::invalid_argument("Conv2d expects 4D input [batch, channels, height, width]");
@@ -629,7 +629,7 @@ Conv1d::Conv1d(int64_t in_channels, int64_t out_channels, int64_t kernel_size,
     }
 }
 
-auto Conv1d::forward(const Variable& input) -> Variable {
+auto Conv1d::forward_impl(const Variable& input) -> Variable {
     auto input_shape = input.shape();
     if (input_shape.size() != 3) {
         throw std::invalid_argument("Conv1d expects 3D input [batch, channels, length]");
@@ -712,7 +712,7 @@ ConvTranspose2d::ConvTranspose2d(int64_t in_channels, int64_t out_channels, int6
     }
 }
 
-auto ConvTranspose2d::forward(const Variable& input) -> Variable {
+auto ConvTranspose2d::forward_impl(const Variable& input) -> Variable {
     auto input_shape = input.shape();
     if (input_shape.size() != 4) {
         throw std::invalid_argument("ConvTranspose2d expects 4D input [batch, channels, height, width]");

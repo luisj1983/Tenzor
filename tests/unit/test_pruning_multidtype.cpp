@@ -121,7 +121,7 @@ protected:
             layers_.push_back(final_layer);
         }
 
-        Variable forward(const Variable& x) override {
+        Variable forward_impl(const Variable& x) override {
             Variable out = x;
             for (auto& layer : layers_) {
                 out = layer->forward(out);
@@ -879,7 +879,7 @@ TYPED_TEST(PruningMultiDTypeTest, Integration_PruneConvAndLinear) {
             register_module("fc", fc_);
         }
 
-        Variable forward(const Variable& x) override {
+        Variable forward_impl(const Variable& x) override {
             auto out = conv_->forward(x);
             auto flat = out.tensor().reshape({x.tensor().shape()[0], -1});
             return fc_->forward(Variable(flat, out.requires_grad()));

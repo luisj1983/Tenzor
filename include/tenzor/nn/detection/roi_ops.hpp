@@ -72,7 +72,7 @@ public:
     /**
      * @brief Module forward (not used, ROIAlign requires both features and ROIs).
      */
-    auto forward(const Variable& /* input */) -> Variable override {
+    auto forward_impl(const Variable& /* input */) -> Variable override {
         throw std::runtime_error("ROIAlign requires both features and rois. "
                                  "Use forward(features, rois) instead.");
     }

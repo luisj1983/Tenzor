@@ -46,7 +46,7 @@ AtrousSeparableConv2d::AtrousSeparableConv2d(int64_t in_channels,
     register_module("bn2", bn2_);
 }
 
-auto AtrousSeparableConv2d::forward(const Variable& input) -> Variable {
+auto AtrousSeparableConv2d::forward_impl(const Variable& input) -> Variable {
     // Depthwise atrous convolution
     auto x = depthwise_->forward(input);
     x = bn1_->forward(x);
@@ -122,7 +122,7 @@ ASPP::ASPP(int64_t in_channels,
                      std::shared_ptr<Dropout> dropout)
             : conv_(conv), bn_(bn), relu_(relu), dropout_(dropout) {}
 
-        auto forward(const Variable& input) -> Variable override {
+        auto forward_impl(const Variable& input) -> Variable override {
             auto x = conv_->forward(input);
             x = bn_->forward(x);
             x = relu_->forward(x);
@@ -142,7 +142,7 @@ ASPP::ASPP(int64_t in_channels,
     register_module("project", project_);
 }
 
-auto ASPP::forward(const Variable& input) -> Variable {
+auto ASPP::forward_impl(const Variable& input) -> Variable {
     const auto& shape = input.tensor().shape();
     if (shape.size() != 4) {
         throw std::runtime_error("ASPP expects 4D input (N, C, H, W)");
@@ -321,7 +321,7 @@ auto make_conv_bn_relu(int64_t in_channels,
             register_module("bn", bn_);
         }
 
-        auto forward(const Variable& input) -> Variable override {
+        auto forward_impl(const Variable& input) -> Variable override {
             auto x = conv_->forward(input);
             x = bn_->forward(x);
             x = relu_.forward(x);

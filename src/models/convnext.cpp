@@ -24,7 +24,7 @@ LayerScale::LayerScale(int64_t dim, double init_value) {
     register_parameter("gamma", gamma_);
 }
 
-auto LayerScale::forward(const Variable& input) -> Variable {
+auto LayerScale::forward_impl(const Variable& input) -> Variable {
     // Multiply input by learnable scale factor
     // Convert gamma to match input dtype for multi-dtype support
     auto gamma_tensor_matched = gamma_.tensor().to(input.dtype());
@@ -68,7 +68,7 @@ ConvNeXtBlock::ConvNeXtBlock(int64_t dim,
     register_module("gamma", gamma_);
 }
 
-auto ConvNeXtBlock::forward(const Variable& input) -> Variable {
+auto ConvNeXtBlock::forward_impl(const Variable& input) -> Variable {
     Variable shortcut = input;
 
     // Depthwise convolution
@@ -257,7 +257,7 @@ auto ConvNeXt::make_downsample(int64_t in_dim, int64_t out_dim)
     return downsample;
 }
 
-auto ConvNeXt::forward(const Variable& input) -> Variable {
+auto ConvNeXt::forward_impl(const Variable& input) -> Variable {
     // Stem: Conv + LayerNorm with proper permutations
     auto x = stem_conv_->forward(input);  // Output: NCHW
     x = x.permute({0, 2, 3, 1});           // NCHW → NHWC

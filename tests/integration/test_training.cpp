@@ -194,7 +194,7 @@ TEST_P(TrainingTest, SimpleMLP_Training) {
             register_module("fc2", fc2);
         }
 
-        auto forward(const Variable& x) -> Variable override {
+        auto forward_impl(const Variable& x) -> Variable override {
             auto h = fc1->forward(x);
             h = relu->forward(h);
             return fc2->forward(h);

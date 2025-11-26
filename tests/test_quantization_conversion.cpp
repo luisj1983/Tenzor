@@ -219,7 +219,7 @@ public:
         register_module("conv2", conv2_);
     }
 
-    auto forward(const Variable& input) -> Variable override {
+    auto forward_impl(const Variable& input) -> Variable override {
         auto x = conv1_->forward(input);
         x = conv2_->forward(x);
         // Would add ReLU and residual connection in full implementation

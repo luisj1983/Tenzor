@@ -63,7 +63,7 @@ namespace nn {
 class ReLU : public Module {
 public:
     ReLU() = default;
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 };
 
 /**
@@ -77,7 +77,7 @@ public:
 class ReLU6 : public Module {
 public:
     ReLU6() = default;
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 };
 
 /**
@@ -125,7 +125,7 @@ public:
 class LeakyReLU : public Module {
 public:
     explicit LeakyReLU(double negative_slope = 0.01);
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     double negative_slope_;
@@ -166,7 +166,7 @@ private:
 class Sigmoid : public Module {
 public:
     Sigmoid() = default;
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 };
 
 /**
@@ -199,7 +199,7 @@ public:
 class Tanh : public Module {
 public:
     Tanh() = default;
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 };
 
 /**
@@ -237,7 +237,7 @@ public:
 class GELU : public Module {
 public:
     GELU() = default;
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 };
 
 /**
@@ -275,7 +275,7 @@ public:
 class Softmax : public Module {
 public:
     explicit Softmax(int64_t dim = -1);
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     int64_t dim_;
@@ -310,7 +310,7 @@ private:
 class LogSoftmax : public Module {
 public:
     explicit LogSoftmax(int64_t dim = -1);
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     int64_t dim_;
@@ -350,7 +350,7 @@ private:
 class ELU : public Module {
 public:
     explicit ELU(double alpha = 1.0);
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     double alpha_;
@@ -392,7 +392,7 @@ private:
 class SELU : public Module {
 public:
     SELU() = default;
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 };
 
 /**
@@ -430,7 +430,7 @@ public:
 class Swish : public Module {
 public:
     Swish() = default;
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 };
 
 /**
@@ -465,7 +465,7 @@ public:
 class Mish : public Module {
 public:
     Mish() = default;
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 };
 
 /**

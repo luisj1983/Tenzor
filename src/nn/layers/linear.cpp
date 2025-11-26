@@ -27,7 +27,7 @@ Linear::Linear(int64_t in_features, int64_t out_features, bool bias)
     }
 }
 
-auto Linear::forward(const Variable& input) -> Variable {
+auto Linear::forward_impl(const Variable& input) -> Variable {
     // input: [*, in_features] where * can be any number of dimensions
     // weight: [out_features, in_features]
     // output: [*, out_features]

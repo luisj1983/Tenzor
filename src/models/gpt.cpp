@@ -73,7 +73,7 @@ auto GPTEmbeddings::forward(const Variable& input_ids, const Variable& position_
     return dropout_->forward(embeddings);
 }
 
-auto GPTEmbeddings::forward(const Variable& input) -> Variable {
+auto GPTEmbeddings::forward_impl(const Variable& input) -> Variable {
     return forward(input, Variable{});
 }
 
@@ -154,7 +154,7 @@ auto GPTDecoderLayer::forward(const Variable& hidden_states,
     return x;
 }
 
-auto GPTDecoderLayer::forward(const Variable& input) -> Variable {
+auto GPTDecoderLayer::forward_impl(const Variable& input) -> Variable {
     return forward(input, Tensor{}, false);
 }
 
@@ -215,7 +215,7 @@ auto GPT2Model::forward(const Variable& input_ids,
     return hidden_states;
 }
 
-auto GPT2Model::forward(const Variable& input) -> Variable {
+auto GPT2Model::forward_impl(const Variable& input) -> Variable {
     return forward(input, Variable{}, Tensor{});
 }
 
@@ -244,7 +244,7 @@ auto GPT2LMHeadModel::forward(const Variable& input_ids,
     return logits;
 }
 
-auto GPT2LMHeadModel::forward(const Variable& input) -> Variable {
+auto GPT2LMHeadModel::forward_impl(const Variable& input) -> Variable {
     return forward(input, Variable{}, Tensor{});
 }
 

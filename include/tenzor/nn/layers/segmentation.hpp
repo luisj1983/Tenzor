@@ -63,7 +63,7 @@ public:
                           int64_t dilation = 1,
                           bool bias = false);
 
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     std::shared_ptr<Conv2d> depthwise_;  ///< Depthwise atrous convolution
@@ -138,7 +138,7 @@ public:
      * @param input Input features of shape (N, in_channels, H, W)
      * @return ASPP output of shape (N, out_channels, H, W)
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     // Branch 1: 1×1 convolution

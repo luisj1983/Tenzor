@@ -236,7 +236,7 @@ auto FasterRCNN::forward_train(
     return all_losses;
 }
 
-auto FasterRCNN::forward(const Variable& input) -> Variable {
+auto FasterRCNN::forward_impl(const Variable& input) -> Variable {
     if (is_training()) {
         throw std::runtime_error(
             "Use forward_train() in training mode with targets"

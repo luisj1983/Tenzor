@@ -77,7 +77,7 @@ public:
      * Variable flat = flatten.forward(conv_out);  // Shape: {32, 8192}
      * @endcode
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     int64_t start_dim_;  ///< First dimension to include in flattening

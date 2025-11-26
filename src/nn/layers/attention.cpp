@@ -302,7 +302,7 @@ auto MultiheadAttention::forward(const Variable& query,
     }
 }
 
-auto MultiheadAttention::forward(const Variable& input) -> Variable {
+auto MultiheadAttention::forward_impl(const Variable& input) -> Variable {
     // Self-attention: Q = K = V = input
     auto [output, _] = forward(input, input, input, Tensor{}, Tensor{}, false);
     return output;

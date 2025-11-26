@@ -46,7 +46,7 @@ public:
         register_module("fc2", fc2_);
     }
 
-    auto forward(const Variable& x) -> Variable override {
+    auto forward_impl(const Variable& x) -> Variable override {
         Variable h = fc1_->forward(x);
         h = tenzor::nn::relu(h);
         Variable out = fc2_->forward(h);
@@ -84,7 +84,7 @@ public:
         register_module("layer_" + std::to_string(num_layers - 1), layer_out);
     }
 
-    auto forward(const Variable& x) -> Variable override {
+    auto forward_impl(const Variable& x) -> Variable override {
         Variable out = x;
         for (size_t i = 0; i < layers_.size() - 1; ++i) {
             out = layers_[i]->forward(out);

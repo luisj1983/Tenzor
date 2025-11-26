@@ -82,7 +82,7 @@ public:
      * @param input Input variable
      * @return Fake-quantized output variable
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
     /**
      * @brief Enable or disable observer.

@@ -50,7 +50,7 @@ public:
      */
     explicit DarknetResidualBlock(int64_t channels);
 
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     std::shared_ptr<nn::Conv2d> conv1_;  // 1x1 conv (reduce channels)
@@ -89,7 +89,7 @@ public:
      * @param input Input images (N, 3, H, W)
      * @return Tuple of feature maps at scales 1/8, 1/16, 1/32
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
     /**
      * @brief Get multi-scale feature maps.
@@ -144,7 +144,7 @@ public:
      * @param input Feature map (N, C, H, W)
      * @return Predictions (N, num_anchors, H, W, 5 + num_classes)
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     int64_t num_anchors_;
@@ -191,7 +191,7 @@ public:
      * @param input Input images (N, 3, H, W)
      * @return Tuple of (boxes, scores, class_ids) for each image
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
     /**
      * @brief Get raw predictions before post-processing.
@@ -285,7 +285,7 @@ public:
                   int64_t num_blocks = 1,
                   bool shortcut = true);
 
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     std::shared_ptr<nn::Conv2d> conv1_;  // Initial conv
@@ -317,7 +317,7 @@ public:
      */
     CSPDarknet(double depth_multiple = 1.0, double width_multiple = 1.0);
 
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
     auto forward_multiscale(const Variable& input) -> std::vector<Variable>;
 
 private:
@@ -359,7 +359,7 @@ public:
      * @param input Placeholder input
      * @return Placeholder output
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
     /**
      * @brief Forward pass with multi-scale features.
@@ -394,7 +394,7 @@ class YOLOv5Head : public nn::Module {
 public:
     YOLOv5Head(int64_t in_channels, int64_t num_classes, int64_t num_anchors = 3);
 
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     int64_t num_anchors_;
@@ -446,7 +446,7 @@ public:
                     double conf_threshold = 0.25,
                     double nms_threshold = 0.45);
 
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
     auto forward_raw(const Variable& input) -> std::vector<Variable>;
     auto decode_predictions(const std::vector<Variable>& predictions, int64_t img_size)
         -> Tensor;

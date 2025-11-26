@@ -45,7 +45,7 @@ QuantizedLinear::QuantizedLinear(
     weight_(Tensor({out_features, in_features}, DType::Int8, Device::cpu()), weight_qparams),
     bias_scale_(bias_scale) {}
 
-auto QuantizedLinear::forward(const Variable& input) -> Variable {
+auto QuantizedLinear::forward_impl(const Variable& input) -> Variable {
     // Quantize input, perform computation, dequantize output
     auto q_input = quantize_per_tensor_symmetric(input.tensor());
     Tensor output = forward_quantized(q_input);
@@ -156,7 +156,7 @@ QuantizedConv2d::QuantizedConv2d(
                    DType::Int8, Device::cpu()), weight_qparams),
     bias_scale_(bias_scale) {}
 
-auto QuantizedConv2d::forward(const Variable& input) -> Variable {
+auto QuantizedConv2d::forward_impl(const Variable& input) -> Variable {
     auto q_input = quantize_per_tensor_symmetric(input.tensor());
     Tensor output = forward_quantized(q_input);
     return Variable(output, input.requires_grad());
@@ -278,7 +278,7 @@ QuantizedBatchNorm2d::QuantizedBatchNorm2d(
     scale_(std::move(scale)),
     bias_(std::move(bias)) {}
 
-auto QuantizedBatchNorm2d::forward(const Variable& input) -> Variable {
+auto QuantizedBatchNorm2d::forward_impl(const Variable& input) -> Variable {
     // Apply scale and bias
     Tensor scaled = input.tensor() * scale_.unsqueeze(0).unsqueeze(2).unsqueeze(3);
     Tensor output = scaled + bias_.unsqueeze(0).unsqueeze(2).unsqueeze(3);
@@ -339,7 +339,7 @@ auto QuantizedBatchNorm2d::from_float(const Module& fp_bn, const QConfig& qconfi
 QuantStub::QuantStub(QuantizationParams qparams)
     : qparams_(std::move(qparams)) {}
 
-auto QuantStub::forward(const Variable& input) -> Variable {
+auto QuantStub::forward_impl(const Variable& input) -> Variable {
     // Quantize input tensor and immediately dequantize for Variable compatibility
     // This maintains the computational graph while simulating quantization
     auto q_tensor = forward_to_quantized(input.tensor());
@@ -363,7 +363,7 @@ auto QuantStub::forward_to_quantized(const Tensor& input) -> QuantizedTensor {
     return quantize_tensor(fp_input, qparams_);
 }
 
-auto DeQuantStub::forward(const Variable& input) -> Variable {
+auto DeQuantStub::forward_impl(const Variable& input) -> Variable {
     // For Variable input, we assume it contains quantized data that needs dequantization
     // In a real implementation, the Variable would have metadata indicating it's quantized
     // For now, we pass through assuming the tensor is already in FP32 format

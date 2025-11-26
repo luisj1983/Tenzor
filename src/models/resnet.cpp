@@ -49,7 +49,7 @@ BasicBlock::BasicBlock(int64_t in_channels,
     }
 }
 
-auto BasicBlock::forward(const Variable& input) -> Variable {
+auto BasicBlock::forward_impl(const Variable& input) -> Variable {
     Variable identity = input;
 
     // First conv block: conv -> bn -> relu
@@ -119,7 +119,7 @@ Bottleneck::Bottleneck(int64_t in_channels,
     }
 }
 
-auto Bottleneck::forward(const Variable& input) -> Variable {
+auto Bottleneck::forward_impl(const Variable& input) -> Variable {
     Variable identity = input;
 
     // First conv block: 1x1 conv -> bn -> relu
@@ -283,7 +283,7 @@ auto ResNet::make_layer_bottleneck(int64_t out_channels, int64_t num_blocks, int
     return layer;
 }
 
-auto ResNet::forward(const Variable& input) -> Variable {
+auto ResNet::forward_impl(const Variable& input) -> Variable {
     // Extract features through all residual layers
     auto x = forward_features(input);
 

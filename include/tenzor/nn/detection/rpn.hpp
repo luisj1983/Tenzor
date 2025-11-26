@@ -140,7 +140,7 @@ public:
     /**
      * @brief Module forward (required by base class).
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
     /**
      * @brief Get RPN losses (objectness + box regression).

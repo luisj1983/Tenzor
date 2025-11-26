@@ -56,7 +56,7 @@ InceptionModule::InceptionModule(int64_t in_channels,
     register_module("branch4_bn", branch4_bn_);
 }
 
-auto InceptionModule::forward(const Variable& x) -> Variable {
+auto InceptionModule::forward_impl(const Variable& x) -> Variable {
     // Branch 1: 1x1
     auto b1 = branch1_conv1x1_->forward(x);
     b1 = branch1_bn_->forward(b1);
@@ -114,7 +114,7 @@ InceptionAux::InceptionAux(int64_t in_channels, int64_t num_classes, double drop
     register_module("dropout", dropout_);
 }
 
-auto InceptionAux::forward(const Variable& x) -> Variable {
+auto InceptionAux::forward_impl(const Variable& x) -> Variable {
     // Average pooling
     auto pooled = avgpool_->forward(x);
 
@@ -154,7 +154,7 @@ GoogLeNet::GoogLeNet(int64_t num_classes, bool aux_logits, double dropout, bool 
     }
 }
 
-auto GoogLeNet::forward(const Variable& x) -> Variable {
+auto GoogLeNet::forward_impl(const Variable& x) -> Variable {
     // Initial convolutions
     auto out = conv1_->forward(x);
     out = bn1_->forward(out);

@@ -44,7 +44,7 @@ public:
         register_parameter("b2", Variable(zeros({output_dim}, DType::Float32, Device::cpu()), true));
     }
 
-    auto forward(const Variable& x) -> Variable override {
+    auto forward_impl(const Variable& x) -> Variable override {
         auto w1 = parameters_.at("w1");
         auto b1 = parameters_.at("b1");
         auto w2 = parameters_.at("w2");

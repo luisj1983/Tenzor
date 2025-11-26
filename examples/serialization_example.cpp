@@ -21,7 +21,7 @@ public:
         register_module("fc2", fc2_);
     }
 
-    auto forward(const Variable& input) -> Variable override {
+    auto forward_impl(const Variable& input) -> Variable override {
         auto h = fc1_->forward(input);
         // Apply ReLU manually (if activation not available)
         // h = relu(h);

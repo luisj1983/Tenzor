@@ -31,7 +31,7 @@ class DoubleModule : public Module {
 public:
     DoubleModule() = default;
 
-    auto forward(const Variable& input) -> Variable override {
+    auto forward_impl(const Variable& input) -> Variable override {
         // Simply multiply input by 2
         return Variable(input.tensor() * 2.0f);
     }
@@ -62,7 +62,7 @@ public:
         register_parameter("bias", bias_);
     }
 
-    auto forward(const Variable& input) -> Variable override {
+    auto forward_impl(const Variable& input) -> Variable override {
         // Simple linear transformation: y = xW^T + b
         auto output = input.tensor() * weight_.tensor();
         return Variable(output + bias_.tensor());

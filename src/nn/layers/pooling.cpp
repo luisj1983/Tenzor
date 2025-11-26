@@ -147,7 +147,7 @@ MaxPool2d::MaxPool2d(int64_t kernel_size, int64_t stride, int64_t padding)
     : kernel_size_(kernel_size), stride_(stride < 0 ? kernel_size : stride),
       padding_(padding) {}
 
-auto MaxPool2d::forward(const Variable& input) -> Variable {
+auto MaxPool2d::forward_impl(const Variable& input) -> Variable {
     // Input shape: [N, C, H_in, W_in]
     auto input_shape = input.shape();
     if (input_shape.size() != 4) {
@@ -493,7 +493,7 @@ AvgPool2d::AvgPool2d(int64_t kernel_size, int64_t stride, int64_t padding)
     : kernel_size_(kernel_size), stride_(stride < 0 ? kernel_size : stride),
       padding_(padding) {}
 
-auto AvgPool2d::forward(const Variable& input) -> Variable {
+auto AvgPool2d::forward_impl(const Variable& input) -> Variable {
     // Input shape: [N, C, H_in, W_in]
     auto input_shape = input.shape();
     if (input_shape.size() != 4) {
@@ -806,7 +806,7 @@ private:
 AdaptiveAvgPool2d::AdaptiveAvgPool2d(int64_t output_h, int64_t output_w)
     : output_h_(output_h), output_w_(output_w) {}
 
-auto AdaptiveAvgPool2d::forward(const Variable& input) -> Variable {
+auto AdaptiveAvgPool2d::forward_impl(const Variable& input) -> Variable {
     // Input shape: [N, C, H_in, W_in]
     auto input_shape = input.shape();
     if (input_shape.size() != 4) {

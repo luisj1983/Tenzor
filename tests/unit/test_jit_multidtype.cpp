@@ -73,7 +73,7 @@ public:
         register_module("fc2", fc2_);
     }
 
-    Variable forward(const Variable& x) override {
+    Variable forward_impl(const Variable& x) override {
         auto out = fc1_->forward(x);
         out = fc2_->forward(out);
         return out;
@@ -95,7 +95,7 @@ public:
         register_module("conv2", conv2_);
     }
 
-    Variable forward(const Variable& x) override {
+    Variable forward_impl(const Variable& x) override {
         auto out = conv1_->forward(x);
         out = conv2_->forward(out);
         return out;
@@ -119,7 +119,7 @@ public:
         register_module("relu", relu_);
     }
 
-    Variable forward(const Variable& x) override {
+    Variable forward_impl(const Variable& x) override {
         auto out = conv_->forward(x);
         out = bn_->forward(out);
         out = relu_->forward(out);
@@ -400,7 +400,7 @@ TYPED_TEST(JITMultiDTypeTest, OptimizeConstantFolding) {
 
     class ModelWithConstants : public Module {
     public:
-        Variable forward(const Variable& x) override {
+        Variable forward_impl(const Variable& x) override {
             Tensor constant({1, 10}, DTypeTraits<T>::value, Device::cpu());
             constant.fill_(static_cast<T>(1.0));
 
@@ -441,7 +441,7 @@ TYPED_TEST(JITMultiDTypeTest, OptimizeDeadCodeElimination) {
             register_module("fc2", fc2_);
         }
 
-        Variable forward(const Variable& x) override {
+        Variable forward_impl(const Variable& x) override {
             return fc1_->forward(x);
         }
 
@@ -687,7 +687,7 @@ TYPED_TEST(JITMultiDTypeTest, TraceMixedDTypeError) {
 
     class MixedDTypeModel : public Module {
     public:
-        Variable forward(const Variable& x) override {
+        Variable forward_impl(const Variable& x) override {
             // Try to mix dtypes (should fail)
             Tensor wrong_dtype({2, 10}, DType::Float32, Device::cpu());
             if constexpr (std::is_same_v<T, double>) {

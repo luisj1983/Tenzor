@@ -60,7 +60,7 @@ VGG::VGG(const VGGConfig& config,
     }
 }
 
-auto VGG::forward(const Variable& x) -> Variable {
+auto VGG::forward_impl(const Variable& x) -> Variable {
     // Extract features
     auto features = features_->forward(x);
 

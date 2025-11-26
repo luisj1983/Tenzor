@@ -48,7 +48,7 @@ public:
         register_module("fc", fc_);
     }
 
-    auto forward(const Variable& x) -> Variable override {
+    auto forward_impl(const Variable& x) -> Variable override {
         auto h = conv1_->forward(x).relu();
         h = conv2_->forward(h).relu();
         h = conv3_->forward(h).relu();
@@ -86,7 +86,7 @@ public:
         register_module("fc", fc_);
     }
 
-    auto forward(const Variable& x) -> Variable override {
+    auto forward_impl(const Variable& x) -> Variable override {
         auto h = conv1_->forward(x).relu();
 
         // Depthwise separable conv 1

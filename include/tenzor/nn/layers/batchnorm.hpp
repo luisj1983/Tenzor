@@ -69,7 +69,7 @@ public:
      * @param input Input variable of shape (N, C, H, W)
      * @return Normalized output of shape (N, C, H, W)
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     int64_t num_features_;          ///< Number of feature channels
@@ -132,7 +132,7 @@ public:
      * @param input Input variable of shape (N, C) or (N, C, L)
      * @return Normalized output (same shape as input)
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     int64_t num_features_;          ///< Number of feature channels

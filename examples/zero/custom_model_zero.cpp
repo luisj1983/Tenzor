@@ -85,7 +85,7 @@ public:
             Variable(zeros({num_classes}, DType::Float32, Device::cpu()), true));
     }
 
-    auto forward(const Variable& input) -> Variable override {
+    auto forward_impl(const Variable& input) -> Variable override {
         // Input projection
         auto x = matmul(input.tensor(), parameters_.at("input_proj_weight")->tensor())
                + parameters_.at("input_proj_bias")->tensor();

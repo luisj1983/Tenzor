@@ -168,7 +168,7 @@ public:
      * @param input Input images
      * @return Dummy output (use forward_inference or forward_train instead)
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
     /**
      * @brief Load pretrained weights from file.

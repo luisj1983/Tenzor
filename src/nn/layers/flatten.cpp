@@ -34,7 +34,7 @@ private:
 Flatten::Flatten(int64_t start_dim, int64_t end_dim)
     : start_dim_(start_dim), end_dim_(end_dim) {}
 
-auto Flatten::forward(const Variable& input) -> Variable {
+auto Flatten::forward_impl(const Variable& input) -> Variable {
     auto shape = input.tensor().shape();
     auto ndim = static_cast<int64_t>(shape.size());
 

@@ -55,7 +55,7 @@ public:
      */
     LayerScale(int64_t dim, double init_value = 1e-6);
 
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     Variable gamma_;  ///< Learnable scale parameter [dim, 1, 1]
@@ -108,7 +108,7 @@ public:
                   double drop_path = 0.0,
                   double layer_scale_init_value = 1e-6);
 
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     std::shared_ptr<nn::Conv2d> dwconv_;        ///< 7×7 depthwise convolution
@@ -160,7 +160,7 @@ public:
      * @param input Input image tensor of shape (N, C, H, W)
      * @return Output logits of shape (N, num_classes)
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
     /**
      * @brief Load pretrained weights.

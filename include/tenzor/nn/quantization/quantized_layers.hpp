@@ -67,7 +67,7 @@ public:
      * @param input Floating-point input variable
      * @return Floating-point output variable
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
     /**
      * @brief Forward pass with quantized input.
@@ -162,7 +162,7 @@ public:
         float bias_scale = 1.0f
     );
 
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
     auto forward_quantized(const QuantizedTensor& input) -> Tensor;
     auto forward_quantized_output(const QuantizedTensor& input,
                                   const QuantizationParams& output_qparams)
@@ -211,7 +211,7 @@ public:
         Tensor bias
     );
 
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
     auto forward_quantized(const QuantizedTensor& input) -> QuantizedTensor;
 
     /**
@@ -288,7 +288,7 @@ public:
         Tensor bn_bias
     );
 
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
     auto forward_quantized(const QuantizedTensor& input) -> Tensor;
 
     /**
@@ -356,7 +356,7 @@ public:
      * @param input Floating-point input variable
      * @return Variable containing quantized tensor data
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
     /**
      * @brief Quantize tensor directly.
@@ -445,7 +445,7 @@ public:
      * @param input Variable containing quantized tensor
      * @return Floating-point output variable
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
     /**
      * @brief Dequantize QuantizedTensor directly.

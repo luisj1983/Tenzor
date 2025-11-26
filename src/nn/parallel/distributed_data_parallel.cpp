@@ -412,7 +412,7 @@ DistributedDataParallel::DistributedDataParallel(
     initialize_distributed();
 }
 
-auto DistributedDataParallel::forward(const Variable& input) -> Variable {
+auto DistributedDataParallel::forward_impl(const Variable& input) -> Variable {
     // First forward pass: setup complete
     if (first_forward_) {
         first_forward_ = false;

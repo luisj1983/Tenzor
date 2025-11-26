@@ -42,7 +42,7 @@ DarknetResidualBlock::DarknetResidualBlock(int64_t channels)
     register_module("bn2", bn2_);
 }
 
-auto DarknetResidualBlock::forward(const Variable& input) -> Variable {
+auto DarknetResidualBlock::forward_impl(const Variable& input) -> Variable {
     Variable identity = input;
 
     auto out = conv1_->forward(input);
@@ -109,7 +109,7 @@ auto Darknet53::make_layer(int64_t in_channels, int64_t out_channels, int64_t nu
     return layers;
 }
 
-auto Darknet53::forward(const Variable& input) -> Variable {
+auto Darknet53::forward_impl(const Variable& input) -> Variable {
     auto features = forward_multiscale(input);
     return features.back();  // Return final feature map
 }
@@ -184,7 +184,7 @@ YOLOv3Head::YOLOv3Head(int64_t in_channels, int64_t num_classes, int64_t num_anc
     register_module("detect", detect_);
 }
 
-auto YOLOv3Head::forward(const Variable& input) -> Variable {
+auto YOLOv3Head::forward_impl(const Variable& input) -> Variable {
     auto x = conv1_->forward(input);
     x = bn1_->forward(x);
     x = act_.forward(x);
@@ -265,7 +265,7 @@ auto YOLOv3::build_fpn_neck() -> void {
     register_module("fpn_lateral2", fpn_lateral2_);
 }
 
-auto YOLOv3::forward(const Variable& input) -> Variable {
+auto YOLOv3::forward_impl(const Variable& input) -> Variable {
     auto predictions = forward_raw(input);
 
     // For training, return raw predictions
@@ -541,7 +541,7 @@ CSPBottleneck::CSPBottleneck(int64_t in_channels, int64_t out_channels,
     register_module("bn_merge", bn_merge_);
 }
 
-auto CSPBottleneck::forward(const Variable& input) -> Variable {
+auto CSPBottleneck::forward_impl(const Variable& input) -> Variable {
     nn::Swish act;  // SiLU activation (Swish)
 
     // Split path
@@ -643,7 +643,7 @@ auto CSPDarknet::make_divisible(int64_t x, int64_t divisor) -> int64_t {
     return ((x + divisor / 2) / divisor) * divisor;
 }
 
-auto CSPDarknet::forward(const Variable& input) -> Variable {
+auto CSPDarknet::forward_impl(const Variable& input) -> Variable {
     auto features = forward_multiscale(input);
     return features.back();
 }
@@ -730,7 +730,7 @@ PANet::PANet(const std::vector<int64_t>& channels) {
     register_module("bn4", bn4_);
 }
 
-auto PANet::forward(const Variable& input) -> Variable {
+auto PANet::forward_impl(const Variable& input) -> Variable {
     // PANet is designed for multi-scale feature fusion
     // Single input forward is not the typical use case
     // This forwards to forward_multi with single feature
@@ -799,7 +799,7 @@ YOLOv5Head::YOLOv5Head(int64_t in_channels, int64_t num_classes, int64_t num_anc
     register_module("detect", detect_);
 }
 
-auto YOLOv5Head::forward(const Variable& input) -> Variable {
+auto YOLOv5Head::forward_impl(const Variable& input) -> Variable {
     nn::Swish act;  // SiLU activation (Swish)
     auto x = conv1_->forward(input);
     x = bn1_->forward(x);
@@ -876,7 +876,7 @@ auto YOLOv5::get_size_params(Size size) -> std::pair<double, double> {
     }
 }
 
-auto YOLOv5::forward(const Variable& input) -> Variable {
+auto YOLOv5::forward_impl(const Variable& input) -> Variable {
     auto predictions = forward_raw(input);
 
     if (is_training()) {

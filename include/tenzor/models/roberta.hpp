@@ -191,7 +191,7 @@ public:
     /**
      * @brief Required by Module base class (returns sequence_output only)
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
     /**
      * @brief Get model configuration
@@ -245,7 +245,7 @@ public:
     /**
      * @brief Required by Module base class
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     RobertaConfig config_;
@@ -295,7 +295,7 @@ public:
     /**
      * @brief Required by Module base class
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     RobertaConfig config_;
@@ -354,7 +354,7 @@ public:
     /**
      * @brief Required by Module base class (returns start_logits only)
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     RobertaConfig config_;

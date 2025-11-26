@@ -100,7 +100,7 @@ public:
      * auto out = embedding->forward(input);
      * @endcode
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
     /**
      * @brief Get embedding weight matrix (learnable parameters)
@@ -195,6 +195,9 @@ private:
  */
 class EmbeddingBag : public Module {
 public:
+    // Bring base class forward into scope (avoid hiding by 2-param forward)
+    using Module::forward;
+
     /**
      * @brief Construct embedding bag layer
      *
@@ -239,7 +242,7 @@ public:
     /**
      * @brief Default forward pass (required by Module base class)
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
     /**
      * @brief Get embedding weight matrix

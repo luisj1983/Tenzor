@@ -46,7 +46,7 @@ auto ElectraGenerator::forward(const Variable& input_ids,
     return logits;  // [batch, seq_len, vocab_size]
 }
 
-auto ElectraGenerator::forward(const Variable& input) -> Variable {
+auto ElectraGenerator::forward_impl(const Variable& input) -> Variable {
     return forward(input, Tensor{}, Variable{});
 }
 
@@ -86,7 +86,7 @@ auto ElectraDiscriminator::forward(const Variable& input_ids,
     return squeezed;
 }
 
-auto ElectraDiscriminator::forward(const Variable& input) -> Variable {
+auto ElectraDiscriminator::forward_impl(const Variable& input) -> Variable {
     return forward(input, Tensor{}, Variable{});
 }
 
@@ -224,7 +224,7 @@ auto ElectraForPreTraining::forward(const Variable& input_ids,
     return ElectraPreTrainingOutput{gen_logits, disc_logits, is_replaced};
 }
 
-auto ElectraForPreTraining::forward(const Variable& input) -> Variable {
+auto ElectraForPreTraining::forward_impl(const Variable& input) -> Variable {
     // Simplified interface - just return discriminator output
     // For actual pre-training, use the full forward() method
     auto disc_logits = discriminator_->forward(input, Tensor{}, Variable{});
@@ -325,7 +325,7 @@ auto ElectraForSequenceClassification::forward(const Variable& input_ids,
     return logits;
 }
 
-auto ElectraForSequenceClassification::forward(const Variable& input) -> Variable {
+auto ElectraForSequenceClassification::forward_impl(const Variable& input) -> Variable {
     return forward(input, Tensor{}, Variable{});
 }
 
@@ -367,7 +367,7 @@ auto ElectraForTokenClassification::forward(const Variable& input_ids,
     return logits;
 }
 
-auto ElectraForTokenClassification::forward(const Variable& input) -> Variable {
+auto ElectraForTokenClassification::forward_impl(const Variable& input) -> Variable {
     return forward(input, Tensor{}, Variable{});
 }
 
@@ -449,7 +449,7 @@ auto ElectraForQuestionAnswering::forward(const Variable& input_ids,
     return ElectraQAOutput{start_logits, end_logits};
 }
 
-auto ElectraForQuestionAnswering::forward(const Variable& input) -> Variable {
+auto ElectraForQuestionAnswering::forward_impl(const Variable& input) -> Variable {
     auto outputs = forward(input, Tensor{}, Variable{});
     return outputs.start_logits;
 }

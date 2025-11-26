@@ -59,19 +59,19 @@ public:
     RPN(int64_t in_channels, int64_t num_anchors);
 
     /**
-     * @brief Forward pass through RPN.
+     * @brief Forward pass through RPN returning both outputs.
      *
      * @param features Feature map from backbone (N, C, H, W)
      * @return Tuple of (objectness_logits, bbox_deltas)
      *         - objectness_logits: (N, num_anchors*H*W, 2)
      *         - bbox_deltas: (N, num_anchors*H*W, 4)
      */
-    auto forward_impl(const Variable& features)
+    auto forward_multi(const Variable& features)
         -> std::tuple<Variable, Variable>;
 
     // Module interface implementation - returns objectness logits only
-    auto forward(const Variable& input) -> Variable override {
-        auto [obj_logits, bbox_deltas] = forward_impl(input);
+    auto forward_impl(const Variable& input) -> Variable override {
+        auto [obj_logits, bbox_deltas] = forward_multi(input);
         return obj_logits;
     }
 
@@ -113,19 +113,19 @@ public:
     ROIHead(int64_t in_channels, int64_t num_classes, int64_t roi_size = 7);
 
     /**
-     * @brief Forward pass through ROI head.
+     * @brief Forward pass through ROI head returning both outputs.
      *
      * @param roi_features ROI-pooled features (num_rois, C, roi_size, roi_size)
      * @return Tuple of (class_logits, bbox_deltas)
      *         - class_logits: (num_rois, num_classes)
      *         - bbox_deltas: (num_rois, num_classes*4)
      */
-    auto forward_impl(const Variable& roi_features)
+    auto forward_multi(const Variable& roi_features)
         -> std::tuple<Variable, Variable>;
 
     // Module interface implementation - returns class logits only
-    auto forward(const Variable& input) -> Variable override {
-        auto [cls_logits, bbox_deltas] = forward_impl(input);
+    auto forward_impl(const Variable& input) -> Variable override {
+        auto [cls_logits, bbox_deltas] = forward_multi(input);
         return cls_logits;
     }
 
@@ -221,7 +221,7 @@ public:
      * @param images Input images (N, 3, H, W)
      * @return Tuple of (boxes, labels, scores, masks)
      */
-    auto forward(const Variable& images) -> Variable override;
+    auto forward_impl(const Variable& images) -> Variable override;
 
     /**
      * @brief Forward pass with ground truth targets (training).

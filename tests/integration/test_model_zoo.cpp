@@ -241,7 +241,7 @@ TEST(ModelZoo, BERTSequenceClassification) {
             register_module("classifier", classifier_);
         }
 
-        auto forward(const Variable& input) -> Variable override {
+        auto forward_impl(const Variable& input) -> Variable override {
             // Use default attention mask (all ones)
             std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
             auto attention_mask = ones(shape_vec, DType::Float32, input.device());

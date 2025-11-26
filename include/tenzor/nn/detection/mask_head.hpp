@@ -101,7 +101,7 @@ public:
      * @note During training, use all class masks with class labels
      *       During inference, select mask for predicted class only
      */
-    auto forward(const Variable& roi_features) -> Variable override;
+    auto forward_impl(const Variable& roi_features) -> Variable override;
 
     /**
      * @brief Get output mask resolution.

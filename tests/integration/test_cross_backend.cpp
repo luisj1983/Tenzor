@@ -208,7 +208,7 @@ TEST_P(CrossBackendTest, ModelInferenceConsistency) {
             register_module("fc", fc);
         }
 
-        auto forward(const Variable& x) -> Variable override {
+        auto forward_impl(const Variable& x) -> Variable override {
             auto out = conv->forward(x);
             out = bn->forward(out);
             out = relu(out);
@@ -428,7 +428,7 @@ TEST_P(CrossBackendTest, CompleteTrainingLoop) {
             register_module("fc2", fc2);
         }
 
-        auto forward(const Variable& x) -> Variable override {
+        auto forward_impl(const Variable& x) -> Variable override {
             auto h = fc1->forward(x);
             h = relu->forward(h);
             return fc2->forward(h);

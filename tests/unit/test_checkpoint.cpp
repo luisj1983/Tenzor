@@ -51,7 +51,7 @@ public:
         register_module("fc2", fc2_);
     }
 
-    auto forward(const Variable& x) -> Variable override {
+    auto forward_impl(const Variable& x) -> Variable override {
         auto h = fc1_->forward(x);
         return fc2_->forward(h);
     }
@@ -576,7 +576,7 @@ TEST_F(CheckpointTest, LargeCheckpoint) {
             register_module("fc3", fc3_);
         }
 
-        auto forward(const Variable& x) -> Variable override {
+        auto forward_impl(const Variable& x) -> Variable override {
             return fc3_->forward(fc2_->forward(fc1_->forward(x)));
         }
 

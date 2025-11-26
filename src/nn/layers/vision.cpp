@@ -54,7 +54,7 @@ PatchEmbedding::PatchEmbedding(int64_t in_channels,
     register_module("proj", proj_);
 }
 
-auto PatchEmbedding::forward(const Variable& input) -> Variable {
+auto PatchEmbedding::forward_impl(const Variable& input) -> Variable {
     auto shape = input.tensor().shape();
 
     // Validate input shape

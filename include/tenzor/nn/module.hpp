@@ -55,27 +55,45 @@ public:
     virtual ~Module() = default;
 
     /**
-     * @brief Forward pass computation (must be implemented by derived classes).
+     * @brief Forward pass computation.
+     *
+     * This method automatically calls forward pre-hooks and post-hooks
+     * if any are registered on this module. Derived classes should override
+     * forward_impl() to provide their computation logic.
      *
      * @param input Input variable
      * @return Output variable
      */
-    virtual auto forward(const Variable& input) -> Variable = 0;
+    auto forward(const Variable& input) -> Variable {
+        // Only call hooks if this specific module has hooks registered
+        // This avoids overhead for modules without hooks
+        if (has_forward_hooks_) {
+            call_own_forward_pre_hooks();
+            auto output = forward_impl(input);
+            call_own_forward_post_hooks();
+            return output;
+        }
+        return forward_impl(input);
+    }
+
+    /**
+     * @brief Implementation of forward pass (must be implemented by derived classes).
+     *
+     * @param input Input variable
+     * @return Output variable
+     */
+    virtual auto forward_impl(const Variable& input) -> Variable = 0;
 
     /**
      * @brief Convenience operator for forward pass.
      *
-     * Allows calling module like a function: output = module(input)
-     * Automatically calls forward pre-hooks and post-hooks.
+     * Equivalent to calling forward() - provided for functional syntax.
      *
      * @param input Input variable
      * @return Output variable
      */
     auto operator()(const Variable& input) -> Variable {
-        call_forward_pre_hooks();
-        auto output = forward(input);
-        call_forward_post_hooks();
-        return output;
+        return forward(input);
     }
 
     // ============================================================================
@@ -97,6 +115,15 @@ public:
      * @endcode
      */
     virtual auto parameters() -> std::vector<std::shared_ptr<Variable>>;
+
+    /**
+     * @brief Get only this module's direct parameters (not submodules').
+     *
+     * Used by offload hooks to load/offload only the current layer's parameters.
+     *
+     * @return Vector of shared pointers to this module's own parameters only
+     */
+    virtual auto own_parameters() -> std::vector<std::shared_ptr<Variable>>;
 
     /**
      * @brief Get all parameters with names.
@@ -388,6 +415,25 @@ protected:
     std::vector<BackwardPreHook> backward_pre_hooks_;                             ///< Backward pre-hooks
     std::vector<BackwardPostHook> backward_post_hooks_;                           ///< Backward post-hooks
     size_t next_hook_id_{0};                                                      ///< Next hook ID for tracking
+    bool has_forward_hooks_{false};                                               ///< True if this module has forward hooks
+
+    /**
+     * @brief Call only this module's forward pre-hooks (no recursion).
+     */
+    auto call_own_forward_pre_hooks() -> void {
+        for (auto& hook : forward_pre_hooks_) {
+            hook(this);
+        }
+    }
+
+    /**
+     * @brief Call only this module's forward post-hooks (no recursion).
+     */
+    auto call_own_forward_post_hooks() -> void {
+        for (auto& hook : forward_post_hooks_) {
+            hook(this);
+        }
+    }
 };
 
 /**
@@ -451,7 +497,7 @@ public:
      * @param input Input variable
      * @return Output after passing through all modules
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
     /**
      * @brief Get all parameters preserving module order.

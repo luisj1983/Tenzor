@@ -71,7 +71,7 @@ public:
      *
      * @throws std::runtime_error if seq_len exceeds max_len
      */
-    auto forward(const Variable& x) -> Variable override;
+    auto forward_impl(const Variable& x) -> Variable override;
 
 private:
     int64_t d_model_;        ///< Model dimension
@@ -124,6 +124,9 @@ private:
  */
 class TransformerEncoderLayer : public Module {
 public:
+    // Bring base class forward into scope (avoid hiding by multi-param forward)
+    using Module::forward;
+
     /**
      * @brief Construct transformer encoder layer.
      *
@@ -176,7 +179,7 @@ public:
     /**
      * @brief Default forward (not meaningful for encoder layer, throws error).
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
     // Allow TransformerEncoder to access configuration for layer cloning
     friend class TransformerEncoder;
@@ -221,6 +224,9 @@ private:
  */
 class TransformerEncoder : public Module {
 public:
+    // Bring base class forward into scope (avoid hiding by multi-param forward)
+    using Module::forward;
+
     /**
      * @brief Construct transformer encoder.
      *
@@ -253,7 +259,7 @@ public:
     /**
      * @brief Default forward (not meaningful for encoder, throws error).
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     std::vector<std::shared_ptr<TransformerEncoderLayer>> layers_;
@@ -308,6 +314,9 @@ private:
  */
 class TransformerDecoderLayer : public Module {
 public:
+    // Bring base class forward into scope (avoid hiding by multi-param forward)
+    using Module::forward;
+
     /**
      * @brief Construct transformer decoder layer.
      *
@@ -357,7 +366,7 @@ public:
     /**
      * @brief Default forward (not meaningful for decoder, throws error).
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
     // Allow TransformerDecoder to access configuration for layer cloning
     friend class TransformerDecoder;
@@ -405,6 +414,9 @@ private:
  */
 class TransformerDecoder : public Module {
 public:
+    // Bring base class forward into scope (avoid hiding by multi-param forward)
+    using Module::forward;
+
     /**
      * @brief Construct transformer decoder.
      *
@@ -437,7 +449,7 @@ public:
     /**
      * @brief Default forward (not meaningful for decoder, throws error).
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     std::vector<std::shared_ptr<TransformerDecoderLayer>> layers_;
@@ -460,6 +472,9 @@ private:
  */
 class Transformer : public Module {
 public:
+    // Bring base class forward into scope (avoid hiding by multi-param forward)
+    using Module::forward;
+
     /**
      * @brief Construct complete transformer model.
      *
@@ -506,7 +521,7 @@ public:
     /**
      * @brief Default forward (not meaningful, throws error).
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
 private:
     std::shared_ptr<TransformerEncoder> encoder_;

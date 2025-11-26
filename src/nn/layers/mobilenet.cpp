@@ -58,7 +58,7 @@ SqueezeExcitation::SqueezeExcitation(int64_t channels,
     register_module("fc2", fc2_);
 }
 
-auto SqueezeExcitation::forward(const Variable& input) -> Variable {
+auto SqueezeExcitation::forward_impl(const Variable& input) -> Variable {
     auto shape = input.tensor().shape();
     if (shape.size() != 4) {
         throw std::runtime_error("SqueezeExcitation expects 4D input (N, C, H, W)");
@@ -164,7 +164,7 @@ InvertedResidual::InvertedResidual(int64_t in_channels,
     register_module("conv", conv_);
 }
 
-auto InvertedResidual::forward(const Variable& input) -> Variable {
+auto InvertedResidual::forward_impl(const Variable& input) -> Variable {
     auto x = conv_->forward(input);
 
     // Apply SE if present
@@ -250,7 +250,7 @@ FusedMBConv::FusedMBConv(int64_t in_channels,
     register_module("conv", conv_);
 }
 
-auto FusedMBConv::forward(const Variable& input) -> Variable {
+auto FusedMBConv::forward_impl(const Variable& input) -> Variable {
     auto x = conv_->forward(input);
 
     // Apply SE if present

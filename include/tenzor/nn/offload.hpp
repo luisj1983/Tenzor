@@ -211,6 +211,7 @@ private:
     struct TensorInfo {
         Tensor* tensor;                  ///< Pointer to original tensor
         Tensor cpu_copy;                 ///< Copy on CPU (if offloaded)
+        Device original_device;          ///< Original GPU device before offloading
         bool is_offloaded{false};        ///< Currently offloaded to CPU
         bool is_pinned{false};           ///< Pinned to GPU (don't offload)
         bool is_gradient{false};         ///< True if this is a gradient tensor
@@ -246,6 +247,11 @@ private:
      * @brief Register hooks on all modules
      */
     auto register_hooks() -> void;
+
+    /**
+     * @brief Recursively register hooks on a module and its submodules
+     */
+    auto register_hooks_recursive(Module* module) -> void;
 
     /**
      * @brief Build layer ordering for sequential processing

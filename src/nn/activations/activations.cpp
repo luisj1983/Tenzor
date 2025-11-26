@@ -265,32 +265,32 @@ public:
 };
 
 // Module implementations
-auto ReLU::forward(const Variable& input) -> Variable {
+auto ReLU::forward_impl(const Variable& input) -> Variable {
     return relu(input);
 }
 
-auto ReLU6::forward(const Variable& input) -> Variable {
+auto ReLU6::forward_impl(const Variable& input) -> Variable {
     // ReLU6(x) = min(max(0, x), 6)
     return clamp(relu(input), 0.0f, 6.0f);
 }
 
 LeakyReLU::LeakyReLU(double negative_slope) : negative_slope_(negative_slope) {}
 
-auto LeakyReLU::forward(const Variable& input) -> Variable {
+auto LeakyReLU::forward_impl(const Variable& input) -> Variable {
     return leaky_relu(input, negative_slope_);
 }
 
-auto Sigmoid::forward(const Variable& input) -> Variable {
+auto Sigmoid::forward_impl(const Variable& input) -> Variable {
     return sigmoid(input);
 }
 
-auto Tanh::forward(const Variable& input) -> Variable {
+auto Tanh::forward_impl(const Variable& input) -> Variable {
     return tanh(input);
 }
 
 Softmax::Softmax(int64_t dim) : dim_(dim) {}
 
-auto Softmax::forward(const Variable& input) -> Variable {
+auto Softmax::forward_impl(const Variable& input) -> Variable {
     return tenzor::softmax(input, dim_);
 }
 
@@ -441,15 +441,15 @@ auto log_softmax(const Variable& input, int64_t dim) -> Variable {
 
 LogSoftmax::LogSoftmax(int64_t dim) : dim_(dim) {}
 
-auto LogSoftmax::forward(const Variable& input) -> Variable {
+auto LogSoftmax::forward_impl(const Variable& input) -> Variable {
     return tenzor::log_softmax(input, dim_);
 }
 
-auto GELU::forward(const Variable& input) -> Variable {
+auto GELU::forward_impl(const Variable& input) -> Variable {
     return gelu(input);
 }
 
-auto ELU::forward(const Variable& input) -> Variable {
+auto ELU::forward_impl(const Variable& input) -> Variable {
     return elu(input, alpha_);
 }
 
@@ -490,7 +490,7 @@ auto elu(const Variable& input, double alpha) -> Variable {
     return output;
 }
 
-auto SELU::forward(const Variable& input) -> Variable {
+auto SELU::forward_impl(const Variable& input) -> Variable {
     return selu(input);
 }
 
@@ -525,7 +525,7 @@ auto selu(const Variable& input) -> Variable {
     return output;
 }
 
-auto Swish::forward(const Variable& input) -> Variable {
+auto Swish::forward_impl(const Variable& input) -> Variable {
     return swish(input);
 }
 
@@ -560,7 +560,7 @@ auto swish(const Variable& input) -> Variable {
     return output;
 }
 
-auto Mish::forward(const Variable& input) -> Variable {
+auto Mish::forward_impl(const Variable& input) -> Variable {
     return mish(input);
 }
 

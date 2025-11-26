@@ -258,7 +258,7 @@ RPN::RPN(int64_t in_channels, int64_t num_anchors) {
     register_module("bbox_pred", bbox_pred_);
 }
 
-auto RPN::forward_impl(const Variable& features)
+auto RPN::forward_multi(const Variable& features)
     -> std::tuple<Variable, Variable> {
     // features: (N, C, H, W)
 
@@ -309,7 +309,7 @@ ROIHead::ROIHead(int64_t in_channels, int64_t num_classes, int64_t roi_size) {
     register_module("bbox_pred", bbox_pred_);
 }
 
-auto ROIHead::forward_impl(const Variable& roi_features)
+auto ROIHead::forward_multi(const Variable& roi_features)
     -> std::tuple<Variable, Variable> {
     // roi_features: (num_rois, C, roi_size, roi_size)
 
@@ -397,7 +397,7 @@ MaskRCNN::MaskRCNN(std::shared_ptr<nn::Module> backbone,
     register_module("mask_head", mask_head_);
 }
 
-auto MaskRCNN::forward(const Variable& images) -> Variable {
+auto MaskRCNN::forward_impl(const Variable& images) -> Variable {
     if (is_training()) {
         throw std::runtime_error(
             "MaskRCNN::forward() requires ground truth targets during training. "
@@ -428,7 +428,7 @@ auto MaskRCNN::forward_train(const Variable& images,
     std::cerr << "[forward_train] Features extracted, dtype=" << static_cast<int>(features.tensor().dtype()) << std::endl;
 
     // 2. Generate proposals with RPN
-    auto [rpn_cls_logits, rpn_bbox_deltas] = rpn_->forward_impl(features);
+    auto [rpn_cls_logits, rpn_bbox_deltas] = rpn_->forward_multi(features);
 
     // Generate anchor boxes
     auto H = features.tensor().shape()[2];
@@ -463,7 +463,7 @@ auto MaskRCNN::forward_train(const Variable& images,
     auto roi_features_box = roi_align_box_->forward(features, sampled_rois);
 
     // 6. Box classification and regression
-    auto [cls_logits, bbox_deltas] = roi_head_->forward_impl(roi_features_box);
+    auto [cls_logits, bbox_deltas] = roi_head_->forward_multi(roi_features_box);
 
     // 7. Match sampled ROIs to ground truth to get their labels and target boxes
     auto num_sampled = sampled_rois.shape()[0];
@@ -621,14 +621,14 @@ auto MaskRCNN::forward_test(const Variable& images)
     auto features = extract_features(images);
 
     // 2. Generate proposals
-    auto [rpn_cls_logits, rpn_bbox_deltas] = rpn_->forward_impl(features);
+    auto [rpn_cls_logits, rpn_bbox_deltas] = rpn_->forward_multi(features);
     auto proposals = generate_proposals(features);
 
     // 3. ROI Align for boxes
     auto roi_features_box = roi_align_box_->forward(features, proposals);
 
     // 4. Box classification and regression
-    auto [cls_logits, bbox_deltas] = roi_head_->forward_impl(roi_features_box);
+    auto [cls_logits, bbox_deltas] = roi_head_->forward_multi(roi_features_box);
 
     // 5. Apply NMS and get final detections
     auto cls_probs = tenzor::softmax(cls_logits, 1).tensor();

@@ -74,7 +74,7 @@ auto RobertaModel::forward(const Variable& input_ids,
     return RobertaOutput{sequence_output, pooled_output};
 }
 
-auto RobertaModel::forward(const Variable& input) -> Variable {
+auto RobertaModel::forward_impl(const Variable& input) -> Variable {
     auto outputs = forward(input, Tensor{}, Variable{}, Variable{});
     return outputs.sequence_output;
 }
@@ -116,7 +116,7 @@ auto RobertaForSequenceClassification::forward(const Variable& input_ids,
     return logits;
 }
 
-auto RobertaForSequenceClassification::forward(const Variable& input) -> Variable {
+auto RobertaForSequenceClassification::forward_impl(const Variable& input) -> Variable {
     return forward(input, Tensor{}, Variable{});
 }
 
@@ -157,7 +157,7 @@ auto RobertaForTokenClassification::forward(const Variable& input_ids,
     return logits;
 }
 
-auto RobertaForTokenClassification::forward(const Variable& input) -> Variable {
+auto RobertaForTokenClassification::forward_impl(const Variable& input) -> Variable {
     return forward(input, Tensor{}, Variable{});
 }
 
@@ -238,7 +238,7 @@ auto RobertaForQuestionAnswering::forward(const Variable& input_ids,
     return RobertaQAOutput{start_logits, end_logits};
 }
 
-auto RobertaForQuestionAnswering::forward(const Variable& input) -> Variable {
+auto RobertaForQuestionAnswering::forward_impl(const Variable& input) -> Variable {
     auto outputs = forward(input, Tensor{}, Variable{});
     return outputs.start_logits;
 }

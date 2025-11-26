@@ -77,7 +77,7 @@ public:
      *
      * @throws std::runtime_error if input shape is incompatible
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
     /**
      * @brief Get weight parameter.

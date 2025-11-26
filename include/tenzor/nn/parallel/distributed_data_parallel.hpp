@@ -287,7 +287,7 @@ public:
      * @param input Input variable (must be on master device)
      * @return Output variable on master device
      */
-    auto forward(const Variable& input) -> Variable override;
+    auto forward_impl(const Variable& input) -> Variable override;
 
     /**
      * @brief Get underlying module.
