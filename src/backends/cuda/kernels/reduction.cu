@@ -375,7 +375,7 @@ static auto compute_reduction_shape(
     int64_t dim,
     bool keepdim
 ) -> std::vector<int64_t> {
-    if (dim < 0) {
+    if (dim == INT64_MIN) {
         // Full reduction
         if (keepdim) {
             return std::vector<int64_t>(input_shape.size(), 1);
@@ -383,11 +383,20 @@ static auto compute_reduction_shape(
         return {};  // Scalar (0D tensor)
     }
 
+    // Normalize negative dimension
+    int64_t normalized_dim = dim;
+    if (dim < 0) {
+        normalized_dim = static_cast<int64_t>(input_shape.size()) + dim;
+        if (normalized_dim < 0 || normalized_dim >= static_cast<int64_t>(input_shape.size())) {
+            throw std::invalid_argument("Dimension out of range in compute_reduction_shape");
+        }
+    }
+
     std::vector<int64_t> output_shape = input_shape;
     if (keepdim) {
-        output_shape[dim] = 1;
+        output_shape[normalized_dim] = 1;
     } else {
-        output_shape.erase(output_shape.begin() + dim);
+        output_shape.erase(output_shape.begin() + normalized_dim);
         // Keep empty shape for scalar result
     }
     return output_shape;
@@ -638,6 +647,15 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
     const auto& input_shape = input.shape();
     const auto& input_strides = input.strides();
 
+    // Normalize negative dimension
+    int64_t normalized_dim = dim;
+    if (dim < 0 && dim != INT64_MIN) {  // INT64_MIN means reduce all dimensions
+        normalized_dim = static_cast<int64_t>(input_shape.size()) + dim;
+        if (normalized_dim < 0) {
+            throw std::invalid_argument("Dimension out of range");
+        }
+    }
+
     auto output_shape = compute_reduction_shape(
         std::vector<int64_t>(input_shape.begin(), input_shape.end()),
         dim, keepdim
@@ -650,14 +668,14 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
             auto* input_data = input.data<float>();
             auto* output_data = output.data<float>();
 
-            if (dim < 0) {
+            if (dim == INT64_MIN) {  // Full reduction
                 launch_full_reduction_sum(input_data, output_data, input.numel(), stream);
             } else {
                 launch_dim_reduction_sum(
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    dim
+                    normalized_dim
                 );
             }
             break;
@@ -666,14 +684,14 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
             auto* input_data = input.data<double>();
             auto* output_data = output.data<double>();
 
-            if (dim < 0) {
+            if (dim == INT64_MIN) {  // Full reduction
                 launch_full_reduction_sum(input_data, output_data, input.numel(), stream);
             } else {
                 launch_dim_reduction_sum(
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    dim
+                    normalized_dim
                 );
             }
             break;
@@ -682,14 +700,14 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
             auto* input_data = input.data<int32_t>();
             auto* output_data = output.data<int32_t>();
 
-            if (dim < 0) {
+            if (dim == INT64_MIN) {  // Full reduction
                 launch_full_reduction_sum(input_data, output_data, input.numel(), stream);
             } else {
                 launch_dim_reduction_sum(
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    dim
+                    normalized_dim
                 );
             }
             break;
@@ -698,14 +716,14 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
             auto* input_data = input.data<int64_t>();
             auto* output_data = output.data<int64_t>();
 
-            if (dim < 0) {
+            if (dim == INT64_MIN) {  // Full reduction
                 launch_full_reduction_sum(input_data, output_data, input.numel(), stream);
             } else {
                 launch_dim_reduction_sum(
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    dim
+                    normalized_dim
                 );
             }
             break;
@@ -714,14 +732,14 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
             auto* input_data = reinterpret_cast<const __half*>(input.data_ptr());
             auto* output_data = reinterpret_cast<__half*>(output.data_ptr());
 
-            if (dim < 0) {
+            if (dim == INT64_MIN) {  // Full reduction
                 launch_full_reduction_sum(input_data, output_data, input.numel(), stream);
             } else {
                 launch_dim_reduction_sum(
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    dim
+                    normalized_dim
                 );
             }
             break;

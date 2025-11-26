@@ -702,6 +702,9 @@ auto add_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
         } else if (a.dtype() == DType::Int16) {
             add_kernel_device<<<grid, block, 0, stream>>>(
                 a.data<int16_t>(), b.data<int16_t>(), result.data<int16_t>(), n);
+        } else if (a.dtype() == DType::Bool) {
+            add_kernel_device<<<grid, block, 0, stream>>>(
+                a.data<bool>(), b.data<bool>(), result.data<bool>(), n);
         } else {
             throw std::runtime_error("Unsupported dtype for add operation");
         }
@@ -774,6 +777,10 @@ auto add_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
     } else if (a.dtype() == DType::Int16) {
         broadcast_kernel<<<grid, block, 0, stream>>>(
             a.data<int16_t>(), b.data<int16_t>(), result.data<int16_t>(),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, AddOp());
+    } else if (a.dtype() == DType::Bool) {
+        broadcast_kernel<<<grid, block, 0, stream>>>(
+            a.data<bool>(), b.data<bool>(), result.data<bool>(),
             d_strides_a, d_strides_b, d_output_shape, ndim, n, AddOp());
     } else {
         throw std::runtime_error("Unsupported dtype for add operation");
@@ -973,10 +980,12 @@ auto mul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
                 reinterpret_cast<const __half*>(b.data<Float16>()),
                 reinterpret_cast<__half*>(result.data<Float16>()), n);
         } else if (a.dtype() == DType::BFloat16) {
-            mul_kernel_bf16<<<grid, block, 0, stream>>>(
+            mul_kernel_device<<<grid, block, 0, stream>>>(
                 reinterpret_cast<const __nv_bfloat16*>(a.data<BFloat16>()),
                 reinterpret_cast<const __nv_bfloat16*>(b.data<BFloat16>()),
                 reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()), n);
+        } else if (a.dtype() == DType::Bool) {
+            mul_kernel_device<<<grid, block, 0, stream>>>(a.data<bool>(), b.data<bool>(), result.data<bool>(), n);
         } else {
             throw std::runtime_error("Unsupported dtype for mul operation");
         }
@@ -1035,6 +1044,10 @@ auto mul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
             reinterpret_cast<const __nv_bfloat16*>(a.data<BFloat16>()),
             reinterpret_cast<const __nv_bfloat16*>(b.data<BFloat16>()),
             reinterpret_cast<__nv_bfloat16*>(result.data<BFloat16>()),
+            d_strides_a, d_strides_b, d_output_shape, ndim, n, MulOp());
+    } else if (a.dtype() == DType::Bool) {
+        broadcast_kernel<<<grid, block, 0, stream>>>(
+            a.data<bool>(), b.data<bool>(), result.data<bool>(),
             d_strides_a, d_strides_b, d_output_shape, ndim, n, MulOp());
     } else {
         throw std::runtime_error("Unsupported dtype for mul operation");

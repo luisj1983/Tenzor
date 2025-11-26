@@ -227,25 +227,29 @@ TEST_P(ChunkMultiDTypeTest, ChunkInvalidDimension) {
 
 TEST_P(ChunkMultiDTypeTest, ChunkDataCorrectness) {
     // Verify that chunk() creates tensors with correct shapes and is slice-based
-    auto x = zeros({6, 3}, dtype, device);
+    // Create tensor on CPU first for data population, then transfer to target device
+    auto x_cpu = zeros({6, 3}, dtype, Device::cpu());
 
     // Fill with sequential values for verification
     if (dtype == DType::Float32) {
-        float* data = x.data<float>();
+        float* data = x_cpu.data<float>();
         for (int i = 0; i < 18; ++i) {
             data[i] = static_cast<float>(i);
         }
     } else if (dtype == DType::Float64) {
-        double* data = x.data<double>();
+        double* data = x_cpu.data<double>();
         for (int i = 0; i < 18; ++i) {
             data[i] = static_cast<double>(i);
         }
     } else if (dtype == DType::Int32) {
-        int32_t* data = x.data<int32_t>();
+        int32_t* data = x_cpu.data<int32_t>();
         for (int i = 0; i < 18; ++i) {
             data[i] = i;
         }
     }
+
+    // Transfer to target device if needed
+    auto x = (device.type == Device::Type::CPU) ? x_cpu : x_cpu.to(device);
 
     // Split into 3 chunks along dim=0
     auto chunks = chunk(x, 3, 0);

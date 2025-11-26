@@ -15,6 +15,7 @@
 #include "../core/tensor.hpp"
 #include "../core/dtype.hpp"
 #include "../core/device.hpp"
+#include "../backend/loader.hpp"
 
 namespace tenzor {
 
@@ -234,7 +235,22 @@ auto from_data(const T* data, std::vector<int64_t> shape,
     // Copy data
     if (tensor.impl() && tensor.impl()->storage) {
         size_t bytes = tensor.numel() * sizeof(T);
-        std::memcpy(tensor.impl()->storage->data(), data, bytes);
+
+        // For CPU device, use memcpy
+        if (device.type == Device::Type::CPU) {
+            std::memcpy(tensor.impl()->storage->data(), data, bytes);
+        } else {
+            // For GPU devices, use backend's copy method
+            auto* backend = tenzor::backend_registry().get_backend(device.type);
+            if (backend) {
+                backend->copy(tensor.impl()->storage->data(),
+                             const_cast<T*>(data),
+                             bytes,
+                             tenzor::CopyKind::HostToDevice);
+            } else {
+                throw std::runtime_error("Backend not available for device type");
+            }
+        }
     }
 
     return tensor;

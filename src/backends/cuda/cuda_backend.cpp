@@ -369,7 +369,7 @@ public:
                     throw std::invalid_argument("sum operation requires exactly 1 input");
                 }
                 // Parse attributes
-                int64_t dim = -1;
+                int64_t dim = INT64_MIN;  // INT64_MIN means full reduction (all dimensions)
                 bool keepdim = false;
                 if (attrs.contains("dim")) {
                     dim = std::stoll(attrs.at("dim"));
@@ -383,7 +383,7 @@ public:
                 if (inputs.size() != 1) {
                     throw std::invalid_argument("mean operation requires exactly 1 input");
                 }
-                int64_t dim = -1;
+                int64_t dim = INT64_MIN;  // INT64_MIN means full reduction (all dimensions)
                 bool keepdim = false;
                 if (attrs.contains("dim")) {
                     dim = std::stoll(attrs.at("dim"));

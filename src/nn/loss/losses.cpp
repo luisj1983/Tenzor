@@ -123,23 +123,38 @@ auto CrossEntropyLoss::forward(const Variable& input, const Tensor& target) -> V
         auto batch_size = input.tensor().shape()[0];
         auto num_classes = input.tensor().shape()[1];
 
-        // Create one-hot tensor with proper dtype handling
-        auto one_hot = tenzor::zeros({batch_size, num_classes}, input.tensor().dtype(), input.tensor().device());
-        const int64_t* target_data = target.data<int64_t>();
+        // Move target to CPU for one-hot encoding (since we need to access it directly)
+        auto target_cpu = target.device().type == Device::Type::CPU ? target : target.cpu();
+        const int64_t* target_data = target_cpu.data<int64_t>();
+
+        // Create one-hot tensor on CPU with proper dtype handling
+        auto one_hot_cpu = tenzor::zeros({batch_size, num_classes}, input.tensor().dtype(), Device::cpu());
 
         if (input.tensor().dtype() == DType::Float32) {
-            auto* one_hot_data = one_hot.data<float>();
+            auto* one_hot_data = one_hot_cpu.data<float>();
             for (int64_t i = 0; i < batch_size; ++i) {
                 int64_t class_idx = target_data[i];
                 one_hot_data[i * num_classes + class_idx] = 1.0f;
             }
         } else if (input.tensor().dtype() == DType::Float64) {
-            auto* one_hot_data = one_hot.data<double>();
+            auto* one_hot_data = one_hot_cpu.data<double>();
             for (int64_t i = 0; i < batch_size; ++i) {
                 int64_t class_idx = target_data[i];
                 one_hot_data[i * num_classes + class_idx] = 1.0;
             }
+        } else if (input.tensor().dtype() == DType::Float16) {
+            // For Float16, work with float32 internally then convert
+            auto one_hot_f32 = tenzor::zeros({batch_size, num_classes}, DType::Float32, Device::cpu());
+            auto* one_hot_data = one_hot_f32.data<float>();
+            for (int64_t i = 0; i < batch_size; ++i) {
+                int64_t class_idx = target_data[i];
+                one_hot_data[i * num_classes + class_idx] = 1.0f;
+            }
+            one_hot_cpu = one_hot_f32.to(DType::Float16);
         }
+
+        // Move one_hot tensor to the same device as input
+        auto one_hot = one_hot_cpu.device() == input.tensor().device() ? one_hot_cpu : one_hot_cpu.to(input.tensor().device());
 
         // Convert to Variable for autograd
         one_hot_var = Variable(one_hot, false);

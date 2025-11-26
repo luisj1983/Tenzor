@@ -1193,6 +1193,15 @@ auto softmax_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Te
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
 
+    // Initialize result to zero
+    if (input.dtype() == DType::Float32) {
+        cudaMemsetAsync(result.data_ptr(), 0, result.numel() * sizeof(float), stream);
+    } else if (input.dtype() == DType::Float64) {
+        cudaMemsetAsync(result.data_ptr(), 0, result.numel() * sizeof(double), stream);
+    } else if (input.dtype() == DType::Float16) {
+        cudaMemsetAsync(result.data_ptr(), 0, result.numel() * sizeof(__half), stream);
+    }
+
     if (input.numel() == 0) {
         cudaStreamSynchronize(stream);
         return result;
@@ -1242,6 +1251,7 @@ auto softmax_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Te
         throw std::runtime_error(std::string("CUDA error in softmax_kernel: ") + cudaGetErrorString(err));
     }
 
+    cudaStreamSynchronize(stream);
     return result;
 }
 
