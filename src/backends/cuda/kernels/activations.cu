@@ -901,8 +901,13 @@ auto sigmoid_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
         int num_blocks = get_num_blocks(n);
         sigmoid_forward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        int num_blocks = get_num_blocks(n);
+        sigmoid_forward_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<const __half*>(input.data_ptr()),
+            reinterpret_cast<__half*>(result.data_ptr()), n);
     } else {
-        throw std::runtime_error("Sigmoid only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("Sigmoid only supports Float32, Float64, and Float16 dtypes");
     }
 
     cudaError_t err = cudaGetLastError();
@@ -932,8 +937,14 @@ auto sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& input, cud
         int num_blocks = get_num_blocks(n);
         sigmoid_backward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             grad_output.data<double>(), input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        int num_blocks = get_num_blocks(n);
+        sigmoid_backward_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<const __half*>(grad_output.data_ptr()),
+            reinterpret_cast<const __half*>(input.data_ptr()),
+            reinterpret_cast<__half*>(result.data_ptr()), n);
     } else {
-        throw std::runtime_error("Sigmoid backward only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("Sigmoid backward only supports Float32, Float64, and Float16 dtypes");
     }
 
     cudaError_t err = cudaGetLastError();

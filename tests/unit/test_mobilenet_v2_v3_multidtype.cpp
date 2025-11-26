@@ -473,6 +473,11 @@ TEST_P(MobileNetMultiDTypeTest, MobileNetFloat16ReducedSize) {
     // For Float16, test with smaller dimensions to avoid memory issues
     if (dtype_ == DType::Float16) {
         auto model = mobilenet_v2_width(10, 0.5, false);  // 50% width
+
+        // Convert model to test dtype and device
+        model->to(dtype_);
+        model->to(device_);
+
         model->eval();
 
         Variable input = createInput({1, 3, 112, 112}, false);  // Half resolution
