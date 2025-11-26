@@ -58,6 +58,15 @@ auto GRUCell::forward(const Variable& input, const Variable& hx) -> Variable {
 
     int64_t batch_size = input_shape[0];
 
+    // Ensure module parameters are on the same device as input
+    auto input_device = input.device();
+    reset_gate_input_->to(input_device);
+    reset_gate_hidden_->to(input_device);
+    update_gate_input_->to(input_device);
+    update_gate_hidden_->to(input_device);
+    new_gate_input_->to(input_device);
+    new_gate_hidden_->to(input_device);
+
     // Initialize hidden state if not provided
     Variable h = hx;
     if (!h.is_initialized() || h.tensor().numel() == 0) {

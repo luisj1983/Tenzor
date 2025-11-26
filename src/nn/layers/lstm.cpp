@@ -48,6 +48,11 @@ auto LSTMCell::forward(const Variable& input, const Variable& hx, const Variable
 
     int64_t batch_size = input_shape[0];
 
+    // Ensure module parameters are on the same device as input
+    auto input_device = input.device();
+    weight_ih_->to(input_device);
+    weight_hh_->to(input_device);
+
     // Initialize hidden and cell states if not provided
     Variable h = hx;
     Variable c = cx;
