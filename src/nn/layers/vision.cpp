@@ -15,6 +15,7 @@
 #include <stdexcept>
 #include <cmath>
 #include <random>
+#include <iostream>
 
 namespace tenzor::nn {
 
@@ -198,7 +199,11 @@ auto WindowAttention::compute_relative_position_index() -> void {
 
 auto WindowAttention::get_relative_position_bias() const -> Tensor {
     // Gather biases using precomputed indices
-    auto bias_table = relative_position_bias_table_->tensor();
+    // Use parameters_ map to get tensor (ensures offload hooks see correct device)
+    auto bias_table_it = parameters_.find("relative_position_bias_table");
+    auto bias_table = (bias_table_it != parameters_.end())
+                      ? bias_table_it->second->tensor()
+                      : relative_position_bias_table_->tensor();
     auto target_dtype = bias_table.dtype();
     auto target_device = bias_table.device();
     int64_t table_size = 2 * window_size_ - 1;
@@ -254,6 +259,10 @@ auto WindowAttention::get_relative_position_bias() const -> Tensor {
 }
 
 auto WindowAttention::forward(const Variable& input, const Tensor& mask) -> Variable {
+    // Call forward pre-hooks (enables offloading)
+    // NOTE: This is necessary because this 2-argument forward bypasses Module::forward()
+    call_forward_pre_hooks();
+
     auto shape = input.tensor().shape();
 
     // Validate input shape
@@ -338,6 +347,9 @@ auto WindowAttention::forward(const Variable& input, const Tensor& mask) -> Vari
     // Output projection
     x = proj_->forward(x);
     x = proj_drop_->forward(x);
+
+    // Call forward post-hooks (enables offloading)
+    call_forward_post_hooks();
 
     return x;
 }

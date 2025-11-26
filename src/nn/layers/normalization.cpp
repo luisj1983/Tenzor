@@ -213,9 +213,10 @@ auto LayerNorm::forward_impl(const Variable& input) -> Variable {
     Device original_device = input.tensor().device();
     Tensor input_cpu = (original_device == Device::cpu()) ? input.tensor() : input.tensor().to(Device::cpu());
 
-    // Move weight and bias to CPU AND convert to input's dtype if needed
-    Tensor weight_cpu = weight_.tensor();
-    Tensor bias_cpu = bias_.tensor();
+    // Get weight/bias from parameters_ to respect offload hooks
+    // Note: hooks modify parameters_["weight"]->tensor(), not the member weight_
+    Tensor weight_cpu = elementwise_affine_ ? parameters_["weight"]->tensor() : weight_.tensor();
+    Tensor bias_cpu = elementwise_affine_ ? parameters_["bias"]->tensor() : bias_.tensor();
     if (elementwise_affine_) {
         if (weight_cpu.device() != Device::cpu()) {
             weight_cpu = weight_cpu.to(Device::cpu());

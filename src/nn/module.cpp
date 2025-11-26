@@ -171,6 +171,17 @@ auto Module::buffers() -> std::vector<std::shared_ptr<Variable>> {
     return bufs;
 }
 
+auto Module::own_buffers() -> std::vector<std::shared_ptr<Variable>> {
+    std::vector<std::shared_ptr<Variable>> bufs;
+
+    // Return only this module's direct buffers, not submodules'
+    for (auto& [name, buffer] : buffers_) {
+        bufs.push_back(buffer);
+    }
+
+    return bufs;
+}
+
 auto Module::named_buffers() -> std::vector<std::pair<std::string, std::shared_ptr<Variable>>> {
     std::vector<std::pair<std::string, std::shared_ptr<Variable>>> bufs;
 

@@ -104,6 +104,7 @@ public:
         bool enable_statistics{true};          ///< Track offload statistics
         size_t cpu_memory_limit{16ULL * 1024 * 1024 * 1024};  ///< CPU memory limit (16 GB)
         size_t gpu_memory_limit{8ULL * 1024 * 1024 * 1024};   ///< GPU memory limit (8 GB)
+        Device target_device{Device::cuda(0)}; ///< Target device for computation (for CPU-start models)
 
         Config() = default;
     };

@@ -149,6 +149,13 @@ public:
     auto buffers() -> std::vector<std::shared_ptr<Variable>>;
 
     /**
+     * @brief Get this module's own buffers (not submodules').
+     *
+     * @return Vector of shared pointers to this module's direct buffers only
+     */
+    auto own_buffers() -> std::vector<std::shared_ptr<Variable>>;
+
+    /**
      * @brief Get all buffers with names.
      *
      * @return Vector of (name, shared_ptr to buffer) pairs

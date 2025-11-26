@@ -296,7 +296,10 @@ auto OffloadContext::initialize_tensor_info(Tensor* tensor, Module* layer) -> vo
 
     TensorInfo info;
     info.tensor = tensor;
-    info.original_device = tensor->device();  // Save original device for later restoration
+    // For CPU-start models, use target_device for computation; otherwise use tensor's current device
+    info.original_device = (tensor->device().type == Device::Type::CPU)
+                           ? config_.target_device
+                           : tensor->device();
     info.is_offloaded = false;
     info.is_pinned = false;
     info.use_count = 0;
@@ -481,28 +484,56 @@ auto OffloadContext::should_offload(const TensorInfo& info) const -> bool {
 auto OffloadContext::forward_pre_hook(Module* layer) -> void {
     if (!is_enabled()) return;
 
-    // Load ONLY this layer's own parameters back to GPU if they were offloaded
-    // Using own_parameters() instead of parameters() to avoid loading submodule params
+    // Helper lambda to load a tensor to GPU
+    auto load_tensor_to_gpu = [&](Tensor* tensor_ptr) {
+        std::lock_guard<std::mutex> lock(tensor_map_mutex_);
+        auto it = tensor_map_.find(tensor_ptr);
+
+        // Case 1: Tensor was offloaded from GPU - restore it
+        if (it != tensor_map_.end() && it->second.is_offloaded) {
+            try {
+                Tensor gpu_tensor = transfer_engine_->cpu_to_gpu(it->second.cpu_copy, it->second.original_device);
+                *tensor_ptr = gpu_tensor;
+                it->second.is_offloaded = false;
+                stats_.current_cpu_memory.fetch_sub(it->second.size_bytes, std::memory_order_relaxed);
+            } catch (const std::exception& e) {
+                std::cerr << "Failed to load tensor to GPU: " << e.what() << "\n";
+            }
+        }
+        // Case 2: Tensor on CPU and not in map - CPU-start model, load to target device
+        else if (tensor_ptr->device().type == Device::Type::CPU) {
+            try {
+                // Initialize tensor info if not already tracked
+                if (it == tensor_map_.end()) {
+                    initialize_tensor_info(tensor_ptr, layer);
+                    it = tensor_map_.find(tensor_ptr);
+                }
+                // Store CPU copy and load to GPU
+                if (it != tensor_map_.end()) {
+                    it->second.cpu_copy = *tensor_ptr;  // Store original CPU tensor
+                    Tensor gpu_tensor = transfer_engine_->cpu_to_gpu(*tensor_ptr, config_.target_device);
+                    *tensor_ptr = gpu_tensor;
+                    it->second.is_offloaded = false;  // Currently on GPU
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "Failed to load CPU tensor to GPU: " << e.what() << "\n";
+            }
+        }
+    };
+
+    // Load this layer's own parameters to GPU
     auto params = layer->own_parameters();
     for (auto& param_ptr : params) {
         if (param_ptr) {
-            Tensor* tensor_ptr = &(param_ptr->tensor());
+            load_tensor_to_gpu(&(param_ptr->tensor()));
+        }
+    }
 
-            std::lock_guard<std::mutex> lock(tensor_map_mutex_);
-            auto it = tensor_map_.find(tensor_ptr);
-            if (it != tensor_map_.end() && it->second.is_offloaded) {
-                // Load back to GPU using the stored original device
-                try {
-                    Tensor gpu_tensor = transfer_engine_->cpu_to_gpu(it->second.cpu_copy, it->second.original_device);
-                    *tensor_ptr = gpu_tensor;
-                    it->second.is_offloaded = false;
-
-                    // Update stats
-                    stats_.current_cpu_memory.fetch_sub(it->second.size_bytes, std::memory_order_relaxed);
-                } catch (const std::exception& e) {
-                    std::cerr << "Failed to load tensor to GPU: " << e.what() << "\n";
-                }
-            }
+    // Also load this layer's own buffers to GPU (e.g., BatchNorm running stats)
+    auto bufs = layer->own_buffers();
+    for (auto& buf_ptr : bufs) {
+        if (buf_ptr) {
+            load_tensor_to_gpu(&(buf_ptr->tensor()));
         }
     }
 
