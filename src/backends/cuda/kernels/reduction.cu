@@ -1440,6 +1440,15 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t 
     const auto& input_shape = input.shape();
     const auto& input_strides = input.strides();
 
+    // Normalize negative dimension
+    int64_t normalized_dim = dim;
+    if (dim < 0 && dim != INT64_MIN) {  // INT64_MIN means reduce all dimensions
+        normalized_dim = static_cast<int64_t>(input_shape.size()) + dim;
+        if (normalized_dim < 0 || normalized_dim >= static_cast<int64_t>(input_shape.size())) {
+            throw std::invalid_argument("Dimension out of range in argmax_kernel");
+        }
+    }
+
     // Compute output shape (always Int64 for indices)
     auto output_shape = compute_reduction_shape(
         std::vector<int64_t>(input_shape.begin(), input_shape.end()),
@@ -1453,14 +1462,14 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t 
             auto* input_data = input.data<float>();
             auto* output_data = output.data<int64_t>();
 
-            if (dim < 0) {
+            if (dim == INT64_MIN) {
                 launch_full_argmax(input_data, output_data, input.numel(), stream);
             } else {
                 launch_dim_argmax(
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    dim
+                    normalized_dim
                 );
             }
             break;
@@ -1469,20 +1478,52 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t 
             auto* input_data = input.data<double>();
             auto* output_data = output.data<int64_t>();
 
-            if (dim < 0) {
+            if (dim == INT64_MIN) {
                 launch_full_argmax(input_data, output_data, input.numel(), stream);
             } else {
                 launch_dim_argmax(
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    dim
+                    normalized_dim
+                );
+            }
+            break;
+        }
+        case DType::Int32: {
+            auto* input_data = input.data<int32_t>();
+            auto* output_data = output.data<int64_t>();
+
+            if (dim == INT64_MIN) {
+                launch_full_argmax(input_data, output_data, input.numel(), stream);
+            } else {
+                launch_dim_argmax(
+                    input_data, output_data,
+                    std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                    std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                    normalized_dim
+                );
+            }
+            break;
+        }
+        case DType::Int64: {
+            auto* input_data = input.data<int64_t>();
+            auto* output_data = output.data<int64_t>();
+
+            if (dim == INT64_MIN) {
+                launch_full_argmax(input_data, output_data, input.numel(), stream);
+            } else {
+                launch_dim_argmax(
+                    input_data, output_data,
+                    std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                    std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                    normalized_dim
                 );
             }
             break;
         }
         default:
-            throw std::runtime_error("argmax: only Float32 and Float64 are supported");
+            throw std::runtime_error("argmax: only Float32, Float64, Int32, and Int64 are supported");
     }
 
     cudaStreamSynchronize(stream);
@@ -1502,6 +1543,15 @@ auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t 
     const auto& input_shape = input.shape();
     const auto& input_strides = input.strides();
 
+    // Normalize negative dimension
+    int64_t normalized_dim = dim;
+    if (dim < 0 && dim != INT64_MIN) {  // INT64_MIN means reduce all dimensions
+        normalized_dim = static_cast<int64_t>(input_shape.size()) + dim;
+        if (normalized_dim < 0 || normalized_dim >= static_cast<int64_t>(input_shape.size())) {
+            throw std::invalid_argument("Dimension out of range in argmin_kernel");
+        }
+    }
+
     // Compute output shape (always Int64 for indices)
     auto output_shape = compute_reduction_shape(
         std::vector<int64_t>(input_shape.begin(), input_shape.end()),
@@ -1515,14 +1565,14 @@ auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t 
             auto* input_data = input.data<float>();
             auto* output_data = output.data<int64_t>();
 
-            if (dim < 0) {
+            if (dim == INT64_MIN) {
                 launch_full_argmin(input_data, output_data, input.numel(), stream);
             } else {
                 launch_dim_argmin(
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    dim
+                    normalized_dim
                 );
             }
             break;
@@ -1531,20 +1581,52 @@ auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t 
             auto* input_data = input.data<double>();
             auto* output_data = output.data<int64_t>();
 
-            if (dim < 0) {
+            if (dim == INT64_MIN) {
                 launch_full_argmin(input_data, output_data, input.numel(), stream);
             } else {
                 launch_dim_argmin(
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    dim
+                    normalized_dim
+                );
+            }
+            break;
+        }
+        case DType::Int32: {
+            auto* input_data = input.data<int32_t>();
+            auto* output_data = output.data<int64_t>();
+
+            if (dim == INT64_MIN) {
+                launch_full_argmin(input_data, output_data, input.numel(), stream);
+            } else {
+                launch_dim_argmin(
+                    input_data, output_data,
+                    std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                    std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                    normalized_dim
+                );
+            }
+            break;
+        }
+        case DType::Int64: {
+            auto* input_data = input.data<int64_t>();
+            auto* output_data = output.data<int64_t>();
+
+            if (dim == INT64_MIN) {
+                launch_full_argmin(input_data, output_data, input.numel(), stream);
+            } else {
+                launch_dim_argmin(
+                    input_data, output_data,
+                    std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                    std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                    normalized_dim
                 );
             }
             break;
         }
         default:
-            throw std::runtime_error("argmin: only Float32 and Float64 are supported");
+            throw std::runtime_error("argmin: only Float32, Float64, Int32, and Int64 are supported");
     }
 
     cudaStreamSynchronize(stream);
@@ -1732,6 +1814,15 @@ auto prod_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t st
     const auto& input_shape = input.shape();
     const auto& input_strides = input.strides();
 
+    // Normalize negative dimension
+    int64_t normalized_dim = dim;
+    if (dim < 0 && dim != INT64_MIN) {  // INT64_MIN means reduce all dimensions
+        normalized_dim = static_cast<int64_t>(input_shape.size()) + dim;
+        if (normalized_dim < 0 || normalized_dim >= static_cast<int64_t>(input_shape.size())) {
+            throw std::invalid_argument("Dimension out of range in prod_kernel");
+        }
+    }
+
     // Compute output shape
     auto output_shape = compute_reduction_shape(
         std::vector<int64_t>(input_shape.begin(), input_shape.end()),
@@ -1745,14 +1836,14 @@ auto prod_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t st
             auto* input_data = input.data<float>();
             auto* output_data = output.data<float>();
 
-            if (dim < 0) {
+            if (dim == INT64_MIN) {
                 launch_full_reduction_prod(input_data, output_data, input.numel(), stream);
             } else {
                 launch_dim_reduction_prod(
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    dim
+                    normalized_dim
                 );
             }
             break;
@@ -1761,20 +1852,52 @@ auto prod_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t st
             auto* input_data = input.data<double>();
             auto* output_data = output.data<double>();
 
-            if (dim < 0) {
+            if (dim == INT64_MIN) {
                 launch_full_reduction_prod(input_data, output_data, input.numel(), stream);
             } else {
                 launch_dim_reduction_prod(
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
-                    dim
+                    normalized_dim
+                );
+            }
+            break;
+        }
+        case DType::Int32: {
+            auto* input_data = input.data<int32_t>();
+            auto* output_data = output.data<int32_t>();
+
+            if (dim == INT64_MIN) {
+                launch_full_reduction_prod(input_data, output_data, input.numel(), stream);
+            } else {
+                launch_dim_reduction_prod(
+                    input_data, output_data,
+                    std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                    std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                    normalized_dim
+                );
+            }
+            break;
+        }
+        case DType::Int64: {
+            auto* input_data = input.data<int64_t>();
+            auto* output_data = output.data<int64_t>();
+
+            if (dim == INT64_MIN) {
+                launch_full_reduction_prod(input_data, output_data, input.numel(), stream);
+            } else {
+                launch_dim_reduction_prod(
+                    input_data, output_data,
+                    std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                    std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                    normalized_dim
                 );
             }
             break;
         }
         default:
-            throw std::runtime_error("prod: only Float32 and Float64 are supported");
+            throw std::runtime_error("prod: only Float32, Float64, Int32, and Int64 are supported");
     }
 
     cudaStreamSynchronize(stream);
