@@ -62,6 +62,10 @@ auto RobertaModel::forward(const Variable& input_ids,
                            const Tensor& attention_mask,
                            const Variable& token_type_ids,
                            const Variable& position_ids) -> RobertaOutput {
+    // Call forward pre-hooks (enables CPU-start offloading)
+    // NOTE: This is necessary because this multi-argument forward bypasses Module::forward()
+    call_forward_pre_hooks();
+
     // Get embeddings
     auto embedding_output = embeddings_->forward(input_ids, token_type_ids, position_ids);
 
@@ -70,6 +74,9 @@ auto RobertaModel::forward(const Variable& input_ids,
 
     // Pool
     auto pooled_output = pooler_->forward(sequence_output);
+
+    // Call forward post-hooks (enables CPU-start offloading)
+    call_forward_post_hooks();
 
     return RobertaOutput{sequence_output, pooled_output};
 }
@@ -101,6 +108,9 @@ RobertaForSequenceClassification::RobertaForSequenceClassification(
 auto RobertaForSequenceClassification::forward(const Variable& input_ids,
                                                 const Tensor& attention_mask,
                                                 const Variable& token_type_ids) -> Variable {
+    // Call forward pre-hooks (enables CPU-start offloading)
+    call_forward_pre_hooks();
+
     // Get RoBERTa outputs
     auto outputs = roberta_->forward(input_ids, attention_mask, token_type_ids, Variable{});
 
@@ -112,6 +122,9 @@ auto RobertaForSequenceClassification::forward(const Variable& input_ids,
 
     // Classify
     auto logits = classifier_->forward(pooled_output);
+
+    // Call forward post-hooks (enables CPU-start offloading)
+    call_forward_post_hooks();
 
     return logits;
 }
@@ -142,6 +155,9 @@ RobertaForTokenClassification::RobertaForTokenClassification(
 auto RobertaForTokenClassification::forward(const Variable& input_ids,
                                              const Tensor& attention_mask,
                                              const Variable& token_type_ids) -> Variable {
+    // Call forward pre-hooks (enables CPU-start offloading)
+    call_forward_pre_hooks();
+
     // Get RoBERTa outputs
     auto outputs = roberta_->forward(input_ids, attention_mask, token_type_ids, Variable{});
 
@@ -153,6 +169,9 @@ auto RobertaForTokenClassification::forward(const Variable& input_ids,
 
     // Classify each token
     auto logits = classifier_->forward(sequence_output);
+
+    // Call forward post-hooks (enables CPU-start offloading)
+    call_forward_post_hooks();
 
     return logits;
 }
@@ -180,6 +199,9 @@ RobertaForQuestionAnswering::RobertaForQuestionAnswering(const RobertaConfig& co
 auto RobertaForQuestionAnswering::forward(const Variable& input_ids,
                                           const Tensor& attention_mask,
                                           const Variable& token_type_ids) -> RobertaQAOutput {
+    // Call forward pre-hooks (enables CPU-start offloading)
+    call_forward_pre_hooks();
+
     // Get RoBERTa outputs
     auto outputs = roberta_->forward(input_ids, attention_mask, token_type_ids, Variable{});
 
@@ -234,6 +256,9 @@ auto RobertaForQuestionAnswering::forward(const Variable& input_ids,
     // Reshape back to [batch, seq_len]
     auto start_logits = tenzor::reshape(start_flat, {batch_size, seq_len});
     auto end_logits = tenzor::reshape(end_flat, {batch_size, seq_len});
+
+    // Call forward post-hooks (enables CPU-start offloading)
+    call_forward_post_hooks();
 
     return RobertaQAOutput{start_logits, end_logits};
 }

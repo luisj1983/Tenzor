@@ -37,11 +37,18 @@ ElectraGenerator::ElectraGenerator(const ElectraConfig& config)
 auto ElectraGenerator::forward(const Variable& input_ids,
                                 const Tensor& attention_mask,
                                 const Variable& token_type_ids) -> Variable {
+    // Call forward pre-hooks (enables CPU-start offloading)
+    // NOTE: This is necessary because this multi-argument forward bypasses Module::forward()
+    call_forward_pre_hooks();
+
     // Get generator outputs
     auto outputs = generator_->forward(input_ids, attention_mask, token_type_ids, Variable{});
 
     // Predict tokens for all positions
     auto logits = lm_head_->forward(outputs.sequence_output);
+
+    // Call forward post-hooks (enables CPU-start offloading)
+    call_forward_post_hooks();
 
     return logits;  // [batch, seq_len, vocab_size]
 }
@@ -70,6 +77,10 @@ ElectraDiscriminator::ElectraDiscriminator(const ElectraConfig& config)
 auto ElectraDiscriminator::forward(const Variable& input_ids,
                                     const Tensor& attention_mask,
                                     const Variable& token_type_ids) -> Variable {
+    // Call forward pre-hooks (enables CPU-start offloading)
+    // NOTE: This is necessary because this multi-argument forward bypasses Module::forward()
+    call_forward_pre_hooks();
+
     // Get discriminator outputs
     auto outputs = discriminator_->forward(input_ids, attention_mask, token_type_ids, Variable{});
 
@@ -82,6 +93,9 @@ auto ElectraDiscriminator::forward(const Variable& input_ids,
     int64_t seq_len = shape[1];
 
     auto squeezed = tenzor::reshape(logits, {batch_size, seq_len});
+
+    // Call forward post-hooks (enables CPU-start offloading)
+    call_forward_post_hooks();
 
     return squeezed;
 }
@@ -116,6 +130,9 @@ auto ElectraForPreTraining::forward(const Variable& input_ids,
                                     const Tensor& masked_positions,
                                     const Tensor& original_tokens,
                                     const Tensor& attention_mask) -> ElectraPreTrainingOutput {
+    // Call forward pre-hooks (enables CPU-start offloading)
+    call_forward_pre_hooks();
+
     int64_t batch_size = input_ids.shape()[0];
     int64_t seq_len = input_ids.shape()[1];
 
@@ -221,6 +238,9 @@ auto ElectraForPreTraining::forward(const Variable& input_ids,
     Variable gen_input(generated_tokens, false);  // Don't need gradients for input tensor
     auto disc_logits = discriminator_->forward(gen_input, attention_mask);  // [batch, seq_len]
 
+    // Call forward post-hooks (enables CPU-start offloading)
+    call_forward_post_hooks();
+
     return ElectraPreTrainingOutput{gen_logits, disc_logits, is_replaced};
 }
 
@@ -310,6 +330,9 @@ ElectraForSequenceClassification::ElectraForSequenceClassification(
 auto ElectraForSequenceClassification::forward(const Variable& input_ids,
                                                 const Tensor& attention_mask,
                                                 const Variable& token_type_ids) -> Variable {
+    // Call forward pre-hooks (enables CPU-start offloading)
+    call_forward_pre_hooks();
+
     // Get BERT outputs
     auto outputs = bert_->forward(input_ids, attention_mask, token_type_ids, Variable{});
 
@@ -321,6 +344,9 @@ auto ElectraForSequenceClassification::forward(const Variable& input_ids,
 
     // Classify
     auto logits = classifier_->forward(pooled_output);
+
+    // Call forward post-hooks (enables CPU-start offloading)
+    call_forward_post_hooks();
 
     return logits;
 }
@@ -352,6 +378,9 @@ ElectraForTokenClassification::ElectraForTokenClassification(
 auto ElectraForTokenClassification::forward(const Variable& input_ids,
                                              const Tensor& attention_mask,
                                              const Variable& token_type_ids) -> Variable {
+    // Call forward pre-hooks (enables CPU-start offloading)
+    call_forward_pre_hooks();
+
     // Get BERT outputs
     auto outputs = bert_->forward(input_ids, attention_mask, token_type_ids, Variable{});
 
@@ -363,6 +392,9 @@ auto ElectraForTokenClassification::forward(const Variable& input_ids,
 
     // Classify each token
     auto logits = classifier_->forward(sequence_output);
+
+    // Call forward post-hooks (enables CPU-start offloading)
+    call_forward_post_hooks();
 
     return logits;
 }
@@ -391,6 +423,9 @@ ElectraForQuestionAnswering::ElectraForQuestionAnswering(const ElectraConfig& co
 auto ElectraForQuestionAnswering::forward(const Variable& input_ids,
                                           const Tensor& attention_mask,
                                           const Variable& token_type_ids) -> ElectraQAOutput {
+    // Call forward pre-hooks (enables CPU-start offloading)
+    call_forward_pre_hooks();
+
     // Get BERT outputs
     auto outputs = bert_->forward(input_ids, attention_mask, token_type_ids, Variable{});
 
@@ -445,6 +480,9 @@ auto ElectraForQuestionAnswering::forward(const Variable& input_ids,
     // Reshape back to [batch, seq_len]
     auto start_logits = tenzor::reshape(start_flat, {batch_size, seq_len});
     auto end_logits = tenzor::reshape(end_flat, {batch_size, seq_len});
+
+    // Call forward post-hooks (enables CPU-start offloading)
+    call_forward_post_hooks();
 
     return ElectraQAOutput{start_logits, end_logits};
 }

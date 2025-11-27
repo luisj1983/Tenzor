@@ -199,6 +199,7 @@ public:
      * @param attn_drop Attention dropout rate (default: 0.0)
      * @param drop_path Stochastic depth rates (default: empty)
      * @param downsample Downsample layer at end of stage (default: nullptr)
+     * @param use_checkpoint Enable gradient checkpointing for memory efficiency (default: false)
      */
     BasicLayer(int64_t dim,
               const std::pair<int64_t, int64_t>& input_resolution,
@@ -211,7 +212,8 @@ public:
               double drop = 0.0,
               double attn_drop = 0.0,
               const std::vector<double>& drop_path = {},
-              std::shared_ptr<nn::Module> downsample = nullptr);
+              std::shared_ptr<nn::Module> downsample = nullptr,
+              bool use_checkpoint = false);
 
     auto forward_impl(const Variable& input) -> Variable override;
 
@@ -222,11 +224,28 @@ public:
         return output_resolution_;
     }
 
+    /**
+     * @brief Enable or disable gradient checkpointing.
+     *
+     * When enabled, activations are not saved during forward pass and
+     * are recomputed during backward pass. Reduces memory by ~50-80%
+     * at cost of ~20-33% more compute.
+     *
+     * @param enable Whether to enable checkpointing
+     */
+    auto set_use_checkpoint(bool enable) -> void { use_checkpoint_ = enable; }
+
+    /**
+     * @brief Check if gradient checkpointing is enabled.
+     */
+    auto use_checkpoint() const -> bool { return use_checkpoint_; }
+
 private:
     int64_t dim_;
     std::pair<int64_t, int64_t> input_resolution_;
     std::pair<int64_t, int64_t> output_resolution_;
     int64_t depth_;
+    bool use_checkpoint_;  ///< Enable gradient checkpointing
 
     std::vector<std::shared_ptr<SwinTransformerBlock>> blocks_;
     std::shared_ptr<nn::Module> downsample_;
@@ -351,6 +370,7 @@ public:
      * @param attn_drop_rate Attention dropout rate (default: 0.0)
      * @param drop_path_rate Stochastic depth rate (default: 0.1)
      * @param norm_layer If true, use LayerNorm in patch embed (default: true)
+     * @param use_checkpoint Enable gradient checkpointing for memory efficiency (default: false)
      */
     SwinTransformer(int64_t img_size = 224,
                    int64_t patch_size = 4,
@@ -366,7 +386,8 @@ public:
                    double drop_rate = 0.0,
                    double attn_drop_rate = 0.0,
                    double drop_path_rate = 0.1,
-                   bool norm_layer = true);
+                   bool norm_layer = true,
+                   bool use_checkpoint = false);
 
     /**
      * @brief Forward pass through Swin Transformer.
@@ -403,6 +424,7 @@ private:
     int64_t num_layers_;
     int64_t embed_dim_;
     int64_t num_features_;  ///< Final feature dimension
+    bool use_checkpoint_;   ///< Enable gradient checkpointing
 
     // Network components
     std::shared_ptr<PatchEmbed> patch_embed_;
@@ -428,6 +450,7 @@ private:
  * @param num_classes Number of output classes (default: 1000)
  * @param img_size Input image size (default: 224)
  * @param pretrained Load pretrained ImageNet weights (default: false)
+ * @param use_checkpoint Enable gradient checkpointing for memory efficiency (default: false)
  * @return Shared pointer to Swin-Tiny model
  *
  * @code
@@ -437,7 +460,8 @@ private:
  */
 auto swin_tiny(int64_t num_classes = 1000,
               int64_t img_size = 224,
-              bool pretrained = false) -> std::shared_ptr<SwinTransformer>;
+              bool pretrained = false,
+              bool use_checkpoint = false) -> std::shared_ptr<SwinTransformer>;
 
 /**
  * @brief Create Swin-Small model.
@@ -450,11 +474,13 @@ auto swin_tiny(int64_t num_classes = 1000,
  * @param num_classes Number of output classes (default: 1000)
  * @param img_size Input image size (default: 224)
  * @param pretrained Load pretrained ImageNet weights (default: false)
+ * @param use_checkpoint Enable gradient checkpointing for memory efficiency (default: false)
  * @return Shared pointer to Swin-Small model
  */
 auto swin_small(int64_t num_classes = 1000,
                int64_t img_size = 224,
-               bool pretrained = false) -> std::shared_ptr<SwinTransformer>;
+               bool pretrained = false,
+               bool use_checkpoint = false) -> std::shared_ptr<SwinTransformer>;
 
 /**
  * @brief Create Swin-Base model.
@@ -467,11 +493,13 @@ auto swin_small(int64_t num_classes = 1000,
  * @param num_classes Number of output classes (default: 1000)
  * @param img_size Input image size (default: 224)
  * @param pretrained Load pretrained ImageNet weights (default: false)
+ * @param use_checkpoint Enable gradient checkpointing for memory efficiency (default: false)
  * @return Shared pointer to Swin-Base model
  */
 auto swin_base(int64_t num_classes = 1000,
               int64_t img_size = 224,
-              bool pretrained = false) -> std::shared_ptr<SwinTransformer>;
+              bool pretrained = false,
+              bool use_checkpoint = false) -> std::shared_ptr<SwinTransformer>;
 
 /**
  * @brief Create Swin-Large model.
@@ -484,11 +512,13 @@ auto swin_base(int64_t num_classes = 1000,
  * @param num_classes Number of output classes (default: 1000)
  * @param img_size Input image size (default: 224)
  * @param pretrained Load pretrained ImageNet weights (default: false)
+ * @param use_checkpoint Enable gradient checkpointing for memory efficiency (default: false)
  * @return Shared pointer to Swin-Large model
  */
 auto swin_large(int64_t num_classes = 1000,
                int64_t img_size = 224,
-               bool pretrained = false) -> std::shared_ptr<SwinTransformer>;
+               bool pretrained = false,
+               bool use_checkpoint = false) -> std::shared_ptr<SwinTransformer>;
 
 } // namespace models
 } // namespace tenzor

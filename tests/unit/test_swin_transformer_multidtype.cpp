@@ -341,32 +341,22 @@ TEST_P(SwinMultiDTypeTest, SwinLargeForwardShape) {
 TEST_P(SwinMultiDTypeTest, SwinLargeGradientFlow) {
     int img_size = GetImageSize();
 
-    // With the NVI pattern fix, forward hooks now work properly because:
-    // - Module::forward() is a non-virtual wrapper that calls hooks
-    // - forward_impl() is the virtual method that derived classes override
-    // - Hooks are triggered via forward() which is called by operator()
+    // With gradient checkpointing, activations are not saved during forward pass
+    // and are recomputed during backward pass. This dramatically reduces memory:
+    // - Without checkpointing: ~2-3 GB activations
+    // - With checkpointing: ~100-200 MB (only current block)
     //
-    // For Float64 CUDA, we use swin_base to verify offloading while fitting in GPU memory.
-    // Full swin_large Float64 would require activation checkpointing to fit in 6GB.
-    // Parameters: 88M × 8 bytes = 704 MB (offloaded layer by layer)
-    // Activations for 224x224: ~1-2 GB peak (fits in 6GB GPU)
+    // Memory breakdown with checkpointing (model on GPU):
+    // - Parameters: 1.58 GB
+    // - Activations: ~200 MB (checkpointed)
+    // - Gradients: 1.58 GB
+    // - Total: ~3.4 GB → fits in 6GB GPU!
     //
-    // Test true layer-by-layer offloading with CPU-start model for Float64 CUDA
-    // The model stays on CPU, offload hooks load each layer to GPU just-in-time
-    auto model = swin_base(10, img_size, false);
+    // No CPU-start offloading needed when using gradient checkpointing.
+    auto model = swin_large(10, img_size, false, true);  // use_checkpoint=true
     model->to(dtype_);
-    // NOTE: Don't call model->to(device_) - keep model on CPU
+    model->to(device_);  // Model on GPU - checkpointing handles memory
     model->train();
-
-    nn::OffloadContext::Config offload_config;
-    offload_config.offload_parameters = true;
-    offload_config.offload_gradients = true;
-    offload_config.prefetch_depth = 2;
-    offload_config.pin_first_layer = true;
-    offload_config.pin_last_layer = true;
-    offload_config.target_device = device_;  // Tell offloader to use this device
-    nn::OffloadContext offload_ctx(*model, offload_config);
-    offload_ctx.enable();
 
     Variable input(Tensor({1, 3, img_size, img_size}, dtype_, device_), true);
     Variable output = (*model)(input);
@@ -446,7 +436,7 @@ TEST_P(SwinMultiDTypeTest, SwinBaseImageSize560) {
     // Valid sizes must be multiples of 224 (patch_size * 2^(stages-1) * window_size)
     // Using 672 instead (672/4/8=21, 21%7=0)
     int img_size = 672;
-    auto model = swin_base(1000, img_size, false);
+    auto model = swin_base(1000, img_size, false, true);  // use_checkpoint=true for memory
     model->to(dtype_);
     model->to(device_);
 
@@ -739,7 +729,7 @@ TEST_P(SwinMultiDTypeTest, SwinTinyMinimalBatch) {
 
 TEST_P(SwinMultiDTypeTest, SwinSmallLargeBatch) {
     int img_size = GetImageSize();
-    auto model = swin_small(10, img_size, false);
+    auto model = swin_small(10, img_size, false, true);  // use_checkpoint=true for memory
     model->to(dtype_);
     model->to(device_);
 

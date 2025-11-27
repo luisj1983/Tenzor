@@ -299,7 +299,7 @@ auto LayerNorm::forward_impl(const Variable& input) -> Variable {
         Tensor output = (original_device == Device::cpu()) ? output_cpu : output_cpu.to(original_device);
 
         // Set up autograd if needed
-        if (input.requires_grad() || (elementwise_affine_ && weight_.requires_grad())) {
+        if (input.requires_grad() || (elementwise_affine_ && parameters_["weight"]->requires_grad())) {
             auto result = Variable(output, true);
 
             // Prepare tensors to save for backward
@@ -307,7 +307,7 @@ auto LayerNorm::forward_impl(const Variable& input) -> Variable {
                 input.tensor(),
                 batch_mean,
                 rstd,
-                elementwise_affine_ ? weight_.tensor() : ones({N}, input.tensor().dtype(), input.tensor().device())
+                elementwise_affine_ ? parameters_["weight"]->tensor() : ones({N}, input.tensor().dtype(), input.tensor().device())
             };
 
             auto grad_fn = std::make_shared<LayerNormBackward>(
@@ -322,8 +322,8 @@ auto LayerNorm::forward_impl(const Variable& input) -> Variable {
             if (auto input_grad_fn = input.grad_fn()) {
                 next_funcs.push_back(input_grad_fn);
             }
-            if (elementwise_affine_ && weight_.grad_fn()) {
-                next_funcs.push_back(weight_.grad_fn());
+            if (elementwise_affine_ && parameters_["weight"]->grad_fn()) {
+                next_funcs.push_back(parameters_["weight"]->grad_fn());
             }
 
             grad_fn->set_next_functions(std::move(next_funcs));
@@ -388,7 +388,7 @@ auto LayerNorm::forward_impl(const Variable& input) -> Variable {
         Tensor output = (original_device == Device::cpu()) ? output_cpu : output_cpu.to(original_device);
 
         // Set up autograd if needed
-        if (input.requires_grad() || (elementwise_affine_ && weight_.requires_grad())) {
+        if (input.requires_grad() || (elementwise_affine_ && parameters_["weight"]->requires_grad())) {
             auto result = Variable(output, true);
 
             // Prepare tensors to save for backward
@@ -396,7 +396,7 @@ auto LayerNorm::forward_impl(const Variable& input) -> Variable {
                 input.tensor(),
                 batch_mean,
                 rstd,
-                elementwise_affine_ ? weight_.tensor() : ones({N}, input.tensor().dtype(), input.tensor().device())
+                elementwise_affine_ ? parameters_["weight"]->tensor() : ones({N}, input.tensor().dtype(), input.tensor().device())
             };
 
             auto grad_fn = std::make_shared<LayerNormBackward>(
@@ -511,7 +511,7 @@ auto LayerNorm::forward_impl(const Variable& input) -> Variable {
         Tensor output = (original_device == Device::cpu()) ? output_cpu : output_cpu.to(original_device);
 
         // Set up autograd if needed
-        if (input.requires_grad() || (elementwise_affine_ && weight_.requires_grad())) {
+        if (input.requires_grad() || (elementwise_affine_ && parameters_["weight"]->requires_grad())) {
             auto result = Variable(output, true);
 
             // Convert mean and rstd to Float32 for backward compatibility
@@ -530,7 +530,7 @@ auto LayerNorm::forward_impl(const Variable& input) -> Variable {
                 input.tensor(),
                 batch_mean_f32,
                 rstd_f32,
-                elementwise_affine_ ? weight_.tensor() : ones({N}, input.tensor().dtype(), input.tensor().device())
+                elementwise_affine_ ? parameters_["weight"]->tensor() : ones({N}, input.tensor().dtype(), input.tensor().device())
             };
 
             auto grad_fn = std::make_shared<LayerNormBackward>(
@@ -740,10 +740,13 @@ auto GroupNorm::forward_impl(const Variable& input) -> Variable {
     auto original_device = input.tensor().device();
     Variable input_cpu = (original_device.type == Device::Type::CPU) ?
                          input : Variable(input.tensor().cpu(), input.requires_grad());
-    Variable weight_cpu = (weight_.tensor().device().type == Device::Type::CPU) ?
-                          weight_ : Variable(weight_.tensor().cpu(), weight_.requires_grad());
-    Variable bias_cpu = (bias_.tensor().device().type == Device::Type::CPU) ?
-                        bias_ : Variable(bias_.tensor().cpu(), bias_.requires_grad());
+    // Get weight/bias from parameters_ to respect offload hooks
+    Tensor weight_tensor = affine_ ? parameters_["weight"]->tensor() : weight_.tensor();
+    Tensor bias_tensor = affine_ ? parameters_["bias"]->tensor() : bias_.tensor();
+    Variable weight_cpu = (weight_tensor.device().type == Device::Type::CPU) ?
+                          Variable(weight_tensor, parameters_["weight"]->requires_grad()) : Variable(weight_tensor.cpu(), parameters_["weight"]->requires_grad());
+    Variable bias_cpu = (bias_tensor.device().type == Device::Type::CPU) ?
+                        Variable(bias_tensor, parameters_["bias"]->requires_grad()) : Variable(bias_tensor.cpu(), parameters_["bias"]->requires_grad());
 
     // Compute mean and variance for each group
     // Shape: [N, num_groups]
@@ -840,14 +843,14 @@ auto GroupNorm::forward_impl(const Variable& input) -> Variable {
                           output : output.to(original_device);
 
     // Set up autograd if needed
-    if (input.requires_grad() || (affine_ && weight_.requires_grad())) {
+    if (input.requires_grad() || (affine_ && parameters_["weight"]->requires_grad())) {
         auto result = Variable(output_final, true);
 
         std::vector<Tensor> tensors_to_save = {
             input.tensor(),
             group_mean,
             rstd,
-            affine_ ? weight_.tensor() : ones({C}, input.tensor().dtype(), input.tensor().device())
+            affine_ ? parameters_["weight"]->tensor() : ones({C}, input.tensor().dtype(), input.tensor().device())
         };
 
         auto grad_fn = std::make_shared<GroupNormBackward>(

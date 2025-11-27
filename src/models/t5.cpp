@@ -7,6 +7,7 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/autograd/ops.hpp"
+#include "tenzor/autograd/checkpoint.hpp"
 #include "tenzor/nn/activations/activations.hpp"
 #include <cmath>
 #include <stdexcept>
@@ -157,6 +158,9 @@ auto T5Attention::forward(const Variable& hidden_states,
                            const Tensor& attention_mask,
                            const Tensor& position_bias)
     -> std::tuple<Variable, Tensor> {
+    // Call forward pre-hooks (enables CPU-start offloading)
+    // NOTE: This is necessary because this multi-argument forward bypasses Module::forward()
+    call_forward_pre_hooks();
 
     bool is_cross_attention = key_value_states.is_initialized();
     auto shape = hidden_states.shape();
@@ -267,6 +271,9 @@ auto T5Attention::forward(const Variable& hidden_states,
     // Output projection
     auto output = o_proj_->forward(context);
 
+    // Call forward post-hooks (enables CPU-start offloading)
+    call_forward_post_hooks();
+
     return {output, bias};
 }
 
@@ -359,6 +366,9 @@ auto T5Block::forward(const Variable& hidden_states,
                        const Tensor& position_bias,
                        const Tensor& encoder_position_bias)
     -> std::tuple<Variable, Tensor, Tensor> {
+    // Call forward pre-hooks (enables CPU-start offloading)
+    // NOTE: This is necessary because this multi-argument forward bypasses Module::forward()
+    call_forward_pre_hooks();
 
     Tensor self_attn_bias;
     Tensor cross_attn_bias;
@@ -391,6 +401,9 @@ auto T5Block::forward(const Variable& hidden_states,
     auto ffn_output = ffn_->forward(normed);
     ffn_output = dropout_->forward(ffn_output);
     hidden_states_mut = residual + ffn_output;
+
+    // Call forward post-hooks (enables CPU-start offloading)
+    call_forward_post_hooks();
 
     return {hidden_states_mut, self_attn_bias, cross_attn_bias};
 }
@@ -427,6 +440,10 @@ T5Encoder::T5Encoder(const T5Config& config, std::shared_ptr<nn::Embedding> shar
 
 auto T5Encoder::forward(const Variable& input_ids,
                          const Tensor& attention_mask) -> Variable {
+    // Call forward pre-hooks (enables CPU-start offloading)
+    // NOTE: This is necessary because this multi-argument forward bypasses Module::forward()
+    call_forward_pre_hooks();
+
     // Get token embeddings (no position embeddings in T5)
     auto hidden_states = shared_embeddings_->forward(input_ids);
     hidden_states = dropout_->forward(hidden_states);
@@ -446,6 +463,9 @@ auto T5Encoder::forward(const Variable& input_ids,
     // Final layer norm
     hidden_states = final_layer_norm_->forward(hidden_states);
     hidden_states = dropout_->forward(hidden_states);
+
+    // Call forward post-hooks (enables CPU-start offloading)
+    call_forward_post_hooks();
 
     return hidden_states;
 }
@@ -517,6 +537,10 @@ auto T5Decoder::forward(const Variable& decoder_input_ids,
                          const Variable& encoder_hidden_states,
                          const Tensor& decoder_attention_mask,
                          const Tensor& encoder_attention_mask) -> Variable {
+    // Call forward pre-hooks (enables CPU-start offloading)
+    // NOTE: This is necessary because this multi-argument forward bypasses Module::forward()
+    call_forward_pre_hooks();
+
     // Get token embeddings
     auto hidden_states = shared_embeddings_->forward(decoder_input_ids);
     hidden_states = dropout_->forward(hidden_states);
@@ -551,6 +575,9 @@ auto T5Decoder::forward(const Variable& decoder_input_ids,
     hidden_states = final_layer_norm_->forward(hidden_states);
     hidden_states = dropout_->forward(hidden_states);
 
+    // Call forward post-hooks (enables CPU-start offloading)
+    call_forward_post_hooks();
+
     return hidden_states;
 }
 
@@ -581,6 +608,10 @@ auto T5Model::forward(const Variable& input_ids,
                        const Variable& decoder_input_ids,
                        const Tensor& attention_mask,
                        const Tensor& decoder_attention_mask) -> T5Output {
+    // Call forward pre-hooks (enables CPU-start offloading)
+    // NOTE: This is necessary because this multi-argument forward bypasses Module::forward()
+    call_forward_pre_hooks();
+
     // Encode
     auto encoder_output = encoder_->forward(input_ids, attention_mask);
 
@@ -589,6 +620,9 @@ auto T5Model::forward(const Variable& input_ids,
         decoder_input_ids, encoder_output,
         decoder_attention_mask, attention_mask
     );
+
+    // Call forward post-hooks (enables CPU-start offloading)
+    call_forward_post_hooks();
 
     return T5Output{encoder_output, decoder_output};
 }
@@ -615,9 +649,17 @@ auto T5ForConditionalGeneration::forward(const Variable& input_ids,
                                           const Variable& decoder_input_ids,
                                           const Tensor& attention_mask,
                                           const Tensor& decoder_attention_mask) -> Variable {
+    // Call forward pre-hooks (enables CPU-start offloading)
+    // NOTE: This is necessary because this multi-argument forward bypasses Module::forward()
+    call_forward_pre_hooks();
+
     auto outputs = t5_->forward(input_ids, decoder_input_ids,
                                 attention_mask, decoder_attention_mask);
     auto logits = lm_head_->forward(outputs.decoder_output);
+
+    // Call forward post-hooks (enables CPU-start offloading)
+    call_forward_post_hooks();
+
     return logits;
 }
 

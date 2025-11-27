@@ -204,6 +204,10 @@ auto TransformerEncoderLayer::apply_activation(const Variable& x) const -> Varia
 auto TransformerEncoderLayer::forward(const Variable& src,
                                      const Tensor& src_mask,
                                      const Tensor& src_key_padding_mask) -> Variable {
+    // Call forward pre-hooks (enables CPU-start offloading)
+    // NOTE: This is necessary because this multi-argument forward bypasses Module::forward()
+    call_forward_pre_hooks();
+
     // Self-attention block
     auto [attn_output, _] = self_attn_->forward(src, src, src,
                                                  src_key_padding_mask,
@@ -223,6 +227,9 @@ auto TransformerEncoderLayer::forward(const Variable& src,
     // Dropout + residual + norm (use unique variable names)
     Variable residual2 = x_norm1 + dropout3_->forward(ff_output);
     Variable output = norm2_->forward(residual2);
+
+    // Call forward post-hooks (enables CPU-start offloading)
+    call_forward_post_hooks();
 
     return output;
 }
@@ -267,6 +274,10 @@ TransformerEncoder::TransformerEncoder(
 auto TransformerEncoder::forward(const Variable& src,
                                 const Tensor& mask,
                                 const Tensor& src_key_padding_mask) -> Variable {
+    // Call forward pre-hooks (enables CPU-start offloading)
+    // NOTE: This is necessary because this multi-argument forward bypasses Module::forward()
+    call_forward_pre_hooks();
+
     // Pass through first encoder layer using original src (no copy)
     Variable output = layers_[0]->forward(src, mask, src_key_padding_mask);
 
@@ -279,6 +290,9 @@ auto TransformerEncoder::forward(const Variable& src,
     if (norm_) {
         output = norm_->forward(output);
     }
+
+    // Call forward post-hooks (enables CPU-start offloading)
+    call_forward_post_hooks();
 
     return output;
 }

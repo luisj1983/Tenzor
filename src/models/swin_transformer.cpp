@@ -5,6 +5,7 @@
 
 #include "tenzor/models/swin_transformer.hpp"
 #include "tenzor/autograd/ops.hpp"
+#include "tenzor/autograd/checkpoint.hpp"
 #include "tenzor/nn/checkpoint.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
@@ -255,10 +256,12 @@ BasicLayer::BasicLayer(int64_t dim,
                       double drop,
                       double attn_drop,
                       const std::vector<double>& drop_path,
-                      std::shared_ptr<Module> downsample)
+                      std::shared_ptr<Module> downsample,
+                      bool use_checkpoint)
     : dim_(dim)
     , input_resolution_(input_resolution)
     , depth_(depth)
+    , use_checkpoint_(use_checkpoint)
     , downsample_(downsample)
 {
     // Build Swin Transformer blocks
@@ -297,9 +300,20 @@ BasicLayer::BasicLayer(int64_t dim,
 auto BasicLayer::forward_impl(const Variable& input) -> Variable {
     auto x = input;
 
-    // Apply all blocks
+    // Apply all blocks with optional gradient checkpointing
     for (auto& block : blocks_) {
-        x = block->forward(x);
+        if (use_checkpoint_ && training_) {
+            // Use gradient checkpointing: don't save activations during forward,
+            // recompute them during backward. Saves ~50-80% memory.
+            x = autograd::checkpoint(
+                [&block](const Variable& in) -> Variable {
+                    return block->forward(in);
+                },
+                x
+            );
+        } else {
+            x = block->forward(x);
+        }
     }
 
     // Apply downsampling if exists
@@ -398,11 +412,13 @@ SwinTransformer::SwinTransformer(int64_t img_size,
                                 double drop_rate,
                                 double attn_drop_rate,
                                 double drop_path_rate,
-                                bool norm_layer)
+                                bool norm_layer,
+                                bool use_checkpoint)
     : num_classes_(num_classes)
     , num_layers_(depths.size())
     , embed_dim_(embed_dim)
     , num_features_(embed_dim * (1 << (num_layers_ - 1)))  // embed_dim * 2^(num_layers-1)
+    , use_checkpoint_(use_checkpoint)
 {
     // Patch embedding
     patch_embed_ = std::make_shared<PatchEmbed>(
@@ -460,7 +476,8 @@ SwinTransformer::SwinTransformer(int64_t img_size,
             drop_rate,
             attn_drop_rate,
             layer_dpr,
-            downsample
+            downsample,
+            use_checkpoint_  // Pass checkpoint flag to each stage
         );
 
         layers_.push_back(layer);
@@ -583,7 +600,7 @@ auto SwinTransformer::load_pretrained(const std::string& path) -> void {
 // Factory Functions
 // ============================================================================
 
-auto swin_tiny(int64_t num_classes, int64_t img_size, bool pretrained)
+auto swin_tiny(int64_t num_classes, int64_t img_size, bool pretrained, bool use_checkpoint)
     -> std::shared_ptr<SwinTransformer>
 {
     auto model = std::make_shared<SwinTransformer>(
@@ -601,7 +618,8 @@ auto swin_tiny(int64_t num_classes, int64_t img_size, bool pretrained)
         0.0,                        // drop_rate
         0.0,                        // attn_drop_rate
         0.1,                        // drop_path_rate
-        true                        // norm_layer
+        true,                       // norm_layer
+        use_checkpoint              // gradient checkpointing
     );
 
     if (pretrained) {
@@ -618,7 +636,7 @@ auto swin_tiny(int64_t num_classes, int64_t img_size, bool pretrained)
     return model;
 }
 
-auto swin_small(int64_t num_classes, int64_t img_size, bool pretrained)
+auto swin_small(int64_t num_classes, int64_t img_size, bool pretrained, bool use_checkpoint)
     -> std::shared_ptr<SwinTransformer>
 {
     auto model = std::make_shared<SwinTransformer>(
@@ -636,7 +654,8 @@ auto swin_small(int64_t num_classes, int64_t img_size, bool pretrained)
         0.0,                        // drop_rate
         0.0,                        // attn_drop_rate
         0.2,                        // drop_path_rate
-        true                        // norm_layer
+        true,                       // norm_layer
+        use_checkpoint              // gradient checkpointing
     );
 
     if (pretrained) {
@@ -646,7 +665,7 @@ auto swin_small(int64_t num_classes, int64_t img_size, bool pretrained)
     return model;
 }
 
-auto swin_base(int64_t num_classes, int64_t img_size, bool pretrained)
+auto swin_base(int64_t num_classes, int64_t img_size, bool pretrained, bool use_checkpoint)
     -> std::shared_ptr<SwinTransformer>
 {
     auto model = std::make_shared<SwinTransformer>(
@@ -664,7 +683,8 @@ auto swin_base(int64_t num_classes, int64_t img_size, bool pretrained)
         0.0,                        // drop_rate
         0.0,                        // attn_drop_rate
         0.5,                        // drop_path_rate
-        true                        // norm_layer
+        true,                       // norm_layer
+        use_checkpoint              // gradient checkpointing
     );
 
     if (pretrained) {
@@ -674,7 +694,7 @@ auto swin_base(int64_t num_classes, int64_t img_size, bool pretrained)
     return model;
 }
 
-auto swin_large(int64_t num_classes, int64_t img_size, bool pretrained)
+auto swin_large(int64_t num_classes, int64_t img_size, bool pretrained, bool use_checkpoint)
     -> std::shared_ptr<SwinTransformer>
 {
     auto model = std::make_shared<SwinTransformer>(
@@ -692,7 +712,8 @@ auto swin_large(int64_t num_classes, int64_t img_size, bool pretrained)
         0.0,                        // drop_rate
         0.0,                        // attn_drop_rate
         0.5,                        // drop_path_rate
-        true                        // norm_layer
+        true,                       // norm_layer
+        use_checkpoint              // gradient checkpointing
     );
 
     if (pretrained) {

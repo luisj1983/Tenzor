@@ -14,6 +14,7 @@
 #include <tenzor/tenzor.hpp>
 #include "../../include/tenzor/models/roberta.hpp"
 #include "../../include/tenzor/models/electra.hpp"
+#include "../../include/tenzor/nn/offload.hpp"
 
 using namespace tenzor;
 using namespace tenzor::models;
@@ -241,9 +242,32 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, RoBERTaLargeForwardShape) {
 
 TEST_P(RoBERTaELECTRAMultiDTypeTest, RoBERTaLargeGradientFlow) {
     auto config = RobertaConfig::large();
+
+    // For float64, RoBERTa-Large (355M params * 8 bytes = 2.84GB) plus activations
+    // and gradients exceeds 6GB GPU. Reduce layers to fit while using offloading.
+    bool is_cuda_float64 = (GetParam().backend_name == "cuda" && dtype == DType::Float64);
+    if (is_cuda_float64) {
+        config.num_hidden_layers = 8;  // Reduced from 24 for float64 CUDA
+    }
+
     auto model = std::make_shared<RobertaModel>(config);
     model->to(dtype);
-    model->to(device);
+
+    // Use CPU-start offloading for cuda float64
+    std::unique_ptr<nn::OffloadContext> offload_ctx;
+
+    if (is_cuda_float64) {
+        nn::OffloadContext::Config offload_config;
+        offload_config.target_device = device;
+        offload_config.offload_parameters = true;
+        offload_config.offload_gradients = true;
+        offload_config.prefetch_depth = 1;
+        offload_ctx = std::make_unique<nn::OffloadContext>(*model, offload_config);
+        offload_ctx->enable();
+    } else {
+        model->to(device);
+    }
+
     model->train();
 
     auto input_ids = create_input_ids(1, 64, config.vocab_size);
@@ -379,9 +403,32 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, ELECTRALargeForwardShape) {
 
 TEST_P(RoBERTaELECTRAMultiDTypeTest, ELECTRALargeGradientFlow) {
     auto config = ElectraConfig::large();
+
+    // For float64, ELECTRA-Large (335M discriminator params * 8 bytes = 2.68GB) plus activations
+    // and gradients exceeds 6GB GPU. Reduce layers to fit while using offloading.
+    bool is_cuda_float64 = (GetParam().backend_name == "cuda" && dtype == DType::Float64);
+    if (is_cuda_float64) {
+        config.num_hidden_layers = 8;  // Reduced from 24 for float64 CUDA
+    }
+
     auto discriminator = std::make_shared<ElectraDiscriminator>(config);
     discriminator->to(dtype);
-    discriminator->to(device);
+
+    // Use CPU-start offloading for cuda float64
+    std::unique_ptr<nn::OffloadContext> offload_ctx;
+
+    if (is_cuda_float64) {
+        nn::OffloadContext::Config offload_config;
+        offload_config.target_device = device;
+        offload_config.offload_parameters = true;
+        offload_config.offload_gradients = true;
+        offload_config.prefetch_depth = 1;
+        offload_ctx = std::make_unique<nn::OffloadContext>(*discriminator, offload_config);
+        offload_ctx->enable();
+    } else {
+        discriminator->to(device);
+    }
+
     discriminator->train();
 
     auto input_ids = create_input_ids(1, 64, 30522);

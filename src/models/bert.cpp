@@ -76,6 +76,10 @@ auto BertEmbeddings::create_position_ids(const Tensor& input_ids) -> Tensor {
 auto BertEmbeddings::forward(const Variable& input_ids,
                              const Variable& token_type_ids,
                              const Variable& position_ids) -> Variable {
+    // Call forward pre-hooks (enables CPU-start offloading)
+    // NOTE: This is necessary because this multi-argument forward bypasses Module::forward()
+    call_forward_pre_hooks();
+
     auto shape = input_ids.tensor().shape();
     int64_t batch_size = shape[0];
     int64_t seq_len = shape[1];
@@ -110,6 +114,9 @@ auto BertEmbeddings::forward(const Variable& input_ids,
     // Apply layer normalization and dropout
     embeddings = layer_norm_->forward(embeddings);
     embeddings = dropout_->forward(embeddings);
+
+    // Call forward post-hooks (enables CPU-start offloading)
+    call_forward_post_hooks();
 
     return embeddings;
 }
@@ -169,11 +176,20 @@ auto BertEncoder::prepare_attention_mask(const Tensor& mask, int64_t seq_len) ->
 
 auto BertEncoder::forward(const Variable& hidden_states,
                           const Tensor& attention_mask) -> Variable {
+    // Call forward pre-hooks (enables CPU-start offloading)
+    // NOTE: This is necessary because this multi-argument forward bypasses Module::forward()
+    call_forward_pre_hooks();
+
     // Prepare attention mask if provided
     auto mask = prepare_attention_mask(attention_mask, hidden_states.tensor().shape()[1]);
 
     // Pass through encoder layers
-    return encoder_->forward(hidden_states, mask, Tensor{});
+    auto output = encoder_->forward(hidden_states, mask, Tensor{});
+
+    // Call forward post-hooks (enables CPU-start offloading)
+    call_forward_post_hooks();
+
+    return output;
 }
 
 auto BertEncoder::forward_impl(const Variable& input) -> Variable {
@@ -281,6 +297,10 @@ auto BertModel::forward(const Variable& input_ids,
                        const Tensor& attention_mask,
                        const Variable& token_type_ids,
                        const Variable& position_ids) -> BertOutput {
+    // Call forward pre-hooks (enables CPU-start offloading)
+    // NOTE: This is necessary because this multi-argument forward bypasses Module::forward()
+    call_forward_pre_hooks();
+
     // Get embeddings
     auto embedding_output = embeddings_->forward(input_ids, token_type_ids, position_ids);
 
@@ -298,6 +318,9 @@ auto BertModel::forward(const Variable& input_ids,
         empty_pooled.zero_();
         pooled_output = Variable(empty_pooled, false);
     }
+
+    // Call forward post-hooks (enables CPU-start offloading)
+    call_forward_post_hooks();
 
     return BertOutput{sequence_output, pooled_output};
 }
@@ -329,6 +352,9 @@ BertForSequenceClassification::BertForSequenceClassification(
 auto BertForSequenceClassification::forward(const Variable& input_ids,
                                             const Tensor& attention_mask,
                                             const Variable& token_type_ids) -> Variable {
+    // Call forward pre-hooks (enables CPU-start offloading)
+    call_forward_pre_hooks();
+
     // Get BERT outputs
     auto outputs = bert_->forward(input_ids, attention_mask, token_type_ids, Variable{});
 
@@ -340,6 +366,9 @@ auto BertForSequenceClassification::forward(const Variable& input_ids,
 
     // Classify
     auto logits = classifier_->forward(pooled_output);
+
+    // Call forward post-hooks (enables CPU-start offloading)
+    call_forward_post_hooks();
 
     return logits;
 }
@@ -370,6 +399,9 @@ BertForTokenClassification::BertForTokenClassification(
 auto BertForTokenClassification::forward(const Variable& input_ids,
                                          const Tensor& attention_mask,
                                          const Variable& token_type_ids) -> Variable {
+    // Call forward pre-hooks (enables CPU-start offloading)
+    call_forward_pre_hooks();
+
     // Get BERT outputs
     auto outputs = bert_->forward(input_ids, attention_mask, token_type_ids, Variable{});
 
@@ -381,6 +413,9 @@ auto BertForTokenClassification::forward(const Variable& input_ids,
 
     // Classify each token
     auto logits = classifier_->forward(sequence_output);
+
+    // Call forward post-hooks (enables CPU-start offloading)
+    call_forward_post_hooks();
 
     return logits;
 }
@@ -408,6 +443,9 @@ BertForQuestionAnswering::BertForQuestionAnswering(const BertConfig& config)
 auto BertForQuestionAnswering::forward(const Variable& input_ids,
                                        const Tensor& attention_mask,
                                        const Variable& token_type_ids) -> BertQAOutput {
+    // Call forward pre-hooks (enables CPU-start offloading)
+    call_forward_pre_hooks();
+
     // Get BERT outputs
     auto outputs = bert_->forward(input_ids, attention_mask, token_type_ids, Variable{});
 
@@ -462,6 +500,9 @@ auto BertForQuestionAnswering::forward(const Variable& input_ids,
     // Reshape back to [batch, seq_len]
     auto start_logits = tenzor::reshape(start_flat, {batch_size, seq_len});
     auto end_logits = tenzor::reshape(end_flat, {batch_size, seq_len});
+
+    // Call forward post-hooks (enables CPU-start offloading)
+    call_forward_post_hooks();
 
     return BertQAOutput{start_logits, end_logits};
 }

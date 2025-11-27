@@ -44,6 +44,7 @@ struct T5Config {
     double layer_norm_epsilon = 1e-6;        ///< Layer norm epsilon
     std::string dense_act_fn = "relu";       ///< Activation function (T5 uses ReLU)
     bool is_gated_act = false;               ///< Use gated activation (T5.1.1)
+    bool use_checkpoint = false;             ///< Enable gradient checkpointing for memory savings
 
     /**
      * @brief Create T5-small configuration (60M params)

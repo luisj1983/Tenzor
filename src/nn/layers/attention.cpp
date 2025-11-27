@@ -198,6 +198,9 @@ auto MultiheadAttention::forward(const Variable& query,
                                 const Tensor& key_padding_mask,
                                 const Tensor& attn_mask,
                                 bool need_weights) -> std::pair<Variable, Variable> {
+    // Call forward pre-hooks (enables CPU-start offloading)
+    // NOTE: This is necessary because this multi-argument forward bypasses Module::forward()
+    call_forward_pre_hooks();
 
     // Handle batch_first parameter - only transform if needed
     const Variable* q_ptr = &query;
@@ -289,6 +292,9 @@ auto MultiheadAttention::forward(const Variable& query,
     if (!batch_first_) {
         output = autograd::permute(output, {1, 0, 2});
     }
+
+    // Call forward post-hooks (enables CPU-start offloading)
+    call_forward_post_hooks();
 
     // Return attention weights based on need_weights flag
     if (need_weights) {

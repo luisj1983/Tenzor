@@ -270,12 +270,16 @@ auto Embedding::forward_impl(const Variable& input) -> Variable {
         renorm_embeddings(input_cpu);
     }
 
+    // Get weight from parameters_ map to respect offload hooks
+    // Note: hooks modify parameters_["weight"]->tensor(), not the member weight_
+    Tensor weight_tensor = parameters_["weight"]->tensor();
+
     // Ensure weights are on CPU for lookup
-    auto weight_cpu = weight_.tensor().device().type == Device::Type::CPU ?
-                      weight_.tensor() : weight_.tensor().to(Device::cpu());
+    auto weight_cpu = weight_tensor.device().type == Device::Type::CPU ?
+                      weight_tensor : weight_tensor.to(Device::cpu());
 
     // Check if gradient is needed
-    if (!weight_.requires_grad() || !is_grad_enabled()) {
+    if (!parameters_["weight"]->requires_grad() || !is_grad_enabled()) {
         // No gradient needed, just compute
         std::vector<int64_t> output_shape(input_shape.begin(), input_shape.end());
         output_shape.push_back(embedding_dim_);
@@ -336,8 +340,8 @@ auto Embedding::forward_impl(const Variable& input) -> Variable {
     auto grad_fn = std::make_shared<EmbeddingBackward>(input_cpu, num_embeddings_, embedding_dim_);
 
     // Create temporary weight variable on CPU if needed
-    Variable weight_for_lookup = weight_.tensor().device().type == Device::Type::CPU ?
-                                 weight_ : Variable(weight_cpu, weight_.requires_grad());
+    Variable weight_for_lookup = weight_tensor.device().type == Device::Type::CPU ?
+                                 *parameters_["weight"] : Variable(weight_cpu, parameters_["weight"]->requires_grad());
 
     // Perform forward pass
     auto outputs = grad_fn->forward({weight_for_lookup});
@@ -356,10 +360,10 @@ auto Embedding::forward_impl(const Variable& input) -> Variable {
 
     // Set up backward graph
     std::vector<std::shared_ptr<Function>> next_funcs;
-    next_funcs.push_back(weight_.grad_fn());  // nullptr if weight is leaf
+    next_funcs.push_back(parameters_["weight"]->grad_fn());  // nullptr if weight is leaf
 
     grad_fn->set_next_functions(next_funcs);
-    grad_fn->set_input_variables({weight_});
+    grad_fn->set_input_variables({*parameters_["weight"]});
 
     result.set_grad_fn(grad_fn);
 
@@ -368,11 +372,14 @@ auto Embedding::forward_impl(const Variable& input) -> Variable {
 
 auto Embedding::renorm_embeddings(const Tensor& indices) -> void {
     // Renormalize embeddings that exceed max_norm
+    // Get weight from parameters_ map to respect offload hooks
+    Tensor weight_tensor = parameters_["weight"]->tensor();
+
     // Transfer to CPU for pointer-based computation
-    Device weight_device = weight_.tensor().device();
+    Device weight_device = weight_tensor.device();
     Device indices_device = indices.device();
 
-    Tensor weight_cpu = (weight_device == Device::cpu()) ? weight_.tensor() : weight_.tensor().to(Device::cpu());
+    Tensor weight_cpu = (weight_device == Device::cpu()) ? weight_tensor : weight_tensor.to(Device::cpu());
     Tensor indices_cpu = (indices_device == Device::cpu()) ? indices : indices.to(Device::cpu());
 
     auto indices_ptr = indices_cpu.data<int64_t>();
@@ -437,27 +444,28 @@ auto Embedding::renorm_embeddings(const Tensor& indices) -> void {
     }
 
     // Transfer modified weights back to original device if needed
+    // Update parameters_ map and member variable
     if (weight_device != Device::cpu()) {
         Tensor weight_device_tensor = weight_cpu.to(weight_device);
-        weight_ = Variable(weight_device_tensor, weight_.requires_grad());
-        if (weight_.grad_fn()) {
-            weight_.set_grad_fn(weight_.grad_fn());
-        }
-    } else if (weight_cpu.data_ptr() != weight_.tensor().data_ptr()) {
+        auto new_var = std::make_shared<Variable>(weight_device_tensor, parameters_["weight"]->requires_grad());
+        parameters_["weight"] = new_var;
+        weight_ = *new_var;
+    } else if (weight_cpu.data_ptr() != weight_tensor.data_ptr()) {
         // Even on CPU, update if we created a copy
-        weight_ = Variable(weight_cpu, weight_.requires_grad());
-        if (weight_.grad_fn()) {
-            weight_.set_grad_fn(weight_.grad_fn());
-        }
+        auto new_var = std::make_shared<Variable>(weight_cpu, parameters_["weight"]->requires_grad());
+        parameters_["weight"] = new_var;
+        weight_ = *new_var;
     }
 }
 
 auto Embedding::weight() -> Variable& {
-    return weight_;
+    // Return from parameters_ to respect offload hooks
+    return *parameters_["weight"];
 }
 
 auto Embedding::weight() const -> const Variable& {
-    return weight_;
+    // Return from parameters_ to respect offload hooks
+    return *parameters_.at("weight");
 }
 
 // ============================================================================
