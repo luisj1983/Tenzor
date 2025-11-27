@@ -110,6 +110,8 @@ set(SHADERS
     max_pool2d_backward
     # Final 3 operations for 100% coverage
     conv2d_forward
+    conv2d_forward_f64
+    conv2d_forward_f16
     full
     full_f64
     ones

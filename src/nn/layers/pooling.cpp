@@ -57,8 +57,8 @@ public:
         int64_t H_in = input_shape[2];
         int64_t W_in = input_shape[3];
 
-        // Use CUDA backend if on GPU
-        if (grad_output.device().type == Device::Type::CUDA) {
+        // Use backend dispatch for non-CPU devices (CUDA, Vulkan, etc.)
+        if (grad_output.device().type != Device::Type::CPU) {
             std::vector<Tensor> tensors_for_dispatch = {grad_output};
             auto* backend = Dispatcher::get_backend(tensors_for_dispatch);
             std::vector<Tensor> inputs = {grad_output, indices};
@@ -162,8 +162,8 @@ auto MaxPool2d::forward_impl(const Variable& input) -> Variable {
 
     Tensor output, indices;
 
-    // Use CUDA backend if on GPU
-    if (original_device.type == Device::Type::CUDA) {
+    // Use backend dispatch for non-CPU devices (CUDA, Vulkan, etc.)
+    if (original_device.type != Device::Type::CPU) {
         std::vector<Tensor> tensors_for_dispatch = {input.tensor()};
         auto* backend = Dispatcher::get_backend(tensors_for_dispatch);
         std::vector<Tensor> inputs = {input.tensor()};
@@ -508,8 +508,8 @@ auto AvgPool2d::forward_impl(const Variable& input) -> Variable {
 
     Tensor output;
 
-    // Use CUDA backend if on GPU
-    if (original_device.type == Device::Type::CUDA) {
+    // Use backend dispatch for non-CPU devices (CUDA, Vulkan, etc.)
+    if (original_device.type != Device::Type::CPU) {
         std::vector<Tensor> tensors_for_dispatch = {input.tensor()};
         auto* backend = Dispatcher::get_backend(tensors_for_dispatch);
         std::vector<Tensor> inputs = {input.tensor()};

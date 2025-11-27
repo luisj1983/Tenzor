@@ -536,8 +536,8 @@ vulkan::ComputePipeline* VulkanBackend::getPipeline(const std::string& shader_na
         push_range.offset = 0;
         push_range.size = 4;  // uint32_t
         pushConstants.push_back(push_range);
-    } else if (shader_name == "conv2d_forward") {
-        // conv2d_forward: 60 bytes (15 uint32_t)
+    } else if (shader_name == "conv2d_forward" || shader_name == "conv2d_forward_f64" || shader_name == "conv2d_forward_f16") {
+        // conv2d_forward (all dtype variants): 60 bytes (15 uint32_t)
         VkPushConstantRange push_range{};
         push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         push_range.offset = 0;
@@ -1394,7 +1394,14 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         }
         DType dtype = DType::Float32;
         if (attrs.contains("dtype")) {
-            // Parse dtype if provided
+            std::string dtype_str = attrs.at("dtype");
+            if (dtype_str == "float32" || dtype_str == "Float32") {
+                dtype = DType::Float32;
+            } else if (dtype_str == "float64" || dtype_str == "Float64") {
+                dtype = DType::Float64;
+            } else if (dtype_str == "float16" || dtype_str == "Float16") {
+                dtype = DType::Float16;
+            }
         }
         return {dispatchRand(shape, dtype)};
     }
@@ -1415,7 +1422,14 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         }
         DType dtype = DType::Float32;
         if (attrs.contains("dtype")) {
-            // Parse dtype if provided
+            std::string dtype_str = attrs.at("dtype");
+            if (dtype_str == "float32" || dtype_str == "Float32") {
+                dtype = DType::Float32;
+            } else if (dtype_str == "float64" || dtype_str == "Float64") {
+                dtype = DType::Float64;
+            } else if (dtype_str == "float16" || dtype_str == "Float16") {
+                dtype = DType::Float16;
+            }
         }
         return {dispatchRandn(shape, dtype)};
     }
@@ -6244,7 +6258,15 @@ auto VulkanBackend::dispatchConv2dForward(const Tensor& input, const Tensor& wei
     int64_t out_width = (in_width + 2 * padding - dilation * (kernel_w - 1) - 1) / stride + 1;
 
     int32_t device_id = input.device().index;
-    auto* pipeline = getPipeline("conv2d_forward", device_id);
+
+    // Select shader based on dtype
+    std::string shader_name = "conv2d_forward";
+    if (input.dtype() == DType::Float64) {
+        shader_name = "conv2d_forward_f64";
+    } else if (input.dtype() == DType::Float16) {
+        shader_name = "conv2d_forward_f16";
+    }
+    auto* pipeline = getPipeline(shader_name, device_id);
 
     // Create output tensor
     std::vector<int64_t> output_shape = {batch, out_channels, out_height, out_width};
@@ -6546,21 +6568,37 @@ auto VulkanBackend::dispatchRand(const std::vector<int64_t>& shape, DType dtype)
     Tensor output(shape, dtype, device);
 
     // Uniform random distribution requires CPU generation, then copy to GPU
-    // Generate random data on CPU
     size_t numel = output.numel();
-    std::vector<float> cpu_data(numel);
 
     // Use C++11 random number generation
     static std::random_device rd;
     static std::mt19937 gen(rd());
-    static std::uniform_real_distribution<float> dist(0.0f, 1.0f);
 
-    for (size_t i = 0; i < numel; ++i) {
-        cpu_data[i] = dist(gen);
+    if (dtype == DType::Float32) {
+        std::vector<float> cpu_data(numel);
+        std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+        for (size_t i = 0; i < numel; ++i) {
+            cpu_data[i] = dist(gen);
+        }
+        copy(output.data_ptr(), cpu_data.data(), numel * sizeof(float), CopyKind::HostToDevice);
+    } else if (dtype == DType::Float64) {
+        std::vector<double> cpu_data(numel);
+        std::uniform_real_distribution<double> dist(0.0, 1.0);
+        for (size_t i = 0; i < numel; ++i) {
+            cpu_data[i] = dist(gen);
+        }
+        copy(output.data_ptr(), cpu_data.data(), numel * sizeof(double), CopyKind::HostToDevice);
+    } else if (dtype == DType::Float16) {
+        std::vector<uint16_t> cpu_data(numel);  // Float16 is stored as uint16_t
+        std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+        for (size_t i = 0; i < numel; ++i) {
+            Float16 val(dist(gen));
+            cpu_data[i] = *reinterpret_cast<uint16_t*>(&val);
+        }
+        copy(output.data_ptr(), cpu_data.data(), numel * sizeof(uint16_t), CopyKind::HostToDevice);
+    } else {
+        throw std::runtime_error("Unsupported dtype for rand: only Float32, Float64, and Float16 are supported");
     }
-
-    // Copy to GPU
-    copy(output.data_ptr(), cpu_data.data(), numel * sizeof(float), CopyKind::HostToDevice);
 
     return output;
 }
@@ -6571,21 +6609,37 @@ auto VulkanBackend::dispatchRandn(const std::vector<int64_t>& shape, DType dtype
     Tensor output(shape, dtype, device);
 
     // Normal random distribution requires CPU generation, then copy to GPU
-    // Generate random data on CPU
     size_t numel = output.numel();
-    std::vector<float> cpu_data(numel);
 
     // Use C++11 random number generation
     static std::random_device rd;
     static std::mt19937 gen(rd());
-    static std::normal_distribution<float> dist(0.0f, 1.0f);
 
-    for (size_t i = 0; i < numel; ++i) {
-        cpu_data[i] = dist(gen);
+    if (dtype == DType::Float32) {
+        std::vector<float> cpu_data(numel);
+        std::normal_distribution<float> dist(0.0f, 1.0f);
+        for (size_t i = 0; i < numel; ++i) {
+            cpu_data[i] = dist(gen);
+        }
+        copy(output.data_ptr(), cpu_data.data(), numel * sizeof(float), CopyKind::HostToDevice);
+    } else if (dtype == DType::Float64) {
+        std::vector<double> cpu_data(numel);
+        std::normal_distribution<double> dist(0.0, 1.0);
+        for (size_t i = 0; i < numel; ++i) {
+            cpu_data[i] = dist(gen);
+        }
+        copy(output.data_ptr(), cpu_data.data(), numel * sizeof(double), CopyKind::HostToDevice);
+    } else if (dtype == DType::Float16) {
+        std::vector<uint16_t> cpu_data(numel);  // Float16 is stored as uint16_t
+        std::normal_distribution<float> dist(0.0f, 1.0f);
+        for (size_t i = 0; i < numel; ++i) {
+            Float16 val(dist(gen));
+            cpu_data[i] = *reinterpret_cast<uint16_t*>(&val);
+        }
+        copy(output.data_ptr(), cpu_data.data(), numel * sizeof(uint16_t), CopyKind::HostToDevice);
+    } else {
+        throw std::runtime_error("Unsupported dtype for randn: only Float32, Float64, and Float16 are supported");
     }
-
-    // Copy to GPU
-    copy(output.data_ptr(), cpu_data.data(), numel * sizeof(float), CopyKind::HostToDevice);
 
     return output;
 }
