@@ -122,6 +122,14 @@ namespace cuda {
     auto ge_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor;
     auto dot_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor;
 
+    // Indexing operations (native CUDA implementations - no CPU fallback)
+    auto index_select_kernel(const Tensor& input, int64_t dim, const Tensor& index, cudaStream_t stream) -> Tensor;
+    auto gather_kernel(const Tensor& input, int64_t dim, const Tensor& index, cudaStream_t stream) -> Tensor;
+    auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& src, cudaStream_t stream) -> Tensor;
+    auto masked_select_kernel(const Tensor& input, const Tensor& mask, cudaStream_t stream) -> Tensor;
+    auto masked_fill_kernel(const Tensor& input, const Tensor& mask, double value, cudaStream_t stream) -> Tensor;
+    auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y, cudaStream_t stream) -> Tensor;
+
     // BatchNorm2d operations
     auto batchnorm2d_mean_var(const Tensor& input, Tensor& mean, Tensor& variance, cudaStream_t stream) -> void;
     auto batchnorm2d_forward(const Tensor& input, const Tensor& mean, const Tensor& variance, float epsilon, cudaStream_t stream) -> Tensor;
@@ -1109,107 +1117,56 @@ public:
                 return {cuda::unsqueeze_kernel(inputs[0], dim, stream)};
             }
             else if (op_name == "index_select") {
-                // CPU fallback for index_select (complex indexing operation)
                 if (inputs.size() != 2) {
                     throw std::invalid_argument("index_select operation requires exactly 2 inputs");
                 }
-                auto input_cpu = inputs[0].to(Device::cpu());
-                auto index_cpu = inputs[1].to(Device::cpu());
-
-                // Dispatch to CPU backend
-                auto* cpu_backend = backend_registry().get_backend(Device::Type::CPU);
-                OpAttributes cpu_attrs = attrs;
-                std::vector<Tensor> cpu_inputs = {input_cpu, index_cpu};
-                auto result = cpu_backend->dispatch("index_select", cpu_inputs, cpu_attrs);
-
-                // Move result back to CUDA
-                return {result[0].to(inputs[0].device())};
+                int64_t dim = 0;
+                if (attrs.contains("dim")) {
+                    dim = std::stoll(attrs.at("dim"));
+                }
+                return {cuda::index_select_kernel(inputs[0], dim, inputs[1], stream)};
             }
             else if (op_name == "gather") {
-                // CPU fallback for gather (complex indexing operation)
                 if (inputs.size() != 2) {
                     throw std::invalid_argument("gather operation requires exactly 2 inputs");
                 }
-                auto input_cpu = inputs[0].to(Device::cpu());
-                auto index_cpu = inputs[1].to(Device::cpu());
-
-                // Dispatch to CPU backend
-                auto* cpu_backend = backend_registry().get_backend(Device::Type::CPU);
-                OpAttributes cpu_attrs = attrs;
-                std::vector<Tensor> cpu_inputs = {input_cpu, index_cpu};
-                auto result = cpu_backend->dispatch("gather", cpu_inputs, cpu_attrs);
-
-                // Move result back to CUDA
-                return {result[0].to(inputs[0].device())};
+                int64_t dim = 0;
+                if (attrs.contains("dim")) {
+                    dim = std::stoll(attrs.at("dim"));
+                }
+                return {cuda::gather_kernel(inputs[0], dim, inputs[1], stream)};
             }
             else if (op_name == "scatter") {
-                // CPU fallback for scatter (complex indexing operation)
                 if (inputs.size() != 3) {
                     throw std::invalid_argument("scatter operation requires exactly 3 inputs");
                 }
-                auto input_cpu = inputs[0].to(Device::cpu());
-                auto index_cpu = inputs[1].to(Device::cpu());
-                auto src_cpu = inputs[2].to(Device::cpu());
-
-                // Dispatch to CPU backend
-                auto* cpu_backend = backend_registry().get_backend(Device::Type::CPU);
-                OpAttributes cpu_attrs = attrs;
-                std::vector<Tensor> cpu_inputs = {input_cpu, index_cpu, src_cpu};
-                auto result = cpu_backend->dispatch("scatter", cpu_inputs, cpu_attrs);
-
-                // Move result back to CUDA
-                return {result[0].to(inputs[0].device())};
+                int64_t dim = 0;
+                if (attrs.contains("dim")) {
+                    dim = std::stoll(attrs.at("dim"));
+                }
+                return {cuda::scatter_kernel(inputs[0], dim, inputs[1], inputs[2], stream)};
             }
             else if (op_name == "masked_select") {
-                // CPU fallback for masked_select
                 if (inputs.size() != 2) {
                     throw std::invalid_argument("masked_select operation requires exactly 2 inputs");
                 }
-                auto input_cpu = inputs[0].to(Device::cpu());
-                auto mask_cpu = inputs[1].to(Device::cpu());
-
-                // Dispatch to CPU backend
-                auto* cpu_backend = backend_registry().get_backend(Device::Type::CPU);
-                OpAttributes cpu_attrs = attrs;
-                std::vector<Tensor> cpu_inputs = {input_cpu, mask_cpu};
-                auto result = cpu_backend->dispatch("masked_select", cpu_inputs, cpu_attrs);
-
-                // Move result back to CUDA
-                return {result[0].to(inputs[0].device())};
+                return {cuda::masked_select_kernel(inputs[0], inputs[1], stream)};
             }
             else if (op_name == "masked_fill") {
-                // CPU fallback for masked_fill
                 if (inputs.size() != 2) {
                     throw std::invalid_argument("masked_fill operation requires exactly 2 inputs");
                 }
-                auto input_cpu = inputs[0].to(Device::cpu());
-                auto mask_cpu = inputs[1].to(Device::cpu());
-
-                // Dispatch to CPU backend
-                auto* cpu_backend = backend_registry().get_backend(Device::Type::CPU);
-                OpAttributes cpu_attrs = attrs;
-                std::vector<Tensor> cpu_inputs = {input_cpu, mask_cpu};
-                auto result = cpu_backend->dispatch("masked_fill", cpu_inputs, cpu_attrs);
-
-                // Move result back to CUDA
-                return {result[0].to(inputs[0].device())};
+                double value = 0.0;
+                if (attrs.contains("value")) {
+                    value = std::stod(attrs.at("value"));
+                }
+                return {cuda::masked_fill_kernel(inputs[0], inputs[1], value, stream)};
             }
             else if (op_name == "where") {
-                // CPU fallback for where
                 if (inputs.size() != 3) {
                     throw std::invalid_argument("where operation requires exactly 3 inputs");
                 }
-                auto condition_cpu = inputs[0].to(Device::cpu());
-                auto x_cpu = inputs[1].to(Device::cpu());
-                auto y_cpu = inputs[2].to(Device::cpu());
-
-                // Dispatch to CPU backend
-                auto* cpu_backend = backend_registry().get_backend(Device::Type::CPU);
-                std::vector<Tensor> cpu_inputs = {condition_cpu, x_cpu, y_cpu};
-                auto result = cpu_backend->dispatch("where", cpu_inputs, OpAttributes{});
-
-                // Move result back to CUDA
-                return {result[0].to(inputs[0].device())};
+                return {cuda::where_kernel(inputs[0], inputs[1], inputs[2], stream)};
             }
             else if (op_name == "cat") {
                 if (inputs.empty()) {
