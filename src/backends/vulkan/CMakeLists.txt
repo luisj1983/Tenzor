@@ -39,8 +39,12 @@ set(SHADERS
     # Basic operations
     math
     math_f64
+    math_f16
+    math_i8
     math_broadcast
     math_broadcast_f64
+    math_broadcast_f16
+    math_broadcast_i8
     comparison
     matmul
     activations
@@ -114,7 +118,21 @@ set(SHADERS
     conv2d_forward_f16
     full
     full_f64
+    full_f16
+    full_i8
     ones
+    ones_f16
+    ones_i8
+    # Float16 transformer operations
+    matmul_f16
+    softmax_f16
+    layer_norm_f16
+    activations_f16
+    reduction_f16
+    # Float64 transformer operations
+    matmul_f64
+    softmax_f64
+    layer_norm_f64
 )
 
 # Compile each shader

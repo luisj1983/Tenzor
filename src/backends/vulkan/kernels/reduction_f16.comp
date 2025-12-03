@@ -1,0 +1,121 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// Reduction operations for Float16: sum, mean, max, min
+// Float16 elements are packed 2 per 32-bit word
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Input { uint input_data[]; };
+layout(binding = 1) buffer Output { uint output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;              // Total number of elements in input
+    uint reduce_size;    // Size of dimension to reduce
+    uint outer_size;     // Number of output elements
+    uint inner_size;     // Product of dimensions after reduction dim
+    uint op;             // 0=sum, 1=mean, 2=max, 3=min
+} params;
+
+shared float shared_data[256];
+
+// Helper to read float16 at element index
+float readF16AsFloat(uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed = input_data[word_idx];
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return unpackHalf2x16(bits | (bits << 16)).x;
+}
+
+// Helper to write float16 at element index
+void writeF16(uint element_idx, float val) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint bits = packHalf2x16(vec2(val, 0.0)).x & 0xFFFFu;
+
+    if (word_offset == 0) {
+        uint existing = output_data[word_idx];
+        output_data[word_idx] = (existing & 0xFFFF0000u) | bits;
+    } else {
+        uint existing = output_data[word_idx];
+        output_data[word_idx] = (existing & 0x0000FFFFu) | (bits << 16);
+    }
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint output_idx = gl_WorkGroupID.x;
+
+    // Each workgroup handles one output element
+    if (output_idx >= params.outer_size) {
+        return;
+    }
+
+    // Initialize accumulator based on operation
+    float accum;
+    if (params.op == 2) { // max
+        accum = -1.0 / 0.0; // -infinity
+    } else if (params.op == 3) { // min
+        accum = 1.0 / 0.0; // +infinity
+    } else {
+        accum = 0.0;
+    }
+
+    // Calculate the position in output space
+    uint outer_idx = output_idx / params.inner_size;
+    uint inner_idx = output_idx % params.inner_size;
+
+    // Starting position in input
+    uint base_idx = outer_idx * params.reduce_size * params.inner_size + inner_idx;
+
+    // Each thread processes multiple elements along the reduction dimension
+    for (uint i = tid; i < params.reduce_size; i += 256) {
+        uint idx = base_idx + i * params.inner_size;
+        if (idx < params.n) {
+            float val = readF16AsFloat(idx);
+            switch (params.op) {
+                case 0: // sum
+                case 1: // mean
+                    accum += val;
+                    break;
+                case 2: // max
+                    accum = max(accum, val);
+                    break;
+                case 3: // min
+                    accum = min(accum, val);
+                    break;
+            }
+        }
+    }
+
+    shared_data[tid] = accum;
+    barrier();
+
+    // Parallel reduction in shared memory
+    for (uint s = 128; s > 0; s >>= 1) {
+        if (tid < s) {
+            switch (params.op) {
+                case 0: // sum
+                case 1: // mean
+                    shared_data[tid] += shared_data[tid + s];
+                    break;
+                case 2: // max
+                    shared_data[tid] = max(shared_data[tid], shared_data[tid + s]);
+                    break;
+                case 3: // min
+                    shared_data[tid] = min(shared_data[tid], shared_data[tid + s]);
+                    break;
+            }
+        }
+        barrier();
+    }
+
+    // Write result
+    if (tid == 0) {
+        float result = shared_data[0];
+        if (params.op == 1) { // mean
+            result /= float(params.reduce_size);
+        }
+        writeF16(output_idx, result);
+    }
+}

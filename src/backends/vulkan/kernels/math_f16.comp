@@ -1,0 +1,108 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// Math operations for Float16: add, sub, mul, div, sqrt, exp, log, neg, abs, pow, sign
+// Float16 elements are packed 2 per 32-bit word
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer InputA { uint a[]; };
+layout(binding = 1) buffer InputB { uint b[]; };
+layout(binding = 2) buffer Output { uint result[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;          // Number of elements
+    uint op;         // Operation code
+    float param;     // Parameter for operations like pow
+} params;
+
+// Helper to read float16 from packed buffer
+float16_t readF16(uint packed, uint offset) {
+    uint bits = (packed >> (offset * 16)) & 0xFFFFu;
+    return float16_t(unpackHalf2x16(bits | (bits << 16)).x);
+}
+
+// Helper to pack two float16 values
+uint packF16Pair(float16_t v0, float16_t v1) {
+    uint bits0 = packHalf2x16(vec2(float(v0), 0.0)).x & 0xFFFFu;
+    uint bits1 = packHalf2x16(vec2(float(v1), 0.0)).x & 0xFFFFu;
+    return bits0 | (bits1 << 16);
+}
+
+void main() {
+    // Process 2 elements per thread
+    uint pair_idx = gl_GlobalInvocationID.x;
+    uint idx0 = pair_idx * 2;
+    uint idx1 = pair_idx * 2 + 1;
+
+    if (idx0 >= params.n) {
+        return;
+    }
+
+    uint a_packed = a[pair_idx];
+    uint b_packed = b[pair_idx];
+
+    float16_t val_a0 = readF16(a_packed, 0);
+    float16_t val_b0 = readF16(b_packed, 0);
+    float16_t val_a1 = readF16(a_packed, 1);
+    float16_t val_b1 = readF16(b_packed, 1);
+
+    float16_t res0, res1;
+
+    switch (params.op) {
+        case 0: // add
+            res0 = val_a0 + val_b0;
+            res1 = val_a1 + val_b1;
+            break;
+        case 1: // sub
+            res0 = val_a0 - val_b0;
+            res1 = val_a1 - val_b1;
+            break;
+        case 2: // mul
+            res0 = val_a0 * val_b0;
+            res1 = val_a1 * val_b1;
+            break;
+        case 3: // div
+            res0 = val_a0 / val_b0;
+            res1 = val_a1 / val_b1;
+            break;
+        case 4: // sqrt (unary)
+            res0 = float16_t(sqrt(float(val_a0)));
+            res1 = float16_t(sqrt(float(val_a1)));
+            break;
+        case 5: // exp (unary)
+            res0 = float16_t(exp(float(val_a0)));
+            res1 = float16_t(exp(float(val_a1)));
+            break;
+        case 6: // log (unary)
+            res0 = float16_t(log(float(val_a0)));
+            res1 = float16_t(log(float(val_a1)));
+            break;
+        case 7: // neg (unary)
+            res0 = -val_a0;
+            res1 = -val_a1;
+            break;
+        case 8: // abs (unary)
+            res0 = abs(val_a0);
+            res1 = abs(val_a1);
+            break;
+        case 9: // pow (unary with parameter)
+            res0 = float16_t(pow(float(val_a0), params.param));
+            res1 = float16_t(pow(float(val_a1), params.param));
+            break;
+        case 10: // sign (unary)
+            res0 = float16_t(sign(float(val_a0)));
+            res1 = float16_t(sign(float(val_a1)));
+            break;
+        default:
+            res0 = float16_t(0.0);
+            res1 = float16_t(0.0);
+            break;
+    }
+
+    // Handle odd number of elements
+    if (idx1 >= params.n) {
+        res1 = float16_t(0.0);
+    }
+
+    result[pair_idx] = packF16Pair(res0, res1);
+}

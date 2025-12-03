@@ -522,15 +522,15 @@ vulkan::ComputePipeline* VulkanBackend::getPipeline(const std::string& shader_na
         push_range.offset = 0;
         push_range.size = 8;  // 2 uint32_t values
         pushConstants.push_back(push_range);
-    } else if (shader_name == "fill" || shader_name == "full") {
-        // fill/full: 8 bytes (uint n, float value)
+    } else if (shader_name == "fill" || shader_name == "full" || shader_name == "full_f16" || shader_name == "full_i8") {
+        // fill/full/full_f16/full_i8: 8 bytes (uint n, uint/float value bits)
         VkPushConstantRange push_range{};
         push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         push_range.offset = 0;
-        push_range.size = 8;  // uint32_t + float
+        push_range.size = 8;  // uint32_t + uint32_t (value bits)
         pushConstants.push_back(push_range);
-    } else if (shader_name == "ones") {
-        // ones: 4 bytes (uint n)
+    } else if (shader_name == "ones" || shader_name == "ones_f16" || shader_name == "ones_i8") {
+        // ones/ones_f16/ones_i8: 4 bytes (uint n)
         VkPushConstantRange push_range{};
         push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         push_range.offset = 0;
@@ -550,12 +550,19 @@ vulkan::ComputePipeline* VulkanBackend::getPipeline(const std::string& shader_na
         push_range.offset = 0;
         push_range.size = 20;  // 5 uint32_t values
         pushConstants.push_back(push_range);
-    } else if (shader_name == "math_broadcast") {
-        // math_broadcast: 120 bytes (output_size, op, dtype, ndim_a, ndim_b, ndim_out, strides_a[8], strides_b[8], shape_out[8])
+    } else if (shader_name == "math_broadcast" || shader_name == "math_broadcast_i8" || shader_name == "math_broadcast_f16") {
+        // math_broadcast/math_broadcast_i8/math_broadcast_f16: 120 bytes (output_size, op, dtype, ndim_a, ndim_b, ndim_out, strides_a[8], strides_b[8], shape_out[8])
         VkPushConstantRange push_range{};
         push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         push_range.offset = 0;
         push_range.size = 120;  // 6 uint32_t + 3 * 8 uint32_t arrays = 6*4 + 24*4 = 120 bytes
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "math_i8") {
+        // math_i8: 12 bytes (n, op, param)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 12;  // 3 uint32_t values
         pushConstants.push_back(push_range);
     }
 
@@ -1336,12 +1343,15 @@ auto VulkanBackend::dispatch(const std::string& op_name,
                 dtype = DType::Int32;
             } else if (dtype_str == "float32" || dtype_str == "Float32") {
                 dtype = DType::Float32;
+            } else if (dtype_str == "float16" || dtype_str == "Float16") {
+                dtype = DType::Float16;
             } else if (dtype_str == "float64" || dtype_str == "Float64") {
                 dtype = DType::Float64;
             } else if (dtype_str == "int64" || dtype_str == "Int64") {
                 dtype = DType::Int64;
+            } else if (dtype_str == "int8" || dtype_str == "Int8") {
+                dtype = DType::Int8;
             }
-            // Add more dtypes as needed
         }
         return {dispatchFull(shape, value, dtype)};
     }
@@ -1367,12 +1377,16 @@ auto VulkanBackend::dispatch(const std::string& op_name,
             std::string dtype_str = attrs.at("dtype");
             if (dtype_str == "float32") {
                 dtype = DType::Float32;
+            } else if (dtype_str == "float16") {
+                dtype = DType::Float16;
             } else if (dtype_str == "int32") {
                 dtype = DType::Int32;
             } else if (dtype_str == "int64") {
                 dtype = DType::Int64;
             } else if (dtype_str == "float64") {
                 dtype = DType::Float64;
+            } else if (dtype_str == "int8") {
+                dtype = DType::Int8;
             }
         }
         return {dispatchOnes(shape, dtype)};
@@ -1666,9 +1680,20 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
         return output;
     } else {
         // Broadcasting path: use math_broadcast shader
-        // Select shader based on dtype: "math_broadcast" for Float32, "math_broadcast_f64" for Float64
+        // Select shader based on dtype
         bool is_float64 = (a.dtype() == DType::Float64);
-        std::string shader_name = is_float64 ? "math_broadcast_f64" : "math_broadcast";
+        bool is_float16 = (a.dtype() == DType::Float16);
+        bool is_int8 = (a.dtype() == DType::Int8);
+        std::string shader_name;
+        if (is_float64) {
+            shader_name = "math_broadcast_f64";
+        } else if (is_float16) {
+            shader_name = "math_broadcast_f16";
+        } else if (is_int8) {
+            shader_name = "math_broadcast_i8";
+        } else {
+            shader_name = "math_broadcast";
+        }
         auto* pipeline = getPipeline(shader_name, device_id);
 
         Tensor output(output_shape, a.dtype(), a.device());
@@ -1788,8 +1813,8 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
                                pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
 
         // DIAGNOSTIC: Print push constant values before sending
-        printf("PUSH CONSTANTS: dtype=%u op=%u size=%u (DType=%d dtype_code=%u)\n",
-               push_constants.dtype, push_constants.op, push_constants.output_size,
+        printf("PUSH CONSTANTS: shader=%s dtype=%u op=%u size=%u (DType=%d dtype_code=%u)\n",
+               shader_name.c_str(), push_constants.dtype, push_constants.op, push_constants.output_size,
                static_cast<int>(a.dtype()), dtype_code);
         fflush(stdout);
 
@@ -1797,7 +1822,14 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
                           VK_SHADER_STAGE_COMPUTE_BIT,
                           0, sizeof(PushConstantsBroadcast), &push_constants);
 
-        uint32_t workgroups = (output_numel + 255) / 256;
+        // Calculate workgroups - Float16 processes 2 elements per thread
+        uint32_t workgroups;
+        if (is_float16) {
+            uint32_t num_pairs = (output_numel + 1) / 2;
+            workgroups = (num_pairs + 255) / 256;
+        } else {
+            workgroups = (output_numel + 255) / 256;
+        }
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
         VkMemoryBarrier memoryBarrier{};
@@ -2291,7 +2323,15 @@ auto VulkanBackend::dispatchReduction(const std::string& op_name,
     int32_t device_id = input.device().index;
     // Select correct pipeline based on dtype
     bool is_float64 = (input.dtype() == DType::Float64);
-    std::string shader_name = is_float64 ? "reduction_f64" : "reduction";
+    bool is_float16 = (input.dtype() == DType::Float16);
+    std::string shader_name;
+    if (is_float64) {
+        shader_name = "reduction_f64";
+    } else if (is_float16) {
+        shader_name = "reduction_f16";
+    } else {
+        shader_name = "reduction";
+    }
     auto* pipeline = getPipeline(shader_name, device_id);
 
     // Map operation name to opcode for push constants
@@ -2419,7 +2459,19 @@ auto VulkanBackend::dispatchMatmul(const Tensor& a, const Tensor& b) -> Tensor {
     }
 
     int32_t device_id = a.device().index;
-    auto* pipeline = getPipeline("matmul", device_id);
+
+    // Select correct pipeline based on dtype
+    bool is_float64 = (a.dtype() == DType::Float64);
+    bool is_float16 = (a.dtype() == DType::Float16);
+    std::string shader_name;
+    if (is_float64) {
+        shader_name = "matmul_f64";
+    } else if (is_float16) {
+        shader_name = "matmul_f16";
+    } else {
+        shader_name = "matmul";
+    }
+    auto* pipeline = getPipeline(shader_name, device_id);
 
     std::vector<int64_t> out_shape = {a_shape[0], b_shape[1]};
     Tensor output(out_shape, a.dtype(), a.device());
@@ -3520,7 +3572,19 @@ auto VulkanBackend::dispatchLayerNorm(const Tensor& input, int64_t normalized_sh
                                       const Tensor* gamma, const Tensor* beta, float epsilon) -> Tensor {
     auto input_shape = input.shape();
     int32_t device_id = input.device().index;
-    auto* pipeline = getPipeline("layer_norm", device_id);
+
+    // Select correct pipeline based on dtype
+    bool is_float64 = (input.dtype() == DType::Float64);
+    bool is_float16 = (input.dtype() == DType::Float16);
+    std::string shader_name;
+    if (is_float64) {
+        shader_name = "layer_norm_f64";
+    } else if (is_float16) {
+        shader_name = "layer_norm_f16";
+    } else {
+        shader_name = "layer_norm";
+    }
+    auto* pipeline = getPipeline(shader_name, device_id);
 
     std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end());
     Tensor output(out_shape, input.dtype(), input.device());
@@ -3560,7 +3624,19 @@ auto VulkanBackend::dispatchGroupNorm(const Tensor& input, int64_t num_groups,
 auto VulkanBackend::dispatchSoftmax(const Tensor& input, int64_t dim) -> Tensor {
     auto input_shape = input.shape();
     int32_t device_id = input.device().index;
-    auto* pipeline = getPipeline("softmax", device_id);
+
+    // Select correct pipeline based on dtype
+    bool is_float64 = (input.dtype() == DType::Float64);
+    bool is_float16 = (input.dtype() == DType::Float16);
+    std::string shader_name;
+    if (is_float64) {
+        shader_name = "softmax_f64";
+    } else if (is_float16) {
+        shader_name = "softmax_f16";
+    } else {
+        shader_name = "softmax";
+    }
+    auto* pipeline = getPipeline(shader_name, device_id);
 
     // Handle negative dimension
     if (dim < 0) {
@@ -5281,7 +5357,15 @@ auto VulkanBackend::dispatchActivation(const std::string& op_name,
 
     // Select correct pipeline based on dtype
     bool is_float64 = (input.dtype() == DType::Float64);
-    std::string shader_name = is_float64 ? "activations_f64" : "activations";
+    bool is_float16 = (input.dtype() == DType::Float16);
+    std::string shader_name;
+    if (is_float64) {
+        shader_name = "activations_f64";
+    } else if (is_float16) {
+        shader_name = "activations_f16";
+    } else {
+        shader_name = "activations";
+    }
     auto* pipeline = getPipeline(shader_name, device_id);
 
     // Create output tensor
@@ -5349,7 +5433,16 @@ auto VulkanBackend::dispatchActivation(const std::string& op_name,
                       0, push_constants_size, push_constants_ptr);
 
     // Dispatch compute workgroups
-    uint32_t workgroups = (input.numel() + 255) / 256;
+    // For Float16, shader processes 2 elements per thread (packed pairs)
+    uint32_t num_elements = static_cast<uint32_t>(input.numel());
+    uint32_t workgroups;
+    if (is_float16) {
+        // Each thread handles 2 elements (pair), 256 threads per workgroup
+        uint32_t num_pairs = (num_elements + 1) / 2;
+        workgroups = (num_pairs + 255) / 256;
+    } else {
+        workgroups = (num_elements + 255) / 256;
+    }
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
@@ -6393,7 +6486,9 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, float value,
 
     // Select shader based on dtype
     bool is_float64 = (dtype == DType::Float64);
-    std::string shader_name = is_float64 ? "full_f64" : "full";
+    bool is_float16 = (dtype == DType::Float16);
+    bool is_int8 = (dtype == DType::Int8);
+    std::string shader_name = is_float64 ? "full_f64" : (is_float16 ? "full_f16" : (is_int8 ? "full_i8" : "full"));
     auto* pipeline = getPipeline(shader_name, device_id);
 
     VkBuffer buffer_out = getVulkanBuffer(output.data_ptr());
@@ -6429,6 +6524,97 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, float value,
 
         uint32_t workgroups = (output.numel() + 255) / 256;
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+        endSingleTimeCommands(cmdBuffer, device_id);
+        return output;
+    }
+
+    // Float16 uses a dedicated shader with half-precision packing
+    if (is_float16) {
+        struct PushConstantsF16 {
+            uint32_t n_elements;
+            uint32_t fill_value_f16;  // Float16 bits in lower 16 bits
+        } push_constants;
+
+        push_constants.n_elements = static_cast<uint32_t>(output.numel());
+
+        // Convert float to Float16 bits
+        Float16 f16_value(value);
+        push_constants.fill_value_f16 = static_cast<uint32_t>(f16_value.bits);
+
+        VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+        vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                          VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(PushConstantsF16), &push_constants);
+
+        // Each thread handles 2 float16 elements, so we need half the workgroups
+        uint32_t num_pairs = (output.numel() + 1) / 2;
+        uint32_t workgroups = (num_pairs + 255) / 256;
+        vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+        // Add memory barrier
+        VkMemoryBarrier memoryBarrier{};
+        memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        memoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
+
+        vkCmdPipelineBarrier(
+            cmdBuffer,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
+            0,
+            1, &memoryBarrier,
+            0, nullptr,
+            0, nullptr
+        );
+
+        endSingleTimeCommands(cmdBuffer, device_id);
+        return output;
+    }
+
+    // Int8 uses a dedicated shader that packs 4 elements per uint32
+    if (is_int8) {
+        struct PushConstantsI8 {
+            uint32_t n_elements;
+            uint32_t fill_value_i8;  // Int8 bits in lower 8 bits
+        } push_constants;
+
+        push_constants.n_elements = static_cast<uint32_t>(output.numel());
+        // Convert float value to int8 and store in lower 8 bits
+        int8_t i8_value = static_cast<int8_t>(value);
+        push_constants.fill_value_i8 = static_cast<uint32_t>(static_cast<uint8_t>(i8_value));
+
+        VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+        vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                          VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(PushConstantsI8), &push_constants);
+
+        // Each thread handles 4 int8 elements, so we need 1/4 the workgroups
+        uint32_t num_quads = (output.numel() + 3) / 4;
+        uint32_t workgroups = (num_quads + 255) / 256;
+        vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+        // Add memory barrier
+        VkMemoryBarrier memoryBarrier{};
+        memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        memoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
+
+        vkCmdPipelineBarrier(
+            cmdBuffer,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
+            0,
+            1, &memoryBarrier,
+            0, nullptr,
+            0, nullptr
+        );
 
         endSingleTimeCommands(cmdBuffer, device_id);
         return output;
@@ -6497,7 +6683,12 @@ auto VulkanBackend::dispatchOnes(const std::vector<int64_t>& shape, DType dtype)
     Tensor output(shape, dtype, device);
 
     int32_t device_id = device.index;
-    auto* pipeline = getPipeline("ones", device_id);
+
+    // Select shader based on dtype
+    bool is_float16 = (dtype == DType::Float16);
+    bool is_int8 = (dtype == DType::Int8);
+    std::string shader_name = is_float16 ? "ones_f16" : (is_int8 ? "ones_i8" : "ones");
+    auto* pipeline = getPipeline(shader_name, device_id);
 
     VkBuffer buffer_out = getVulkanBuffer(output.data_ptr());
     size_t buffer_size_out = output.numel() * output.dtype_size();
@@ -6509,6 +6700,88 @@ auto VulkanBackend::dispatchOnes(const std::vector<int64_t>& shape, DType dtype)
 
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
         device_id, pipeline, bindings, sizes);
+
+    // Float16 uses a different shader that only needs n_elements
+    if (is_float16) {
+        struct PushConstantsF16 {
+            uint32_t n_elements;
+        } push_constants;
+
+        push_constants.n_elements = static_cast<uint32_t>(output.numel());
+
+        VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+        vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                          VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(PushConstantsF16), &push_constants);
+
+        // Each thread handles 2 float16 elements, so we need half the workgroups
+        uint32_t num_pairs = (output.numel() + 1) / 2;
+        uint32_t workgroups = (num_pairs + 255) / 256;
+        vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+        // Add memory barrier
+        VkMemoryBarrier memoryBarrier{};
+        memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        memoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
+
+        vkCmdPipelineBarrier(
+            cmdBuffer,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
+            0,
+            1, &memoryBarrier,
+            0, nullptr,
+            0, nullptr
+        );
+
+        endSingleTimeCommands(cmdBuffer, device_id);
+        return output;
+    }
+
+    // Int8 uses a different shader that packs 4 elements per uint32
+    if (is_int8) {
+        struct PushConstantsI8 {
+            uint32_t n_elements;
+        } push_constants;
+
+        push_constants.n_elements = static_cast<uint32_t>(output.numel());
+
+        VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+        vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                          VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(PushConstantsI8), &push_constants);
+
+        // Each thread handles 4 int8 elements, so we need 1/4 the workgroups
+        uint32_t num_quads = (output.numel() + 3) / 4;
+        uint32_t workgroups = (num_quads + 255) / 256;
+        vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+        // Add memory barrier
+        VkMemoryBarrier memoryBarrier{};
+        memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        memoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
+
+        vkCmdPipelineBarrier(
+            cmdBuffer,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
+            0,
+            1, &memoryBarrier,
+            0, nullptr,
+            0, nullptr
+        );
+
+        endSingleTimeCommands(cmdBuffer, device_id);
+        return output;
+    }
 
     struct PushConstants {
         uint32_t n_elements;

@@ -1,0 +1,119 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// Broadcasting-aware binary operations for Vulkan with Float16 support
+// Supports NumPy-style broadcasting rules
+// Float16 elements are packed 2 per 32-bit word
+layout(local_size_x = 256) in;
+
+// For Float16, we use uint buffers and pack/unpack manually
+layout(binding = 0) buffer InputA { uint a[]; };
+layout(binding = 1) buffer InputB { uint b[]; };
+layout(binding = 2) buffer Output { uint result[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint output_size;      // Total number of output elements
+    uint op;               // Operation: 0=add, 1=sub, 2=mul, 3=div
+    uint dtype;            // Data type (unused in this shader)
+    uint ndim_a;           // Number of dimensions in tensor A
+    uint ndim_b;           // Number of dimensions in tensor B
+    uint ndim_out;         // Number of dimensions in output
+    // Strides for tensor A (up to 8 dimensions)
+    uint strides_a[8];
+    // Strides for tensor B (up to 8 dimensions)
+    uint strides_b[8];
+    // Output shape (up to 8 dimensions)
+    uint shape_out[8];
+} params;
+
+// Helper functions to pack/unpack float16 from uint
+float16_t unpackFloat16(uint packed, uint offset) {
+    uint bits = (packed >> (offset * 16)) & 0xFFFFu;
+    return float16_t(unpackHalf2x16(bits | (bits << 16)).x);
+}
+
+uint packFloat16Pair(float16_t v0, float16_t v1) {
+    uint bits0 = packHalf2x16(vec2(float(v0), 0.0)).x & 0xFFFFu;
+    uint bits1 = packHalf2x16(vec2(float(v1), 0.0)).x & 0xFFFFu;
+    return bits0 | (bits1 << 16);
+}
+
+// Read float16 at element index from input A
+float16_t readA(uint idx) {
+    uint word_idx = idx / 2;
+    uint word_offset = idx % 2;
+    return unpackFloat16(a[word_idx], word_offset);
+}
+
+// Read float16 at element index from input B
+float16_t readB(uint idx) {
+    uint word_idx = idx / 2;
+    uint word_offset = idx % 2;
+    return unpackFloat16(b[word_idx], word_offset);
+}
+
+// Compute input index from output index using broadcasting strides
+uint computeInputIdxA(uint out_idx) {
+    uint idx = 0;
+    uint tmp = out_idx;
+    for (uint i = 0; i < params.ndim_out; i++) {
+        uint dim_idx = params.ndim_out - 1 - i;
+        uint coord = tmp % params.shape_out[dim_idx];
+        tmp /= params.shape_out[dim_idx];
+        idx += coord * params.strides_a[dim_idx];
+    }
+    return idx;
+}
+
+uint computeInputIdxB(uint out_idx) {
+    uint idx = 0;
+    uint tmp = out_idx;
+    for (uint i = 0; i < params.ndim_out; i++) {
+        uint dim_idx = params.ndim_out - 1 - i;
+        uint coord = tmp % params.shape_out[dim_idx];
+        tmp /= params.shape_out[dim_idx];
+        idx += coord * params.strides_b[dim_idx];
+    }
+    return idx;
+}
+
+float16_t compute_op(float16_t val_a, float16_t val_b) {
+    switch (params.op) {
+        case 0: return val_a + val_b;
+        case 1: return val_a - val_b;
+        case 2: return val_a * val_b;
+        case 3: return val_a / val_b;
+        default: return float16_t(0.0);
+    }
+}
+
+void main() {
+    // Process 2 elements per thread (since float16 is packed 2 per uint32)
+    uint pair_idx = gl_GlobalInvocationID.x;
+    uint out_idx0 = pair_idx * 2;
+    uint out_idx1 = pair_idx * 2 + 1;
+
+    if (out_idx0 >= params.output_size) {
+        return;
+    }
+
+    // Process first element
+    uint idx_a0 = computeInputIdxA(out_idx0);
+    uint idx_b0 = computeInputIdxB(out_idx0);
+    float16_t val_a0 = readA(idx_a0);
+    float16_t val_b0 = readB(idx_b0);
+    float16_t res0 = compute_op(val_a0, val_b0);
+
+    // Process second element if within bounds
+    float16_t res1 = float16_t(0.0);
+    if (out_idx1 < params.output_size) {
+        uint idx_a1 = computeInputIdxA(out_idx1);
+        uint idx_b1 = computeInputIdxB(out_idx1);
+        float16_t val_a1 = readA(idx_a1);
+        float16_t val_b1 = readB(idx_b1);
+        res1 = compute_op(val_a1, val_b1);
+    }
+
+    // Write both results packed
+    result[pair_idx] = packFloat16Pair(res0, res1);
+}

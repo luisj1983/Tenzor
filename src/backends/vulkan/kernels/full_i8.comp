@@ -1,0 +1,45 @@
+#version 450
+
+// Full operation: create tensor filled with specific value for Int8 dtype
+// Int8 elements are packed 4 per 32-bit word
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Output { uint output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;       // Number of int8 elements
+    uint fill_value_i8;    // Fill value as int8 bits (only lower 8 bits used)
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    // Each thread handles 4 int8 elements packed in one uint32
+    uint element_quad_idx = idx;
+    uint base_element = element_quad_idx * 4;
+
+    if (base_element >= params.n_elements) {
+        return;
+    }
+
+    // Extract int8 value from push constant (lower 8 bits)
+    uint value_i8 = params.fill_value_i8 & 0xFFu;
+
+    // Pack four int8 values into one uint32
+    uint packed_value = 0;
+    uint remaining = params.n_elements - base_element;
+
+    if (remaining >= 4) {
+        // All 4 elements are valid
+        packed_value = value_i8 | (value_i8 << 8) | (value_i8 << 16) | (value_i8 << 24);
+    } else if (remaining == 3) {
+        packed_value = value_i8 | (value_i8 << 8) | (value_i8 << 16);
+    } else if (remaining == 2) {
+        packed_value = value_i8 | (value_i8 << 8);
+    } else {
+        // remaining == 1
+        packed_value = value_i8;
+    }
+
+    output_data[element_quad_idx] = packed_value;
+}
