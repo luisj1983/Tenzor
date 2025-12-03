@@ -3,6 +3,7 @@
 
 // Layer Normalization for Float16
 // Float16 elements are packed 2 per 32-bit word
+// Uses paired writes to avoid race conditions
 layout(local_size_x = 256) in;
 
 layout(binding = 0) buffer Input { uint input_data[]; };
@@ -20,46 +21,27 @@ layout(push_constant) uniform PushConstants {
 shared float shared_sum[256];
 shared float shared_sum_sq[256];
 
-// Helper to read float16 from input
-float16_t readInput(uint element_idx) {
+// Helper to read float16 from buffer at element index
+float readF16(uint buffer_idx, uint element_idx) {
     uint word_idx = element_idx / 2;
     uint word_offset = element_idx % 2;
-    uint packed = input_data[word_idx];
-    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
-    return float16_t(unpackHalf2x16(bits | (bits << 16)).x);
-}
-
-// Helper to read float16 from gamma
-float16_t readGamma(uint element_idx) {
-    uint word_idx = element_idx / 2;
-    uint word_offset = element_idx % 2;
-    uint packed = gamma_data[word_idx];
-    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
-    return float16_t(unpackHalf2x16(bits | (bits << 16)).x);
-}
-
-// Helper to read float16 from beta
-float16_t readBeta(uint element_idx) {
-    uint word_idx = element_idx / 2;
-    uint word_offset = element_idx % 2;
-    uint packed = beta_data[word_idx];
-    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
-    return float16_t(unpackHalf2x16(bits | (bits << 16)).x);
-}
-
-// Helper to write float16 to output
-void writeOutput(uint element_idx, float16_t val) {
-    uint word_idx = element_idx / 2;
-    uint word_offset = element_idx % 2;
-    uint bits = packHalf2x16(vec2(float(val), 0.0)).x & 0xFFFFu;
-
-    if (word_offset == 0) {
-        uint existing = output_data[word_idx];
-        output_data[word_idx] = (existing & 0xFFFF0000u) | bits;
+    uint packed;
+    if (buffer_idx == 0) {
+        packed = input_data[word_idx];
+    } else if (buffer_idx == 2) {
+        packed = gamma_data[word_idx];
     } else {
-        uint existing = output_data[word_idx];
-        output_data[word_idx] = (existing & 0x0000FFFFu) | (bits << 16);
+        packed = beta_data[word_idx];
     }
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return unpackHalf2x16(bits | (bits << 16)).x;
+}
+
+// Helper to pack two float16 values
+uint packF16Pair(float v0, float v1) {
+    uint bits0 = packHalf2x16(vec2(v0, 0.0)).x & 0xFFFFu;
+    uint bits1 = packHalf2x16(vec2(v1, 0.0)).x & 0xFFFFu;
+    return bits0 | (bits1 << 16);
 }
 
 void main() {
@@ -75,7 +57,7 @@ void main() {
     // Step 1: Compute mean (use float for accumulation)
     float local_sum = 0.0;
     for (uint i = tid; i < params.normalized_shape; i += 256) {
-        local_sum += float(readInput(base_idx + i));
+        local_sum += readF16(0, base_idx + i);
     }
     shared_sum[tid] = local_sum;
     barrier();
@@ -94,7 +76,7 @@ void main() {
     // Step 2: Compute variance
     float local_sum_sq = 0.0;
     for (uint i = tid; i < params.normalized_shape; i += 256) {
-        float val = float(readInput(base_idx + i));
+        float val = readF16(0, base_idx + i);
         float diff = val - mean;
         local_sum_sq += diff * diff;
     }
@@ -113,17 +95,42 @@ void main() {
     float inv_std = 1.0 / sqrt(variance + params.epsilon);
     barrier();
 
-    // Step 3: Normalize and apply affine transformation
-    for (uint i = tid; i < params.normalized_shape; i += 256) {
-        float val = float(readInput(base_idx + i));
-        float normalized = (val - mean) * inv_std;
+    // Step 3: Normalize and write output as packed pairs
+    // Each thread writes complete words (2 elements) to avoid race conditions
+    uint num_words = (params.normalized_shape + 1) / 2;
+    for (uint word_idx = tid; word_idx < num_words; word_idx += 256) {
+        uint elem0 = word_idx * 2;
+        uint elem1 = word_idx * 2 + 1;
 
-        if (params.affine > 0) {
-            float gamma = float(readGamma(i));
-            float beta = float(readBeta(i));
-            normalized = normalized * gamma + beta;
+        float val0, val1;
+
+        // Process element 0
+        if (elem0 < params.normalized_shape) {
+            float input_val = readF16(0, base_idx + elem0);
+            val0 = (input_val - mean) * inv_std;
+            if (params.affine > 0) {
+                float gamma = readF16(2, elem0);
+                float beta = readF16(3, elem0);
+                val0 = val0 * gamma + beta;
+            }
+        } else {
+            val0 = 0.0;
         }
 
-        writeOutput(base_idx + i, float16_t(normalized));
+        // Process element 1
+        if (elem1 < params.normalized_shape) {
+            float input_val = readF16(0, base_idx + elem1);
+            val1 = (input_val - mean) * inv_std;
+            if (params.affine > 0) {
+                float gamma = readF16(2, elem1);
+                float beta = readF16(3, elem1);
+                val1 = val1 * gamma + beta;
+            }
+        } else {
+            val1 = 0.0;
+        }
+
+        // Write packed pair - no race condition since each thread owns its word
+        output_data[(base_idx / 2) + word_idx] = packF16Pair(val0, val1);
     }
 }

@@ -322,6 +322,10 @@ TEST_P(DTypeEdgeCaseTest, DenormalNumbers) {
     if (dtype == DType::Float32) {
         const float* data = b_cpu.data<float>();
         for (int i = 0; i < 10; ++i) {
+            // Debug output
+            uint32_t bits;
+            std::memcpy(&bits, &data[i], sizeof(float));
+            std::printf("Index %d: value=%.20e bits=0x%08x\n", i, data[i], bits);
             // Should get 2 * denorm_min
             EXPECT_GT(data[i], 0.0f) << "Denormal addition at index " << i;
             EXPECT_LT(data[i], std::numeric_limits<float>::min())

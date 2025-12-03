@@ -46,6 +46,7 @@ set(SHADERS
     math_broadcast_f16
     math_broadcast_i8
     comparison
+    comparison_bool
     matmul
     activations
     activations_f64
@@ -123,6 +124,15 @@ set(SHADERS
     ones
     ones_f16
     ones_i8
+    ones_uint8
+    ones_i64
+    full_uint8
+    full_i64
+    # UInt8 and Int64 math operations
+    math_uint8
+    math_broadcast_uint8
+    math_i64
+    math_broadcast_i64
     # Float16 transformer operations
     matmul_f16
     softmax_f16

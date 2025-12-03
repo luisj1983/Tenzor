@@ -1,0 +1,23 @@
+#version 450
+#extension GL_EXT_shader_8bit_storage : require
+
+// Fill tensor with a constant value for UInt8 dtype
+// Uses direct byte access via 8-bit storage extension
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Output { uint8_t output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;       // Number of uint8 elements
+    uint fill_value_u8;    // Fill value as uint8 bits (only lower 8 bits used)
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.n_elements) {
+        return;
+    }
+
+    output_data[idx] = uint8_t(params.fill_value_u8 & 0xFFu);
+}

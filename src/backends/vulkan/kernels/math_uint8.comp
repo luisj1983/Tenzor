@@ -1,0 +1,58 @@
+#version 450
+#extension GL_EXT_shader_8bit_storage : require
+
+// Math operations for UInt8 dtype: add, sub, mul, div, neg, abs, sign
+// Uses direct byte access via 8-bit storage extension
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer InputA { uint8_t a[]; };
+layout(binding = 1) buffer InputB { uint8_t b[]; };
+layout(binding = 2) buffer Output { uint8_t result[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;          // Number of elements
+    uint op;         // Operation: 0=add, 1=sub, 2=mul, 3=div, 7=neg, 8=abs, 10=sign
+    int param;       // Parameter for operations (unused for basic ops)
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.n) {
+        return;
+    }
+
+    uint val_a = uint(a[idx]);
+    uint val_b = uint(b[idx]);
+    uint res = 0u;
+
+    switch (params.op) {
+        case 0: // add
+            res = val_a + val_b;
+            break;
+        case 1: // sub
+            res = val_a - val_b;
+            break;
+        case 2: // mul
+            res = val_a * val_b;
+            break;
+        case 3: // div
+            res = val_a / val_b;
+            break;
+        case 7: // neg (unary) - for unsigned, this wraps around
+            res = 256u - val_a;
+            break;
+        case 8: // abs (unary) - for unsigned, value is already non-negative
+            res = val_a;
+            break;
+        case 10: // sign (unary)
+            res = (val_a > 0u) ? 1u : 0u;
+            break;
+        default:
+            res = 0u;
+            break;
+    }
+
+    // Truncate to uint8 range (overflow wraps naturally)
+    result[idx] = uint8_t(res & 0xFFu);
+}

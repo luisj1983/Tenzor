@@ -1,0 +1,78 @@
+#version 450
+#extension GL_EXT_shader_8bit_storage : require
+
+// Broadcasting-aware binary operations for UInt8 dtype
+// Handles byte-level access for 8-bit unsigned integer operations
+layout(local_size_x = 256) in;
+
+// Use 8-bit storage extension for proper byte access
+layout(binding = 0) buffer InputA { uint8_t a[]; };
+layout(binding = 1) buffer InputB { uint8_t b[]; };
+layout(binding = 2) buffer Output { uint8_t result[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint output_size;      // Total number of output elements
+    uint op;               // Operation: 0=add, 1=sub, 2=mul, 3=div
+    uint dtype;            // Data type (unused, always uint8 in this shader)
+    uint ndim_a;           // Number of dimensions in tensor A
+    uint ndim_b;           // Number of dimensions in tensor B
+    uint ndim_out;         // Number of dimensions in output
+    // Strides for tensor A (up to 8 dimensions)
+    uint strides_a[8];
+    // Strides for tensor B (up to 8 dimensions)
+    uint strides_b[8];
+    // Output shape (up to 8 dimensions)
+    uint shape_out[8];
+} params;
+
+void main() {
+    uint out_idx = gl_GlobalInvocationID.x;
+
+    if (out_idx >= params.output_size) {
+        return;
+    }
+
+    // Convert flat output index to multi-dimensional coordinates
+    // Then use broadcasting strides to compute input indices
+    uint idx_a = 0;
+    uint idx_b = 0;
+    uint tmp = out_idx;
+
+    // Iterate from last dimension to first (row-major order)
+    for (uint i = 0; i < params.ndim_out; i++) {
+        uint dim_idx = params.ndim_out - 1 - i;
+        uint coord = tmp % params.shape_out[dim_idx];
+        tmp /= params.shape_out[dim_idx];
+
+        // Add contribution to input indices using broadcasting strides
+        // Broadcasting strides are 0 for broadcasted dimensions
+        idx_a += coord * params.strides_a[dim_idx];
+        idx_b += coord * params.strides_b[dim_idx];
+    }
+
+    // UInt8 operations with proper byte access
+    uint val_a = uint(a[idx_a]);
+    uint val_b = uint(b[idx_b]);
+    uint res = 0u;
+
+    switch (params.op) {
+        case 0: // add
+            res = val_a + val_b;
+            break;
+        case 1: // sub
+            res = val_a - val_b;
+            break;
+        case 2: // mul
+            res = val_a * val_b;
+            break;
+        case 3: // div
+            res = val_a / val_b;
+            break;
+        default:
+            res = 0u;
+            break;
+    }
+
+    // Truncate to uint8 range (overflow wraps naturally in unsigned 8-bit)
+    result[out_idx] = uint8_t(res & 0xFFu);
+}

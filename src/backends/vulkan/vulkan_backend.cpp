@@ -208,18 +208,55 @@ void VulkanBackend::createLogicalDevices() {
         VkPhysicalDeviceFeatures deviceFeatures{};
         deviceFeatures.shaderFloat64 = VK_TRUE;
 
+        // Check for VK_KHR_shader_float_controls extension support
+        uint32_t extensionCount = 0;
+        vkEnumerateDeviceExtensionProperties(ctx.physicalDevice, nullptr, &extensionCount, nullptr);
+        std::vector<VkExtensionProperties> availableExtensions(extensionCount);
+        vkEnumerateDeviceExtensionProperties(ctx.physicalDevice, nullptr, &extensionCount, availableExtensions.data());
+
+        bool hasFloatControls = false;
+        for (const auto& ext : availableExtensions) {
+            if (strcmp(ext.extensionName, VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME) == 0) {
+                hasFloatControls = true;
+                break;
+            }
+        }
+
+        // Extensions to enable
+        std::vector<const char*> deviceExtensions;
+        if (hasFloatControls) {
+            deviceExtensions.push_back(VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME);
+        }
+
+        // Query float controls properties to check for denorm preservation support
+        VkPhysicalDeviceFloatControlsProperties floatControlsProps{};
+        floatControlsProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FLOAT_CONTROLS_PROPERTIES;
+        floatControlsProps.pNext = nullptr;
+
+        VkPhysicalDeviceProperties2 deviceProps2{};
+        deviceProps2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+        deviceProps2.pNext = &floatControlsProps;
+        vkGetPhysicalDeviceProperties2(ctx.physicalDevice, &deviceProps2);
+
+        // Check if denorm preserve is supported for float32
+        bool canPreserveDenormsF32 = (floatControlsProps.shaderDenormPreserveFloat32 == VK_TRUE);
+
         // Device creation
         VkDeviceCreateInfo createInfo{};
         createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
         createInfo.queueCreateInfoCount = 1;
         createInfo.pQueueCreateInfos = &queueCreateInfo;
         createInfo.pEnabledFeatures = &deviceFeatures;
-        createInfo.enabledExtensionCount = 0;
+        createInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
+        createInfo.ppEnabledExtensionNames = deviceExtensions.empty() ? nullptr : deviceExtensions.data();
         createInfo.enabledLayerCount = 0;
 
         vulkan::checkVk(vkCreateDevice(ctx.physicalDevice, &createInfo,
                                       nullptr, &ctx.device),
                        "Failed to create logical device");
+
+        // Store denorm preservation capability for later use
+        ctx.canPreserveDenormsF32 = canPreserveDenormsF32;
 
         // Get compute queue
         vkGetDeviceQueue(ctx.device, ctx.queueFamilyIndex, 0, &ctx.computeQueue);
@@ -515,8 +552,8 @@ vulkan::ComputePipeline* VulkanBackend::getPipeline(const std::string& shader_na
 
     // Setup push constants for shaders
     std::vector<VkPushConstantRange> pushConstants;
-    if (shader_name == "math" || shader_name == "comparison") {
-        // math/comparison: 8 bytes (uint n, uint op)
+    if (shader_name == "math" || shader_name == "comparison" || shader_name == "comparison_bool") {
+        // math/comparison/comparison_bool: 8 bytes (uint n, uint op)
         VkPushConstantRange push_range{};
         push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         push_range.offset = 0;
@@ -550,19 +587,48 @@ vulkan::ComputePipeline* VulkanBackend::getPipeline(const std::string& shader_na
         push_range.offset = 0;
         push_range.size = 20;  // 5 uint32_t values
         pushConstants.push_back(push_range);
-    } else if (shader_name == "math_broadcast" || shader_name == "math_broadcast_i8" || shader_name == "math_broadcast_f16") {
-        // math_broadcast/math_broadcast_i8/math_broadcast_f16: 120 bytes (output_size, op, dtype, ndim_a, ndim_b, ndim_out, strides_a[8], strides_b[8], shape_out[8])
+    } else if (shader_name == "math_broadcast" || shader_name == "math_broadcast_i8" || shader_name == "math_broadcast_f16" ||
+               shader_name == "math_broadcast_uint8" || shader_name == "math_broadcast_i64" || shader_name == "math_broadcast_f64") {
+        // math_broadcast (all variants): 120 bytes (output_size, op, dtype, ndim_a, ndim_b, ndim_out, strides_a[8], strides_b[8], shape_out[8])
         VkPushConstantRange push_range{};
         push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         push_range.offset = 0;
         push_range.size = 120;  // 6 uint32_t + 3 * 8 uint32_t arrays = 6*4 + 24*4 = 120 bytes
         pushConstants.push_back(push_range);
-    } else if (shader_name == "math_i8") {
-        // math_i8: 12 bytes (n, op, param)
+    } else if (shader_name == "math_i8" || shader_name == "math_uint8" || shader_name == "math_i64") {
+        // math_i8/math_uint8/math_i64: 12 bytes (n, op, param)
         VkPushConstantRange push_range{};
         push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         push_range.offset = 0;
         push_range.size = 12;  // 3 uint32_t values
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "full_uint8") {
+        // full_uint8: 8 bytes (n_elements, fill_value_uint8)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 8;  // 2 uint32_t values
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "ones_uint8") {
+        // ones_uint8: 4 bytes (n_elements)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 4;  // 1 uint32_t value
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "full_i64") {
+        // full_i64: 12 bytes (n, value_low, value_high)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 12;  // 3 uint32_t values
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "ones_i64") {
+        // ones_i64: 4 bytes (n_elements)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 4;  // 1 uint32_t value
         pushConstants.push_back(push_range);
     }
 
@@ -1351,6 +1417,10 @@ auto VulkanBackend::dispatch(const std::string& op_name,
                 dtype = DType::Int64;
             } else if (dtype_str == "int8" || dtype_str == "Int8") {
                 dtype = DType::Int8;
+            } else if (dtype_str == "uint8" || dtype_str == "UInt8") {
+                dtype = DType::UInt8;
+            } else if (dtype_str == "bool" || dtype_str == "Bool") {
+                dtype = DType::Bool;
             }
         }
         return {dispatchFull(shape, value, dtype)};
@@ -1387,6 +1457,10 @@ auto VulkanBackend::dispatch(const std::string& op_name,
                 dtype = DType::Float64;
             } else if (dtype_str == "int8") {
                 dtype = DType::Int8;
+            } else if (dtype_str == "uint8") {
+                dtype = DType::UInt8;
+            } else if (dtype_str == "bool") {
+                dtype = DType::Bool;
             }
         }
         return {dispatchOnes(shape, dtype)};
@@ -1684,6 +1758,8 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
         bool is_float64 = (a.dtype() == DType::Float64);
         bool is_float16 = (a.dtype() == DType::Float16);
         bool is_int8 = (a.dtype() == DType::Int8);
+        bool is_uint8 = (a.dtype() == DType::UInt8);
+        bool is_int64 = (a.dtype() == DType::Int64);
         std::string shader_name;
         if (is_float64) {
             shader_name = "math_broadcast_f64";
@@ -1691,6 +1767,10 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
             shader_name = "math_broadcast_f16";
         } else if (is_int8) {
             shader_name = "math_broadcast_i8";
+        } else if (is_uint8) {
+            shader_name = "math_broadcast_uint8";
+        } else if (is_int64) {
+            shader_name = "math_broadcast_i64";
         } else {
             shader_name = "math_broadcast";
         }
@@ -1811,12 +1891,6 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
         vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
         vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                                pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
-
-        // DIAGNOSTIC: Print push constant values before sending
-        printf("PUSH CONSTANTS: shader=%s dtype=%u op=%u size=%u (DType=%d dtype_code=%u)\n",
-               shader_name.c_str(), push_constants.dtype, push_constants.op, push_constants.output_size,
-               static_cast<int>(a.dtype()), dtype_code);
-        fflush(stdout);
 
         vkCmdPushConstants(cmdBuffer, pipeline->layout(),
                           VK_SHADER_STAGE_COMPUTE_BIT,
@@ -2197,7 +2271,11 @@ auto VulkanBackend::dispatchComparisonOp(const std::string& op_name,
     }
 
     int32_t device_id = a.device().index;
-    auto* pipeline = getPipeline("comparison", device_id);
+
+    // Select shader based on input dtype
+    // Bool dtype requires comparison_bool shader (uint8_t inputs)
+    std::string shader_name = (a.dtype() == DType::Bool) ? "comparison_bool" : "comparison";
+    auto* pipeline = getPipeline(shader_name, device_id);
 
     // Create output tensor (convert span to vector)
     // Output is boolean values (DType::Bool stored as uint8 with 0 or 1)
@@ -2415,9 +2493,15 @@ auto VulkanBackend::dispatchReduction(const std::string& op_name,
     vkCmdPushConstants(cmdBuffer, pipeline->layout(),
                       VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pushConstants), &pushConstants);
 
-    // Dispatch one workgroup per output element
-    // Each workgroup has 256 threads and reduces one output element
-    uint32_t workgroups = pushConstants.outer_size;
+    // Dispatch workgroups
+    // For Float16: each workgroup handles TWO adjacent output elements (one packed word)
+    uint32_t workgroups;
+    if (is_float16) {
+        workgroups = (pushConstants.outer_size + 1) / 2;
+    } else {
+        // Each workgroup has 256 threads and reduces one output element
+        workgroups = pushConstants.outer_size;
+    }
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     endSingleTimeCommands(cmdBuffer, device_id);
@@ -2520,7 +2604,14 @@ auto VulkanBackend::dispatchMatmul(const Tensor& a, const Tensor& b) -> Tensor {
                       0, sizeof(PushConstants), &push_constants);
 
     // Tile-based dispatch (16x16 workgroups as defined in shader)
-    uint32_t workgroups_x = (push_constants.N + 15) / 16;
+    // For Float16: each thread processes 2 columns, so halve workgroups_x
+    uint32_t workgroups_x;
+    if (is_float16) {
+        // Each thread handles 2 adjacent columns
+        workgroups_x = ((push_constants.N + 1) / 2 + 15) / 16;
+    } else {
+        workgroups_x = (push_constants.N + 15) / 16;
+    }
     uint32_t workgroups_y = (push_constants.M + 15) / 16;
     vkCmdDispatch(cmdBuffer, workgroups_x, workgroups_y, 1);
 
@@ -6488,7 +6579,24 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, float value,
     bool is_float64 = (dtype == DType::Float64);
     bool is_float16 = (dtype == DType::Float16);
     bool is_int8 = (dtype == DType::Int8);
-    std::string shader_name = is_float64 ? "full_f64" : (is_float16 ? "full_f16" : (is_int8 ? "full_i8" : "full"));
+    bool is_uint8 = (dtype == DType::UInt8);
+    bool is_int64 = (dtype == DType::Int64);
+    bool is_bool = (dtype == DType::Bool);
+    std::string shader_name;
+    if (is_float64) {
+        shader_name = "full_f64";
+    } else if (is_float16) {
+        shader_name = "full_f16";
+    } else if (is_int8) {
+        shader_name = "full_i8";
+    } else if (is_uint8 || is_bool) {
+        // Bool is stored as uint8_t, so use the same shader
+        shader_name = "full_uint8";
+    } else if (is_int64) {
+        shader_name = "full_i64";
+    } else {
+        shader_name = "full";
+    }
     auto* pipeline = getPipeline(shader_name, device_id);
 
     VkBuffer buffer_out = getVulkanBuffer(output.data_ptr());
@@ -6620,6 +6728,97 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, float value,
         return output;
     }
 
+    // UInt8 and Bool use a dedicated shader with direct byte access via 8-bit storage extension
+    // Bool is stored as uint8_t (0 = false, non-zero = true)
+    if (is_uint8 || is_bool) {
+        struct PushConstantsUInt8 {
+            uint32_t n_elements;
+            uint32_t fill_value_uint8;  // UInt8 bits in lower 8 bits
+        } push_constants_u8;
+
+        push_constants_u8.n_elements = static_cast<uint32_t>(output.numel());
+        // Convert float value to uint8 and store in lower 8 bits
+        // For Bool: any non-zero value becomes 1 (true)
+        uint8_t u8_value = is_bool ? (value != 0.0f ? 1 : 0) : static_cast<uint8_t>(value);
+        push_constants_u8.fill_value_uint8 = static_cast<uint32_t>(u8_value);
+
+        VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+        vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                          VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(PushConstantsUInt8), &push_constants_u8);
+
+        // Each thread handles 1 uint8 element
+        uint32_t workgroups = (output.numel() + 255) / 256;
+        vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+        // Add memory barrier
+        VkMemoryBarrier memoryBarrier{};
+        memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        memoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
+
+        vkCmdPipelineBarrier(
+            cmdBuffer,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
+            0,
+            1, &memoryBarrier,
+            0, nullptr,
+            0, nullptr
+        );
+
+        endSingleTimeCommands(cmdBuffer, device_id);
+        return output;
+    }
+
+    // Int64 uses a dedicated shader with 64-bit value split into two 32-bit parts
+    if (is_int64) {
+        struct PushConstantsI64 {
+            uint32_t n_elements;
+            uint32_t value_low;   // Low 32 bits of int64
+            uint32_t value_high;  // High 32 bits of int64
+        } push_constants_i64;
+
+        push_constants_i64.n_elements = static_cast<uint32_t>(output.numel());
+        // Convert float value to int64 and split into two uint32
+        int64_t i64_value = static_cast<int64_t>(value);
+        push_constants_i64.value_low = static_cast<uint32_t>(i64_value & 0xFFFFFFFF);
+        push_constants_i64.value_high = static_cast<uint32_t>((static_cast<uint64_t>(i64_value) >> 32) & 0xFFFFFFFF);
+
+        VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+        vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                          VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(PushConstantsI64), &push_constants_i64);
+
+        uint32_t workgroups = (output.numel() + 255) / 256;
+        vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+        // Add memory barrier
+        VkMemoryBarrier memoryBarrier{};
+        memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        memoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
+
+        vkCmdPipelineBarrier(
+            cmdBuffer,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
+            0,
+            1, &memoryBarrier,
+            0, nullptr,
+            0, nullptr
+        );
+
+        endSingleTimeCommands(cmdBuffer, device_id);
+        return output;
+    }
+
     struct PushConstants {
         uint32_t n_elements;
         uint32_t fill_value_bits;
@@ -6673,8 +6872,9 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, float value,
 // ============================================================================
 
 auto VulkanBackend::dispatchOnes(const std::vector<int64_t>& shape, DType dtype) -> Tensor {
-    // For Float64, use full() instead since ones shader only supports 32-bit values
-    if (dtype == DType::Float64) {
+    // For Float64, Int64, UInt8, or Bool, use full() instead since ones shader only supports 32-bit values
+    // Bool is stored as uint8_t, so it needs byte-level access like UInt8
+    if (dtype == DType::Float64 || dtype == DType::Int64 || dtype == DType::UInt8 || dtype == DType::Bool) {
         return dispatchFull(shape, 1.0, dtype);
     }
 

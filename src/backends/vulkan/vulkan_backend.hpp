@@ -62,6 +62,7 @@ private:
         VkCommandPool commandPool;
         VkPhysicalDeviceMemoryProperties memoryProperties;
         std::unique_ptr<vulkan::DescriptorPool> descriptorPool;
+        bool canPreserveDenormsF32 = false;  // Whether GPU supports denormal preservation for float32
     };
 
     // Staging buffer for host-device transfers

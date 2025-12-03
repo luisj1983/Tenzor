@@ -50,26 +50,88 @@ void main() {
     }
 
     if (params.dtype == 0) {
-        // Float32 operations
-        float val_a = uintBitsToFloat(a[idx_a]);
-        float val_b = uintBitsToFloat(b[idx_b]);
-        float res;
+        // Float32 operations with denormal handling
+        uint bits_a = a[idx_a];
+        uint bits_b = b[idx_b];
+        float val_a = uintBitsToFloat(bits_a);
+        float val_b = uintBitsToFloat(bits_b);
+        uint res_bits;
+
+        // Check if both values are denormals (exponent == 0, mantissa != 0)
+        // or zeros. Denormals have format: [sign:1][exp:8=0][mantissa:23!=0]
+        uint exp_a = (bits_a >> 23) & 0xFFu;
+        uint exp_b = (bits_b >> 23) & 0xFFu;
+        bool both_denorm_or_zero = (exp_a == 0u) && (exp_b == 0u);
 
         switch (params.op) {
             case 0: // add
-                res = val_a + val_b;
+                if (both_denorm_or_zero) {
+                    // For denormals/zeros with same sign, use integer arithmetic
+                    // to preserve denormal results
+                    uint sign_a = bits_a & 0x80000000u;
+                    uint sign_b = bits_b & 0x80000000u;
+                    uint mant_a = bits_a & 0x007FFFFFu;
+                    uint mant_b = bits_b & 0x007FFFFFu;
+
+                    if (sign_a == sign_b) {
+                        // Same sign: add mantissas
+                        uint mant_sum = mant_a + mant_b;
+                        if (mant_sum >= 0x00800000u) {
+                            // Overflow to normalized number (exponent becomes 1)
+                            res_bits = sign_a | 0x00800000u | ((mant_sum - 0x00800000u) & 0x007FFFFFu);
+                        } else {
+                            // Still denormal
+                            res_bits = sign_a | mant_sum;
+                        }
+                    } else {
+                        // Different signs: subtract mantissas
+                        if (mant_a >= mant_b) {
+                            res_bits = sign_a | (mant_a - mant_b);
+                        } else {
+                            res_bits = sign_b | (mant_b - mant_a);
+                        }
+                    }
+                } else {
+                    res_bits = floatBitsToUint(val_a + val_b);
+                }
                 break;
             case 1: // sub
-                res = val_a - val_b;
+                if (both_denorm_or_zero) {
+                    // For denormals, subtraction is like adding with flipped sign
+                    uint sign_a = bits_a & 0x80000000u;
+                    uint sign_b = bits_b ^ 0x80000000u;  // Flip sign of b
+                    uint mant_a = bits_a & 0x007FFFFFu;
+                    uint mant_b = bits_b & 0x007FFFFFu;
+
+                    if (sign_a == sign_b) {
+                        uint mant_sum = mant_a + mant_b;
+                        if (mant_sum >= 0x00800000u) {
+                            res_bits = sign_a | 0x00800000u | ((mant_sum - 0x00800000u) & 0x007FFFFFu);
+                        } else {
+                            res_bits = sign_a | mant_sum;
+                        }
+                    } else {
+                        if (mant_a >= mant_b) {
+                            res_bits = sign_a | (mant_a - mant_b);
+                        } else {
+                            res_bits = sign_b | (mant_b - mant_a);
+                        }
+                    }
+                } else {
+                    res_bits = floatBitsToUint(val_a - val_b);
+                }
                 break;
             case 2: // mul
-                res = val_a * val_b;
+                res_bits = floatBitsToUint(val_a * val_b);
                 break;
             case 3: // div
-                res = val_a / val_b;
+                res_bits = floatBitsToUint(val_a / val_b);
+                break;
+            default:
+                res_bits = 0u;
                 break;
         }
-        result[out_idx] = floatBitsToUint(res);
+        result[out_idx] = res_bits;
     } else {
         // Int32 operations - reinterpret uint as int
         int val_a = int(a[idx_a]);
