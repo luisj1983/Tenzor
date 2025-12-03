@@ -29,6 +29,11 @@ struct BackendDTypeParam {
     }
 };
 
+// Required for gtest_discover_tests to show human-readable test names
+void PrintTo(const BackendDTypeParam& param, std::ostream* os) {
+    *os << param.ToString();
+}
+
 // ============================================================================
 // GRUCell Multi-DType Tests
 // ============================================================================

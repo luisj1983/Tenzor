@@ -50,6 +50,11 @@ struct BackendDTypeParam {
     }
 };
 
+// Required for gtest_discover_tests to show human-readable test names
+void PrintTo(const BackendDTypeParam& param, std::ostream* os) {
+    *os << param.ToString();
+}
+
 // Generate test combinations for all backends and dtypes
 std::vector<BackendDTypeParam> GenerateBackendDTypeCombinations() {
     std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi"};

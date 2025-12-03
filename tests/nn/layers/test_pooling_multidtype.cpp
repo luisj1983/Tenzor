@@ -27,6 +27,11 @@ struct DTypeParam {
     }
 };
 
+// Required for gtest_discover_tests to show human-readable test names
+void PrintTo(const DTypeParam& param, std::ostream* os) {
+    *os << param.ToString();
+}
+
 class PoolingMultiDTypeTest : public ::testing::TestWithParam<DTypeParam> {
 protected:
     DType dtype;

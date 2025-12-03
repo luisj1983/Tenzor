@@ -42,6 +42,11 @@ struct FusedOpsDTypeParam {
     }
 };
 
+// Required for gtest_discover_tests to show human-readable test names
+void PrintTo(const FusedOpsDTypeParam& param, std::ostream* os) {
+    *os << param.ToString();
+}
+
 // Generate test parameters with appropriate tolerances
 std::vector<FusedOpsDTypeParam> GenerateFusedOpsDTypes() {
     return {

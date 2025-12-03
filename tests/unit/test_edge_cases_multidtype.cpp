@@ -40,6 +40,11 @@ struct BackendConfig {
     }
 };
 
+// Required for gtest_discover_tests to show human-readable test names
+void PrintTo(const BackendConfig& param, std::ostream* os) {
+    *os << param.ToString();
+}
+
 // Helper to check if backend is available
 bool is_backend_available(Device::Type type) {
     try {
@@ -90,6 +95,10 @@ struct DTypeConfig {
     }
 };
 
+void PrintTo(const DTypeConfig& param, std::ostream* os) {
+    *os << param.ToString();
+}
+
 // Get all test dtypes
 std::vector<DTypeConfig> get_test_dtypes() {
     return {
@@ -112,6 +121,10 @@ struct TestConfig {
         return backend.ToString() + "_" + dtype.ToString();
     }
 };
+
+void PrintTo(const TestConfig& param, std::ostream* os) {
+    *os << param.ToString();
+}
 
 // Generate all combinations of backends and dtypes
 std::vector<TestConfig> get_test_configs() {

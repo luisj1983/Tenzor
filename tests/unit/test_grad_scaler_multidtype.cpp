@@ -43,6 +43,11 @@ struct GradScalerDTypeParam {
     }
 };
 
+// Required for gtest_discover_tests to show human-readable test names
+void PrintTo(const GradScalerDTypeParam& param, std::ostream* os) {
+    *os << param.ToString();
+}
+
 class GradScalerMultiDTypeTest : public ::testing::TestWithParam<GradScalerDTypeParam> {
 protected:
     Device device;

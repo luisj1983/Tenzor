@@ -41,6 +41,10 @@ struct DTypeParam {
     }
 };
 
+void PrintTo(const DTypeParam& param, std::ostream* os) {
+    *os << param.ToString();
+}
+
 // ============================================================================
 // Float16 Conversion Tests (Multi-DType)
 // ============================================================================
@@ -412,6 +416,10 @@ struct BackendDTypeParam {
         return backend_name + "_" + dtype_name;
     }
 };
+
+void PrintTo(const BackendDTypeParam& param, std::ostream* os) {
+    *os << param.ToString();
+}
 
 class TensorFloat16Test : public ::testing::TestWithParam<BackendDTypeParam> {
 protected:

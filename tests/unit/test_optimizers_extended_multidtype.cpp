@@ -42,6 +42,11 @@ struct OptimizerExtDTypeParam {
     }
 };
 
+// Required for gtest_discover_tests to show human-readable test names
+void PrintTo(const OptimizerExtDTypeParam& param, std::ostream* os) {
+    *os << param.ToString();
+}
+
 // ============================================================================
 // Test Fixture
 // ============================================================================

@@ -28,6 +28,11 @@ struct BackendConfig {
     }
 };
 
+// Required for gtest_discover_tests to show human-readable test names
+void PrintTo(const BackendConfig& param, std::ostream* os) {
+    *os << param.ToString();
+}
+
 // Helper to check if backend is available
 bool is_backend_available(Device::Type type) {
     try {

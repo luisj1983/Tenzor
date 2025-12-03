@@ -42,6 +42,11 @@ struct CheckpointDTypeParam {
     }
 };
 
+// Required for gtest_discover_tests to show human-readable test names
+void PrintTo(const CheckpointDTypeParam& param, std::ostream* os) {
+    *os << param.ToString();
+}
+
 class CheckpointMultiDTypeTest : public ::testing::TestWithParam<CheckpointDTypeParam> {
 protected:
     DType dtype;

@@ -258,6 +258,8 @@ target_link_libraries(test_minimal_training PRIVATE
     GTest::gtest_main
 )
 
+gtest_discover_tests(test_minimal_training DISCOVERY_TIMEOUT 30)
+
 # Normalization tests
 add_executable(test_normalization
     nn/layers/test_normalization.cpp
@@ -370,6 +372,8 @@ target_link_libraries(test_offload PRIVATE
     tenzor_core
     GTest::gtest_main
 )
+
+gtest_discover_tests(test_offload DISCOVERY_TIMEOUT 30)
 
 # Note: Distributed tests for Phase 3 (collective operations) are in
 # integration/test_distributed.cpp and built via integration/CMakeLists.txt
@@ -548,6 +552,8 @@ target_link_libraries(test_mixed_precision PRIVATE
     GTest::gtest_main
 )
 
+gtest_discover_tests(test_mixed_precision DISCOVERY_TIMEOUT 30)
+
 # DataLoader tests
 add_executable(test_dataloader
     unit/test_dataloader.cpp
@@ -637,6 +643,8 @@ target_link_libraries(test_linear_reshape_integration PRIVATE
     tenzor_core
     GTest::gtest_main
 )
+
+gtest_discover_tests(test_linear_reshape_integration DISCOVERY_TIMEOUT 30)
 
 # Fused operations tests
 add_executable(test_fused_ops
@@ -1049,6 +1057,8 @@ if(TENZOR_BUILD_CUDA)
     set_target_properties(test_cuda_cat PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON
     )
+
+    add_test(NAME CUDAConcatenation COMMAND test_cuda_cat)
 
     # FP16/BF16 kernel tests
     add_executable(test_fp16_kernels
@@ -1529,6 +1539,7 @@ endif()
 add_executable(test_checkpoint_leaf_fix test_checkpoint_leaf_fix.cpp)
 target_link_libraries(test_checkpoint_leaf_fix tenzor_core)
 target_include_directories(test_checkpoint_leaf_fix PRIVATE ${PROJECT_SOURCE_DIR}/include)
+add_test(NAME CheckpointLeafFix COMMAND test_checkpoint_leaf_fix)
 
 # Manual KLDiv debug test
 add_executable(test_kldiv_manual test_kldiv_manual.cpp)

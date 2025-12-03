@@ -31,6 +31,11 @@ struct BackendDTypeParam {
     }
 };
 
+// Required for gtest_discover_tests to show human-readable test names
+void PrintTo(const BackendDTypeParam& param, std::ostream* os) {
+    *os << param.ToString();
+}
+
 // Test fixture for multi-backend and multi-dtype testing
 class MultiheadAttentionMultiDTypeTest : public ::testing::TestWithParam<BackendDTypeParam> {
 protected:
