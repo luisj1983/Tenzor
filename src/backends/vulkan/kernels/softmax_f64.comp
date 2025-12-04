@@ -19,9 +19,38 @@ layout(push_constant) uniform PushConstants {
 shared double shared_max[256];
 shared double shared_sum[256];
 
-// Helper: exp for double using float precision
+// Helper: exp for double using range reduction
+// exp(x) = exp(k*ln(2) + r) = 2^k * exp(r) where |r| < ln(2)/2
 double exp_d(double x) {
-    return double(exp(float(x)));
+    // Clamp to avoid overflow/underflow
+    if (x > 709.0) return 1.0e308;  // near max double
+    if (x < -745.0) return 0.0;
+
+    // For moderate values that fit in float range, use float exp
+    // Float has sufficient precision for exp in range [-87, 88]
+    if (x >= -87.0 && x <= 88.0) {
+        return double(exp(float(x)));
+    }
+
+    // For values outside float range, use range reduction
+    double ln2 = 0.6931471805599453;
+    double k = floor(x / ln2 + 0.5);
+    double r = x - k * ln2;
+
+    // exp(r) where |r| <= ln(2)/2, use float exp which is accurate
+    double exp_r = double(exp(float(r)));
+
+    // Multiply by 2^k
+    if (k >= 0.0) {
+        for (int i = 0; i < int(k) && i < 1024; i++) {
+            exp_r *= 2.0;
+        }
+    } else {
+        for (int i = 0; i < int(-k) && i < 1024; i++) {
+            exp_r *= 0.5;
+        }
+    }
+    return exp_r;
 }
 
 void main() {
@@ -77,9 +106,10 @@ void main() {
         double row_sum = shared_sum[0];
         barrier();
 
-        // Step 3: Divide by sum
+        // Step 3: Divide by sum (protect against division by zero)
+        double safe_sum = (row_sum > 0.0) ? row_sum : 1.0;
         for (uint i = tid; i < params.num_classes; i += 256) {
-            output_data[base_idx + i] /= row_sum;
+            output_data[base_idx + i] /= safe_sum;
         }
 
         // Store max and sum for backward pass

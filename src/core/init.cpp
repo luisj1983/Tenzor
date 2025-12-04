@@ -2076,6 +2076,11 @@ auto initialize() -> void {
                         return vulkan_backend->dispatch("adaptive_avg_pool2d", inputs, attrs);
                     });
 
+                registry.register_kernel("adaptive_avg_pool2d_backward", Device::Type::Vulkan,
+                    [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return vulkan_backend->dispatch("adaptive_avg_pool2d_backward", inputs, attrs);
+                    });
+
                 // Normalization operations
                 registry.register_kernel("softmax", Device::Type::Vulkan,
                     [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
@@ -2401,7 +2406,13 @@ auto initialize() -> void {
                         return vulkan_backend->dispatch("where", inputs, attrs);
                     });
 
-                std::cout << "Vulkan operations registered successfully (99 operations - all core operations added!)" << std::endl;
+                // Vision operations
+                registry.register_kernel("gather_relative_position_bias", Device::Type::Vulkan,
+                    [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return vulkan_backend->dispatch("gather_relative_position_bias", inputs, attrs);
+                    });
+
+                std::cout << "Vulkan operations registered successfully (101 operations - all core operations added!)" << std::endl;
             } else {
                 std::cout << "Vulkan backend loaded but no Vulkan devices available" << std::endl;
             }

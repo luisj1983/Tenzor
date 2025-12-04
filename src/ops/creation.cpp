@@ -7,6 +7,7 @@
 #include <cmath>
 #include <algorithm>
 #include <sstream>
+#include <iostream>  // DEBUG
 
 namespace tenzor {
 
@@ -79,6 +80,22 @@ auto zeros(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
 }
 
 auto ones(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
+    // DEBUG: trace small tensor ones creation
+    {
+        int64_t debug_numel = 1;
+        for (auto s : shape) debug_numel *= s;
+        if (debug_numel <= 10) {
+            std::cerr << "[ONES_CREATION] shape=[";
+            for (size_t i = 0; i < shape.size(); ++i) {
+                if (i > 0) std::cerr << ",";
+                std::cerr << shape[i];
+            }
+            std::cerr << "] dtype=" << static_cast<int>(dtype)
+                      << " device_type=" << static_cast<int>(device.type)
+                      << " device_idx=" << device.index << std::endl;
+        }
+    }
+
     // Use backend directly for non-CPU devices
     if (device.type != Device::Type::CPU) {
         auto backend = backend_registry().get_backend(device.type);
@@ -90,6 +107,12 @@ auto ones(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
         attrs["shape"] = shape_to_string(shape);
         attrs["dtype"] = dtype_to_string(dtype);
         attrs["device_id"] = std::to_string(device.index);
+
+        // DEBUG
+        if (shape.size() == 1 && shape[0] <= 10) {
+            std::cerr << "[ONES_DISPATCH] Calling backend->dispatch(\"ones\") with shape=\""
+                      << attrs["shape"] << "\" dtype=\"" << attrs["dtype"] << "\"" << std::endl;
+        }
 
         return backend->dispatch("ones", {}, attrs)[0];
     }

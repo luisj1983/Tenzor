@@ -1,0 +1,86 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// Expand operation: broadcast tensor to larger size for Float16
+// Supports multi-dimensional broadcasting following NumPy rules
+// Float16 elements are packed 2 per 32-bit word
+layout(local_size_x = 256) in;
+
+// For Float16, we use uint buffers and pack/unpack manually
+layout(binding = 0) buffer Input { uint input_data[]; };
+layout(binding = 1) buffer Output { uint output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;        // Total output elements
+    uint input_ndim;        // Input dimensions
+    uint output_ndim;       // Output dimensions
+    uint input_shape[8];    // Input shape (max 8 dims)
+    uint output_shape[8];   // Output shape (max 8 dims)
+    uint input_strides[8];  // Input strides for indexing
+} params;
+
+// Helper functions to pack/unpack float16 from uint
+float16_t unpackFloat16(uint packed, uint offset) {
+    uint bits = (packed >> (offset * 16)) & 0xFFFFu;
+    return float16_t(unpackHalf2x16(bits | (bits << 16)).x);
+}
+
+uint packFloat16Pair(float16_t v0, float16_t v1) {
+    uint bits0 = packHalf2x16(vec2(float(v0), 0.0)).x & 0xFFFFu;
+    uint bits1 = packHalf2x16(vec2(float(v1), 0.0)).x & 0xFFFFu;
+    return bits0 | (bits1 << 16);
+}
+
+// Read float16 at element index from input
+float16_t readInput(uint idx) {
+    uint word_idx = idx / 2;
+    uint word_offset = idx % 2;
+    return unpackFloat16(input_data[word_idx], word_offset);
+}
+
+// Compute input flat index from output flat index using broadcasting rules
+uint computeInputIdx(uint out_idx) {
+    // Decode output flat index to multi-dimensional indices
+    uint out_indices[8];
+    uint temp = out_idx;
+    for (int i = int(params.output_ndim) - 1; i >= 0; i--) {
+        out_indices[i] = temp % params.output_shape[i];
+        temp /= params.output_shape[i];
+    }
+
+    // Map output indices to input indices using broadcasting rules
+    // If input dimension is 1, use index 0; otherwise use output index
+    uint input_idx = 0;
+    for (uint i = 0; i < params.input_ndim; i++) {
+        // Align dimensions from the right
+        uint out_dim_idx = params.output_ndim - params.input_ndim + i;
+        uint in_idx = (params.input_shape[i] == 1) ? 0 : out_indices[out_dim_idx];
+        input_idx += in_idx * params.input_strides[i];
+    }
+    return input_idx;
+}
+
+void main() {
+    // Process 2 elements per thread (since float16 is packed 2 per uint32)
+    uint pair_idx = gl_GlobalInvocationID.x;
+    uint out_idx0 = pair_idx * 2;
+    uint out_idx1 = pair_idx * 2 + 1;
+
+    if (out_idx0 >= params.n_elements) {
+        return;
+    }
+
+    // Process first element
+    uint input_idx0 = computeInputIdx(out_idx0);
+    float16_t val0 = readInput(input_idx0);
+
+    // Process second element if within bounds
+    float16_t val1 = float16_t(0.0);
+    if (out_idx1 < params.n_elements) {
+        uint input_idx1 = computeInputIdx(out_idx1);
+        val1 = readInput(input_idx1);
+    }
+
+    // Write both results packed
+    output_data[pair_idx] = packFloat16Pair(val0, val1);
+}

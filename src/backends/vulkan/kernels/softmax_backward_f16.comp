@@ -1,0 +1,88 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// Softmax backward for Float16: grad_input = output * (grad_output - dot(grad_output, output))
+// Float16 elements are packed 2 per 32-bit word
+
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer GradOutput { uint grad_output[]; };
+layout(binding = 1) buffer OutputBuffer { uint output_data[]; };
+layout(binding = 2) buffer GradInput { uint grad_input[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint outer_size;   // Product of dimensions before reduction dim
+    uint dim_size;     // Size of the reduction dimension
+    uint inner_size;   // Product of dimensions after reduction dim
+} params;
+
+// Helper to read float16 at element index from buffer
+float readF16(uint buffer_type, uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed;
+    if (buffer_type == 0) {
+        packed = grad_output[word_idx];
+    } else {
+        packed = output_data[word_idx];
+    }
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return unpackHalf2x16(bits | (bits << 16)).x;
+}
+
+// Helper to write float16 at element index
+void writeF16(uint element_idx, float value) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+
+    // Read-modify-write (not atomic, but we process pairs)
+    uint packed = grad_input[word_idx];
+    uint bits = packHalf2x16(vec2(value, 0.0)) & 0xFFFFu;
+
+    if (word_offset == 0) {
+        packed = (packed & 0xFFFF0000u) | bits;
+    } else {
+        packed = (packed & 0x0000FFFFu) | (bits << 16);
+    }
+    grad_input[word_idx] = packed;
+}
+
+// Helper to pack two float16 values
+uint packF16Pair(float v0, float v1) {
+    uint bits0 = packHalf2x16(vec2(v0, 0.0)) & 0xFFFFu;
+    uint bits1 = packHalf2x16(vec2(v1, 0.0)) & 0xFFFFu;
+    return bits0 | (bits1 << 16);
+}
+
+void main() {
+    // Each thread handles one (outer, inner) position
+    uint global_idx = gl_GlobalInvocationID.x;
+    uint total_threads = params.outer_size * params.inner_size;
+
+    if (global_idx >= total_threads) {
+        return;
+    }
+
+    uint outer_idx = global_idx / params.inner_size;
+    uint inner_idx = global_idx % params.inner_size;
+    uint offset = (outer_idx * params.dim_size * params.inner_size) + inner_idx;
+
+    // Compute dot product: sum(grad_output * output) along dimension
+    // Use float for accumulation to avoid precision loss
+    float dot_product = 0.0;
+    for (uint d = 0; d < params.dim_size; ++d) {
+        uint elem_idx = offset + d * params.inner_size;
+        float grad_val = readF16(0, elem_idx);  // grad_output
+        float out_val = readF16(1, elem_idx);   // output
+        dot_product += grad_val * out_val;
+    }
+
+    // Compute gradient: output * (grad_output - dot)
+    for (uint d = 0; d < params.dim_size; ++d) {
+        uint elem_idx = offset + d * params.inner_size;
+        float grad_val = readF16(0, elem_idx);  // grad_output
+        float out_val = readF16(1, elem_idx);   // output
+        float grad_input_val = out_val * (grad_val - dot_product);
+        writeF16(elem_idx, grad_input_val);
+    }
+}

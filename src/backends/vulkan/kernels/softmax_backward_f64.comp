@@ -1,0 +1,44 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Softmax backward for Float64: grad_input = output * (grad_output - dot(grad_output, output))
+// This requires reduction along a dimension
+
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer GradOutput { double grad_output[]; };
+layout(binding = 1) buffer OutputBuffer { double output_data[]; };
+layout(binding = 2) buffer GradInput { double grad_input[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint outer_size;   // Product of dimensions before reduction dim
+    uint dim_size;     // Size of the reduction dimension
+    uint inner_size;   // Product of dimensions after reduction dim
+} params;
+
+void main() {
+    // Each thread handles one (outer, inner) position
+    uint global_idx = gl_GlobalInvocationID.x;
+    uint total_threads = params.outer_size * params.inner_size;
+
+    if (global_idx >= total_threads) {
+        return;
+    }
+
+    uint outer_idx = global_idx / params.inner_size;
+    uint inner_idx = global_idx % params.inner_size;
+    uint offset = (outer_idx * params.dim_size * params.inner_size) + inner_idx;
+
+    // Compute dot product: sum(grad_output * output) along dimension
+    double dot = 0.0;
+    for (uint d = 0; d < params.dim_size; ++d) {
+        uint idx = offset + d * params.inner_size;
+        dot += grad_output[idx] * output_data[idx];
+    }
+
+    // Compute gradient: output * (grad_output - dot)
+    for (uint d = 0; d < params.dim_size; ++d) {
+        uint idx = offset + d * params.inner_size;
+        grad_input[idx] = output_data[idx] * (grad_output[idx] - dot);
+    }
+}

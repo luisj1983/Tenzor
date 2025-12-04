@@ -1,0 +1,35 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Swish backward pass for Float64: grad_input = grad_output * swish'(x)
+// where swish(x) = x * sigmoid(x)
+// and swish'(x) = sigmoid(x) + x * sigmoid(x) * (1 - sigmoid(x))
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer GradOutput { double grad_output[]; };
+layout(binding = 1) buffer InputData { double input_data[]; };
+layout(binding = 2) buffer GradInput { double grad_input[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;  // Number of elements
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.n) {
+        return;
+    }
+
+    double x = input_data[idx];
+    double g_out = grad_output[idx];
+
+    // Compute sigmoid(x) - use float for exp to avoid precision issues
+    double sigmoid_x = 1.0 / (1.0 + double(exp(float(-x))));
+
+    // Compute swish derivative: sigmoid(x) + x * sigmoid(x) * (1 - sigmoid(x))
+    double swish_derivative = sigmoid_x + x * sigmoid_x * (1.0 - sigmoid_x);
+
+    // Apply chain rule
+    grad_input[idx] = g_out * swish_derivative;
+}

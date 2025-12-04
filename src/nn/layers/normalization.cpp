@@ -35,6 +35,21 @@ public:
         auto& rstd_orig = saved[2];  // reciprocal std (1 / sqrt(var + eps))
         auto& weight_orig = saved[3];
 
+        // Debug for Float64
+        if (grad_output_orig.dtype() == DType::Float64) {
+            std::cerr << "[LAYERNORM_BACKWARD_F64] grad_output shape: [";
+            for (size_t i = 0; i < grad_output_orig.shape().size(); ++i) {
+                if (i > 0) std::cerr << ",";
+                std::cerr << grad_output_orig.shape()[i];
+            }
+            std::cerr << "], input shape: [";
+            for (size_t i = 0; i < input_orig.shape().size(); ++i) {
+                if (i > 0) std::cerr << ",";
+                std::cerr << input_orig.shape()[i];
+            }
+            std::cerr << "], normalized_size=" << normalized_size_ << std::endl;
+        }
+
         // Save original device before transferring to CPU
         Device original_device = input_orig.device();
 
@@ -83,6 +98,31 @@ public:
         auto* grad_in_data = grad_input.data<float>();
         auto* grad_weight_data = grad_weight.data<float>();
         auto* grad_bias_data = grad_bias.data<float>();
+
+        // Debug: Check input values for Float64
+        if (original_dtype == DType::Float64 && batch_size > 0) {
+            std::cerr << "[LAYERNORM_BACKWARD_F64] batch_size=" << batch_size << ", N=" << N << std::endl;
+            std::cerr << "[LAYERNORM_BACKWARD_F64] mean[0]=" << mean_data[0]
+                      << ", rstd[0]=" << rstd_data[0] << std::endl;
+            std::cerr << "[LAYERNORM_BACKWARD_F64] input first5=[";
+            for (int i = 0; i < std::min(5, static_cast<int>(N)); i++) {
+                if (i > 0) std::cerr << ",";
+                std::cerr << input_data[i];
+            }
+            std::cerr << "]" << std::endl;
+            std::cerr << "[LAYERNORM_BACKWARD_F64] grad_out first5=[";
+            for (int i = 0; i < std::min(5, static_cast<int>(N)); i++) {
+                if (i > 0) std::cerr << ",";
+                std::cerr << grad_out_data[i];
+            }
+            std::cerr << "]" << std::endl;
+            std::cerr << "[LAYERNORM_BACKWARD_F64] weight first5=[";
+            for (int i = 0; i < std::min(5, static_cast<int>(N)); i++) {
+                if (i > 0) std::cerr << ",";
+                std::cerr << weight_data[i];
+            }
+            std::cerr << "]" << std::endl;
+        }
 
         // Compute gradients for each batch element
         for (int64_t b = 0; b < batch_size; b++) {
@@ -141,6 +181,24 @@ public:
             }
         }
 
+        // Debug: Check if grad_input has NaN before final conversion
+        if (original_dtype == DType::Float64) {
+            bool has_nan = false;
+            for (int64_t i = 0; i < std::min(static_cast<int64_t>(100), grad_input.numel()); i++) {
+                if (std::isnan(grad_in_data[i])) {
+                    has_nan = true;
+                    break;
+                }
+            }
+            std::cerr << "[LAYERNORM_BACKWARD_F64] grad_input (Float32) has_nan=" << has_nan
+                      << ", first5=[";
+            for (int i = 0; i < std::min(5, static_cast<int>(grad_input.numel())); i++) {
+                if (i > 0) std::cerr << ",";
+                std::cerr << grad_in_data[i];
+            }
+            std::cerr << "]" << std::endl;
+        }
+
         // Transfer gradients back to original device and dtype if needed
         Tensor grad_input_final = (original_device == Device::cpu())
                                  ? grad_input.contiguous().to(original_dtype)
@@ -151,6 +209,26 @@ public:
         Tensor grad_bias_final = (original_device == Device::cpu())
                                 ? grad_bias.contiguous().to(original_dtype)
                                 : grad_bias.contiguous().to(original_device).to(original_dtype);
+
+        // Debug: Check if grad_input_final has NaN after conversion back to Float64
+        if (original_dtype == DType::Float64) {
+            auto grad_check = grad_input_final.to(Device::cpu());
+            auto* data = grad_check.data<double>();
+            bool has_nan = false;
+            for (int64_t i = 0; i < std::min(static_cast<int64_t>(100), grad_check.numel()); i++) {
+                if (std::isnan(data[i])) {
+                    has_nan = true;
+                    break;
+                }
+            }
+            std::cerr << "[LAYERNORM_BACKWARD_F64] grad_input_final (Float64) has_nan=" << has_nan
+                      << ", first5=[";
+            for (int i = 0; i < std::min(5, static_cast<int>(grad_check.numel())); i++) {
+                if (i > 0) std::cerr << ",";
+                std::cerr << data[i];
+            }
+            std::cerr << "]" << std::endl;
+        }
 
         return {grad_input_final, grad_weight_final, grad_bias_final};
     }

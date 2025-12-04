@@ -41,6 +41,7 @@ set(SHADERS
     math_f64
     math_f16
     math_i8
+    math_i32
     math_broadcast
     math_broadcast_f64
     math_broadcast_f16
@@ -51,10 +52,12 @@ set(SHADERS
     comparison_i32
     comparison_i64
     matmul
+    matmul_i32
     activations
     activations_f64
     reduction
     reduction_f64
+    reduction_i32
     conv2d
     pooling
     batchnorm
@@ -70,6 +73,11 @@ set(SHADERS
     pooling_backward
     pooling_forward_with_indices
     adaptive_pooling
+    adaptive_pooling_f64
+    adaptive_pooling_f16
+    adaptive_avg_pool2d_backward
+    adaptive_avg_pool2d_backward_f64
+    adaptive_avg_pool2d_backward_f16
     # Normalization
     batchnorm_backward
     layer_norm
@@ -80,8 +88,10 @@ set(SHADERS
     cross_entropy
     # Advanced reductions
     argmax_argmin
+    argmax_argmin_i32
     variance_std
     prod_reduction
+    prod_reduction_i32
     boolean_reduction
     # Indexing operations
     embedding
@@ -95,9 +105,15 @@ set(SHADERS
     permute
     # Backward activation functions
     activations_backward
+    activations_backward_f64
+    activations_backward_f16
     softmax_backward
+    softmax_backward_f64
+    softmax_backward_f16
     log_softmax_backward
+    log_softmax_backward_f64
     swish_backward
+    swish_backward_f64
     # Conv2d backward operations
     conv2d_backward_input
     conv2d_backward_weight
@@ -105,6 +121,7 @@ set(SHADERS
     # Tensor manipulation operations
     expand
     expand_f64
+    expand_f16
     cat
     clamp
     clamp_f64
@@ -148,6 +165,10 @@ set(SHADERS
     softmax_f64
     layer_norm_f64
     log_softmax_f64
+    # Vision transformer operations
+    gather_relative_position_bias
+    gather_relative_position_bias_f64
+    gather_relative_position_bias_f16
 )
 
 # Compile each shader

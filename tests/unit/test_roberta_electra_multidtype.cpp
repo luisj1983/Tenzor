@@ -250,16 +250,18 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, RoBERTaLargeGradientFlow) {
 
     // For float64, RoBERTa-Large (355M params * 8 bytes = 2.84GB) plus activations
     // and gradients exceeds 6GB GPU. Reduce layers to fit while using offloading.
-    bool is_cuda_float64 = (GetParam().backend_name == "cuda" && dtype == DType::Float64);
-    if (is_cuda_float64) {
-        config.num_hidden_layers = 8;  // Reduced from 24 for float64 CUDA
+    bool is_float64 = (dtype == DType::Float64);
+    bool is_gpu_float64 = is_float64 && (GetParam().backend_name == "cuda" || GetParam().backend_name == "vulkan");
+    if (is_gpu_float64) {
+        config.num_hidden_layers = 8;  // Reduced from 24 for float64 CUDA/Vulkan
     }
 
     auto model = std::make_shared<RobertaModel>(config);
     model->to(dtype);
 
-    // Use CPU-start offloading for cuda float64
+    // Use CPU-start offloading for CUDA float64 (Vulkan doesn't support this yet)
     std::unique_ptr<nn::OffloadContext> offload_ctx;
+    bool is_cuda_float64 = (GetParam().backend_name == "cuda" && is_float64);
 
     if (is_cuda_float64) {
         nn::OffloadContext::Config offload_config;
@@ -411,16 +413,18 @@ TEST_P(RoBERTaELECTRAMultiDTypeTest, ELECTRALargeGradientFlow) {
 
     // For float64, ELECTRA-Large (335M discriminator params * 8 bytes = 2.68GB) plus activations
     // and gradients exceeds 6GB GPU. Reduce layers to fit while using offloading.
-    bool is_cuda_float64 = (GetParam().backend_name == "cuda" && dtype == DType::Float64);
-    if (is_cuda_float64) {
-        config.num_hidden_layers = 8;  // Reduced from 24 for float64 CUDA
+    bool is_float64 = (dtype == DType::Float64);
+    bool is_gpu_float64 = is_float64 && (GetParam().backend_name == "cuda" || GetParam().backend_name == "vulkan");
+    if (is_gpu_float64) {
+        config.num_hidden_layers = 8;  // Reduced from 24 for float64 CUDA/Vulkan
     }
 
     auto discriminator = std::make_shared<ElectraDiscriminator>(config);
     discriminator->to(dtype);
 
-    // Use CPU-start offloading for cuda float64
+    // Use CPU-start offloading for CUDA float64 (Vulkan doesn't support this yet)
     std::unique_ptr<nn::OffloadContext> offload_ctx;
+    bool is_cuda_float64 = (GetParam().backend_name == "cuda" && is_float64);
 
     if (is_cuda_float64) {
         nn::OffloadContext::Config offload_config;

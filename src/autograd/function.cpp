@@ -170,6 +170,67 @@ auto MatMulBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<T
     const auto& b = saved_tensors_[1];
     const auto& grad_out = grad_outputs[0];
 
+    // Debug for Float64
+    if (a.dtype() == DType::Float64) {
+        std::cerr << "[MATMUL_BACKWARD_F64] a.shape: [";
+        for (size_t i = 0; i < a.shape().size(); ++i) {
+            if (i > 0) std::cerr << ", ";
+            std::cerr << a.shape()[i];
+        }
+        std::cerr << "], b.shape: [";
+        for (size_t i = 0; i < b.shape().size(); ++i) {
+            if (i > 0) std::cerr << ", ";
+            std::cerr << b.shape()[i];
+        }
+        std::cerr << "], grad_out.shape: [";
+        for (size_t i = 0; i < grad_out.shape().size(); ++i) {
+            if (i > 0) std::cerr << ", ";
+            std::cerr << grad_out.shape()[i];
+        }
+        std::cerr << "], device=" << static_cast<int>(a.device().type) << std::endl;
+
+        // Check for inf in saved tensors
+        auto a_cpu = a.to(Device::cpu());
+        auto* a_data = a_cpu.data<double>();
+        bool a_has_inf = false;
+        for (int i = 0; i < std::min(1000, static_cast<int>(a_cpu.numel())); ++i) {
+            if (std::isinf(a_data[i])) {
+                a_has_inf = true;
+                break;
+            }
+        }
+        auto b_cpu = b.to(Device::cpu());
+        auto* b_data = b_cpu.data<double>();
+        bool b_has_inf = false;
+        for (int i = 0; i < std::min(1000, static_cast<int>(b_cpu.numel())); ++i) {
+            if (std::isinf(b_data[i])) {
+                b_has_inf = true;
+                break;
+            }
+        }
+        auto go_cpu = grad_out.to(Device::cpu());
+        auto* go_data = go_cpu.data<double>();
+        bool go_has_inf = false;
+        for (int i = 0; i < std::min(1000, static_cast<int>(go_cpu.numel())); ++i) {
+            if (std::isinf(go_data[i])) {
+                go_has_inf = true;
+                break;
+            }
+        }
+        // Also check max values of saved tensors
+        double a_max = 0.0;
+        for (int i = 0; i < static_cast<int>(a_cpu.numel()); ++i) {
+            if (std::abs(a_data[i]) > a_max) a_max = std::abs(a_data[i]);
+        }
+        double b_max = 0.0;
+        for (int i = 0; i < static_cast<int>(b_cpu.numel()); ++i) {
+            if (std::abs(b_data[i]) > b_max) b_max = std::abs(b_data[i]);
+        }
+        std::cerr << "[MATMUL_BACKWARD_F64] a_has_inf=" << a_has_inf << " (max=" << a_max << ")"
+                  << ", b_has_inf=" << b_has_inf << " (max=" << b_max << ")"
+                  << ", grad_out_has_inf=" << go_has_inf << std::endl;
+    }
+
     // Debug for Float16
     if (a.dtype() == DType::Float16) {
         std::cerr << "[MATMUL_BACKWARD_F16] a.shape: [";
@@ -215,8 +276,106 @@ auto MatMulBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<T
     auto b_t = transpose(b, b_ndim - 2, b_ndim - 1);
     auto a_t = transpose(a, a_ndim - 2, a_ndim - 1);
 
+    // Debug: Check transposes for Float64
+    if (a.dtype() == DType::Float64) {
+        auto b_t_cpu = b_t.to(Device::cpu());
+        auto* b_t_data = b_t_cpu.data<double>();
+        bool b_t_has_inf = false;
+        double b_t_max = 0.0;
+        for (int i = 0; i < static_cast<int>(b_t_cpu.numel()); ++i) {
+            if (std::isinf(b_t_data[i])) { b_t_has_inf = true; }
+            if (std::abs(b_t_data[i]) > b_t_max) b_t_max = std::abs(b_t_data[i]);
+        }
+        auto a_t_cpu = a_t.to(Device::cpu());
+        auto* a_t_data = a_t_cpu.data<double>();
+        bool a_t_has_inf = false;
+        double a_t_max = 0.0;
+        for (int i = 0; i < static_cast<int>(a_t_cpu.numel()); ++i) {
+            if (std::isinf(a_t_data[i])) { a_t_has_inf = true; }
+            if (std::abs(a_t_data[i]) > a_t_max) a_t_max = std::abs(a_t_data[i]);
+        }
+        auto go_cpu = grad_out.to(Device::cpu());
+        auto* go_data = go_cpu.data<double>();
+        double go_max = 0.0;
+        for (int i = 0; i < static_cast<int>(go_cpu.numel()); ++i) {
+            if (std::abs(go_data[i]) > go_max) go_max = std::abs(go_data[i]);
+        }
+        std::cerr << "[MATMUL_BACKWARD_F64] After transpose: b_t_has_inf=" << b_t_has_inf << " (max=" << b_t_max << ")"
+                  << ", a_t_has_inf=" << a_t_has_inf << " (max=" << a_t_max << ")"
+                  << ", grad_out_max=" << go_max << std::endl;
+    }
+
     auto grad_a = matmul(grad_out, b_t);
+
+    // Debug: Check grad_a for Float64 - check ALL elements
+    // Also check if values overflow when converted to Float32
+    if (a.dtype() == DType::Float64) {
+        auto grad_a_cpu = grad_a.to(Device::cpu());
+        auto* grad_a_data = grad_a_cpu.data<double>();
+        bool grad_a_has_inf = false;
+        bool grad_a_overflow_f32 = false;
+        int inf_idx = -1;
+        int overflow_idx = -1;
+        double max_val = 0.0;
+        for (int i = 0; i < static_cast<int>(grad_a_cpu.numel()); ++i) {
+            double v = grad_a_data[i];
+            if (std::isinf(v)) {
+                grad_a_has_inf = true;
+                if (inf_idx < 0) inf_idx = i;
+            }
+            if (std::abs(v) > max_val) max_val = std::abs(v);
+            // Check if it would overflow in Float32
+            if (!std::isinf(v) && std::abs(v) > 3.4e38) {  // Float32 max ~3.4e38
+                grad_a_overflow_f32 = true;
+                if (overflow_idx < 0) overflow_idx = i;
+            }
+        }
+        std::cerr << "[MATMUL_BACKWARD_F64] After grad_a = matmul(grad_out, b_t): grad_a_has_inf=" << grad_a_has_inf
+                  << " (idx=" << inf_idx << "/" << grad_a_cpu.numel() << ")"
+                  << ", max=" << max_val
+                  << ", overflow_f32=" << grad_a_overflow_f32 << " (idx=" << overflow_idx << ")"
+                  << ", grad_a.shape=[";
+        for (size_t i = 0; i < grad_a.shape().size(); ++i) {
+            if (i > 0) std::cerr << ",";
+            std::cerr << grad_a.shape()[i];
+        }
+        std::cerr << "]" << std::endl;
+    }
+
     auto grad_b = matmul(a_t, grad_out);
+
+    // Debug: Check grad_b for Float64 - check ALL elements
+    if (a.dtype() == DType::Float64) {
+        auto grad_b_cpu = grad_b.to(Device::cpu());
+        auto* grad_b_data = grad_b_cpu.data<double>();
+        bool grad_b_has_inf = false;
+        bool grad_b_overflow_f32 = false;
+        int inf_idx = -1;
+        int overflow_idx = -1;
+        double max_val = 0.0;
+        for (int i = 0; i < static_cast<int>(grad_b_cpu.numel()); ++i) {
+            double v = grad_b_data[i];
+            if (std::isinf(v)) {
+                grad_b_has_inf = true;
+                if (inf_idx < 0) inf_idx = i;
+            }
+            if (std::abs(v) > max_val) max_val = std::abs(v);
+            if (!std::isinf(v) && std::abs(v) > 3.4e38) {
+                grad_b_overflow_f32 = true;
+                if (overflow_idx < 0) overflow_idx = i;
+            }
+        }
+        std::cerr << "[MATMUL_BACKWARD_F64] After grad_b = matmul(a_t, grad_out): grad_b_has_inf=" << grad_b_has_inf
+                  << " (idx=" << inf_idx << "/" << grad_b_cpu.numel() << ")"
+                  << ", max=" << max_val
+                  << ", overflow_f32=" << grad_b_overflow_f32 << " (idx=" << overflow_idx << ")"
+                  << ", grad_b.shape=[";
+        for (size_t i = 0; i < grad_b.shape().size(); ++i) {
+            if (i > 0) std::cerr << ",";
+            std::cerr << grad_b.shape()[i];
+        }
+        std::cerr << "]" << std::endl;
+    }
 
     // Debug output gradients for Float16
     if (a.dtype() == DType::Float16) {
@@ -293,13 +452,26 @@ auto MeanBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
         n_elements = input.numel();
     }
 
-    float scale = 1.0f / static_cast<float>(n_elements);
+    // Use double for scale calculation to preserve precision for Float64 tensors
+    double scale = 1.0 / static_cast<double>(n_elements);
     auto input_shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+
+    // Debug for Float64 and Float16
+    bool debug = (input.dtype() == DType::Float64 || input.dtype() == DType::Float16) &&
+                 input.device().type == Device::Type::Vulkan;
 
     if (!dim_.has_value()) {
         // Reduced all dimensions - broadcast scalar tensor back to original shape
         // Use pure tensor operations (no CPU transfers) - backend agnostic!
         auto grad = grad_output;
+
+        if (debug) {
+            auto grad_cpu = grad.to(Device::cpu()).to(DType::Float32);
+            auto* data = grad_cpu.data<float>();
+            std::cerr << "[MEAN_BACKWARD] grad_output numel=" << grad.numel()
+                      << " dtype=" << static_cast<int>(grad.dtype())
+                      << " value=" << (grad.numel() > 0 ? data[0] : -999.0f) << std::endl;
+        }
 
         // Ensure grad is a 0-d tensor (may be 1-element tensor from some reductions)
         if (grad.ndim() > 0) {
@@ -309,11 +481,42 @@ auto MeanBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
         // Expand the scalar to input shape natively on device
         auto expanded = expand(grad, input_shape_vec);
 
+        if (debug) {
+            auto exp_cpu = expanded.to(Device::cpu()).to(DType::Float32);
+            auto* data = exp_cpu.data<float>();
+            std::cerr << "[MEAN_BACKWARD] expanded numel=" << expanded.numel()
+                      << " first5=";
+            for (int i = 0; i < std::min(5, (int)exp_cpu.numel()); ++i) {
+                std::cerr << data[i] << " ";
+            }
+            std::cerr << std::endl;
+        }
+
         // Scale by 1/N using backend-agnostic tensor multiplication
         // Create scalar tensor with same dtype and device as expanded gradient
+        // Use double overload of full() to preserve precision for Float64
         auto scale_tensor = full({}, scale, expanded.dtype(), expanded.device());
 
+        if (debug) {
+            auto scale_cpu = scale_tensor.to(Device::cpu()).to(DType::Float32);
+            auto* data = scale_cpu.data<float>();
+            std::cerr << "[MEAN_BACKWARD] scale_tensor numel=" << scale_tensor.numel()
+                      << " value=" << data[0]
+                      << " (scale=" << scale << ", n_elements=" << n_elements << ")" << std::endl;
+        }
+
         auto result = mul(expanded, scale_tensor);
+
+        if (debug) {
+            auto res_cpu = result.to(Device::cpu()).to(DType::Float32);
+            auto* data = res_cpu.data<float>();
+            std::cerr << "[MEAN_BACKWARD] result numel=" << result.numel()
+                      << " first5=";
+            for (int i = 0; i < std::min(5, (int)res_cpu.numel()); ++i) {
+                std::cerr << data[i] << " ";
+            }
+            std::cerr << std::endl;
+        }
 
         return {result};
     } else {
@@ -332,6 +535,7 @@ auto MeanBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Ten
         // Scale the expanded gradient using native Tensor multiplication
         // This now uses CUDA broadcasting automatically
         // Use expanded.dtype() to ensure dtypes match for element-wise operations
+        // Use double overload of full() to preserve precision for Float64
         auto scale_tensor = full(input_shape_vec, scale, expanded.dtype(), expanded.device());
         return {mul(expanded, scale_tensor)};
     }

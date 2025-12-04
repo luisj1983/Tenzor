@@ -133,10 +133,13 @@ private:
                           int64_t padding_h, int64_t padding_w) -> Tensor;
     auto dispatchAdaptiveMaxPool2d(const Tensor& input, int64_t out_h, int64_t out_w) -> std::pair<Tensor, Tensor>;
     auto dispatchAdaptiveAvgPool2d(const Tensor& input, int64_t out_h, int64_t out_w) -> Tensor;
+    auto dispatchAdaptiveAvgPool2dBackward(const Tensor& grad_output, int64_t H_in, int64_t W_in) -> Tensor;
     auto dispatchMaxPool2dBackward(const Tensor& grad_out, const Tensor& input,
                                    const Tensor& indices, int64_t kernel_h, int64_t kernel_w,
                                    int64_t stride_h, int64_t stride_w,
                                    int64_t padding_h, int64_t padding_w) -> Tensor;
+    auto dispatchMaxPool2dBackwardWithIndices(const Tensor& grad_output, const Tensor& indices,
+                                              int64_t H_in, int64_t W_in) -> Tensor;
 
     // New pooling operations (OpAttributes versions)
     auto dispatchAvgPool2dForward(const Tensor& input, const OpAttributes& attrs) -> Tensor;
@@ -182,6 +185,10 @@ private:
     auto dispatchScatter(const Tensor& input, int64_t dim, const Tensor& indices,
                         const Tensor& values, int64_t reduction) -> Tensor;
     auto dispatchIndexSelect(const Tensor& input, int64_t dim, const Tensor& indices) -> Tensor;
+
+    // Vision operations
+    auto dispatchGatherRelativePositionBias(const Tensor& table, const Tensor& indices,
+                                            int64_t num_positions, int64_t num_heads) -> Tensor;
 
     // Shape operations
     auto dispatchReshape(const Tensor& input, const std::vector<int64_t>& new_shape) -> Tensor;

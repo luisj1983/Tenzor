@@ -12,6 +12,7 @@
 #include "tenzor/ops/transform.hpp"
 #include <stdexcept>
 #include <cmath>
+#include <iostream>
 
 namespace tenzor::models {
 
@@ -499,20 +500,47 @@ SwinTransformer::SwinTransformer(int64_t img_size,
     register_module("head", head_);
 }
 
+// Helper to check max value of tensor
+static double check_max_value(const Variable& var, const std::string& name, bool always_print = false) {
+    if (var.tensor().dtype() != DType::Float64) return 0.0;
+    auto cpu = var.tensor().to(Device::cpu());
+    auto* data = cpu.data<double>();
+    double max_val = 0.0;
+    for (int i = 0; i < static_cast<int>(cpu.numel()); ++i) {
+        if (std::abs(data[i]) > max_val) max_val = std::abs(data[i]);
+    }
+    if (max_val > 1e10 || always_print) {
+        std::cerr << "[SWIN_FORWARD_F64] " << name << " max=" << max_val
+                  << ", shape=[";
+        for (size_t i = 0; i < var.tensor().shape().size(); ++i) {
+            if (i > 0) std::cerr << ",";
+            std::cerr << var.tensor().shape()[i];
+        }
+        std::cerr << "]" << std::endl;
+    }
+    return max_val;
+}
+
 auto SwinTransformer::forward_impl(const Variable& input) -> Variable {
     // Patch embedding
     auto x = patch_embed_->forward(input);
+    check_max_value(x, "after_patch_embed");
 
     // Position dropout
     x = pos_drop_->forward(x);
+    check_max_value(x, "after_pos_drop");
 
     // Apply all stages
+    int stage_idx = 0;
     for (auto& layer : layers_) {
         x = layer->forward(x);
+        check_max_value(x, "after_stage_" + std::to_string(stage_idx));
+        stage_idx++;
     }
 
     // Final layer norm
     x = norm_->forward(x);
+    check_max_value(x, "after_final_norm");
 
     // Global average pooling
     // x shape: (B, num_patches, C)
@@ -533,16 +561,21 @@ auto SwinTransformer::forward_impl(const Variable& input) -> Variable {
 
     // Reshape: (B, H*W, C) -> (B, H, W, C) -> (B, C, H, W)
     x = x.reshape({B, H, W, C});
+    check_max_value(x, "after_reshape1", true);
     x = x.permute({0, 3, 1, 2});  // (B, C, H, W)
+    check_max_value(x, "after_permute", true);
 
     // Global pooling
     x = avgpool_->forward(x);
+    check_max_value(x, "after_avgpool", true);
 
     // Flatten: (B, C, 1, 1) -> (B, C)
     x = x.reshape({B, C});
+    check_max_value(x, "after_flatten");
 
     // Classification head
     x = head_->forward(x);
+    check_max_value(x, "after_head");
 
     return x;
 }
