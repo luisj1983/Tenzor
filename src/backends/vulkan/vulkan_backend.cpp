@@ -552,8 +552,9 @@ vulkan::ComputePipeline* VulkanBackend::getPipeline(const std::string& shader_na
 
     // Setup push constants for shaders
     std::vector<VkPushConstantRange> pushConstants;
-    if (shader_name == "math" || shader_name == "comparison" || shader_name == "comparison_bool") {
-        // math/comparison/comparison_bool: 8 bytes (uint n, uint op)
+    if (shader_name == "math" || shader_name == "comparison" || shader_name == "comparison_bool" ||
+        shader_name == "comparison_f64" || shader_name == "comparison_i32" || shader_name == "comparison_i64") {
+        // math/comparison (all variants): 8 bytes (uint n, uint op)
         VkPushConstantRange push_range{};
         push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         push_range.offset = 0;
@@ -629,6 +630,13 @@ vulkan::ComputePipeline* VulkanBackend::getPipeline(const std::string& shader_na
         push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         push_range.offset = 0;
         push_range.size = 4;  // 1 uint32_t value
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "clamp_f64") {
+        // clamp_f64: 24 bytes (n_elements, padding, min_value double, max_value double)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 24;  // uint32_t + uint32_t padding + 2 doubles
         pushConstants.push_back(push_range);
     }
 
@@ -2273,8 +2281,25 @@ auto VulkanBackend::dispatchComparisonOp(const std::string& op_name,
     int32_t device_id = a.device().index;
 
     // Select shader based on input dtype
-    // Bool dtype requires comparison_bool shader (uint8_t inputs)
-    std::string shader_name = (a.dtype() == DType::Bool) ? "comparison_bool" : "comparison";
+    std::string shader_name;
+    switch (a.dtype()) {
+        case DType::Bool:
+            shader_name = "comparison_bool";
+            break;
+        case DType::Float64:
+            shader_name = "comparison_f64";
+            break;
+        case DType::Int32:
+            shader_name = "comparison_i32";
+            break;
+        case DType::Int64:
+            shader_name = "comparison_i64";
+            break;
+        default:
+            // Float32 and Float16 use the default comparison shader
+            shader_name = "comparison";
+            break;
+    }
     auto* pipeline = getPipeline(shader_name, device_id);
 
     // Create output tensor (convert span to vector)
@@ -3806,7 +3831,10 @@ auto VulkanBackend::dispatchSoftmax(const Tensor& input, int64_t dim) -> Tensor 
 auto VulkanBackend::dispatchLogSoftmax(const Tensor& input, int64_t dim) -> Tensor {
     auto input_shape = input.shape();
     int32_t device_id = input.device().index;
-    auto* pipeline = getPipeline("log_softmax", device_id);
+
+    // Select shader based on dtype
+    std::string shader_name = (input.dtype() == DType::Float64) ? "log_softmax_f64" : "log_softmax";
+    auto* pipeline = getPipeline(shader_name, device_id);
 
     // Handle negative dimension
     if (dim < 0) {
@@ -5388,7 +5416,9 @@ auto VulkanBackend::dispatchCat(const std::vector<Tensor>& inputs, int64_t dim) 
  */
 auto VulkanBackend::dispatchClamp(const Tensor& input, float min_value, float max_value) -> Tensor {
     int32_t device_id = input.device().index;
-    auto* pipeline = getPipeline("clamp", device_id);
+    bool is_float64 = (input.dtype() == DType::Float64);
+    std::string shader_name = is_float64 ? "clamp_f64" : "clamp";
+    auto* pipeline = getPipeline(shader_name, device_id);
 
     // Create output tensor
     auto input_shape = input.shape();
@@ -5409,24 +5439,44 @@ auto VulkanBackend::dispatchClamp(const Tensor& input, float min_value, float ma
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
         device_id, pipeline, bindings, sizes);
 
-    // Prepare push constants
-    struct PushConstants {
-        uint32_t n_elements;
-        float min_value;
-        float max_value;
-    } push_constants;
-
-    push_constants.n_elements = static_cast<uint32_t>(output.numel());
-    push_constants.min_value = min_value;
-    push_constants.max_value = max_value;
-
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
     vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                            pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
-    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
-                      VK_SHADER_STAGE_COMPUTE_BIT,
-                      0, sizeof(PushConstants), &push_constants);
+
+    if (is_float64) {
+        // Float64 push constants with double min/max values
+        struct PushConstantsF64 {
+            uint32_t n_elements;
+            uint32_t padding;
+            double min_value;
+            double max_value;
+        } push_constants_f64;
+
+        push_constants_f64.n_elements = static_cast<uint32_t>(output.numel());
+        push_constants_f64.padding = 0;
+        push_constants_f64.min_value = static_cast<double>(min_value);
+        push_constants_f64.max_value = static_cast<double>(max_value);
+
+        vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                          VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(PushConstantsF64), &push_constants_f64);
+    } else {
+        // Float32 push constants
+        struct PushConstants {
+            uint32_t n_elements;
+            float min_value;
+            float max_value;
+        } push_constants;
+
+        push_constants.n_elements = static_cast<uint32_t>(output.numel());
+        push_constants.min_value = min_value;
+        push_constants.max_value = max_value;
+
+        vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                          VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(PushConstants), &push_constants);
+    }
 
     uint32_t workgroups = (output.numel() + 255) / 256;
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);

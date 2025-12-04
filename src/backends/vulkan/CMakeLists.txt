@@ -47,6 +47,9 @@ set(SHADERS
     math_broadcast_i8
     comparison
     comparison_bool
+    comparison_f64
+    comparison_i32
+    comparison_i64
     matmul
     activations
     activations_f64
@@ -104,6 +107,7 @@ set(SHADERS
     expand_f64
     cat
     clamp
+    clamp_f64
     # BatchNorm2d operations
     batchnorm2d_forward
     batchnorm2d_backward
@@ -143,6 +147,7 @@ set(SHADERS
     matmul_f64
     softmax_f64
     layer_norm_f64
+    log_softmax_f64
 )
 
 # Compile each shader

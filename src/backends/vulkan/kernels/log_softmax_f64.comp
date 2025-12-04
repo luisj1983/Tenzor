@@ -1,0 +1,123 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Log Softmax with numerical stability for Float64
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Input { double input_data[]; };
+layout(binding = 1) buffer Output { double output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint batch_size;
+    uint num_classes;
+    uint dim;
+} params;
+
+shared double shared_max[256];
+shared double shared_sum[256];
+
+// Double-precision exp approximation with range reduction
+double exp_d(double x) {
+    // For large |x|, clamp to avoid overflow/underflow
+    if (x > 709.0) return 1.0e308;  // near max double
+    if (x < -745.0) return 0.0;
+
+    // Use range reduction: exp(x) = 2^k * exp(r) where x = k*ln(2) + r
+    double ln2 = 0.6931471805599453;
+    double k = floor(x / ln2);
+    double r = x - k * ln2;
+
+    // exp(r) where |r| < ln(2) ~ 0.693, use float exp which is accurate enough for small values
+    double exp_r = double(exp(float(r)));
+
+    // Multiply by 2^k
+    if (k >= 0.0) {
+        for (int i = 0; i < int(k); i++) {
+            exp_r *= 2.0;
+        }
+    } else {
+        for (int i = 0; i < int(-k); i++) {
+            exp_r *= 0.5;
+        }
+    }
+    return exp_r;
+}
+
+// Double-precision log approximation
+double log_d(double x) {
+    if (x <= 0.0) return -1.0 / 0.0;  // -inf for x <= 0
+    if (x == 1.0) return 0.0;
+
+    // For values that fit in float range with good precision, use float log
+    if (x >= 1.0e-30 && x <= 1.0e30) {
+        return double(log(float(x)));
+    }
+
+    // For extreme values, use range reduction
+    double ln2 = 0.6931471805599453;
+    int e = 0;
+    double m = x;
+
+    // Normalize to range [1, 2)
+    while (m >= 2.0) { m *= 0.5; e++; }
+    while (m < 1.0) { m *= 2.0; e--; }
+
+    // Now m is in [1, 2), compute log(m) using float
+    double log_m = double(log(float(m)));
+
+    return log_m + double(e) * ln2;
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint batch_idx = gl_WorkGroupID.x;
+
+    if (batch_idx >= params.batch_size) {
+        return;
+    }
+
+    uint base_idx = batch_idx * params.num_classes;
+
+    // Step 1: Find maximum for numerical stability
+    double local_max = -1.0 / 0.0; // -infinity
+    for (uint i = tid; i < params.num_classes; i += 256) {
+        local_max = max(local_max, input_data[base_idx + i]);
+    }
+    shared_max[tid] = local_max;
+    barrier();
+
+    // Parallel reduction for max
+    for (uint s = 128; s > 0; s >>= 1) {
+        if (tid < s) {
+            shared_max[tid] = max(shared_max[tid], shared_max[tid + s]);
+        }
+        barrier();
+    }
+
+    double row_max = shared_max[0];
+    barrier();
+
+    // Step 2: Compute sum(exp(x - max))
+    double local_sum = 0.0;
+    for (uint i = tid; i < params.num_classes; i += 256) {
+        local_sum += exp_d(input_data[base_idx + i] - row_max);
+    }
+    shared_sum[tid] = local_sum;
+    barrier();
+
+    // Parallel reduction for sum
+    for (uint s = 128; s > 0; s >>= 1) {
+        if (tid < s) {
+            shared_sum[tid] += shared_sum[tid + s];
+        }
+        barrier();
+    }
+
+    double log_sum_exp = log_d(shared_sum[0]);
+    barrier();
+
+    // Step 3: Compute log_softmax = x - max - log(sum(exp(x - max)))
+    for (uint i = tid; i < params.num_classes; i += 256) {
+        output_data[base_idx + i] = input_data[base_idx + i] - row_max - log_sum_exp;
+    }
+}

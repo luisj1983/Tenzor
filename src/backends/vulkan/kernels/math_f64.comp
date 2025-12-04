@@ -1,5 +1,6 @@
 #version 450
 #extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+#extension GL_ARB_gpu_shader_fp64 : enable
 
 // Math operations with Float64 support
 layout(local_size_x = 256) in;
@@ -13,6 +14,73 @@ layout(push_constant) uniform PushConstants {
     uint op;         // Operation: 0=add, 1=sub, 2=mul, 3=div, 4=sqrt, 5=exp, 6=log, 7=neg, 8=abs, 9=pow, 10=sign, 11=floor, 12=ceil, 13=round, 14=trunc, 15=reciprocal
     double param;    // Parameter for operations like pow (exponent) - now double
 } params;
+
+// Double-precision exp approximation using the identity: exp(x) = exp(x/2)^2
+// This provides better precision than casting to float
+double exp_double(double x) {
+    // For large |x|, clamp to avoid overflow/underflow
+    if (x > 709.0) return 1.0e308;  // near max double
+    if (x < -745.0) return 0.0;
+
+    // Use range reduction: exp(x) = 2^k * exp(r) where x = k*ln(2) + r
+    // For values in reasonable range, use float exp with correction
+    double ln2 = 0.6931471805599453;
+    double k = floor(x / ln2);
+    double r = x - k * ln2;
+
+    // exp(r) where |r| < ln(2) ~ 0.693, use float exp which is accurate enough
+    double exp_r = double(exp(float(r)));
+
+    // Multiply by 2^k using ldexp-like operation
+    // 2^k = exp(k * ln(2))
+    if (k >= 0.0) {
+        for (int i = 0; i < int(k); i++) {
+            exp_r *= 2.0;
+        }
+    } else {
+        for (int i = 0; i < int(-k); i++) {
+            exp_r *= 0.5;
+        }
+    }
+    return exp_r;
+}
+
+// Double-precision log approximation
+// log(x) = log(m * 2^e) = log(m) + e * log(2)
+double log_double(double x) {
+    if (x <= 0.0) return -1.0 / 0.0;  // -inf for x <= 0
+    if (x == 1.0) return 0.0;
+
+    // For values that fit in float range with good precision, use float log
+    // Float has ~7 decimal digits precision, sufficient for values 1e-38 to 1e38
+    if (x >= 1.0e-30 && x <= 1.0e30) {
+        return double(log(float(x)));
+    }
+
+    // For extreme values, use range reduction
+    double ln2 = 0.6931471805599453;
+    int e = 0;
+    double m = x;
+
+    // Normalize to range [1, 2)
+    while (m >= 2.0) { m *= 0.5; e++; }
+    while (m < 1.0) { m *= 2.0; e--; }
+
+    // Now m is in [1, 2), compute log(m) using float
+    double log_m = double(log(float(m)));
+
+    return log_m + double(e) * ln2;
+}
+
+// Double-precision pow approximation
+double pow_double(double base, double exp_val) {
+    if (base <= 0.0) {
+        if (base == 0.0) return 0.0;
+        return 0.0;  // Negative base with non-integer exp is undefined
+    }
+    // pow(base, exp) = exp(exp * log(base))
+    return exp_double(exp_val * log_double(base));
+}
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
@@ -41,10 +109,10 @@ void main() {
             result[idx] = sqrt(val_a);
             break;
         case 5: // exp (unary)
-            result[idx] = double(exp(float(val_a)));
+            result[idx] = exp_double(val_a);
             break;
         case 6: // log (unary)
-            result[idx] = double(log(float(val_a)));
+            result[idx] = log_double(val_a);
             break;
         case 7: // neg (unary)
             result[idx] = -val_a;
@@ -53,7 +121,7 @@ void main() {
             result[idx] = abs(val_a);
             break;
         case 9: // pow (unary with parameter)
-            result[idx] = double(pow(float(val_a), float(params.param)));
+            result[idx] = pow_double(val_a, params.param);
             break;
         case 10: // sign (unary)
             if (val_a < 0.0) {

@@ -1,0 +1,27 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Clamp operation for Float64: clamp values to [min, max] range
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Input { double input_data[]; };
+layout(binding = 1) buffer Output { double output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;    // Number of elements
+    uint padding;       // Padding for alignment
+    double min_value;   // Minimum value (double)
+    double max_value;   // Maximum value (double)
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_elements) return;
+
+    double value = input_data[idx];
+
+    // Clamp value to [min, max] range
+    value = max(params.min_value, min(params.max_value, value));
+
+    output_data[idx] = value;
+}
