@@ -1,0 +1,88 @@
+#version 450
+#extension GL_ARB_gpu_shader_fp64 : enable
+
+// GPU Random Number Generation for Float64 using Philox 4x32
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Output { double output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    uint seed;
+    uint offset;
+    uint distribution;   // 0 = uniform, 1 = normal
+} params;
+
+const uint PHILOX_M0 = 0xD2511F53u;
+const uint PHILOX_M1 = 0xCD9E8D57u;
+const uint PHILOX_W0 = 0x9E3779B9u;
+const uint PHILOX_W1 = 0xBB67AE85u;
+
+uint mulhi(uint a, uint b) {
+    uint a_lo = a & 0xFFFFu;
+    uint a_hi = a >> 16;
+    uint b_lo = b & 0xFFFFu;
+    uint b_hi = b >> 16;
+    uint p0 = a_lo * b_lo;
+    uint p1 = a_lo * b_hi;
+    uint p2 = a_hi * b_lo;
+    uint p3 = a_hi * b_hi;
+    uint carry = ((p0 >> 16) + (p1 & 0xFFFFu) + (p2 & 0xFFFFu)) >> 16;
+    return p3 + (p1 >> 16) + (p2 >> 16) + carry;
+}
+
+void philox_round(inout uvec4 ctr, uvec2 key) {
+    uint hi0 = mulhi(ctr.x, PHILOX_M0);
+    uint lo0 = ctr.x * PHILOX_M0;
+    uint hi1 = mulhi(ctr.z, PHILOX_M1);
+    uint lo1 = ctr.z * PHILOX_M1;
+    ctr = uvec4(hi1 ^ ctr.y ^ key.x, lo1, hi0 ^ ctr.w ^ key.y, lo0);
+}
+
+uvec4 philox4x32(uvec4 ctr, uvec2 key) {
+    for (int i = 0; i < 10; i++) {
+        philox_round(ctr, key);
+        key.x += PHILOX_W0;
+        key.y += PHILOX_W1;
+    }
+    return ctr;
+}
+
+// Convert two uint32s to double in [0, 1) with higher precision
+double uints_to_double01(uint hi, uint lo) {
+    // Use 32 bits for simplicity (still gives good precision)
+    return double(hi) / 4294967296.0LF;
+}
+
+dvec2 box_muller_double(double u1, double u2) {
+    // Use float versions and convert to double for transcendental functions
+    // as GLSL doesn't have native double transcendentals
+    float f_u1 = float(max(u1, 1e-15LF));
+    float f_u2 = float(u2);
+    float r = sqrt(-2.0 * log(f_u1));
+    float theta = 6.283185307179586 * f_u2;
+    return dvec2(double(r * cos(theta)), double(r * sin(theta)));
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.n_elements) {
+        return;
+    }
+
+    uint element_idx = idx + params.offset;
+    uvec4 ctr = uvec4(element_idx, element_idx >> 16, 0, 0);
+    uvec2 key = uvec2(params.seed, params.seed ^ 0xDEADBEEFu);
+
+    uvec4 rand_vals = philox4x32(ctr, key);
+
+    if (params.distribution == 0) {
+        output_data[idx] = uints_to_double01(rand_vals.x, rand_vals.y);
+    } else {
+        double u1 = uints_to_double01(rand_vals.x, rand_vals.y);
+        double u2 = uints_to_double01(rand_vals.z, rand_vals.w);
+        dvec2 normal = box_muller_double(u1, u2);
+        output_data[idx] = normal.x;
+    }
+}

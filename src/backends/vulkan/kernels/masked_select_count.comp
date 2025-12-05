@@ -1,0 +1,78 @@
+#version 450
+
+// Masked select - Pass 1: Count true elements in mask
+// Uses parallel reduction to count efficiently
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Mask { uint mask_data[]; };   // Bool mask (packed as uint8 in uint32)
+layout(binding = 1) buffer Count { uint count[]; };      // Output: count per workgroup, then total
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;      // Total number of mask elements
+    uint mask_is_float;   // 0 = bool/uint8, 1 = float32 (non-zero = true)
+    uint pass;            // 0 = per-element, 1 = reduce workgroup counts
+} params;
+
+shared uint shared_count[256];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint gid = gl_GlobalInvocationID.x;
+    uint wid = gl_WorkGroupID.x;
+
+    if (params.pass == 0) {
+        // Pass 1: Count true elements
+        uint local_count = 0;
+
+        if (gid < params.n_elements) {
+            if (params.mask_is_float == 1) {
+                // Float mask - non-zero = true
+                float val = uintBitsToFloat(mask_data[gid]);
+                if (val != 0.0) local_count = 1;
+            } else {
+                // Bool mask packed as bytes
+                uint byte_idx = gid / 4;
+                uint bit_offset = (gid % 4) * 8;
+                uint byte_val = (mask_data[byte_idx] >> bit_offset) & 0xFF;
+                if (byte_val != 0) local_count = 1;
+            }
+        }
+
+        shared_count[tid] = local_count;
+        barrier();
+
+        // Parallel reduction
+        for (uint s = 128; s > 0; s >>= 1) {
+            if (tid < s) {
+                shared_count[tid] += shared_count[tid + s];
+            }
+            barrier();
+        }
+
+        if (tid == 0) {
+            count[wid] = shared_count[0];
+        }
+    } else {
+        // Pass 2: Sum workgroup counts (single workgroup)
+        uint n_workgroups = (params.n_elements + 255) / 256;
+
+        uint local_sum = 0;
+        for (uint i = tid; i < n_workgroups; i += 256) {
+            local_sum += count[i];
+        }
+
+        shared_count[tid] = local_sum;
+        barrier();
+
+        for (uint s = 128; s > 0; s >>= 1) {
+            if (tid < s) {
+                shared_count[tid] += shared_count[tid + s];
+            }
+            barrier();
+        }
+
+        if (tid == 0) {
+            count[0] = shared_count[0];
+        }
+    }
+}

@@ -1,0 +1,32 @@
+#version 450
+
+// BatchNorm running statistics update using exponential moving average
+// running_mean = (1 - momentum) * running_mean + momentum * batch_mean
+// running_var  = (1 - momentum) * running_var  + momentum * batch_var
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer RunningMean { float running_mean[]; };
+layout(binding = 1) buffer RunningVar { float running_var[]; };
+layout(binding = 2) buffer BatchMean { float batch_mean[]; };
+layout(binding = 3) buffer BatchVar { float batch_var[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_channels;      // Number of channels (C)
+    float momentum;       // Momentum for EMA (typically 0.1)
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.n_channels) {
+        return;
+    }
+
+    float one_minus_momentum = 1.0 - params.momentum;
+
+    // Update running mean with EMA
+    running_mean[idx] = one_minus_momentum * running_mean[idx] + params.momentum * batch_mean[idx];
+
+    // Update running variance with EMA
+    running_var[idx] = one_minus_momentum * running_var[idx] + params.momentum * batch_var[idx];
+}

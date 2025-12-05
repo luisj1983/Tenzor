@@ -1,0 +1,57 @@
+#version 450
+#extension GL_ARB_gpu_shader_int64 : enable
+
+// Strided copy operation for Float64: copy non-contiguous tensor to contiguous layout
+layout(local_size_x = 256) in;
+
+// Use uvec2 to represent double (64-bit) values
+layout(binding = 0) buffer Input { uvec2 input_data[]; };
+layout(binding = 1) buffer Output { uvec2 output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    uint ndims;
+    uint base_offset;
+    uvec4 shape_0_3;
+    uvec4 shape_4_7;
+    ivec4 strides_0_3;
+    ivec4 strides_4_7;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.n_elements) {
+        return;
+    }
+
+    uint remaining = idx;
+    int src_offset = int(params.base_offset);
+
+    uint shape[8];
+    int strides[8];
+    shape[0] = params.shape_0_3.x;
+    shape[1] = params.shape_0_3.y;
+    shape[2] = params.shape_0_3.z;
+    shape[3] = params.shape_0_3.w;
+    shape[4] = params.shape_4_7.x;
+    shape[5] = params.shape_4_7.y;
+    shape[6] = params.shape_4_7.z;
+    shape[7] = params.shape_4_7.w;
+    strides[0] = params.strides_0_3.x;
+    strides[1] = params.strides_0_3.y;
+    strides[2] = params.strides_0_3.z;
+    strides[3] = params.strides_0_3.w;
+    strides[4] = params.strides_4_7.x;
+    strides[5] = params.strides_4_7.y;
+    strides[6] = params.strides_4_7.z;
+    strides[7] = params.strides_4_7.w;
+
+    for (int dim = int(params.ndims) - 1; dim >= 0; dim--) {
+        uint dim_idx = remaining % shape[dim];
+        remaining /= shape[dim];
+        src_offset += int(dim_idx) * strides[dim];
+    }
+
+    output_data[idx] = input_data[src_offset];
+}

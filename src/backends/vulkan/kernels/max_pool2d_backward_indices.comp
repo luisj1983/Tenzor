@@ -1,0 +1,33 @@
+#version 450
+#extension GL_EXT_shader_atomic_float : enable
+
+// Max Pooling 2D Backward Pass using pre-computed indices
+// This kernel scatters gradients to the positions where max values were found
+// Uses atomic operations for overlapping pooling windows
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer GradOutput { float grad_output[]; };  // (N, C, H_out, W_out) flattened
+layout(binding = 1) buffer Indices { float indices[]; };          // Pre-computed max indices
+layout(binding = 2) buffer GradInput { float grad_input[]; };     // (N, C, H, W) output
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;          // Total output gradient elements (N * C * H_out * W_out)
+    uint grad_input_size;     // Total input gradient elements (N * C * H * W)
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.n_elements) {
+        return;
+    }
+
+    // Get gradient and target index
+    float grad = grad_output[idx];
+    int target_idx = int(indices[idx]);
+
+    // Bounds check and scatter gradient
+    if (target_idx >= 0 && target_idx < int(params.grad_input_size)) {
+        atomicAdd(grad_input[target_idx], grad);
+    }
+}

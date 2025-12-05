@@ -13,6 +13,7 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <iostream>
 #include <limits>
@@ -63,6 +64,17 @@ VulkanBackend::~VulkanBackend() {
         // Otherwise descriptor pool destructor will try to use invalid device handle
         if (ctx.descriptorPool) {
             ctx.descriptorPool.reset();
+        }
+        // Free command buffer pool before destroying command pool
+        if (!ctx.commandBufferPool.empty() && ctx.commandPool != VK_NULL_HANDLE) {
+            vkFreeCommandBuffers(ctx.device, ctx.commandPool,
+                                static_cast<uint32_t>(ctx.commandBufferPool.size()),
+                                ctx.commandBufferPool.data());
+            ctx.commandBufferPool.clear();
+        }
+        // Destroy fence
+        if (ctx.pendingFence != VK_NULL_HANDLE) {
+            vkDestroyFence(ctx.device, ctx.pendingFence, nullptr);
         }
         if (ctx.commandPool != VK_NULL_HANDLE) {
             vkDestroyCommandPool(ctx.device, ctx.commandPool, nullptr);
@@ -275,6 +287,17 @@ void VulkanBackend::createLogicalDevices() {
         // Increased from 1000 to 100000 to support long-running tests (transformers, LSTMs, etc.)
         ctx.descriptorPool = std::make_unique<vulkan::DescriptorPool>(ctx.device, 100000);
 
+        // Create fence for async synchronization
+        VkFenceCreateInfo fenceInfo{};
+        fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        fenceInfo.flags = 0;  // Start unsignaled
+        vulkan::checkVk(vkCreateFence(ctx.device, &fenceInfo, nullptr, &ctx.pendingFence),
+                       "Failed to create synchronization fence");
+        ctx.hasPendingWork = false;
+
+        // Initialize command buffer pool
+        initCommandBufferPool(ctx);
+
         // Initialize caches
         stagingBuffers_.push_back({});
         pipelineCaches_.push_back({});
@@ -330,6 +353,8 @@ auto VulkanBackend::deallocate(void* ptr) -> void {
     auto it = allocations_.find(ptr);
     if (it != allocations_.end()) {
         auto [bytes, device_id] = it->second;
+        // Ensure any pending async GPU work completes before freeing memory
+        ensurePendingWorkComplete(device_id);
         freeDeviceMemory(ptr, device_id);
         allocations_.erase(it);
     }
@@ -369,6 +394,9 @@ auto VulkanBackend::copy(void* dst, const void* src, size_t bytes,
             break;
         }
         case CopyKind::DeviceToHost: {
+            // Ensure any pending GPU compute work is complete before copying
+            ensurePendingWorkComplete(device_id);
+
             auto& staging = getStagingBuffer(device_id, bytes);
 
             // Copy from device to staging
@@ -381,6 +409,9 @@ auto VulkanBackend::copy(void* dst, const void* src, size_t bytes,
             vkCmdCopyBuffer(cmdBuffer, src_buffer,
                           staging.buffer->buffer(), 1, &copyRegion);
             endSingleTimeCommands(cmdBuffer, device_id);
+
+            // Ensure copy is complete before reading from staging buffer
+            ensurePendingWorkComplete(device_id);
 
             void* mapped = staging.buffer->map();
             std::memcpy(dst, mapped, bytes);
@@ -424,27 +455,81 @@ VulkanBackend::StagingBuffer& VulkanBackend::getStagingBuffer(int32_t device_id,
 }
 
 VkCommandBuffer VulkanBackend::beginSingleTimeCommands(int32_t device_id) {
-    auto& ctx = devices_[device_id];
+    // Use pooled command buffer for reduced allocation overhead
+    return acquireCommandBuffer(device_id);
+}
 
+void VulkanBackend::endSingleTimeCommands(VkCommandBuffer commandBuffer, int32_t device_id) {
+    // Use async submission with fence tracking
+    endSingleTimeCommandsAsync(commandBuffer, device_id);
+}
+
+void VulkanBackend::initCommandBufferPool(DeviceContext& ctx) {
     VkCommandBufferAllocateInfo allocInfo{};
     allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     allocInfo.commandPool = ctx.commandPool;
-    allocInfo.commandBufferCount = 1;
+    allocInfo.commandBufferCount = static_cast<uint32_t>(DeviceContext::COMMAND_BUFFER_POOL_SIZE);
 
-    VkCommandBuffer commandBuffer;
-    vkAllocateCommandBuffers(ctx.device, &allocInfo, &commandBuffer);
+    ctx.commandBufferPool.resize(DeviceContext::COMMAND_BUFFER_POOL_SIZE);
+    vulkan::checkVk(vkAllocateCommandBuffers(ctx.device, &allocInfo, ctx.commandBufferPool.data()),
+                   "Failed to allocate command buffer pool");
+    ctx.nextCommandBufferIndex = 0;
+}
+
+VkCommandBuffer VulkanBackend::acquireCommandBuffer(int32_t device_id) {
+    auto& ctx = devices_[device_id];
+
+    // If we've used all buffers in the pool, wait for pending work and reset
+    if (ctx.nextCommandBufferIndex >= ctx.commandBufferPool.size()) {
+        ensurePendingWorkComplete(device_id);
+        vkResetCommandPool(ctx.device, ctx.commandPool, 0);
+        ctx.nextCommandBufferIndex = 0;
+    }
+
+    VkCommandBuffer cmdBuffer = ctx.commandBufferPool[ctx.nextCommandBufferIndex++];
 
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 
-    vkBeginCommandBuffer(commandBuffer, &beginInfo);
-
-    return commandBuffer;
+    vkBeginCommandBuffer(cmdBuffer, &beginInfo);
+    return cmdBuffer;
 }
 
-void VulkanBackend::endSingleTimeCommands(VkCommandBuffer commandBuffer, int32_t device_id) {
+void VulkanBackend::releaseCommandBuffer(VkCommandBuffer cmdBuffer, int32_t device_id) {
+    // Command buffers are pooled and reset together, no individual release needed
+    (void)cmdBuffer;
+    (void)device_id;
+}
+
+void VulkanBackend::ensurePendingWorkComplete(int32_t device_id) {
+    auto& ctx = devices_[device_id];
+
+    if (ctx.hasPendingWork) {
+        // First check fence status without waiting
+        VkResult status = vkGetFenceStatus(ctx.device, ctx.pendingFence);
+        if (status == VK_ERROR_DEVICE_LOST) {
+            throw std::runtime_error("Device lost before fence wait (fence status check)");
+        }
+
+        VkResult result = vkWaitForFences(ctx.device, 1, &ctx.pendingFence, VK_TRUE, UINT64_MAX);
+        if (result != VK_SUCCESS) {
+            // Get more info about the error
+            std::string error_msg = "Failed to wait for fence: " + std::to_string(result);
+            if (result == VK_ERROR_DEVICE_LOST) {
+                error_msg += " (VK_ERROR_DEVICE_LOST - GPU crash or timeout)";
+            } else if (result == VK_TIMEOUT) {
+                error_msg += " (VK_TIMEOUT)";
+            }
+            throw std::runtime_error(error_msg);
+        }
+        vkResetFences(ctx.device, 1, &ctx.pendingFence);
+        ctx.hasPendingWork = false;
+    }
+}
+
+void VulkanBackend::endSingleTimeCommandsAsync(VkCommandBuffer commandBuffer, int32_t device_id) {
     auto& ctx = devices_[device_id];
 
     VkResult result = vkEndCommandBuffer(commandBuffer);
@@ -452,22 +537,35 @@ void VulkanBackend::endSingleTimeCommands(VkCommandBuffer commandBuffer, int32_t
         throw std::runtime_error("Failed to end command buffer: " + std::to_string(result));
     }
 
+    // Wait for any previous work before submitting new work with the fence
+    ensurePendingWorkComplete(device_id);
+
+    // Verify fence is in unsignaled state before submit
+    VkResult fenceStatus = vkGetFenceStatus(ctx.device, ctx.pendingFence);
+    if (fenceStatus == VK_SUCCESS) {
+        // Fence is signaled, need to reset it
+        vkResetFences(ctx.device, 1, &ctx.pendingFence);
+    } else if (fenceStatus != VK_NOT_READY) {
+        throw std::runtime_error("Fence in invalid state before submit: " + std::to_string(fenceStatus));
+    }
+
     VkSubmitInfo submitInfo{};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &commandBuffer;
 
-    result = vkQueueSubmit(ctx.computeQueue, 1, &submitInfo, VK_NULL_HANDLE);
+    result = vkQueueSubmit(ctx.computeQueue, 1, &submitInfo, ctx.pendingFence);
     if (result != VK_SUCCESS) {
-        throw std::runtime_error("Failed to submit queue: " + std::to_string(result));
+        std::string error_msg = "Failed to submit queue with fence: " + std::to_string(result);
+        if (result == VK_ERROR_DEVICE_LOST) {
+            error_msg += " (VK_ERROR_DEVICE_LOST)";
+        }
+        throw std::runtime_error(error_msg);
     }
 
-    result = vkQueueWaitIdle(ctx.computeQueue);
-    if (result != VK_SUCCESS) {
-        throw std::runtime_error("Failed to wait for queue idle: " + std::to_string(result));
-    }
-
-    vkFreeCommandBuffers(ctx.device, ctx.commandPool, 1, &commandBuffer);
+    ctx.hasPendingWork = true;
+    // NOTE: We don't wait here - that's the whole point of async submission!
+    // The fence will be waited on when we need to read data back to CPU
 }
 
 auto VulkanBackend::synchronize(int32_t device_id) -> void {
@@ -475,10 +573,16 @@ auto VulkanBackend::synchronize(int32_t device_id) -> void {
         throw std::invalid_argument("Invalid device ID");
     }
     auto& ctx = devices_[device_id];
+
+    // First ensure any fence-tracked work is complete
+    ensurePendingWorkComplete(device_id);
+
+    // Then wait for all device operations
     vkDeviceWaitIdle(ctx.device);
 
-    // Reset command pool to prevent fragmentation/corruption
+    // Reset command pool and pool index
     vkResetCommandPool(ctx.device, ctx.commandPool, 0);
+    ctx.nextCommandBufferIndex = 0;
 }
 
 auto VulkanBackend::create_stream(int32_t device_id) -> StreamHandle {
@@ -1405,8 +1509,7 @@ auto VulkanBackend::dispatch(const std::string& op_name,
     }
 
     if (op_name == "batchnorm2d_update_running_stats") {
-        // CPU fallback for updating running statistics
-        // This operation is infrequent (once per batch) and works with small tensors (C channels)
+        // Use GPU kernel for updating running statistics with exponential moving average
         if (inputs.size() != 4) {
             throw std::invalid_argument("batchnorm2d_update_running_stats requires 4 inputs (running_mean, running_var, batch_mean, batch_var)");
         }
@@ -1416,110 +1519,71 @@ auto VulkanBackend::dispatch(const std::string& op_name,
             momentum = std::stof(attrs.at("momentum"));
         }
 
-        // Move tensors to CPU, perform update, then move back to Vulkan
-        Tensor cpu_running_mean = inputs[0].to(Device::cpu());
-        Tensor cpu_running_var = inputs[1].to(Device::cpu());
-        Tensor cpu_batch_mean = inputs[2].to(Device::cpu());
-        Tensor cpu_batch_var = inputs[3].to(Device::cpu());
+        const Tensor& running_mean = inputs[0];
+        const Tensor& running_var = inputs[1];
+        const Tensor& batch_mean = inputs[2];
+        const Tensor& batch_var = inputs[3];
 
-        // Perform exponential moving average update on CPU
-        int64_t C = cpu_batch_mean.numel();
-        if (cpu_running_mean.dtype() == DType::Float32) {
-            float* running_mean_data = cpu_running_mean.data<float>();
-            float* running_var_data = cpu_running_var.data<float>();
-            const float* batch_mean_data = cpu_batch_mean.data<float>();
-            const float* batch_var_data = cpu_batch_var.data<float>();
+        int64_t n_channels = batch_mean.numel();
+        if (n_channels == 0) {
+            return {running_mean, running_var};
+        }
 
-            for (int64_t i = 0; i < C; ++i) {
-                running_mean_data[i] = (1.0f - momentum) * running_mean_data[i] + momentum * batch_mean_data[i];
-                running_var_data[i] = (1.0f - momentum) * running_var_data[i] + momentum * batch_var_data[i];
-            }
-        } else if (cpu_running_mean.dtype() == DType::Float64) {
-            double* running_mean_data = cpu_running_mean.data<double>();
-            double* running_var_data = cpu_running_var.data<double>();
-            const double* batch_mean_data = cpu_batch_mean.data<double>();
-            const double* batch_var_data = cpu_batch_var.data<double>();
-            double momentum_d = static_cast<double>(momentum);
+        int32_t device_id = running_mean.device().index;
 
-            for (int64_t i = 0; i < C; ++i) {
-                running_mean_data[i] = (1.0 - momentum_d) * running_mean_data[i] + momentum_d * batch_mean_data[i];
-                running_var_data[i] = (1.0 - momentum_d) * running_var_data[i] + momentum_d * batch_var_data[i];
-            }
-        } else if (cpu_running_mean.dtype() == DType::Float16) {
-            // For Float16, we work with the raw half-precision data
-            // Use the half-precision conversion utilities
-            uint16_t* running_mean_data = reinterpret_cast<uint16_t*>(cpu_running_mean.data_ptr());
-            uint16_t* running_var_data = reinterpret_cast<uint16_t*>(cpu_running_var.data_ptr());
-            const uint16_t* batch_mean_data = reinterpret_cast<const uint16_t*>(cpu_batch_mean.data_ptr());
-            const uint16_t* batch_var_data = reinterpret_cast<const uint16_t*>(cpu_batch_var.data_ptr());
-
-            // Helper lambda to convert half to float
-            auto half_to_float = [](uint16_t h) -> float {
-                uint32_t sign = (h & 0x8000) << 16;
-                uint32_t exp = (h >> 10) & 0x1F;
-                uint32_t mant = h & 0x3FF;
-
-                if (exp == 0) {
-                    if (mant == 0) {
-                        uint32_t result = sign;
-                        return *reinterpret_cast<float*>(&result);
-                    }
-                    // Denormalized
-                    while (!(mant & 0x400)) {
-                        mant <<= 1;
-                        exp--;
-                    }
-                    exp++;
-                    mant &= ~0x400;
-                    exp += 127 - 15;
-                    uint32_t result = sign | (exp << 23) | (mant << 13);
-                    return *reinterpret_cast<float*>(&result);
-                } else if (exp == 31) {
-                    uint32_t result = sign | 0x7F800000 | (mant << 13);
-                    return *reinterpret_cast<float*>(&result);
-                }
-                exp += 127 - 15;
-                uint32_t result = sign | (exp << 23) | (mant << 13);
-                return *reinterpret_cast<float*>(&result);
-            };
-
-            // Helper lambda to convert float to half
-            auto float_to_half = [](float f) -> uint16_t {
-                uint32_t bits = *reinterpret_cast<uint32_t*>(&f);
-                uint32_t sign = (bits >> 16) & 0x8000;
-                int32_t exp = ((bits >> 23) & 0xFF) - 127 + 15;
-                uint32_t mant = bits & 0x7FFFFF;
-
-                if (exp <= 0) {
-                    if (exp < -10) return static_cast<uint16_t>(sign);
-                    mant |= 0x800000;
-                    uint32_t shift = 14 - exp;
-                    mant >>= shift;
-                    return static_cast<uint16_t>(sign | mant);
-                } else if (exp >= 31) {
-                    return static_cast<uint16_t>(sign | 0x7C00);
-                }
-                return static_cast<uint16_t>(sign | (exp << 10) | (mant >> 13));
-            };
-
-            for (int64_t i = 0; i < C; ++i) {
-                float rm = half_to_float(running_mean_data[i]);
-                float rv = half_to_float(running_var_data[i]);
-                float bm = half_to_float(batch_mean_data[i]);
-                float bv = half_to_float(batch_var_data[i]);
-
-                rm = (1.0f - momentum) * rm + momentum * bm;
-                rv = (1.0f - momentum) * rv + momentum * bv;
-
-                running_mean_data[i] = float_to_half(rm);
-                running_var_data[i] = float_to_half(rv);
-            }
-        } else {
+        // Select shader based on dtype
+        std::string shader_name = "batchnorm_update_stats";
+        if (running_mean.dtype() == DType::Float64) {
+            shader_name = "batchnorm_update_stats_f64";
+        } else if (running_mean.dtype() == DType::Float16) {
+            shader_name = "batchnorm_update_stats_f16";
+        } else if (running_mean.dtype() != DType::Float32) {
             throw std::runtime_error("Unsupported dtype for batchnorm2d_update_running_stats");
         }
 
-        // Move updated tensors back to Vulkan
-        return {cpu_running_mean.to(inputs[0].device()), cpu_running_var.to(inputs[1].device())};
+        auto* pipeline = getPipeline(shader_name, device_id);
+
+        VkBuffer buffer_rm = getVulkanBuffer(running_mean.data_ptr());
+        VkBuffer buffer_rv = getVulkanBuffer(running_var.data_ptr());
+        VkBuffer buffer_bm = getVulkanBuffer(const_cast<void*>(batch_mean.data_ptr()));
+        VkBuffer buffer_bv = getVulkanBuffer(const_cast<void*>(batch_var.data_ptr()));
+
+        size_t buffer_size = n_channels * running_mean.dtype_size();
+
+        std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+            {0, buffer_rm},
+            {1, buffer_rv},
+            {2, buffer_bm},
+            {3, buffer_bv}
+        };
+        std::vector<size_t> sizes = {buffer_size, buffer_size, buffer_size, buffer_size};
+
+        VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+            device_id, pipeline, bindings, sizes);
+
+        struct PushConstants {
+            uint32_t n_channels;
+            float momentum;
+        } push_constants;
+
+        push_constants.n_channels = static_cast<uint32_t>(n_channels);
+        push_constants.momentum = momentum;
+
+        VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+        vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                          VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(PushConstants), &push_constants);
+
+        uint32_t workgroups = (n_channels + 255) / 256;
+        vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+        endSingleTimeCommands(cmdBuffer, device_id);
+
+        // Return the updated tensors (modified in-place)
+        return {running_mean, running_var};
     }
 
     // Pooling operations (new OpAttributes versions)
@@ -5545,7 +5609,7 @@ auto VulkanBackend::dispatchUnsqueeze(const Tensor& input, int64_t dim) -> Tenso
  * @brief Contiguous - ensure tensor is contiguous in memory
  *
  * If already contiguous, returns the input tensor.
- * Otherwise, creates a new contiguous copy.
+ * Otherwise, creates a new contiguous copy using GPU strided_copy kernel.
  */
 auto VulkanBackend::dispatchContiguous(const Tensor& input) -> Tensor {
     // If already contiguous, return as-is
@@ -5553,85 +5617,98 @@ auto VulkanBackend::dispatchContiguous(const Tensor& input) -> Tensor {
         return input;
     }
 
-    // For non-contiguous tensors, we need to reorder the data
-    // Strategy: Download to CPU, make contiguous, upload back to GPU
+    // For non-contiguous tensors, use GPU kernel to reorder the data
+    const int64_t total_elements = input.numel();
+    const int64_t ndims = input.ndim();
+    const int64_t base_offset = input.impl_ ? input.impl_->offset : 0;
 
     // Create new contiguous tensor with same shape, dtype, device
     Tensor result(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
 
-    // Copy data from GPU to CPU using element-wise access with strides
-    const int64_t total_elements = input.numel();
-    const size_t element_size = input.dtype_size();
-    const int64_t ndims = input.ndim();
-    const int64_t base_offset = input.impl_ ? input.impl_->offset : 0;
+    if (total_elements == 0) {
+        return result;
+    }
 
-    // Calculate the size of underlying storage we need to copy
-    // We need to copy enough data to cover all accessed elements considering strides and offset
+    int32_t device_id = input.device().index;
+
+    // Select shader based on dtype
+    std::string shader_name = "strided_copy";
+    if (input.dtype() == DType::Float64) {
+        shader_name = "strided_copy_f64";
+    } else if (input.dtype() == DType::Float16) {
+        shader_name = "strided_copy_f16";
+    }
+
+    auto* pipeline = getPipeline(shader_name, device_id);
+
+    // Get Vulkan buffers - use base storage pointer for input
+    const void* base_storage_ptr = input.impl_ ? input.impl_->storage->data() : input.data_ptr();
+    VkBuffer buffer_in = getVulkanBuffer(const_cast<void*>(base_storage_ptr));
+    VkBuffer buffer_out = getVulkanBuffer(result.data_ptr());
+
+    // Calculate buffer sizes
     int64_t max_offset = base_offset;
+    auto strides = input.strides();
+    auto shape = input.shape();
     if (ndims > 0) {
-        auto strides = input.strides();
-        auto shape = input.shape();
         for (int64_t dim = 0; dim < ndims; ++dim) {
             max_offset += (shape[dim] - 1) * std::abs(strides[dim]);
         }
     }
-    int64_t storage_elements_needed = max_offset + 1;
+    size_t input_buffer_size = (max_offset + 1) * input.dtype_size();
+    size_t output_buffer_size = total_elements * input.dtype_size();
 
-    // Allocate temporary CPU buffers
-    std::vector<uint8_t> cpu_input_buffer(storage_elements_needed * element_size);
-    std::vector<uint8_t> cpu_output_buffer(total_elements * element_size);
+    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+        {0, buffer_in},
+        {1, buffer_out}
+    };
+    std::vector<size_t> sizes = {input_buffer_size, output_buffer_size};
 
-    // Download input tensor data from GPU to CPU
-    // Get the base storage pointer (without offset) for copying
-    const void* base_storage_ptr = input.impl_ ? input.impl_->storage->data() : input.data_ptr();
-    copy(cpu_input_buffer.data(), base_storage_ptr,
-         storage_elements_needed * element_size, CopyKind::DeviceToHost);
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
 
-    // Reorder data on CPU using strides and offset
+    // Push constants structure matching the shader
+    struct PushConstants {
+        uint32_t n_elements;
+        uint32_t ndims;
+        uint32_t base_offset;
+        uint32_t shape_0, shape_1, shape_2, shape_3;
+        uint32_t shape_4, shape_5, shape_6, shape_7;
+        int32_t strides_0, strides_1, strides_2, strides_3;
+        int32_t strides_4, strides_5, strides_6, strides_7;
+    } push_constants;
 
-    if (ndims == 0) {
-        // Scalar tensor - direct copy with offset
-        std::memcpy(cpu_output_buffer.data(),
-                   cpu_input_buffer.data() + base_offset * element_size,
-                   element_size);
-    } else {
-        // Multi-dimensional copy using stride calculations with base offset
-        std::vector<int64_t> indices(ndims, 0);
-        int64_t dst_offset = 0;
+    push_constants.n_elements = static_cast<uint32_t>(total_elements);
+    push_constants.ndims = static_cast<uint32_t>(ndims);
+    push_constants.base_offset = static_cast<uint32_t>(base_offset);
 
-        auto strides = input.strides();
-        auto shape = input.shape();
+    // Initialize all shape/stride values to defaults
+    push_constants.shape_0 = push_constants.shape_1 = push_constants.shape_2 = push_constants.shape_3 = 1;
+    push_constants.shape_4 = push_constants.shape_5 = push_constants.shape_6 = push_constants.shape_7 = 1;
+    push_constants.strides_0 = push_constants.strides_1 = push_constants.strides_2 = push_constants.strides_3 = 0;
+    push_constants.strides_4 = push_constants.strides_5 = push_constants.strides_6 = push_constants.strides_7 = 0;
 
-        for (int64_t i = 0; i < total_elements; ++i) {
-            // Calculate source offset using strides and add base offset
-            int64_t src_offset = base_offset;
-            for (int64_t dim = 0; dim < ndims; ++dim) {
-                src_offset += indices[dim] * strides[dim];
-            }
-
-            // Copy single element
-            std::memcpy(cpu_output_buffer.data() + dst_offset * element_size,
-                       cpu_input_buffer.data() + src_offset * element_size,
-                       element_size);
-
-            // Increment destination offset (contiguous layout)
-            ++dst_offset;
-
-            // Increment indices (iterate through tensor in row-major order)
-            for (int64_t dim = ndims - 1; dim >= 0; --dim) {
-                ++indices[dim];
-                if (indices[dim] < shape[dim]) {
-                    break;
-                }
-                indices[dim] = 0;
-            }
-        }
+    // Fill in actual shape and strides
+    uint32_t* shape_arr = &push_constants.shape_0;
+    int32_t* strides_arr = &push_constants.strides_0;
+    for (int64_t i = 0; i < ndims && i < 8; ++i) {
+        shape_arr[i] = static_cast<uint32_t>(shape[i]);
+        strides_arr[i] = static_cast<int32_t>(strides[i]);
     }
 
-    // Upload reordered data back to GPU
-    copy(result.data_ptr(), cpu_output_buffer.data(),
-         total_elements * element_size, CopyKind::HostToDevice);
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(PushConstants), &push_constants);
+
+    uint32_t workgroups = (total_elements + 255) / 256;
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    endSingleTimeCommands(cmdBuffer, device_id);
 
     return result;
 }
@@ -7067,15 +7144,12 @@ auto VulkanBackend::dispatchMaxPool2dBackward(const Tensor& grad_output, const T
 }
 
 // ============================================================================
-// MaxPool2d Backward with Indices (scatter-based)
+// MaxPool2d Backward with Indices (scatter-based with GPU atomicAdd)
 // ============================================================================
 
 auto VulkanBackend::dispatchMaxPool2dBackwardWithIndices(const Tensor& grad_output, const Tensor& indices,
                                                           int64_t H_in, int64_t W_in) -> Tensor {
-    // This is an index-based scatter operation - we use CPU fallback for reliability
-    // since GPU scatter operations require atomic additions.
-    // The indices tensor contains the linear indices into the input tensor where max values were found.
-
+    // Use GPU kernel with atomicAdd for scatter operation
     auto grad_out_shape = grad_output.shape();
     if (grad_out_shape.size() != 4) {
         throw std::invalid_argument("max_pool2d_backward requires 4D grad_output (N, C, H_out, W_out)");
@@ -7083,119 +7157,70 @@ auto VulkanBackend::dispatchMaxPool2dBackwardWithIndices(const Tensor& grad_outp
 
     int64_t N = grad_out_shape[0];
     int64_t C = grad_out_shape[1];
-    int64_t H_out = grad_out_shape[2];
-    int64_t W_out = grad_out_shape[3];
+    int64_t grad_out_numel = grad_output.numel();
+    int64_t grad_in_numel = N * C * H_in * W_in;
 
-    // Move tensors to CPU for the scatter operation
-    Tensor cpu_grad_output = grad_output.to(Device::cpu());
-    Tensor cpu_indices = indices.to(Device::cpu());
+    if (grad_out_numel == 0) {
+        return Tensor({N, C, H_in, W_in}, grad_output.dtype(), grad_output.device());
+    }
 
-    // Create grad_input tensor on CPU, initialized to zeros
-    Tensor cpu_grad_input({N, C, H_in, W_in}, grad_output.dtype(), Device::cpu());
-    std::memset(cpu_grad_input.data_ptr(), 0, cpu_grad_input.numel() * cpu_grad_input.dtype_size());
+    int32_t device_id = grad_output.device().index;
 
-    // Scatter gradients to positions indicated by indices
-    int64_t grad_out_numel = N * C * H_out * W_out;
+    // Create grad_input tensor initialized to zeros
+    Tensor grad_input = dispatchZeros({N, C, H_in, W_in}, grad_output.dtype(), grad_output.device());
 
-    if (grad_output.dtype() == DType::Float32) {
-        float* grad_input_data = cpu_grad_input.data<float>();
-        const float* grad_output_data = cpu_grad_output.data<float>();
-        const float* indices_data = cpu_indices.data<float>();
-
-        for (int64_t i = 0; i < grad_out_numel; ++i) {
-            int64_t max_idx = static_cast<int64_t>(indices_data[i]);
-            if (max_idx >= 0 && max_idx < N * C * H_in * W_in) {
-                grad_input_data[max_idx] += grad_output_data[i];
-            }
-        }
-    } else if (grad_output.dtype() == DType::Float64) {
-        double* grad_input_data = cpu_grad_input.data<double>();
-        const double* grad_output_data = cpu_grad_output.data<double>();
-        const double* indices_data = cpu_indices.data<double>();
-
-        for (int64_t i = 0; i < grad_out_numel; ++i) {
-            int64_t max_idx = static_cast<int64_t>(indices_data[i]);
-            if (max_idx >= 0 && max_idx < N * C * H_in * W_in) {
-                grad_input_data[max_idx] += grad_output_data[i];
-            }
-        }
+    // Select shader based on dtype
+    std::string shader_name = "max_pool2d_backward_indices";
+    if (grad_output.dtype() == DType::Float64) {
+        shader_name = "max_pool2d_backward_indices_f64";
     } else if (grad_output.dtype() == DType::Float16) {
-        // For Float16, work with raw half-precision data
-        uint16_t* grad_input_data = reinterpret_cast<uint16_t*>(cpu_grad_input.data_ptr());
-        const uint16_t* grad_output_data = reinterpret_cast<const uint16_t*>(cpu_grad_output.data_ptr());
-        const uint16_t* indices_data = reinterpret_cast<const uint16_t*>(cpu_indices.data_ptr());
-
-        // Helper lambda to convert half to float
-        auto half_to_float = [](uint16_t h) -> float {
-            uint32_t sign = (h & 0x8000) << 16;
-            uint32_t exp = (h >> 10) & 0x1F;
-            uint32_t mant = h & 0x3FF;
-
-            if (exp == 0) {
-                if (mant == 0) {
-                    uint32_t result = sign;
-                    float f;
-                    std::memcpy(&f, &result, sizeof(f));
-                    return f;
-                }
-                while (!(mant & 0x400)) {
-                    mant <<= 1;
-                    exp--;
-                }
-                exp++;
-                mant &= ~0x400;
-                exp += 127 - 15;
-                uint32_t result = sign | (exp << 23) | (mant << 13);
-                float f;
-                std::memcpy(&f, &result, sizeof(f));
-                return f;
-            } else if (exp == 31) {
-                uint32_t result = sign | 0x7F800000 | (mant << 13);
-                float f;
-                std::memcpy(&f, &result, sizeof(f));
-                return f;
-            }
-            exp += 127 - 15;
-            uint32_t result = sign | (exp << 23) | (mant << 13);
-            float f;
-            std::memcpy(&f, &result, sizeof(f));
-            return f;
-        };
-
-        // Helper lambda to convert float to half
-        auto float_to_half = [](float f) -> uint16_t {
-            uint32_t bits;
-            std::memcpy(&bits, &f, sizeof(bits));
-            uint32_t sign = (bits >> 16) & 0x8000;
-            int32_t exp = ((bits >> 23) & 0xFF) - 127 + 15;
-            uint32_t mant = bits & 0x7FFFFF;
-
-            if (exp <= 0) {
-                if (exp < -10) return static_cast<uint16_t>(sign);
-                mant |= 0x800000;
-                uint32_t shift = 14 - exp;
-                mant >>= shift;
-                return static_cast<uint16_t>(sign | mant);
-            } else if (exp >= 31) {
-                return static_cast<uint16_t>(sign | 0x7C00);
-            }
-            return static_cast<uint16_t>(sign | (exp << 10) | (mant >> 13));
-        };
-
-        for (int64_t i = 0; i < grad_out_numel; ++i) {
-            int64_t max_idx = static_cast<int64_t>(half_to_float(indices_data[i]));
-            if (max_idx >= 0 && max_idx < N * C * H_in * W_in) {
-                float current = half_to_float(grad_input_data[max_idx]);
-                float grad_val = half_to_float(grad_output_data[i]);
-                grad_input_data[max_idx] = float_to_half(current + grad_val);
-            }
-        }
-    } else {
+        shader_name = "max_pool2d_backward_indices_f16";
+    } else if (grad_output.dtype() != DType::Float32) {
         throw std::runtime_error("Unsupported dtype for max_pool2d_backward_with_indices");
     }
 
-    // Move result back to Vulkan device
-    return cpu_grad_input.to(grad_output.device());
+    auto* pipeline = getPipeline(shader_name, device_id);
+
+    VkBuffer buffer_grad_out = getVulkanBuffer(const_cast<void*>(grad_output.data_ptr()));
+    VkBuffer buffer_indices = getVulkanBuffer(const_cast<void*>(indices.data_ptr()));
+    VkBuffer buffer_grad_in = getVulkanBuffer(grad_input.data_ptr());
+
+    size_t grad_out_size = grad_out_numel * grad_output.dtype_size();
+    size_t indices_size = indices.numel() * indices.dtype_size();
+    size_t grad_in_size = grad_in_numel * grad_input.dtype_size();
+
+    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+        {0, buffer_grad_out},
+        {1, buffer_indices},
+        {2, buffer_grad_in}
+    };
+    std::vector<size_t> sizes = {grad_out_size, indices_size, grad_in_size};
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
+    struct PushConstants {
+        uint32_t n_elements;
+        uint32_t grad_input_size;
+    } push_constants;
+
+    push_constants.n_elements = static_cast<uint32_t>(grad_out_numel);
+    push_constants.grad_input_size = static_cast<uint32_t>(grad_in_numel);
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(PushConstants), &push_constants);
+
+    uint32_t workgroups = (grad_out_numel + 255) / 256;
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return grad_input;
 }
 
 // ============================================================================
@@ -7849,38 +7874,63 @@ auto VulkanBackend::dispatchRand(const std::vector<int64_t>& shape, DType dtype)
     Device device(Device::Type::Vulkan, 0);
     Tensor output(shape, dtype, device);
 
-    // Uniform random distribution requires CPU generation, then copy to GPU
     size_t numel = output.numel();
+    if (numel == 0) {
+        return output;
+    }
 
-    // Use C++11 random number generation
-    static std::random_device rd;
-    static std::mt19937 gen(rd());
+    // Use GPU Philox RNG for random number generation
+    int32_t device_id = device.index;
 
-    if (dtype == DType::Float32) {
-        std::vector<float> cpu_data(numel);
-        std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-        for (size_t i = 0; i < numel; ++i) {
-            cpu_data[i] = dist(gen);
-        }
-        copy(output.data_ptr(), cpu_data.data(), numel * sizeof(float), CopyKind::HostToDevice);
-    } else if (dtype == DType::Float64) {
-        std::vector<double> cpu_data(numel);
-        std::uniform_real_distribution<double> dist(0.0, 1.0);
-        for (size_t i = 0; i < numel; ++i) {
-            cpu_data[i] = dist(gen);
-        }
-        copy(output.data_ptr(), cpu_data.data(), numel * sizeof(double), CopyKind::HostToDevice);
+    // Select shader based on dtype
+    std::string shader_name = "random";
+    if (dtype == DType::Float64) {
+        shader_name = "random_f64";
     } else if (dtype == DType::Float16) {
-        std::vector<uint16_t> cpu_data(numel);  // Float16 is stored as uint16_t
-        std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-        for (size_t i = 0; i < numel; ++i) {
-            Float16 val(dist(gen));
-            cpu_data[i] = *reinterpret_cast<uint16_t*>(&val);
-        }
-        copy(output.data_ptr(), cpu_data.data(), numel * sizeof(uint16_t), CopyKind::HostToDevice);
-    } else {
+        shader_name = "random_f16";
+    } else if (dtype != DType::Float32) {
         throw std::runtime_error("Unsupported dtype for rand: only Float32, Float64, and Float16 are supported");
     }
+
+    auto* pipeline = getPipeline(shader_name, device_id);
+
+    VkBuffer buffer_out = getVulkanBuffer(output.data_ptr());
+    size_t buffer_size = numel * output.dtype_size();
+
+    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {{0, buffer_out}};
+    std::vector<size_t> sizes = {buffer_size};
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
+    // Generate seed from hardware random
+    static std::random_device rd;
+    static std::atomic<uint32_t> offset_counter{0};
+
+    struct PushConstants {
+        uint32_t n_elements;
+        uint32_t seed;
+        uint32_t offset;
+        uint32_t distribution;  // 0 = uniform
+    } push_constants;
+
+    push_constants.n_elements = static_cast<uint32_t>(numel);
+    push_constants.seed = rd();
+    push_constants.offset = offset_counter.fetch_add(static_cast<uint32_t>(numel));
+    push_constants.distribution = 0;  // uniform
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(PushConstants), &push_constants);
+
+    uint32_t workgroups = (numel + 255) / 256;
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    endSingleTimeCommands(cmdBuffer, device_id);
 
     return output;
 }
@@ -7890,38 +7940,63 @@ auto VulkanBackend::dispatchRandn(const std::vector<int64_t>& shape, DType dtype
     Device device(Device::Type::Vulkan, 0);
     Tensor output(shape, dtype, device);
 
-    // Normal random distribution requires CPU generation, then copy to GPU
     size_t numel = output.numel();
+    if (numel == 0) {
+        return output;
+    }
 
-    // Use C++11 random number generation
-    static std::random_device rd;
-    static std::mt19937 gen(rd());
+    // Use GPU Philox RNG with Box-Muller transform for normal distribution
+    int32_t device_id = device.index;
 
-    if (dtype == DType::Float32) {
-        std::vector<float> cpu_data(numel);
-        std::normal_distribution<float> dist(0.0f, 1.0f);
-        for (size_t i = 0; i < numel; ++i) {
-            cpu_data[i] = dist(gen);
-        }
-        copy(output.data_ptr(), cpu_data.data(), numel * sizeof(float), CopyKind::HostToDevice);
-    } else if (dtype == DType::Float64) {
-        std::vector<double> cpu_data(numel);
-        std::normal_distribution<double> dist(0.0, 1.0);
-        for (size_t i = 0; i < numel; ++i) {
-            cpu_data[i] = dist(gen);
-        }
-        copy(output.data_ptr(), cpu_data.data(), numel * sizeof(double), CopyKind::HostToDevice);
+    // Select shader based on dtype
+    std::string shader_name = "random";
+    if (dtype == DType::Float64) {
+        shader_name = "random_f64";
     } else if (dtype == DType::Float16) {
-        std::vector<uint16_t> cpu_data(numel);  // Float16 is stored as uint16_t
-        std::normal_distribution<float> dist(0.0f, 1.0f);
-        for (size_t i = 0; i < numel; ++i) {
-            Float16 val(dist(gen));
-            cpu_data[i] = *reinterpret_cast<uint16_t*>(&val);
-        }
-        copy(output.data_ptr(), cpu_data.data(), numel * sizeof(uint16_t), CopyKind::HostToDevice);
-    } else {
+        shader_name = "random_f16";
+    } else if (dtype != DType::Float32) {
         throw std::runtime_error("Unsupported dtype for randn: only Float32, Float64, and Float16 are supported");
     }
+
+    auto* pipeline = getPipeline(shader_name, device_id);
+
+    VkBuffer buffer_out = getVulkanBuffer(output.data_ptr());
+    size_t buffer_size = numel * output.dtype_size();
+
+    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {{0, buffer_out}};
+    std::vector<size_t> sizes = {buffer_size};
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
+    // Generate seed from hardware random
+    static std::random_device rd;
+    static std::atomic<uint32_t> offset_counter{0};
+
+    struct PushConstants {
+        uint32_t n_elements;
+        uint32_t seed;
+        uint32_t offset;
+        uint32_t distribution;  // 1 = normal
+    } push_constants;
+
+    push_constants.n_elements = static_cast<uint32_t>(numel);
+    push_constants.seed = rd();
+    push_constants.offset = offset_counter.fetch_add(static_cast<uint32_t>(numel));
+    push_constants.distribution = 1;  // normal
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(PushConstants), &push_constants);
+
+    uint32_t workgroups = (numel + 255) / 256;
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    endSingleTimeCommands(cmdBuffer, device_id);
 
     return output;
 }

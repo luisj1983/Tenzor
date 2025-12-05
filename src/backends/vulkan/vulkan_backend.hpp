@@ -63,6 +63,15 @@ private:
         VkPhysicalDeviceMemoryProperties memoryProperties;
         std::unique_ptr<vulkan::DescriptorPool> descriptorPool;
         bool canPreserveDenormsF32 = false;  // Whether GPU supports denormal preservation for float32
+
+        // Fence-based async synchronization
+        VkFence pendingFence = VK_NULL_HANDLE;  // Fence for last submitted work
+        bool hasPendingWork = false;            // Whether fence needs to be waited on
+
+        // Command buffer pool for reuse
+        std::vector<VkCommandBuffer> commandBufferPool;
+        size_t nextCommandBufferIndex = 0;
+        static constexpr size_t COMMAND_BUFFER_POOL_SIZE = 32;
     };
 
     // Staging buffer for host-device transfers
@@ -91,6 +100,13 @@ private:
     // Command execution
     VkCommandBuffer beginSingleTimeCommands(int32_t device_id);
     void endSingleTimeCommands(VkCommandBuffer commandBuffer, int32_t device_id);
+
+    // Async command execution (fence-based, no blocking)
+    void endSingleTimeCommandsAsync(VkCommandBuffer commandBuffer, int32_t device_id);
+    void ensurePendingWorkComplete(int32_t device_id);
+    void initCommandBufferPool(DeviceContext& ctx);
+    VkCommandBuffer acquireCommandBuffer(int32_t device_id);
+    void releaseCommandBuffer(VkCommandBuffer cmdBuffer, int32_t device_id);
 
     // Pipeline management
     vulkan::ComputePipeline* getPipeline(const std::string& shader_name, int32_t device_id);

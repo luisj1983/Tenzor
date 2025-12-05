@@ -1,0 +1,63 @@
+#version 450
+
+// Strided copy operation: copy non-contiguous tensor to contiguous layout
+// Supports up to 8 dimensions for general N-D tensors
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Input { float input_data[]; };
+layout(binding = 1) buffer Output { float output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;      // Total number of elements
+    uint ndims;           // Number of dimensions
+    uint base_offset;     // Base offset in input storage
+    // Shape and strides packed: shape[0..3], shape[4..7], strides[0..3], strides[4..7]
+    uvec4 shape_0_3;      // shape[0], shape[1], shape[2], shape[3]
+    uvec4 shape_4_7;      // shape[4], shape[5], shape[6], shape[7]
+    ivec4 strides_0_3;    // strides[0], strides[1], strides[2], strides[3]
+    ivec4 strides_4_7;    // strides[4], strides[5], strides[6], strides[7]
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.n_elements) {
+        return;
+    }
+
+    // Convert flat output index to multi-dimensional indices
+    // Then compute source offset using strides
+    uint remaining = idx;
+    int src_offset = int(params.base_offset);
+
+    // Unpack shape and strides
+    uint shape[8];
+    int strides[8];
+    shape[0] = params.shape_0_3.x;
+    shape[1] = params.shape_0_3.y;
+    shape[2] = params.shape_0_3.z;
+    shape[3] = params.shape_0_3.w;
+    shape[4] = params.shape_4_7.x;
+    shape[5] = params.shape_4_7.y;
+    shape[6] = params.shape_4_7.z;
+    shape[7] = params.shape_4_7.w;
+    strides[0] = params.strides_0_3.x;
+    strides[1] = params.strides_0_3.y;
+    strides[2] = params.strides_0_3.z;
+    strides[3] = params.strides_0_3.w;
+    strides[4] = params.strides_4_7.x;
+    strides[5] = params.strides_4_7.y;
+    strides[6] = params.strides_4_7.z;
+    strides[7] = params.strides_4_7.w;
+
+    // Calculate inner sizes for index decomposition (row-major order)
+    // We iterate from the last dimension to the first
+    for (int dim = int(params.ndims) - 1; dim >= 0; dim--) {
+        uint dim_idx = remaining % shape[dim];
+        remaining /= shape[dim];
+        src_offset += int(dim_idx) * strides[dim];
+    }
+
+    // Copy element from strided source to contiguous destination
+    output_data[idx] = input_data[src_offset];
+}

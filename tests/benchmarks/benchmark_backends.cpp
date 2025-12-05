@@ -97,7 +97,9 @@ public:
             auto vulkan_dev = Device::vulkan(0);
             auto test = zeros({2, 2}, DType::Float32, vulkan_dev);
             backends.push_back(vulkan_dev);
-        } catch (...) {}
+        } catch (const std::exception& e) {
+            std::cerr << "Vulkan detection failed: " << e.what() << std::endl;
+        }
 
         // Check OneAPI
         try {
@@ -302,7 +304,8 @@ void benchmarkElementwise(BackendBenchmark& bench, std::vector<BenchmarkResult>&
                 try {
                     a = ones(shape, dtype, device);
                     b = full(shape, 2.0f, dtype, device);
-                } catch (...) {
+                } catch (const std::exception& e) {
+                    std::cerr << backend_name << " tensor creation failed: " << e.what() << std::endl;
                     continue;
                 }
 

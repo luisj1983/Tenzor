@@ -1,0 +1,97 @@
+#version 450
+
+// Exclusive prefix sum (scan) for masked_select
+// Blelloch-style parallel scan
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Mask { uint mask_data[]; };
+layout(binding = 1) buffer PrefixSums { uint prefix_sums[]; };
+layout(binding = 2) buffer BlockSums { uint block_sums[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    uint mask_is_float;
+    uint pass;            // 0 = local scan, 1 = add block offsets
+} params;
+
+shared uint shared_data[512];  // Double buffer for scan
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint gid = gl_GlobalInvocationID.x;
+    uint bid = gl_WorkGroupID.x;
+
+    if (params.pass == 0) {
+        // Load data and convert mask to 0/1
+        uint val = 0;
+        if (gid < params.n_elements) {
+            if (params.mask_is_float == 1) {
+                float f = uintBitsToFloat(mask_data[gid]);
+                val = (f != 0.0) ? 1 : 0;
+            } else {
+                uint byte_idx = gid / 4;
+                uint bit_offset = (gid % 4) * 8;
+                uint byte_val = (mask_data[byte_idx] >> bit_offset) & 0xFF;
+                val = (byte_val != 0) ? 1 : 0;
+            }
+        }
+
+        shared_data[tid] = val;
+        barrier();
+
+        // Up-sweep (reduce)
+        uint offset = 1;
+        for (uint d = 256 >> 1; d > 0; d >>= 1) {
+            barrier();
+            if (tid < d) {
+                uint ai = offset * (2 * tid + 1) - 1;
+                uint bi = offset * (2 * tid + 2) - 1;
+                if (bi < 256) {
+                    shared_data[bi] += shared_data[ai];
+                }
+            }
+            offset *= 2;
+        }
+
+        // Store block sum and clear last element for exclusive scan
+        if (tid == 0) {
+            block_sums[bid] = shared_data[255];
+            shared_data[255] = 0;
+        }
+        barrier();
+
+        // Down-sweep
+        for (uint d = 1; d < 256; d *= 2) {
+            offset >>= 1;
+            barrier();
+            if (tid < d) {
+                uint ai = offset * (2 * tid + 1) - 1;
+                uint bi = offset * (2 * tid + 2) - 1;
+                if (bi < 256) {
+                    uint t = shared_data[ai];
+                    shared_data[ai] = shared_data[bi];
+                    shared_data[bi] += t;
+                }
+            }
+        }
+        barrier();
+
+        // Write result
+        if (gid < params.n_elements) {
+            prefix_sums[gid] = shared_data[tid];
+        }
+    } else {
+        // Pass 1: Add block offsets
+        if (bid == 0) return;  // First block has no offset
+
+        // Compute prefix sum of block_sums (single workgroup does this)
+        uint block_offset = 0;
+        for (uint i = 0; i < bid; i++) {
+            block_offset += block_sums[i];
+        }
+
+        if (gid < params.n_elements) {
+            prefix_sums[gid] += block_offset;
+        }
+    }
+}

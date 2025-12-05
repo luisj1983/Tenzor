@@ -80,22 +80,6 @@ auto zeros(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
 }
 
 auto ones(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
-    // DEBUG: trace small tensor ones creation
-    {
-        int64_t debug_numel = 1;
-        for (auto s : shape) debug_numel *= s;
-        if (debug_numel <= 10) {
-            std::cerr << "[ONES_CREATION] shape=[";
-            for (size_t i = 0; i < shape.size(); ++i) {
-                if (i > 0) std::cerr << ",";
-                std::cerr << shape[i];
-            }
-            std::cerr << "] dtype=" << static_cast<int>(dtype)
-                      << " device_type=" << static_cast<int>(device.type)
-                      << " device_idx=" << device.index << std::endl;
-        }
-    }
-
     // Use backend directly for non-CPU devices
     if (device.type != Device::Type::CPU) {
         auto backend = backend_registry().get_backend(device.type);

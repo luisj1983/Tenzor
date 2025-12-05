@@ -170,6 +170,23 @@ set(SHADERS
     gather_relative_position_bias
     gather_relative_position_bias_f64
     gather_relative_position_bias_f16
+    # GPU-optimized operations (replacing CPU fallbacks)
+    strided_copy
+    strided_copy_f64
+    strided_copy_f16
+    random
+    random_f64
+    random_f16
+    max_pool2d_backward_indices
+    max_pool2d_backward_indices_f64
+    max_pool2d_backward_indices_f16
+    batchnorm_update_stats
+    batchnorm_update_stats_f64
+    batchnorm_update_stats_f16
+    # Masked select support (prefix sum)
+    masked_select_count
+    masked_select_gather
+    prefix_sum
 )
 
 # Compile each shader
