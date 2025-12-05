@@ -768,11 +768,6 @@ auto VulkanBackend::dispatch(const std::string& op_name,
                             std::span<const Tensor> inputs,
                             const OpAttributes& attrs) -> std::vector<Tensor> {
 
-    // Debug: trace ones dispatch calls
-    if (op_name == "ones" && attrs.contains("shape")) {
-        std::cerr << "[VULKAN_DISPATCH_ENTRY] op=ones shape=\"" << attrs.at("shape") << "\"" << std::endl;
-    }
-
     try {
     // Binary operations
     if (op_name == "add" || op_name == "sub" || op_name == "mul" || op_name == "div") {
@@ -1616,10 +1611,6 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         if (attrs.contains("shape")) {
             // Parse shape string like "2,3,4"
             std::string shape_str = attrs.at("shape");
-
-            // DEBUG
-            std::cerr << "[VULKAN_ONES] shape_str=\"" << shape_str << "\"" << std::endl;
-
             size_t pos = 0;
             while ((pos = shape_str.find(',')) != std::string::npos) {
                 shape.push_back(std::stoll(shape_str.substr(0, pos)));
@@ -1632,10 +1623,6 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         DType dtype = DType::Float32;  // Default dtype
         if (attrs.contains("dtype")) {
             std::string dtype_str = attrs.at("dtype");
-
-            // DEBUG
-            std::cerr << "[VULKAN_ONES] dtype_str=\"" << dtype_str << "\"" << std::endl;
-
             if (dtype_str == "float32") {
                 dtype = DType::Float32;
             } else if (dtype_str == "float16") {
@@ -2031,45 +2018,6 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
         }
         for (size_t i = 0; i < std::min(size_t(8), output_shape.size()); ++i) {
             push_constants.shape_out[i] = static_cast<uint32_t>(output_shape[i]);
-        }
-
-        // DEBUG: Comprehensive logging for Int32 operations
-        if (dtype_code == 1) {
-            std::cerr << "\n=== Int32 Broadcasting Debug ===\n";
-            std::cerr << "Operation: " << op_name << " (opcode=" << opcode << ")\n";
-            std::cerr << "Input A shape: [";
-            for (size_t i = 0; i < shape_a_vec.size(); ++i) {
-                std::cerr << shape_a_vec[i] << (i < shape_a_vec.size()-1 ? ", " : "");
-            }
-            std::cerr << "] strides: [";
-            for (size_t i = 0; i < strides_a.size(); ++i) {
-                std::cerr << strides_a[i] << (i < strides_a.size()-1 ? ", " : "");
-            }
-            std::cerr << "]\n";
-            std::cerr << "Input B shape: [";
-            for (size_t i = 0; i < shape_b_vec.size(); ++i) {
-                std::cerr << shape_b_vec[i] << (i < shape_b_vec.size()-1 ? ", " : "");
-            }
-            std::cerr << "] strides: [";
-            for (size_t i = 0; i < strides_b.size(); ++i) {
-                std::cerr << strides_b[i] << (i < strides_b.size()-1 ? ", " : "");
-            }
-            std::cerr << "]\n";
-            std::cerr << "Output shape: [";
-            for (size_t i = 0; i < output_shape.size(); ++i) {
-                std::cerr << output_shape[i] << (i < output_shape.size()-1 ? ", " : "");
-            }
-            std::cerr << "] numel=" << output_numel << "\n";
-            std::cerr << "Push constants: output_size=" << push_constants.output_size
-                      << " op=" << push_constants.op
-                      << " dtype=" << push_constants.dtype
-                      << " ndim_a=" << push_constants.ndim_a
-                      << " ndim_b=" << push_constants.ndim_b
-                      << " ndim_out=" << push_constants.ndim_out << "\n";
-            std::cerr << "Buffer sizes: a=" << (a.numel() * a.dtype_size())
-                      << " b=" << (b.numel() * b.dtype_size())
-                      << " out=" << (output_numel * output.dtype_size()) << "\n";
-            std::cerr << "===========================\n\n";
         }
 
         // Get VkBuffer handles
@@ -7723,16 +7671,6 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, float value,
 // ============================================================================
 
 auto VulkanBackend::dispatchOnes(const std::vector<int64_t>& shape, DType dtype) -> Tensor {
-    // DEBUG
-    int64_t numel = 1;
-    for (auto s : shape) numel *= s;
-    std::cerr << "[DISPATCH_ONES] shape=[";
-    for (size_t i = 0; i < shape.size(); ++i) {
-        if (i > 0) std::cerr << ",";
-        std::cerr << shape[i];
-    }
-    std::cerr << "] numel=" << numel << " dtype=" << static_cast<int>(dtype) << std::endl;
-
     // For Float64, Int64, UInt8, or Bool, use full() instead since ones shader only supports 32-bit values
     // Bool is stored as uint8_t, so it needs byte-level access like UInt8
     if (dtype == DType::Float64 || dtype == DType::Int64 || dtype == DType::UInt8 || dtype == DType::Bool) {
@@ -7750,13 +7688,6 @@ auto VulkanBackend::dispatchOnes(const std::vector<int64_t>& shape, DType dtype)
     bool is_int8 = (dtype == DType::Int8);
     std::string shader_name = is_float16 ? "ones_f16" : (is_int8 ? "ones_i8" : "ones");
 
-    // DEBUG: trace for small numel
-    if (output.numel() <= 10) {
-        std::cerr << "[DISPATCH_ONES_DEBUG] is_float16=" << is_float16
-                  << " shader=" << shader_name
-                  << " output.numel()=" << output.numel() << std::endl;
-    }
-
     auto* pipeline = getPipeline(shader_name, device_id);
 
     VkBuffer buffer_out = getVulkanBuffer(output.data_ptr());
@@ -7769,25 +7700,6 @@ auto VulkanBackend::dispatchOnes(const std::vector<int64_t>& shape, DType dtype)
         buffer_size_out = num_pairs * 4;
     }
 
-    // DEBUG: trace for small numel
-    if (output.numel() <= 10) {
-        // Check if data_ptr and buffer handle match
-        void* data_ptr = output.data_ptr();
-        auto it = bufferMap_.find(data_ptr);
-        bool found_direct = (it != bufferMap_.end());
-
-        std::cerr << "[DISPATCH_ONES_DEBUG] buffer_size_out=" << buffer_size_out
-                  << " buffer_out=0x" << std::hex << reinterpret_cast<uint64_t>(buffer_out) << std::dec
-                  << " data_ptr=0x" << std::hex << reinterpret_cast<uint64_t>(data_ptr) << std::dec
-                  << " found_in_map=" << found_direct << std::endl;
-
-        // Try to read current buffer value before shader
-        Tensor before_cpu = output.to(Device::cpu());
-        auto* before_data = before_cpu.data<Float16>();
-        std::cerr << "[DISPATCH_ONES_DEBUG] BEFORE shader, value bits=0x"
-                  << std::hex << before_data[0].bits << std::dec << std::endl;
-    }
-
     std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
         {0, buffer_out}
     };
@@ -7796,11 +7708,6 @@ auto VulkanBackend::dispatchOnes(const std::vector<int64_t>& shape, DType dtype)
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
         device_id, pipeline, bindings, sizes);
 
-    // DEBUG: trace for small numel
-    if (output.numel() <= 10) {
-        std::cerr << "[DISPATCH_ONES_DEBUG] descriptorSet allocated" << std::endl;
-    }
-
     // Float16 uses a different shader that only needs n_elements
     if (is_float16) {
         struct PushConstantsF16 {
@@ -7808,10 +7715,6 @@ auto VulkanBackend::dispatchOnes(const std::vector<int64_t>& shape, DType dtype)
         } push_constants;
 
         push_constants.n_elements = static_cast<uint32_t>(output.numel());
-
-        // DEBUG
-        std::cerr << "[ONES_F16] n_elements=" << push_constants.n_elements
-                  << " buffer_size=" << buffer_size_out << std::endl;
 
         VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
         vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
@@ -7824,9 +7727,6 @@ auto VulkanBackend::dispatchOnes(const std::vector<int64_t>& shape, DType dtype)
         // Each thread handles 2 float16 elements, so we need half the workgroups
         uint32_t num_pairs = (output.numel() + 1) / 2;
         uint32_t workgroups = (num_pairs + 255) / 256;
-
-        // DEBUG
-        std::cerr << "[ONES_F16] num_pairs=" << num_pairs << " workgroups=" << workgroups << std::endl;
 
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
@@ -7847,19 +7747,6 @@ auto VulkanBackend::dispatchOnes(const std::vector<int64_t>& shape, DType dtype)
         );
 
         endSingleTimeCommands(cmdBuffer, device_id);
-
-        // DEBUG: Verify output is correct immediately after shader
-        if (output.numel() <= 10) {
-            // Copy to CPU and verify
-            Tensor verify_cpu = output.to(Device::cpu());
-            auto* verify_data = verify_cpu.data<Float16>();
-            std::cerr << "[ONES_F16_VERIFY] After shader, values: ";
-            for (int i = 0; i < std::min(5, static_cast<int>(verify_cpu.numel())); ++i) {
-                std::cerr << static_cast<float>(verify_data[i])
-                          << " (bits=0x" << std::hex << verify_data[i].bits << std::dec << ") ";
-            }
-            std::cerr << std::endl;
-        }
 
         return output;
     }

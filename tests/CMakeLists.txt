@@ -1438,6 +1438,15 @@ target_link_libraries(benchmark_suite PRIVATE
     tenzor_core
 )
 
+# Cross-backend benchmark suite
+add_executable(benchmark_backends
+    benchmarks/benchmark_backends.cpp
+)
+
+target_link_libraries(benchmark_backends PRIVATE
+    tenzor_core
+)
+
 # Debug DataLoader test
 add_executable(debug_dataloader
     debug_dataloader.cpp
