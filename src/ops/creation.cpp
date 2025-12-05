@@ -93,10 +93,10 @@ auto ones(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
         attrs["device_id"] = std::to_string(device.index);
 
         // DEBUG
-        if (shape.size() == 1 && shape[0] <= 10) {
-            std::cerr << "[ONES_DISPATCH] Calling backend->dispatch(\"ones\") with shape=\""
-                      << attrs["shape"] << "\" dtype=\"" << attrs["dtype"] << "\"" << std::endl;
-        }
+        //if (shape.size() == 1 && shape[0] <= 10) {
+        //    std::cerr << "[ONES_DISPATCH] Calling backend->dispatch(\"ones\") with shape=\""
+        //              << attrs["shape"] << "\" dtype=\"" << attrs["dtype"] << "\"" << std::endl;
+        //}
 
         return backend->dispatch("ones", {}, attrs)[0];
     }

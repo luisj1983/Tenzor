@@ -55,3 +55,9 @@ target_link_libraries(custom_training_loop PRIVATE tenzor_core)
 # Tutorial 4: Mixed precision training
 add_executable(mixed_precision_training tutorials/mixed_precision_training.cpp)
 target_link_libraries(mixed_precision_training PRIVATE tenzor_core)
+
+# ============================================================================
+# Showcase Examples (Demonstrate library features at 3 abstraction levels)
+# ============================================================================
+
+add_subdirectory(showcase)

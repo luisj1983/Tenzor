@@ -564,14 +564,10 @@ auto Conv2d::forward_impl(const Variable& input) -> Variable {
 
         result.set_grad_fn(backward_fn);
 
-        std::vector<Variable> input_vars;
-        if (input.requires_grad()) {
-            input_vars.push_back(input);
-        }
-        if (weight.requires_grad()) {
-            input_vars.push_back(*parameters_["weight"]);
-        }
-        if (bias_it != parameters_.end() && bias_it->second->requires_grad()) {
+        // MUST include all inputs to maintain 1:1 index correspondence with gradients
+        // The engine correctly skips variables that don't require grad
+        std::vector<Variable> input_vars = {input, *parameters_["weight"]};
+        if (bias_it != parameters_.end()) {
             input_vars.push_back(*bias_it->second);
         }
         backward_fn->set_input_variables(input_vars);

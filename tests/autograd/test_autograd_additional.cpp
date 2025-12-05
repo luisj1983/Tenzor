@@ -663,6 +663,141 @@ TEST_P(AutogradAdditionalTest, MatMulBackwardCorrectGradients) {
     EXPECT_EQ(b.grad()->shape()[1], 5) << "Failed on " << device.to_string();
 }
 
+// -----------------------------------------------------------------------------
+// MatMul backward tests with partial gradient requirements
+// These tests cover the common neural network pattern where input data
+// does not require gradients but weights do.
+// -----------------------------------------------------------------------------
+
+TEST_P(AutogradAdditionalTest, MatMulBackwardOnlyRightOperandRequiresGrad) {
+    // This is the common neural network pattern:
+    // X (input data) has no gradient, W (weights) needs gradient
+    // z = X @ W
+    auto X = Variable(ones({4, 2}, DType::Float32, device), false);  // Input - no grad
+    auto W = Variable(ones({2, 4}, DType::Float32, device), true);   // Weights - has grad
+
+    auto z = matmul(X, W);  // {4, 4}
+    auto loss = sum(z);
+    loss.backward();
+
+    // X should not have gradient (didn't request it)
+    EXPECT_FALSE(X.has_grad()) << "X should not have grad on " << device.to_string();
+
+    // W must have gradient with correct shape
+    ASSERT_TRUE(W.has_grad()) << "W must have grad on " << device.to_string();
+
+    // Critical check: gradient shape must match weight shape
+    // For W(2,4), grad must be (2,4) - NOT transposed to (4,2)
+    EXPECT_EQ(W.grad()->shape()[0], 2) << "W.grad row dim wrong on " << device.to_string();
+    EXPECT_EQ(W.grad()->shape()[1], 4) << "W.grad col dim wrong on " << device.to_string();
+
+    // Verify gradient values: dL/dW = X^T @ grad_output
+    // With all ones, dL/dW[i,j] = sum over batch = 4
+    auto w_grad = W.grad()->to(Device::cpu());
+    for (size_t i = 0; i < 8; ++i) {
+        EXPECT_NEAR(w_grad.data<float>()[i], 4.0f, 1e-4f)
+            << "W.grad value wrong at " << i << " on " << device.to_string();
+    }
+}
+
+TEST_P(AutogradAdditionalTest, MatMulBackwardOnlyLeftOperandRequiresGrad) {
+    // Less common but still valid: left operand needs gradient, right doesn't
+    auto A = Variable(ones({3, 4}, DType::Float32, device), true);   // Has grad
+    auto B = Variable(ones({4, 5}, DType::Float32, device), false);  // No grad
+
+    auto C = matmul(A, B);  // {3, 5}
+    auto loss = sum(C);
+    loss.backward();
+
+    // A must have gradient with correct shape
+    ASSERT_TRUE(A.has_grad()) << "A must have grad on " << device.to_string();
+
+    // B should not have gradient
+    EXPECT_FALSE(B.has_grad()) << "B should not have grad on " << device.to_string();
+
+    // Check A gradient shape: must be (3, 4)
+    EXPECT_EQ(A.grad()->shape()[0], 3) << "A.grad row dim wrong on " << device.to_string();
+    EXPECT_EQ(A.grad()->shape()[1], 4) << "A.grad col dim wrong on " << device.to_string();
+
+    // Verify gradient values: dL/dA = grad_output @ B^T
+    // With all ones, dL/dA[i,j] = sum over output cols = 5
+    auto a_grad = A.grad()->to(Device::cpu());
+    for (size_t i = 0; i < 12; ++i) {
+        EXPECT_NEAR(a_grad.data<float>()[i], 5.0f, 1e-4f)
+            << "A.grad value wrong at " << i << " on " << device.to_string();
+    }
+}
+
+TEST_P(AutogradAdditionalTest, MatMulBackwardMemberFunctionOnlyRightGrad) {
+    // Test the member function variant: X.matmul(W)
+    auto X = Variable(ones({4, 2}, DType::Float32, device), false);
+    auto W = Variable(ones({2, 4}, DType::Float32, device), true);
+
+    auto z = X.matmul(W);  // Using member function
+    auto loss = sum(z);
+    loss.backward();
+
+    ASSERT_TRUE(W.has_grad()) << "W must have grad on " << device.to_string();
+
+    // Shape must be (2, 4) - matching W, not transposed
+    EXPECT_EQ(W.grad()->shape()[0], 2) << "W.grad row dim wrong on " << device.to_string();
+    EXPECT_EQ(W.grad()->shape()[1], 4) << "W.grad col dim wrong on " << device.to_string();
+}
+
+TEST_P(AutogradAdditionalTest, MatMulBackwardNeuralNetworkScenario) {
+    // Realistic neural network scenario: batch_size x features @ features x hidden
+    // Input: (32, 16) - batch of 32 samples, 16 features each
+    // Weights: (16, 8) - project to 8 hidden units
+    auto input = Variable(randn({32, 16}, DType::Float32, device), false);
+    auto weights = Variable(randn({16, 8}, DType::Float32, device), true);
+
+    auto hidden = matmul(input, weights);  // (32, 8)
+    auto loss = mean(hidden);  // Scalar loss
+    loss.backward();
+
+    ASSERT_TRUE(weights.has_grad()) << "weights must have grad on " << device.to_string();
+
+    // Critical: gradient shape must match weight shape (16, 8)
+    EXPECT_EQ(weights.grad()->shape()[0], 16)
+        << "weights.grad row dim wrong on " << device.to_string();
+    EXPECT_EQ(weights.grad()->shape()[1], 8)
+        << "weights.grad col dim wrong on " << device.to_string();
+}
+
+TEST_P(AutogradAdditionalTest, MatMulBackwardChainedOperationsPartialGrad) {
+    // Test gradient flow through chained matmuls with partial grad requirements
+    // This mimics a 2-layer neural network
+    auto X = Variable(ones({4, 2}, DType::Float32, device), false);   // Input
+    auto W1 = Variable(ones({2, 3}, DType::Float32, device), true);   // Layer 1 weights
+    auto W2 = Variable(ones({3, 1}, DType::Float32, device), true);   // Layer 2 weights
+
+    auto h = matmul(X, W1);   // (4, 3) hidden layer
+    auto out = matmul(h, W2); // (4, 1) output
+    auto loss = sum(out);
+    loss.backward();
+
+    // Both weight matrices must have gradients
+    ASSERT_TRUE(W1.has_grad()) << "W1 must have grad on " << device.to_string();
+    ASSERT_TRUE(W2.has_grad()) << "W2 must have grad on " << device.to_string();
+
+    // W1 gradient shape must be (2, 3)
+    EXPECT_EQ(W1.grad()->shape()[0], 2) << "W1.grad row dim wrong on " << device.to_string();
+    EXPECT_EQ(W1.grad()->shape()[1], 3) << "W1.grad col dim wrong on " << device.to_string();
+
+    // W2 gradient shape must be (3, 1)
+    EXPECT_EQ(W2.grad()->shape()[0], 3) << "W2.grad row dim wrong on " << device.to_string();
+    EXPECT_EQ(W2.grad()->shape()[1], 1) << "W2.grad col dim wrong on " << device.to_string();
+
+    // Verify W2 gradient values: dL/dW2 = h^T @ grad_output = (3,4) @ (4,1) -> (3,1)
+    // h is all 2s (X@W1 with all ones), grad_output is all 1s
+    // So dL/dW2 = 2 * 4 = 8
+    auto w2_grad = W2.grad()->to(Device::cpu());
+    for (size_t i = 0; i < 3; ++i) {
+        EXPECT_NEAR(w2_grad.data<float>()[i], 8.0f, 1e-4f)
+            << "W2.grad value wrong at " << i << " on " << device.to_string();
+    }
+}
+
 TEST_P(AutogradAdditionalTest, BmmBackwardCorrectGradients) {
     auto a = Variable(ones({2, 3, 4}, DType::Float32, device), true);
     auto b = Variable(ones({2, 4, 5}, DType::Float32, device), true);

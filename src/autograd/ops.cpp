@@ -600,13 +600,9 @@ auto bmm(const Variable& a, const Variable& b) -> Variable {
     grad_fn->set_next_functions(next_funcs);
 
     // Track input variables for gradient accumulation
-    std::vector<Variable> input_vars;
-    if (a.requires_grad()) {
-        input_vars.push_back(a);
-    }
-    if (b.requires_grad()) {
-        input_vars.push_back(b);
-    }
+    // MUST include both variables to maintain 1:1 index correspondence with input_grads
+    // The engine correctly skips variables that don't require grad
+    std::vector<Variable> input_vars = {a, b};
     grad_fn->set_input_variables(input_vars);
 
     // Compute result
@@ -639,13 +635,9 @@ auto matmul(const Variable& a, const Variable& b) -> Variable {
     grad_fn->set_next_functions(next_funcs);
 
     // Track input variables for gradient accumulation
-    std::vector<Variable> input_vars;
-    if (a.requires_grad()) {
-        input_vars.push_back(a);
-    }
-    if (b.requires_grad()) {
-        input_vars.push_back(b);
-    }
+    // MUST include both variables to maintain 1:1 index correspondence with input_grads
+    // The engine correctly skips variables that don't require grad
+    std::vector<Variable> input_vars = {a, b};
     grad_fn->set_input_variables(input_vars);
 
     // Compute result
