@@ -46,6 +46,7 @@ set(SHADERS
     math_broadcast_f64
     math_broadcast_f16
     math_broadcast_i8
+    math_broadcast_bool
     comparison
     comparison_bool
     comparison_f64

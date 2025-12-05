@@ -1128,7 +1128,8 @@ auto VulkanBackend::dispatch(const std::string& op_name,
 
     if (op_name == "norm") {
         float p = attrs.contains("p") ? std::stof(attrs.at("p")) : 2.0f;
-        int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
+        // Use INT64_MIN to signal full reduction when dim is not specified
+        int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : INT64_MIN;
         bool keepdim = attrs.contains("keepdim") && attrs.at("keepdim") == "1";
         return {dispatchNorm(inputs[0], p, dim, keepdim)};
     }
@@ -1961,6 +1962,7 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
         bool is_int8 = (a.dtype() == DType::Int8);
         bool is_uint8 = (a.dtype() == DType::UInt8);
         bool is_int64 = (a.dtype() == DType::Int64);
+        bool is_bool = (a.dtype() == DType::Bool);
         std::string shader_name;
         if (is_float64) {
             shader_name = "math_broadcast_f64";
@@ -1972,6 +1974,8 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
             shader_name = "math_broadcast_uint8";
         } else if (is_int64) {
             shader_name = "math_broadcast_i64";
+        } else if (is_bool) {
+            shader_name = "math_broadcast_bool";
         } else {
             shader_name = "math_broadcast";
         }
