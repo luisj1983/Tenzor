@@ -36,6 +36,11 @@ set(ONEAPI_BACKEND_SOURCES
     kernels/im2col.cpp
     kernels/expand.cpp
     kernels/statistical.cpp
+    kernels/fused_ops.cpp
+    kernels/lstm.cpp
+    kernels/gru.cpp
+    kernels/vision.cpp
+    kernels/quantization.cpp
 )
 
 # Separate SYCL kernel sources from C++ backend source
@@ -55,6 +60,11 @@ set(ONEAPI_SYCL_SOURCES
     kernels/im2col.cpp
     kernels/expand.cpp
     kernels/statistical.cpp
+    kernels/fused_ops.cpp
+    kernels/lstm.cpp
+    kernels/gru.cpp
+    kernels/vision.cpp
+    kernels/quantization.cpp
 )
 
 set(ONEAPI_BACKEND_SOURCE

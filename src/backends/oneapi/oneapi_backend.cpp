@@ -150,6 +150,102 @@ namespace oneapi {
     auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, sycl::queue& queue) -> Tensor;
     auto clamp_kernel(const Tensor& input, float min_val, float max_val, sycl::queue& queue) -> Tensor;
     auto sign_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+
+    // Trigonometric operations
+    auto sin_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto cos_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto tan_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto asin_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto acos_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto atan_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto sinh_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto cosh_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto atan2_kernel(const Tensor& y, const Tensor& x, sycl::queue& queue) -> Tensor;
+
+    // Rounding operations
+    auto round_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto floor_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto ceil_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto trunc_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto reciprocal_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+
+    // Additional utility operations
+    auto clamp_min_kernel(const Tensor& input, float min_val, sycl::queue& queue) -> Tensor;
+    auto clamp_max_kernel(const Tensor& input, float max_val, sycl::queue& queue) -> Tensor;
+    auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y, sycl::queue& queue) -> Tensor;
+    auto repeat_kernel(const Tensor& input, const std::vector<int64_t>& repeats, sycl::queue& queue) -> Tensor;
+
+    // Fused operations
+    auto fused_add_relu_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
+    auto fused_gelu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto fused_layer_norm_kernel(const Tensor& input, const Tensor& weight, const Tensor& bias,
+                                 const std::vector<int64_t>& normalized_shape, float epsilon,
+                                 sycl::queue& queue) -> std::tuple<Tensor, Tensor, Tensor>;
+    auto fused_layer_norm_backward_kernel(const Tensor& grad_output, const Tensor& input,
+                                          const Tensor& mean, const Tensor& inv_std, const Tensor& weight,
+                                          const std::vector<int64_t>& normalized_shape,
+                                          sycl::queue& queue) -> std::tuple<Tensor, Tensor, Tensor>;
+    auto fused_linear_relu_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
+                                  sycl::queue& queue) -> Tensor;
+    auto fused_batchnorm_relu_kernel(const Tensor& input, const Tensor& running_mean,
+                                     const Tensor& running_var, const Tensor& weight,
+                                     const Tensor& bias, float epsilon, sycl::queue& queue) -> Tensor;
+    auto fused_matmul_add_kernel(const Tensor& a, const Tensor& b, const Tensor& bias,
+                                 sycl::queue& queue) -> Tensor;
+    auto fused_softmax_cross_entropy_kernel(const Tensor& logits, const Tensor& targets,
+                                            const std::string& reduction, sycl::queue& queue) -> Tensor;
+
+    // LSTM operations
+    auto lstm_cell_forward_kernel(const Tensor& gates, const Tensor& c_prev,
+                                  int64_t batch_size, int64_t hidden_size,
+                                  sycl::queue& queue) -> std::pair<Tensor, Tensor>;
+    auto lstm_cell_backward_kernel(const Tensor& grad_h, const Tensor& grad_c, const Tensor& gates,
+                                   const Tensor& c_prev, const Tensor& c_out,
+                                   int64_t batch_size, int64_t hidden_size,
+                                   sycl::queue& queue) -> std::pair<Tensor, Tensor>;
+
+    // GRU operations
+    auto gru_cell_forward_kernel(const Tensor& reset_gates, const Tensor& update_gates,
+                                 const Tensor& new_gates_input, const Tensor& new_gates_hidden,
+                                 const Tensor& h_prev, int64_t batch_size, int64_t hidden_size,
+                                 sycl::queue& queue) -> Tensor;
+    // GRU backward outputs struct
+    struct GRUBackwardOutputs {
+        Tensor grad_reset;
+        Tensor grad_update;
+        Tensor grad_new_input;
+        Tensor grad_new_hidden;
+        Tensor grad_h_prev;
+    };
+    auto gru_cell_backward_kernel(const Tensor& grad_h, const Tensor& reset_gates,
+                                  const Tensor& update_gates, const Tensor& new_gates_input,
+                                  const Tensor& new_gates_hidden, const Tensor& h_prev,
+                                  int64_t batch_size, int64_t hidden_size,
+                                  sycl::queue& queue) -> GRUBackwardOutputs;
+
+    // Vision operations
+    auto nms_kernel(const Tensor& boxes, const Tensor& scores, float iou_threshold,
+                    sycl::queue& queue) -> Tensor;
+    auto roi_align_kernel(const Tensor& features, const Tensor& rois,
+                          int64_t output_height, int64_t output_width,
+                          float spatial_scale, int64_t sampling_ratio, bool aligned,
+                          sycl::queue& queue) -> Tensor;
+
+    // Quantization operations
+    auto quantize_kernel(const Tensor& input, float scale, int32_t zero_point,
+                         sycl::queue& queue) -> Tensor;
+    auto dequantize_kernel(const Tensor& input, float scale, int32_t zero_point,
+                           sycl::queue& queue) -> Tensor;
+    auto quantized_linear_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
+                                 float input_scale, int32_t input_zero_point,
+                                 float weight_scale, int32_t weight_zero_point,
+                                 float output_scale, int32_t output_zero_point,
+                                 sycl::queue& queue) -> Tensor;
+    auto quantized_conv2d_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias,
+                                 int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
+                                 float input_scale, int32_t input_zero_point,
+                                 float weight_scale, int32_t weight_zero_point,
+                                 sycl::queue& queue) -> Tensor;
 } // namespace oneapi
 
 /**
@@ -910,6 +1006,248 @@ public:
                 int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
                 bool keepdim = attrs.contains("keepdim") && attrs.at("keepdim") == "1";
                 return {oneapi::argmin_kernel(inputs[0], dim, keepdim, queue)};
+            }
+
+            // ================================================================
+            // Trigonometric operations
+            // ================================================================
+            else if (op_name == "sin") {
+                if (inputs.size() != 1) throw std::invalid_argument("sin requires 1 input");
+                return {oneapi::sin_kernel(inputs[0], queue)};
+            }
+            else if (op_name == "cos") {
+                if (inputs.size() != 1) throw std::invalid_argument("cos requires 1 input");
+                return {oneapi::cos_kernel(inputs[0], queue)};
+            }
+            else if (op_name == "tan") {
+                if (inputs.size() != 1) throw std::invalid_argument("tan requires 1 input");
+                return {oneapi::tan_kernel(inputs[0], queue)};
+            }
+            else if (op_name == "asin") {
+                if (inputs.size() != 1) throw std::invalid_argument("asin requires 1 input");
+                return {oneapi::asin_kernel(inputs[0], queue)};
+            }
+            else if (op_name == "acos") {
+                if (inputs.size() != 1) throw std::invalid_argument("acos requires 1 input");
+                return {oneapi::acos_kernel(inputs[0], queue)};
+            }
+            else if (op_name == "atan") {
+                if (inputs.size() != 1) throw std::invalid_argument("atan requires 1 input");
+                return {oneapi::atan_kernel(inputs[0], queue)};
+            }
+            else if (op_name == "sinh") {
+                if (inputs.size() != 1) throw std::invalid_argument("sinh requires 1 input");
+                return {oneapi::sinh_kernel(inputs[0], queue)};
+            }
+            else if (op_name == "cosh") {
+                if (inputs.size() != 1) throw std::invalid_argument("cosh requires 1 input");
+                return {oneapi::cosh_kernel(inputs[0], queue)};
+            }
+            else if (op_name == "atan2") {
+                if (inputs.size() != 2) throw std::invalid_argument("atan2 requires 2 inputs");
+                return {oneapi::atan2_kernel(inputs[0], inputs[1], queue)};
+            }
+
+            // ================================================================
+            // Rounding operations
+            // ================================================================
+            else if (op_name == "round") {
+                if (inputs.size() != 1) throw std::invalid_argument("round requires 1 input");
+                return {oneapi::round_kernel(inputs[0], queue)};
+            }
+            else if (op_name == "floor") {
+                if (inputs.size() != 1) throw std::invalid_argument("floor requires 1 input");
+                return {oneapi::floor_kernel(inputs[0], queue)};
+            }
+            else if (op_name == "ceil") {
+                if (inputs.size() != 1) throw std::invalid_argument("ceil requires 1 input");
+                return {oneapi::ceil_kernel(inputs[0], queue)};
+            }
+            else if (op_name == "trunc") {
+                if (inputs.size() != 1) throw std::invalid_argument("trunc requires 1 input");
+                return {oneapi::trunc_kernel(inputs[0], queue)};
+            }
+            else if (op_name == "reciprocal") {
+                if (inputs.size() != 1) throw std::invalid_argument("reciprocal requires 1 input");
+                return {oneapi::reciprocal_kernel(inputs[0], queue)};
+            }
+
+            // ================================================================
+            // Additional utility operations
+            // ================================================================
+            else if (op_name == "clamp_min") {
+                if (inputs.size() != 1) throw std::invalid_argument("clamp_min requires 1 input");
+                float min_val = attrs.contains("min") ? std::stof(attrs.at("min")) : 0.0f;
+                return {oneapi::clamp_min_kernel(inputs[0], min_val, queue)};
+            }
+            else if (op_name == "clamp_max") {
+                if (inputs.size() != 1) throw std::invalid_argument("clamp_max requires 1 input");
+                float max_val = attrs.contains("max") ? std::stof(attrs.at("max")) : 1.0f;
+                return {oneapi::clamp_max_kernel(inputs[0], max_val, queue)};
+            }
+            else if (op_name == "where") {
+                if (inputs.size() != 3) throw std::invalid_argument("where requires 3 inputs (condition, x, y)");
+                return {oneapi::where_kernel(inputs[0], inputs[1], inputs[2], queue)};
+            }
+            else if (op_name == "repeat") {
+                if (inputs.size() != 1) throw std::invalid_argument("repeat requires 1 input");
+                auto repeats = parse_shape(attrs.at("repeats"));
+                return {oneapi::repeat_kernel(inputs[0], repeats, queue)};
+            }
+
+            // ================================================================
+            // Fused operations
+            // ================================================================
+            else if (op_name == "fused_add_relu") {
+                if (inputs.size() != 2) throw std::invalid_argument("fused_add_relu requires 2 inputs");
+                return {oneapi::fused_add_relu_kernel(inputs[0], inputs[1], queue)};
+            }
+            else if (op_name == "fused_gelu") {
+                if (inputs.size() != 1) throw std::invalid_argument("fused_gelu requires 1 input");
+                return {oneapi::fused_gelu_kernel(inputs[0], queue)};
+            }
+            else if (op_name == "fused_layer_norm") {
+                if (inputs.size() != 3) throw std::invalid_argument("fused_layer_norm requires 3 inputs");
+                auto normalized_shape = parse_shape(attrs.at("normalized_shape"));
+                float epsilon = attrs.contains("epsilon") ? std::stof(attrs.at("epsilon")) : 1e-5f;
+                auto [output, mean, inv_std] = oneapi::fused_layer_norm_kernel(
+                    inputs[0], inputs[1], inputs[2], normalized_shape, epsilon, queue);
+                return {output, mean, inv_std};
+            }
+            else if (op_name == "fused_layer_norm_backward") {
+                if (inputs.size() != 5) throw std::invalid_argument("fused_layer_norm_backward requires 5 inputs");
+                auto normalized_shape = parse_shape(attrs.at("normalized_shape"));
+                auto [grad_input, grad_weight, grad_bias] = oneapi::fused_layer_norm_backward_kernel(
+                    inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], normalized_shape, queue);
+                return {grad_input, grad_weight, grad_bias};
+            }
+            else if (op_name == "fused_linear_relu") {
+                if (inputs.size() < 2) throw std::invalid_argument("fused_linear_relu requires 2-3 inputs");
+                const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+                return {oneapi::fused_linear_relu_kernel(inputs[0], inputs[1], bias, queue)};
+            }
+            else if (op_name == "fused_batchnorm_relu") {
+                if (inputs.size() != 5) throw std::invalid_argument("fused_batchnorm_relu requires 5 inputs");
+                float epsilon = attrs.contains("epsilon") ? std::stof(attrs.at("epsilon")) : 1e-5f;
+                return {oneapi::fused_batchnorm_relu_kernel(
+                    inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], epsilon, queue)};
+            }
+            else if (op_name == "fused_matmul_add") {
+                if (inputs.size() != 3) throw std::invalid_argument("fused_matmul_add requires 3 inputs");
+                return {oneapi::fused_matmul_add_kernel(inputs[0], inputs[1], inputs[2], queue)};
+            }
+            else if (op_name == "fused_softmax_cross_entropy") {
+                if (inputs.size() != 2) throw std::invalid_argument("fused_softmax_cross_entropy requires 2 inputs");
+                std::string reduction = attrs.contains("reduction") ? attrs.at("reduction") : "mean";
+                return {oneapi::fused_softmax_cross_entropy_kernel(inputs[0], inputs[1], reduction, queue)};
+            }
+
+            // ================================================================
+            // LSTM operations
+            // ================================================================
+            else if (op_name == "lstm_cell_forward") {
+                if (inputs.size() != 2) throw std::invalid_argument("lstm_cell_forward requires 2 inputs");
+                int64_t batch_size = std::stoll(attrs.at("batch_size"));
+                int64_t hidden_size = std::stoll(attrs.at("hidden_size"));
+                auto [h_out, c_out] = oneapi::lstm_cell_forward_kernel(
+                    inputs[0], inputs[1], batch_size, hidden_size, queue);
+                return {h_out, c_out};
+            }
+            else if (op_name == "lstm_cell_backward") {
+                if (inputs.size() != 5) throw std::invalid_argument("lstm_cell_backward requires 5 inputs");
+                int64_t batch_size = std::stoll(attrs.at("batch_size"));
+                int64_t hidden_size = std::stoll(attrs.at("hidden_size"));
+                auto [grad_gates, grad_c_prev] = oneapi::lstm_cell_backward_kernel(
+                    inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
+                    batch_size, hidden_size, queue);
+                return {grad_gates, grad_c_prev};
+            }
+
+            // ================================================================
+            // GRU operations
+            // ================================================================
+            else if (op_name == "gru_cell_forward") {
+                if (inputs.size() != 5) throw std::invalid_argument("gru_cell_forward requires 5 inputs");
+                int64_t batch_size = std::stoll(attrs.at("batch_size"));
+                int64_t hidden_size = std::stoll(attrs.at("hidden_size"));
+                return {oneapi::gru_cell_forward_kernel(
+                    inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
+                    batch_size, hidden_size, queue)};
+            }
+            else if (op_name == "gru_cell_backward") {
+                if (inputs.size() != 6) throw std::invalid_argument("gru_cell_backward requires 6 inputs");
+                int64_t batch_size = std::stoll(attrs.at("batch_size"));
+                int64_t hidden_size = std::stoll(attrs.at("hidden_size"));
+                auto outputs = oneapi::gru_cell_backward_kernel(
+                    inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], inputs[5],
+                    batch_size, hidden_size, queue);
+                return {outputs.grad_reset, outputs.grad_update, outputs.grad_new_input,
+                        outputs.grad_new_hidden, outputs.grad_h_prev};
+            }
+
+            // ================================================================
+            // Vision operations
+            // ================================================================
+            else if (op_name == "nms") {
+                if (inputs.size() != 2) throw std::invalid_argument("nms requires 2 inputs (boxes, scores)");
+                float iou_threshold = attrs.contains("iou_threshold") ? std::stof(attrs.at("iou_threshold")) : 0.5f;
+                return {oneapi::nms_kernel(inputs[0], inputs[1], iou_threshold, queue)};
+            }
+            else if (op_name == "roi_align") {
+                if (inputs.size() != 2) throw std::invalid_argument("roi_align requires 2 inputs");
+                int64_t output_height = std::stoll(attrs.at("output_height"));
+                int64_t output_width = std::stoll(attrs.at("output_width"));
+                float spatial_scale = attrs.contains("spatial_scale") ? std::stof(attrs.at("spatial_scale")) : 1.0f;
+                int64_t sampling_ratio = attrs.contains("sampling_ratio") ? std::stoll(attrs.at("sampling_ratio")) : 0;
+                bool aligned = attrs.contains("aligned") && attrs.at("aligned") == "1";
+                return {oneapi::roi_align_kernel(inputs[0], inputs[1], output_height, output_width,
+                                                 spatial_scale, sampling_ratio, aligned, queue)};
+            }
+
+            // ================================================================
+            // Quantization operations
+            // ================================================================
+            else if (op_name == "quantize") {
+                if (inputs.size() != 1) throw std::invalid_argument("quantize requires 1 input");
+                float scale = std::stof(attrs.at("scale"));
+                int32_t zero_point = std::stoi(attrs.at("zero_point"));
+                return {oneapi::quantize_kernel(inputs[0], scale, zero_point, queue)};
+            }
+            else if (op_name == "dequantize") {
+                if (inputs.size() != 1) throw std::invalid_argument("dequantize requires 1 input");
+                float scale = std::stof(attrs.at("scale"));
+                int32_t zero_point = std::stoi(attrs.at("zero_point"));
+                return {oneapi::dequantize_kernel(inputs[0], scale, zero_point, queue)};
+            }
+            else if (op_name == "quantized_linear") {
+                if (inputs.size() < 2) throw std::invalid_argument("quantized_linear requires 2-3 inputs");
+                const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+                float input_scale = std::stof(attrs.at("input_scale"));
+                int32_t input_zero_point = std::stoi(attrs.at("input_zero_point"));
+                float weight_scale = std::stof(attrs.at("weight_scale"));
+                int32_t weight_zero_point = std::stoi(attrs.at("weight_zero_point"));
+                float output_scale = attrs.contains("output_scale") ? std::stof(attrs.at("output_scale")) : 1.0f;
+                int32_t output_zero_point = attrs.contains("output_zero_point") ? std::stoi(attrs.at("output_zero_point")) : 0;
+                return {oneapi::quantized_linear_kernel(inputs[0], inputs[1], bias,
+                                                        input_scale, input_zero_point,
+                                                        weight_scale, weight_zero_point,
+                                                        output_scale, output_zero_point, queue)};
+            }
+            else if (op_name == "quantized_conv2d") {
+                if (inputs.size() < 2) throw std::invalid_argument("quantized_conv2d requires 2-3 inputs");
+                const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+                int64_t stride = attrs.contains("stride") ? std::stoll(attrs.at("stride")) : 1;
+                int64_t padding = attrs.contains("padding") ? std::stoll(attrs.at("padding")) : 0;
+                int64_t dilation = attrs.contains("dilation") ? std::stoll(attrs.at("dilation")) : 1;
+                int64_t groups = attrs.contains("groups") ? std::stoll(attrs.at("groups")) : 1;
+                float input_scale = std::stof(attrs.at("input_scale"));
+                int32_t input_zero_point = std::stoi(attrs.at("input_zero_point"));
+                float weight_scale = std::stof(attrs.at("weight_scale"));
+                int32_t weight_zero_point = std::stoi(attrs.at("weight_zero_point"));
+                return {oneapi::quantized_conv2d_kernel(inputs[0], inputs[1], bias,
+                                                        stride, padding, dilation, groups,
+                                                        input_scale, input_zero_point,
+                                                        weight_scale, weight_zero_point, queue)};
             }
 
             else {
