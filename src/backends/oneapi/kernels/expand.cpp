@@ -155,13 +155,20 @@ auto expand_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& 
     auto input_shape_span = input.shape();
     std::vector<int64_t> input_shape(input_shape_span.begin(), input_shape_span.end());
 
-    // Validate dimensions match
-    if (input_shape.size() != target_shape.size()) {
+    // Validate target shape has at least as many dimensions as input
+    if (target_shape.size() < input_shape.size()) {
         std::ostringstream oss;
-        oss << "expand: input and target must have same number of dimensions (input: "
+        oss << "expand: target shape must have at least as many dimensions as input (input: "
             << input_shape.size() << ", target: " << target_shape.size() << ")";
         throw std::invalid_argument(oss.str());
     }
+
+    // Pad input shape with 1s at the front to match target dimensions
+    // This handles scalar -> 1D, 1D -> 2D expansion, etc.
+    size_t dim_diff = target_shape.size() - input_shape.size();
+    std::vector<int64_t> padded_input_shape(dim_diff, 1);
+    padded_input_shape.insert(padded_input_shape.end(), input_shape.begin(), input_shape.end());
+    input_shape = padded_input_shape;
 
     // Validate broadcasting rules
     for (size_t i = 0; i < input_shape.size(); ++i) {

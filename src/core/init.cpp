@@ -1496,6 +1496,27 @@ auto initialize() -> void {
                         return oneapi_backend->dispatch("dot", inputs, attrs);
                     });
 
+                // In-place operations
+                registry.register_kernel("add_inplace", Device::Type::OneAPI,
+                    [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return oneapi_backend->dispatch("add_inplace", inputs, attrs);
+                    });
+
+                registry.register_kernel("sub_inplace", Device::Type::OneAPI,
+                    [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return oneapi_backend->dispatch("sub_inplace", inputs, attrs);
+                    });
+
+                registry.register_kernel("mul_inplace", Device::Type::OneAPI,
+                    [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return oneapi_backend->dispatch("mul_inplace", inputs, attrs);
+                    });
+
+                registry.register_kernel("div_inplace", Device::Type::OneAPI,
+                    [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return oneapi_backend->dispatch("div_inplace", inputs, attrs);
+                    });
+
                 // Activation functions
                 registry.register_kernel("relu", Device::Type::OneAPI,
                     [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
@@ -1826,7 +1847,85 @@ auto initialize() -> void {
                         return oneapi_backend->dispatch("argmin", inputs, attrs);
                     });
 
-                std::cout << "OneAPI operations registered successfully (76 operations)" << std::endl;
+                // Trigonometric operations
+                registry.register_kernel("sin", Device::Type::OneAPI,
+                    [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return oneapi_backend->dispatch("sin", inputs, attrs);
+                    });
+
+                registry.register_kernel("cos", Device::Type::OneAPI,
+                    [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return oneapi_backend->dispatch("cos", inputs, attrs);
+                    });
+
+                registry.register_kernel("tan", Device::Type::OneAPI,
+                    [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return oneapi_backend->dispatch("tan", inputs, attrs);
+                    });
+
+                registry.register_kernel("asin", Device::Type::OneAPI,
+                    [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return oneapi_backend->dispatch("asin", inputs, attrs);
+                    });
+
+                registry.register_kernel("acos", Device::Type::OneAPI,
+                    [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return oneapi_backend->dispatch("acos", inputs, attrs);
+                    });
+
+                registry.register_kernel("atan", Device::Type::OneAPI,
+                    [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return oneapi_backend->dispatch("atan", inputs, attrs);
+                    });
+
+                registry.register_kernel("sinh", Device::Type::OneAPI,
+                    [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return oneapi_backend->dispatch("sinh", inputs, attrs);
+                    });
+
+                registry.register_kernel("cosh", Device::Type::OneAPI,
+                    [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return oneapi_backend->dispatch("cosh", inputs, attrs);
+                    });
+
+                // Rounding operations
+                registry.register_kernel("round", Device::Type::OneAPI,
+                    [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return oneapi_backend->dispatch("round", inputs, attrs);
+                    });
+
+                registry.register_kernel("floor", Device::Type::OneAPI,
+                    [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return oneapi_backend->dispatch("floor", inputs, attrs);
+                    });
+
+                registry.register_kernel("ceil", Device::Type::OneAPI,
+                    [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return oneapi_backend->dispatch("ceil", inputs, attrs);
+                    });
+
+                registry.register_kernel("trunc", Device::Type::OneAPI,
+                    [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return oneapi_backend->dispatch("trunc", inputs, attrs);
+                    });
+
+                registry.register_kernel("reciprocal", Device::Type::OneAPI,
+                    [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return oneapi_backend->dispatch("reciprocal", inputs, attrs);
+                    });
+
+                // Clamp operations
+                registry.register_kernel("clamp_min", Device::Type::OneAPI,
+                    [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return oneapi_backend->dispatch("clamp_min", inputs, attrs);
+                    });
+
+                registry.register_kernel("clamp_max", Device::Type::OneAPI,
+                    [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return oneapi_backend->dispatch("clamp_max", inputs, attrs);
+                    });
+
+                std::cout << "OneAPI operations registered successfully (91 operations)" << std::endl;
             } else {
                 std::cout << "OneAPI backend loaded but no OneAPI devices available" << std::endl;
             }

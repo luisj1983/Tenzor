@@ -1401,5 +1401,123 @@ auto repeat_kernel(const Tensor& input, const std::vector<int64_t>& repeats, syc
     return output;
 }
 
+// In-place operation kernel name classes
+struct AddInplaceKernelFloat32 {};
+struct AddInplaceKernelFloat64 {};
+struct SubInplaceKernelFloat32 {};
+struct SubInplaceKernelFloat64 {};
+struct MulInplaceKernelFloat32 {};
+struct MulInplaceKernelFloat64 {};
+struct DivInplaceKernelFloat32 {};
+struct DivInplaceKernelFloat64 {};
+
+// In-place add kernel
+auto add_inplace_kernel(Tensor& inout, const Tensor& other, sycl::queue& queue) -> Tensor {
+    const int64_t n = inout.numel();
+
+    if (inout.dtype() == DType::Float32) {
+        float* data = get_data_ptr<float>(inout);
+        const float* other_ptr = get_data_ptr<const float>(other);
+
+        queue.parallel_for<AddInplaceKernelFloat32>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+            data[idx] += other_ptr[idx];
+        }).wait();
+    }
+    else if (inout.dtype() == DType::Float64) {
+        double* data = get_data_ptr<double>(inout);
+        const double* other_ptr = get_data_ptr<const double>(other);
+
+        queue.parallel_for<AddInplaceKernelFloat64>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+            data[idx] += other_ptr[idx];
+        }).wait();
+    }
+    else {
+        throw std::runtime_error("add_inplace: unsupported dtype");
+    }
+
+    return inout;
+}
+
+// In-place sub kernel
+auto sub_inplace_kernel(Tensor& inout, const Tensor& other, sycl::queue& queue) -> Tensor {
+    const int64_t n = inout.numel();
+
+    if (inout.dtype() == DType::Float32) {
+        float* data = get_data_ptr<float>(inout);
+        const float* other_ptr = get_data_ptr<const float>(other);
+
+        queue.parallel_for<SubInplaceKernelFloat32>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+            data[idx] -= other_ptr[idx];
+        }).wait();
+    }
+    else if (inout.dtype() == DType::Float64) {
+        double* data = get_data_ptr<double>(inout);
+        const double* other_ptr = get_data_ptr<const double>(other);
+
+        queue.parallel_for<SubInplaceKernelFloat64>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+            data[idx] -= other_ptr[idx];
+        }).wait();
+    }
+    else {
+        throw std::runtime_error("sub_inplace: unsupported dtype");
+    }
+
+    return inout;
+}
+
+// In-place mul kernel
+auto mul_inplace_kernel(Tensor& inout, const Tensor& other, sycl::queue& queue) -> Tensor {
+    const int64_t n = inout.numel();
+
+    if (inout.dtype() == DType::Float32) {
+        float* data = get_data_ptr<float>(inout);
+        const float* other_ptr = get_data_ptr<const float>(other);
+
+        queue.parallel_for<MulInplaceKernelFloat32>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+            data[idx] *= other_ptr[idx];
+        }).wait();
+    }
+    else if (inout.dtype() == DType::Float64) {
+        double* data = get_data_ptr<double>(inout);
+        const double* other_ptr = get_data_ptr<const double>(other);
+
+        queue.parallel_for<MulInplaceKernelFloat64>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+            data[idx] *= other_ptr[idx];
+        }).wait();
+    }
+    else {
+        throw std::runtime_error("mul_inplace: unsupported dtype");
+    }
+
+    return inout;
+}
+
+// In-place div kernel
+auto div_inplace_kernel(Tensor& inout, const Tensor& other, sycl::queue& queue) -> Tensor {
+    const int64_t n = inout.numel();
+
+    if (inout.dtype() == DType::Float32) {
+        float* data = get_data_ptr<float>(inout);
+        const float* other_ptr = get_data_ptr<const float>(other);
+
+        queue.parallel_for<DivInplaceKernelFloat32>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+            data[idx] /= other_ptr[idx];
+        }).wait();
+    }
+    else if (inout.dtype() == DType::Float64) {
+        double* data = get_data_ptr<double>(inout);
+        const double* other_ptr = get_data_ptr<const double>(other);
+
+        queue.parallel_for<DivInplaceKernelFloat64>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+            data[idx] /= other_ptr[idx];
+        }).wait();
+    }
+    else {
+        throw std::runtime_error("div_inplace: unsupported dtype");
+    }
+
+    return inout;
+}
+
 } // namespace oneapi
 } // namespace tenzor
