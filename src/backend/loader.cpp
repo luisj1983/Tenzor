@@ -8,9 +8,45 @@
 namespace tenzor {
 
 BackendLoader::~BackendLoader() {
-    // First, destroy all backend objects (while libraries are still loaded)
-    backends_.clear();
+    // IMPORTANT: Destroy backends in reverse dependency order to avoid cleanup issues.
+    // AdaptiveCpp (when using CUDA target) depends on CUDA runtime, so it must be
+    // destroyed BEFORE CUDA backend. The order matters because AdaptiveCpp creates
+    // CUDA streams that become invalid if CUDA runtime unloads first.
+    //
+    // Destruction order (reverse of typical dependency):
+    // 1. AdaptiveCpp (depends on CUDA/ROCm runtimes)
+    // 2. OneAPI (independent SYCL runtime)
+    // 3. Vulkan, Metal, WebGPU (independent GPU APIs)
+    // 4. ROCm (AMD GPU runtime)
+    // 5. CUDA (NVIDIA GPU runtime)
+    // 6. CPU (always safe, no GPU dependencies)
+
+    // Clear device type mapping first
     device_to_backend_.clear();
+
+    // Destroy backends in specific order to avoid runtime cleanup races
+    const std::vector<std::string> destruction_order = {
+        "adaptivecpp",  // Must be destroyed first - uses CUDA/ROCm internally
+        "oneapi",       // Independent SYCL runtime
+        "vulkan",       // Independent GPU API
+        "metal",        // Independent GPU API
+        "webgpu",       // Independent GPU API
+        "rocm",         // AMD runtime (AdaptiveCpp may use this)
+        "cuda",         // NVIDIA runtime (AdaptiveCpp may use this)
+        "cpu"           // Always safe last
+    };
+
+    for (const auto& name : destruction_order) {
+        auto it = backends_.find(name);
+        if (it != backends_.end()) {
+            // Explicitly reset the unique_ptr to destroy the backend
+            it->second.reset();
+            backends_.erase(it);
+        }
+    }
+
+    // Destroy any remaining backends not in the explicit order
+    backends_.clear();
 
     // Then unload libraries
     for (auto handle : loaded_libraries_) {

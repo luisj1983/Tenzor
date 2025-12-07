@@ -14,6 +14,52 @@ if(NOT GTest_FOUND)
     FetchContent_MakeAvailable(googletest)
 endif()
 
+# Include GoogleTest module for gtest_discover_tests
+include(GoogleTest)
+
+# Set environment variable to skip AdaptiveCpp during test discovery.
+# AdaptiveCpp with CUDA backend has a known race condition during process exit
+# where CUDA runtime may shut down before AdaptiveCpp cleanup completes, causing
+# CUDA error 4 (cudaErrorCudartUnloading). Since test discovery just lists tests
+# and doesn't actually need GPU backends, we skip AdaptiveCpp to avoid this issue.
+set(TENZOR_TEST_DISCOVERY_ENV "TENZOR_SKIP_ADAPTIVECPP=1")
+
+# Custom function that wraps gtest_discover_tests
+# The AdaptiveCpp backend with CUDA has a known race condition during process exit
+# where CUDA runtime may shut down before AdaptiveCpp cleanup completes, causing
+# CUDA error 4 (cudaErrorCudartUnloading).
+#
+# We use the TEST_LAUNCHER target property to run a wrapper script that sets
+# the environment variable during test discovery.
+function(tenzor_discover_tests target)
+    cmake_parse_arguments(PARSE_ARGV 1 ARG "" "DISCOVERY_TIMEOUT" "PROPERTIES")
+    set(TIMEOUT ${ARG_DISCOVERY_TIMEOUT})
+    if(NOT TIMEOUT)
+        set(TIMEOUT 30)
+    endif()
+    # Merge our environment with any passed properties
+    set(PROPS ${ARG_PROPERTIES})
+    list(APPEND PROPS ENVIRONMENT "${TENZOR_TEST_DISCOVERY_ENV}")
+
+    # Create a wrapper script for test discovery
+    set(WRAPPER_SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/${target}_discovery_wrapper.sh")
+    file(WRITE ${WRAPPER_SCRIPT}
+"#!/bin/bash
+# Wrapper script for gtest discovery - skips AdaptiveCpp to avoid CUDA cleanup race
+export TENZOR_SKIP_ADAPTIVECPP=1
+exec \"$@\"
+")
+    file(CHMOD ${WRAPPER_SCRIPT} PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE)
+
+    # Set the TEST_LAUNCHER property on the target - this is what gtest_discover_tests uses
+    set_property(TARGET ${target} PROPERTY TEST_LAUNCHER "${WRAPPER_SCRIPT}")
+
+    # Now call gtest_discover_tests - it will pick up the TEST_LAUNCHER property
+    gtest_discover_tests(${target}
+        DISCOVERY_TIMEOUT ${TIMEOUT}
+        PROPERTIES ${PROPS})
+endfunction()
+
 # Unit tests
 add_executable(tenzor_unit_tests
     unit/test_tensor.cpp
@@ -68,6 +114,7 @@ target_link_libraries(test_cuda_scalar_debug PRIVATE
 add_executable(tenzor_integration_tests
     integration/test_nn.cpp
     integration/test_training.cpp
+    integration/test_debug_mlp.cpp
 )
 
 target_link_libraries(tenzor_integration_tests PRIVATE
@@ -258,7 +305,7 @@ target_link_libraries(test_minimal_training PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_minimal_training DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_minimal_training DISCOVERY_TIMEOUT 30)
 
 # Normalization tests
 add_executable(test_normalization
@@ -373,7 +420,7 @@ target_link_libraries(test_offload PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_offload DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_offload DISCOVERY_TIMEOUT 30)
 
 # Note: Distributed tests for Phase 3 (collective operations) are in
 # integration/test_distributed.cpp and built via integration/CMakeLists.txt
@@ -552,7 +599,7 @@ target_link_libraries(test_mixed_precision PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_mixed_precision DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_mixed_precision DISCOVERY_TIMEOUT 30)
 
 # DataLoader tests
 add_executable(test_dataloader
@@ -644,7 +691,7 @@ target_link_libraries(test_linear_reshape_integration PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_linear_reshape_integration DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_linear_reshape_integration DISCOVERY_TIMEOUT 30)
 
 # Fused operations tests
 add_executable(test_fused_ops
@@ -846,7 +893,7 @@ target_link_libraries(test_caching_allocator PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_caching_allocator DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_caching_allocator DISCOVERY_TIMEOUT 30)
 
 # CUDA-specific tests
 if(TENZOR_BUILD_CUDA)
@@ -1154,65 +1201,67 @@ endif()
 # )
 
 # Register tests with CTest
-# Note: Using longer discovery timeout (30 seconds) because ROCm backend initialization can be slow
-include(GoogleTest)
-gtest_discover_tests(tenzor_unit_tests DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(tenzor_integration_tests DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_cuda_scalar_debug DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_dropout DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_batchnorm2d DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_conv2d DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_conv2d_multidtype DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_pooling DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_conv1d DISCOVERY_TIMEOUT 30)
-# gtest_discover_tests(test_convtranspose2d DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_schedulers DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_normalization DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_serialization DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_embedding DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_embedding_multidtype DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_optimizers_extended DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_schedulers_advanced DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_losses_advanced DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_rnn DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_rnn_multidtype DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_lstm DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_lstm_multidtype DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_gru DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_gru_multidtype DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_attention DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_attention_multidtype DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_transformer DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_transformer_multidtype DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_chunk DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_split_operation DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_bmm_autograd DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_grad_scaler DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_grad_scaler_multidtype DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_autocast DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_autocast_multidtype DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_dataloader DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_fp16 DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_dtype_conversion DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_gradient_checkpoint DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_checkpoint_multidtype DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_model_checkpoint DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_checkpoint DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_gradient_utils DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_zero_stage1 DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_zero_stage1_integration DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_zero_stage1_distributed DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_zero_stage2 DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_zero_stage2_integration DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_zero_stage3 DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_zero_stage3_integration DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_zero_profiling DISCOVERY_TIMEOUT 30)
+# Note: tenzor_discover_tests function is defined at the top of this file
+# and includes the TENZOR_SKIP_ADAPTIVECPP environment variable to avoid
+# CUDA cleanup race conditions during test discovery.
 
-gtest_discover_tests(test_fused_ops DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_fused_ops_multidtype DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_backend_ops_parameterized DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_edge_cases DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_dtype_edge_cases DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(tenzor_unit_tests DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(tenzor_integration_tests DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_cuda_scalar_debug DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_dropout DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_batchnorm2d DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_conv2d DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_conv2d_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_pooling DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_conv1d DISCOVERY_TIMEOUT 30)
+# tenzor_discover_tests(test_convtranspose2d DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_schedulers DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_normalization DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_serialization DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_embedding DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_embedding_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_optimizers_extended DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_schedulers_advanced DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_losses_advanced DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_rnn DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_rnn_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_lstm DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_lstm_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_gru DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_gru_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_attention DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_attention_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_transformer DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_transformer_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_chunk DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_split_operation DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_bmm_autograd DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_grad_scaler DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_grad_scaler_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_autocast DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_autocast_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_dataloader DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_fp16 DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_dtype_conversion DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_gradient_checkpoint DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_checkpoint_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_model_checkpoint DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_checkpoint DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_gradient_utils DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_zero_stage1 DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_zero_stage1_integration DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_zero_stage1_distributed DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_zero_stage2 DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_zero_stage2_integration DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_zero_stage3 DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_zero_stage3_integration DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_zero_profiling DISCOVERY_TIMEOUT 30)
+
+tenzor_discover_tests(test_fused_ops DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_fused_ops_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_backend_ops_parameterized DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_edge_cases DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_dtype_edge_cases DISCOVERY_TIMEOUT 30)
 
 # Loss function multi-dtype tests
 add_executable(test_losses_multidtype
@@ -1360,39 +1409,39 @@ target_link_libraries(test_efficientnet_multidtype PRIVATE
 # MobileNet model multi-dtype tests (duplicate removed - see line 1748)
 
 # Multi-DType Parameterized Tests Registration
-gtest_discover_tests(test_tensor_multidtype DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_autograd_multidtype DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_broadcasting_multidtype DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_ops_multidtype DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_comparison_ops_multidtype DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_creation_ops_multidtype DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_advanced_ops_multidtype DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_detection_ops_multidtype DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_optimizers_multidtype DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_pooling_multidtype DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_dropout_multidtype DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_batchnorm2d_multidtype DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_normalization_multidtype DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_linear_multidtype DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_losses_multidtype DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_flatten_multidtype DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_shape_ops_multidtype DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_segmentation_multidtype DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_fp16_multidtype DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_mixed_precision_multidtype DISCOVERY_TIMEOUT 30)
-# gtest_discover_tests(test_grad_scaler_multidtype DISCOVERY_TIMEOUT 30)  # Duplicate removed
-# gtest_discover_tests(test_autocast_multidtype DISCOVERY_TIMEOUT 30)  # Duplicate removed
-# gtest_discover_tests(test_resnet_multidtype DISCOVERY_TIMEOUT 30)  # Duplicate removed
-gtest_discover_tests(test_bert_multidtype DISCOVERY_TIMEOUT 30)
-# gtest_discover_tests(test_gpt_multidtype DISCOVERY_TIMEOUT 30)  # Duplicate removed
-gtest_discover_tests(test_vit_multidtype DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_unet_multidtype DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_yolo_multidtype DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_mask_rcnn_multidtype DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_faster_rcnn_multidtype DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_swin_transformer_multidtype DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_efficientnet_multidtype DISCOVERY_TIMEOUT 30)
-# gtest_discover_tests(test_mobilenet_multidtype DISCOVERY_TIMEOUT 30)  # Duplicate removed
+tenzor_discover_tests(test_tensor_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_autograd_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_broadcasting_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_ops_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_comparison_ops_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_creation_ops_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_advanced_ops_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_detection_ops_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_optimizers_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_pooling_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_dropout_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_batchnorm2d_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_normalization_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_linear_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_losses_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_flatten_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_shape_ops_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_segmentation_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_fp16_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_mixed_precision_multidtype DISCOVERY_TIMEOUT 30)
+# tenzor_discover_tests(test_grad_scaler_multidtype DISCOVERY_TIMEOUT 30)  # Duplicate removed
+# tenzor_discover_tests(test_autocast_multidtype DISCOVERY_TIMEOUT 30)  # Duplicate removed
+# tenzor_discover_tests(test_resnet_multidtype DISCOVERY_TIMEOUT 30)  # Duplicate removed
+tenzor_discover_tests(test_bert_multidtype DISCOVERY_TIMEOUT 30)
+# tenzor_discover_tests(test_gpt_multidtype DISCOVERY_TIMEOUT 30)  # Duplicate removed
+tenzor_discover_tests(test_vit_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_unet_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_yolo_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_mask_rcnn_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_faster_rcnn_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_swin_transformer_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_efficientnet_multidtype DISCOVERY_TIMEOUT 30)
+# tenzor_discover_tests(test_mobilenet_multidtype DISCOVERY_TIMEOUT 30)  # Duplicate removed
 
 # SIMD operations tests
 add_executable(test_simd_ops
@@ -1404,7 +1453,7 @@ target_link_libraries(test_simd_ops PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_simd_ops DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_simd_ops DISCOVERY_TIMEOUT 30)
 
 # Comparison operators tests
 add_executable(test_comparison_operators
@@ -1426,8 +1475,8 @@ target_link_libraries(test_comparison_ops PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_comparison_operators DISCOVERY_TIMEOUT 30)
-gtest_discover_tests(test_comparison_ops DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_comparison_operators DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_comparison_ops DISCOVERY_TIMEOUT 30)
 
 # Benchmark suite
 add_executable(benchmark_suite
@@ -1458,17 +1507,17 @@ target_link_libraries(debug_dataloader PRIVATE
 
 if(TENZOR_BUILD_CUDA)
     # CUDA tests with thread-safe handle management - can run in parallel
-    gtest_discover_tests(test_memory_manager DISCOVERY_TIMEOUT 30)
-    gtest_discover_tests(test_pinned_allocator DISCOVERY_TIMEOUT 30)
-    gtest_discover_tests(test_transfer_engine DISCOVERY_TIMEOUT 30)
-    gtest_discover_tests(test_transfer_benchmark DISCOVERY_TIMEOUT 30)
-    gtest_discover_tests(test_offload_engine DISCOVERY_TIMEOUT 30)
-    gtest_discover_tests(test_parameter_offload DISCOVERY_TIMEOUT 30)
-    gtest_discover_tests(test_cuda_kernels DISCOVERY_TIMEOUT 30)
-    gtest_discover_tests(test_cuda_training DISCOVERY_TIMEOUT 30)
-    gtest_discover_tests(test_data_parallel DISCOVERY_TIMEOUT 30)
-    gtest_discover_tests(test_data_parallel_single_gpu DISCOVERY_TIMEOUT 30)
-    gtest_discover_tests(test_fp16_kernels DISCOVERY_TIMEOUT 30)
+    tenzor_discover_tests(test_memory_manager DISCOVERY_TIMEOUT 30)
+    tenzor_discover_tests(test_pinned_allocator DISCOVERY_TIMEOUT 30)
+    tenzor_discover_tests(test_transfer_engine DISCOVERY_TIMEOUT 30)
+    tenzor_discover_tests(test_transfer_benchmark DISCOVERY_TIMEOUT 30)
+    tenzor_discover_tests(test_offload_engine DISCOVERY_TIMEOUT 30)
+    tenzor_discover_tests(test_parameter_offload DISCOVERY_TIMEOUT 30)
+    tenzor_discover_tests(test_cuda_kernels DISCOVERY_TIMEOUT 30)
+    tenzor_discover_tests(test_cuda_training DISCOVERY_TIMEOUT 30)
+    tenzor_discover_tests(test_data_parallel DISCOVERY_TIMEOUT 30)
+    tenzor_discover_tests(test_data_parallel_single_gpu DISCOVERY_TIMEOUT 30)
+    tenzor_discover_tests(test_fp16_kernels DISCOVERY_TIMEOUT 30)
 endif()
 
 # OneAPI-specific tests
@@ -1486,7 +1535,7 @@ if(TENZOR_BUILD_ONEAPI)
     )
 
     # OneAPI device initialization can be slow, use 60 second timeout
-    gtest_discover_tests(test_oneapi_backend DISCOVERY_TIMEOUT 60)
+    tenzor_discover_tests(test_oneapi_backend DISCOVERY_TIMEOUT 60)
 endif()
 
 # ROCm-specific tests
@@ -1519,8 +1568,8 @@ if(TENZOR_BUILD_ROCM)
     )
 
     # ROCm initialization can be slow, use 60 second timeout
-    gtest_discover_tests(test_rocm_backend DISCOVERY_TIMEOUT 60)
-    gtest_discover_tests(test_rocm_kernels DISCOVERY_TIMEOUT 60)
+    tenzor_discover_tests(test_rocm_backend DISCOVERY_TIMEOUT 60)
+    tenzor_discover_tests(test_rocm_kernels DISCOVERY_TIMEOUT 60)
 endif()
 # Debug tests commented out - tmp files not tracked in git
 # add_executable(debug_multi_linear ../tests/tmp/debug_multi_linear.cpp)
@@ -1567,7 +1616,7 @@ target_link_libraries(test_onnx_export PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_onnx_export DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_onnx_export DISCOVERY_TIMEOUT 30)
 
 # ONNX import tests
 add_executable(test_onnx_import
@@ -1579,7 +1628,7 @@ target_link_libraries(test_onnx_import PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_onnx_import DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_onnx_import DISCOVERY_TIMEOUT 30)
 
 # Gradient checking tests
 add_executable(test_gradcheck
@@ -1591,7 +1640,7 @@ target_link_libraries(test_gradcheck PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_gradcheck DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_gradcheck DISCOVERY_TIMEOUT 30)
 
 # ModelHub tests
 add_executable(test_model_hub
@@ -1603,7 +1652,7 @@ target_link_libraries(test_model_hub PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_model_hub DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_model_hub DISCOVERY_TIMEOUT 30)
 
 # BERT model tests
 add_executable(test_bert
@@ -1615,7 +1664,7 @@ target_link_libraries(test_bert PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_bert DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_bert DISCOVERY_TIMEOUT 30)
 
 # Classic CNN models tests
 add_executable(test_classic_models
@@ -1627,7 +1676,7 @@ target_link_libraries(test_classic_models PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_classic_models DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_classic_models DISCOVERY_TIMEOUT 30)
 
 # GPT model tests
 add_executable(test_gpt
@@ -1639,7 +1688,7 @@ target_link_libraries(test_gpt PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_gpt DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_gpt DISCOVERY_TIMEOUT 30)
 
 # GPT model multi-dtype tests
 add_executable(test_gpt_multidtype
@@ -1651,7 +1700,7 @@ target_link_libraries(test_gpt_multidtype PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_gpt_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_gpt_multidtype DISCOVERY_TIMEOUT 30)
 
 # ResNet model tests
 add_executable(test_resnet
@@ -1663,7 +1712,7 @@ target_link_libraries(test_resnet PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_resnet DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_resnet DISCOVERY_TIMEOUT 30)
 
 # ResNet multi-dtype tests
 add_executable(test_resnet_multidtype
@@ -1675,7 +1724,7 @@ target_link_libraries(test_resnet_multidtype PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_resnet_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_resnet_multidtype DISCOVERY_TIMEOUT 30)
 
 # RoBERTa model tests
 add_executable(test_roberta
@@ -1687,7 +1736,7 @@ target_link_libraries(test_roberta PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_roberta DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_roberta DISCOVERY_TIMEOUT 30)
 
 # ELECTRA model tests
 add_executable(test_electra
@@ -1699,7 +1748,7 @@ target_link_libraries(test_electra PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_electra DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_electra DISCOVERY_TIMEOUT 30)
 
 # ELECTRA model multi-dtype tests
 add_executable(test_electra_multidtype
@@ -1711,7 +1760,7 @@ target_link_libraries(test_electra_multidtype PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_electra_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_electra_multidtype DISCOVERY_TIMEOUT 30)
 
 # ============================================================================
 # Phase 9 Model Tests - Vision Models
@@ -1727,7 +1776,7 @@ target_link_libraries(test_efficientnet PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_efficientnet DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_efficientnet DISCOVERY_TIMEOUT 30)
 
 # Vision Transformer tests (Base/Large/Huge)
 add_executable(test_vit
@@ -1739,7 +1788,7 @@ target_link_libraries(test_vit PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_vit DISCOVERY_TIMEOUT 30 PROPERTIES TIMEOUT 600)
+tenzor_discover_tests(test_vit DISCOVERY_TIMEOUT 30 PROPERTIES TIMEOUT 600)
 
 # Swin Transformer tests (DISABLED - needs API fixes)
 # add_executable(test_swin_transformer
@@ -1751,7 +1800,7 @@ gtest_discover_tests(test_vit DISCOVERY_TIMEOUT 30 PROPERTIES TIMEOUT 600)
 #     GTest::gtest_main
 # )
 
-# gtest_discover_tests(test_swin_transformer DISCOVERY_TIMEOUT 30)
+# tenzor_discover_tests(test_swin_transformer DISCOVERY_TIMEOUT 30)
 
 # ConvNeXt tests
 add_executable(test_convnext
@@ -1763,7 +1812,7 @@ target_link_libraries(test_convnext PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_convnext DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_convnext DISCOVERY_TIMEOUT 30)
 
 # ConvNeXt multi-dtype tests
 add_executable(test_convnext_multidtype
@@ -1775,7 +1824,7 @@ target_link_libraries(test_convnext_multidtype PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_convnext_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_convnext_multidtype DISCOVERY_TIMEOUT 30)
 
 # MobileNet V2/V3 tests
 add_executable(test_mobilenet_v2_v3
@@ -1787,7 +1836,7 @@ target_link_libraries(test_mobilenet_v2_v3 PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_mobilenet_v2_v3 DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_mobilenet_v2_v3 DISCOVERY_TIMEOUT 30)
 
 # Vision Components tests (PatchEmbedding, SE, MBConv, etc.) (DISABLED - depends on Swin)
 # add_executable(test_vision_components
@@ -1799,7 +1848,7 @@ gtest_discover_tests(test_mobilenet_v2_v3 DISCOVERY_TIMEOUT 30)
 #     GTest::gtest_main
 # )
 
-# gtest_discover_tests(test_vision_components DISCOVERY_TIMEOUT 30)
+# tenzor_discover_tests(test_vision_components DISCOVERY_TIMEOUT 30)
 
 # ============================================================================
 # Phase 9 Model Tests - NLP Models
@@ -1815,7 +1864,7 @@ target_link_libraries(test_roberta_electra PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_roberta_electra DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_roberta_electra DISCOVERY_TIMEOUT 30)
 
 # ALBERT and T5 tests
 add_executable(test_albert_t5
@@ -1827,7 +1876,7 @@ target_link_libraries(test_albert_t5 PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_albert_t5 DISCOVERY_TIMEOUT 30 PROPERTIES TIMEOUT 600)
+tenzor_discover_tests(test_albert_t5 DISCOVERY_TIMEOUT 30 PROPERTIES TIMEOUT 600)
 
 # ============================================================================
 # Phase 9 Model Tests - Detection and Segmentation Models
@@ -1843,7 +1892,7 @@ target_link_libraries(test_faster_rcnn PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_faster_rcnn DISCOVERY_TIMEOUT 30 PROPERTIES TIMEOUT 1200)
+tenzor_discover_tests(test_faster_rcnn DISCOVERY_TIMEOUT 30 PROPERTIES TIMEOUT 1200)
 
 # YOLO tests (v3 and v5)
 add_executable(test_yolo
@@ -1855,7 +1904,7 @@ target_link_libraries(test_yolo PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_yolo DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_yolo DISCOVERY_TIMEOUT 30)
 
 # Mask R-CNN tests
 add_executable(test_mask_rcnn
@@ -1867,7 +1916,7 @@ target_link_libraries(test_mask_rcnn PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_mask_rcnn DISCOVERY_TIMEOUT 30 PROPERTIES TIMEOUT 1200)
+tenzor_discover_tests(test_mask_rcnn DISCOVERY_TIMEOUT 30 PROPERTIES TIMEOUT 1200)
 
 # U-Net tests
 add_executable(test_unet
@@ -1879,7 +1928,7 @@ target_link_libraries(test_unet PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_unet DISCOVERY_TIMEOUT 30 PROPERTIES TIMEOUT 1200)
+tenzor_discover_tests(test_unet DISCOVERY_TIMEOUT 30 PROPERTIES TIMEOUT 1200)
 
 # DeepLab v3+ tests
 add_executable(test_deeplabv3plus
@@ -1891,7 +1940,7 @@ target_link_libraries(test_deeplabv3plus PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_deeplabv3plus DISCOVERY_TIMEOUT 30 PROPERTIES TIMEOUT 1200)
+tenzor_discover_tests(test_deeplabv3plus DISCOVERY_TIMEOUT 30 PROPERTIES TIMEOUT 1200)
 
 # DeepLab v3+ multi-dtype tests
 add_executable(test_deeplabv3plus_multidtype
@@ -1903,7 +1952,7 @@ target_link_libraries(test_deeplabv3plus_multidtype PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_deeplabv3plus_multidtype DISCOVERY_TIMEOUT 30 PROPERTIES TIMEOUT 1200)
+tenzor_discover_tests(test_deeplabv3plus_multidtype DISCOVERY_TIMEOUT 30 PROPERTIES TIMEOUT 1200)
 
 # Detection Operations tests (ROI, NMS, etc.)
 add_executable(test_detection_ops
@@ -1915,7 +1964,7 @@ target_link_libraries(test_detection_ops PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_detection_ops DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_detection_ops DISCOVERY_TIMEOUT 30)
 
 # ============================================================================
 # Phase 10 Tests - Model Export, Optimization, and Compression
@@ -1931,7 +1980,7 @@ target_link_libraries(test_jit PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_jit DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_jit DISCOVERY_TIMEOUT 30)
 
 # JIT multi-dtype tests
 add_executable(test_jit_multidtype
@@ -1943,7 +1992,7 @@ target_link_libraries(test_jit_multidtype PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_jit_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_jit_multidtype DISCOVERY_TIMEOUT 30)
 
 # Pruning tests
 add_executable(test_pruning
@@ -1955,7 +2004,7 @@ target_link_libraries(test_pruning PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_pruning DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_pruning DISCOVERY_TIMEOUT 30)
 
 # Pruning multi-dtype tests
 add_executable(test_pruning_multidtype
@@ -1967,7 +2016,7 @@ target_link_libraries(test_pruning_multidtype PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_pruning_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_pruning_multidtype DISCOVERY_TIMEOUT 30)
 
 # Knowledge distillation tests
 add_executable(test_distillation
@@ -1979,7 +2028,7 @@ target_link_libraries(test_distillation PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_distillation DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_distillation DISCOVERY_TIMEOUT 30)
 
 # Knowledge distillation multi-dtype tests
 add_executable(test_distillation_multidtype
@@ -1991,7 +2040,7 @@ target_link_libraries(test_distillation_multidtype PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_distillation_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_distillation_multidtype DISCOVERY_TIMEOUT 30)
 
 # Callbacks multi-dtype tests
 add_executable(test_callbacks_multidtype
@@ -2003,7 +2052,7 @@ target_link_libraries(test_callbacks_multidtype PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_callbacks_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_callbacks_multidtype DISCOVERY_TIMEOUT 30)
 
 # RoBERTa model multi-dtype tests
 add_executable(test_roberta_multidtype
@@ -2015,7 +2064,7 @@ target_link_libraries(test_roberta_multidtype PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_roberta_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_roberta_multidtype DISCOVERY_TIMEOUT 30)
 
 # Edge cases multi-dtype tests
 add_executable(test_edge_cases_multidtype
@@ -2027,7 +2076,7 @@ target_link_libraries(test_edge_cases_multidtype PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_edge_cases_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_edge_cases_multidtype DISCOVERY_TIMEOUT 30)
 
 # Quantization tests
 add_executable(test_quantization
@@ -2039,7 +2088,7 @@ target_link_libraries(test_quantization PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_quantization DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_quantization DISCOVERY_TIMEOUT 30)
 
 # Quantization multi-dtype tests (Float32/Float64 to Int8)
 add_executable(test_quantization_multidtype
@@ -2051,7 +2100,7 @@ target_link_libraries(test_quantization_multidtype PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_quantization_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_quantization_multidtype DISCOVERY_TIMEOUT 30)
 
 # ============================================================================
 # Phase 11 Tests - Additional Backend Support
@@ -2068,7 +2117,7 @@ target_link_libraries(test_phase11_backends PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_phase11_backends DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_phase11_backends DISCOVERY_TIMEOUT 30)
 
 # ============================================================================
 # CIoU Loss Tests - Complete IoU implementation for YOLO
@@ -2083,7 +2132,7 @@ target_link_libraries(test_ciou_loss PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_ciou_loss DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_ciou_loss DISCOVERY_TIMEOUT 30)
 
 # Backend Parity Test - Verify slice operations work correctly on all backends
 add_executable(test_slice_backend_parity
@@ -2095,7 +2144,7 @@ target_link_libraries(test_slice_backend_parity PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_slice_backend_parity DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_slice_backend_parity DISCOVERY_TIMEOUT 30)
 
 # Slice Debug Test - Debug slice offset and data_ptr behavior
 add_executable(test_slice_debug
@@ -2107,7 +2156,7 @@ target_link_libraries(test_slice_debug PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_slice_debug DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_slice_debug DISCOVERY_TIMEOUT 30)
 
 # Contiguous Fix Test - Verify .contiguous() fixes slice data access
 add_executable(test_contiguous_fix
@@ -2119,7 +2168,7 @@ target_link_libraries(test_contiguous_fix PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_contiguous_fix DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_contiguous_fix DISCOVERY_TIMEOUT 30)
 
 # Tensor Lifetime Test - Debug tensor data pointer stability
 add_executable(test_tensor_lifetime
@@ -2131,7 +2180,7 @@ target_link_libraries(test_tensor_lifetime PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_tensor_lifetime DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_tensor_lifetime DISCOVERY_TIMEOUT 30)
 
 # Backend Parity Example - Shows how to write multi-backend tests
 add_executable(test_backend_parity_example
@@ -2143,7 +2192,7 @@ target_link_libraries(test_backend_parity_example PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_backend_parity_example DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_backend_parity_example DISCOVERY_TIMEOUT 30)
 
 # Tensor indexing operator test
 add_executable(test_indexing_operator
@@ -2155,7 +2204,7 @@ target_link_libraries(test_indexing_operator PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_indexing_operator DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_indexing_operator DISCOVERY_TIMEOUT 30)
 
 # ============================================================================
 # Phase 12 Tests - Enhanced Test Coverage and Validation
@@ -2171,7 +2220,7 @@ target_link_libraries(test_quantization_conversion PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_quantization_conversion DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_quantization_conversion DISCOVERY_TIMEOUT 30)
 
 # Mask R-CNN loss tests
 add_executable(test_mask_rcnn_losses
@@ -2183,7 +2232,7 @@ target_link_libraries(test_mask_rcnn_losses PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_mask_rcnn_losses DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_mask_rcnn_losses DISCOVERY_TIMEOUT 30)
 
 # Vulkan complete operations tests
 add_executable(test_vulkan_complete_ops
@@ -2195,7 +2244,7 @@ target_link_libraries(test_vulkan_complete_ops PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_vulkan_complete_ops DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_vulkan_complete_ops DISCOVERY_TIMEOUT 30)
 
 # Async operations tests
 add_executable(test_async_ops
@@ -2207,7 +2256,7 @@ target_link_libraries(test_async_ops PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_async_ops DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_async_ops DISCOVERY_TIMEOUT 30)
 
 # Repeat and Tile tests
 add_executable(test_repeat_tile
@@ -2219,7 +2268,7 @@ target_link_libraries(test_repeat_tile PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_repeat_tile DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_repeat_tile DISCOVERY_TIMEOUT 30)
 
 # Data loading tests (multi-backend)
 add_executable(test_data_loading
@@ -2231,7 +2280,7 @@ target_link_libraries(test_data_loading PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_data_loading DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_data_loading DISCOVERY_TIMEOUT 30)
 
 # SIMD tests (multi-backend)
 add_executable(test_simd
@@ -2243,7 +2292,7 @@ target_link_libraries(test_simd PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_simd DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_simd DISCOVERY_TIMEOUT 30)
 
 # Extended gradcheck tests (multi-backend)
 add_executable(test_gradcheck_extended
@@ -2255,7 +2304,7 @@ target_link_libraries(test_gradcheck_extended PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_gradcheck_extended DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_gradcheck_extended DISCOVERY_TIMEOUT 30)
 
 # Additional autograd tests for increased coverage
 add_executable(test_autograd_additional
@@ -2267,7 +2316,7 @@ target_link_libraries(test_autograd_additional PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_autograd_additional DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_autograd_additional DISCOVERY_TIMEOUT 30)
 
 # Utility module tests
 add_subdirectory(utils)
@@ -2309,7 +2358,7 @@ target_link_libraries(test_inplace_operations_multidtype PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_inplace_operations_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_inplace_operations_multidtype DISCOVERY_TIMEOUT 30)
 
 # ============================================================================
 # Additional Multi-DType Tests - Option 3 Completion
@@ -2325,7 +2374,7 @@ target_link_libraries(test_albert_t5_multidtype PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_albert_t5_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_albert_t5_multidtype DISCOVERY_TIMEOUT 30)
 
 # NLP Models - RoBERTa & ELECTRA combined multi-dtype tests
 add_executable(test_roberta_electra_multidtype
@@ -2337,7 +2386,7 @@ target_link_libraries(test_roberta_electra_multidtype PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_roberta_electra_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_roberta_electra_multidtype DISCOVERY_TIMEOUT 30)
 
 # Vision Models - MobileNet V2/V3 multi-dtype tests
 add_executable(test_mobilenet_v2_v3_multidtype
@@ -2349,7 +2398,7 @@ target_link_libraries(test_mobilenet_v2_v3_multidtype PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_mobilenet_v2_v3_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_mobilenet_v2_v3_multidtype DISCOVERY_TIMEOUT 30)
 
 # Vision Models - Swin Transformer multi-dtype tests
 # Vision Models - Classic models multi-dtype tests
@@ -2362,7 +2411,7 @@ target_link_libraries(test_classic_models_multidtype PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_classic_models_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_classic_models_multidtype DISCOVERY_TIMEOUT 30)
 
 # Vision Components multi-dtype tests
 add_executable(test_vision_components_multidtype
@@ -2374,7 +2423,7 @@ target_link_libraries(test_vision_components_multidtype PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_vision_components_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_vision_components_multidtype DISCOVERY_TIMEOUT 30)
 
 # Detection Components multi-dtype tests
 add_executable(test_detection_components_multidtype
@@ -2386,7 +2435,7 @@ target_link_libraries(test_detection_components_multidtype PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_detection_components_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_detection_components_multidtype DISCOVERY_TIMEOUT 30)
 
 # Training Utilities - Advanced losses multi-dtype tests
 add_executable(test_losses_advanced_multidtype
@@ -2398,7 +2447,7 @@ target_link_libraries(test_losses_advanced_multidtype PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_losses_advanced_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_losses_advanced_multidtype DISCOVERY_TIMEOUT 30)
 
 # Training Utilities - Advanced schedulers multi-dtype tests
 add_executable(test_schedulers_advanced_multidtype
@@ -2410,7 +2459,7 @@ target_link_libraries(test_schedulers_advanced_multidtype PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_schedulers_advanced_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_schedulers_advanced_multidtype DISCOVERY_TIMEOUT 30)
 
 # Training Utilities - Extended optimizers multi-dtype tests
 add_executable(test_optimizers_extended_multidtype
@@ -2422,7 +2471,7 @@ target_link_libraries(test_optimizers_extended_multidtype PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_optimizers_extended_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_optimizers_extended_multidtype DISCOVERY_TIMEOUT 30)
 
 # Operations - Additional NN components multi-dtype tests
 add_executable(test_nn_additional_multidtype
@@ -2434,7 +2483,7 @@ target_link_libraries(test_nn_additional_multidtype PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_nn_additional_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_nn_additional_multidtype DISCOVERY_TIMEOUT 30)
 
 # Operations - Additional ops multi-dtype tests
 add_executable(test_ops_additional_multidtype
@@ -2446,7 +2495,7 @@ target_link_libraries(test_ops_additional_multidtype PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_ops_additional_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_ops_additional_multidtype DISCOVERY_TIMEOUT 30)
 
 # Operations - Chunk multi-dtype tests
 add_executable(test_chunk_multidtype
@@ -2458,7 +2507,7 @@ target_link_libraries(test_chunk_multidtype PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_chunk_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_chunk_multidtype DISCOVERY_TIMEOUT 30)
 
 # Infrastructure - Gradient checkpoint multi-dtype tests
 add_executable(test_gradient_checkpoint_multidtype
@@ -2470,7 +2519,7 @@ target_link_libraries(test_gradient_checkpoint_multidtype PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_gradient_checkpoint_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_gradient_checkpoint_multidtype DISCOVERY_TIMEOUT 30)
 
 # Infrastructure - Model checkpoint multi-dtype tests
 add_executable(test_model_checkpoint_multidtype
@@ -2482,7 +2531,7 @@ target_link_libraries(test_model_checkpoint_multidtype PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_model_checkpoint_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_model_checkpoint_multidtype DISCOVERY_TIMEOUT 30)
 
 # Infrastructure - Transforms multi-dtype tests
 add_executable(test_transforms_multidtype
@@ -2494,7 +2543,7 @@ target_link_libraries(test_transforms_multidtype PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_transforms_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_transforms_multidtype DISCOVERY_TIMEOUT 30)
 
 # Infrastructure - Async operations multi-dtype tests
 add_executable(test_async_ops_multidtype
@@ -2506,7 +2555,7 @@ target_link_libraries(test_async_ops_multidtype PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_async_ops_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_async_ops_multidtype DISCOVERY_TIMEOUT 30)
 
 # Infrastructure - Dataloader multi-dtype tests
 add_executable(test_dataloader_multidtype
@@ -2518,7 +2567,7 @@ target_link_libraries(test_dataloader_multidtype PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_dataloader_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_dataloader_multidtype DISCOVERY_TIMEOUT 30)
 
 # Infrastructure - DType edge cases multi-dtype tests (enhanced)
 add_executable(test_dtype_edge_cases_multidtype
@@ -2530,7 +2579,7 @@ target_link_libraries(test_dtype_edge_cases_multidtype PRIVATE
     GTest::gtest_main
 )
 
-gtest_discover_tests(test_dtype_edge_cases_multidtype DISCOVERY_TIMEOUT 30)
+tenzor_discover_tests(test_dtype_edge_cases_multidtype DISCOVERY_TIMEOUT 30)
 
 
 # Minimal Float16 Linear backward test

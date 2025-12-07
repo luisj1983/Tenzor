@@ -17,25 +17,13 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
         auto& grad_output = grad_outputs[0];
         const auto& input = saved_tensors()[0];
-        const auto& output = saved_tensors()[1];  // Use output tensor for dtype reference
 
-        // d_relu/dx = 1 if x > 0, else 0
-        // grad_input = grad_output * (input > 0)
+        // Use the backend's native relu_backward kernel for efficiency
+        // This avoids CPU transfers that happen when using comparison + dtype conversion
+        std::vector<Tensor> backward_inputs = {grad_output, input};
+        auto grad_input = Dispatcher::dispatch("relu_backward", backward_inputs)[0];
 
-        // Create zero tensor for comparison
-        auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
-        auto zero_tensor = zeros(shape_vec, input.dtype(), input.device());
-
-        // Perform comparison to get boolean mask
-        auto mask = input > zero_tensor;  // Returns Bool tensor
-
-        // Convert mask to same dtype as grad_output for multiplication
-        auto mask_float = mask.to(grad_output.dtype());
-
-        // Apply mask to gradient
-        std::vector<Tensor> result;
-        result.push_back(grad_output * mask_float);
-        return result;
+        return {grad_input};
     }
 };
 
@@ -308,8 +296,8 @@ auto relu(const Variable& input) -> Variable {
 
     // Set up autograd
     auto grad_fn = std::make_shared<ReLUBackward>();
-    // Save BOTH input and output to avoid dtype issues during checkpoint recomputation
-    grad_fn->save_for_backward({input.tensor(), result_tensor});
+    // Save only input - relu_backward kernel only needs input
+    grad_fn->save_for_backward({input.tensor()});
 
     std::vector<std::shared_ptr<Function>> next_funcs;
     if (input.grad_fn()) {

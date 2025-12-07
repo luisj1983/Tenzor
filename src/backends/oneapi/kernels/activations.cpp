@@ -3,6 +3,13 @@
 #include <cmath>
 #include <stdexcept>
 
+// Forward declaration for contiguous kernel
+namespace tenzor {
+namespace oneapi {
+    auto contiguous_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+}
+}
+
 namespace tenzor {
 namespace oneapi {
 
@@ -43,22 +50,26 @@ inline auto get_data_ptr(const Tensor& t) -> T* {
 }
 
 // ReLU activation forward
+// IMPORTANT: Must ensure contiguous input for direct memory access
 auto relu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
-    Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
-                  input.dtype(), input.device());
+    // Ensure input is contiguous for correct memory access
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
 
-    const int64_t numel = input.numel();
+    Tensor output(std::vector<int64_t>(in_cont.shape().begin(), in_cont.shape().end()),
+                  in_cont.dtype(), in_cont.device());
 
-    if (input.dtype() == DType::Float32) {
-        const float* in_ptr = get_data_ptr<const float>(input);
+    const int64_t numel = in_cont.numel();
+
+    if (in_cont.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(in_cont);
         float* out_ptr = get_data_ptr<float>(output);
 
         queue.parallel_for<ReLUKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = sycl::fmax(0.0f, in_ptr[idx]);
         }).wait();
     }
-    else if (input.dtype() == DType::Float64) {
-        const double* in_ptr = get_data_ptr<const double>(input);
+    else if (in_cont.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(in_cont);
         double* out_ptr = get_data_ptr<double>(output);
 
         queue.parallel_for<ReLUKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
@@ -73,24 +84,29 @@ auto relu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 }
 
 // ReLU backward
+// IMPORTANT: Must ensure contiguous inputs for direct memory access
 auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::queue& queue) -> Tensor {
-    Tensor grad_input(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
-                      input.dtype(), input.device());
+    // Ensure inputs are contiguous for correct memory access
+    Tensor grad_out_cont = grad_output.is_contiguous() ? grad_output : contiguous_kernel(grad_output, queue);
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
 
-    const int64_t numel = input.numel();
+    Tensor grad_input(std::vector<int64_t>(in_cont.shape().begin(), in_cont.shape().end()),
+                      in_cont.dtype(), in_cont.device());
 
-    if (input.dtype() == DType::Float32) {
-        const float* grad_out_ptr = get_data_ptr<const float>(grad_output);
-        const float* in_ptr = get_data_ptr<const float>(input);
+    const int64_t numel = in_cont.numel();
+
+    if (in_cont.dtype() == DType::Float32) {
+        const float* grad_out_ptr = get_data_ptr<const float>(grad_out_cont);
+        const float* in_ptr = get_data_ptr<const float>(in_cont);
         float* grad_in_ptr = get_data_ptr<float>(grad_input);
 
         queue.parallel_for<ReLUBackwardKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             grad_in_ptr[idx] = in_ptr[idx] > 0.0f ? grad_out_ptr[idx] : 0.0f;
         }).wait();
     }
-    else if (input.dtype() == DType::Float64) {
-        const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
-        const double* in_ptr = get_data_ptr<const double>(input);
+    else if (in_cont.dtype() == DType::Float64) {
+        const double* grad_out_ptr = get_data_ptr<const double>(grad_out_cont);
+        const double* in_ptr = get_data_ptr<const double>(in_cont);
         double* grad_in_ptr = get_data_ptr<double>(grad_input);
 
         queue.parallel_for<ReLUBackwardKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {

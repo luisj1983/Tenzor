@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <memory>
 #include <cstring>
+#include <atomic>
 
 namespace tenzor {
 
@@ -256,6 +257,9 @@ namespace adaptivecpp {
 class AdaptiveCppBackend : public Backend {
 public:
     AdaptiveCppBackend() {
+        // Flag to track if we're in shutdown mode - async errors during shutdown are expected
+        shutdown_in_progress_ = false;
+
         try {
             // Enumerate all available SYCL devices
             auto platforms = sycl::platform::get_platforms();
@@ -264,7 +268,21 @@ public:
                 auto devices = platform.get_devices();
                 for (const auto& device : devices) {
                     try {
-                        auto queue = std::make_shared<sycl::queue>(device,
+                        // Create queue with custom async error handler that doesn't abort
+                        // during shutdown. This prevents CUDA error 4 (cudaErrorCudartUnloading)
+                        // from terminating the application during cleanup.
+                        auto async_handler = [this](sycl::exception_list exceptions) {
+                            // During shutdown, silently ignore CUDA runtime shutdown errors
+                            if (this->shutdown_in_progress_) {
+                                return; // Don't propagate errors during cleanup
+                            }
+                            // During normal operation, throw the first exception
+                            for (const auto& e : exceptions) {
+                                std::rethrow_exception(e);
+                            }
+                        };
+
+                        auto queue = std::make_shared<sycl::queue>(device, async_handler,
                             sycl::property_list{sycl::property::queue::in_order{}});
 
                         DeviceInfo info;
@@ -294,6 +312,30 @@ public:
     }
 
     ~AdaptiveCppBackend() override {
+        // Set shutdown flag FIRST - this tells our async error handler to ignore
+        // CUDA cleanup errors (error code 4 = cudaErrorCudartUnloading)
+        shutdown_in_progress_ = true;
+
+        // Properly synchronize and cleanup all SYCL queues before destruction.
+        // This is critical when AdaptiveCpp uses CUDA backend - we must ensure
+        // all CUDA operations complete before the queues are destroyed.
+        for (auto& device_info : devices_) {
+            if (device_info.queue) {
+                try {
+                    // Wait for all operations to complete on this queue
+                    // The wait() may fail during CUDA shutdown, but that's okay
+                    // since our async handler will suppress the error
+                    device_info.queue->wait();
+                } catch (const sycl::exception& e) {
+                    // Ignore cleanup errors - runtime may already be shutting down
+                } catch (...) {
+                    // Silently ignore any other exceptions during cleanup
+                }
+            }
+        }
+        // Clear allocations map before destroying queues
+        allocations_.clear();
+        // Now safe to destroy the queues
         devices_.clear();
     }
 
@@ -1044,6 +1086,7 @@ private:
 
     std::vector<DeviceInfo> devices_;
     std::unordered_map<void*, int32_t> allocations_;
+    std::atomic<bool> shutdown_in_progress_{false};  // Flag to suppress CUDA shutdown errors
 
     auto get_queue(int32_t device_id) -> sycl::queue& {
         return *devices_[device_id].queue;

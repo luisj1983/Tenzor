@@ -105,6 +105,16 @@ namespace oneapi {
                         int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
                         bool compute_grad_input, bool compute_grad_weight, bool compute_grad_bias,
                         sycl::queue& queue) -> std::tuple<Tensor, Tensor, Tensor>;
+    // Separate backward operations (matching CPU API)
+    auto conv2d_backward_input(const Tensor& grad_output, const Tensor& weight,
+                               const std::vector<int64_t>& input_shape,
+                               int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
+                               sycl::queue& queue) -> Tensor;
+    auto conv2d_backward_weight(const Tensor& grad_output, const Tensor& input,
+                                const std::vector<int64_t>& weight_shape,
+                                int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
+                                sycl::queue& queue) -> Tensor;
+    auto conv2d_backward_bias(const Tensor& grad_output, sycl::queue& queue) -> Tensor;
 
     // Embedding operations
     auto embedding_lookup_kernel(const Tensor& indices, const Tensor& weights,
@@ -128,7 +138,7 @@ namespace oneapi {
 
     // Pooling operations
     auto avg_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
-    auto max_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
+    auto max_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> std::pair<Tensor, Tensor>;
     auto adaptive_avg_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
     auto adaptive_max_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
     auto avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
@@ -834,7 +844,26 @@ public:
             }
             else if (op_name == "conv2d_backward_input") {
                 // Computes gradient with respect to input
-                if (inputs.size() != 3) throw std::invalid_argument("conv2d_backward_input requires 3 inputs: grad_output, input, weight");
+                // API: 2 inputs (grad_output, weight) + input_shape from attrs
+                if (inputs.size() != 2) throw std::invalid_argument("conv2d_backward_input requires 2 inputs: grad_output, weight");
+
+                // Parse input_shape from comma-separated string
+                std::vector<int64_t> input_shape;
+                if (attrs.contains("input_shape")) {
+                    std::string shape_str = attrs.at("input_shape");
+                    size_t pos = 0;
+                    while (pos < shape_str.size()) {
+                        size_t comma = shape_str.find(',', pos);
+                        if (comma == std::string::npos) {
+                            input_shape.push_back(std::stoll(shape_str.substr(pos)));
+                            break;
+                        }
+                        input_shape.push_back(std::stoll(shape_str.substr(pos, comma - pos)));
+                        pos = comma + 1;
+                    }
+                } else {
+                    throw std::invalid_argument("conv2d_backward_input requires input_shape attribute");
+                }
 
                 // Extract attributes
                 int64_t stride = attrs.contains("stride") ? std::stoll(attrs.at("stride")) : 1;
@@ -842,16 +871,31 @@ public:
                 int64_t dilation = attrs.contains("dilation") ? std::stoll(attrs.at("dilation")) : 1;
                 int64_t groups = attrs.contains("groups") ? std::stoll(attrs.at("groups")) : 1;
 
-                // Call conv2d_backward with compute_grad_input=true, others=false
-                auto [grad_input, grad_weight, grad_bias] = oneapi::conv2d_backward(
-                    inputs[0], inputs[1], inputs[2],
-                    stride, padding, dilation, groups,
-                    true, false, false, queue);
-                return {grad_input};  // Return only grad_input
+                return {oneapi::conv2d_backward_input(inputs[0], inputs[1], input_shape,
+                                                      stride, padding, dilation, groups, queue)};
             }
             else if (op_name == "conv2d_backward_weight") {
                 // Computes gradient with respect to weight
-                if (inputs.size() != 3) throw std::invalid_argument("conv2d_backward_weight requires 3 inputs: grad_output, input, weight");
+                // API: 2 inputs (grad_output, input) + weight_shape from attrs
+                if (inputs.size() != 2) throw std::invalid_argument("conv2d_backward_weight requires 2 inputs: grad_output, input");
+
+                // Parse weight_shape from comma-separated string
+                std::vector<int64_t> weight_shape;
+                if (attrs.contains("weight_shape")) {
+                    std::string shape_str = attrs.at("weight_shape");
+                    size_t pos = 0;
+                    while (pos < shape_str.size()) {
+                        size_t comma = shape_str.find(',', pos);
+                        if (comma == std::string::npos) {
+                            weight_shape.push_back(std::stoll(shape_str.substr(pos)));
+                            break;
+                        }
+                        weight_shape.push_back(std::stoll(shape_str.substr(pos, comma - pos)));
+                        pos = comma + 1;
+                    }
+                } else {
+                    throw std::invalid_argument("conv2d_backward_weight requires weight_shape attribute");
+                }
 
                 // Extract attributes
                 int64_t stride = attrs.contains("stride") ? std::stoll(attrs.at("stride")) : 1;
@@ -859,29 +903,15 @@ public:
                 int64_t dilation = attrs.contains("dilation") ? std::stoll(attrs.at("dilation")) : 1;
                 int64_t groups = attrs.contains("groups") ? std::stoll(attrs.at("groups")) : 1;
 
-                // Call conv2d_backward with compute_grad_weight=true, others=false
-                auto [grad_input, grad_weight, grad_bias] = oneapi::conv2d_backward(
-                    inputs[0], inputs[1], inputs[2],
-                    stride, padding, dilation, groups,
-                    false, true, false, queue);
-                return {grad_weight};  // Return only grad_weight
+                return {oneapi::conv2d_backward_weight(inputs[0], inputs[1], weight_shape,
+                                                       stride, padding, dilation, groups, queue)};
             }
             else if (op_name == "conv2d_backward_bias") {
                 // Computes gradient with respect to bias
-                if (inputs.size() != 3) throw std::invalid_argument("conv2d_backward_bias requires 3 inputs: grad_output, input, weight");
+                // API: 1 input (grad_output)
+                if (inputs.size() < 1) throw std::invalid_argument("conv2d_backward_bias requires at least 1 input: grad_output");
 
-                // Extract attributes (bias gradient doesn't depend on conv params, but we pass them anyway)
-                int64_t stride = attrs.contains("stride") ? std::stoll(attrs.at("stride")) : 1;
-                int64_t padding = attrs.contains("padding") ? std::stoll(attrs.at("padding")) : 0;
-                int64_t dilation = attrs.contains("dilation") ? std::stoll(attrs.at("dilation")) : 1;
-                int64_t groups = attrs.contains("groups") ? std::stoll(attrs.at("groups")) : 1;
-
-                // Call conv2d_backward with compute_grad_bias=true, others=false
-                auto [grad_input, grad_weight, grad_bias] = oneapi::conv2d_backward(
-                    inputs[0], inputs[1], inputs[2],
-                    stride, padding, dilation, groups,
-                    false, false, true, queue);
-                return {grad_bias};  // Return only grad_bias
+                return {oneapi::conv2d_backward_bias(inputs[0], queue)};
             }
 
             // Embedding operations
@@ -972,7 +1002,8 @@ public:
             }
             else if (op_name == "max_pool2d") {
                 if (inputs.size() != 1) throw std::invalid_argument("max_pool2d requires 1 input");
-                return {oneapi::max_pool2d_kernel(inputs[0], attrs, queue)};
+                auto [output, indices] = oneapi::max_pool2d_kernel(inputs[0], attrs, queue);
+                return {output, indices};
             }
             else if (op_name == "adaptive_avg_pool2d") {
                 if (inputs.size() != 1) throw std::invalid_argument("adaptive_avg_pool2d requires 1 input");

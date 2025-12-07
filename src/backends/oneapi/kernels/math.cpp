@@ -15,20 +15,32 @@ namespace tenzor {
     auto div(const Tensor& a, const Tensor& b) -> Tensor;
 }
 
+// Forward declaration for contiguous kernel
+namespace tenzor {
+namespace oneapi {
+    auto contiguous_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+}
+}
+
 namespace tenzor {
 namespace oneapi {
 
 // SYCL Kernel name classes (using functors for SYCL 2025.2 compatibility)
 struct AddKernelFloat32 {};
 struct AddKernelFloat64 {};
+struct AddKernelFloat16 {};
 struct SubKernelFloat32 {};
 struct SubKernelFloat64 {};
+struct SubKernelFloat16 {};
 struct MulKernelFloat32 {};
 struct MulKernelFloat64 {};
+struct MulKernelFloat16 {};
 struct DivKernelFloat32 {};
 struct DivKernelFloat64 {};
+struct DivKernelFloat16 {};
 struct MatMulKernelFloat32 {};
 struct MatMulKernelFloat64 {};
+struct MatMulKernelFloat16 {};
 struct SqrtKernelFloat32 {};
 struct SqrtKernelFloat64 {};
 struct NegKernelFloat32 {};
@@ -100,10 +112,14 @@ inline auto calculate_numel(const std::vector<int64_t>& shape) -> int64_t {
 }
 
 // Element-wise addition kernel
+// IMPORTANT: Must ensure contiguous inputs for direct memory access
 auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
-    // Validate inputs
-    auto a_shape = a.shape();
-    auto b_shape = b.shape();
+    // Ensure inputs are contiguous for correct memory access
+    Tensor a_cont = a.is_contiguous() ? a : contiguous_kernel(a, queue);
+    Tensor b_cont = b.is_contiguous() ? b : contiguous_kernel(b, queue);
+
+    auto a_shape = a_cont.shape();
+    auto b_shape = b_cont.shape();
 
     // Check if shapes match exactly
     bool same_shape = std::equal(a_shape.begin(), a_shape.end(), b_shape.begin(), b_shape.end());
@@ -112,43 +128,53 @@ auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
     // TODO: Implement proper SYCL broadcasting kernels
     if (!same_shape) {
         // Copy to CPU, perform operation, copy back
-        auto a_cpu = a.to(Device::cpu());
-        auto b_cpu = b.to(Device::cpu());
+        auto a_cpu = a_cont.to(Device::cpu());
+        auto b_cpu = b_cont.to(Device::cpu());
 
         // CPU backend handles broadcasting
         auto result_cpu = tenzor::add(a_cpu, b_cpu);
 
         // Copy result back to OneAPI device
-        return result_cpu.to(a.device());
+        return result_cpu.to(a_cont.device());
     }
 
-    if (a.dtype() != b.dtype()) {
+    if (a_cont.dtype() != b_cont.dtype()) {
         throw std::invalid_argument("Tensor dtypes must match for addition");
     }
 
     // Create output tensor
-    Tensor output(std::vector<int64_t>(a.shape().begin(), a.shape().end()),
-                  a.dtype(), a.device());
+    Tensor output(std::vector<int64_t>(a_cont.shape().begin(), a_cont.shape().end()),
+                  a_cont.dtype(), a_cont.device());
 
-    const int64_t numel = a.numel();
+    const int64_t numel = a_cont.numel();
 
     // Dispatch based on dtype
-    if (a.dtype() == DType::Float32) {
-        const float* a_ptr = get_data_ptr<const float>(a);
-        const float* b_ptr = get_data_ptr<const float>(b);
+    if (a_cont.dtype() == DType::Float32) {
+        const float* a_ptr = get_data_ptr<const float>(a_cont);
+        const float* b_ptr = get_data_ptr<const float>(b_cont);
         float* out_ptr = get_data_ptr<float>(output);
 
         queue.parallel_for<AddKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] + b_ptr[idx];
         }).wait();
     }
-    else if (a.dtype() == DType::Float64) {
-        const double* a_ptr = get_data_ptr<const double>(a);
-        const double* b_ptr = get_data_ptr<const double>(b);
+    else if (a_cont.dtype() == DType::Float64) {
+        const double* a_ptr = get_data_ptr<const double>(a_cont);
+        const double* b_ptr = get_data_ptr<const double>(b_cont);
         double* out_ptr = get_data_ptr<double>(output);
 
         queue.parallel_for<AddKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] + b_ptr[idx];
+        }).wait();
+    }
+    else if (a_cont.dtype() == DType::Float16) {
+        const sycl::half* a_ptr = get_data_ptr<const sycl::half>(a_cont);
+        const sycl::half* b_ptr = get_data_ptr<const sycl::half>(b_cont);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+
+        queue.parallel_for<AddKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            // Use float accumulation for precision
+            out_ptr[idx] = sycl::half(static_cast<float>(a_ptr[idx]) + static_cast<float>(b_ptr[idx]));
         }).wait();
     }
     else {
@@ -159,38 +185,43 @@ auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 }
 
 // Element-wise subtraction kernel
+// IMPORTANT: Must ensure contiguous inputs for direct memory access
 auto sub_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
-    auto a_shape = a.shape();
-    auto b_shape = b.shape();
+    // Ensure inputs are contiguous for correct memory access
+    Tensor a_cont = a.is_contiguous() ? a : contiguous_kernel(a, queue);
+    Tensor b_cont = b.is_contiguous() ? b : contiguous_kernel(b, queue);
+
+    auto a_shape = a_cont.shape();
+    auto b_shape = b_cont.shape();
 
     // Check if shapes match exactly
     bool same_shape = std::equal(a_shape.begin(), a_shape.end(), b_shape.begin(), b_shape.end());
 
     // If shapes don't match, fall back to CPU for broadcasting
     if (!same_shape) {
-        auto a_cpu = a.to(Device::cpu());
-        auto b_cpu = b.to(Device::cpu());
+        auto a_cpu = a_cont.to(Device::cpu());
+        auto b_cpu = b_cont.to(Device::cpu());
         auto result_cpu = tenzor::sub(a_cpu, b_cpu);
-        return result_cpu.to(a.device());
+        return result_cpu.to(a_cont.device());
     }
 
-    Tensor output(std::vector<int64_t>(a.shape().begin(), a.shape().end()),
-                  a.dtype(), a.device());
+    Tensor output(std::vector<int64_t>(a_cont.shape().begin(), a_cont.shape().end()),
+                  a_cont.dtype(), a_cont.device());
 
-    const int64_t numel = a.numel();
+    const int64_t numel = a_cont.numel();
 
-    if (a.dtype() == DType::Float32) {
-        const float* a_ptr = get_data_ptr<const float>(a);
-        const float* b_ptr = get_data_ptr<const float>(b);
+    if (a_cont.dtype() == DType::Float32) {
+        const float* a_ptr = get_data_ptr<const float>(a_cont);
+        const float* b_ptr = get_data_ptr<const float>(b_cont);
         float* out_ptr = get_data_ptr<float>(output);
 
         queue.parallel_for<SubKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] - b_ptr[idx];
         }).wait();
     }
-    else if (a.dtype() == DType::Float64) {
-        const double* a_ptr = get_data_ptr<const double>(a);
-        const double* b_ptr = get_data_ptr<const double>(b);
+    else if (a_cont.dtype() == DType::Float64) {
+        const double* a_ptr = get_data_ptr<const double>(a_cont);
+        const double* b_ptr = get_data_ptr<const double>(b_cont);
         double* out_ptr = get_data_ptr<double>(output);
 
         queue.parallel_for<SubKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
@@ -205,38 +236,43 @@ auto sub_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 }
 
 // Element-wise multiplication kernel
+// IMPORTANT: Must ensure contiguous inputs for direct memory access
 auto mul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
-    auto a_shape = a.shape();
-    auto b_shape = b.shape();
+    // Ensure inputs are contiguous for correct memory access
+    Tensor a_cont = a.is_contiguous() ? a : contiguous_kernel(a, queue);
+    Tensor b_cont = b.is_contiguous() ? b : contiguous_kernel(b, queue);
+
+    auto a_shape = a_cont.shape();
+    auto b_shape = b_cont.shape();
 
     // Check if shapes match exactly
     bool same_shape = std::equal(a_shape.begin(), a_shape.end(), b_shape.begin(), b_shape.end());
 
     // If shapes don't match, fall back to CPU for broadcasting
     if (!same_shape) {
-        auto a_cpu = a.to(Device::cpu());
-        auto b_cpu = b.to(Device::cpu());
+        auto a_cpu = a_cont.to(Device::cpu());
+        auto b_cpu = b_cont.to(Device::cpu());
         auto result_cpu = tenzor::mul(a_cpu, b_cpu);
-        return result_cpu.to(a.device());
+        return result_cpu.to(a_cont.device());
     }
 
-    Tensor output(std::vector<int64_t>(a.shape().begin(), a.shape().end()),
-                  a.dtype(), a.device());
+    Tensor output(std::vector<int64_t>(a_cont.shape().begin(), a_cont.shape().end()),
+                  a_cont.dtype(), a_cont.device());
 
-    const int64_t numel = a.numel();
+    const int64_t numel = a_cont.numel();
 
-    if (a.dtype() == DType::Float32) {
-        const float* a_ptr = get_data_ptr<const float>(a);
-        const float* b_ptr = get_data_ptr<const float>(b);
+    if (a_cont.dtype() == DType::Float32) {
+        const float* a_ptr = get_data_ptr<const float>(a_cont);
+        const float* b_ptr = get_data_ptr<const float>(b_cont);
         float* out_ptr = get_data_ptr<float>(output);
 
         queue.parallel_for<MulKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] * b_ptr[idx];
         }).wait();
     }
-    else if (a.dtype() == DType::Float64) {
-        const double* a_ptr = get_data_ptr<const double>(a);
-        const double* b_ptr = get_data_ptr<const double>(b);
+    else if (a_cont.dtype() == DType::Float64) {
+        const double* a_ptr = get_data_ptr<const double>(a_cont);
+        const double* b_ptr = get_data_ptr<const double>(b_cont);
         double* out_ptr = get_data_ptr<double>(output);
 
         queue.parallel_for<MulKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
@@ -251,38 +287,43 @@ auto mul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 }
 
 // Element-wise division kernel
+// IMPORTANT: Must ensure contiguous inputs for direct memory access
 auto div_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
-    auto a_shape = a.shape();
-    auto b_shape = b.shape();
+    // Ensure inputs are contiguous for correct memory access
+    Tensor a_cont = a.is_contiguous() ? a : contiguous_kernel(a, queue);
+    Tensor b_cont = b.is_contiguous() ? b : contiguous_kernel(b, queue);
+
+    auto a_shape = a_cont.shape();
+    auto b_shape = b_cont.shape();
 
     // Check if shapes match exactly
     bool same_shape = std::equal(a_shape.begin(), a_shape.end(), b_shape.begin(), b_shape.end());
 
     // If shapes don't match, fall back to CPU for broadcasting
     if (!same_shape) {
-        auto a_cpu = a.to(Device::cpu());
-        auto b_cpu = b.to(Device::cpu());
+        auto a_cpu = a_cont.to(Device::cpu());
+        auto b_cpu = b_cont.to(Device::cpu());
         auto result_cpu = tenzor::div(a_cpu, b_cpu);
-        return result_cpu.to(a.device());
+        return result_cpu.to(a_cont.device());
     }
 
-    Tensor output(std::vector<int64_t>(a.shape().begin(), a.shape().end()),
-                  a.dtype(), a.device());
+    Tensor output(std::vector<int64_t>(a_cont.shape().begin(), a_cont.shape().end()),
+                  a_cont.dtype(), a_cont.device());
 
-    const int64_t numel = a.numel();
+    const int64_t numel = a_cont.numel();
 
-    if (a.dtype() == DType::Float32) {
-        const float* a_ptr = get_data_ptr<const float>(a);
-        const float* b_ptr = get_data_ptr<const float>(b);
+    if (a_cont.dtype() == DType::Float32) {
+        const float* a_ptr = get_data_ptr<const float>(a_cont);
+        const float* b_ptr = get_data_ptr<const float>(b_cont);
         float* out_ptr = get_data_ptr<float>(output);
 
         queue.parallel_for<DivKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] / b_ptr[idx];
         }).wait();
     }
-    else if (a.dtype() == DType::Float64) {
-        const double* a_ptr = get_data_ptr<const double>(a);
-        const double* b_ptr = get_data_ptr<const double>(b);
+    else if (a_cont.dtype() == DType::Float64) {
+        const double* a_ptr = get_data_ptr<const double>(a_cont);
+        const double* b_ptr = get_data_ptr<const double>(b_cont);
         double* out_ptr = get_data_ptr<double>(output);
 
         queue.parallel_for<DivKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
@@ -297,9 +338,15 @@ auto div_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 }
 
 // Matrix multiplication kernel
+// IMPORTANT: oneMKL GEMM assumes contiguous row-major layout
+// Non-contiguous tensors (e.g., from transpose) must be made contiguous first
 auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
-    auto a_shape = a.shape();
-    auto b_shape = b.shape();
+    // Ensure inputs are contiguous - oneMKL GEMM requires contiguous memory layout
+    Tensor a_cont = a.is_contiguous() ? a : contiguous_kernel(a, queue);
+    Tensor b_cont = b.is_contiguous() ? b : contiguous_kernel(b, queue);
+
+    auto a_shape = a_cont.shape();
+    auto b_shape = b_cont.shape();
 
     // Handle 1D vector × 2D matrix (vector-matrix multiplication)
     if (a_shape.size() == 1 && b_shape.size() == 2) {
@@ -315,12 +362,12 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
         }
 
         // Treat 1D vector as row vector (1, n) and perform matmul to get (1, m), then return as (m,)
-        Tensor output({m}, a.dtype(), a.device());
+        Tensor output({m}, a_cont.dtype(), a_cont.device());
 
 #ifdef TENZOR_HAS_ONEMKL
-        if (a.dtype() == DType::Float32) {
-            const float* a_ptr = get_data_ptr<const float>(a);
-            const float* b_ptr = get_data_ptr<const float>(b);
+        if (a_cont.dtype() == DType::Float32) {
+            const float* a_ptr = get_data_ptr<const float>(a_cont);
+            const float* b_ptr = get_data_ptr<const float>(b_cont);
             float* out_ptr = get_data_ptr<float>(output);
 
             const float alpha = 1.0f;
@@ -343,9 +390,9 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
             );
             queue.wait();
         }
-        else if (a.dtype() == DType::Float64) {
-            const double* a_ptr = get_data_ptr<const double>(a);
-            const double* b_ptr = get_data_ptr<const double>(b);
+        else if (a_cont.dtype() == DType::Float64) {
+            const double* a_ptr = get_data_ptr<const double>(a_cont);
+            const double* b_ptr = get_data_ptr<const double>(b_cont);
             double* out_ptr = get_data_ptr<double>(output);
 
             const double alpha = 1.0;
@@ -369,9 +416,9 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
         }
 #else
         // Fallback naive implementation
-        if (a.dtype() == DType::Float32) {
-            const float* a_ptr = get_data_ptr<const float>(a);
-            const float* b_ptr = get_data_ptr<const float>(b);
+        if (a_cont.dtype() == DType::Float32) {
+            const float* a_ptr = get_data_ptr<const float>(a_cont);
+            const float* b_ptr = get_data_ptr<const float>(b_cont);
             float* out_ptr = get_data_ptr<float>(output);
 
             queue.parallel_for<class MatMulKernelVector>(sycl::range<1>(m), [=](sycl::id<1> idx) {
@@ -412,70 +459,72 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
     out_shape.push_back(m);
     out_shape.push_back(n);
 
-    Tensor output(out_shape, a.dtype(), a.device());
+    Tensor output(out_shape, a_cont.dtype(), a_cont.device());
 
 #ifdef TENZOR_HAS_ONEMKL
-    // Use oneMKL for optimized GEMM
-    // oneMKL GEMM: C = alpha * op(A) * op(B) + beta * C
-    // where A is (m x k), B is (k x n), C is (m x n)
-    // oneMKL uses column-major layout, so we compute C^T = B^T * A^T
-    // This means: gemm(transB, transA, n, m, k, alpha, B, ldb, A, lda, beta, C, ldc)
-
-    if (a.dtype() == DType::Float32) {
-        const float* a_ptr = get_data_ptr<const float>(a);
-        const float* b_ptr = get_data_ptr<const float>(b);
+    // NOTE: oneMKL GEMM has issues with sycl::malloc_shared memory on some devices/configurations.
+    // Produces incorrect results (8x multiplier bug when k>16) with shared memory.
+    // Using naive SYCL kernel instead for correctness.
+    // TODO: Investigate using malloc_device with explicit transfers for oneMKL GEMM performance
+    if (a_cont.dtype() == DType::Float32) {
+        const float* a_ptr = get_data_ptr<const float>(a_cont);
+        const float* b_ptr = get_data_ptr<const float>(b_cont);
         float* out_ptr = get_data_ptr<float>(output);
 
-        const float alpha = 1.0f;
-        const float beta = 0.0f;
+        // C[i,j] = sum_p(A[i,p] * B[p,j])
+        queue.parallel_for<MatMulKernelFloat32>(sycl::range<2>(m, n), [=](sycl::id<2> idx) {
+            const int64_t i = idx[0];
+            const int64_t j = idx[1];
 
-        // oneMKL expects column-major, we have row-major
-        // For row-major C = A * B (A: m x k, B: k x n, C: m x n)
-        // Equivalent to column-major C^T = B^T * A^T
-        ::oneapi::mkl::blas::column_major::gemm(
-            queue,
-            ::oneapi::mkl::transpose::nontrans,  // B^T is not transposed (since B is already in memory as we want)
-            ::oneapi::mkl::transpose::nontrans,  // A^T is not transposed
-            n,        // number of rows of op(B) and C in column-major
-            m,        // number of columns of op(A) and C in column-major
-            k,        // number of columns of op(B) and rows of op(A)
-            alpha,
-            b_ptr, n, // B, leading dimension n
-            a_ptr, k, // A, leading dimension k
-            beta,
-            out_ptr, n // C, leading dimension n
-        );
-        queue.wait();
+            float sum = 0.0f;
+            for (int64_t p = 0; p < k; ++p) {
+                sum += a_ptr[i * k + p] * b_ptr[p * n + j];
+            }
+            out_ptr[i * n + j] = sum;
+        }).wait();
     }
-    else if (a.dtype() == DType::Float64) {
-        const double* a_ptr = get_data_ptr<const double>(a);
-        const double* b_ptr = get_data_ptr<const double>(b);
+    else if (a_cont.dtype() == DType::Float64) {
+        const double* a_ptr = get_data_ptr<const double>(a_cont);
+        const double* b_ptr = get_data_ptr<const double>(b_cont);
         double* out_ptr = get_data_ptr<double>(output);
 
-        const double alpha = 1.0;
-        const double beta = 0.0;
+        // C[i,j] = sum_p(A[i,p] * B[p,j])
+        queue.parallel_for<MatMulKernelFloat64>(sycl::range<2>(m, n), [=](sycl::id<2> idx) {
+            const int64_t i = idx[0];
+            const int64_t j = idx[1];
 
-        ::oneapi::mkl::blas::column_major::gemm(
-            queue,
-            ::oneapi::mkl::transpose::nontrans,
-            ::oneapi::mkl::transpose::nontrans,
-            n, m, k,
-            alpha,
-            b_ptr, n,
-            a_ptr, k,
-            beta,
-            out_ptr, n
-        );
-        queue.wait();
+            double sum = 0.0;
+            for (int64_t p = 0; p < k; ++p) {
+                sum += a_ptr[i * k + p] * b_ptr[p * n + j];
+            }
+            out_ptr[i * n + j] = sum;
+        }).wait();
+    }
+    else if (a_cont.dtype() == DType::Float16) {
+        const sycl::half* a_ptr = get_data_ptr<const sycl::half>(a_cont);
+        const sycl::half* b_ptr = get_data_ptr<const sycl::half>(b_cont);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+
+        // Use float accumulation for precision
+        queue.parallel_for<MatMulKernelFloat16>(sycl::range<2>(m, n), [=](sycl::id<2> idx) {
+            const int64_t i = idx[0];
+            const int64_t j = idx[1];
+
+            float sum = 0.0f;
+            for (int64_t p = 0; p < k; ++p) {
+                sum += static_cast<float>(a_ptr[i * k + p]) * static_cast<float>(b_ptr[p * n + j]);
+            }
+            out_ptr[i * n + j] = sycl::half(sum);
+        }).wait();
     }
     else {
         throw std::runtime_error("Unsupported dtype for matmul with oneMKL");
     }
 #else
     // Fallback naive implementation for Float32
-    if (a.dtype() == DType::Float32) {
-        const float* a_ptr = get_data_ptr<const float>(a);
-        const float* b_ptr = get_data_ptr<const float>(b);
+    if (a_cont.dtype() == DType::Float32) {
+        const float* a_ptr = get_data_ptr<const float>(a_cont);
+        const float* b_ptr = get_data_ptr<const float>(b_cont);
         float* out_ptr = get_data_ptr<float>(output);
 
         // Simple parallel matrix multiplication
@@ -490,9 +539,9 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
             out_ptr[i * n + j] = sum;
         }).wait();
     }
-    else if (a.dtype() == DType::Float64) {
-        const double* a_ptr = get_data_ptr<const double>(a);
-        const double* b_ptr = get_data_ptr<const double>(b);
+    else if (a_cont.dtype() == DType::Float64) {
+        const double* a_ptr = get_data_ptr<const double>(a_cont);
+        const double* b_ptr = get_data_ptr<const double>(b_cont);
         double* out_ptr = get_data_ptr<double>(output);
 
         queue.parallel_for<MatMulKernelFloat64>(sycl::range<2>(m, n), [=](sycl::id<2> idx) {
@@ -504,6 +553,23 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
                 sum += a_ptr[i * k + p] * b_ptr[p * n + j];
             }
             out_ptr[i * n + j] = sum;
+        }).wait();
+    }
+    else if (a_cont.dtype() == DType::Float16) {
+        const sycl::half* a_ptr = get_data_ptr<const sycl::half>(a_cont);
+        const sycl::half* b_ptr = get_data_ptr<const sycl::half>(b_cont);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+
+        // Use float accumulation for precision
+        queue.parallel_for<MatMulKernelFloat16>(sycl::range<2>(m, n), [=](sycl::id<2> idx) {
+            const int64_t i = idx[0];
+            const int64_t j = idx[1];
+
+            float sum = 0.0f;
+            for (int64_t p = 0; p < k; ++p) {
+                sum += static_cast<float>(a_ptr[i * k + p]) * static_cast<float>(b_ptr[p * n + j]);
+            }
+            out_ptr[i * n + j] = sycl::half(sum);
         }).wait();
     }
     else {

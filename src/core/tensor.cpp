@@ -901,27 +901,52 @@ auto Tensor::view(std::vector<int64_t> new_shape) const -> Tensor {
         throw std::runtime_error("View requires contiguous tensor. Use reshape() or contiguous() first.");
     }
 
-    // Validate total elements
+    // Handle -1 inference (one dimension can be inferred)
+    int64_t infer_dim = -1;
     int64_t total = 1;
-    for (auto dim : new_shape) {
-        total *= dim;
+    for (size_t i = 0; i < new_shape.size(); ++i) {
+        if (new_shape[i] == -1) {
+            if (infer_dim != -1) {
+                throw std::invalid_argument("Only one dimension can be inferred");
+            }
+            infer_dim = static_cast<int64_t>(i);
+        } else if (new_shape[i] <= 0) {
+            throw std::invalid_argument("Invalid shape dimension");
+        } else {
+            total *= new_shape[i];
+        }
     }
+
+    if (infer_dim != -1) {
+        if (total == 0) {
+            throw std::invalid_argument("Cannot infer dimension: product of known dimensions is zero");
+        }
+        if (numel() % total != 0) {
+            throw std::invalid_argument("Cannot infer dimension");
+        }
+        new_shape[infer_dim] = numel() / total;
+        total = numel();
+    }
+
+    // Validate total elements match
     if (total != numel()) {
         throw std::invalid_argument("View shape incompatible with number of elements");
     }
 
-    // Build attributes with new shape
-    OpAttributes attrs;
-    std::string shape_str;
-    for (size_t i = 0; i < new_shape.size(); ++i) {
-        if (i > 0) shape_str += ",";
-        shape_str += std::to_string(new_shape[i]);
-    }
-    attrs["shape"] = shape_str;
+    // View is a zero-copy operation - create a new tensor that shares the same storage
+    // This is the key difference from reshape: view MUST share storage
+    Tensor result;
+    result.impl_ = std::make_shared<TensorImpl>(*impl_);
 
-    // Dispatch to backend (uses reshape since view is just reshape on contiguous tensor)
-    std::vector<Tensor> inputs = {*this};
-    return Dispatcher::dispatch("reshape", inputs, attrs)[0];
+    // Update shape and recompute strides for contiguous layout
+    result.impl_->shape = std::move(new_shape);
+    result.impl_->strides = compute_strides(result.impl_->shape);
+
+    // CRITICAL: Share the same storage - this is what makes it a view
+    // The storage is already shared via the copy constructor of TensorImpl
+    // which copies the shared_ptr<Storage>
+
+    return result;
 }
 
 auto Tensor::transpose(int64_t dim0, int64_t dim1) const -> Tensor {

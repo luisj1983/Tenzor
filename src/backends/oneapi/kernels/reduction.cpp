@@ -5,6 +5,13 @@
 #include <algorithm>
 #include <stdexcept>
 
+// Forward declaration for contiguous kernel
+namespace tenzor {
+namespace oneapi {
+    auto contiguous_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+}
+}
+
 namespace tenzor {
 namespace oneapi {
 
@@ -61,8 +68,12 @@ static auto compute_reduction_shape(const std::vector<int64_t>& input_shape,
 }
 
 // Sum reduction kernel
+// IMPORTANT: Must ensure contiguous input for direct memory access
 auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor {
-    auto shape = input.shape();
+    // Ensure input is contiguous for correct memory access
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+
+    auto shape = in_cont.shape();
     std::vector<int64_t> shape_vec(shape.begin(), shape.end());
 
     // Check if this is a full reduction (dim < 0 means reduce all dimensions)
@@ -80,26 +91,26 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
 
     // Calculate output shape
     auto out_shape = compute_reduction_shape(shape_vec, is_full_reduction ? -1 : dim, keepdim);
-    Tensor output(out_shape, input.dtype(), input.device());
+    Tensor output(out_shape, in_cont.dtype(), in_cont.device());
 
     if (is_full_reduction) {
         // Full reduction: sum all elements
-        const int64_t total_size = input.numel();
+        const int64_t total_size = in_cont.numel();
 
         // Handle empty tensor: sum of empty set is 0 (additive identity)
         if (total_size == 0) {
-            if (input.dtype() == DType::Float32) {
+            if (in_cont.dtype() == DType::Float32) {
                 float* out_ptr = get_data_ptr<float>(output);
                 queue.single_task([=]() { out_ptr[0] = 0.0f; }).wait();
-            } else if (input.dtype() == DType::Float64) {
+            } else if (in_cont.dtype() == DType::Float64) {
                 double* out_ptr = get_data_ptr<double>(output);
                 queue.single_task([=]() { out_ptr[0] = 0.0; }).wait();
             }
             return output;
         }
 
-        if (input.dtype() == DType::Float32) {
-            const float* in_ptr = get_data_ptr<const float>(input);
+        if (in_cont.dtype() == DType::Float32) {
+            const float* in_ptr = get_data_ptr<const float>(in_cont);
             float* out_ptr = get_data_ptr<float>(output);
 
             // Use parallel_for with reduction
@@ -115,8 +126,8 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
             queue.wait();
             sycl::free(sum_buf, queue);
         }
-        else if (input.dtype() == DType::Float64) {
-            const double* in_ptr = get_data_ptr<const double>(input);
+        else if (in_cont.dtype() == DType::Float64) {
+            const double* in_ptr = get_data_ptr<const double>(in_cont);
             double* out_ptr = get_data_ptr<double>(output);
 
             auto sum_buf = sycl::malloc_shared<double>(1, queue);
@@ -140,8 +151,8 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
         const int64_t dim_size = shape[dim];
         const int64_t inner_size = std::accumulate(shape.begin() + dim + 1, shape.end(), 1LL, std::multiplies<>());
 
-        if (input.dtype() == DType::Float32) {
-            const float* in_ptr = get_data_ptr<const float>(input);
+        if (in_cont.dtype() == DType::Float32) {
+            const float* in_ptr = get_data_ptr<const float>(in_cont);
             float* out_ptr = get_data_ptr<float>(output);
 
             queue.parallel_for<SumKernelFloat32>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
@@ -157,8 +168,8 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                 out_ptr[outer_idx * inner_size + inner_idx] = sum;
             }).wait();
         }
-        else if (input.dtype() == DType::Float64) {
-            const double* in_ptr = get_data_ptr<const double>(input);
+        else if (in_cont.dtype() == DType::Float64) {
+            const double* in_ptr = get_data_ptr<const double>(in_cont);
             double* out_ptr = get_data_ptr<double>(output);
 
             queue.parallel_for<SumKernelFloat64>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
@@ -183,8 +194,12 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
 }
 
 // Mean reduction kernel
+// IMPORTANT: Must ensure contiguous input for direct memory access
 auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& queue) -> Tensor {
-    auto shape = input.shape();
+    // Ensure input is contiguous for correct memory access
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+
+    auto shape = in_cont.shape();
     std::vector<int64_t> shape_vec(shape.begin(), shape.end());
 
     // Check if this is a full reduction (dim < 0 means reduce all dimensions)
@@ -202,14 +217,14 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& qu
 
     // Calculate output shape
     auto out_shape = compute_reduction_shape(shape_vec, is_full_reduction ? -1 : dim, keepdim);
-    Tensor output(out_shape, input.dtype(), input.device());
+    Tensor output(out_shape, in_cont.dtype(), in_cont.device());
 
     if (is_full_reduction) {
         // Full reduction: mean of all elements
-        const int64_t total_size = input.numel();
+        const int64_t total_size = in_cont.numel();
 
-        if (input.dtype() == DType::Float32) {
-            const float* in_ptr = get_data_ptr<const float>(input);
+        if (in_cont.dtype() == DType::Float32) {
+            const float* in_ptr = get_data_ptr<const float>(in_cont);
             float* out_ptr = get_data_ptr<float>(output);
             const float scale = 1.0f / static_cast<float>(total_size);
 
@@ -225,8 +240,8 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& qu
             queue.wait();
             sycl::free(sum_buf, queue);
         }
-        else if (input.dtype() == DType::Float64) {
-            const double* in_ptr = get_data_ptr<const double>(input);
+        else if (in_cont.dtype() == DType::Float64) {
+            const double* in_ptr = get_data_ptr<const double>(in_cont);
             double* out_ptr = get_data_ptr<double>(output);
             const double scale = 1.0 / static_cast<double>(total_size);
 
@@ -251,8 +266,8 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& qu
         const int64_t dim_size = shape[dim];
         const int64_t inner_size = std::accumulate(shape.begin() + dim + 1, shape.end(), 1LL, std::multiplies<>());
 
-        if (input.dtype() == DType::Float32) {
-            const float* in_ptr = get_data_ptr<const float>(input);
+        if (in_cont.dtype() == DType::Float32) {
+            const float* in_ptr = get_data_ptr<const float>(in_cont);
             float* out_ptr = get_data_ptr<float>(output);
             const float scale = 1.0f / static_cast<float>(dim_size);
 
@@ -269,8 +284,8 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& qu
                 out_ptr[outer_idx * inner_size + inner_idx] = sum * scale;
             }).wait();
         }
-        else if (input.dtype() == DType::Float64) {
-            const double* in_ptr = get_data_ptr<const double>(input);
+        else if (in_cont.dtype() == DType::Float64) {
+            const double* in_ptr = get_data_ptr<const double>(in_cont);
             double* out_ptr = get_data_ptr<double>(output);
             const double scale = 1.0 / static_cast<double>(dim_size);
 

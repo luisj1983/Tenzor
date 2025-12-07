@@ -69,6 +69,7 @@ auto reshape_kernel(const Tensor& input, const std::vector<int64_t>& new_shape, 
 // Transpose kernel - swap two dimensions
 auto transpose_kernel(const Tensor& input, int64_t dim0, int64_t dim1, sycl::queue& queue) -> Tensor {
     auto shape_span = input.shape();
+    auto input_strides_span = input.strides();
     const size_t ndim = shape_span.size();
 
     // Handle negative dimensions
@@ -80,8 +81,9 @@ auto transpose_kernel(const Tensor& input, int64_t dim0, int64_t dim1, sycl::que
         throw std::invalid_argument("Transpose: invalid dimensions");
     }
 
-    // Convert span to vector
+    // Convert spans to vectors
     std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
+    std::vector<int64_t> in_actual_strides(input_strides_span.begin(), input_strides_span.end());
 
     // Create output shape by swapping dimensions
     std::vector<int64_t> out_shape = shape;
@@ -89,17 +91,23 @@ auto transpose_kernel(const Tensor& input, int64_t dim0, int64_t dim1, sycl::que
 
     Tensor output(out_shape, input.dtype(), input.device());
 
-    // Calculate strides
-    auto in_strides = calculate_strides(shape);
+    // Calculate output strides (always contiguous for output)
     auto out_strides = calculate_strides(out_shape);
+
+    // For iterating, we need contiguous strides to decompose the flat index into coordinates
+    auto iter_strides = calculate_strides(shape);
 
     const int64_t numel = input.numel();
 
-    // Convert strides to device-copyable arrays
-    int64_t in_strides_arr[8];
-    int64_t out_strides_arr[8];
+    // Convert to device-copyable arrays
+    int64_t shape_arr[8] = {0};
+    int64_t in_actual_strides_arr[8] = {0};  // Actual input strides (may be non-contiguous)
+    int64_t iter_strides_arr[8] = {0};        // For decomposing flat index into coordinates
+    int64_t out_strides_arr[8] = {0};
     for (size_t i = 0; i < ndim && i < 8; ++i) {
-        in_strides_arr[i] = in_strides[i];
+        shape_arr[i] = shape[i];
+        in_actual_strides_arr[i] = in_actual_strides[i];
+        iter_strides_arr[i] = iter_strides[i];
         out_strides_arr[i] = out_strides[i];
     }
 
@@ -108,17 +116,19 @@ auto transpose_kernel(const Tensor& input, int64_t dim0, int64_t dim1, sycl::que
         float* out_ptr = get_data_ptr<float>(output);
 
         queue.parallel_for<TransposeKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            // Compute multi-dimensional index in input
-            int64_t temp = idx;
+            // Decompose flat output index into coordinates using contiguous strides
+            int64_t remaining = idx;
             int64_t in_idx = 0;
             int64_t out_idx = 0;
 
             for (size_t d = 0; d < ndim; ++d) {
-                int64_t coord = temp / in_strides_arr[d];
-                temp %= in_strides_arr[d];
-                in_idx += coord * in_strides_arr[d];
+                int64_t coord = remaining / iter_strides_arr[d];
+                remaining %= iter_strides_arr[d];
 
-                // Map to output dimension (swap dim0 and dim1)
+                // Input index uses actual (possibly non-contiguous) strides
+                in_idx += coord * in_actual_strides_arr[d];
+
+                // Map coordinate to output dimension (swap dim0 and dim1)
                 size_t out_d = (d == static_cast<size_t>(dim0)) ? dim1 :
                               (d == static_cast<size_t>(dim1)) ? dim0 : d;
                 out_idx += coord * out_strides_arr[out_d];
@@ -132,14 +142,15 @@ auto transpose_kernel(const Tensor& input, int64_t dim0, int64_t dim1, sycl::que
         double* out_ptr = get_data_ptr<double>(output);
 
         queue.parallel_for<TransposeKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
-            int64_t temp = idx;
+            int64_t remaining = idx;
             int64_t in_idx = 0;
             int64_t out_idx = 0;
 
             for (size_t d = 0; d < ndim; ++d) {
-                int64_t coord = temp / in_strides_arr[d];
-                temp %= in_strides_arr[d];
-                in_idx += coord * in_strides_arr[d];
+                int64_t coord = remaining / iter_strides_arr[d];
+                remaining %= iter_strides_arr[d];
+
+                in_idx += coord * in_actual_strides_arr[d];
 
                 size_t out_d = (d == static_cast<size_t>(dim0)) ? dim1 :
                               (d == static_cast<size_t>(dim1)) ? dim0 : d;
@@ -157,16 +168,19 @@ auto transpose_kernel(const Tensor& input, int64_t dim0, int64_t dim1, sycl::que
 }
 
 // Permute kernel - reorder dimensions
+// IMPORTANT: Must handle non-contiguous inputs correctly by using actual strides
 auto permute_kernel(const Tensor& input, const std::vector<int64_t>& dims, sycl::queue& queue) -> Tensor {
     auto shape_span = input.shape();
+    auto input_strides_span = input.strides();
     const size_t ndim = shape_span.size();
 
     if (dims.size() != ndim) {
         throw std::invalid_argument("Permute: number of dimensions must match");
     }
 
-    // Convert span to vector
+    // Convert spans to vectors
     std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
+    std::vector<int64_t> in_actual_strides(input_strides_span.begin(), input_strides_span.end());
 
     // Validate and handle negative dimensions
     std::vector<int64_t> perm_dims = dims;
@@ -185,18 +199,21 @@ auto permute_kernel(const Tensor& input, const std::vector<int64_t>& dims, sycl:
 
     Tensor output(out_shape, input.dtype(), input.device());
 
-    // Calculate strides
-    auto in_strides = calculate_strides(shape);
+    // Calculate contiguous iteration strides for coordinate decomposition
+    auto iter_strides = calculate_strides(shape);
+    // Output is always contiguous
     auto out_strides = calculate_strides(out_shape);
 
     const int64_t numel = input.numel();
 
     // Convert vectors to device-copyable arrays
-    int64_t in_strides_arr[8];
-    int64_t out_strides_arr[8];
-    int64_t perm_dims_arr[8];
+    int64_t iter_strides_arr[8] = {0};      // For decomposing flat index into coordinates
+    int64_t in_actual_strides_arr[8] = {0}; // Actual input strides (may be non-contiguous)
+    int64_t out_strides_arr[8] = {0};
+    int64_t perm_dims_arr[8] = {0};
     for (size_t i = 0; i < ndim && i < 8; ++i) {
-        in_strides_arr[i] = in_strides[i];
+        iter_strides_arr[i] = iter_strides[i];
+        in_actual_strides_arr[i] = in_actual_strides[i];
         out_strides_arr[i] = out_strides[i];
         perm_dims_arr[i] = perm_dims[i];
     }
@@ -206,18 +223,18 @@ auto permute_kernel(const Tensor& input, const std::vector<int64_t>& dims, sycl:
         float* out_ptr = get_data_ptr<float>(output);
 
         queue.parallel_for<PermuteKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
-            // Compute multi-dimensional coordinates from flat index
+            // Compute multi-dimensional coordinates from flat index using iteration strides
             int64_t coords[8];
             int64_t temp = flat_idx;
             for (size_t d = 0; d < ndim; ++d) {
-                coords[d] = temp / in_strides_arr[d];
-                temp %= in_strides_arr[d];
+                coords[d] = temp / iter_strides_arr[d];
+                temp %= iter_strides_arr[d];
             }
 
-            // Compute input index
+            // Compute input index using ACTUAL strides (may be non-contiguous)
             int64_t in_idx = 0;
             for (size_t d = 0; d < ndim; ++d) {
-                in_idx += coords[d] * in_strides_arr[d];
+                in_idx += coords[d] * in_actual_strides_arr[d];
             }
 
             // Compute output index with permuted dimensions
@@ -237,13 +254,13 @@ auto permute_kernel(const Tensor& input, const std::vector<int64_t>& dims, sycl:
             int64_t coords[8];
             int64_t temp = flat_idx;
             for (size_t d = 0; d < ndim; ++d) {
-                coords[d] = temp / in_strides_arr[d];
-                temp %= in_strides_arr[d];
+                coords[d] = temp / iter_strides_arr[d];
+                temp %= iter_strides_arr[d];
             }
 
             int64_t in_idx = 0;
             for (size_t d = 0; d < ndim; ++d) {
-                in_idx += coords[d] * in_strides_arr[d];
+                in_idx += coords[d] * in_actual_strides_arr[d];
             }
 
             int64_t out_idx = 0;
@@ -342,15 +359,136 @@ auto unsqueeze_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> T
 }
 
 // Contiguous kernel - ensure tensor data is laid out contiguously
+// IMPORTANT: Must handle non-contiguous tensors correctly by respecting strides
 auto contiguous_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
-    // Always create a new contiguous tensor - works for all dtypes
-    Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
-                  input.dtype(), input.device());
+    // If already contiguous, just clone
+    if (input.is_contiguous()) {
+        Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                      input.dtype(), input.device());
+        const size_t bytes = input.numel() * input.dtype_size();
+        const void* in_ptr = input.data_ptr();
+        void* out_ptr = const_cast<void*>(output.data_ptr());
+        queue.memcpy(out_ptr, in_ptr, bytes).wait();
+        return output;
+    }
 
-    const size_t bytes = input.numel() * input.dtype_size();
-    const void* in_ptr = input.data_ptr();
-    void* out_ptr = const_cast<void*>(output.data_ptr());
-    queue.memcpy(out_ptr, in_ptr, bytes).wait();
+    // Non-contiguous tensor: need to respect strides
+    auto shape_span = input.shape();
+    auto strides_span = input.strides();
+    std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
+    std::vector<int64_t> in_strides(strides_span.begin(), strides_span.end());
+
+    Tensor output(shape, input.dtype(), input.device());
+    const int64_t numel = output.numel();
+    const size_t ndim = shape.size();
+
+    // Calculate output strides (contiguous layout)
+    std::vector<int64_t> out_strides(ndim);
+    int64_t stride = 1;
+    for (int64_t i = ndim - 1; i >= 0; --i) {
+        out_strides[i] = stride;
+        stride *= shape[i];
+    }
+
+    // Convert to device-copyable arrays
+    int64_t shape_arr[8] = {0};
+    int64_t in_strides_arr[8] = {0};
+    int64_t out_strides_arr[8] = {0};
+    for (size_t i = 0; i < ndim && i < 8; ++i) {
+        shape_arr[i] = shape[i];
+        in_strides_arr[i] = in_strides[i];
+        out_strides_arr[i] = out_strides[i];
+    }
+
+    if (input.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(input);
+        float* out_ptr = get_data_ptr<float>(output);
+
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
+            // Convert flat output index to multi-dimensional indices
+            int64_t remaining = flat_idx;
+            int64_t in_idx = 0;
+
+            for (size_t d = 0; d < ndim; ++d) {
+                int64_t coord = remaining / out_strides_arr[d];
+                remaining %= out_strides_arr[d];
+                in_idx += coord * in_strides_arr[d];
+            }
+
+            out_ptr[flat_idx] = in_ptr[in_idx];
+        }).wait();
+    }
+    else if (input.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(input);
+        double* out_ptr = get_data_ptr<double>(output);
+
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
+            int64_t remaining = flat_idx;
+            int64_t in_idx = 0;
+
+            for (size_t d = 0; d < ndim; ++d) {
+                int64_t coord = remaining / out_strides_arr[d];
+                remaining %= out_strides_arr[d];
+                in_idx += coord * in_strides_arr[d];
+            }
+
+            out_ptr[flat_idx] = in_ptr[in_idx];
+        }).wait();
+    }
+    else if (input.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
+            int64_t remaining = flat_idx;
+            int64_t in_idx = 0;
+
+            for (size_t d = 0; d < ndim; ++d) {
+                int64_t coord = remaining / out_strides_arr[d];
+                remaining %= out_strides_arr[d];
+                in_idx += coord * in_strides_arr[d];
+            }
+
+            out_ptr[flat_idx] = in_ptr[in_idx];
+        }).wait();
+    }
+    else if (input.dtype() == DType::Int32) {
+        const int32_t* in_ptr = get_data_ptr<const int32_t>(input);
+        int32_t* out_ptr = get_data_ptr<int32_t>(output);
+
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
+            int64_t remaining = flat_idx;
+            int64_t in_idx = 0;
+
+            for (size_t d = 0; d < ndim; ++d) {
+                int64_t coord = remaining / out_strides_arr[d];
+                remaining %= out_strides_arr[d];
+                in_idx += coord * in_strides_arr[d];
+            }
+
+            out_ptr[flat_idx] = in_ptr[in_idx];
+        }).wait();
+    }
+    else if (input.dtype() == DType::Int64) {
+        const int64_t* in_ptr = get_data_ptr<const int64_t>(input);
+        int64_t* out_ptr = get_data_ptr<int64_t>(output);
+
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
+            int64_t remaining = flat_idx;
+            int64_t in_idx = 0;
+
+            for (size_t d = 0; d < ndim; ++d) {
+                int64_t coord = remaining / out_strides_arr[d];
+                remaining %= out_strides_arr[d];
+                in_idx += coord * in_strides_arr[d];
+            }
+
+            out_ptr[flat_idx] = in_ptr[in_idx];
+        }).wait();
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for contiguous kernel");
+    }
 
     return output;
 }
@@ -396,6 +534,13 @@ auto ones_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
         std::vector<double> host_data(numel, 1.0);
         double* device_ptr = get_data_ptr<double>(output);
         queue.memcpy(device_ptr, host_data.data(), numel * sizeof(double)).wait();
+    }
+    else if (dtype == DType::Float16) {
+        // sycl::half doesn't work well with std::vector, so fill via kernel
+        sycl::half* device_ptr = get_data_ptr<sycl::half>(output);
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            device_ptr[i] = sycl::half(1.0f);
+        }).wait();
     }
     else if (dtype == DType::Int32) {
         std::vector<int32_t> host_data(numel, 1);
@@ -459,6 +604,13 @@ auto full_kernel(const std::vector<int64_t>& shape, float value, DType dtype, De
         std::vector<double> host_data(numel, value_d);
         double* device_ptr = get_data_ptr<double>(output);
         queue.memcpy(device_ptr, host_data.data(), numel * sizeof(double)).wait();
+    }
+    else if (dtype == DType::Float16) {
+        const sycl::half value_h(value);
+        sycl::half* device_ptr = get_data_ptr<sycl::half>(output);
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            device_ptr[i] = value_h;
+        }).wait();
     }
     else if (dtype == DType::Int32) {
         const int32_t value_i = static_cast<int32_t>(value);

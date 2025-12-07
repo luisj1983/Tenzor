@@ -2528,9 +2528,18 @@ auto initialize() -> void {
     }
 
     // Try to load AdaptiveCpp backend if available
+    // Note: AdaptiveCpp can be skipped via TENZOR_SKIP_ADAPTIVECPP=1 environment variable
+    // This is useful for test discovery where the CUDA cleanup race can cause issues
     std::filesystem::path adaptivecpp_backend_path = bin_path / "tenzor_backend_adaptivecpp.so";
 
-    if (std::filesystem::exists(adaptivecpp_backend_path)) {
+    const char* skip_adaptivecpp = std::getenv("TENZOR_SKIP_ADAPTIVECPP");
+    bool should_skip_adaptivecpp = (skip_adaptivecpp != nullptr &&
+                                    (std::string(skip_adaptivecpp) == "1" ||
+                                     std::string(skip_adaptivecpp) == "true"));
+
+    if (should_skip_adaptivecpp) {
+        std::cout << "AdaptiveCpp backend skipped (TENZOR_SKIP_ADAPTIVECPP=1)" << std::endl;
+    } else if (std::filesystem::exists(adaptivecpp_backend_path)) {
         std::cout << "Loading AdaptiveCpp backend from: " << adaptivecpp_backend_path << std::endl;
 
         auto adaptivecpp_result = loader.load_backend(adaptivecpp_backend_path);

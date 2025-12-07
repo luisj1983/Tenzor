@@ -76,6 +76,30 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
 
             queue.wait();
         }
+        else if (dtype == DType::Float16) {
+            // oneMKL doesn't support half precision directly, so generate float32 and convert
+            sycl::half* ptr = get_data_ptr<sycl::half>(output);
+
+            // Create temporary float32 buffer
+            Tensor temp_buffer({numel}, DType::Float32, device);
+            float* temp_ptr = get_data_ptr<float>(temp_buffer);
+
+            // Create Philox4x32x10 engine
+            ::oneapi::mkl::rng::philox4x32x10 engine(queue, seed);
+
+            // Generate Gaussian distribution with mean=0.0, stddev=1.0
+            ::oneapi::mkl::rng::gaussian<float> distribution(0.0f, 1.0f);
+
+            // Generate random numbers into temp buffer
+            ::oneapi::mkl::rng::generate(distribution, engine, numel, temp_ptr);
+
+            queue.wait();
+
+            // Convert from float32 to float16
+            queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+                ptr[i] = sycl::half(temp_ptr[i]);
+            }).wait();
+        }
         else {
             throw std::runtime_error("Unsupported dtype for randn (oneMKL path)");
         }
@@ -113,6 +137,23 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
 
         double* device_ptr = get_data_ptr<double>(output);
         queue.memcpy(device_ptr, host_data.data(), numel * sizeof(double)).wait();
+    }
+    else if (dtype == DType::Float16) {
+        // Generate float32 on host and convert to float16
+        std::vector<float> host_data(numel);
+        for (int64_t i = 0; i < numel; ++i) {
+            host_data[i] = static_cast<float>(dist(gen));
+        }
+
+        // Upload to temp buffer and convert on device
+        Tensor temp_buffer({numel}, DType::Float32, device);
+        float* temp_ptr = get_data_ptr<float>(temp_buffer);
+        queue.memcpy(temp_ptr, host_data.data(), numel * sizeof(float)).wait();
+
+        sycl::half* device_ptr = get_data_ptr<sycl::half>(output);
+        queue.parallel_for(sycl::range<1>(numel), [=](sycl::id<1> i) {
+            device_ptr[i] = sycl::half(temp_ptr[i]);
+        }).wait();
     }
     else {
         throw std::runtime_error("Unsupported dtype for randn (fallback path)");

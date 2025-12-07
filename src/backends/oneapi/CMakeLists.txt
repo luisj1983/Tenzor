@@ -20,6 +20,11 @@ endif()
 
 find_package(MKL QUIET)
 
+# Note: oneDNN (dnnl) is available but the kernel code uses an older API (pre-v2.0)
+# that is incompatible with the current oneDNN v3.x. For now, using native SYCL kernels.
+# TODO: Update kernel code to use oneDNN v3.x API (primitive_desc instead of desc)
+# find_package(dnnl QUIET)
+
 set(ONEAPI_BACKEND_SOURCES
     oneapi_backend.cpp
     kernels/math.cpp
@@ -213,13 +218,9 @@ if(MKL_FOUND)
     )
 endif()
 
-# Find oneDNN (Intel's DNN library)
-find_package(dnnl QUIET)
-if(dnnl_FOUND)
-    message(STATUS "OneAPI Backend: oneDNN support enabled")
-else()
-    message(STATUS "OneAPI Backend: oneDNN not found, using built-in kernels")
-endif()
+# Note: oneDNN support disabled due to API incompatibility (v3.x vs pre-v2.0 code)
+# Using native SYCL kernels instead
+message(STATUS "OneAPI Backend: Using native SYCL kernels (oneDNN API update needed)")
 
 # Device selection (CPU, GPU, FPGA)
 # Users can specify with -DTENZOR_ONEAPI_DEVICES="cpu;gpu"
@@ -241,6 +242,5 @@ message(STATUS "  Device Support: ${TENZOR_ONEAPI_DEVICES}")
 if(MKL_FOUND)
     message(STATUS "  oneMKL: Enabled")
 endif()
-if(dnnl_FOUND)
-    message(STATUS "  oneDNN: Enabled")
-endif()
+# oneDNN disabled - API incompatibility
+message(STATUS "  oneDNN: Disabled (API update needed)")
