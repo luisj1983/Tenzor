@@ -41,6 +41,7 @@ set(ONEAPI_BACKEND_SOURCES
     kernels/gru.cpp
     kernels/vision.cpp
     kernels/quantization.cpp
+    kernels/utilities.cpp
 )
 
 # Separate SYCL kernel sources from C++ backend source
@@ -65,6 +66,7 @@ set(ONEAPI_SYCL_SOURCES
     kernels/gru.cpp
     kernels/vision.cpp
     kernels/quantization.cpp
+    kernels/utilities.cpp
 )
 
 set(ONEAPI_BACKEND_SOURCE

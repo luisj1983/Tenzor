@@ -1744,6 +1744,11 @@ auto initialize() -> void {
                         return oneapi_backend->dispatch("sign", inputs, attrs);
                     });
 
+                registry.register_kernel("repeat", Device::Type::OneAPI,
+                    [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return oneapi_backend->dispatch("repeat", inputs, attrs);
+                    });
+
                 // Vision operations (im2col/col2im)
                 registry.register_kernel("im2col", Device::Type::OneAPI,
                     [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {

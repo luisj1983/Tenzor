@@ -86,6 +86,18 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
         // Full reduction: sum all elements
         const int64_t total_size = input.numel();
 
+        // Handle empty tensor: sum of empty set is 0 (additive identity)
+        if (total_size == 0) {
+            if (input.dtype() == DType::Float32) {
+                float* out_ptr = get_data_ptr<float>(output);
+                queue.single_task([=]() { out_ptr[0] = 0.0f; }).wait();
+            } else if (input.dtype() == DType::Float64) {
+                double* out_ptr = get_data_ptr<double>(output);
+                queue.single_task([=]() { out_ptr[0] = 0.0; }).wait();
+            }
+            return output;
+        }
+
         if (input.dtype() == DType::Float32) {
             const float* in_ptr = get_data_ptr<const float>(input);
             float* out_ptr = get_data_ptr<float>(output);

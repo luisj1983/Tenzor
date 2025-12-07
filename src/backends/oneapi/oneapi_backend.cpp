@@ -694,19 +694,6 @@ public:
                 float value = std::stof(attrs.at("value"));
                 return {oneapi::masked_fill_kernel(inputs[0], inputs[1], value, queue)};
             }
-            else if (op_name == "where") {
-                // CPU fallback for where
-                if (inputs.size() != 3) throw std::invalid_argument("where requires 3 inputs");
-                auto condition_cpu = inputs[0].to(Device::cpu());
-                auto x_cpu = inputs[1].to(Device::cpu());
-                auto y_cpu = inputs[2].to(Device::cpu());
-
-                auto* cpu_backend = backend_registry().get_backend(Device::Type::CPU);
-                std::vector<Tensor> cpu_inputs = {condition_cpu, x_cpu, y_cpu};
-                auto result = cpu_backend->dispatch("where", cpu_inputs, OpAttributes{});
-
-                return {result[0].to(inputs[0].device())};
-            }
             else if (op_name == "contiguous") {
                 if (inputs.size() != 1) throw std::invalid_argument("contiguous requires 1 input");
                 return {oneapi::contiguous_kernel(inputs[0], queue)};
