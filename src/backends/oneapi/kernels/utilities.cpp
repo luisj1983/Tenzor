@@ -10,10 +10,13 @@ namespace oneapi {
 // SYCL Kernel name classes
 struct CatKernelFloat32 {};
 struct CatKernelFloat64 {};
+struct CatKernelFloat16 {};
 struct ClampKernelFloat32 {};
 struct ClampKernelFloat64 {};
+struct ClampKernelFloat16 {};
 struct SignKernelFloat32 {};
 struct SignKernelFloat64 {};
+struct SignKernelFloat16 {};
 
 // Helper function to get typed pointer from tensor
 template<typename T>
@@ -199,6 +202,32 @@ auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, sycl::queue& queue
                 }
             ).wait();
         }
+        else if (dtype == DType::Float16) {
+            const sycl::half* src_ptr = get_data_ptr<const sycl::half>(tensor);
+            sycl::half* dst_ptr = get_data_ptr<sycl::half>(output);
+
+            const int64_t src_slice_stride = elements_per_slice * tensor_size_in_dim;
+            const int64_t dst_slice_stride = elements_per_slice * out_shape[dim];
+            const int64_t dst_offset = offset_in_concat_dim * elements_per_slice;
+
+            queue.parallel_for<CatKernelFloat16>(
+                sycl::range<1>(num_slices * tensor_size_in_dim * elements_per_slice),
+                [=](sycl::id<1> idx) {
+                    const int64_t flat_idx = idx[0];
+                    const int64_t slice_idx = flat_idx / src_slice_stride;
+                    const int64_t remainder = flat_idx % src_slice_stride;
+                    const int64_t concat_idx = remainder / elements_per_slice;
+                    const int64_t elem_idx = remainder % elements_per_slice;
+
+                    const int64_t src_idx = slice_idx * src_slice_stride + concat_idx * elements_per_slice + elem_idx;
+                    const int64_t dst_idx = slice_idx * dst_slice_stride +
+                                           (offset_in_concat_dim + concat_idx) * elements_per_slice +
+                                           elem_idx;
+
+                    dst_ptr[dst_idx] = src_ptr[src_idx];
+                }
+            ).wait();
+        }
         else {
             throw std::runtime_error("cat_kernel: unsupported dtype");
         }
@@ -259,6 +288,15 @@ auto clamp_kernel(const Tensor& input, float min_val, float max_val, sycl::queue
         queue.parallel_for<ClampKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             const double val = in_ptr[idx];
             out_ptr[idx] = sycl::fmin(sycl::fmax(val, min_d), max_d);
+        }).wait();
+    }
+    else if (input.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+
+        queue.parallel_for<ClampKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            const float val = static_cast<float>(in_ptr[idx]);
+            out_ptr[idx] = sycl::half(sycl::fmin(sycl::fmax(val, min_val), max_val));
         }).wait();
     }
     else {
@@ -322,6 +360,21 @@ auto sign_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
                 out_ptr[idx] = 1.0;
             } else {
                 out_ptr[idx] = -1.0;
+            }
+        }).wait();
+    }
+    else if (input.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+
+        queue.parallel_for<SignKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            const float val = static_cast<float>(in_ptr[idx]);
+            if (val == 0.0f) {
+                out_ptr[idx] = sycl::half(0.0f);
+            } else if (val > 0.0f) {
+                out_ptr[idx] = sycl::half(1.0f);
+            } else {
+                out_ptr[idx] = sycl::half(-1.0f);
             }
         }).wait();
     }

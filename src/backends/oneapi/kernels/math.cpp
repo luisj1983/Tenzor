@@ -228,6 +228,15 @@ auto sub_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
             out_ptr[idx] = a_ptr[idx] - b_ptr[idx];
         }).wait();
     }
+    else if (a_cont.dtype() == DType::Float16) {
+        const sycl::half* a_ptr = get_data_ptr<const sycl::half>(a_cont);
+        const sycl::half* b_ptr = get_data_ptr<const sycl::half>(b_cont);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+
+        queue.parallel_for<SubKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = sycl::half(static_cast<float>(a_ptr[idx]) - static_cast<float>(b_ptr[idx]));
+        }).wait();
+    }
     else {
         throw std::runtime_error("Unsupported dtype for subtraction");
     }
@@ -279,6 +288,15 @@ auto mul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
             out_ptr[idx] = a_ptr[idx] * b_ptr[idx];
         }).wait();
     }
+    else if (a_cont.dtype() == DType::Float16) {
+        const sycl::half* a_ptr = get_data_ptr<const sycl::half>(a_cont);
+        const sycl::half* b_ptr = get_data_ptr<const sycl::half>(b_cont);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+
+        queue.parallel_for<MulKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = sycl::half(static_cast<float>(a_ptr[idx]) * static_cast<float>(b_ptr[idx]));
+        }).wait();
+    }
     else {
         throw std::runtime_error("Unsupported dtype for multiplication");
     }
@@ -328,6 +346,15 @@ auto div_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 
         queue.parallel_for<DivKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] / b_ptr[idx];
+        }).wait();
+    }
+    else if (a_cont.dtype() == DType::Float16) {
+        const sycl::half* a_ptr = get_data_ptr<const sycl::half>(a_cont);
+        const sycl::half* b_ptr = get_data_ptr<const sycl::half>(b_cont);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+
+        queue.parallel_for<DivKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = sycl::half(static_cast<float>(a_ptr[idx]) / static_cast<float>(b_ptr[idx]));
         }).wait();
     }
     else {

@@ -18,16 +18,22 @@ namespace oneapi {
 // Kernel class declarations for SYCL
 class SumKernelFloat32;
 class SumKernelFloat64;
+class SumKernelFloat16;
 class MeanKernelFloat32;
 class MeanKernelFloat64;
+class MeanKernelFloat16;
 class MaxKernelFloat32;
 class MaxKernelFloat64;
+class MaxKernelFloat16;
 class MinKernelFloat32;
 class MinKernelFloat64;
+class MinKernelFloat16;
 class ArgmaxKernelFloat32;
 class ArgmaxKernelFloat64;
+class ArgmaxKernelFloat16;
 class ArgminKernelFloat32;
 class ArgminKernelFloat64;
+class ArgminKernelFloat16;
 
 // Helper function to get typed pointer from tensor
 template<typename T>
@@ -142,6 +148,23 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
             queue.wait();
             sycl::free(sum_buf, queue);
         }
+        else if (in_cont.dtype() == DType::Float16) {
+            const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
+            sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+
+            // Use float accumulation for precision
+            auto sum_buf = sycl::malloc_shared<float>(1, queue);
+            sum_buf[0] = 0.0f;
+
+            queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(sum_buf, sycl::plus<float>()),
+                              [=](sycl::id<1> idx, auto& sum) {
+                sum += static_cast<float>(in_ptr[idx]);
+            }).wait();
+
+            out_ptr[0] = sycl::half(sum_buf[0]);
+            queue.wait();
+            sycl::free(sum_buf, queue);
+        }
         else {
             throw std::runtime_error("Unsupported dtype for sum reduction");
         }
@@ -183,6 +206,24 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                 }
 
                 out_ptr[outer_idx * inner_size + inner_idx] = sum;
+            }).wait();
+        }
+        else if (in_cont.dtype() == DType::Float16) {
+            const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
+            sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+
+            queue.parallel_for<SumKernelFloat16>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+                const int64_t outer_idx = idx[0];
+                const int64_t inner_idx = idx[1];
+                const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+
+                // Use float accumulation for precision
+                float sum = 0.0f;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    sum += static_cast<float>(in_ptr[base_offset + d * inner_size]);
+                }
+
+                out_ptr[outer_idx * inner_size + inner_idx] = sycl::half(sum);
             }).wait();
         }
         else {
@@ -257,6 +298,23 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& qu
             queue.wait();
             sycl::free(sum_buf, queue);
         }
+        else if (in_cont.dtype() == DType::Float16) {
+            const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
+            sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+            const float scale = 1.0f / static_cast<float>(total_size);
+
+            auto sum_buf = sycl::malloc_shared<float>(1, queue);
+            sum_buf[0] = 0.0f;
+
+            queue.parallel_for(sycl::range<1>(total_size), sycl::reduction(sum_buf, sycl::plus<float>()),
+                              [=](sycl::id<1> idx, auto& sum) {
+                sum += static_cast<float>(in_ptr[idx]);
+            }).wait();
+
+            out_ptr[0] = sycl::half(sum_buf[0] * scale);
+            queue.wait();
+            sycl::free(sum_buf, queue);
+        }
         else {
             throw std::runtime_error("Unsupported dtype for mean reduction");
         }
@@ -300,6 +358,24 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& qu
                 }
 
                 out_ptr[outer_idx * inner_size + inner_idx] = sum * scale;
+            }).wait();
+        }
+        else if (in_cont.dtype() == DType::Float16) {
+            const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
+            sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+            const float scale = 1.0f / static_cast<float>(dim_size);
+
+            queue.parallel_for<MeanKernelFloat16>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+                const int64_t outer_idx = idx[0];
+                const int64_t inner_idx = idx[1];
+                const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+
+                float sum = 0.0f;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    sum += static_cast<float>(in_ptr[base_offset + d * inner_size]);
+                }
+
+                out_ptr[outer_idx * inner_size + inner_idx] = sycl::half(sum * scale);
             }).wait();
         }
         else {
