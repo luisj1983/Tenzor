@@ -27,3 +27,7 @@ endif()
 if(TENZOR_BUILD_WEBGPU)
     add_subdirectory(webgpu)
 endif()
+
+if(TENZOR_BUILD_ADAPTIVECPP)
+    add_subdirectory(adaptivecpp)
+endif()

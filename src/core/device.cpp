@@ -39,6 +39,11 @@ auto Device::from_string(std::string_view str) -> Device {
         return Device::webgpu(idx);
     }
 
+    if (str.starts_with("adaptivecpp:")) {
+        int idx = std::stoi(std::string(str.substr(12)));
+        return Device::adaptivecpp(idx);
+    }
+
     throw std::invalid_argument("Invalid device string: " + std::string(str));
 }
 

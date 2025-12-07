@@ -35,13 +35,14 @@ struct Device {
      * @brief Device backend type enumeration.
      */
     enum class Type : uint8_t {
-        CPU,      ///< CPU backend
-        CUDA,     ///< NVIDIA CUDA backend
-        ROCm,     ///< AMD ROCm backend
-        OneAPI,   ///< Intel OneAPI backend
-        Vulkan,   ///< Vulkan cross-platform backend
-        Metal,    ///< Apple Metal backend (macOS/iOS)
-        WebGPU    ///< WebGPU browser/WASM backend
+        CPU,         ///< CPU backend
+        CUDA,        ///< NVIDIA CUDA backend
+        ROCm,        ///< AMD ROCm backend
+        OneAPI,      ///< Intel OneAPI backend
+        Vulkan,      ///< Vulkan cross-platform backend
+        Metal,       ///< Apple Metal backend (macOS/iOS)
+        WebGPU,      ///< WebGPU browser/WASM backend
+        AdaptiveCpp  ///< AdaptiveCpp/SYCL portable backend
     };
 
     Type type;         ///< Device backend type
@@ -125,6 +126,16 @@ struct Device {
     }
 
     /**
+     * @brief Create an AdaptiveCpp/SYCL device.
+     *
+     * @param idx Device index (default: 0)
+     * @return Device configured for AdaptiveCpp execution
+     */
+    static auto adaptivecpp(int32_t idx = 0) -> Device {
+        return Device{Type::AdaptiveCpp, idx};
+    }
+
+    /**
      * @brief Compare devices for equality.
      *
      * @param other Device to compare with
@@ -163,6 +174,7 @@ struct Device {
             case Type::Vulkan: return "vulkan:" + std::to_string(index);
             case Type::Metal: return "metal:" + std::to_string(index);
             case Type::WebGPU: return "webgpu:" + std::to_string(index);
+            case Type::AdaptiveCpp: return "adaptivecpp:" + std::to_string(index);
         }
         return "unknown";
     }

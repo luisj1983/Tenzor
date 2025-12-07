@@ -70,6 +70,8 @@ auto BackendLoader::register_backend(std::string_view name,
         device_type = Device::Type::Metal;
     } else if (backend_name == "webgpu") {
         device_type = Device::Type::WebGPU;
+    } else if (backend_name == "adaptivecpp") {
+        device_type = Device::Type::AdaptiveCpp;
     } else {
         device_type = Device::Type::CPU; // Default fallback
     }
