@@ -143,6 +143,7 @@ set(ADAPTIVECPP_SYCL_SOURCES
     kernels/gru.cpp
     kernels/vision.cpp
     kernels/quantization.cpp
+    kernels/utilities.cpp
 )
 
 set(ADAPTIVECPP_BACKEND_SOURCE

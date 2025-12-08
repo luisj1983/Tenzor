@@ -19,6 +19,12 @@ namespace adaptivecpp {
     auto div_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
     auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
 
+    // In-place operations
+    auto add_inplace_kernel(Tensor& inout, const Tensor& other, sycl::queue& queue) -> Tensor;
+    auto sub_inplace_kernel(Tensor& inout, const Tensor& other, sycl::queue& queue) -> Tensor;
+    auto mul_inplace_kernel(Tensor& inout, const Tensor& other, sycl::queue& queue) -> Tensor;
+    auto div_inplace_kernel(Tensor& inout, const Tensor& other, sycl::queue& queue) -> Tensor;
+
     // Unary operations
     auto sqrt_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
     auto neg_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
@@ -549,6 +555,28 @@ public:
             else if (op_name == "matmul") {
                 if (inputs.size() != 2) throw std::invalid_argument("matmul requires 2 inputs");
                 return {adaptivecpp::matmul_kernel(inputs[0], inputs[1], queue)};
+            }
+
+            // In-place operations
+            else if (op_name == "add_inplace") {
+                if (inputs.size() != 2) throw std::invalid_argument("add_inplace requires 2 inputs");
+                Tensor result = inputs[0];
+                return {adaptivecpp::add_inplace_kernel(result, inputs[1], queue)};
+            }
+            else if (op_name == "sub_inplace") {
+                if (inputs.size() != 2) throw std::invalid_argument("sub_inplace requires 2 inputs");
+                Tensor result = inputs[0];
+                return {adaptivecpp::sub_inplace_kernel(result, inputs[1], queue)};
+            }
+            else if (op_name == "mul_inplace") {
+                if (inputs.size() != 2) throw std::invalid_argument("mul_inplace requires 2 inputs");
+                Tensor result = inputs[0];
+                return {adaptivecpp::mul_inplace_kernel(result, inputs[1], queue)};
+            }
+            else if (op_name == "div_inplace") {
+                if (inputs.size() != 2) throw std::invalid_argument("div_inplace requires 2 inputs");
+                Tensor result = inputs[0];
+                return {adaptivecpp::div_inplace_kernel(result, inputs[1], queue)};
             }
 
             // Unary operations

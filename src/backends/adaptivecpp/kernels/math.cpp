@@ -80,6 +80,16 @@ struct WhereKernelFloat64 {};
 struct RepeatKernelFloat32 {};
 struct RepeatKernelFloat64 {};
 
+// In-place operation kernel name classes
+struct AddInplaceKernelFloat32 {};
+struct AddInplaceKernelFloat64 {};
+struct SubInplaceKernelFloat32 {};
+struct SubInplaceKernelFloat64 {};
+struct MulInplaceKernelFloat32 {};
+struct MulInplaceKernelFloat64 {};
+struct DivInplaceKernelFloat32 {};
+struct DivInplaceKernelFloat64 {};
+
 // Helper function to get typed pointer from tensor
 template<typename T>
 inline auto get_data_ptr(const Tensor& t) -> T* {
@@ -290,6 +300,167 @@ auto div_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
     }
 
     return output;
+}
+
+// In-place addition kernel
+auto add_inplace_kernel(Tensor& inout, const Tensor& other, sycl::queue& queue) -> Tensor {
+    auto inout_shape = inout.shape();
+    auto other_shape = other.shape();
+
+    // Check if shapes match exactly
+    bool same_shape = std::equal(inout_shape.begin(), inout_shape.end(), other_shape.begin(), other_shape.end());
+
+    if (!same_shape) {
+        throw std::invalid_argument("add_inplace requires tensors with matching shapes");
+    }
+
+    if (inout.dtype() != other.dtype()) {
+        throw std::invalid_argument("Tensor dtypes must match for in-place addition");
+    }
+
+    const int64_t numel = inout.numel();
+
+    if (inout.dtype() == DType::Float32) {
+        float* inout_ptr = get_data_ptr<float>(inout);
+        const float* other_ptr = get_data_ptr<const float>(other);
+
+        queue.parallel_for<AddInplaceKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            inout_ptr[idx] += other_ptr[idx];
+        }).wait();
+    }
+    else if (inout.dtype() == DType::Float64) {
+        double* inout_ptr = get_data_ptr<double>(inout);
+        const double* other_ptr = get_data_ptr<const double>(other);
+
+        queue.parallel_for<AddInplaceKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            inout_ptr[idx] += other_ptr[idx];
+        }).wait();
+    }
+    else {
+        throw std::runtime_error("add_inplace only supports Float32 and Float64 dtypes");
+    }
+
+    return inout;
+}
+
+// In-place subtraction kernel
+auto sub_inplace_kernel(Tensor& inout, const Tensor& other, sycl::queue& queue) -> Tensor {
+    auto inout_shape = inout.shape();
+    auto other_shape = other.shape();
+
+    bool same_shape = std::equal(inout_shape.begin(), inout_shape.end(), other_shape.begin(), other_shape.end());
+
+    if (!same_shape) {
+        throw std::invalid_argument("sub_inplace requires tensors with matching shapes");
+    }
+
+    if (inout.dtype() != other.dtype()) {
+        throw std::invalid_argument("Tensor dtypes must match for in-place subtraction");
+    }
+
+    const int64_t numel = inout.numel();
+
+    if (inout.dtype() == DType::Float32) {
+        float* inout_ptr = get_data_ptr<float>(inout);
+        const float* other_ptr = get_data_ptr<const float>(other);
+
+        queue.parallel_for<SubInplaceKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            inout_ptr[idx] -= other_ptr[idx];
+        }).wait();
+    }
+    else if (inout.dtype() == DType::Float64) {
+        double* inout_ptr = get_data_ptr<double>(inout);
+        const double* other_ptr = get_data_ptr<const double>(other);
+
+        queue.parallel_for<SubInplaceKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            inout_ptr[idx] -= other_ptr[idx];
+        }).wait();
+    }
+    else {
+        throw std::runtime_error("sub_inplace only supports Float32 and Float64 dtypes");
+    }
+
+    return inout;
+}
+
+// In-place multiplication kernel
+auto mul_inplace_kernel(Tensor& inout, const Tensor& other, sycl::queue& queue) -> Tensor {
+    auto inout_shape = inout.shape();
+    auto other_shape = other.shape();
+
+    bool same_shape = std::equal(inout_shape.begin(), inout_shape.end(), other_shape.begin(), other_shape.end());
+
+    if (!same_shape) {
+        throw std::invalid_argument("mul_inplace requires tensors with matching shapes");
+    }
+
+    if (inout.dtype() != other.dtype()) {
+        throw std::invalid_argument("Tensor dtypes must match for in-place multiplication");
+    }
+
+    const int64_t numel = inout.numel();
+
+    if (inout.dtype() == DType::Float32) {
+        float* inout_ptr = get_data_ptr<float>(inout);
+        const float* other_ptr = get_data_ptr<const float>(other);
+
+        queue.parallel_for<MulInplaceKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            inout_ptr[idx] *= other_ptr[idx];
+        }).wait();
+    }
+    else if (inout.dtype() == DType::Float64) {
+        double* inout_ptr = get_data_ptr<double>(inout);
+        const double* other_ptr = get_data_ptr<const double>(other);
+
+        queue.parallel_for<MulInplaceKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            inout_ptr[idx] *= other_ptr[idx];
+        }).wait();
+    }
+    else {
+        throw std::runtime_error("mul_inplace only supports Float32 and Float64 dtypes");
+    }
+
+    return inout;
+}
+
+// In-place division kernel
+auto div_inplace_kernel(Tensor& inout, const Tensor& other, sycl::queue& queue) -> Tensor {
+    auto inout_shape = inout.shape();
+    auto other_shape = other.shape();
+
+    bool same_shape = std::equal(inout_shape.begin(), inout_shape.end(), other_shape.begin(), other_shape.end());
+
+    if (!same_shape) {
+        throw std::invalid_argument("div_inplace requires tensors with matching shapes");
+    }
+
+    if (inout.dtype() != other.dtype()) {
+        throw std::invalid_argument("Tensor dtypes must match for in-place division");
+    }
+
+    const int64_t numel = inout.numel();
+
+    if (inout.dtype() == DType::Float32) {
+        float* inout_ptr = get_data_ptr<float>(inout);
+        const float* other_ptr = get_data_ptr<const float>(other);
+
+        queue.parallel_for<DivInplaceKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            inout_ptr[idx] /= other_ptr[idx];
+        }).wait();
+    }
+    else if (inout.dtype() == DType::Float64) {
+        double* inout_ptr = get_data_ptr<double>(inout);
+        const double* other_ptr = get_data_ptr<const double>(other);
+
+        queue.parallel_for<DivInplaceKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            inout_ptr[idx] /= other_ptr[idx];
+        }).wait();
+    }
+    else {
+        throw std::runtime_error("div_inplace only supports Float32 and Float64 dtypes");
+    }
+
+    return inout;
 }
 
 // Matrix multiplication kernel

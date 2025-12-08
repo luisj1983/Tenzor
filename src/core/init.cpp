@@ -2703,6 +2703,27 @@ auto initialize() -> void {
                         return adaptivecpp_backend->dispatch("reciprocal", inputs, attrs);
                     });
 
+                // In-place operations
+                registry.register_kernel("add_inplace", Device::Type::AdaptiveCpp,
+                    [adaptivecpp_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return adaptivecpp_backend->dispatch("add_inplace", inputs, attrs);
+                    });
+
+                registry.register_kernel("sub_inplace", Device::Type::AdaptiveCpp,
+                    [adaptivecpp_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return adaptivecpp_backend->dispatch("sub_inplace", inputs, attrs);
+                    });
+
+                registry.register_kernel("mul_inplace", Device::Type::AdaptiveCpp,
+                    [adaptivecpp_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return adaptivecpp_backend->dispatch("mul_inplace", inputs, attrs);
+                    });
+
+                registry.register_kernel("div_inplace", Device::Type::AdaptiveCpp,
+                    [adaptivecpp_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return adaptivecpp_backend->dispatch("div_inplace", inputs, attrs);
+                    });
+
                 // Activation functions
                 registry.register_kernel("relu", Device::Type::AdaptiveCpp,
                     [adaptivecpp_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
