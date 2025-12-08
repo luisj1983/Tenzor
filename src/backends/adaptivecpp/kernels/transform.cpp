@@ -516,6 +516,11 @@ auto ones_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
         uint64_t* device_ptr = get_data_ptr<uint64_t>(output);
         queue.memcpy(device_ptr, host_data.data(), numel * sizeof(uint64_t)).wait();
     }
+    else if (dtype == DType::Float16) {
+        std::vector<sycl::half> host_data(numel, sycl::half(1.0f));
+        sycl::half* device_ptr = get_data_ptr<sycl::half>(output);
+        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(sycl::half)).wait();
+    }
     else {
         throw std::runtime_error("Unsupported dtype for ones");
     }
@@ -586,6 +591,12 @@ auto full_kernel(const std::vector<int64_t>& shape, float value, DType dtype, De
         std::vector<uint64_t> host_data(numel, value_i);
         uint64_t* device_ptr = get_data_ptr<uint64_t>(output);
         queue.memcpy(device_ptr, host_data.data(), numel * sizeof(uint64_t)).wait();
+    }
+    else if (dtype == DType::Float16) {
+        const sycl::half value_h = sycl::half(value);
+        std::vector<sycl::half> host_data(numel, value_h);
+        sycl::half* device_ptr = get_data_ptr<sycl::half>(output);
+        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(sycl::half)).wait();
     }
     else {
         throw std::runtime_error("Unsupported dtype for full");

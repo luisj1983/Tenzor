@@ -9,16 +9,20 @@ namespace adaptivecpp {
 // Kernel class declarations for SYCL named kernels
 class ReLUKernelFloat32;
 class ReLUKernelFloat64;
+class ReLUKernelFloat16;
 class ReLUBackwardKernelFloat32;
 class ReLUBackwardKernelFloat64;
+class ReLUBackwardKernelFloat16;
 class SigmoidKernelFloat32;
 class SigmoidKernelFloat64;
 class SigmoidBackwardKernelFloat32;
 class SigmoidBackwardKernelFloat64;
 class TanhKernelFloat32;
 class TanhKernelFloat64;
+class TanhKernelFloat16;
 class TanhBackwardKernelFloat32;
 class TanhBackwardKernelFloat64;
+class TanhBackwardKernelFloat16;
 class GeLUKernelFloat32;
 class GeLUKernelFloat64;
 class GeLUBackwardKernelFloat32;
@@ -65,6 +69,15 @@ auto relu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             out_ptr[idx] = sycl::fmax(0.0, in_ptr[idx]);
         }).wait();
     }
+    else if (input.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+
+        queue.parallel_for<ReLUKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float val = static_cast<float>(in_ptr[idx]);
+            out_ptr[idx] = sycl::half(sycl::fmax(0.0f, val));
+        }).wait();
+    }
     else {
         throw std::runtime_error("Unsupported dtype for relu");
     }
@@ -95,6 +108,17 @@ auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::
 
         queue.parallel_for<ReLUBackwardKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             grad_in_ptr[idx] = in_ptr[idx] > 0.0 ? grad_out_ptr[idx] : 0.0;
+        }).wait();
+    }
+    else if (input.dtype() == DType::Float16) {
+        const sycl::half* grad_out_ptr = get_data_ptr<const sycl::half>(grad_output);
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        sycl::half* grad_in_ptr = get_data_ptr<sycl::half>(grad_input);
+
+        queue.parallel_for<ReLUBackwardKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float val = static_cast<float>(in_ptr[idx]);
+            float go = static_cast<float>(grad_out_ptr[idx]);
+            grad_in_ptr[idx] = sycl::half(val > 0.0f ? go : 0.0f);
         }).wait();
     }
     else {
@@ -189,6 +213,16 @@ auto tanh_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             out_ptr[idx] = sycl::tanh(in_ptr[idx]);
         }).wait();
     }
+    else if (input.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+
+        queue.parallel_for<TanhKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            // Compute in float for precision, convert back to half
+            float val = static_cast<float>(in_ptr[idx]);
+            out_ptr[idx] = sycl::half(sycl::tanh(val));
+        }).wait();
+    }
     else {
         throw std::runtime_error("Unsupported dtype for tanh");
     }
@@ -219,6 +253,18 @@ auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& output, sycl:
 
         queue.parallel_for<TanhBackwardKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             grad_in_ptr[idx] = grad_out_ptr[idx] * (1.0 - out_ptr[idx] * out_ptr[idx]);
+        }).wait();
+    }
+    else if (output.dtype() == DType::Float16) {
+        const sycl::half* grad_out_ptr = get_data_ptr<const sycl::half>(grad_output);
+        const sycl::half* out_ptr = get_data_ptr<const sycl::half>(output);
+        sycl::half* grad_in_ptr = get_data_ptr<sycl::half>(grad_input);
+
+        queue.parallel_for<TanhBackwardKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            // Compute in float for precision
+            float go = static_cast<float>(grad_out_ptr[idx]);
+            float o = static_cast<float>(out_ptr[idx]);
+            grad_in_ptr[idx] = sycl::half(go * (1.0f - o * o));
         }).wait();
     }
     else {

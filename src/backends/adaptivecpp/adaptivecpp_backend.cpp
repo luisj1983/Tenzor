@@ -7,6 +7,8 @@
 #include <memory>
 #include <cstring>
 #include <atomic>
+#include <algorithm>
+#include <cctype>
 
 namespace tenzor {
 
@@ -280,6 +282,40 @@ public:
             auto platforms = sycl::platform::get_platforms();
 
             for (const auto& platform : platforms) {
+                // Get platform name to filter backends
+                std::string platform_name;
+                try {
+                    platform_name = platform.get_info<sycl::info::platform::name>();
+                    // Convert to lowercase for comparison
+                    std::transform(platform_name.begin(), platform_name.end(),
+                                   platform_name.begin(), ::tolower);
+                } catch (...) {
+                    platform_name = "";
+                }
+
+                // Skip HIP backend - it causes GPU hang issues on some systems when
+                // mixed with CUDA backend, leading to segfaults during cleanup.
+                // HIP devices on AMD GPUs can still be used via the dedicated ROCm backend.
+                // See: https://github.com/AdaptiveCpp/AdaptiveCpp/issues/ (known multi-backend issue)
+                if (platform_name.find("hip") != std::string::npos) {
+                    continue;
+                }
+
+                // Skip OpenCL backend - AdaptiveCpp doesn't support SSCP (generic kernel
+                // compilation) for OpenCL, causing "No kernel launcher" errors at runtime.
+                // OpenCL CPU devices can be used via the OneAPI backend instead.
+                if (platform_name.find("opencl") != std::string::npos) {
+                    continue;
+                }
+
+                // Skip OpenMP backend - it causes segfaults during cleanup when mixed with
+                // CUDA backend, particularly in LSTM/RNN gradient computations. The OpenMP
+                // backend can interfere with CUDA driver unloading during program shutdown.
+                // CPU compute can be handled via the CPU backend instead.
+                if (platform_name.find("omp") != std::string::npos) {
+                    continue;
+                }
+
                 auto devices = platform.get_devices();
                 for (const auto& device : devices) {
                     try {

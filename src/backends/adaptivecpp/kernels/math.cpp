@@ -17,14 +17,19 @@ namespace adaptivecpp {
 // SYCL Kernel name classes (using functors for SYCL 2025.2 compatibility)
 struct AddKernelFloat32 {};
 struct AddKernelFloat64 {};
+struct AddKernelFloat16 {};
 struct SubKernelFloat32 {};
 struct SubKernelFloat64 {};
+struct SubKernelFloat16 {};
 struct MulKernelFloat32 {};
 struct MulKernelFloat64 {};
+struct MulKernelFloat16 {};
 struct DivKernelFloat32 {};
 struct DivKernelFloat64 {};
+struct DivKernelFloat16 {};
 struct MatMulKernelFloat32 {};
 struct MatMulKernelFloat64 {};
+struct MatMulKernelFloat16 {};
 struct SqrtKernelFloat32 {};
 struct SqrtKernelFloat64 {};
 struct NegKernelFloat32 {};
@@ -157,6 +162,15 @@ auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
             out_ptr[idx] = a_ptr[idx] + b_ptr[idx];
         }).wait();
     }
+    else if (a.dtype() == DType::Float16) {
+        const sycl::half* a_ptr = get_data_ptr<const sycl::half>(a);
+        const sycl::half* b_ptr = get_data_ptr<const sycl::half>(b);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+
+        queue.parallel_for<AddKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = a_ptr[idx] + b_ptr[idx];
+        }).wait();
+    }
     else {
         throw std::runtime_error("Unsupported dtype for addition");
     }
@@ -246,6 +260,15 @@ auto mul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
         double* out_ptr = get_data_ptr<double>(output);
 
         queue.parallel_for<MulKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = a_ptr[idx] * b_ptr[idx];
+        }).wait();
+    }
+    else if (a.dtype() == DType::Float16) {
+        const sycl::half* a_ptr = get_data_ptr<const sycl::half>(a);
+        const sycl::half* b_ptr = get_data_ptr<const sycl::half>(b);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+
+        queue.parallel_for<MulKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] * b_ptr[idx];
         }).wait();
     }
@@ -517,6 +540,20 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
                 out_ptr[j] = sum;
             }).wait();
         }
+        else if (a_contig.dtype() == DType::Float16) {
+            const sycl::half* a_ptr = get_data_ptr<const sycl::half>(a_contig);
+            const sycl::half* b_ptr = get_data_ptr<const sycl::half>(b_contig);
+            sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+
+            queue.parallel_for<class MatMulKernelVectorF16>(sycl::range<1>(m), [=](sycl::id<1> idx) {
+                const int64_t j = idx[0];
+                float sum = 0.0f;  // Accumulate in float for precision
+                for (int64_t p = 0; p < n; ++p) {
+                    sum += static_cast<float>(a_ptr[p]) * static_cast<float>(b_ptr[p * m + j]);
+                }
+                out_ptr[j] = sycl::half(sum);
+            }).wait();
+        }
         else {
             throw std::runtime_error("Unsupported dtype for 1D×2D matmul fallback");
         }
@@ -579,6 +616,23 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
                 sum += a_ptr[i * k + p] * b_ptr[p * n + j];
             }
             out_ptr[i * n + j] = sum;
+        }).wait();
+    }
+    else if (a_contig.dtype() == DType::Float16) {
+        const sycl::half* a_ptr = get_data_ptr<const sycl::half>(a_contig);
+        const sycl::half* b_ptr = get_data_ptr<const sycl::half>(b_contig);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+
+        queue.parallel_for<MatMulKernelFloat16>(sycl::range<2>(m, n), [=](sycl::id<2> idx) {
+            const int64_t i = idx[0];
+            const int64_t j = idx[1];
+
+            // Accumulate in float for better precision, then convert back to half
+            float sum = 0.0f;
+            for (int64_t p = 0; p < k; ++p) {
+                sum += static_cast<float>(a_ptr[i * k + p]) * static_cast<float>(b_ptr[p * n + j]);
+            }
+            out_ptr[i * n + j] = sycl::half(sum);
         }).wait();
     }
     else {
@@ -1377,8 +1431,11 @@ auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y, syc
 }
 
 // Repeat kernel - repeats tensor along specified dimensions
+// Uses fixed-size arrays for kernel capture to avoid SYCL buffer issues at shutdown
 auto repeat_kernel(const Tensor& input, const std::vector<int64_t>& repeats, sycl::queue& queue) -> Tensor {
-    auto shape = input.shape();
+    auto shape_span = input.shape();
+    std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
+
     if (repeats.size() != shape.size()) {
         throw std::invalid_argument("repeat: repeats size must match tensor dimensions");
     }
@@ -1393,7 +1450,7 @@ auto repeat_kernel(const Tensor& input, const std::vector<int64_t>& repeats, syc
 
     // For simplicity, use a strided copy approach
     // This handles general N-dimensional repeat
-    const int64_t ndim = shape.size();
+    const int64_t ndim = static_cast<int64_t>(shape.size());
     const int64_t out_numel = output.numel();
 
     // Pre-compute strides
@@ -1408,64 +1465,52 @@ auto repeat_kernel(const Tensor& input, const std::vector<int64_t>& repeats, syc
         out_stride *= out_shape[i];
     }
 
+    // Copy to fixed-size arrays for kernel capture (max 8 dimensions)
+    int64_t shape_arr[8] = {0};
+    int64_t out_shape_arr[8] = {0};
+    int64_t in_strides_arr[8] = {0};
+    int64_t out_strides_arr[8] = {0};
+
+    for (int64_t i = 0; i < ndim && i < 8; ++i) {
+        shape_arr[i] = shape[i];
+        out_shape_arr[i] = out_shape[i];
+        in_strides_arr[i] = in_strides[i];
+        out_strides_arr[i] = out_strides[i];
+    }
+
     if (input.dtype() == DType::Float32) {
         const float* in_ptr = get_data_ptr<const float>(input);
         float* out_ptr = get_data_ptr<float>(output);
 
-        // Copy shape and strides to device-accessible memory
-        auto shape_buf = sycl::buffer<int64_t, 1>(shape.data(), sycl::range<1>(ndim));
-        auto out_shape_buf = sycl::buffer<int64_t, 1>(out_shape.data(), sycl::range<1>(ndim));
-        auto in_strides_buf = sycl::buffer<int64_t, 1>(in_strides.data(), sycl::range<1>(ndim));
-        auto out_strides_buf = sycl::buffer<int64_t, 1>(out_strides.data(), sycl::range<1>(ndim));
+        queue.parallel_for<RepeatKernelFloat32>(sycl::range<1>(out_numel), [=](sycl::id<1> idx) {
+            int64_t out_idx = idx[0];
+            int64_t in_idx = 0;
 
-        queue.submit([&](sycl::handler& h) {
-            auto shape_acc = shape_buf.get_access<sycl::access::mode::read>(h);
-            auto out_shape_acc = out_shape_buf.get_access<sycl::access::mode::read>(h);
-            auto in_strides_acc = in_strides_buf.get_access<sycl::access::mode::read>(h);
-            auto out_strides_acc = out_strides_buf.get_access<sycl::access::mode::read>(h);
+            // Convert output index to input index using modular arithmetic
+            for (int64_t d = 0; d < ndim; ++d) {
+                int64_t coord = (out_idx / out_strides_arr[d]) % out_shape_arr[d];
+                int64_t in_coord = coord % shape_arr[d];
+                in_idx += in_coord * in_strides_arr[d];
+            }
 
-            h.parallel_for<RepeatKernelFloat32>(sycl::range<1>(out_numel), [=](sycl::id<1> idx) {
-                int64_t out_idx = idx[0];
-                int64_t in_idx = 0;
-
-                // Convert output index to input index using modular arithmetic
-                for (int64_t d = 0; d < ndim; ++d) {
-                    int64_t coord = (out_idx / out_strides_acc[d]) % out_shape_acc[d];
-                    int64_t in_coord = coord % shape_acc[d];
-                    in_idx += in_coord * in_strides_acc[d];
-                }
-
-                out_ptr[out_idx] = in_ptr[in_idx];
-            });
+            out_ptr[out_idx] = in_ptr[in_idx];
         }).wait();
     }
     else if (input.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(input);
         double* out_ptr = get_data_ptr<double>(output);
 
-        auto shape_buf = sycl::buffer<int64_t, 1>(shape.data(), sycl::range<1>(ndim));
-        auto out_shape_buf = sycl::buffer<int64_t, 1>(out_shape.data(), sycl::range<1>(ndim));
-        auto in_strides_buf = sycl::buffer<int64_t, 1>(in_strides.data(), sycl::range<1>(ndim));
-        auto out_strides_buf = sycl::buffer<int64_t, 1>(out_strides.data(), sycl::range<1>(ndim));
+        queue.parallel_for<RepeatKernelFloat64>(sycl::range<1>(out_numel), [=](sycl::id<1> idx) {
+            int64_t out_idx = idx[0];
+            int64_t in_idx = 0;
 
-        queue.submit([&](sycl::handler& h) {
-            auto shape_acc = shape_buf.get_access<sycl::access::mode::read>(h);
-            auto out_shape_acc = out_shape_buf.get_access<sycl::access::mode::read>(h);
-            auto in_strides_acc = in_strides_buf.get_access<sycl::access::mode::read>(h);
-            auto out_strides_acc = out_strides_buf.get_access<sycl::access::mode::read>(h);
+            for (int64_t d = 0; d < ndim; ++d) {
+                int64_t coord = (out_idx / out_strides_arr[d]) % out_shape_arr[d];
+                int64_t in_coord = coord % shape_arr[d];
+                in_idx += in_coord * in_strides_arr[d];
+            }
 
-            h.parallel_for<RepeatKernelFloat64>(sycl::range<1>(out_numel), [=](sycl::id<1> idx) {
-                int64_t out_idx = idx[0];
-                int64_t in_idx = 0;
-
-                for (int64_t d = 0; d < ndim; ++d) {
-                    int64_t coord = (out_idx / out_strides_acc[d]) % out_shape_acc[d];
-                    int64_t in_coord = coord % shape_acc[d];
-                    in_idx += in_coord * in_strides_acc[d];
-                }
-
-                out_ptr[out_idx] = in_ptr[in_idx];
-            });
+            out_ptr[out_idx] = in_ptr[in_idx];
         }).wait();
     }
     else {
