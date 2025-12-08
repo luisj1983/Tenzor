@@ -10,8 +10,12 @@ namespace oneapi {
 // SYCL Kernel name classes
 class TransposeKernelFloat32;
 class TransposeKernelFloat64;
+class TransposeKernelUInt8;
+class TransposeKernelBool;
 class PermuteKernelFloat32;
 class PermuteKernelFloat64;
+class PermuteKernelUInt8;
+class PermuteKernelBool;
 
 // Helper function to get typed pointer from tensor
 template<typename T>
@@ -160,6 +164,52 @@ auto transpose_kernel(const Tensor& input, int64_t dim0, int64_t dim1, sycl::que
             out_ptr[out_idx] = in_ptr[in_idx];
         }).wait();
     }
+    else if (input.dtype() == DType::UInt8) {
+        const uint8_t* in_ptr = get_data_ptr<const uint8_t>(input);
+        uint8_t* out_ptr = get_data_ptr<uint8_t>(output);
+
+        queue.parallel_for<TransposeKernelUInt8>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            int64_t remaining = idx;
+            int64_t in_idx = 0;
+            int64_t out_idx = 0;
+
+            for (size_t d = 0; d < ndim; ++d) {
+                int64_t coord = remaining / iter_strides_arr[d];
+                remaining %= iter_strides_arr[d];
+
+                in_idx += coord * in_actual_strides_arr[d];
+
+                size_t out_d = (d == static_cast<size_t>(dim0)) ? dim1 :
+                              (d == static_cast<size_t>(dim1)) ? dim0 : d;
+                out_idx += coord * out_strides_arr[out_d];
+            }
+
+            out_ptr[out_idx] = in_ptr[in_idx];
+        }).wait();
+    }
+    else if (input.dtype() == DType::Bool) {
+        const bool* in_ptr = get_data_ptr<const bool>(input);
+        bool* out_ptr = get_data_ptr<bool>(output);
+
+        queue.parallel_for<TransposeKernelBool>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            int64_t remaining = idx;
+            int64_t in_idx = 0;
+            int64_t out_idx = 0;
+
+            for (size_t d = 0; d < ndim; ++d) {
+                int64_t coord = remaining / iter_strides_arr[d];
+                remaining %= iter_strides_arr[d];
+
+                in_idx += coord * in_actual_strides_arr[d];
+
+                size_t out_d = (d == static_cast<size_t>(dim0)) ? dim1 :
+                              (d == static_cast<size_t>(dim1)) ? dim0 : d;
+                out_idx += coord * out_strides_arr[out_d];
+            }
+
+            out_ptr[out_idx] = in_ptr[in_idx];
+        }).wait();
+    }
     else {
         throw std::runtime_error("Unsupported dtype for transpose");
     }
@@ -251,6 +301,56 @@ auto permute_kernel(const Tensor& input, const std::vector<int64_t>& dims, sycl:
         double* out_ptr = get_data_ptr<double>(output);
 
         queue.parallel_for<PermuteKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
+            int64_t coords[8];
+            int64_t temp = flat_idx;
+            for (size_t d = 0; d < ndim; ++d) {
+                coords[d] = temp / iter_strides_arr[d];
+                temp %= iter_strides_arr[d];
+            }
+
+            int64_t in_idx = 0;
+            for (size_t d = 0; d < ndim; ++d) {
+                in_idx += coords[d] * in_actual_strides_arr[d];
+            }
+
+            int64_t out_idx = 0;
+            for (size_t d = 0; d < ndim; ++d) {
+                out_idx += coords[perm_dims_arr[d]] * out_strides_arr[d];
+            }
+
+            out_ptr[out_idx] = in_ptr[in_idx];
+        }).wait();
+    }
+    else if (input.dtype() == DType::UInt8) {
+        const uint8_t* in_ptr = get_data_ptr<const uint8_t>(input);
+        uint8_t* out_ptr = get_data_ptr<uint8_t>(output);
+
+        queue.parallel_for<PermuteKernelUInt8>(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
+            int64_t coords[8];
+            int64_t temp = flat_idx;
+            for (size_t d = 0; d < ndim; ++d) {
+                coords[d] = temp / iter_strides_arr[d];
+                temp %= iter_strides_arr[d];
+            }
+
+            int64_t in_idx = 0;
+            for (size_t d = 0; d < ndim; ++d) {
+                in_idx += coords[d] * in_actual_strides_arr[d];
+            }
+
+            int64_t out_idx = 0;
+            for (size_t d = 0; d < ndim; ++d) {
+                out_idx += coords[perm_dims_arr[d]] * out_strides_arr[d];
+            }
+
+            out_ptr[out_idx] = in_ptr[in_idx];
+        }).wait();
+    }
+    else if (input.dtype() == DType::Bool) {
+        const bool* in_ptr = get_data_ptr<const bool>(input);
+        bool* out_ptr = get_data_ptr<bool>(output);
+
+        queue.parallel_for<PermuteKernelBool>(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
             int64_t coords[8];
             int64_t temp = flat_idx;
             for (size_t d = 0; d < ndim; ++d) {
@@ -582,6 +682,13 @@ auto ones_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
         uint64_t* device_ptr = get_data_ptr<uint64_t>(output);
         queue.memcpy(device_ptr, host_data.data(), numel * sizeof(uint64_t)).wait();
     }
+    else if (dtype == DType::Bool) {
+        std::vector<bool> host_data(numel, true);
+        bool* device_ptr = get_data_ptr<bool>(output);
+        // std::vector<bool> is special, need to copy element by element
+        std::vector<uint8_t> temp_data(numel, 1);
+        queue.memcpy(device_ptr, temp_data.data(), numel * sizeof(bool)).wait();
+    }
     else {
         throw std::runtime_error("Unsupported dtype for ones");
     }
@@ -659,6 +766,12 @@ auto full_kernel(const std::vector<int64_t>& shape, float value, DType dtype, De
         std::vector<uint64_t> host_data(numel, value_i);
         uint64_t* device_ptr = get_data_ptr<uint64_t>(output);
         queue.memcpy(device_ptr, host_data.data(), numel * sizeof(uint64_t)).wait();
+    }
+    else if (dtype == DType::Bool) {
+        const uint8_t value_b = (value != 0.0f) ? 1 : 0;
+        std::vector<uint8_t> host_data(numel, value_b);
+        bool* device_ptr = get_data_ptr<bool>(output);
+        queue.memcpy(device_ptr, host_data.data(), numel * sizeof(bool)).wait();
     }
     else {
         throw std::runtime_error("Unsupported dtype for full");

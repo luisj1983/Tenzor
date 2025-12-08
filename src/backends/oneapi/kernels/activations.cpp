@@ -56,7 +56,9 @@ class SwishKernelFloat16;
 class SwishBackwardKernelFloat32;
 class SwishBackwardKernelFloat64;
 class SwishBackwardKernelFloat16;
+class LogSoftmaxKernelFloat64;
 class LogSoftmaxKernelFloat16;
+class LogSoftmaxBackwardKernelFloat64;
 class LogSoftmaxBackwardKernelFloat16;
 
 // Helper function to get typed pointer from tensor
@@ -801,6 +803,52 @@ auto log_softmax_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) ->
             );
         }).wait();
     }
+    else if (input.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(input);
+        double* out_ptr = get_data_ptr<double>(output);
+
+        // Calculate dimensions
+        int64_t outer_size = 1;
+        for (int64_t i = 0; i < dim; ++i) {
+            outer_size *= shape[i];
+        }
+        int64_t dim_size = shape[dim];
+        int64_t inner_size = 1;
+        for (int64_t i = dim + 1; i < static_cast<int64_t>(shape.size()); ++i) {
+            inner_size *= shape[i];
+        }
+
+        queue.submit([&](sycl::handler& cgh) {
+            cgh.parallel_for<LogSoftmaxKernelFloat64>(
+                sycl::range<2>(outer_size, inner_size),
+                [=](sycl::id<2> idx) {
+                    const int64_t i = idx[0];
+                    const int64_t k = idx[1];
+
+                    // Find max for numerical stability
+                    double max_val = -std::numeric_limits<double>::infinity();
+                    for (int64_t j = 0; j < dim_size; ++j) {
+                        const int64_t index = (i * dim_size + j) * inner_size + k;
+                        max_val = sycl::max(max_val, in_ptr[index]);
+                    }
+
+                    // Compute log(sum(exp(x - max)))
+                    double sum_exp = 0.0;
+                    for (int64_t j = 0; j < dim_size; ++j) {
+                        const int64_t index = (i * dim_size + j) * inner_size + k;
+                        sum_exp += sycl::exp(in_ptr[index] - max_val);
+                    }
+                    const double log_sum_exp = sycl::log(sum_exp);
+
+                    // Compute log_softmax = x - max - log_sum_exp
+                    for (int64_t j = 0; j < dim_size; ++j) {
+                        const int64_t index = (i * dim_size + j) * inner_size + k;
+                        out_ptr[index] = in_ptr[index] - max_val - log_sum_exp;
+                    }
+                }
+            );
+        }).wait();
+    }
     else if (input.dtype() == DType::Float16) {
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
         sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
@@ -887,6 +935,45 @@ auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output
 
                     // Compute sum of gradients along dim
                     float sum_grad = 0.0f;
+                    for (int64_t j = 0; j < dim_size; ++j) {
+                        const int64_t index = (i * dim_size + j) * inner_size + k;
+                        sum_grad += grad_out_ptr[index];
+                    }
+
+                    // Compute gradient: grad_output - exp(log_softmax) * sum_grad
+                    for (int64_t j = 0; j < dim_size; ++j) {
+                        const int64_t index = (i * dim_size + j) * inner_size + k;
+                        grad_in_ptr[index] = grad_out_ptr[index] - sycl::exp(out_ptr[index]) * sum_grad;
+                    }
+                }
+            );
+        }).wait();
+    }
+    else if (output.dtype() == DType::Float64) {
+        const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
+        const double* out_ptr = get_data_ptr<const double>(output);
+        double* grad_in_ptr = get_data_ptr<double>(grad_input);
+
+        // Calculate dimensions
+        int64_t outer_size = 1;
+        for (int64_t i = 0; i < dim; ++i) {
+            outer_size *= shape[i];
+        }
+        int64_t dim_size = shape[dim];
+        int64_t inner_size = 1;
+        for (int64_t i = dim + 1; i < static_cast<int64_t>(shape.size()); ++i) {
+            inner_size *= shape[i];
+        }
+
+        queue.submit([&](sycl::handler& cgh) {
+            cgh.parallel_for<LogSoftmaxBackwardKernelFloat64>(
+                sycl::range<2>(outer_size, inner_size),
+                [=](sycl::id<2> idx) {
+                    const int64_t i = idx[0];
+                    const int64_t k = idx[1];
+
+                    // Compute sum of gradients along dim
+                    double sum_grad = 0.0;
                     for (int64_t j = 0; j < dim_size; ++j) {
                         const int64_t index = (i * dim_size + j) * inner_size + k;
                         sum_grad += grad_out_ptr[index];
