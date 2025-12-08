@@ -13,9 +13,17 @@ namespace oneapi {
 
 // Kernel class declarations for SYCL
 class BatchNorm2dForwardKernelFloat32;
+class BatchNorm2dForwardKernelFloat64;
+class BatchNorm2dForwardKernelFloat16;
 class BatchNorm2dForwardAffineKernelFloat32;
+class BatchNorm2dForwardAffineKernelFloat64;
+class BatchNorm2dForwardAffineKernelFloat16;
 class BatchNorm2dBackwardGammaKernelFloat32;
+class BatchNorm2dBackwardGammaKernelFloat64;
+class BatchNorm2dBackwardGammaKernelFloat16;
 class BatchNorm2dBackwardInputKernelFloat32;
+class BatchNorm2dBackwardInputKernelFloat64;
+class BatchNorm2dBackwardInputKernelFloat16;
 class BatchNormScaleShiftKernelFloat32;
 class BatchNormExtractGradKernelFloat32;
 class BatchNorm2dMeanKernelFloat32;
@@ -352,6 +360,46 @@ auto batchnorm2d_forward(const Tensor& input, const Tensor& mean, const Tensor& 
             out_ptr[input_idx] = (in_ptr[input_idx] - m) * std_inv;
         }).wait();
     }
+    else if (input.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(input);
+        const double* mean_ptr = get_data_ptr<const double>(mean);
+        const double* var_ptr = get_data_ptr<const double>(variance);
+        double* out_ptr = get_data_ptr<double>(output);
+
+        queue.parallel_for<BatchNorm2dForwardKernelFloat64>(sycl::range<3>(N, C, H * W), [=](sycl::id<3> idx) {
+            const int64_t n = idx[0];
+            const int64_t c = idx[1];
+            const int64_t hw = idx[2];
+
+            const double m = mean_ptr[c];
+            const double v = var_ptr[c];
+            const double std_inv = 1.0 / sycl::sqrt(v + static_cast<double>(epsilon));
+
+            const int64_t input_idx = ((n * C + c) * H * W) + hw;
+            out_ptr[input_idx] = (in_ptr[input_idx] - m) * std_inv;
+        }).wait();
+    }
+    else if (input.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        const sycl::half* mean_ptr = get_data_ptr<const sycl::half>(mean);
+        const sycl::half* var_ptr = get_data_ptr<const sycl::half>(variance);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+
+        queue.parallel_for<BatchNorm2dForwardKernelFloat16>(sycl::range<3>(N, C, H * W), [=](sycl::id<3> idx) {
+            const int64_t n = idx[0];
+            const int64_t c = idx[1];
+            const int64_t hw = idx[2];
+
+            // Use float for intermediate calculations for numerical stability
+            const float m = static_cast<float>(mean_ptr[c]);
+            const float v = static_cast<float>(var_ptr[c]);
+            const float std_inv = 1.0f / sycl::sqrt(v + epsilon);
+
+            const int64_t input_idx = ((n * C + c) * H * W) + hw;
+            const float val = static_cast<float>(in_ptr[input_idx]);
+            out_ptr[input_idx] = sycl::half((val - m) * std_inv);
+        }).wait();
+    }
     else {
         throw std::runtime_error("Unsupported dtype for batchnorm2d_forward (pure SYCL)");
     }
@@ -394,6 +442,54 @@ auto batchnorm2d_forward_affine(const Tensor& input, const Tensor& mean, const T
 
             const int64_t input_idx = ((n * C + c) * H * W) + hw;
             out_ptr[input_idx] = g * (in_ptr[input_idx] - m) * std_inv + b;
+        }).wait();
+    }
+    else if (input.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(input);
+        const double* mean_ptr = get_data_ptr<const double>(mean);
+        const double* var_ptr = get_data_ptr<const double>(variance);
+        const double* gamma_ptr = get_data_ptr<const double>(gamma);
+        const double* beta_ptr = get_data_ptr<const double>(beta);
+        double* out_ptr = get_data_ptr<double>(output);
+
+        queue.parallel_for<BatchNorm2dForwardAffineKernelFloat64>(sycl::range<3>(N, C, H * W), [=](sycl::id<3> idx) {
+            const int64_t n = idx[0];
+            const int64_t c = idx[1];
+            const int64_t hw = idx[2];
+
+            const double m = mean_ptr[c];
+            const double v = var_ptr[c];
+            const double g = gamma_ptr[c];
+            const double b = beta_ptr[c];
+            const double std_inv = 1.0 / sycl::sqrt(v + static_cast<double>(epsilon));
+
+            const int64_t input_idx = ((n * C + c) * H * W) + hw;
+            out_ptr[input_idx] = g * (in_ptr[input_idx] - m) * std_inv + b;
+        }).wait();
+    }
+    else if (input.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        const sycl::half* mean_ptr = get_data_ptr<const sycl::half>(mean);
+        const sycl::half* var_ptr = get_data_ptr<const sycl::half>(variance);
+        const sycl::half* gamma_ptr = get_data_ptr<const sycl::half>(gamma);
+        const sycl::half* beta_ptr = get_data_ptr<const sycl::half>(beta);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+
+        queue.parallel_for<BatchNorm2dForwardAffineKernelFloat16>(sycl::range<3>(N, C, H * W), [=](sycl::id<3> idx) {
+            const int64_t n = idx[0];
+            const int64_t c = idx[1];
+            const int64_t hw = idx[2];
+
+            // Use float for intermediate calculations for numerical stability
+            const float m = static_cast<float>(mean_ptr[c]);
+            const float v = static_cast<float>(var_ptr[c]);
+            const float g = static_cast<float>(gamma_ptr[c]);
+            const float b = static_cast<float>(beta_ptr[c]);
+            const float std_inv = 1.0f / sycl::sqrt(v + epsilon);
+
+            const int64_t input_idx = ((n * C + c) * H * W) + hw;
+            const float val = static_cast<float>(in_ptr[input_idx]);
+            out_ptr[input_idx] = sycl::half(g * (val - m) * std_inv + b);
         }).wait();
     }
     else {
@@ -465,6 +561,112 @@ auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const 
             grad_in_ptr[input_idx] = g * std_inv * (grad_out_ptr[input_idx] -
                                                       grad_beta_ptr[c] * scale -
                                                       x_norm * grad_gamma_ptr[c] * scale);
+        }).wait();
+    }
+    else if (input.dtype() == DType::Float64) {
+        const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
+        const double* in_ptr = get_data_ptr<const double>(input);
+        const double* mean_ptr = get_data_ptr<const double>(mean);
+        const double* var_ptr = get_data_ptr<const double>(variance);
+        const double* gamma_ptr = get_data_ptr<const double>(gamma);
+        double* grad_in_ptr = get_data_ptr<double>(grad_input);
+        double* grad_gamma_ptr = get_data_ptr<double>(grad_gamma);
+        double* grad_beta_ptr = get_data_ptr<double>(grad_beta);
+
+        // Compute grad_gamma and grad_beta
+        queue.parallel_for<BatchNorm2dBackwardGammaKernelFloat64>(sycl::range<1>(C), [=](sycl::id<1> c) {
+            double sum_grad_out = 0.0;
+            double sum_grad_out_norm = 0.0;
+            const double m = mean_ptr[c];
+            const double v = var_ptr[c];
+            const double std_inv = 1.0 / sycl::sqrt(v + static_cast<double>(epsilon));
+
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t hw = 0; hw < spatial; ++hw) {
+                    const int64_t idx = ((n * C + c) * spatial) + hw;
+                    sum_grad_out += grad_out_ptr[idx];
+                    sum_grad_out_norm += grad_out_ptr[idx] * (in_ptr[idx] - m) * std_inv;
+                }
+            }
+
+            grad_gamma_ptr[c] = sum_grad_out_norm;
+            grad_beta_ptr[c] = sum_grad_out;
+        }).wait();
+
+        // Compute grad_input
+        const double scale = 1.0 / static_cast<double>(N * spatial);
+        queue.parallel_for<BatchNorm2dBackwardInputKernelFloat64>(sycl::range<3>(N, C, spatial), [=](sycl::id<3> idx) {
+            const int64_t n = idx[0];
+            const int64_t c = idx[1];
+            const int64_t hw = idx[2];
+
+            const double m = mean_ptr[c];
+            const double v = var_ptr[c];
+            const double g = gamma_ptr[c];
+            const double std_inv = 1.0 / sycl::sqrt(v + static_cast<double>(epsilon));
+
+            const int64_t input_idx = ((n * C + c) * spatial) + hw;
+            const double x_norm = (in_ptr[input_idx] - m) * std_inv;
+
+            grad_in_ptr[input_idx] = g * std_inv * (grad_out_ptr[input_idx] -
+                                                      grad_beta_ptr[c] * scale -
+                                                      x_norm * grad_gamma_ptr[c] * scale);
+        }).wait();
+    }
+    else if (input.dtype() == DType::Float16) {
+        const sycl::half* grad_out_ptr = get_data_ptr<const sycl::half>(grad_output);
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        const sycl::half* mean_ptr = get_data_ptr<const sycl::half>(mean);
+        const sycl::half* var_ptr = get_data_ptr<const sycl::half>(variance);
+        const sycl::half* gamma_ptr = get_data_ptr<const sycl::half>(gamma);
+        sycl::half* grad_in_ptr = get_data_ptr<sycl::half>(grad_input);
+        sycl::half* grad_gamma_ptr = get_data_ptr<sycl::half>(grad_gamma);
+        sycl::half* grad_beta_ptr = get_data_ptr<sycl::half>(grad_beta);
+
+        // Compute grad_gamma and grad_beta using float accumulation
+        queue.parallel_for<BatchNorm2dBackwardGammaKernelFloat16>(sycl::range<1>(C), [=](sycl::id<1> c) {
+            float sum_grad_out = 0.0f;
+            float sum_grad_out_norm = 0.0f;
+            const float m = static_cast<float>(mean_ptr[c]);
+            const float v = static_cast<float>(var_ptr[c]);
+            const float std_inv = 1.0f / sycl::sqrt(v + epsilon);
+
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t hw = 0; hw < spatial; ++hw) {
+                    const int64_t idx = ((n * C + c) * spatial) + hw;
+                    float grad_out_val = static_cast<float>(grad_out_ptr[idx]);
+                    float in_val = static_cast<float>(in_ptr[idx]);
+                    sum_grad_out += grad_out_val;
+                    sum_grad_out_norm += grad_out_val * (in_val - m) * std_inv;
+                }
+            }
+
+            grad_gamma_ptr[c] = sycl::half(sum_grad_out_norm);
+            grad_beta_ptr[c] = sycl::half(sum_grad_out);
+        }).wait();
+
+        // Compute grad_input
+        const float scale = 1.0f / static_cast<float>(N * spatial);
+        queue.parallel_for<BatchNorm2dBackwardInputKernelFloat16>(sycl::range<3>(N, C, spatial), [=](sycl::id<3> idx) {
+            const int64_t n = idx[0];
+            const int64_t c = idx[1];
+            const int64_t hw = idx[2];
+
+            const float m = static_cast<float>(mean_ptr[c]);
+            const float v = static_cast<float>(var_ptr[c]);
+            const float g = static_cast<float>(gamma_ptr[c]);
+            const float std_inv = 1.0f / sycl::sqrt(v + epsilon);
+
+            const int64_t input_idx = ((n * C + c) * spatial) + hw;
+            const float in_val = static_cast<float>(in_ptr[input_idx]);
+            const float x_norm = (in_val - m) * std_inv;
+            const float grad_out_val = static_cast<float>(grad_out_ptr[input_idx]);
+            const float grad_beta_val = static_cast<float>(grad_beta_ptr[c]);
+            const float grad_gamma_val = static_cast<float>(grad_gamma_ptr[c]);
+
+            grad_in_ptr[input_idx] = sycl::half(g * std_inv * (grad_out_val -
+                                                      grad_beta_val * scale -
+                                                      x_norm * grad_gamma_val * scale));
         }).wait();
     }
     else {
