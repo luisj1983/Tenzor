@@ -43,18 +43,23 @@ struct SubKernelUInt8 {};
 struct MulKernelFloat32 {};
 struct MulKernelFloat64 {};
 struct MulKernelFloat16 {};
+struct MulKernelInt32 {};
 struct DivKernelFloat32 {};
 struct DivKernelFloat64 {};
 struct DivKernelFloat16 {};
+struct DivKernelInt32 {};
 struct MatMulKernelFloat32 {};
 struct MatMulKernelFloat64 {};
 struct MatMulKernelFloat16 {};
+struct MatMulKernelInt32 {};
 struct SqrtKernelFloat32 {};
 struct SqrtKernelFloat64 {};
 struct NegKernelFloat32 {};
 struct NegKernelFloat64 {};
+struct NegKernelInt32 {};
 struct AbsKernelFloat32 {};
 struct AbsKernelFloat64 {};
+struct AbsKernelInt32 {};
 struct LogKernelFloat32 {};
 struct LogKernelFloat64 {};
 struct ExpKernelFloat32 {};
@@ -378,6 +383,15 @@ auto mul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
             out_ptr[idx] = sycl::half(static_cast<float>(a_ptr[idx]) * static_cast<float>(b_ptr[idx]));
         }).wait();
     }
+    else if (a_cont.dtype() == DType::Int32) {
+        const int32_t* a_ptr = get_data_ptr<const int32_t>(a_cont);
+        const int32_t* b_ptr = get_data_ptr<const int32_t>(b_cont);
+        int32_t* out_ptr = get_data_ptr<int32_t>(output);
+
+        queue.parallel_for<MulKernelInt32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = a_ptr[idx] * b_ptr[idx];
+        }).wait();
+    }
     else {
         throw std::runtime_error("Unsupported dtype for multiplication");
     }
@@ -436,6 +450,15 @@ auto div_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 
         queue.parallel_for<DivKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = sycl::half(static_cast<float>(a_ptr[idx]) / static_cast<float>(b_ptr[idx]));
+        }).wait();
+    }
+    else if (a_cont.dtype() == DType::Int32) {
+        const int32_t* a_ptr = get_data_ptr<const int32_t>(a_cont);
+        const int32_t* b_ptr = get_data_ptr<const int32_t>(b_cont);
+        int32_t* out_ptr = get_data_ptr<int32_t>(output);
+
+        queue.parallel_for<DivKernelInt32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = a_ptr[idx] / b_ptr[idx];
         }).wait();
     }
     else {
@@ -625,6 +648,23 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
             out_ptr[i * n + j] = sycl::half(sum);
         }).wait();
     }
+    else if (a_cont.dtype() == DType::Int32) {
+        const int32_t* a_ptr = get_data_ptr<const int32_t>(a_cont);
+        const int32_t* b_ptr = get_data_ptr<const int32_t>(b_cont);
+        int32_t* out_ptr = get_data_ptr<int32_t>(output);
+
+        // Use int64 accumulation to avoid overflow
+        queue.parallel_for<MatMulKernelInt32>(sycl::range<2>(m, n), [=](sycl::id<2> idx) {
+            const int64_t i = idx[0];
+            const int64_t j = idx[1];
+
+            int64_t sum = 0;
+            for (int64_t p = 0; p < k; ++p) {
+                sum += static_cast<int64_t>(a_ptr[i * k + p]) * static_cast<int64_t>(b_ptr[p * n + j]);
+            }
+            out_ptr[i * n + j] = static_cast<int32_t>(sum);
+        }).wait();
+    }
     else {
         throw std::runtime_error("Unsupported dtype for matmul with oneMKL");
     }
@@ -678,6 +718,23 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
                 sum += static_cast<float>(a_ptr[i * k + p]) * static_cast<float>(b_ptr[p * n + j]);
             }
             out_ptr[i * n + j] = sycl::half(sum);
+        }).wait();
+    }
+    else if (a_cont.dtype() == DType::Int32) {
+        const int32_t* a_ptr = get_data_ptr<const int32_t>(a_cont);
+        const int32_t* b_ptr = get_data_ptr<const int32_t>(b_cont);
+        int32_t* out_ptr = get_data_ptr<int32_t>(output);
+
+        // Use int64 accumulation to avoid overflow
+        queue.parallel_for<MatMulKernelInt32>(sycl::range<2>(m, n), [=](sycl::id<2> idx) {
+            const int64_t i = idx[0];
+            const int64_t j = idx[1];
+
+            int64_t sum = 0;
+            for (int64_t p = 0; p < k; ++p) {
+                sum += static_cast<int64_t>(a_ptr[i * k + p]) * static_cast<int64_t>(b_ptr[p * n + j]);
+            }
+            out_ptr[i * n + j] = static_cast<int32_t>(sum);
         }).wait();
     }
     else {
@@ -741,6 +798,14 @@ auto neg_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             out_ptr[idx] = -in_ptr[idx];
         }).wait();
     }
+    else if (input.dtype() == DType::Int32) {
+        const int32_t* in_ptr = get_data_ptr<const int32_t>(input);
+        int32_t* out_ptr = get_data_ptr<int32_t>(output);
+
+        queue.parallel_for<NegKernelInt32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = -in_ptr[idx];
+        }).wait();
+    }
     else {
         throw std::runtime_error("Unsupported dtype for negation");
     }
@@ -769,6 +834,14 @@ auto abs_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 
         queue.parallel_for<AbsKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = sycl::fabs(in_ptr[idx]);
+        }).wait();
+    }
+    else if (input.dtype() == DType::Int32) {
+        const int32_t* in_ptr = get_data_ptr<const int32_t>(input);
+        int32_t* out_ptr = get_data_ptr<int32_t>(output);
+
+        queue.parallel_for<AbsKernelInt32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = sycl::abs(in_ptr[idx]);
         }).wait();
     }
     else {

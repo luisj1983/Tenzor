@@ -479,6 +479,60 @@ auto prod_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& qu
 
         return output;
     }
+    else if (input.dtype() == DType::Int32) {
+        const int32_t* in_ptr = get_data_ptr<const int32_t>(input);
+
+        // Copy to host and compute product
+        std::vector<int32_t> host_data(total_size);
+        queue.memcpy(host_data.data(), in_ptr, total_size * sizeof(int32_t)).wait();
+
+        std::vector<int32_t> result(output_size);
+
+        if (dim == -1) {
+            // Full reduction - use int64_t accumulator to avoid overflow
+            int64_t prod_value = 1;
+            for (int64_t i = 0; i < total_size; ++i) {
+                prod_value *= static_cast<int64_t>(host_data[i]);
+            }
+            result[0] = static_cast<int32_t>(prod_value);
+        } else {
+            // Dimensional reduction
+            const int64_t ndim = shape.size();
+            const int64_t dim_size = shape[dim];
+
+            for (int64_t out_idx = 0; out_idx < output_size; ++out_idx) {
+                std::vector<int64_t> indices(ndim, 0);
+                int64_t tmp = out_idx;
+
+                // Convert flat output index to multi-dimensional indices
+                for (int64_t d = ndim - 1; d >= 0; --d) {
+                    if (d == dim) continue;
+                    int64_t size = shape[d];
+                    indices[d] = tmp % size;
+                    tmp /= size;
+                }
+
+                // Compute product along the reduction dimension
+                int64_t prod_value = 1;
+                for (int64_t i = 0; i < dim_size; ++i) {
+                    indices[dim] = i;
+                    int64_t in_idx = 0;
+                    for (int64_t d = 0; d < ndim; ++d) {
+                        in_idx += indices[d] * strides[d];
+                    }
+                    prod_value *= static_cast<int64_t>(host_data[in_idx]);
+                }
+                result[out_idx] = static_cast<int32_t>(prod_value);
+            }
+        }
+
+        // Create output tensor and copy result back
+        Tensor output(out_shape, input.dtype(), input.device());
+        int32_t* out_ptr = get_data_ptr<int32_t>(output);
+        queue.memcpy(out_ptr, result.data(), output_size * sizeof(int32_t)).wait();
+
+        return output;
+    }
     else {
         throw std::runtime_error("Unsupported dtype for prod_kernel");
     }

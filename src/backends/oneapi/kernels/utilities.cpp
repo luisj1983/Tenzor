@@ -11,12 +11,15 @@ namespace oneapi {
 struct CatKernelFloat32 {};
 struct CatKernelFloat64 {};
 struct CatKernelFloat16 {};
+struct CatKernelInt32 {};
 struct ClampKernelFloat32 {};
 struct ClampKernelFloat64 {};
 struct ClampKernelFloat16 {};
+struct ClampKernelInt32 {};
 struct SignKernelFloat32 {};
 struct SignKernelFloat64 {};
 struct SignKernelFloat16 {};
+struct SignKernelInt32 {};
 
 // Helper function to get typed pointer from tensor
 template<typename T>
@@ -228,6 +231,32 @@ auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, sycl::queue& queue
                 }
             ).wait();
         }
+        else if (dtype == DType::Int32) {
+            const int32_t* src_ptr = get_data_ptr<const int32_t>(tensor);
+            int32_t* dst_ptr = get_data_ptr<int32_t>(output);
+
+            const int64_t src_slice_stride = elements_per_slice * tensor_size_in_dim;
+            const int64_t dst_slice_stride = elements_per_slice * out_shape[dim];
+            const int64_t dst_offset = offset_in_concat_dim * elements_per_slice;
+
+            queue.parallel_for<CatKernelInt32>(
+                sycl::range<1>(num_slices * tensor_size_in_dim * elements_per_slice),
+                [=](sycl::id<1> idx) {
+                    const int64_t flat_idx = idx[0];
+                    const int64_t slice_idx = flat_idx / src_slice_stride;
+                    const int64_t remainder = flat_idx % src_slice_stride;
+                    const int64_t concat_idx = remainder / elements_per_slice;
+                    const int64_t elem_idx = remainder % elements_per_slice;
+
+                    const int64_t src_idx = slice_idx * src_slice_stride + concat_idx * elements_per_slice + elem_idx;
+                    const int64_t dst_idx = slice_idx * dst_slice_stride +
+                                           (offset_in_concat_dim + concat_idx) * elements_per_slice +
+                                           elem_idx;
+
+                    dst_ptr[dst_idx] = src_ptr[src_idx];
+                }
+            ).wait();
+        }
         else {
             throw std::runtime_error("cat_kernel: unsupported dtype");
         }
@@ -297,6 +326,18 @@ auto clamp_kernel(const Tensor& input, float min_val, float max_val, sycl::queue
         queue.parallel_for<ClampKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             const float val = static_cast<float>(in_ptr[idx]);
             out_ptr[idx] = sycl::half(sycl::fmin(sycl::fmax(val, min_val), max_val));
+        }).wait();
+    }
+    else if (input.dtype() == DType::Int32) {
+        const int32_t* in_ptr = get_data_ptr<const int32_t>(input);
+        int32_t* out_ptr = get_data_ptr<int32_t>(output);
+
+        const int32_t min_i = static_cast<int32_t>(min_val);
+        const int32_t max_i = static_cast<int32_t>(max_val);
+
+        queue.parallel_for<ClampKernelInt32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            const int32_t val = in_ptr[idx];
+            out_ptr[idx] = sycl::min(sycl::max(val, min_i), max_i);
         }).wait();
     }
     else {
@@ -375,6 +416,21 @@ auto sign_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
                 out_ptr[idx] = sycl::half(1.0f);
             } else {
                 out_ptr[idx] = sycl::half(-1.0f);
+            }
+        }).wait();
+    }
+    else if (input.dtype() == DType::Int32) {
+        const int32_t* in_ptr = get_data_ptr<const int32_t>(input);
+        int32_t* out_ptr = get_data_ptr<int32_t>(output);
+
+        queue.parallel_for<SignKernelInt32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            const int32_t val = in_ptr[idx];
+            if (val == 0) {
+                out_ptr[idx] = 0;
+            } else if (val > 0) {
+                out_ptr[idx] = 1;
+            } else {
+                out_ptr[idx] = -1;
             }
         }).wait();
     }

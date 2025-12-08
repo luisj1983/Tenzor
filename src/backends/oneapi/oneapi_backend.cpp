@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <memory>
 #include <cstring>
+#include <cstdint>
 
 #ifdef TENZOR_HAS_ONEMKL
 #include <oneapi/mkl.hpp>
@@ -661,27 +662,28 @@ public:
             }
 
             // Reduction operations
+            // Use INT64_MIN as sentinel for "full reduction" when dim is not specified
             else if (op_name == "sum") {
                 if (inputs.size() != 1) throw std::invalid_argument("sum requires 1 input");
-                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
+                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : INT64_MIN;
                 bool keepdim = attrs.contains("keepdim") && attrs.at("keepdim") == "1";
                 return {oneapi::sum_kernel(inputs[0], dim, keepdim, queue)};
             }
             else if (op_name == "mean") {
                 if (inputs.size() != 1) throw std::invalid_argument("mean requires 1 input");
-                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
+                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : INT64_MIN;
                 bool keepdim = attrs.contains("keepdim") && attrs.at("keepdim") == "1";
                 return {oneapi::mean_kernel(inputs[0], dim, keepdim, queue)};
             }
             else if (op_name == "max") {
                 if (inputs.size() != 1) throw std::invalid_argument("max requires 1 input");
-                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
+                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : INT64_MIN;
                 bool keepdim = attrs.contains("keepdim") && attrs.at("keepdim") == "1";
                 return {oneapi::max_kernel(inputs[0], dim, keepdim, queue)};
             }
             else if (op_name == "min") {
                 if (inputs.size() != 1) throw std::invalid_argument("min requires 1 input");
-                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
+                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : INT64_MIN;
                 bool keepdim = attrs.contains("keepdim") && attrs.at("keepdim") == "1";
                 return {oneapi::min_kernel(inputs[0], dim, keepdim, queue)};
             }
