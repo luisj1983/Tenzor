@@ -12,6 +12,8 @@ class TransposeKernelFloat32;
 class TransposeKernelFloat64;
 class PermuteKernelFloat32;
 class PermuteKernelFloat64;
+class ContiguousKernelFloat32;
+class ContiguousKernelFloat64;
 
 // Helper function to get typed pointer from tensor
 template<typename T>
@@ -343,14 +345,91 @@ auto unsqueeze_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> T
 
 // Contiguous kernel - ensure tensor data is laid out contiguously
 auto contiguous_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
-    // Always create a new contiguous tensor - works for all dtypes
-    Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
-                  input.dtype(), input.device());
+    // If already contiguous, just return a copy using memcpy
+    if (input.is_contiguous()) {
+        Tensor output(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
+                      input.dtype(), input.device());
+        const size_t bytes = input.numel() * input.dtype_size();
+        const void* in_ptr = input.data_ptr();
+        void* out_ptr = const_cast<void*>(output.data_ptr());
+        queue.memcpy(out_ptr, in_ptr, bytes).wait();
+        return output;
+    }
 
-    const size_t bytes = input.numel() * input.dtype_size();
-    const void* in_ptr = input.data_ptr();
-    void* out_ptr = const_cast<void*>(output.data_ptr());
-    queue.memcpy(out_ptr, in_ptr, bytes).wait();
+    // For non-contiguous tensors, we need to copy element by element respecting strides
+    auto shape_span = input.shape();
+    auto strides_span = input.strides();
+    std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
+    std::vector<int64_t> input_strides(strides_span.begin(), strides_span.end());
+
+    Tensor output(shape, input.dtype(), input.device());
+
+    const int64_t numel = input.numel();
+    const int64_t ndim = static_cast<int64_t>(shape.size());
+
+    // Compute output (contiguous) strides
+    std::vector<int64_t> output_strides(ndim);
+    if (ndim > 0) {
+        output_strides[ndim - 1] = 1;
+        for (int64_t i = ndim - 2; i >= 0; --i) {
+            output_strides[i] = output_strides[i + 1] * shape[i + 1];
+        }
+    }
+
+    // Copy to arrays for kernel capture (max 8 dimensions)
+    int64_t shape_arr[8] = {0};
+    int64_t input_strides_arr[8] = {0};
+    int64_t output_strides_arr[8] = {0};
+    for (int64_t i = 0; i < ndim && i < 8; ++i) {
+        shape_arr[i] = shape[i];
+        input_strides_arr[i] = input_strides[i];
+        output_strides_arr[i] = output_strides[i];
+    }
+
+    if (input.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(input);
+        float* out_ptr = get_data_ptr<float>(output);
+
+        queue.parallel_for<ContiguousKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            int64_t out_idx = idx[0];
+
+            // Convert flat output index to multi-dimensional coordinates
+            // Then compute input index using input strides
+            int64_t in_idx = 0;
+            int64_t remaining = out_idx;
+            for (int64_t d = 0; d < ndim; ++d) {
+                int64_t coord = remaining / output_strides_arr[d];
+                remaining = remaining % output_strides_arr[d];
+                in_idx += coord * input_strides_arr[d];
+            }
+
+            out_ptr[out_idx] = in_ptr[in_idx];
+        }).wait();
+    }
+    else if (input.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(input);
+        double* out_ptr = get_data_ptr<double>(output);
+
+        queue.parallel_for<ContiguousKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            int64_t out_idx = idx[0];
+
+            int64_t in_idx = 0;
+            int64_t remaining = out_idx;
+            for (int64_t d = 0; d < ndim; ++d) {
+                int64_t coord = remaining / output_strides_arr[d];
+                remaining = remaining % output_strides_arr[d];
+                in_idx += coord * input_strides_arr[d];
+            }
+
+            out_ptr[out_idx] = in_ptr[in_idx];
+        }).wait();
+    }
+    else {
+        // Fallback for other dtypes: copy to CPU, make contiguous there, copy back
+        // This is slower but ensures correctness for all dtypes
+        auto cpu_tensor = input.to(Device::cpu()).contiguous();
+        return cpu_tensor.to(input.device());
+    }
 
     return output;
 }

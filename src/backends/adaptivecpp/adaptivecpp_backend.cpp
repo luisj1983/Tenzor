@@ -102,6 +102,15 @@ namespace adaptivecpp {
                         int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
                         bool compute_grad_input, bool compute_grad_weight, bool compute_grad_bias,
                         sycl::queue& queue) -> std::tuple<Tensor, Tensor, Tensor>;
+    auto conv2d_backward_input_kernel(const Tensor& grad_output, const Tensor& weight,
+                                       const std::vector<int64_t>& input_shape,
+                                       int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
+                                       sycl::queue& queue) -> Tensor;
+    auto conv2d_backward_weight_kernel(const Tensor& grad_output, const Tensor& input,
+                                        const std::vector<int64_t>& weight_shape,
+                                        int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
+                                        sycl::queue& queue) -> Tensor;
+    auto conv2d_backward_bias_kernel(const Tensor& grad_output, sycl::queue& queue) -> Tensor;
 
     // Embedding operations
     auto embedding_lookup_kernel(const Tensor& indices, const Tensor& weights,
@@ -125,7 +134,7 @@ namespace adaptivecpp {
 
     // Pooling operations
     auto avg_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
-    auto max_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
+    auto max_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> std::vector<Tensor>;
     auto adaptive_avg_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
     auto adaptive_max_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
     auto avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
@@ -993,7 +1002,7 @@ public:
                 return {adaptivecpp::avg_pool2d_kernel(inputs[0], attrs, queue)};
             }
             else if (op_name == "max_pool2d") {
-                return {adaptivecpp::max_pool2d_kernel(inputs[0], attrs, queue)};
+                return adaptivecpp::max_pool2d_kernel(inputs[0], attrs, queue);
             }
             else if (op_name == "adaptive_avg_pool2d") {
                 return {adaptivecpp::adaptive_avg_pool2d_kernel(inputs[0], attrs, queue)};
@@ -1051,6 +1060,52 @@ public:
                     inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups,
                     compute_grad_input, compute_grad_weight, compute_grad_bias, queue);
                 return {grad_input, grad_weight, grad_bias};
+            }
+            else if (op_name == "conv2d_backward_input") {
+                if (inputs.size() != 2) {
+                    throw std::invalid_argument("conv2d_backward_input requires exactly 2 inputs (grad_output, weight)");
+                }
+                // Parse input_shape from comma-separated string
+                std::vector<int64_t> input_shape;
+                if (attrs.contains("input_shape")) {
+                    std::string shape_str = attrs.at("input_shape");
+                    std::stringstream ss(shape_str);
+                    std::string item;
+                    while (std::getline(ss, item, ',')) {
+                        input_shape.push_back(std::stoll(item));
+                    }
+                }
+                int64_t stride = attrs.contains("stride") ? std::stoll(attrs.at("stride")) : 1;
+                int64_t padding = attrs.contains("padding") ? std::stoll(attrs.at("padding")) : 0;
+                int64_t dilation = attrs.contains("dilation") ? std::stoll(attrs.at("dilation")) : 1;
+                int64_t groups = attrs.contains("groups") ? std::stoll(attrs.at("groups")) : 1;
+                return {adaptivecpp::conv2d_backward_input_kernel(inputs[0], inputs[1], input_shape, stride, padding, dilation, groups, queue)};
+            }
+            else if (op_name == "conv2d_backward_weight") {
+                if (inputs.size() != 2) {
+                    throw std::invalid_argument("conv2d_backward_weight requires exactly 2 inputs (grad_output, input)");
+                }
+                // Parse weight_shape from comma-separated string
+                std::vector<int64_t> weight_shape;
+                if (attrs.contains("weight_shape")) {
+                    std::string shape_str = attrs.at("weight_shape");
+                    std::stringstream ss(shape_str);
+                    std::string item;
+                    while (std::getline(ss, item, ',')) {
+                        weight_shape.push_back(std::stoll(item));
+                    }
+                }
+                int64_t stride = attrs.contains("stride") ? std::stoll(attrs.at("stride")) : 1;
+                int64_t padding = attrs.contains("padding") ? std::stoll(attrs.at("padding")) : 0;
+                int64_t dilation = attrs.contains("dilation") ? std::stoll(attrs.at("dilation")) : 1;
+                int64_t groups = attrs.contains("groups") ? std::stoll(attrs.at("groups")) : 1;
+                return {adaptivecpp::conv2d_backward_weight_kernel(inputs[0], inputs[1], weight_shape, stride, padding, dilation, groups, queue)};
+            }
+            else if (op_name == "conv2d_backward_bias") {
+                if (inputs.size() != 1) {
+                    throw std::invalid_argument("conv2d_backward_bias requires exactly 1 input (grad_output)");
+                }
+                return {adaptivecpp::conv2d_backward_bias_kernel(inputs[0], queue)};
             }
 
             // Embedding operations

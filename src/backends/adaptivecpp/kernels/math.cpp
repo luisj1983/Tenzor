@@ -465,8 +465,12 @@ auto div_inplace_kernel(Tensor& inout, const Tensor& other, sycl::queue& queue) 
 
 // Matrix multiplication kernel
 auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
-    auto a_shape = a.shape();
-    auto b_shape = b.shape();
+    // Make tensors contiguous if needed (handles permuted/transposed tensors correctly)
+    Tensor a_contig = a.is_contiguous() ? a : a.contiguous();
+    Tensor b_contig = b.is_contiguous() ? b : b.contiguous();
+
+    auto a_shape = a_contig.shape();
+    auto b_shape = b_contig.shape();
 
     // Handle 1D vector × 2D matrix (vector-matrix multiplication)
     if (a_shape.size() == 1 && b_shape.size() == 2) {
@@ -482,12 +486,12 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
         }
 
         // Treat 1D vector as row vector (1, n) and perform matmul to get (1, m), then return as (m,)
-        Tensor output({m}, a.dtype(), a.device());
+        Tensor output({m}, a_contig.dtype(), a_contig.device());
 
         // Fallback naive implementation
-        if (a.dtype() == DType::Float32) {
-            const float* a_ptr = get_data_ptr<const float>(a);
-            const float* b_ptr = get_data_ptr<const float>(b);
+        if (a_contig.dtype() == DType::Float32) {
+            const float* a_ptr = get_data_ptr<const float>(a_contig);
+            const float* b_ptr = get_data_ptr<const float>(b_contig);
             float* out_ptr = get_data_ptr<float>(output);
 
             queue.parallel_for<class MatMulKernelVector>(sycl::range<1>(m), [=](sycl::id<1> idx) {
@@ -499,9 +503,9 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
                 out_ptr[j] = sum;
             }).wait();
         }
-        else if (a.dtype() == DType::Float64) {
-            const double* a_ptr = get_data_ptr<const double>(a);
-            const double* b_ptr = get_data_ptr<const double>(b);
+        else if (a_contig.dtype() == DType::Float64) {
+            const double* a_ptr = get_data_ptr<const double>(a_contig);
+            const double* b_ptr = get_data_ptr<const double>(b_contig);
             double* out_ptr = get_data_ptr<double>(output);
 
             queue.parallel_for<class MatMulKernelVectorF64>(sycl::range<1>(m), [=](sycl::id<1> idx) {
@@ -541,12 +545,12 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
     out_shape.push_back(m);
     out_shape.push_back(n);
 
-    Tensor output(out_shape, a.dtype(), a.device());
+    Tensor output(out_shape, a_contig.dtype(), a_contig.device());
 
     // Fallback naive implementation for Float32
-    if (a.dtype() == DType::Float32) {
-        const float* a_ptr = get_data_ptr<const float>(a);
-        const float* b_ptr = get_data_ptr<const float>(b);
+    if (a_contig.dtype() == DType::Float32) {
+        const float* a_ptr = get_data_ptr<const float>(a_contig);
+        const float* b_ptr = get_data_ptr<const float>(b_contig);
         float* out_ptr = get_data_ptr<float>(output);
 
         // Simple parallel matrix multiplication
@@ -561,9 +565,9 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
             out_ptr[i * n + j] = sum;
         }).wait();
     }
-    else if (a.dtype() == DType::Float64) {
-        const double* a_ptr = get_data_ptr<const double>(a);
-        const double* b_ptr = get_data_ptr<const double>(b);
+    else if (a_contig.dtype() == DType::Float64) {
+        const double* a_ptr = get_data_ptr<const double>(a_contig);
+        const double* b_ptr = get_data_ptr<const double>(b_contig);
         double* out_ptr = get_data_ptr<double>(output);
 
         queue.parallel_for<MatMulKernelFloat64>(sycl::range<2>(m, n), [=](sycl::id<2> idx) {

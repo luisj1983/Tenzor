@@ -175,9 +175,13 @@ auto avgpool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
 
 #else // !TENZOR_HAS_ONEDNN - Pure SYCL implementation
 
-// MaxPool2d forward (pure SYCL)
+// Kernel classes for max pooling with indices
+class MaxPool2dWithIndicesKernelFloat32;
+class MaxPool2dWithIndicesKernelFloat64;
+
+// MaxPool2d forward (pure SYCL) - returns both output and indices
 auto maxpool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
-                       int64_t padding, int64_t dilation, sycl::queue& queue) -> Tensor {
+                       int64_t padding, int64_t dilation, sycl::queue& queue) -> std::vector<Tensor> {
     auto shape = input.shape();
     if (shape.size() != 4) {
         throw std::invalid_argument("MaxPool2d requires 4D input (N, C, H, W)");
@@ -192,13 +196,16 @@ auto maxpool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
     const int64_t W_out = (W_in + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
 
     Tensor output({N, C, H_out, W_out}, input.dtype(), input.device());
+    // Indices stored as same dtype as input for consistency
+    Tensor indices({N, C, H_out, W_out}, input.dtype(), input.device());
 
     if (input.dtype() == DType::Float32) {
         const float* in_ptr = get_data_ptr<const float>(input);
         float* out_ptr = get_data_ptr<float>(output);
+        float* idx_ptr = get_data_ptr<float>(indices);
 
         const int64_t total_size = N * C * H_out * W_out;
-        queue.parallel_for<MaxPool2dKernelFloat32>(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
+        queue.parallel_for<MaxPool2dWithIndicesKernelFloat32>(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
             int64_t temp = flat_idx;
             const int64_t w_out = temp % W_out;
             temp /= W_out;
@@ -208,6 +215,7 @@ auto maxpool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
             const int64_t n = temp / C;
 
             float max_val = -3.4028235e+38f;
+            int64_t max_idx = 0;
 
             for (int64_t kh = 0; kh < kernel_size; ++kh) {
                 for (int64_t kw = 0; kw < kernel_size; ++kw) {
@@ -215,21 +223,28 @@ auto maxpool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
                     int64_t w_in = w_out * stride - padding + kw * dilation;
 
                     if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
-                        float val = in_ptr[((n * C + c) * H_in + h_in) * W_in + w_in];
-                        max_val = sycl::fmax(max_val, val);
+                        int64_t input_idx = ((n * C + c) * H_in + h_in) * W_in + w_in;
+                        float val = in_ptr[input_idx];
+                        if (val > max_val) {
+                            max_val = val;
+                            max_idx = input_idx;
+                        }
                     }
                 }
             }
 
-            out_ptr[((n * C + c) * H_out + h_out) * W_out + w_out] = max_val;
+            int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
+            out_ptr[out_idx] = max_val;
+            idx_ptr[out_idx] = static_cast<float>(max_idx);
         }).wait();
     }
     else if (input.dtype() == DType::Float64) {
         const double* in_ptr = get_data_ptr<const double>(input);
         double* out_ptr = get_data_ptr<double>(output);
+        double* idx_ptr = get_data_ptr<double>(indices);
 
         const int64_t total_size = N * C * H_out * W_out;
-        queue.parallel_for<MaxPool2dKernelFloat64>(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
+        queue.parallel_for<MaxPool2dWithIndicesKernelFloat64>(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
             int64_t temp = flat_idx;
             const int64_t w_out = temp % W_out;
             temp /= W_out;
@@ -239,6 +254,7 @@ auto maxpool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
             const int64_t n = temp / C;
 
             double max_val = -1.7976931348623157e+308;
+            int64_t max_idx = 0;
 
             for (int64_t kh = 0; kh < kernel_size; ++kh) {
                 for (int64_t kw = 0; kw < kernel_size; ++kw) {
@@ -246,20 +262,26 @@ auto maxpool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride,
                     int64_t w_in = w_out * stride - padding + kw * dilation;
 
                     if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
-                        double val = in_ptr[((n * C + c) * H_in + h_in) * W_in + w_in];
-                        max_val = sycl::fmax(max_val, val);
+                        int64_t input_idx = ((n * C + c) * H_in + h_in) * W_in + w_in;
+                        double val = in_ptr[input_idx];
+                        if (val > max_val) {
+                            max_val = val;
+                            max_idx = input_idx;
+                        }
                     }
                 }
             }
 
-            out_ptr[((n * C + c) * H_out + h_out) * W_out + w_out] = max_val;
+            int64_t out_idx = ((n * C + c) * H_out + h_out) * W_out + w_out;
+            out_ptr[out_idx] = max_val;
+            idx_ptr[out_idx] = static_cast<double>(max_idx);
         }).wait();
     }
     else {
         throw std::runtime_error("Unsupported dtype for maxpool2d_forward");
     }
 
-    return output;
+    return {output, indices};
 }
 
 // AvgPool2d forward (pure SYCL)
@@ -566,9 +588,9 @@ auto avg_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::que
  * @param input Input tensor (4D: batch, channels, height, width)
  * @param attrs Operation attributes containing kernel_size, stride, padding
  * @param queue SYCL queue for execution
- * @return Tensor Pooled output tensor
+ * @return std::vector<Tensor> Pooled output tensor and indices tensor
  */
-auto max_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor {
+auto max_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> std::vector<Tensor> {
     if (!attrs.contains("kernel_size")) {
         throw std::invalid_argument("max_pool2d: 'kernel_size' attribute is required");
     }

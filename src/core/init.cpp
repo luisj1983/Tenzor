@@ -3084,6 +3084,21 @@ auto initialize() -> void {
                         return adaptivecpp_backend->dispatch("conv2d_backward", inputs, attrs);
                     });
 
+                registry.register_kernel("conv2d_backward_input", Device::Type::AdaptiveCpp,
+                    [adaptivecpp_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return adaptivecpp_backend->dispatch("conv2d_backward_input", inputs, attrs);
+                    });
+
+                registry.register_kernel("conv2d_backward_weight", Device::Type::AdaptiveCpp,
+                    [adaptivecpp_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return adaptivecpp_backend->dispatch("conv2d_backward_weight", inputs, attrs);
+                    });
+
+                registry.register_kernel("conv2d_backward_bias", Device::Type::AdaptiveCpp,
+                    [adaptivecpp_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return adaptivecpp_backend->dispatch("conv2d_backward_bias", inputs, attrs);
+                    });
+
                 // Embedding operations
                 registry.register_kernel("embedding_lookup", Device::Type::AdaptiveCpp,
                     [adaptivecpp_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
