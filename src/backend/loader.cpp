@@ -1,11 +1,39 @@
 #include "tenzor/backend/loader.hpp"
 #include <mutex>
+#include <cstdlib>
 
 #ifndef _WIN32
 #include <dlfcn.h>
 #endif
 
 namespace tenzor {
+
+// Forward declaration
+auto backend_registry() -> BackendLoader&;
+
+/**
+ * @brief Early cleanup guard to ensure AdaptiveCpp cleanup happens before CUDA driver unloads.
+ *
+ * This uses std::atexit to register a cleanup handler. Since atexit handlers run in
+ * LIFO order (last registered runs first), and the CUDA runtime registers its cleanup
+ * early during library load, we need to register AFTER the static BackendLoader is
+ * initialized but we want our cleanup to run BEFORE static destruction begins.
+ *
+ * The key insight is that atexit handlers run BEFORE static destructors. So by
+ * registering an atexit handler that explicitly cleans up the AdaptiveCpp backend,
+ * we ensure it's destroyed while the CUDA runtime is still available.
+ *
+ * See: https://github.com/AdaptiveCpp/AdaptiveCpp/issues/817
+ */
+static bool g_atexit_registered = false;
+
+static void cleanup_adaptivecpp_before_cuda() {
+    // Explicitly destroy AdaptiveCpp backend before CUDA driver unloads
+    auto& loader = backend_registry();
+    if (loader.has_backend("adaptivecpp")) {
+        loader.unload_backend("adaptivecpp");
+    }
+}
 
 BackendLoader::~BackendLoader() {
     // IMPORTANT: Destroy backends in reverse dependency order to avoid cleanup issues.
@@ -108,6 +136,14 @@ auto BackendLoader::register_backend(std::string_view name,
         device_type = Device::Type::WebGPU;
     } else if (backend_name == "adaptivecpp") {
         device_type = Device::Type::AdaptiveCpp;
+        // Register atexit handler to cleanup AdaptiveCpp before CUDA driver unloads.
+        // This must be done here (when AdaptiveCpp is registered) so that the atexit
+        // handler runs AFTER CUDA's atexit cleanup but BEFORE static destructors.
+        // See: https://github.com/AdaptiveCpp/AdaptiveCpp/issues/817
+        if (!g_atexit_registered) {
+            std::atexit(cleanup_adaptivecpp_before_cuda);
+            g_atexit_registered = true;
+        }
     } else {
         device_type = Device::Type::CPU; // Default fallback
     }

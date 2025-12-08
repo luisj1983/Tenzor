@@ -316,6 +316,23 @@ public:
         // CUDA cleanup errors (error code 4 = cudaErrorCudartUnloading)
         shutdown_in_progress_ = true;
 
+        // CRITICAL: Free all USM allocations BEFORE waiting on queues.
+        // USM allocators participate in SYCL runtime reference counting.
+        // If we don't free them before queue destruction, the CUDA driver
+        // may unload before the allocations are cleaned up, causing SEGFAULT.
+        // See: https://github.com/AdaptiveCpp/AdaptiveCpp/issues/817
+        for (auto& [ptr, device_id] : allocations_) {
+            if (ptr && device_id < static_cast<int32_t>(devices_.size())) {
+                try {
+                    auto& queue = *devices_[device_id].queue;
+                    sycl::free(ptr, queue);
+                } catch (...) {
+                    // Ignore cleanup errors during shutdown
+                }
+            }
+        }
+        allocations_.clear();
+
         // Properly synchronize and cleanup all SYCL queues before destruction.
         // This is critical when AdaptiveCpp uses CUDA backend - we must ensure
         // all CUDA operations complete before the queues are destroyed.
@@ -331,11 +348,15 @@ public:
                 } catch (...) {
                     // Silently ignore any other exceptions during cleanup
                 }
+                // Explicitly reset the shared_ptr to destroy the queue while
+                // CUDA runtime is still available. This ensures the SYCL queue's
+                // internal resources (streams, events) are released before
+                // the CUDA driver begins its shutdown sequence.
+                device_info.queue.reset();
             }
         }
-        // Clear allocations map before destroying queues
-        allocations_.clear();
-        // Now safe to destroy the queues
+
+        // Now safe to clear the device info vector
         devices_.clear();
     }
 
