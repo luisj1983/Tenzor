@@ -20,26 +20,32 @@ struct EqKernelFloat32 {};
 struct EqKernelFloat64 {};
 struct EqKernelInt32 {};
 struct EqKernelInt64 {};
+struct EqKernelBool {};
 struct NeKernelFloat32 {};
 struct NeKernelFloat64 {};
 struct NeKernelInt32 {};
 struct NeKernelInt64 {};
+struct NeKernelBool {};
 struct LtKernelFloat32 {};
 struct LtKernelFloat64 {};
 struct LtKernelInt32 {};
 struct LtKernelInt64 {};
+struct LtKernelBool {};
 struct LeKernelFloat32 {};
 struct LeKernelFloat64 {};
 struct LeKernelInt32 {};
 struct LeKernelInt64 {};
+struct LeKernelBool {};
 struct GtKernelFloat32 {};
 struct GtKernelFloat64 {};
 struct GtKernelInt32 {};
 struct GtKernelInt64 {};
+struct GtKernelBool {};
 struct GeKernelFloat32 {};
 struct GeKernelFloat64 {};
 struct GeKernelInt32 {};
 struct GeKernelInt64 {};
+struct GeKernelBool {};
 
 // Helper function to get typed pointer from tensor
 template<typename T>
@@ -119,6 +125,15 @@ auto eq_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
             out_ptr[idx] = (a_ptr[idx] == b_ptr[idx]);
         }).wait();
     }
+    else if (a.dtype() == DType::Bool) {
+        const bool* a_ptr = get_data_ptr<const bool>(a);
+        const bool* b_ptr = get_data_ptr<const bool>(b);
+        bool* out_ptr = get_data_ptr<bool>(output);
+
+        queue.parallel_for<EqKernelBool>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = (a_ptr[idx] == b_ptr[idx]);
+        }).wait();
+    }
     else {
         throw std::runtime_error("Unsupported dtype for eq comparison");
     }
@@ -185,6 +200,15 @@ auto ne_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
         bool* out_ptr = get_data_ptr<bool>(output);
 
         queue.parallel_for<NeKernelInt64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = (a_ptr[idx] != b_ptr[idx]);
+        }).wait();
+    }
+    else if (a.dtype() == DType::Bool) {
+        const bool* a_ptr = get_data_ptr<const bool>(a);
+        const bool* b_ptr = get_data_ptr<const bool>(b);
+        bool* out_ptr = get_data_ptr<bool>(output);
+
+        queue.parallel_for<NeKernelBool>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = (a_ptr[idx] != b_ptr[idx]);
         }).wait();
     }
@@ -257,6 +281,16 @@ auto lt_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
             out_ptr[idx] = (a_ptr[idx] < b_ptr[idx]);
         }).wait();
     }
+    else if (a.dtype() == DType::Bool) {
+        const bool* a_ptr = get_data_ptr<const bool>(a);
+        const bool* b_ptr = get_data_ptr<const bool>(b);
+        bool* out_ptr = get_data_ptr<bool>(output);
+
+        // For bools: false < true (0 < 1)
+        queue.parallel_for<LtKernelBool>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = (!a_ptr[idx] && b_ptr[idx]);
+        }).wait();
+    }
     else {
         throw std::runtime_error("Unsupported dtype for lt comparison");
     }
@@ -324,6 +358,16 @@ auto le_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
 
         queue.parallel_for<LeKernelInt64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = (a_ptr[idx] <= b_ptr[idx]);
+        }).wait();
+    }
+    else if (a.dtype() == DType::Bool) {
+        const bool* a_ptr = get_data_ptr<const bool>(a);
+        const bool* b_ptr = get_data_ptr<const bool>(b);
+        bool* out_ptr = get_data_ptr<bool>(output);
+
+        // For bools: a <= b means !a || b (false <= anything, or true <= true)
+        queue.parallel_for<LeKernelBool>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = (!a_ptr[idx] || b_ptr[idx]);
         }).wait();
     }
     else {
@@ -395,6 +439,16 @@ auto gt_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
             out_ptr[idx] = (a_ptr[idx] > b_ptr[idx]);
         }).wait();
     }
+    else if (a.dtype() == DType::Bool) {
+        const bool* a_ptr = get_data_ptr<const bool>(a);
+        const bool* b_ptr = get_data_ptr<const bool>(b);
+        bool* out_ptr = get_data_ptr<bool>(output);
+
+        // For bools: a > b means a && !b (true > false only)
+        queue.parallel_for<GtKernelBool>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = (a_ptr[idx] && !b_ptr[idx]);
+        }).wait();
+    }
     else {
         throw std::runtime_error("Unsupported dtype for gt comparison");
     }
@@ -462,6 +516,16 @@ auto ge_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
 
         queue.parallel_for<GeKernelInt64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = (a_ptr[idx] >= b_ptr[idx]);
+        }).wait();
+    }
+    else if (a.dtype() == DType::Bool) {
+        const bool* a_ptr = get_data_ptr<const bool>(a);
+        const bool* b_ptr = get_data_ptr<const bool>(b);
+        bool* out_ptr = get_data_ptr<bool>(output);
+
+        // For bools: a >= b means a || !b (anything >= false, or true >= true)
+        queue.parallel_for<GeKernelBool>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = (a_ptr[idx] || !b_ptr[idx]);
         }).wait();
     }
     else {

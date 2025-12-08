@@ -29,9 +29,17 @@ namespace oneapi {
 struct AddKernelFloat32 {};
 struct AddKernelFloat64 {};
 struct AddKernelFloat16 {};
+struct AddKernelInt8 {};
+struct AddKernelInt32 {};
+struct AddKernelInt64 {};
+struct AddKernelUInt8 {};
 struct SubKernelFloat32 {};
 struct SubKernelFloat64 {};
 struct SubKernelFloat16 {};
+struct SubKernelInt8 {};
+struct SubKernelInt32 {};
+struct SubKernelInt64 {};
+struct SubKernelUInt8 {};
 struct MulKernelFloat32 {};
 struct MulKernelFloat64 {};
 struct MulKernelFloat16 {};
@@ -177,6 +185,42 @@ auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
             out_ptr[idx] = sycl::half(static_cast<float>(a_ptr[idx]) + static_cast<float>(b_ptr[idx]));
         }).wait();
     }
+    else if (a_cont.dtype() == DType::Int8) {
+        const int8_t* a_ptr = get_data_ptr<const int8_t>(a_cont);
+        const int8_t* b_ptr = get_data_ptr<const int8_t>(b_cont);
+        int8_t* out_ptr = get_data_ptr<int8_t>(output);
+
+        queue.parallel_for<AddKernelInt8>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = a_ptr[idx] + b_ptr[idx];
+        }).wait();
+    }
+    else if (a_cont.dtype() == DType::Int32) {
+        const int32_t* a_ptr = get_data_ptr<const int32_t>(a_cont);
+        const int32_t* b_ptr = get_data_ptr<const int32_t>(b_cont);
+        int32_t* out_ptr = get_data_ptr<int32_t>(output);
+
+        queue.parallel_for<AddKernelInt32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = a_ptr[idx] + b_ptr[idx];
+        }).wait();
+    }
+    else if (a_cont.dtype() == DType::Int64) {
+        const int64_t* a_ptr = get_data_ptr<const int64_t>(a_cont);
+        const int64_t* b_ptr = get_data_ptr<const int64_t>(b_cont);
+        int64_t* out_ptr = get_data_ptr<int64_t>(output);
+
+        queue.parallel_for<AddKernelInt64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = a_ptr[idx] + b_ptr[idx];
+        }).wait();
+    }
+    else if (a_cont.dtype() == DType::UInt8) {
+        const uint8_t* a_ptr = get_data_ptr<const uint8_t>(a_cont);
+        const uint8_t* b_ptr = get_data_ptr<const uint8_t>(b_cont);
+        uint8_t* out_ptr = get_data_ptr<uint8_t>(output);
+
+        queue.parallel_for<AddKernelUInt8>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = a_ptr[idx] + b_ptr[idx];
+        }).wait();
+    }
     else {
         throw std::runtime_error("Unsupported dtype for addition");
     }
@@ -235,6 +279,42 @@ auto sub_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 
         queue.parallel_for<SubKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = sycl::half(static_cast<float>(a_ptr[idx]) - static_cast<float>(b_ptr[idx]));
+        }).wait();
+    }
+    else if (a_cont.dtype() == DType::Int8) {
+        const int8_t* a_ptr = get_data_ptr<const int8_t>(a_cont);
+        const int8_t* b_ptr = get_data_ptr<const int8_t>(b_cont);
+        int8_t* out_ptr = get_data_ptr<int8_t>(output);
+
+        queue.parallel_for<SubKernelInt8>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = a_ptr[idx] - b_ptr[idx];
+        }).wait();
+    }
+    else if (a_cont.dtype() == DType::Int32) {
+        const int32_t* a_ptr = get_data_ptr<const int32_t>(a_cont);
+        const int32_t* b_ptr = get_data_ptr<const int32_t>(b_cont);
+        int32_t* out_ptr = get_data_ptr<int32_t>(output);
+
+        queue.parallel_for<SubKernelInt32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = a_ptr[idx] - b_ptr[idx];
+        }).wait();
+    }
+    else if (a_cont.dtype() == DType::Int64) {
+        const int64_t* a_ptr = get_data_ptr<const int64_t>(a_cont);
+        const int64_t* b_ptr = get_data_ptr<const int64_t>(b_cont);
+        int64_t* out_ptr = get_data_ptr<int64_t>(output);
+
+        queue.parallel_for<SubKernelInt64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = a_ptr[idx] - b_ptr[idx];
+        }).wait();
+    }
+    else if (a_cont.dtype() == DType::UInt8) {
+        const uint8_t* a_ptr = get_data_ptr<const uint8_t>(a_cont);
+        const uint8_t* b_ptr = get_data_ptr<const uint8_t>(b_cont);
+        uint8_t* out_ptr = get_data_ptr<uint8_t>(output);
+
+        queue.parallel_for<SubKernelUInt8>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = a_ptr[idx] - b_ptr[idx];
         }).wait();
     }
     else {

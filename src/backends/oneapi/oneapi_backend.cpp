@@ -1359,8 +1359,15 @@ private:
         if (dtype_str == "float64") return DType::Float64;
         if (dtype_str == "float16") return DType::Float16;
         if (dtype_str == "bfloat16") return DType::BFloat16;
+        if (dtype_str == "int8") return DType::Int8;
+        if (dtype_str == "int16") return DType::Int16;
         if (dtype_str == "int32") return DType::Int32;
         if (dtype_str == "int64") return DType::Int64;
+        if (dtype_str == "uint8") return DType::UInt8;
+        if (dtype_str == "uint16") return DType::UInt16;
+        if (dtype_str == "uint32") return DType::UInt32;
+        if (dtype_str == "uint64") return DType::UInt64;
+        if (dtype_str == "bool") return DType::Bool;
 
         return DType::Float32;
     }

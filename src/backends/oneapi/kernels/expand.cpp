@@ -10,6 +10,7 @@ namespace oneapi {
 // Kernel class declarations for expand operation (separate classes per dtype to avoid ODR violations)
 struct ExpandKernelFloat32 {};
 struct ExpandKernelFloat64 {};
+struct ExpandKernelFloat16 {};
 
 // Helper function to get typed pointer from tensor
 template<typename T>
@@ -210,8 +211,39 @@ auto expand_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& 
         expand_kernel_impl<double>(input_ptr, output_ptr, input_shape, target_shape,
                                   input_strides, output_size, ndim, queue);
     }
+    else if (input.dtype() == DType::Float16) {
+        const sycl::half* input_ptr = get_data_ptr<const sycl::half>(input);
+        sycl::half* output_ptr = get_data_ptr<sycl::half>(output);
+
+        // Copy shape and stride info to arrays for kernel capture
+        int64_t input_shape_arr[16];
+        int64_t output_shape_arr[16];
+        int64_t input_strides_arr[16];
+
+        for (int64_t i = 0; i < ndim; ++i) {
+            input_shape_arr[i] = input_shape[i];
+            output_shape_arr[i] = target_shape[i];
+            input_strides_arr[i] = input_strides[i];
+        }
+
+        queue.parallel_for<ExpandKernelFloat16>(sycl::range<1>(output_size), [=](sycl::id<1> idx) {
+            int64_t output_idx = idx[0];
+            int64_t input_idx = 0;
+            int64_t remaining = output_idx;
+
+            for (int64_t dim = ndim - 1; dim >= 0; --dim) {
+                int64_t output_coord = remaining % output_shape_arr[dim];
+                remaining /= output_shape_arr[dim];
+
+                int64_t input_coord = (input_shape_arr[dim] == 1) ? 0 : output_coord;
+                input_idx += input_coord * input_strides_arr[dim];
+            }
+
+            output_ptr[output_idx] = input_ptr[input_idx];
+        }).wait();
+    }
     else {
-        throw std::runtime_error("expand: Unsupported data type (only Float32 and Float64 supported)");
+        throw std::runtime_error("expand: Unsupported data type");
     }
 
     return output;
