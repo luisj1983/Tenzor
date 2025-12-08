@@ -33,6 +33,7 @@ struct AddKernelInt8 {};
 struct AddKernelInt32 {};
 struct AddKernelInt64 {};
 struct AddKernelUInt8 {};
+struct AddKernelBool {};
 struct SubKernelFloat32 {};
 struct SubKernelFloat64 {};
 struct SubKernelFloat16 {};
@@ -44,6 +45,7 @@ struct MulKernelFloat32 {};
 struct MulKernelFloat64 {};
 struct MulKernelFloat16 {};
 struct MulKernelInt32 {};
+struct MulKernelBool {};
 struct DivKernelFloat32 {};
 struct DivKernelFloat64 {};
 struct DivKernelFloat16 {};
@@ -227,6 +229,16 @@ auto add_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
             out_ptr[idx] = a_ptr[idx] + b_ptr[idx];
         }).wait();
     }
+    else if (a_cont.dtype() == DType::Bool) {
+        // Bool addition acts as logical OR
+        const bool* a_ptr = get_data_ptr<const bool>(a_cont);
+        const bool* b_ptr = get_data_ptr<const bool>(b_cont);
+        bool* out_ptr = get_data_ptr<bool>(output);
+
+        queue.parallel_for<AddKernelBool>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = a_ptr[idx] || b_ptr[idx];
+        }).wait();
+    }
     else {
         throw std::runtime_error("Unsupported dtype for addition");
     }
@@ -390,6 +402,16 @@ auto mul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
 
         queue.parallel_for<MulKernelInt32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] * b_ptr[idx];
+        }).wait();
+    }
+    else if (a_cont.dtype() == DType::Bool) {
+        // Bool multiplication acts as logical AND
+        const bool* a_ptr = get_data_ptr<const bool>(a_cont);
+        const bool* b_ptr = get_data_ptr<const bool>(b_cont);
+        bool* out_ptr = get_data_ptr<bool>(output);
+
+        queue.parallel_for<MulKernelBool>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = a_ptr[idx] && b_ptr[idx];
         }).wait();
     }
     else {
