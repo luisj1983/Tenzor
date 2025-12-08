@@ -83,6 +83,12 @@ protected:
             }
             device = Device::oneapi(0);
         }
+        else if (param.backend_name == "adaptivecpp") {
+            if (!isBackendAvailable(Device::Type::AdaptiveCpp)) {
+                GTEST_SKIP() << "AdaptiveCpp not available";
+            }
+            device = Device::adaptivecpp(0);
+        }
         else if (param.backend_name == "rocm") {
             if (!isBackendAvailable(Device::Type::ROCm)) {
                 GTEST_SKIP() << "ROCm not available";
@@ -413,7 +419,7 @@ TEST(FlattenErrorTest, NegativeOutOfRange) {
 // ============================================================================
 
 std::vector<BackendDTypeParam> GenerateBackendDTypeCombinations() {
-    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "rocm"};
+    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "adaptivecpp", "rocm"};
 
     // Flatten works with all dtypes - comprehensive testing
     std::vector<std::pair<DType, std::string>> dtypes = {

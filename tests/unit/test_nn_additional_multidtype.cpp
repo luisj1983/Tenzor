@@ -98,6 +98,12 @@ protected:
             }
             device = Device::oneapi(0);
         }
+        else if (param.backend_name == "adaptivecpp") {
+            if (!isBackendAvailable(Device::Type::AdaptiveCpp)) {
+                GTEST_SKIP() << "AdaptiveCpp not available";
+            }
+            device = Device::adaptivecpp(0);
+        }
     }
 
     static bool isBackendAvailable(Device::Type type) {
@@ -707,7 +713,7 @@ TEST_P(NNMultiDTypeTest, GRUCell_SingleStep) {
 // ============================================================================
 
 std::vector<BackendDTypeParam> GenerateNNBackendDTypeCombinations() {
-    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi"};
+    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "adaptivecpp"};
 
     // Test with these dtypes (NN operations primarily use floating point)
     std::vector<std::pair<DType, std::string>> dtypes = {

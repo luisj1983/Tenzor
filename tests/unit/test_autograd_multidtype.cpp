@@ -68,6 +68,12 @@ protected:
             }
             device = Device::oneapi(0);
         }
+        else if (param.backend_name == "adaptivecpp") {
+            if (!isBackendAvailable(Device::Type::AdaptiveCpp)) {
+                GTEST_SKIP() << "AdaptiveCpp not available";
+            }
+            device = Device::adaptivecpp(0);
+        }
     }
 
     static bool isBackendAvailable(Device::Type type) {
@@ -271,7 +277,7 @@ TEST_P(AutogradMultiDTypeTest, ChainedOperations) {
 // ============================================================================
 
 std::vector<BackendDTypeParam> GenerateBackendDTypeCombinations() {
-    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi"};
+    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "adaptivecpp"};
 
     // Test with floating-point dtypes (autograd works with floating-point)
     std::vector<std::pair<DType, std::string>> dtypes = {

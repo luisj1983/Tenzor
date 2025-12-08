@@ -91,6 +91,12 @@ protected:
             }
             device = Device::oneapi(0);
         }
+        else if (param.backend_name == "adaptivecpp") {
+            if (!isBackendAvailable(Device::Type::AdaptiveCpp)) {
+                GTEST_SKIP() << "AdaptiveCpp not available";
+            }
+            device = Device::adaptivecpp(0);
+        }
 
         // Create test parameters
         param1_ = std::make_shared<Variable>(ones({2, 3}, dtype, device), true);
@@ -501,7 +507,7 @@ TEST_P(OptimizersExtendedMultiDTypeTest, AdadeltaNumericalStability) {
 // ============================================================================
 
 std::vector<OptimizerExtDTypeParam> GenerateOptimizerExtDTypeCombinations() {
-    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi"};
+    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "adaptivecpp"};
 
     // Test with floating-point dtypes
     std::vector<std::tuple<DType, std::string, double, double>> dtypes = {

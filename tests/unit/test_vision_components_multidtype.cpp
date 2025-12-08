@@ -81,6 +81,12 @@ protected:
             }
             device = Device::oneapi(0);
         }
+        else if (param.backend_name == "adaptivecpp") {
+            if (!isBackendAvailable(Device::Type::AdaptiveCpp)) {
+                GTEST_SKIP() << "AdaptiveCpp not available";
+            }
+            device = Device::adaptivecpp(0);
+        }
     }
 
     void TearDown() override {
@@ -488,7 +494,7 @@ TEST_P(VisionComponentsMultiDTypeTest, SwinMLPDifferentDimensions) {
 // ============================================================================
 
 std::vector<BackendDTypeParam> GenerateVisionComponentsTestCombinations() {
-    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi"};
+    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "adaptivecpp"};
 
     std::vector<std::tuple<DType, std::string, float>> dtypes = {
         {DType::Float32, "float32", 1e-5f},

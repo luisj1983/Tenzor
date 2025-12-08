@@ -29,32 +29,36 @@ set(TENZOR_TEST_DISCOVERY_ENV "TENZOR_SKIP_ADAPTIVECPP=1")
 # where CUDA runtime may shut down before AdaptiveCpp cleanup completes, causing
 # CUDA error 4 (cudaErrorCudartUnloading).
 #
-# We use the TEST_LAUNCHER target property to run a wrapper script that sets
-# the environment variable during test discovery.
+# We set TENZOR_SKIP_ADAPTIVECPP=1 only during test discovery (--gtest_list_tests),
+# not during actual test execution.
 function(tenzor_discover_tests target)
     cmake_parse_arguments(PARSE_ARGV 1 ARG "" "DISCOVERY_TIMEOUT" "PROPERTIES")
     set(TIMEOUT ${ARG_DISCOVERY_TIMEOUT})
     if(NOT TIMEOUT)
         set(TIMEOUT 30)
     endif()
-    # Merge our environment with any passed properties
     set(PROPS ${ARG_PROPERTIES})
-    list(APPEND PROPS ENVIRONMENT "${TENZOR_TEST_DISCOVERY_ENV}")
 
-    # Create a wrapper script for test discovery
+    # Create a wrapper script that only skips AdaptiveCpp during discovery (--gtest_list_tests)
     set(WRAPPER_SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/${target}_discovery_wrapper.sh")
     file(WRITE ${WRAPPER_SCRIPT}
 "#!/bin/bash
-# Wrapper script for gtest discovery - skips AdaptiveCpp to avoid CUDA cleanup race
-export TENZOR_SKIP_ADAPTIVECPP=1
-exec \"$@\"
+# Wrapper script - only skip AdaptiveCpp during test discovery, not execution
+# Check if this is a discovery run (--gtest_list_tests argument present)
+for arg in \"\$@\"; do
+    if [[ \"\$arg\" == \"--gtest_list_tests\"* ]]; then
+        export TENZOR_SKIP_ADAPTIVECPP=1
+        break
+    fi
+done
+exec \"\$@\"
 ")
     file(CHMOD ${WRAPPER_SCRIPT} PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE)
 
-    # Set the TEST_LAUNCHER property on the target - this is what gtest_discover_tests uses
+    # Set the TEST_LAUNCHER property - used for both discovery and execution
     set_property(TARGET ${target} PROPERTY TEST_LAUNCHER "${WRAPPER_SCRIPT}")
 
-    # Now call gtest_discover_tests - it will pick up the TEST_LAUNCHER property
+    # Now call gtest_discover_tests
     gtest_discover_tests(${target}
         DISCOVERY_TIMEOUT ${TIMEOUT}
         PROPERTIES ${PROPS})

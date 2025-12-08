@@ -1059,5 +1059,5 @@ TEST_P(AutogradAdditionalTest, ScalarDivBackward) {
 INSTANTIATE_TEST_SUITE_P(
     AutogradBackends,
     AutogradAdditionalTest,
-    ::testing::Values("cpu", "cuda", "vulkan", "oneapi")
+    ::testing::Values("cpu", "cuda", "vulkan", "oneapi", "adaptivecpp")
 );

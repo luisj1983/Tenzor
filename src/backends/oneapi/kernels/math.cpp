@@ -58,9 +58,11 @@ struct SqrtKernelFloat32 {};
 struct SqrtKernelFloat64 {};
 struct NegKernelFloat32 {};
 struct NegKernelFloat64 {};
+struct NegKernelFloat16 {};
 struct NegKernelInt32 {};
 struct AbsKernelFloat32 {};
 struct AbsKernelFloat64 {};
+struct AbsKernelFloat16 {};
 struct AbsKernelInt32 {};
 struct LogKernelFloat32 {};
 struct LogKernelFloat64 {};
@@ -820,6 +822,14 @@ auto neg_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             out_ptr[idx] = -in_ptr[idx];
         }).wait();
     }
+    else if (input.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+
+        queue.parallel_for<NegKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = sycl::half(-static_cast<float>(in_ptr[idx]));
+        }).wait();
+    }
     else if (input.dtype() == DType::Int32) {
         const int32_t* in_ptr = get_data_ptr<const int32_t>(input);
         int32_t* out_ptr = get_data_ptr<int32_t>(output);
@@ -856,6 +866,14 @@ auto abs_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 
         queue.parallel_for<AbsKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = sycl::fabs(in_ptr[idx]);
+        }).wait();
+    }
+    else if (input.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+
+        queue.parallel_for<AbsKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = sycl::half(sycl::fabs(static_cast<float>(in_ptr[idx])));
         }).wait();
     }
     else if (input.dtype() == DType::Int32) {
