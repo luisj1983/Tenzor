@@ -143,6 +143,7 @@ namespace oneapi {
     auto adaptive_max_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
     auto avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
     auto max_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
+    auto max_pool2d_backward_with_indices(const Tensor& grad_output, const Tensor& indices, int64_t H_in, int64_t W_in, sycl::queue& queue) -> Tensor;
     auto adaptive_avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
     auto adaptive_avgpool2d_backward(const Tensor& grad_output, int64_t H_in, int64_t W_in, sycl::queue& queue) -> Tensor;
 
@@ -1023,8 +1024,15 @@ public:
                 return {oneapi::avg_pool2d_backward_kernel(inputs[0], inputs[1], attrs, queue)};
             }
             else if (op_name == "max_pool2d_backward") {
-                if (inputs.size() != 2) throw std::invalid_argument("max_pool2d_backward requires 2 inputs: grad_output, input");
-                return {oneapi::max_pool2d_backward_kernel(inputs[0], inputs[1], attrs, queue)};
+                if (inputs.size() != 2) throw std::invalid_argument("max_pool2d_backward requires 2 inputs: grad_output, indices");
+                int64_t H_in = 0, W_in = 0;
+                if (attrs.contains("H_in")) {
+                    H_in = std::stoll(attrs.at("H_in"));
+                }
+                if (attrs.contains("W_in")) {
+                    W_in = std::stoll(attrs.at("W_in"));
+                }
+                return {oneapi::max_pool2d_backward_with_indices(inputs[0], inputs[1], H_in, W_in, queue)};
             }
             else if (op_name == "adaptive_avg_pool2d_backward") {
                 if (inputs.size() != 1) throw std::invalid_argument("adaptive_avg_pool2d_backward requires 1 input: grad_output");

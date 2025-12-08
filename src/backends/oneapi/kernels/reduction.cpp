@@ -82,14 +82,17 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
     auto shape = in_cont.shape();
     std::vector<int64_t> shape_vec(shape.begin(), shape.end());
 
-    // Check if this is a full reduction (dim < 0 means reduce all dimensions)
-    bool is_full_reduction = (dim < 0);
+    // Normalize negative dimensions first (e.g., -1 means last dimension)
+    // A special value like INT64_MIN or std::nullopt would indicate full reduction
+    // For now, treat dim values in valid range after normalization as partial reduction
+    if (dim < 0 && dim >= -static_cast<int64_t>(shape.size())) {
+        dim += shape.size();
+    }
+
+    // Check if this is a full reduction (dim still negative after normalization means full reduction)
+    bool is_full_reduction = (dim < 0 || dim >= static_cast<int64_t>(shape.size()));
 
     if (!is_full_reduction) {
-        // Normalize dimension for partial reduction
-        if (dim < 0) {
-            dim += shape.size();
-        }
         if (dim < 0 || dim >= static_cast<int64_t>(shape.size())) {
             throw std::invalid_argument("Invalid dimension for sum reduction");
         }
@@ -243,14 +246,15 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& qu
     auto shape = in_cont.shape();
     std::vector<int64_t> shape_vec(shape.begin(), shape.end());
 
-    // Check if this is a full reduction (dim < 0 means reduce all dimensions)
-    bool is_full_reduction = (dim < 0);
+    // Normalize negative dimensions first (e.g., -1 means last dimension)
+    if (dim < 0 && dim >= -static_cast<int64_t>(shape.size())) {
+        dim += shape.size();
+    }
+
+    // Check if this is a full reduction (dim still negative after normalization means full reduction)
+    bool is_full_reduction = (dim < 0 || dim >= static_cast<int64_t>(shape.size()));
 
     if (!is_full_reduction) {
-        // Normalize dimension for partial reduction
-        if (dim < 0) {
-            dim += shape.size();
-        }
         if (dim < 0 || dim >= static_cast<int64_t>(shape.size())) {
             throw std::invalid_argument("Invalid dimension for mean reduction");
         }
@@ -391,14 +395,15 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
     auto shape = input.shape();
     std::vector<int64_t> shape_vec(shape.begin(), shape.end());
 
-    // Check if this is a full reduction (dim < 0 means reduce all dimensions)
-    bool is_full_reduction = (dim < 0);
+    // Normalize negative dimensions first (e.g., -1 means last dimension)
+    if (dim < 0 && dim >= -static_cast<int64_t>(shape.size())) {
+        dim += shape.size();
+    }
+
+    // Check if this is a full reduction (dim still negative after normalization means full reduction)
+    bool is_full_reduction = (dim < 0 || dim >= static_cast<int64_t>(shape.size()));
 
     if (!is_full_reduction) {
-        // Normalize dimension for partial reduction
-        if (dim < 0) {
-            dim += shape.size();
-        }
         if (dim < 0 || dim >= static_cast<int64_t>(shape.size())) {
             throw std::invalid_argument("Invalid dimension for max reduction");
         }
@@ -494,14 +499,15 @@ auto min_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
     auto shape = input.shape();
     std::vector<int64_t> shape_vec(shape.begin(), shape.end());
 
-    // Check if this is a full reduction (dim < 0 means reduce all dimensions)
-    bool is_full_reduction = (dim < 0);
+    // Normalize negative dimensions first (e.g., -1 means last dimension)
+    if (dim < 0 && dim >= -static_cast<int64_t>(shape.size())) {
+        dim += shape.size();
+    }
+
+    // Check if this is a full reduction (dim still negative after normalization means full reduction)
+    bool is_full_reduction = (dim < 0 || dim >= static_cast<int64_t>(shape.size()));
 
     if (!is_full_reduction) {
-        // Normalize dimension for partial reduction
-        if (dim < 0) {
-            dim += shape.size();
-        }
         if (dim < 0 || dim >= static_cast<int64_t>(shape.size())) {
             throw std::invalid_argument("Invalid dimension for min reduction");
         }

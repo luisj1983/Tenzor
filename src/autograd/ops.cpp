@@ -4,7 +4,6 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/backend/dispatch.hpp"
-#include <iostream>
 
 namespace tenzor {
 

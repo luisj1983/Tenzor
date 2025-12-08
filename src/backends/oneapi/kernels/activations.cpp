@@ -462,101 +462,108 @@ auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl::
 
 // Softmax activation
 auto softmax_kernel(const Tensor& input, int64_t dim, sycl::queue& queue) -> Tensor {
-    auto shape = input.shape();
+    // Ensure input is contiguous for correct memory access (use OneAPI kernel to keep data on device)
+    Tensor in_cont = input.is_contiguous() ? input : contiguous_kernel(input, queue);
+
+    auto shape = in_cont.shape();
     if (dim < 0) {
         dim += shape.size();
     }
 
     Tensor output(std::vector<int64_t>(shape.begin(), shape.end()),
-                  input.dtype(), input.device());
+                  in_cont.dtype(), in_cont.device());
 
     const int64_t outer_size = std::accumulate(shape.begin(), shape.begin() + dim, 1LL, std::multiplies<>());
     const int64_t dim_size = shape[dim];
     const int64_t inner_size = std::accumulate(shape.begin() + dim + 1, shape.end(), 1LL, std::multiplies<>());
 
-    if (input.dtype() == DType::Float32) {
-        const float* in_ptr = get_data_ptr<const float>(input);
+    if (in_cont.dtype() == DType::Float32) {
+        const float* in_ptr = get_data_ptr<const float>(in_cont);
         float* out_ptr = get_data_ptr<float>(output);
 
-        queue.parallel_for<SoftmaxKernelFloat32>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
-            const int64_t outer_idx = idx[0];
-            const int64_t inner_idx = idx[1];
-            const int64_t offset = (outer_idx * dim_size * inner_size) + inner_idx;
+        // Use 1D dispatch for better compatibility with various SYCL implementations
+        // Total work items = outer_size * inner_size
+        const int64_t total_work_items = outer_size * inner_size;
+        queue.parallel_for<SoftmaxKernelFloat32>(sycl::range<1>(total_work_items), [=](sycl::id<1> idx) {
+            const int64_t work_idx = idx[0];
+            const int64_t outer_idx = work_idx / inner_size;
+            const int64_t inner_idx = work_idx % inner_size;
+            const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
 
             // Find max for numerical stability
             float max_val = -3.4028235e+38f;  // -FLT_MAX (avoid INFINITY with -ffast-math)
             for (int64_t d = 0; d < dim_size; ++d) {
-                float val = in_ptr[offset + d * inner_size];
+                float val = in_ptr[base_offset + d * inner_size];
                 max_val = sycl::fmax(max_val, val);
             }
 
             // Compute exp and sum
             float sum = 0.0f;
             for (int64_t d = 0; d < dim_size; ++d) {
-                float val = sycl::exp(in_ptr[offset + d * inner_size] - max_val);
-                out_ptr[offset + d * inner_size] = val;
+                float val = sycl::exp(in_ptr[base_offset + d * inner_size] - max_val);
+                out_ptr[base_offset + d * inner_size] = val;
                 sum += val;
             }
 
             // Normalize
             for (int64_t d = 0; d < dim_size; ++d) {
-                out_ptr[offset + d * inner_size] /= sum;
+                out_ptr[base_offset + d * inner_size] /= sum;
             }
         }).wait();
     }
-    else if (input.dtype() == DType::Float64) {
-        const double* in_ptr = get_data_ptr<const double>(input);
+    else if (in_cont.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(in_cont);
         double* out_ptr = get_data_ptr<double>(output);
 
         queue.parallel_for<SoftmaxKernelFloat64>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
             const int64_t outer_idx = idx[0];
             const int64_t inner_idx = idx[1];
-            const int64_t offset = (outer_idx * dim_size * inner_size) + inner_idx;
+            const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
 
             double max_val = -1.7976931348623157e+308;  // -DBL_MAX (avoid INFINITY with -ffast-math)
             for (int64_t d = 0; d < dim_size; ++d) {
-                double val = in_ptr[offset + d * inner_size];
+                double val = in_ptr[base_offset + d * inner_size];
                 max_val = sycl::fmax(max_val, val);
             }
 
             double sum = 0.0;
             for (int64_t d = 0; d < dim_size; ++d) {
-                double val = sycl::exp(in_ptr[offset + d * inner_size] - max_val);
-                out_ptr[offset + d * inner_size] = val;
+                double val = sycl::exp(in_ptr[base_offset + d * inner_size] - max_val);
+                out_ptr[base_offset + d * inner_size] = val;
                 sum += val;
             }
 
             for (int64_t d = 0; d < dim_size; ++d) {
-                out_ptr[offset + d * inner_size] /= sum;
+                out_ptr[base_offset + d * inner_size] /= sum;
             }
         }).wait();
     }
-    else if (input.dtype() == DType::Float16) {
-        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+    else if (in_cont.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(in_cont);
         sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
 
         queue.parallel_for<SoftmaxKernelFloat16>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
             const int64_t outer_idx = idx[0];
             const int64_t inner_idx = idx[1];
-            const int64_t offset = (outer_idx * dim_size * inner_size) + inner_idx;
+            const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
 
             // Use float accumulation for numerical stability
             float max_val = -3.4028235e+38f;
             for (int64_t d = 0; d < dim_size; ++d) {
-                float val = static_cast<float>(in_ptr[offset + d * inner_size]);
+                float val = static_cast<float>(in_ptr[base_offset + d * inner_size]);
                 max_val = sycl::fmax(max_val, val);
             }
 
             float sum = 0.0f;
             for (int64_t d = 0; d < dim_size; ++d) {
-                float val = sycl::exp(static_cast<float>(in_ptr[offset + d * inner_size]) - max_val);
-                out_ptr[offset + d * inner_size] = sycl::half(val);
+                float val = sycl::exp(static_cast<float>(in_ptr[base_offset + d * inner_size]) - max_val);
+                out_ptr[base_offset + d * inner_size] = sycl::half(val);
                 sum += val;
             }
 
             for (int64_t d = 0; d < dim_size; ++d) {
-                float normalized = static_cast<float>(out_ptr[offset + d * inner_size]) / sum;
-                out_ptr[offset + d * inner_size] = sycl::half(normalized);
+                float normalized = static_cast<float>(out_ptr[base_offset + d * inner_size]) / sum;
+                out_ptr[base_offset + d * inner_size] = sycl::half(normalized);
             }
         }).wait();
     }

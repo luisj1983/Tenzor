@@ -61,6 +61,7 @@ struct ExpKernelFloat32 {};
 struct ExpKernelFloat64 {};
 struct PowKernelFloat32 {};
 struct PowKernelFloat64 {};
+struct PowKernelFloat16 {};
 
 // Trigonometric kernel name classes
 struct SinKernelFloat32 {};
@@ -859,6 +860,16 @@ auto pow_kernel(const Tensor& input, float exponent, sycl::queue& queue) -> Tens
 
         queue.parallel_for<PowKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = sycl::pow(in_ptr[idx], exp_d);
+        }).wait();
+    }
+    else if (input.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+
+        // Use float accumulation for numerical stability
+        queue.parallel_for<PowKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float val = static_cast<float>(in_ptr[idx]);
+            out_ptr[idx] = sycl::half(sycl::pow(val, exponent));
         }).wait();
     }
     else {

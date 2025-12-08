@@ -27,8 +27,14 @@ class BatchNorm2dBackwardInputKernelFloat16;
 class BatchNormScaleShiftKernelFloat32;
 class BatchNormExtractGradKernelFloat32;
 class BatchNorm2dMeanKernelFloat32;
+class BatchNorm2dMeanKernelFloat64;
+class BatchNorm2dMeanKernelFloat16;
 class BatchNorm2dVarianceKernelFloat32;
+class BatchNorm2dVarianceKernelFloat64;
+class BatchNorm2dVarianceKernelFloat16;
 class BatchNorm2dUpdateRunningStatsKernelFloat32;
+class BatchNorm2dUpdateRunningStatsKernelFloat64;
+class BatchNorm2dUpdateRunningStatsKernelFloat16;
 
 // Helper function to get typed pointer from tensor
 template<typename T>
@@ -696,6 +702,37 @@ auto batchnorm2d_update_running_stats(Tensor& running_mean, Tensor& running_var,
             run_var_ptr[c] = (1.0f - momentum) * run_var_ptr[c] + momentum * batch_var_ptr[c];
         }).wait();
     }
+    else if (running_mean.dtype() == DType::Float64) {
+        double* run_mean_ptr = get_data_ptr<double>(running_mean);
+        double* run_var_ptr = get_data_ptr<double>(running_var);
+        const double* batch_mean_ptr = get_data_ptr<const double>(batch_mean);
+        const double* batch_var_ptr = get_data_ptr<const double>(batch_var);
+
+        const double momentum_d = static_cast<double>(momentum);
+        queue.parallel_for<BatchNorm2dUpdateRunningStatsKernelFloat64>(sycl::range<1>(C), [=](sycl::id<1> c_id) {
+            const int64_t c = c_id[0];
+            run_mean_ptr[c] = (1.0 - momentum_d) * run_mean_ptr[c] + momentum_d * batch_mean_ptr[c];
+            run_var_ptr[c] = (1.0 - momentum_d) * run_var_ptr[c] + momentum_d * batch_var_ptr[c];
+        }).wait();
+    }
+    else if (running_mean.dtype() == DType::Float16) {
+        sycl::half* run_mean_ptr = get_data_ptr<sycl::half>(running_mean);
+        sycl::half* run_var_ptr = get_data_ptr<sycl::half>(running_var);
+        const sycl::half* batch_mean_ptr = get_data_ptr<const sycl::half>(batch_mean);
+        const sycl::half* batch_var_ptr = get_data_ptr<const sycl::half>(batch_var);
+
+        queue.parallel_for<BatchNorm2dUpdateRunningStatsKernelFloat16>(sycl::range<1>(C), [=](sycl::id<1> c_id) {
+            const int64_t c = c_id[0];
+            // Use float for intermediate calculations for numerical stability
+            float run_mean = static_cast<float>(run_mean_ptr[c]);
+            float run_var = static_cast<float>(run_var_ptr[c]);
+            float batch_mean = static_cast<float>(batch_mean_ptr[c]);
+            float batch_var = static_cast<float>(batch_var_ptr[c]);
+
+            run_mean_ptr[c] = sycl::half((1.0f - momentum) * run_mean + momentum * batch_mean);
+            run_var_ptr[c] = sycl::half((1.0f - momentum) * run_var + momentum * batch_var);
+        }).wait();
+    }
     else {
         throw std::runtime_error("Unsupported dtype for batchnorm2d_update_running_stats");
     }
@@ -761,6 +798,88 @@ auto batchnorm2d_mean_var(const Tensor& input, sycl::queue& queue) -> std::vecto
             }
 
             var_ptr[c] = sum_sq_diff / static_cast<float>(total_elements);
+        }).wait();
+    }
+    else if (input.dtype() == DType::Float64) {
+        const double* in_ptr = get_data_ptr<const double>(input);
+        double* mean_ptr = get_data_ptr<double>(mean);
+        double* var_ptr = get_data_ptr<double>(variance);
+
+        // Compute mean for each channel
+        queue.parallel_for<BatchNorm2dMeanKernelFloat64>(sycl::range<1>(C), [=](sycl::id<1> c_id) {
+            const int64_t c = c_id[0];
+            double sum = 0.0;
+
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t h = 0; h < H; ++h) {
+                    for (int64_t w = 0; w < W; ++w) {
+                        const int64_t idx = ((n * C + c) * H + h) * W + w;
+                        sum += in_ptr[idx];
+                    }
+                }
+            }
+
+            mean_ptr[c] = sum / static_cast<double>(total_elements);
+        }).wait();
+
+        // Compute variance for each channel
+        queue.parallel_for<BatchNorm2dVarianceKernelFloat64>(sycl::range<1>(C), [=](sycl::id<1> c_id) {
+            const int64_t c = c_id[0];
+            const double channel_mean = mean_ptr[c];
+            double sum_sq_diff = 0.0;
+
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t h = 0; h < H; ++h) {
+                    for (int64_t w = 0; w < W; ++w) {
+                        const int64_t idx = ((n * C + c) * H + h) * W + w;
+                        const double diff = in_ptr[idx] - channel_mean;
+                        sum_sq_diff += diff * diff;
+                    }
+                }
+            }
+
+            var_ptr[c] = sum_sq_diff / static_cast<double>(total_elements);
+        }).wait();
+    }
+    else if (input.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        sycl::half* mean_ptr = get_data_ptr<sycl::half>(mean);
+        sycl::half* var_ptr = get_data_ptr<sycl::half>(variance);
+
+        // Compute mean for each channel using float accumulation
+        queue.parallel_for<BatchNorm2dMeanKernelFloat16>(sycl::range<1>(C), [=](sycl::id<1> c_id) {
+            const int64_t c = c_id[0];
+            float sum = 0.0f;
+
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t h = 0; h < H; ++h) {
+                    for (int64_t w = 0; w < W; ++w) {
+                        const int64_t idx = ((n * C + c) * H + h) * W + w;
+                        sum += static_cast<float>(in_ptr[idx]);
+                    }
+                }
+            }
+
+            mean_ptr[c] = sycl::half(sum / static_cast<float>(total_elements));
+        }).wait();
+
+        // Compute variance for each channel using float accumulation
+        queue.parallel_for<BatchNorm2dVarianceKernelFloat16>(sycl::range<1>(C), [=](sycl::id<1> c_id) {
+            const int64_t c = c_id[0];
+            const float channel_mean = static_cast<float>(mean_ptr[c]);
+            float sum_sq_diff = 0.0f;
+
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t h = 0; h < H; ++h) {
+                    for (int64_t w = 0; w < W; ++w) {
+                        const int64_t idx = ((n * C + c) * H + h) * W + w;
+                        const float diff = static_cast<float>(in_ptr[idx]) - channel_mean;
+                        sum_sq_diff += diff * diff;
+                    }
+                }
+            }
+
+            var_ptr[c] = sycl::half(sum_sq_diff / static_cast<float>(total_elements));
         }).wait();
     }
     else {
