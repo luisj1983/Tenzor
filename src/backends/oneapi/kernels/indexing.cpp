@@ -8,12 +8,16 @@ namespace oneapi {
 // Kernel class declarations for SYCL
 class GatherKernelFloat32;
 class GatherKernelFloat64;
+class GatherKernelFloat16;
 class ScatterKernelFloat32;
 class ScatterKernelFloat64;
+class ScatterKernelFloat16;
 class IndexSelectKernelFloat32;
 class IndexSelectKernelFloat64;
+class IndexSelectKernelFloat16;
 class MaskedFillKernelFloat32;
 class MaskedFillKernelFloat64;
+class MaskedFillKernelFloat16;
 
 // Helper function to get typed pointer from tensor
 template<typename T>
@@ -148,6 +152,10 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index,
         const double* in_ptr = get_data_ptr<const double>(input);
         double* out_ptr = get_data_ptr<double>(output);
         queue.memcpy(out_ptr, in_ptr, bytes).wait();
+    } else if (input.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+        queue.memcpy(out_ptr, in_ptr, bytes).wait();
     }
 
     auto index_shape_span = index.shape();
@@ -199,6 +207,31 @@ auto scatter_kernel(const Tensor& input, int64_t dim, const Tensor& index,
         const double* src_ptr = get_data_ptr<const double>(src);
 
         queue.parallel_for<ScatterKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
+            int64_t temp = flat_idx;
+            int64_t output_idx = 0;
+
+            for (size_t d = 0; d < ndims; ++d) {
+                int64_t coord = temp / index_strides_arr[d];
+                temp %= index_strides_arr[d];
+
+                if (static_cast<int64_t>(d) == dim) {
+                    int64_t idx_val = index_ptr[flat_idx];
+                    if (idx_val < 0) idx_val += input_shape_arr[d];
+                    output_idx += idx_val * input_strides_arr[d];
+                } else {
+                    output_idx += coord * input_strides_arr[d];
+                }
+            }
+
+            output_ptr[output_idx] = src_ptr[flat_idx];
+        }).wait();
+    }
+    else if (input.dtype() == DType::Float16) {
+        sycl::half* output_ptr = get_data_ptr<sycl::half>(output);
+        const int64_t* index_ptr = get_data_ptr<const int64_t>(index);
+        const sycl::half* src_ptr = get_data_ptr<const sycl::half>(src);
+
+        queue.parallel_for<ScatterKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> flat_idx) {
             int64_t temp = flat_idx;
             int64_t output_idx = 0;
 

@@ -22,8 +22,13 @@ class AvgPool2dKernelFloat32;
 class AvgPool2dKernelFloat64;
 class AdaptiveAvgPool2dKernelFloat32;
 class AdaptiveAvgPool2dKernelFloat64;
+class AdaptiveAvgPool2dKernelFloat16;
 class AdaptiveMaxPool2dKernelFloat32;
 class AdaptiveMaxPool2dKernelFloat64;
+class AdaptiveMaxPool2dKernelFloat16;
+class AdaptiveAvgPool2dBackwardKernelFloat32;
+class AdaptiveAvgPool2dBackwardKernelFloat64;
+class AdaptiveAvgPool2dBackwardKernelFloat16;
 class AvgPool2dBackwardKernelFloat32;
 class AvgPool2dBackwardKernelFloat64;
 class MaxPool2dBackwardKernelFloat32;
@@ -521,11 +526,183 @@ auto adaptive_avgpool2d_forward(const Tensor& input, int64_t output_h, int64_t o
                 count > 0 ? sum / static_cast<double>(count) : 0.0;
         }).wait();
     }
+    else if (input.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+
+        const int64_t total_size = N * C * output_h * output_w;
+        queue.parallel_for<AdaptiveAvgPool2dKernelFloat16>(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
+            int64_t temp = flat_idx;
+            const int64_t w_out = temp % output_w;
+            temp /= output_w;
+            const int64_t h_out = temp % output_h;
+            temp /= output_h;
+            const int64_t c = temp % C;
+            const int64_t n = temp / C;
+
+            // Calculate input region
+            const int64_t h_start = (h_out * H_in) / output_h;
+            const int64_t h_end = ((h_out + 1) * H_in) / output_h;
+            const int64_t w_start = (w_out * W_in) / output_w;
+            const int64_t w_end = ((w_out + 1) * W_in) / output_w;
+
+            // Use float accumulation for numerical stability
+            float sum = 0.0f;
+            int64_t count = 0;
+
+            for (int64_t h = h_start; h < h_end; ++h) {
+                for (int64_t w = w_start; w < w_end; ++w) {
+                    sum += static_cast<float>(in_ptr[((n * C + c) * H_in + h) * W_in + w]);
+                    count++;
+                }
+            }
+
+            out_ptr[((n * C + c) * output_h + h_out) * output_w + w_out] =
+                sycl::half(count > 0 ? sum / static_cast<float>(count) : 0.0f);
+        }).wait();
+    }
     else {
         throw std::runtime_error("Unsupported dtype for adaptive_avgpool2d_forward");
     }
 
     return output;
+}
+
+// AdaptiveAvgPool2d backward - always pure SYCL
+auto adaptive_avgpool2d_backward(const Tensor& grad_output, int64_t H_in, int64_t W_in,
+                                  sycl::queue& queue) -> Tensor {
+    auto shape = grad_output.shape();
+    if (shape.size() != 4) {
+        throw std::invalid_argument("AdaptiveAvgPool2d backward requires 4D grad_output (N, C, H, W)");
+    }
+
+    const int64_t N = shape[0];
+    const int64_t C = shape[1];
+    const int64_t H_out = shape[2];
+    const int64_t W_out = shape[3];
+
+    Tensor grad_input({N, C, H_in, W_in}, grad_output.dtype(), grad_output.device());
+
+    // Initialize grad_input to zeros
+    const size_t bytes = grad_input.numel() * grad_input.dtype_size();
+    queue.memset(const_cast<void*>(grad_input.data_ptr()), 0, bytes).wait();
+
+    if (grad_output.dtype() == DType::Float32) {
+        const float* grad_out_ptr = get_data_ptr<const float>(grad_output);
+        float* grad_in_ptr = get_data_ptr<float>(grad_input);
+
+        const int64_t total_size = N * C * H_out * W_out;
+        queue.parallel_for<AdaptiveAvgPool2dBackwardKernelFloat32>(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
+            int64_t temp = flat_idx;
+            const int64_t w_out = temp % W_out;
+            temp /= W_out;
+            const int64_t h_out = temp % H_out;
+            temp /= H_out;
+            const int64_t c = temp % C;
+            const int64_t n = temp / C;
+
+            // Calculate input region
+            const int64_t h_start = (h_out * H_in) / H_out;
+            const int64_t h_end = ((h_out + 1) * H_in) / H_out;
+            const int64_t w_start = (w_out * W_in) / W_out;
+            const int64_t w_end = ((w_out + 1) * W_in) / W_out;
+
+            const int64_t count = (h_end - h_start) * (w_end - w_start);
+            const float grad_val = grad_out_ptr[flat_idx] / static_cast<float>(count);
+
+            // Distribute gradient to input positions using atomic add
+            for (int64_t h = h_start; h < h_end; ++h) {
+                for (int64_t w = w_start; w < w_end; ++w) {
+                    const int64_t input_idx = ((n * C + c) * H_in + h) * W_in + w;
+                    sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device,
+                                     sycl::access::address_space::global_space> atomic_val(grad_in_ptr[input_idx]);
+                    atomic_val.fetch_add(grad_val);
+                }
+            }
+        }).wait();
+    }
+    else if (grad_output.dtype() == DType::Float64) {
+        const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
+        double* grad_in_ptr = get_data_ptr<double>(grad_input);
+
+        const int64_t total_size = N * C * H_out * W_out;
+        queue.parallel_for<AdaptiveAvgPool2dBackwardKernelFloat64>(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
+            int64_t temp = flat_idx;
+            const int64_t w_out = temp % W_out;
+            temp /= W_out;
+            const int64_t h_out = temp % H_out;
+            temp /= H_out;
+            const int64_t c = temp % C;
+            const int64_t n = temp / C;
+
+            const int64_t h_start = (h_out * H_in) / H_out;
+            const int64_t h_end = ((h_out + 1) * H_in) / H_out;
+            const int64_t w_start = (w_out * W_in) / W_out;
+            const int64_t w_end = ((w_out + 1) * W_in) / W_out;
+
+            const int64_t count = (h_end - h_start) * (w_end - w_start);
+            const double grad_val = grad_out_ptr[flat_idx] / static_cast<double>(count);
+
+            for (int64_t h = h_start; h < h_end; ++h) {
+                for (int64_t w = w_start; w < w_end; ++w) {
+                    const int64_t input_idx = ((n * C + c) * H_in + h) * W_in + w;
+                    sycl::atomic_ref<double, sycl::memory_order::relaxed, sycl::memory_scope::device,
+                                     sycl::access::address_space::global_space> atomic_val(grad_in_ptr[input_idx]);
+                    atomic_val.fetch_add(grad_val);
+                }
+            }
+        }).wait();
+    }
+    else if (grad_output.dtype() == DType::Float16) {
+        // Float16 backward uses float accumulation for numerical stability
+        // We need to first accumulate in float, then convert
+        const sycl::half* grad_out_ptr = get_data_ptr<const sycl::half>(grad_output);
+        sycl::half* grad_in_ptr = get_data_ptr<sycl::half>(grad_input);
+
+        // Use a temporary float buffer for atomic accumulation
+        Tensor grad_input_f32({N, C, H_in, W_in}, DType::Float32, grad_output.device());
+        queue.memset(const_cast<void*>(grad_input_f32.data_ptr()), 0, grad_input_f32.numel() * sizeof(float)).wait();
+        float* grad_in_f32_ptr = get_data_ptr<float>(grad_input_f32);
+
+        const int64_t total_size = N * C * H_out * W_out;
+        queue.parallel_for<AdaptiveAvgPool2dBackwardKernelFloat16>(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
+            int64_t temp = flat_idx;
+            const int64_t w_out = temp % W_out;
+            temp /= W_out;
+            const int64_t h_out = temp % H_out;
+            temp /= H_out;
+            const int64_t c = temp % C;
+            const int64_t n = temp / C;
+
+            const int64_t h_start = (h_out * H_in) / H_out;
+            const int64_t h_end = ((h_out + 1) * H_in) / H_out;
+            const int64_t w_start = (w_out * W_in) / W_out;
+            const int64_t w_end = ((w_out + 1) * W_in) / W_out;
+
+            const int64_t count = (h_end - h_start) * (w_end - w_start);
+            const float grad_val = static_cast<float>(grad_out_ptr[flat_idx]) / static_cast<float>(count);
+
+            for (int64_t h = h_start; h < h_end; ++h) {
+                for (int64_t w = w_start; w < w_end; ++w) {
+                    const int64_t input_idx = ((n * C + c) * H_in + h) * W_in + w;
+                    sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device,
+                                     sycl::access::address_space::global_space> atomic_val(grad_in_f32_ptr[input_idx]);
+                    atomic_val.fetch_add(grad_val);
+                }
+            }
+        }).wait();
+
+        // Convert float result back to half
+        const int64_t total_input = N * C * H_in * W_in;
+        queue.parallel_for(sycl::range<1>(total_input), [=](sycl::id<1> idx) {
+            grad_in_ptr[idx] = sycl::half(grad_in_f32_ptr[idx]);
+        }).wait();
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for adaptive_avgpool2d_backward");
+    }
+
+    return grad_input;
 }
 
 // AdaptiveMaxPool2d - always pure SYCL
@@ -606,6 +783,39 @@ auto adaptive_maxpool2d_forward(const Tensor& input, int64_t output_h, int64_t o
             out_ptr[((n * C + c) * output_h + h_out) * output_w + w_out] = max_val;
         }).wait();
     }
+    else if (input.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+
+        const int64_t total_size = N * C * output_h * output_w;
+        queue.parallel_for<AdaptiveMaxPool2dKernelFloat16>(sycl::range<1>(total_size), [=](sycl::id<1> flat_idx) {
+            int64_t temp = flat_idx;
+            const int64_t w_out = temp % output_w;
+            temp /= output_w;
+            const int64_t h_out = temp % output_h;
+            temp /= output_h;
+            const int64_t c = temp % C;
+            const int64_t n = temp / C;
+
+            // Calculate input region
+            const int64_t h_start = (h_out * H_in) / output_h;
+            const int64_t h_end = ((h_out + 1) * H_in) / output_h;
+            const int64_t w_start = (w_out * W_in) / output_w;
+            const int64_t w_end = ((w_out + 1) * W_in) / output_w;
+
+            // Use float for max computation
+            float max_val = -3.4028235e+38f;
+
+            for (int64_t h = h_start; h < h_end; ++h) {
+                for (int64_t w = w_start; w < w_end; ++w) {
+                    float val = static_cast<float>(in_ptr[((n * C + c) * H_in + h) * W_in + w]);
+                    max_val = sycl::fmax(max_val, val);
+                }
+            }
+
+            out_ptr[((n * C + c) * output_h + h_out) * output_w + w_out] = sycl::half(max_val);
+        }).wait();
+    }
     else {
         throw std::runtime_error("Unsupported dtype for adaptive_maxpool2d_forward");
     }
@@ -674,19 +884,28 @@ auto max_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::que
  * @return Tensor Pooled output tensor
  */
 auto adaptive_avg_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor {
-    if (!attrs.contains("output_size")) {
-        throw std::invalid_argument("adaptive_avg_pool2d: 'output_size' attribute is required");
-    }
+    int64_t output_h = 1, output_w = 1;
 
-    // Parse output_size (format: "H,W")
-    std::string output_size_str = attrs.at("output_size");
-    size_t comma_pos = output_size_str.find(',');
-    if (comma_pos == std::string::npos) {
-        throw std::invalid_argument("adaptive_avg_pool2d: output_size must be in format 'H,W'");
+    // Support both formats: "output_size" (H,W string) and "output_h"/"output_w" (separate integers)
+    if (attrs.contains("output_size")) {
+        // Parse output_size (format: "H,W")
+        std::string output_size_str = attrs.at("output_size");
+        size_t comma_pos = output_size_str.find(',');
+        if (comma_pos == std::string::npos) {
+            throw std::invalid_argument("adaptive_avg_pool2d: output_size must be in format 'H,W'");
+        }
+        output_h = std::stoll(output_size_str.substr(0, comma_pos));
+        output_w = std::stoll(output_size_str.substr(comma_pos + 1));
+    } else if (attrs.contains("output_h") && attrs.contains("output_w")) {
+        output_h = std::stoll(attrs.at("output_h"));
+        output_w = std::stoll(attrs.at("output_w"));
+    } else if (attrs.contains("output_h")) {
+        // Square output if only output_h is provided
+        output_h = std::stoll(attrs.at("output_h"));
+        output_w = output_h;
+    } else {
+        throw std::invalid_argument("adaptive_avg_pool2d: 'output_size' or 'output_h'/'output_w' attributes are required");
     }
-
-    int64_t output_h = std::stoll(output_size_str.substr(0, comma_pos));
-    int64_t output_w = std::stoll(output_size_str.substr(comma_pos + 1));
 
     return adaptive_avgpool2d_forward(input, output_h, output_w, queue);
 }
@@ -703,19 +922,28 @@ auto adaptive_avg_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, 
  * @return Tensor Pooled output tensor
  */
 auto adaptive_max_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor {
-    if (!attrs.contains("output_size")) {
-        throw std::invalid_argument("adaptive_max_pool2d: 'output_size' attribute is required");
-    }
+    int64_t output_h = 1, output_w = 1;
 
-    // Parse output_size (format: "H,W")
-    std::string output_size_str = attrs.at("output_size");
-    size_t comma_pos = output_size_str.find(',');
-    if (comma_pos == std::string::npos) {
-        throw std::invalid_argument("adaptive_max_pool2d: output_size must be in format 'H,W'");
+    // Support both formats: "output_size" (H,W string) and "output_h"/"output_w" (separate integers)
+    if (attrs.contains("output_size")) {
+        // Parse output_size (format: "H,W")
+        std::string output_size_str = attrs.at("output_size");
+        size_t comma_pos = output_size_str.find(',');
+        if (comma_pos == std::string::npos) {
+            throw std::invalid_argument("adaptive_max_pool2d: output_size must be in format 'H,W'");
+        }
+        output_h = std::stoll(output_size_str.substr(0, comma_pos));
+        output_w = std::stoll(output_size_str.substr(comma_pos + 1));
+    } else if (attrs.contains("output_h") && attrs.contains("output_w")) {
+        output_h = std::stoll(attrs.at("output_h"));
+        output_w = std::stoll(attrs.at("output_w"));
+    } else if (attrs.contains("output_h")) {
+        // Square output if only output_h is provided
+        output_h = std::stoll(attrs.at("output_h"));
+        output_w = output_h;
+    } else {
+        throw std::invalid_argument("adaptive_max_pool2d: 'output_size' or 'output_h'/'output_w' attributes are required");
     }
-
-    int64_t output_h = std::stoll(output_size_str.substr(0, comma_pos));
-    int64_t output_w = std::stoll(output_size_str.substr(comma_pos + 1));
 
     return adaptive_maxpool2d_forward(input, output_h, output_w, queue);
 }
@@ -1023,6 +1251,39 @@ auto max_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
     }
 
     return grad_input;
+}
+
+/**
+ * @brief Adaptive average pooling 2D backward operation wrapper.
+ *
+ * Computes gradients for adaptive average pooling.
+ * OpAttributes wrapper for adaptive_avg_pool2d_backward operation.
+ *
+ * @param grad_output Gradient from next layer (4D: batch, channels, height_out, width_out)
+ * @param input Original input tensor (used for shape information)
+ * @param attrs Operation attributes (optional, H_in and W_in can be derived from input)
+ * @param queue SYCL queue for execution
+ * @return Tensor Gradient with respect to input
+ */
+auto adaptive_avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
+                                          const OpAttributes& attrs, sycl::queue& queue) -> Tensor {
+    auto input_shape = input.shape();
+    if (input_shape.size() != 4) {
+        throw std::invalid_argument("adaptive_avg_pool2d_backward requires 4D input (N, C, H, W)");
+    }
+
+    int64_t H_in = input_shape[2];
+    int64_t W_in = input_shape[3];
+
+    // Allow override from attrs if provided
+    if (attrs.contains("input_h")) {
+        H_in = std::stoll(attrs.at("input_h"));
+    }
+    if (attrs.contains("input_w")) {
+        W_in = std::stoll(attrs.at("input_w"));
+    }
+
+    return adaptive_avgpool2d_backward(grad_output, H_in, W_in, queue);
 }
 
 } // namespace oneapi

@@ -14,6 +14,9 @@ struct NMSKernelFloat64 {};
 struct ROIAlignKernelFloat32 {};
 struct ROIAlignKernelFloat64 {};
 struct ROIAlignBackwardKernelFloat32 {};
+struct GatherRelativePositionBiasKernelFloat32 {};
+struct GatherRelativePositionBiasKernelFloat64 {};
+struct GatherRelativePositionBiasKernelFloat16 {};
 
 // Helper function to get typed pointer from tensor
 template<typename T>
@@ -362,6 +365,98 @@ auto roi_align_kernel(
     }
     else {
         throw std::runtime_error("roi_align: unsupported dtype");
+    }
+
+    return output;
+}
+
+// ============================================================================
+// Gather operation for relative position bias (Swin Transformer)
+// ============================================================================
+/**
+ * @brief Gather relative position bias values from a table using indices
+ *
+ * Used in Swin Transformer to compute relative position bias for attention.
+ * Gathers values from a 2D table based on position indices.
+ *
+ * @param table Position bias table: (table_size*table_size, num_heads)
+ * @param indices Position indices: (num_positions, num_positions)
+ * @param num_positions Number of positions (window_size * window_size)
+ * @param num_heads Number of attention heads
+ * @param queue SYCL queue for execution
+ * @return Output tensor: (num_positions, num_positions, num_heads)
+ */
+auto gather_relative_position_bias_kernel(
+    const Tensor& table,
+    const Tensor& indices,
+    int64_t num_positions,
+    int64_t num_heads,
+    sycl::queue& queue
+) -> Tensor {
+    // table: [table_size*table_size, num_heads]
+    // indices: [num_positions, num_positions]
+    // output: [num_positions, num_positions, num_heads]
+
+    Tensor output({num_positions, num_positions, num_heads}, table.dtype(), table.device());
+
+    int64_t total = num_positions * num_positions * num_heads;
+
+    if (table.dtype() == DType::Float32) {
+        const float* table_ptr = get_data_ptr<const float>(table);
+        const int64_t* indices_ptr = get_data_ptr<const int64_t>(indices);
+        float* output_ptr = get_data_ptr<float>(output);
+
+        queue.parallel_for<GatherRelativePositionBiasKernelFloat32>(
+            sycl::range<1>(total),
+            [=](sycl::id<1> idx) {
+                int64_t flat_idx = idx[0];
+                int64_t h = flat_idx % num_heads;
+                int64_t j = (flat_idx / num_heads) % num_positions;
+                int64_t i = flat_idx / (num_heads * num_positions);
+
+                int64_t table_idx = indices_ptr[i * num_positions + j];
+                output_ptr[flat_idx] = table_ptr[table_idx * num_heads + h];
+            }
+        ).wait();
+    }
+    else if (table.dtype() == DType::Float64) {
+        const double* table_ptr = get_data_ptr<const double>(table);
+        const int64_t* indices_ptr = get_data_ptr<const int64_t>(indices);
+        double* output_ptr = get_data_ptr<double>(output);
+
+        queue.parallel_for<GatherRelativePositionBiasKernelFloat64>(
+            sycl::range<1>(total),
+            [=](sycl::id<1> idx) {
+                int64_t flat_idx = idx[0];
+                int64_t h = flat_idx % num_heads;
+                int64_t j = (flat_idx / num_heads) % num_positions;
+                int64_t i = flat_idx / (num_heads * num_positions);
+
+                int64_t table_idx = indices_ptr[i * num_positions + j];
+                output_ptr[flat_idx] = table_ptr[table_idx * num_heads + h];
+            }
+        ).wait();
+    }
+    else if (table.dtype() == DType::Float16) {
+        const sycl::half* table_ptr = get_data_ptr<const sycl::half>(table);
+        const int64_t* indices_ptr = get_data_ptr<const int64_t>(indices);
+        sycl::half* output_ptr = get_data_ptr<sycl::half>(output);
+
+        queue.parallel_for<GatherRelativePositionBiasKernelFloat16>(
+            sycl::range<1>(total),
+            [=](sycl::id<1> idx) {
+                int64_t flat_idx = idx[0];
+                int64_t h = flat_idx % num_heads;
+                int64_t j = (flat_idx / num_heads) % num_positions;
+                int64_t i = flat_idx / (num_heads * num_positions);
+
+                int64_t table_idx = indices_ptr[i * num_positions + j];
+                output_ptr[flat_idx] = table_ptr[table_idx * num_heads + h];
+            }
+        ).wait();
+    }
+    else {
+        throw std::runtime_error("gather_relative_position_bias: unsupported dtype");
     }
 
     return output;

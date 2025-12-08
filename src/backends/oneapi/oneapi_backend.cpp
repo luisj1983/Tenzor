@@ -143,6 +143,8 @@ namespace oneapi {
     auto adaptive_max_pool2d_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
     auto avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
     auto max_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
+    auto adaptive_avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
+    auto adaptive_avgpool2d_backward(const Tensor& grad_output, int64_t H_in, int64_t W_in, sycl::queue& queue) -> Tensor;
 
     // Statistical operations
     auto std_kernel(const Tensor& input, const OpAttributes& attrs, sycl::queue& queue) -> Tensor;
@@ -246,6 +248,9 @@ namespace oneapi {
                           int64_t output_height, int64_t output_width,
                           float spatial_scale, int64_t sampling_ratio, bool aligned,
                           sycl::queue& queue) -> Tensor;
+    auto gather_relative_position_bias_kernel(const Tensor& table, const Tensor& indices,
+                                              int64_t num_positions, int64_t num_heads,
+                                              sycl::queue& queue) -> Tensor;
 
     // Quantization operations
     auto quantize_kernel(const Tensor& input, float scale, int32_t zero_point,
@@ -1021,6 +1026,17 @@ public:
                 if (inputs.size() != 2) throw std::invalid_argument("max_pool2d_backward requires 2 inputs: grad_output, input");
                 return {oneapi::max_pool2d_backward_kernel(inputs[0], inputs[1], attrs, queue)};
             }
+            else if (op_name == "adaptive_avg_pool2d_backward") {
+                if (inputs.size() != 1) throw std::invalid_argument("adaptive_avg_pool2d_backward requires 1 input: grad_output");
+                int64_t H_in = 0, W_in = 0;
+                if (attrs.contains("H_in")) {
+                    H_in = std::stoll(attrs.at("H_in"));
+                }
+                if (attrs.contains("W_in")) {
+                    W_in = std::stoll(attrs.at("W_in"));
+                }
+                return {oneapi::adaptive_avgpool2d_backward(inputs[0], H_in, W_in, queue)};
+            }
 
             // Statistical operations
             else if (op_name == "std") {
@@ -1248,6 +1264,12 @@ public:
                 bool aligned = attrs.contains("aligned") && attrs.at("aligned") == "1";
                 return {oneapi::roi_align_kernel(inputs[0], inputs[1], output_height, output_width,
                                                  spatial_scale, sampling_ratio, aligned, queue)};
+            }
+            else if (op_name == "gather_relative_position_bias") {
+                if (inputs.size() != 2) throw std::invalid_argument("gather_relative_position_bias requires 2 inputs (table, indices)");
+                int64_t num_positions = std::stoll(attrs.at("num_positions"));
+                int64_t num_heads = std::stoll(attrs.at("num_heads"));
+                return {oneapi::gather_relative_position_bias_kernel(inputs[0], inputs[1], num_positions, num_heads, queue)};
             }
 
             // ================================================================

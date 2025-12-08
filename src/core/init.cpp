@@ -1817,6 +1817,11 @@ auto initialize() -> void {
                         return oneapi_backend->dispatch("max_pool2d_backward", inputs, attrs);
                     });
 
+                registry.register_kernel("adaptive_avg_pool2d_backward", Device::Type::OneAPI,
+                    [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return oneapi_backend->dispatch("adaptive_avg_pool2d_backward", inputs, attrs);
+                    });
+
                 registry.register_kernel("std", Device::Type::OneAPI,
                     [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
                         return oneapi_backend->dispatch("std", inputs, attrs);
@@ -1925,7 +1930,13 @@ auto initialize() -> void {
                         return oneapi_backend->dispatch("clamp_max", inputs, attrs);
                     });
 
-                std::cout << "OneAPI operations registered successfully (91 operations)" << std::endl;
+                // Vision operations
+                registry.register_kernel("gather_relative_position_bias", Device::Type::OneAPI,
+                    [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return oneapi_backend->dispatch("gather_relative_position_bias", inputs, attrs);
+                    });
+
+                std::cout << "OneAPI operations registered successfully (92 operations)" << std::endl;
             } else {
                 std::cout << "OneAPI backend loaded but no OneAPI devices available" << std::endl;
             }
