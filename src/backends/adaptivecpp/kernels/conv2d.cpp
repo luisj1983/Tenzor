@@ -280,27 +280,43 @@ auto conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tenso
 
 #else // !TENZOR_HAS_ONEDNN - Fallback implementation using im2col + GEMM
 
-// Kernel class declarations for conv2d operations
-class Conv2dIm2colKernel;
-class Conv2dCol2imKernel;
-class Conv2dForwardGemmFallback;
-class Conv2dForwardBiasAdd;
-class Conv2dForwardBiasAddGrouped;
-class Conv2dBackwardInputGemmFallback;
-class Conv2dBackwardWeightGemmFallback;
-class Conv2dBackwardBiasReduction;
-class Conv2dBackwardBiasSeparate;
+// Kernel class declarations for conv2d operations - Float32
+class Conv2dIm2colKernelFloat32;
+class Conv2dCol2imKernelFloat32;
+class Conv2dForwardGemmFallbackFloat32;
+class Conv2dForwardBiasAddFloat32;
+class Conv2dForwardBiasAddGroupedFloat32;
+class Conv2dForwardGroupedKernelFloat32;
+class Conv2dBackwardInputGemmFallbackFloat32;
+class Conv2dBackwardInputGroupedKernelFloat32;
+class Conv2dBackwardWeightGemmFallbackFloat32;
+class Conv2dBackwardWeightGroupedKernelFloat32;
+class Conv2dBackwardBiasReductionFloat32;
+class Conv2dBackwardBiasSeparateFloat32;
 
-// Im2col transformation for convolution
-template<typename T>
-void im2col_kernel(const T* data_im, int64_t channels, int64_t height, int64_t width,
+// Kernel class declarations for conv2d operations - Float64
+class Conv2dIm2colKernelFloat64;
+class Conv2dCol2imKernelFloat64;
+class Conv2dForwardGemmFallbackFloat64;
+class Conv2dForwardBiasAddFloat64;
+class Conv2dForwardBiasAddGroupedFloat64;
+class Conv2dForwardGroupedKernelFloat64;
+class Conv2dBackwardInputGemmFallbackFloat64;
+class Conv2dBackwardInputGroupedKernelFloat64;
+class Conv2dBackwardWeightGemmFallbackFloat64;
+class Conv2dBackwardWeightGroupedKernelFloat64;
+class Conv2dBackwardBiasReductionFloat64;
+class Conv2dBackwardBiasSeparateFloat64;
+
+// Im2col transformation for convolution - Float32 specialization
+void im2col_kernel_float32(const float* data_im, int64_t channels, int64_t height, int64_t width,
                    int64_t kernel_h, int64_t kernel_w, int64_t pad, int64_t stride,
-                   int64_t dilation, T* data_col, sycl::queue& queue) {
+                   int64_t dilation, float* data_col, sycl::queue& queue) {
     const int64_t output_h = (height + 2 * pad - dilation * (kernel_h - 1) - 1) / stride + 1;
     const int64_t output_w = (width + 2 * pad - dilation * (kernel_w - 1) - 1) / stride + 1;
     const int64_t col_size = channels * kernel_h * kernel_w * output_h * output_w;
 
-    queue.parallel_for<Conv2dIm2colKernel>(sycl::range<1>(col_size), [=](sycl::id<1> index) {
+    queue.parallel_for<Conv2dIm2colKernelFloat32>(sycl::range<1>(col_size), [=](sycl::id<1> index) {
         int64_t w_out = index % output_w;
         int64_t idx = index / output_w;
         int64_t h_out = idx % output_h;
@@ -314,24 +330,49 @@ void im2col_kernel(const T* data_im, int64_t channels, int64_t height, int64_t w
         int64_t w_in = w_out * stride - pad + kw * dilation;
 
         data_col[index] = (h_in >= 0 && w_in >= 0 && h_in < height && w_in < width) ?
-            data_im[(c * height + h_in) * width + w_in] : T(0);
+            data_im[(c * height + h_in) * width + w_in] : 0.0f;
     }).wait();
 }
 
-// Col2im transformation (inverse of im2col)
-template<typename T>
-void col2im_kernel(const T* data_col, int64_t channels, int64_t height, int64_t width,
+// Im2col transformation for convolution - Float64 specialization
+void im2col_kernel_float64(const double* data_im, int64_t channels, int64_t height, int64_t width,
                    int64_t kernel_h, int64_t kernel_w, int64_t pad, int64_t stride,
-                   int64_t dilation, T* data_im, sycl::queue& queue) {
+                   int64_t dilation, double* data_col, sycl::queue& queue) {
+    const int64_t output_h = (height + 2 * pad - dilation * (kernel_h - 1) - 1) / stride + 1;
+    const int64_t output_w = (width + 2 * pad - dilation * (kernel_w - 1) - 1) / stride + 1;
+    const int64_t col_size = channels * kernel_h * kernel_w * output_h * output_w;
+
+    queue.parallel_for<Conv2dIm2colKernelFloat64>(sycl::range<1>(col_size), [=](sycl::id<1> index) {
+        int64_t w_out = index % output_w;
+        int64_t idx = index / output_w;
+        int64_t h_out = idx % output_h;
+        idx /= output_h;
+        int64_t kw = idx % kernel_w;
+        idx /= kernel_w;
+        int64_t kh = idx % kernel_h;
+        int64_t c = idx / kernel_h;
+
+        int64_t h_in = h_out * stride - pad + kh * dilation;
+        int64_t w_in = w_out * stride - pad + kw * dilation;
+
+        data_col[index] = (h_in >= 0 && w_in >= 0 && h_in < height && w_in < width) ?
+            data_im[(c * height + h_in) * width + w_in] : 0.0;
+    }).wait();
+}
+
+// Col2im transformation (inverse of im2col) - Float32 specialization
+void col2im_kernel_float32(const float* data_col, int64_t channels, int64_t height, int64_t width,
+                   int64_t kernel_h, int64_t kernel_w, int64_t pad, int64_t stride,
+                   int64_t dilation, float* data_im, sycl::queue& queue) {
     const int64_t output_h = (height + 2 * pad - dilation * (kernel_h - 1) - 1) / stride + 1;
     const int64_t output_w = (width + 2 * pad - dilation * (kernel_w - 1) - 1) / stride + 1;
     const int64_t im_size = channels * height * width;
 
     // Initialize grad_input to zero
-    queue.fill(data_im, T(0), im_size).wait();
+    queue.fill(data_im, 0.0f, im_size).wait();
 
     // Accumulate gradients from col buffer
-    queue.parallel_for<Conv2dCol2imKernel>(sycl::range<1>(channels * kernel_h * kernel_w * output_h * output_w),
+    queue.parallel_for<Conv2dCol2imKernelFloat32>(sycl::range<1>(channels * kernel_h * kernel_w * output_h * output_w),
                       [=](sycl::id<1> index) {
         int64_t w_out = index % output_w;
         int64_t idx = index / output_w;
@@ -348,17 +389,50 @@ void col2im_kernel(const T* data_col, int64_t channels, int64_t height, int64_t 
         if (h_in >= 0 && w_in >= 0 && h_in < height && w_in < width) {
             int64_t im_idx = (c * height + h_in) * width + w_in;
             // Atomic add for thread safety
-            sycl::atomic_ref<T, sycl::memory_order::relaxed, sycl::memory_scope::device>
+            sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device>
                 atomic_val(data_im[im_idx]);
             atomic_val.fetch_add(data_col[index]);
         }
     }).wait();
 }
 
-// Kernel classes for grouped convolutions
-class Conv2dForwardGroupedKernel;
-class Conv2dBackwardInputGroupedKernel;
-class Conv2dBackwardWeightGroupedKernel;
+// Col2im transformation (inverse of im2col) - Float64 specialization
+void col2im_kernel_float64(const double* data_col, int64_t channels, int64_t height, int64_t width,
+                   int64_t kernel_h, int64_t kernel_w, int64_t pad, int64_t stride,
+                   int64_t dilation, double* data_im, sycl::queue& queue) {
+    const int64_t output_h = (height + 2 * pad - dilation * (kernel_h - 1) - 1) / stride + 1;
+    const int64_t output_w = (width + 2 * pad - dilation * (kernel_w - 1) - 1) / stride + 1;
+    const int64_t im_size = channels * height * width;
+
+    // Initialize grad_input to zero
+    queue.fill(data_im, 0.0, im_size).wait();
+
+    // Accumulate gradients from col buffer
+    queue.parallel_for<Conv2dCol2imKernelFloat64>(sycl::range<1>(channels * kernel_h * kernel_w * output_h * output_w),
+                      [=](sycl::id<1> index) {
+        int64_t w_out = index % output_w;
+        int64_t idx = index / output_w;
+        int64_t h_out = idx % output_h;
+        idx /= output_h;
+        int64_t kw = idx % kernel_w;
+        idx /= kernel_w;
+        int64_t kh = idx % kernel_h;
+        int64_t c = idx / kernel_h;
+
+        int64_t h_in = h_out * stride - pad + kh * dilation;
+        int64_t w_in = w_out * stride - pad + kw * dilation;
+
+        if (h_in >= 0 && w_in >= 0 && h_in < height && w_in < width) {
+            int64_t im_idx = (c * height + h_in) * width + w_in;
+            // Atomic add for thread safety
+            sycl::atomic_ref<double, sycl::memory_order::relaxed, sycl::memory_scope::device>
+                atomic_val(data_im[im_idx]);
+            atomic_val.fetch_add(data_col[index]);
+        }
+    }).wait();
+}
+
+// Remove duplicate declarations - they're already at the top
 
 auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bias,
                     int64_t stride, int64_t padding, int64_t dilation, int64_t groups,
@@ -396,14 +470,14 @@ auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
             float* col_ptr = get_data_ptr<float>(col_buffer);
 
             for (int64_t n = 0; n < N; ++n) {
-                im2col_kernel<float>(
+                im2col_kernel_float32(
                     input_ptr + n * C_in * H_in * W_in,
                     C_in, H_in, W_in, K_h, K_w, padding, stride, dilation,
                     col_ptr, queue
                 );
 
                 // Naive GEMM fallback
-                queue.parallel_for<Conv2dForwardGemmFallback>(sycl::range<2>(C_out, H_out * W_out), [=](sycl::id<2> idx) {
+                queue.parallel_for<Conv2dForwardGemmFallbackFloat32>(sycl::range<2>(C_out, H_out * W_out), [=](sycl::id<2> idx) {
                     const int64_t oc = idx[0];
                     const int64_t hw = idx[1];
 
@@ -416,7 +490,7 @@ auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
 
                 if (bias != nullptr) {
                     const float* bias_ptr = get_data_ptr<const float>(*bias);
-                    queue.parallel_for<Conv2dForwardBiasAdd>(sycl::range<2>(C_out, H_out * W_out), [=](sycl::id<2> idx) {
+                    queue.parallel_for<Conv2dForwardBiasAddFloat32>(sycl::range<2>(C_out, H_out * W_out), [=](sycl::id<2> idx) {
                         const int64_t oc = idx[0];
                         const int64_t hw = idx[1];
                         const int64_t out_idx = n * C_out * H_out * W_out + oc * H_out * W_out + hw;
@@ -427,7 +501,7 @@ auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
         } else {
             // Grouped convolution: direct implementation
             // Weight shape for grouped conv: [C_out, C_in/groups, K_h, K_w]
-            queue.parallel_for<Conv2dForwardGroupedKernel>(
+            queue.parallel_for<Conv2dForwardGroupedKernelFloat32>(
                 sycl::range<3>(N * C_out, H_out, W_out),
                 [=](sycl::id<3> idx) {
                     const int64_t noc = idx[0];
@@ -463,7 +537,96 @@ auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
             // Add bias if present
             if (bias != nullptr) {
                 const float* bias_ptr = get_data_ptr<const float>(*bias);
-                queue.parallel_for<Conv2dForwardBiasAddGrouped>(sycl::range<2>(N * C_out, H_out * W_out), [=](sycl::id<2> idx) {
+                queue.parallel_for<Conv2dForwardBiasAddGroupedFloat32>(sycl::range<2>(N * C_out, H_out * W_out), [=](sycl::id<2> idx) {
+                    const int64_t noc = idx[0];
+                    const int64_t hw = idx[1];
+                    const int64_t oc = noc % C_out;
+                    const int64_t out_idx = noc * H_out * W_out + hw;
+                    output_ptr[out_idx] += bias_ptr[oc];
+                }).wait();
+            }
+        }
+    }
+    else if (input.dtype() == DType::Float64) {
+        const double* input_ptr = get_data_ptr<const double>(input);
+        const double* weight_ptr = get_data_ptr<const double>(weight);
+        double* output_ptr = get_data_ptr<double>(output);
+
+        if (groups == 1) {
+            // Standard convolution: use im2col + GEMM
+            const int64_t col_size = C_in * K_h * K_w * H_out * W_out;
+            Tensor col_buffer({col_size}, input.dtype(), input.device());
+            double* col_ptr = get_data_ptr<double>(col_buffer);
+
+            for (int64_t n = 0; n < N; ++n) {
+                im2col_kernel_float64(
+                    input_ptr + n * C_in * H_in * W_in,
+                    C_in, H_in, W_in, K_h, K_w, padding, stride, dilation,
+                    col_ptr, queue
+                );
+
+                // Naive GEMM fallback
+                queue.parallel_for<Conv2dForwardGemmFallbackFloat64>(sycl::range<2>(C_out, H_out * W_out), [=](sycl::id<2> idx) {
+                    const int64_t oc = idx[0];
+                    const int64_t hw = idx[1];
+
+                    double sum = 0.0;
+                    for (int64_t k = 0; k < C_in * K_h * K_w; ++k) {
+                        sum += weight_ptr[oc * C_in * K_h * K_w + k] * col_ptr[k * H_out * W_out + hw];
+                    }
+                    output_ptr[n * C_out * H_out * W_out + oc * H_out * W_out + hw] = sum;
+                }).wait();
+
+                if (bias != nullptr) {
+                    const double* bias_ptr = get_data_ptr<const double>(*bias);
+                    queue.parallel_for<Conv2dForwardBiasAddFloat64>(sycl::range<2>(C_out, H_out * W_out), [=](sycl::id<2> idx) {
+                        const int64_t oc = idx[0];
+                        const int64_t hw = idx[1];
+                        const int64_t out_idx = n * C_out * H_out * W_out + oc * H_out * W_out + hw;
+                        output_ptr[out_idx] += bias_ptr[oc];
+                    }).wait();
+                }
+            }
+        } else {
+            // Grouped convolution: direct implementation
+            // Weight shape for grouped conv: [C_out, C_in/groups, K_h, K_w]
+            queue.parallel_for<Conv2dForwardGroupedKernelFloat64>(
+                sycl::range<3>(N * C_out, H_out, W_out),
+                [=](sycl::id<3> idx) {
+                    const int64_t noc = idx[0];
+                    const int64_t h_out = idx[1];
+                    const int64_t w_out = idx[2];
+
+                    const int64_t n = noc / C_out;
+                    const int64_t oc = noc % C_out;
+                    const int64_t g = oc / C_out_per_group;  // which group
+                    const int64_t oc_in_group = oc % C_out_per_group;
+
+                    double sum = 0.0;
+                    for (int64_t ic_g = 0; ic_g < C_in_per_group; ++ic_g) {
+                        const int64_t ic = g * C_in_per_group + ic_g;
+                        for (int64_t kh = 0; kh < K_h; ++kh) {
+                            for (int64_t kw = 0; kw < K_w; ++kw) {
+                                const int64_t h_in = h_out * stride - padding + kh * dilation;
+                                const int64_t w_in = w_out * stride - padding + kw * dilation;
+
+                                if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
+                                    const int64_t input_idx = ((n * C_in + ic) * H_in + h_in) * W_in + w_in;
+                                    const int64_t weight_idx = ((oc * C_in_per_group + ic_g) * K_h + kh) * K_w + kw;
+                                    sum += input_ptr[input_idx] * weight_ptr[weight_idx];
+                                }
+                            }
+                        }
+                    }
+
+                    const int64_t out_idx = ((n * C_out + oc) * H_out + h_out) * W_out + w_out;
+                    output_ptr[out_idx] = sum;
+                }).wait();
+
+            // Add bias if present
+            if (bias != nullptr) {
+                const double* bias_ptr = get_data_ptr<const double>(*bias);
+                queue.parallel_for<Conv2dForwardBiasAddGroupedFloat64>(sycl::range<2>(N * C_out, H_out * W_out), [=](sycl::id<2> idx) {
                     const int64_t noc = idx[0];
                     const int64_t hw = idx[1];
                     const int64_t oc = noc % C_out;
@@ -504,181 +667,356 @@ auto conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tenso
     const int64_t H_out = grad_output_shape[2];
     const int64_t W_out = grad_output_shape[3];
 
-    if (input.dtype() != DType::Float32) {
-        throw std::runtime_error("Unsupported dtype for conv2d_backward (fallback)");
-    }
+    if (input.dtype() == DType::Float32) {
+        const float* input_ptr = get_data_ptr<const float>(input);
+        const float* weight_ptr = get_data_ptr<const float>(weight);
+        const float* grad_output_ptr = get_data_ptr<const float>(grad_output);
 
-    const float* input_ptr = get_data_ptr<const float>(input);
-    const float* weight_ptr = get_data_ptr<const float>(weight);
-    const float* grad_output_ptr = get_data_ptr<const float>(grad_output);
+        // Compute grad_input
+        if (compute_grad_input) {
+            grad_input = Tensor(std::vector<int64_t>(input_shape.begin(), input_shape.end()), input.dtype(), input.device());
+            float* grad_input_ptr = get_data_ptr<float>(grad_input);
 
-    // Compute grad_input
-    if (compute_grad_input) {
-        grad_input = Tensor(std::vector<int64_t>(input_shape.begin(), input_shape.end()), input.dtype(), input.device());
-        float* grad_input_ptr = get_data_ptr<float>(grad_input);
+            // Initialize to zero
+            queue.fill(grad_input_ptr, 0.0f, N * C_in * H_in * W_in).wait();
 
-        // Initialize to zero
-        queue.fill(grad_input_ptr, 0.0f, N * C_in * H_in * W_in).wait();
+            if (groups == 1) {
+                // Standard backward: use col2im
+                const int64_t col_size = C_in * K_h * K_w * H_out * W_out;
+                Tensor col_buffer({col_size}, input.dtype(), input.device());
+                float* col_ptr = get_data_ptr<float>(col_buffer);
 
-        if (groups == 1) {
-            // Standard backward: use col2im
-            const int64_t col_size = C_in * K_h * K_w * H_out * W_out;
-            Tensor col_buffer({col_size}, input.dtype(), input.device());
-            float* col_ptr = get_data_ptr<float>(col_buffer);
+                for (int64_t n = 0; n < N; ++n) {
+                    const float* grad_out_batch = grad_output_ptr + n * C_out * H_out * W_out;
+                    float* grad_in_batch = grad_input_ptr + n * C_in * H_in * W_in;
 
-            for (int64_t n = 0; n < N; ++n) {
-                const float* grad_out_batch = grad_output_ptr + n * C_out * H_out * W_out;
-                float* grad_in_batch = grad_input_ptr + n * C_in * H_in * W_in;
+                    queue.parallel_for<Conv2dBackwardInputGemmFallbackFloat32>(sycl::range<2>(C_in * K_h * K_w, H_out * W_out),
+                                     [=](sycl::id<2> idx) {
+                        const int64_t k = idx[0];
+                        const int64_t hw = idx[1];
 
-                queue.parallel_for<Conv2dBackwardInputGemmFallback>(sycl::range<2>(C_in * K_h * K_w, H_out * W_out),
-                                 [=](sycl::id<2> idx) {
-                    const int64_t k = idx[0];
-                    const int64_t hw = idx[1];
+                        float sum = 0.0f;
+                        for (int64_t oc = 0; oc < C_out; ++oc) {
+                            sum += weight_ptr[oc * C_in * K_h * K_w + k] * grad_out_batch[oc * H_out * W_out + hw];
+                        }
+                        col_ptr[k * H_out * W_out + hw] = sum;
+                    }).wait();
 
-                    float sum = 0.0f;
-                    for (int64_t oc = 0; oc < C_out; ++oc) {
-                        sum += weight_ptr[oc * C_in * K_h * K_w + k] * grad_out_batch[oc * H_out * W_out + hw];
-                    }
-                    col_ptr[k * H_out * W_out + hw] = sum;
-                }).wait();
+                    col2im_kernel_float32(col_ptr, C_in, H_in, W_in, K_h, K_w, padding, stride, dilation, grad_in_batch, queue);
+                }
+            } else {
+                // Grouped backward input
+                queue.parallel_for<Conv2dBackwardInputGroupedKernelFloat32>(
+                    sycl::range<3>(N * C_in, H_in, W_in),
+                    [=](sycl::id<3> idx) {
+                        const int64_t nic = idx[0];
+                        const int64_t h_in = idx[1];
+                        const int64_t w_in = idx[2];
 
-                col2im_kernel<float>(col_ptr, C_in, H_in, W_in, K_h, K_w, padding, stride, dilation, grad_in_batch, queue);
-            }
-        } else {
-            // Grouped backward input
-            queue.parallel_for<Conv2dBackwardInputGroupedKernel>(
-                sycl::range<3>(N * C_in, H_in, W_in),
-                [=](sycl::id<3> idx) {
-                    const int64_t nic = idx[0];
-                    const int64_t h_in = idx[1];
-                    const int64_t w_in = idx[2];
+                        const int64_t n = nic / C_in;
+                        const int64_t ic = nic % C_in;
+                        const int64_t g = ic / C_in_per_group;
+                        const int64_t ic_in_group = ic % C_in_per_group;
 
-                    const int64_t n = nic / C_in;
-                    const int64_t ic = nic % C_in;
-                    const int64_t g = ic / C_in_per_group;
-                    const int64_t ic_in_group = ic % C_in_per_group;
+                        float sum = 0.0f;
+                        for (int64_t oc_g = 0; oc_g < C_out_per_group; ++oc_g) {
+                            const int64_t oc = g * C_out_per_group + oc_g;
+                            for (int64_t kh = 0; kh < K_h; ++kh) {
+                                for (int64_t kw = 0; kw < K_w; ++kw) {
+                                    // Reverse the forward convolution indexing
+                                    int64_t h_out_base = h_in + padding - kh * dilation;
+                                    int64_t w_out_base = w_in + padding - kw * dilation;
 
-                    float sum = 0.0f;
-                    for (int64_t oc_g = 0; oc_g < C_out_per_group; ++oc_g) {
-                        const int64_t oc = g * C_out_per_group + oc_g;
-                        for (int64_t kh = 0; kh < K_h; ++kh) {
-                            for (int64_t kw = 0; kw < K_w; ++kw) {
-                                // Reverse the forward convolution indexing
-                                int64_t h_out_base = h_in + padding - kh * dilation;
-                                int64_t w_out_base = w_in + padding - kw * dilation;
+                                    if (h_out_base % stride == 0 && w_out_base % stride == 0) {
+                                        int64_t h_out = h_out_base / stride;
+                                        int64_t w_out = w_out_base / stride;
 
-                                if (h_out_base % stride == 0 && w_out_base % stride == 0) {
-                                    int64_t h_out = h_out_base / stride;
-                                    int64_t w_out = w_out_base / stride;
-
-                                    if (h_out >= 0 && h_out < H_out && w_out >= 0 && w_out < W_out) {
-                                        const int64_t grad_out_idx = ((n * C_out + oc) * H_out + h_out) * W_out + w_out;
-                                        const int64_t weight_idx = ((oc * C_in_per_group + ic_in_group) * K_h + kh) * K_w + kw;
-                                        sum += grad_output_ptr[grad_out_idx] * weight_ptr[weight_idx];
+                                        if (h_out >= 0 && h_out < H_out && w_out >= 0 && w_out < W_out) {
+                                            const int64_t grad_out_idx = ((n * C_out + oc) * H_out + h_out) * W_out + w_out;
+                                            const int64_t weight_idx = ((oc * C_in_per_group + ic_in_group) * K_h + kh) * K_w + kw;
+                                            sum += grad_output_ptr[grad_out_idx] * weight_ptr[weight_idx];
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
 
-                    const int64_t grad_in_idx = ((n * C_in + ic) * H_in + h_in) * W_in + w_in;
-                    grad_input_ptr[grad_in_idx] = sum;
-                }).wait();
-        }
-    }
-
-    // Compute grad_weight
-    if (compute_grad_weight) {
-        grad_weight = Tensor(std::vector<int64_t>(weight_shape.begin(), weight_shape.end()), weight.dtype(), weight.device());
-        float* grad_weight_ptr = get_data_ptr<float>(grad_weight);
-
-        // Initialize grad_weight to zero
-        queue.fill(grad_weight_ptr, 0.0f, C_out * C_in_per_group * K_h * K_w).wait();
-
-        if (groups == 1) {
-            const int64_t col_size = C_in * K_h * K_w * H_out * W_out;
-            Tensor col_buffer({col_size}, input.dtype(), input.device());
-            float* col_ptr = get_data_ptr<float>(col_buffer);
-
-            for (int64_t n = 0; n < N; ++n) {
-                const float* input_batch = input_ptr + n * C_in * H_in * W_in;
-                const float* grad_out_batch = grad_output_ptr + n * C_out * H_out * W_out;
-
-                im2col_kernel<float>(input_batch, C_in, H_in, W_in, K_h, K_w, padding, stride, dilation, col_ptr, queue);
-
-                queue.parallel_for<Conv2dBackwardWeightGemmFallback>(sycl::range<2>(C_out, C_in * K_h * K_w),
-                                 [=](sycl::id<2> idx) {
-                    const int64_t oc = idx[0];
-                    const int64_t k = idx[1];
-
-                    float sum = 0.0f;
-                    for (int64_t hw = 0; hw < H_out * W_out; ++hw) {
-                        sum += grad_out_batch[oc * H_out * W_out + hw] * col_ptr[k * H_out * W_out + hw];
-                    }
-
-                    int64_t grad_w_idx = oc * C_in * K_h * K_w + k;
-                    sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device>
-                        atomic_val(grad_weight_ptr[grad_w_idx]);
-                    atomic_val.fetch_add(sum);
-                }).wait();
+                        const int64_t grad_in_idx = ((n * C_in + ic) * H_in + h_in) * W_in + w_in;
+                        grad_input_ptr[grad_in_idx] = sum;
+                    }).wait();
             }
-        } else {
-            // Grouped backward weight
-            queue.parallel_for<Conv2dBackwardWeightGroupedKernel>(
-                sycl::range<3>(C_out, C_in_per_group * K_h, K_w),
-                [=](sycl::id<3> idx) {
-                    const int64_t oc = idx[0];
-                    const int64_t ic_kh = idx[1];
-                    const int64_t kw = idx[2];
+        }
 
-                    const int64_t ic_g = ic_kh / K_h;
-                    const int64_t kh = ic_kh % K_h;
-                    const int64_t g = oc / C_out_per_group;
-                    const int64_t ic = g * C_in_per_group + ic_g;
+        // Compute grad_weight
+        if (compute_grad_weight) {
+            grad_weight = Tensor(std::vector<int64_t>(weight_shape.begin(), weight_shape.end()), weight.dtype(), weight.device());
+            float* grad_weight_ptr = get_data_ptr<float>(grad_weight);
 
-                    float sum = 0.0f;
-                    for (int64_t n = 0; n < N; ++n) {
-                        for (int64_t h_out = 0; h_out < H_out; ++h_out) {
-                            for (int64_t w_out = 0; w_out < W_out; ++w_out) {
-                                const int64_t h_in = h_out * stride - padding + kh * dilation;
-                                const int64_t w_in = w_out * stride - padding + kw * dilation;
+            // Initialize grad_weight to zero
+            queue.fill(grad_weight_ptr, 0.0f, C_out * C_in_per_group * K_h * K_w).wait();
 
-                                if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
-                                    const int64_t input_idx = ((n * C_in + ic) * H_in + h_in) * W_in + w_in;
-                                    const int64_t grad_out_idx = ((n * C_out + oc) * H_out + h_out) * W_out + w_out;
-                                    sum += input_ptr[input_idx] * grad_output_ptr[grad_out_idx];
+            if (groups == 1) {
+                const int64_t col_size = C_in * K_h * K_w * H_out * W_out;
+                Tensor col_buffer({col_size}, input.dtype(), input.device());
+                float* col_ptr = get_data_ptr<float>(col_buffer);
+
+                for (int64_t n = 0; n < N; ++n) {
+                    const float* input_batch = input_ptr + n * C_in * H_in * W_in;
+                    const float* grad_out_batch = grad_output_ptr + n * C_out * H_out * W_out;
+
+                    im2col_kernel_float32(input_batch, C_in, H_in, W_in, K_h, K_w, padding, stride, dilation, col_ptr, queue);
+
+                    queue.parallel_for<Conv2dBackwardWeightGemmFallbackFloat32>(sycl::range<2>(C_out, C_in * K_h * K_w),
+                                     [=](sycl::id<2> idx) {
+                        const int64_t oc = idx[0];
+                        const int64_t k = idx[1];
+
+                        float sum = 0.0f;
+                        for (int64_t hw = 0; hw < H_out * W_out; ++hw) {
+                            sum += grad_out_batch[oc * H_out * W_out + hw] * col_ptr[k * H_out * W_out + hw];
+                        }
+
+                        int64_t grad_w_idx = oc * C_in * K_h * K_w + k;
+                        sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device>
+                            atomic_val(grad_weight_ptr[grad_w_idx]);
+                        atomic_val.fetch_add(sum);
+                    }).wait();
+                }
+            } else {
+                // Grouped backward weight
+                queue.parallel_for<Conv2dBackwardWeightGroupedKernelFloat32>(
+                    sycl::range<3>(C_out, C_in_per_group * K_h, K_w),
+                    [=](sycl::id<3> idx) {
+                        const int64_t oc = idx[0];
+                        const int64_t ic_kh = idx[1];
+                        const int64_t kw = idx[2];
+
+                        const int64_t ic_g = ic_kh / K_h;
+                        const int64_t kh = ic_kh % K_h;
+                        const int64_t g = oc / C_out_per_group;
+                        const int64_t ic = g * C_in_per_group + ic_g;
+
+                        float sum = 0.0f;
+                        for (int64_t n = 0; n < N; ++n) {
+                            for (int64_t h_out = 0; h_out < H_out; ++h_out) {
+                                for (int64_t w_out = 0; w_out < W_out; ++w_out) {
+                                    const int64_t h_in = h_out * stride - padding + kh * dilation;
+                                    const int64_t w_in = w_out * stride - padding + kw * dilation;
+
+                                    if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
+                                        const int64_t input_idx = ((n * C_in + ic) * H_in + h_in) * W_in + w_in;
+                                        const int64_t grad_out_idx = ((n * C_out + oc) * H_out + h_out) * W_out + w_out;
+                                        sum += input_ptr[input_idx] * grad_output_ptr[grad_out_idx];
+                                    }
                                 }
                             }
                         }
-                    }
 
-                    const int64_t weight_idx = ((oc * C_in_per_group + ic_g) * K_h + kh) * K_w + kw;
-                    grad_weight_ptr[weight_idx] = sum;
-                }).wait();
+                        const int64_t weight_idx = ((oc * C_in_per_group + ic_g) * K_h + kh) * K_w + kw;
+                        grad_weight_ptr[weight_idx] = sum;
+                    }).wait();
+            }
         }
-    }
 
-    // Compute grad_bias: sum grad_output over batch, height, width dimensions
-    if (compute_grad_bias) {
-        grad_bias = Tensor({weight_shape[0]}, weight.dtype(), weight.device());
-        const int64_t batch = grad_output.shape()[0];
-        const int64_t C = grad_output.shape()[1];
-        const int64_t H = grad_output.shape()[2];
-        const int64_t W = grad_output.shape()[3];
+        // Compute grad_bias: sum grad_output over batch, height, width dimensions
+        if (compute_grad_bias) {
+            grad_bias = Tensor({weight_shape[0]}, weight.dtype(), weight.device());
+            const int64_t batch = grad_output.shape()[0];
+            const int64_t C = grad_output.shape()[1];
+            const int64_t H = grad_output.shape()[2];
+            const int64_t W = grad_output.shape()[3];
 
-        float* grad_bias_ptr = get_data_ptr<float>(grad_bias);
+            float* grad_bias_ptr = get_data_ptr<float>(grad_bias);
 
-        queue.parallel_for<Conv2dBackwardBiasReduction>(sycl::range<1>(C), [=](sycl::id<1> c) {
-            float sum = 0.0f;
-            for (int64_t n = 0; n < batch; ++n) {
-                for (int64_t h = 0; h < H; ++h) {
-                    for (int64_t w = 0; w < W; ++w) {
-                        sum += grad_output_ptr[((n * C + c) * H + h) * W + w];
+            queue.parallel_for<Conv2dBackwardBiasReductionFloat32>(sycl::range<1>(C), [=](sycl::id<1> c) {
+                float sum = 0.0f;
+                for (int64_t n = 0; n < batch; ++n) {
+                    for (int64_t h = 0; h < H; ++h) {
+                        for (int64_t w = 0; w < W; ++w) {
+                            sum += grad_output_ptr[((n * C + c) * H + h) * W + w];
+                        }
                     }
                 }
+                grad_bias_ptr[c] = sum;
+            }).wait();
+        }
+    }
+    else if (input.dtype() == DType::Float64) {
+        const double* input_ptr = get_data_ptr<const double>(input);
+        const double* weight_ptr = get_data_ptr<const double>(weight);
+        const double* grad_output_ptr = get_data_ptr<const double>(grad_output);
+
+        // Compute grad_input
+        if (compute_grad_input) {
+            grad_input = Tensor(std::vector<int64_t>(input_shape.begin(), input_shape.end()), input.dtype(), input.device());
+            double* grad_input_ptr = get_data_ptr<double>(grad_input);
+
+            // Initialize to zero
+            queue.fill(grad_input_ptr, 0.0, N * C_in * H_in * W_in).wait();
+
+            if (groups == 1) {
+                // Standard backward: use col2im
+                const int64_t col_size = C_in * K_h * K_w * H_out * W_out;
+                Tensor col_buffer({col_size}, input.dtype(), input.device());
+                double* col_ptr = get_data_ptr<double>(col_buffer);
+
+                for (int64_t n = 0; n < N; ++n) {
+                    const double* grad_out_batch = grad_output_ptr + n * C_out * H_out * W_out;
+                    double* grad_in_batch = grad_input_ptr + n * C_in * H_in * W_in;
+
+                    queue.parallel_for<Conv2dBackwardInputGemmFallbackFloat64>(sycl::range<2>(C_in * K_h * K_w, H_out * W_out),
+                                     [=](sycl::id<2> idx) {
+                        const int64_t k = idx[0];
+                        const int64_t hw = idx[1];
+
+                        double sum = 0.0;
+                        for (int64_t oc = 0; oc < C_out; ++oc) {
+                            sum += weight_ptr[oc * C_in * K_h * K_w + k] * grad_out_batch[oc * H_out * W_out + hw];
+                        }
+                        col_ptr[k * H_out * W_out + hw] = sum;
+                    }).wait();
+
+                    col2im_kernel_float64(col_ptr, C_in, H_in, W_in, K_h, K_w, padding, stride, dilation, grad_in_batch, queue);
+                }
+            } else {
+                // Grouped backward input
+                queue.parallel_for<Conv2dBackwardInputGroupedKernelFloat64>(
+                    sycl::range<3>(N * C_in, H_in, W_in),
+                    [=](sycl::id<3> idx) {
+                        const int64_t nic = idx[0];
+                        const int64_t h_in = idx[1];
+                        const int64_t w_in = idx[2];
+
+                        const int64_t n = nic / C_in;
+                        const int64_t ic = nic % C_in;
+                        const int64_t g = ic / C_in_per_group;
+                        const int64_t ic_in_group = ic % C_in_per_group;
+
+                        double sum = 0.0;
+                        for (int64_t oc_g = 0; oc_g < C_out_per_group; ++oc_g) {
+                            const int64_t oc = g * C_out_per_group + oc_g;
+                            for (int64_t kh = 0; kh < K_h; ++kh) {
+                                for (int64_t kw = 0; kw < K_w; ++kw) {
+                                    // Reverse the forward convolution indexing
+                                    int64_t h_out_base = h_in + padding - kh * dilation;
+                                    int64_t w_out_base = w_in + padding - kw * dilation;
+
+                                    if (h_out_base % stride == 0 && w_out_base % stride == 0) {
+                                        int64_t h_out = h_out_base / stride;
+                                        int64_t w_out = w_out_base / stride;
+
+                                        if (h_out >= 0 && h_out < H_out && w_out >= 0 && w_out < W_out) {
+                                            const int64_t grad_out_idx = ((n * C_out + oc) * H_out + h_out) * W_out + w_out;
+                                            const int64_t weight_idx = ((oc * C_in_per_group + ic_in_group) * K_h + kh) * K_w + kw;
+                                            sum += grad_output_ptr[grad_out_idx] * weight_ptr[weight_idx];
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        const int64_t grad_in_idx = ((n * C_in + ic) * H_in + h_in) * W_in + w_in;
+                        grad_input_ptr[grad_in_idx] = sum;
+                    }).wait();
             }
-            grad_bias_ptr[c] = sum;
-        }).wait();
+        }
+
+        // Compute grad_weight
+        if (compute_grad_weight) {
+            grad_weight = Tensor(std::vector<int64_t>(weight_shape.begin(), weight_shape.end()), weight.dtype(), weight.device());
+            double* grad_weight_ptr = get_data_ptr<double>(grad_weight);
+
+            // Initialize grad_weight to zero
+            queue.fill(grad_weight_ptr, 0.0, C_out * C_in_per_group * K_h * K_w).wait();
+
+            if (groups == 1) {
+                const int64_t col_size = C_in * K_h * K_w * H_out * W_out;
+                Tensor col_buffer({col_size}, input.dtype(), input.device());
+                double* col_ptr = get_data_ptr<double>(col_buffer);
+
+                for (int64_t n = 0; n < N; ++n) {
+                    const double* input_batch = input_ptr + n * C_in * H_in * W_in;
+                    const double* grad_out_batch = grad_output_ptr + n * C_out * H_out * W_out;
+
+                    im2col_kernel_float64(input_batch, C_in, H_in, W_in, K_h, K_w, padding, stride, dilation, col_ptr, queue);
+
+                    queue.parallel_for<Conv2dBackwardWeightGemmFallbackFloat64>(sycl::range<2>(C_out, C_in * K_h * K_w),
+                                     [=](sycl::id<2> idx) {
+                        const int64_t oc = idx[0];
+                        const int64_t k = idx[1];
+
+                        double sum = 0.0;
+                        for (int64_t hw = 0; hw < H_out * W_out; ++hw) {
+                            sum += grad_out_batch[oc * H_out * W_out + hw] * col_ptr[k * H_out * W_out + hw];
+                        }
+
+                        int64_t grad_w_idx = oc * C_in * K_h * K_w + k;
+                        sycl::atomic_ref<double, sycl::memory_order::relaxed, sycl::memory_scope::device>
+                            atomic_val(grad_weight_ptr[grad_w_idx]);
+                        atomic_val.fetch_add(sum);
+                    }).wait();
+                }
+            } else {
+                // Grouped backward weight
+                queue.parallel_for<Conv2dBackwardWeightGroupedKernelFloat64>(
+                    sycl::range<3>(C_out, C_in_per_group * K_h, K_w),
+                    [=](sycl::id<3> idx) {
+                        const int64_t oc = idx[0];
+                        const int64_t ic_kh = idx[1];
+                        const int64_t kw = idx[2];
+
+                        const int64_t ic_g = ic_kh / K_h;
+                        const int64_t kh = ic_kh % K_h;
+                        const int64_t g = oc / C_out_per_group;
+                        const int64_t ic = g * C_in_per_group + ic_g;
+
+                        double sum = 0.0;
+                        for (int64_t n = 0; n < N; ++n) {
+                            for (int64_t h_out = 0; h_out < H_out; ++h_out) {
+                                for (int64_t w_out = 0; w_out < W_out; ++w_out) {
+                                    const int64_t h_in = h_out * stride - padding + kh * dilation;
+                                    const int64_t w_in = w_out * stride - padding + kw * dilation;
+
+                                    if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
+                                        const int64_t input_idx = ((n * C_in + ic) * H_in + h_in) * W_in + w_in;
+                                        const int64_t grad_out_idx = ((n * C_out + oc) * H_out + h_out) * W_out + w_out;
+                                        sum += input_ptr[input_idx] * grad_output_ptr[grad_out_idx];
+                                    }
+                                }
+                            }
+                        }
+
+                        const int64_t weight_idx = ((oc * C_in_per_group + ic_g) * K_h + kh) * K_w + kw;
+                        grad_weight_ptr[weight_idx] = sum;
+                    }).wait();
+            }
+        }
+
+        // Compute grad_bias: sum grad_output over batch, height, width dimensions
+        if (compute_grad_bias) {
+            grad_bias = Tensor({weight_shape[0]}, weight.dtype(), weight.device());
+            const int64_t batch = grad_output.shape()[0];
+            const int64_t C = grad_output.shape()[1];
+            const int64_t H = grad_output.shape()[2];
+            const int64_t W = grad_output.shape()[3];
+
+            double* grad_bias_ptr = get_data_ptr<double>(grad_bias);
+
+            queue.parallel_for<Conv2dBackwardBiasReductionFloat64>(sycl::range<1>(C), [=](sycl::id<1> c) {
+                double sum = 0.0;
+                for (int64_t n = 0; n < batch; ++n) {
+                    for (int64_t h = 0; h < H; ++h) {
+                        for (int64_t w = 0; w < W; ++w) {
+                            sum += grad_output_ptr[((n * C + c) * H + h) * W + w];
+                        }
+                    }
+                }
+                grad_bias_ptr[c] = sum;
+            }).wait();
+        }
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for conv2d_backward (fallback)");
     }
 
     return {grad_input, grad_weight, grad_bias};
@@ -720,28 +1058,45 @@ auto conv2d_backward_bias_kernel(const Tensor& grad_output, sycl::queue& queue) 
     const int64_t C = grad_output.shape()[1];
     Tensor grad_bias({C}, grad_output.dtype(), grad_output.device());
 
-    if (grad_output.dtype() != DType::Float32) {
-        throw std::runtime_error("Unsupported dtype for conv2d_backward_bias");
-    }
-
-    const float* grad_output_ptr = get_data_ptr<const float>(grad_output);
-    float* grad_bias_ptr = get_data_ptr<float>(grad_bias);
-
     const int64_t N = grad_output.shape()[0];
     const int64_t H = grad_output.shape()[2];
     const int64_t W = grad_output.shape()[3];
 
-    queue.parallel_for<Conv2dBackwardBiasSeparate>(sycl::range<1>(C), [=](sycl::id<1> c) {
-        float sum = 0.0f;
-        for (int64_t n = 0; n < N; ++n) {
-            for (int64_t h = 0; h < H; ++h) {
-                for (int64_t w = 0; w < W; ++w) {
-                    sum += grad_output_ptr[((n * C + c) * H + h) * W + w];
+    if (grad_output.dtype() == DType::Float32) {
+        const float* grad_output_ptr = get_data_ptr<const float>(grad_output);
+        float* grad_bias_ptr = get_data_ptr<float>(grad_bias);
+
+        queue.parallel_for<Conv2dBackwardBiasSeparateFloat32>(sycl::range<1>(C), [=](sycl::id<1> c) {
+            float sum = 0.0f;
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t h = 0; h < H; ++h) {
+                    for (int64_t w = 0; w < W; ++w) {
+                        sum += grad_output_ptr[((n * C + c) * H + h) * W + w];
+                    }
                 }
             }
-        }
-        grad_bias_ptr[c] = sum;
-    }).wait();
+            grad_bias_ptr[c] = sum;
+        }).wait();
+    }
+    else if (grad_output.dtype() == DType::Float64) {
+        const double* grad_output_ptr = get_data_ptr<const double>(grad_output);
+        double* grad_bias_ptr = get_data_ptr<double>(grad_bias);
+
+        queue.parallel_for<Conv2dBackwardBiasSeparateFloat64>(sycl::range<1>(C), [=](sycl::id<1> c) {
+            double sum = 0.0;
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t h = 0; h < H; ++h) {
+                    for (int64_t w = 0; w < W; ++w) {
+                        sum += grad_output_ptr[((n * C + c) * H + h) * W + w];
+                    }
+                }
+            }
+            grad_bias_ptr[c] = sum;
+        }).wait();
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for conv2d_backward_bias");
+    }
 
     return grad_bias;
 }
