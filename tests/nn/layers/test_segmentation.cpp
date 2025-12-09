@@ -152,12 +152,6 @@ protected:
             }
             device = Device::oneapi(0);
         }
-        else if (param.backend_name == "adaptivecpp") {
-            if (!isBackendAvailable(Device::Type::AdaptiveCpp)) {
-                GTEST_SKIP() << "AdaptiveCpp not available";
-            }
-            device = Device::adaptivecpp(0);
-        }
         else if (param.backend_name == "rocm") {
             if (!isBackendAvailable(Device::Type::ROCm)) {
                 GTEST_SKIP() << "ROCm not available";
@@ -287,12 +281,6 @@ protected:
                 GTEST_SKIP() << "OneAPI not available";
             }
             device = Device::oneapi(0);
-        }
-        else if (param.backend_name == "adaptivecpp") {
-            if (!isBackendAvailable(Device::Type::AdaptiveCpp)) {
-                GTEST_SKIP() << "AdaptiveCpp not available";
-            }
-            device = Device::adaptivecpp(0);
         }
         else if (param.backend_name == "rocm") {
             if (!isBackendAvailable(Device::Type::ROCm)) {
@@ -481,12 +469,6 @@ protected:
                 GTEST_SKIP() << "OneAPI not available";
             }
             device = Device::oneapi(0);
-        }
-        else if (param.backend_name == "adaptivecpp") {
-            if (!isBackendAvailable(Device::Type::AdaptiveCpp)) {
-                GTEST_SKIP() << "AdaptiveCpp not available";
-            }
-            device = Device::adaptivecpp(0);
         }
         else if (param.backend_name == "rocm") {
             if (!isBackendAvailable(Device::Type::ROCm)) {
@@ -723,7 +705,7 @@ TEST_P(BilinearUpsamplingTest, ASPPWithUpsampling) {
 // ============================================================================
 
 std::vector<BackendDTypeParam> GenerateSegmentationTestParams() {
-    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "adaptivecpp", "rocm"};
+    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "rocm"};
 
     // Segmentation primarily uses float types for computer vision
     std::vector<std::pair<DType, std::string>> dtypes = {

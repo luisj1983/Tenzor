@@ -82,12 +82,6 @@ protected:
             }
             device_ = Device::oneapi(0);
         }
-        else if (param.backend_name == "adaptivecpp") {
-            if (!isBackendAvailable(Device::Type::AdaptiveCpp)) {
-                GTEST_SKIP() << "AdaptiveCpp not available";
-            }
-            device_ = Device::adaptivecpp(0);
-        }
 
         // Set tolerance based on data type
         // Swin has complex attention mechanisms, need relaxed tolerances
@@ -847,7 +841,7 @@ TEST_P(SwinMultiDTypeTest, SwinSmallGradientDTypeConsistency) {
 std::vector<BackendDTypeParam> GenerateParams() {
     std::vector<BackendDTypeParam> params;
 
-    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "adaptivecpp"};
+    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi"};
     std::vector<std::pair<DType, std::string>> dtypes = {
         {DType::Float32, "float32"},
         {DType::Float64, "float64"},

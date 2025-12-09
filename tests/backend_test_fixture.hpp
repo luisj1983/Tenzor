@@ -53,12 +53,6 @@ protected:
             }
             device = Device::oneapi(0);
         }
-        else if (backend_name == "adaptivecpp") {
-            if (!isBackendAvailable(Device::Type::AdaptiveCpp)) {
-                GTEST_SKIP() << "AdaptiveCpp backend not available";
-            }
-            device = Device::adaptivecpp(0);
-        }
         else {
             FAIL() << "Unknown backend: " << backend_name;
         }
@@ -102,7 +96,7 @@ inline bool BackendTest::initialized = false;
     INSTANTIATE_TEST_SUITE_P( \
         AllBackends, \
         TestSuiteName, \
-        ::testing::Values("cpu", "cuda", "vulkan", "oneapi", "adaptivecpp"), \
+        ::testing::Values("cpu", "cuda", "vulkan", "oneapi"), \
         [](const ::testing::TestParamInfo<std::string>& info) { \
             return info.param; \
         } \

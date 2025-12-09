@@ -11,56 +11,20 @@ namespace tenzor {
 // Forward declaration
 auto backend_registry() -> BackendLoader&;
 
-/**
- * @brief Early cleanup guard to ensure AdaptiveCpp cleanup happens before CUDA driver unloads.
- *
- * This uses std::atexit to register a cleanup handler. Since atexit handlers run in
- * LIFO order (last registered runs first), and the CUDA runtime registers its cleanup
- * early during library load, we need to register AFTER the static BackendLoader is
- * initialized but we want our cleanup to run BEFORE static destruction begins.
- *
- * The key insight is that atexit handlers run BEFORE static destructors. So by
- * registering an atexit handler that explicitly cleans up the AdaptiveCpp backend,
- * we ensure it's destroyed while the CUDA runtime is still available.
- *
- * See: https://github.com/AdaptiveCpp/AdaptiveCpp/issues/817
- */
-static bool g_atexit_registered = false;
-
-static void cleanup_adaptivecpp_before_cuda() {
-    // Explicitly destroy AdaptiveCpp backend before CUDA driver unloads
-    auto& loader = backend_registry();
-    if (loader.has_backend("adaptivecpp")) {
-        loader.unload_backend("adaptivecpp");
-    }
-}
-
 BackendLoader::~BackendLoader() {
-    // IMPORTANT: Destroy backends in reverse dependency order to avoid cleanup issues.
-    // AdaptiveCpp (when using CUDA target) depends on CUDA runtime, so it must be
-    // destroyed BEFORE CUDA backend. The order matters because AdaptiveCpp creates
-    // CUDA streams that become invalid if CUDA runtime unloads first.
-    //
-    // Destruction order (reverse of typical dependency):
-    // 1. AdaptiveCpp (depends on CUDA/ROCm runtimes)
-    // 2. OneAPI (independent SYCL runtime)
-    // 3. Vulkan, Metal, WebGPU (independent GPU APIs)
-    // 4. ROCm (AMD GPU runtime)
-    // 5. CUDA (NVIDIA GPU runtime)
-    // 6. CPU (always safe, no GPU dependencies)
+    // Destroy backends in reverse dependency order to avoid cleanup issues.
 
     // Clear device type mapping first
     device_to_backend_.clear();
 
     // Destroy backends in specific order to avoid runtime cleanup races
     const std::vector<std::string> destruction_order = {
-        "adaptivecpp",  // Must be destroyed first - uses CUDA/ROCm internally
         "oneapi",       // Independent SYCL runtime
         "vulkan",       // Independent GPU API
         "metal",        // Independent GPU API
         "webgpu",       // Independent GPU API
-        "rocm",         // AMD runtime (AdaptiveCpp may use this)
-        "cuda",         // NVIDIA runtime (AdaptiveCpp may use this)
+        "rocm",         // AMD runtime
+        "cuda",         // NVIDIA runtime
         "cpu"           // Always safe last
     };
 
@@ -134,16 +98,6 @@ auto BackendLoader::register_backend(std::string_view name,
         device_type = Device::Type::Metal;
     } else if (backend_name == "webgpu") {
         device_type = Device::Type::WebGPU;
-    } else if (backend_name == "adaptivecpp") {
-        device_type = Device::Type::AdaptiveCpp;
-        // Register atexit handler to cleanup AdaptiveCpp before CUDA driver unloads.
-        // This must be done here (when AdaptiveCpp is registered) so that the atexit
-        // handler runs AFTER CUDA's atexit cleanup but BEFORE static destructors.
-        // See: https://github.com/AdaptiveCpp/AdaptiveCpp/issues/817
-        if (!g_atexit_registered) {
-            std::atexit(cleanup_adaptivecpp_before_cuda);
-            g_atexit_registered = true;
-        }
     } else {
         device_type = Device::Type::CPU; // Default fallback
     }

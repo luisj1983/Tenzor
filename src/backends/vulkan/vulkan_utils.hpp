@@ -212,6 +212,18 @@ public:
 
     VkDescriptorPool pool() const { return pool_; }
 
+    /**
+     * @brief Reset the descriptor pool, freeing all allocated descriptor sets
+     *
+     * This should only be called when no descriptor sets are in use (i.e., after
+     * synchronization). All previously allocated descriptor sets become invalid.
+     */
+    void reset() {
+        if (pool_ != VK_NULL_HANDLE) {
+            vkResetDescriptorPool(device_, pool_, 0);
+        }
+    }
+
 private:
     VkDevice device_;
     VkDescriptorPool pool_ = VK_NULL_HANDLE;

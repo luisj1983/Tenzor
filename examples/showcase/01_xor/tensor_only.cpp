@@ -135,9 +135,12 @@ int main(int argc, char* argv[]) {
         // Print progress
         if ((epoch + 1) % print_every == 0 || epoch == 0) {
             // Calculate accuracy
+            // IMPORTANT: Store CPU tensors in variables to avoid dangling pointers
+            auto a2_cpu = a2.cpu();
+            auto y_cpu = y.cpu();
             int correct = 0;
-            const float* pred = a2.cpu().data<float>();
-            const float* tgt = y.cpu().data<float>();
+            const float* pred = a2_cpu.data<float>();
+            const float* tgt = y_cpu.data<float>();
             for (int i = 0; i < 4; ++i) {
                 float predicted = (pred[i] > 0.5f) ? 1.0f : 0.0f;
                 if (predicted == tgt[i]) correct++;
@@ -157,13 +160,17 @@ int main(int argc, char* argv[]) {
     auto predictions = manual_sigmoid(z2_final);
 
     // Move to CPU for printing
+    // IMPORTANT: Store CPU tensors in variables to keep them alive
+    // Calling .cpu().data<float>() directly creates a dangling pointer bug
+    // because the temporary tensor is destroyed at the semicolon.
+    auto X_cpu = X.cpu();
     auto pred_cpu = predictions.cpu();
     auto target_cpu = y.cpu();
 
     std::cout << "Input\t\tTarget\tPrediction\tRounded\n";
     std::cout << "----------------------------------------------\n";
 
-    const float* input_ptr = X.cpu().data<float>();
+    const float* input_ptr = X_cpu.data<float>();
     const float* target_ptr = target_cpu.data<float>();
     const float* pred_ptr = pred_cpu.data<float>();
 

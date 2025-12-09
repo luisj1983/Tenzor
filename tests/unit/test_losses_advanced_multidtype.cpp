@@ -83,12 +83,6 @@ protected:
             }
             device = Device::oneapi(0);
         }
-        else if (param.backend_name == "adaptivecpp") {
-            if (!isBackendAvailable(Device::Type::AdaptiveCpp)) {
-                GTEST_SKIP() << "AdaptiveCpp not available";
-            }
-            device = Device::adaptivecpp(0);
-        }
     }
 
     static bool isBackendAvailable(Device::Type type) {
@@ -657,7 +651,7 @@ TEST_P(LossAdvancedMultiDTypeTest, DiceLoss_ZeroDenominator) {
 // ============================================================================
 
 std::vector<LossAdvancedDTypeParam> GenerateLossAdvancedDTypeCombinations() {
-    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "adaptivecpp"};
+    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi"};
 
     // Advanced loss functions should work with Float32 and Float64
     // Note: Loss functions involve log/exp operations which accumulate numerical error

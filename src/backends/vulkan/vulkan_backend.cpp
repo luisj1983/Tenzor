@@ -72,9 +72,15 @@ VulkanBackend::~VulkanBackend() {
                                 ctx.commandBufferPool.data());
             ctx.commandBufferPool.clear();
         }
-        // Destroy fence
+        // Destroy fences
         if (ctx.pendingFence != VK_NULL_HANDLE) {
             vkDestroyFence(ctx.device, ctx.pendingFence, nullptr);
+        }
+        // Destroy frame fences from ring buffer
+        for (size_t i = 0; i < DeviceContext::MAX_FRAMES_IN_FLIGHT; ++i) {
+            if (ctx.frameFences[i] != VK_NULL_HANDLE) {
+                vkDestroyFence(ctx.device, ctx.frameFences[i], nullptr);
+            }
         }
         if (ctx.commandPool != VK_NULL_HANDLE) {
             vkDestroyCommandPool(ctx.device, ctx.commandPool, nullptr);
@@ -298,6 +304,9 @@ void VulkanBackend::createLogicalDevices() {
         // Initialize command buffer pool
         initCommandBufferPool(ctx);
 
+        // Initialize frame fences for batched execution
+        initFrameFences(ctx);
+
         // Initialize caches
         stagingBuffers_.push_back({});
         pipelineCaches_.push_back({});
@@ -485,6 +494,12 @@ VkCommandBuffer VulkanBackend::acquireCommandBuffer(int32_t device_id) {
         ensurePendingWorkComplete(device_id);
         vkResetCommandPool(ctx.device, ctx.commandPool, 0);
         ctx.nextCommandBufferIndex = 0;
+
+        // Also reset descriptor pool since all command buffers are complete
+        // and no descriptor sets are in use
+        if (ctx.descriptorPool) {
+            ctx.descriptorPool->reset();
+        }
     }
 
     VkCommandBuffer cmdBuffer = ctx.commandBufferPool[ctx.nextCommandBufferIndex++];
@@ -506,27 +521,41 @@ void VulkanBackend::releaseCommandBuffer(VkCommandBuffer cmdBuffer, int32_t devi
 void VulkanBackend::ensurePendingWorkComplete(int32_t device_id) {
     auto& ctx = devices_[device_id];
 
-    if (ctx.hasPendingWork) {
-        // First check fence status without waiting
-        VkResult status = vkGetFenceStatus(ctx.device, ctx.pendingFence);
-        if (status == VK_ERROR_DEVICE_LOST) {
-            throw std::runtime_error("Device lost before fence wait (fence status check)");
+    // Wait on all frame fences that have been submitted
+    if (ctx.submittedFrames > 0) {
+        // Collect all fences that might have pending work
+        std::vector<VkFence> fencesToWait;
+        for (size_t i = 0; i < DeviceContext::MAX_FRAMES_IN_FLIGHT; ++i) {
+            if (ctx.frameFences[i] != VK_NULL_HANDLE) {
+                // Check if fence is actually signaled (has pending work)
+                VkResult status = vkGetFenceStatus(ctx.device, ctx.frameFences[i]);
+                if (status == VK_NOT_READY) {
+                    fencesToWait.push_back(ctx.frameFences[i]);
+                } else if (status == VK_ERROR_DEVICE_LOST) {
+                    throw std::runtime_error("Device lost before fence wait (fence status check)");
+                }
+            }
         }
 
-        VkResult result = vkWaitForFences(ctx.device, 1, &ctx.pendingFence, VK_TRUE, UINT64_MAX);
-        if (result != VK_SUCCESS) {
-            // Get more info about the error
-            std::string error_msg = "Failed to wait for fence: " + std::to_string(result);
-            if (result == VK_ERROR_DEVICE_LOST) {
-                error_msg += " (VK_ERROR_DEVICE_LOST - GPU crash or timeout)";
-            } else if (result == VK_TIMEOUT) {
-                error_msg += " (VK_TIMEOUT)";
+        if (!fencesToWait.empty()) {
+            VkResult result = vkWaitForFences(ctx.device,
+                                              static_cast<uint32_t>(fencesToWait.size()),
+                                              fencesToWait.data(), VK_TRUE, UINT64_MAX);
+            if (result != VK_SUCCESS) {
+                std::string error_msg = "Failed to wait for fences: " + std::to_string(result);
+                if (result == VK_ERROR_DEVICE_LOST) {
+                    error_msg += " (VK_ERROR_DEVICE_LOST - GPU crash or timeout)";
+                }
+                throw std::runtime_error(error_msg);
             }
-            throw std::runtime_error(error_msg);
         }
-        vkResetFences(ctx.device, 1, &ctx.pendingFence);
-        ctx.hasPendingWork = false;
+
+        // Reset state - all work is now complete
+        ctx.submittedFrames = 0;
+        ctx.currentFrame = 0;
     }
+
+    ctx.hasPendingWork = false;
 }
 
 void VulkanBackend::endSingleTimeCommandsAsync(VkCommandBuffer commandBuffer, int32_t device_id) {
@@ -537,24 +566,31 @@ void VulkanBackend::endSingleTimeCommandsAsync(VkCommandBuffer commandBuffer, in
         throw std::runtime_error("Failed to end command buffer: " + std::to_string(result));
     }
 
-    // Wait for any previous work before submitting new work with the fence
-    ensurePendingWorkComplete(device_id);
+    // Use ring buffer of fences for true async execution
+    // Only wait if all frames in flight are occupied
+    size_t targetFrame = ctx.currentFrame;
 
-    // Verify fence is in unsignaled state before submit
-    VkResult fenceStatus = vkGetFenceStatus(ctx.device, ctx.pendingFence);
-    if (fenceStatus == VK_SUCCESS) {
-        // Fence is signaled, need to reset it
-        vkResetFences(ctx.device, 1, &ctx.pendingFence);
-    } else if (fenceStatus != VK_NOT_READY) {
-        throw std::runtime_error("Fence in invalid state before submit: " + std::to_string(fenceStatus));
+    // Check if we need to wait for the target frame's fence
+    // We only need to wait if we've submitted MAX_FRAMES_IN_FLIGHT work already
+    if (ctx.submittedFrames >= DeviceContext::MAX_FRAMES_IN_FLIGHT) {
+        // Wait for the oldest frame to complete before reusing its fence
+        VkFence fenceToWait = ctx.frameFences[targetFrame];
+        VkResult waitResult = vkWaitForFences(ctx.device, 1, &fenceToWait, VK_TRUE, UINT64_MAX);
+        if (waitResult != VK_SUCCESS) {
+            throw std::runtime_error("Failed to wait for frame fence: " + std::to_string(waitResult));
+        }
     }
+
+    // Get the fence for this submission and reset it
+    VkFence fence = ctx.frameFences[targetFrame];
+    vkResetFences(ctx.device, 1, &fence);
 
     VkSubmitInfo submitInfo{};
     submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     submitInfo.commandBufferCount = 1;
     submitInfo.pCommandBuffers = &commandBuffer;
 
-    result = vkQueueSubmit(ctx.computeQueue, 1, &submitInfo, ctx.pendingFence);
+    result = vkQueueSubmit(ctx.computeQueue, 1, &submitInfo, fence);
     if (result != VK_SUCCESS) {
         std::string error_msg = "Failed to submit queue with fence: " + std::to_string(result);
         if (result == VK_ERROR_DEVICE_LOST) {
@@ -563,9 +599,12 @@ void VulkanBackend::endSingleTimeCommandsAsync(VkCommandBuffer commandBuffer, in
         throw std::runtime_error(error_msg);
     }
 
+    // Move to next frame slot (ring buffer)
+    ctx.currentFrame = (ctx.currentFrame + 1) % DeviceContext::MAX_FRAMES_IN_FLIGHT;
+    ctx.submittedFrames = std::min(ctx.submittedFrames + 1, DeviceContext::MAX_FRAMES_IN_FLIGHT);
+
+    // Also mark pendingFence for legacy code paths
     ctx.hasPendingWork = true;
-    // NOTE: We don't wait here - that's the whole point of async submission!
-    // The fence will be waited on when we need to read data back to CPU
 }
 
 auto VulkanBackend::synchronize(int32_t device_id) -> void {
@@ -574,15 +613,148 @@ auto VulkanBackend::synchronize(int32_t device_id) -> void {
     }
     auto& ctx = devices_[device_id];
 
-    // First ensure any fence-tracked work is complete
+    // First ensure any fence-tracked work is complete (legacy pendingFence)
     ensurePendingWorkComplete(device_id);
 
-    // Then wait for all device operations
+    // Wait for all frame fences in the ring buffer
+    if (ctx.submittedFrames > 0) {
+        std::vector<VkFence> fencesToWait;
+        for (size_t i = 0; i < DeviceContext::MAX_FRAMES_IN_FLIGHT; ++i) {
+            if (ctx.frameFences[i] != VK_NULL_HANDLE) {
+                fencesToWait.push_back(ctx.frameFences[i]);
+            }
+        }
+        if (!fencesToWait.empty()) {
+            vkWaitForFences(ctx.device, static_cast<uint32_t>(fencesToWait.size()),
+                           fencesToWait.data(), VK_TRUE, UINT64_MAX);
+        }
+        ctx.submittedFrames = 0;
+        ctx.currentFrame = 0;
+    }
+
+    // Then wait for all device operations (belt and suspenders)
     vkDeviceWaitIdle(ctx.device);
 
     // Reset command pool and pool index
     vkResetCommandPool(ctx.device, ctx.commandPool, 0);
     ctx.nextCommandBufferIndex = 0;
+
+    // Reset batching state
+    ctx.activeCommandBuffer = VK_NULL_HANDLE;
+    ctx.operationsInBatch = 0;
+
+    // Reset descriptor pool to reclaim descriptor sets
+    // This is safe because all GPU work is complete after vkDeviceWaitIdle
+    if (ctx.descriptorPool) {
+        ctx.descriptorPool->reset();
+    }
+}
+
+// ============================================================================
+// Batched Command Execution for Performance
+// ============================================================================
+
+void VulkanBackend::initFrameFences(DeviceContext& ctx) {
+    VkFenceCreateInfo fenceInfo{};
+    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;  // Start signaled so first wait doesn't block
+
+    for (size_t i = 0; i < DeviceContext::MAX_FRAMES_IN_FLIGHT; ++i) {
+        vulkan::checkVk(vkCreateFence(ctx.device, &fenceInfo, nullptr, &ctx.frameFences[i]),
+                       "Failed to create frame fence");
+    }
+
+    // Pre-allocate command buffers for each frame
+    VkCommandBufferAllocateInfo allocInfo{};
+    allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocInfo.commandPool = ctx.commandPool;
+    allocInfo.commandBufferCount = static_cast<uint32_t>(DeviceContext::MAX_FRAMES_IN_FLIGHT);
+
+    vulkan::checkVk(vkAllocateCommandBuffers(ctx.device, &allocInfo, ctx.frameCommandBuffers.data()),
+                   "Failed to allocate frame command buffers");
+}
+
+VkCommandBuffer VulkanBackend::getOrCreateBatchCommandBuffer(int32_t device_id) {
+    auto& ctx = devices_[device_id];
+
+    // If no active batch, start one
+    if (ctx.activeCommandBuffer == VK_NULL_HANDLE) {
+        // Wait for this frame's fence if it has pending work
+        if (ctx.submittedFrames > 0) {
+            waitForFrame(device_id, ctx.currentFrame);
+        }
+
+        ctx.activeCommandBuffer = ctx.frameCommandBuffers[ctx.currentFrame];
+
+        // Reset and begin the command buffer
+        vkResetCommandBuffer(ctx.activeCommandBuffer, 0);
+
+        VkCommandBufferBeginInfo beginInfo{};
+        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(ctx.activeCommandBuffer, &beginInfo);
+
+        ctx.operationsInBatch = 0;
+    }
+
+    return ctx.activeCommandBuffer;
+}
+
+void VulkanBackend::recordOperationToBatch(int32_t device_id) {
+    auto& ctx = devices_[device_id];
+    ctx.operationsInBatch++;
+
+    // Auto-submit if batch is full
+    if (ctx.operationsInBatch >= DeviceContext::MAX_OPERATIONS_PER_BATCH) {
+        submitBatchIfNeeded(device_id, true);
+    }
+}
+
+void VulkanBackend::submitBatchIfNeeded(int32_t device_id, bool force) {
+    auto& ctx = devices_[device_id];
+
+    if (ctx.activeCommandBuffer == VK_NULL_HANDLE || ctx.operationsInBatch == 0) {
+        return;  // Nothing to submit
+    }
+
+    if (!force && ctx.operationsInBatch < DeviceContext::MAX_OPERATIONS_PER_BATCH / 2) {
+        return;  // Let more operations accumulate
+    }
+
+    // End and submit the command buffer
+    vkEndCommandBuffer(ctx.activeCommandBuffer);
+
+    VkFence fence = ctx.frameFences[ctx.currentFrame];
+
+    // Reset fence before use
+    vkResetFences(ctx.device, 1, &fence);
+
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &ctx.activeCommandBuffer;
+
+    VkResult result = vkQueueSubmit(ctx.computeQueue, 1, &submitInfo, fence);
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("Failed to submit batch command buffer: " + std::to_string(result));
+    }
+
+    // Move to next frame slot
+    ctx.activeCommandBuffer = VK_NULL_HANDLE;
+    ctx.operationsInBatch = 0;
+    ctx.currentFrame = (ctx.currentFrame + 1) % DeviceContext::MAX_FRAMES_IN_FLIGHT;
+    ctx.submittedFrames = std::min(ctx.submittedFrames + 1, DeviceContext::MAX_FRAMES_IN_FLIGHT);
+}
+
+void VulkanBackend::waitForFrame(int32_t device_id, size_t frameIndex) {
+    auto& ctx = devices_[device_id];
+    VkFence fence = ctx.frameFences[frameIndex];
+
+    VkResult result = vkWaitForFences(ctx.device, 1, &fence, VK_TRUE, UINT64_MAX);
+    if (result != VK_SUCCESS && result != VK_TIMEOUT) {
+        throw std::runtime_error("Failed to wait for frame fence: " + std::to_string(result));
+    }
 }
 
 auto VulkanBackend::create_stream(int32_t device_id) -> StreamHandle {
@@ -838,8 +1010,24 @@ VkDescriptorSet VulkanBackend::allocateAndWriteDescriptorSet(
     allocInfo.pSetLayouts = &layout;
 
     VkDescriptorSet descriptorSet;
-    vulkan::checkVk(vkAllocateDescriptorSets(ctx.device, &allocInfo, &descriptorSet),
-                    "Failed to allocate descriptor set");
+    VkResult result = vkAllocateDescriptorSets(ctx.device, &allocInfo, &descriptorSet);
+
+    // If descriptor pool is exhausted, wait for pending work, reset, and retry
+    if (result == VK_ERROR_OUT_OF_POOL_MEMORY || result == VK_ERROR_FRAGMENTED_POOL) {
+        // Wait for all GPU work to complete before resetting
+        ensurePendingWorkComplete(device_id);
+        vkDeviceWaitIdle(ctx.device);
+
+        // Reset command pool and descriptor pool
+        vkResetCommandPool(ctx.device, ctx.commandPool, 0);
+        ctx.nextCommandBufferIndex = 0;
+        ctx.descriptorPool->reset();
+
+        // Retry allocation
+        result = vkAllocateDescriptorSets(ctx.device, &allocInfo, &descriptorSet);
+    }
+
+    vulkan::checkVk(result, "Failed to allocate descriptor set");
 
     // Write descriptor set bindings
     std::vector<VkDescriptorBufferInfo> bufferInfos(bufferBindings.size());
@@ -2780,8 +2968,14 @@ auto VulkanBackend::dispatchReduction(const std::string& op_name,
 
 auto VulkanBackend::dispatchMatmul(const Tensor& a, const Tensor& b) -> Tensor {
     // Optimized matmul with proper buffer binding and tiled execution
-    auto a_shape = a.shape();
-    auto b_shape = b.shape();
+
+    // IMPORTANT: Make inputs contiguous if they aren't
+    // Permuted/transposed tensors have non-standard strides that the shader doesn't handle
+    Tensor a_contig = a.is_contiguous() ? a : dispatchContiguous(a);
+    Tensor b_contig = b.is_contiguous() ? b : dispatchContiguous(b);
+
+    auto a_shape = a_contig.shape();
+    auto b_shape = b_contig.shape();
 
     // Handle 1D vector × 2D matrix case
     if (a_shape.size() == 1 && b_shape.size() == 2) {
@@ -2793,8 +2987,8 @@ auto VulkanBackend::dispatchMatmul(const Tensor& a, const Tensor& b) -> Tensor {
         // Treat 1D vector as row vector: (N,) -> (1, N)
         // Then matmul becomes: (1, N) × (N, K) = (1, K)
         // Finally squeeze to get (K,)
-        Tensor a_2d = a.unsqueeze(0);  // (N,) -> (1, N)
-        Tensor result_2d = dispatchMatmul(a_2d, b);  // (1, K)
+        Tensor a_2d = a_contig.unsqueeze(0);  // (N,) -> (1, N)
+        Tensor result_2d = dispatchMatmul(a_2d, b_contig);  // (1, K)
 
         // Return as 1D tensor
         std::vector<int64_t> result_shape = {result_2d.shape()[1]};
@@ -2808,12 +3002,12 @@ auto VulkanBackend::dispatchMatmul(const Tensor& a, const Tensor& b) -> Tensor {
         throw std::invalid_argument("Incompatible dimensions for matmul");
     }
 
-    int32_t device_id = a.device().index;
+    int32_t device_id = a_contig.device().index;
 
     // Select correct pipeline based on dtype
-    bool is_float64 = (a.dtype() == DType::Float64);
-    bool is_float16 = (a.dtype() == DType::Float16);
-    bool is_int32 = (a.dtype() == DType::Int32);
+    bool is_float64 = (a_contig.dtype() == DType::Float64);
+    bool is_float16 = (a_contig.dtype() == DType::Float16);
+    bool is_int32 = (a_contig.dtype() == DType::Int32);
     std::string shader_name;
     if (is_float64) {
         shader_name = "matmul_f64";
@@ -2827,16 +3021,16 @@ auto VulkanBackend::dispatchMatmul(const Tensor& a, const Tensor& b) -> Tensor {
     auto* pipeline = getPipeline(shader_name, device_id);
 
     std::vector<int64_t> out_shape = {a_shape[0], b_shape[1]};
-    Tensor output(out_shape, a.dtype(), a.device());
+    Tensor output(out_shape, a_contig.dtype(), a_contig.device());
 
     // Get VkBuffer handles
-    VkBuffer buffer_a = getVulkanBuffer(a.data_ptr());
-    VkBuffer buffer_b = getVulkanBuffer(b.data_ptr());
+    VkBuffer buffer_a = getVulkanBuffer(a_contig.data_ptr());
+    VkBuffer buffer_b = getVulkanBuffer(b_contig.data_ptr());
     VkBuffer buffer_c = getVulkanBuffer(output.data_ptr());
 
     // Calculate buffer sizes
-    size_t buffer_size_a = a.numel() * a.dtype_size();
-    size_t buffer_size_b = b.numel() * b.dtype_size();
+    size_t buffer_size_a = a_contig.numel() * a_contig.dtype_size();
+    size_t buffer_size_b = b_contig.numel() * b_contig.dtype_size();
     size_t buffer_size_c = output.numel() * output.dtype_size();
 
     // Allocate and write descriptor set
@@ -3962,21 +4156,104 @@ auto VulkanBackend::dispatchBatchNorm2dBackward(const Tensor& grad_out, const Te
                                                  const Tensor* gamma, float epsilon)
                                                  -> std::tuple<Tensor, Tensor, Tensor> {
     auto input_shape = input.shape();
-    int32_t device_id = input.device().index;
-    auto* pipeline = getPipeline("batch_norm2d_backward", device_id);
+    if (input_shape.size() != 4) {
+        throw std::invalid_argument("batchnorm2d_backward requires 4D input (N, C, H, W)");
+    }
 
+    int64_t batch = input_shape[0];
+    int64_t channels = input_shape[1];
+    int64_t height = input_shape[2];
+    int64_t width = input_shape[3];
+    int64_t spatial_size = height * width;
+    int64_t n_elements = input.numel();
+
+    int32_t device_id = input.device().index;
+    auto* pipeline = getPipeline("batchnorm2d_backward", device_id);
+
+    // Create output tensors
     std::vector<int64_t> grad_in_shape(input_shape.begin(), input_shape.end());
     Tensor grad_input(grad_in_shape, input.dtype(), input.device());
 
-    int64_t num_channels = input_shape[1];
-    std::vector<int64_t> param_shape = {num_channels};
-    Tensor grad_gamma(param_shape, input.dtype(), input.device());
-    Tensor grad_beta(param_shape, input.dtype(), input.device());
+    std::vector<int64_t> param_shape = {channels};
+    // Initialize grad_gamma and grad_beta to zeros since shader uses atomicAdd
+    Tensor grad_gamma = dispatchZeros(param_shape, input.dtype(), input.device());
+    Tensor grad_beta = dispatchZeros(param_shape, input.dtype(), input.device());
+
+    // Get VkBuffer handles
+    VkBuffer buffer_grad_out = getVulkanBuffer(grad_out.data_ptr());
+    VkBuffer buffer_input = getVulkanBuffer(input.data_ptr());
+    VkBuffer buffer_mean = getVulkanBuffer(mean.data_ptr());
+    VkBuffer buffer_var = getVulkanBuffer(var.data_ptr());
+    VkBuffer buffer_grad_input = getVulkanBuffer(grad_input.data_ptr());
+    VkBuffer buffer_grad_gamma = getVulkanBuffer(grad_gamma.data_ptr());
+    VkBuffer buffer_grad_beta = getVulkanBuffer(grad_beta.data_ptr());
+
+    // Calculate buffer sizes
+    size_t buffer_size_input = n_elements * input.dtype_size();
+    size_t buffer_size_channel = channels * input.dtype_size();
+
+    // Set up descriptor bindings
+    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+        {0, buffer_grad_out},    // grad_output
+        {1, buffer_input},       // input
+        {2, buffer_mean},        // mean
+        {3, buffer_var},         // variance
+    };
+    std::vector<size_t> sizes = {
+        buffer_size_input,  // grad_output
+        buffer_size_input,  // input
+        buffer_size_channel, // mean
+        buffer_size_channel, // variance
+    };
+
+    // Handle optional gamma
+    if (gamma) {
+        VkBuffer buffer_gamma = getVulkanBuffer(gamma->data_ptr());
+        bindings.push_back({4, buffer_gamma});
+        sizes.push_back(buffer_size_channel);
+    } else {
+        // Use dummy buffer for gamma binding
+        bindings.push_back({4, buffer_mean});
+        sizes.push_back(buffer_size_channel);
+    }
+
+    // Add output buffers
+    bindings.push_back({5, buffer_grad_input});
+    bindings.push_back({6, buffer_grad_gamma});
+    bindings.push_back({7, buffer_grad_beta});
+    sizes.push_back(buffer_size_input);   // grad_input
+    sizes.push_back(buffer_size_channel); // grad_gamma
+    sizes.push_back(buffer_size_channel); // grad_beta
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
+    // Push constants
+    struct PushConstants {
+        uint32_t n_elements;
+        uint32_t batch;
+        uint32_t channels;
+        uint32_t spatial_size;
+        float eps;
+        uint32_t has_gamma;
+    } push_constants;
+
+    push_constants.n_elements = static_cast<uint32_t>(n_elements);
+    push_constants.batch = static_cast<uint32_t>(batch);
+    push_constants.channels = static_cast<uint32_t>(channels);
+    push_constants.spatial_size = static_cast<uint32_t>(spatial_size);
+    push_constants.eps = epsilon;
+    push_constants.has_gamma = (gamma != nullptr) ? 1 : 0;
 
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(PushConstants), &push_constants);
 
-    uint32_t workgroups = (input.numel() + 255) / 256;
+    uint32_t workgroups = (n_elements + 255) / 256;
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     endSingleTimeCommands(cmdBuffer, device_id);
@@ -5669,32 +5946,40 @@ auto VulkanBackend::dispatchContiguous(const Tensor& input) -> Tensor {
         device_id, pipeline, bindings, sizes);
 
     // Push constants structure matching the shader
+    // IMPORTANT: The shader uses uvec4/ivec4 which require 16-byte alignment
+    // We need padding after base_offset to align the first uvec4
     struct PushConstants {
         uint32_t n_elements;
         uint32_t ndims;
         uint32_t base_offset;
-        uint32_t shape_0, shape_1, shape_2, shape_3;
-        uint32_t shape_4, shape_5, shape_6, shape_7;
-        int32_t strides_0, strides_1, strides_2, strides_3;
-        int32_t strides_4, strides_5, strides_6, strides_7;
+        uint32_t _padding;  // Padding to align shape_0_3 to 16 bytes
+        uint32_t shape_0_3[4];   // shape[0..3] as uvec4
+        uint32_t shape_4_7[4];   // shape[4..7] as uvec4
+        int32_t strides_0_3[4];  // strides[0..3] as ivec4
+        int32_t strides_4_7[4];  // strides[4..7] as ivec4
     } push_constants;
 
     push_constants.n_elements = static_cast<uint32_t>(total_elements);
     push_constants.ndims = static_cast<uint32_t>(ndims);
     push_constants.base_offset = static_cast<uint32_t>(base_offset);
+    push_constants._padding = 0;
 
     // Initialize all shape/stride values to defaults
-    push_constants.shape_0 = push_constants.shape_1 = push_constants.shape_2 = push_constants.shape_3 = 1;
-    push_constants.shape_4 = push_constants.shape_5 = push_constants.shape_6 = push_constants.shape_7 = 1;
-    push_constants.strides_0 = push_constants.strides_1 = push_constants.strides_2 = push_constants.strides_3 = 0;
-    push_constants.strides_4 = push_constants.strides_5 = push_constants.strides_6 = push_constants.strides_7 = 0;
+    for (int i = 0; i < 4; ++i) {
+        push_constants.shape_0_3[i] = 1;
+        push_constants.shape_4_7[i] = 1;
+        push_constants.strides_0_3[i] = 0;
+        push_constants.strides_4_7[i] = 0;
+    }
 
     // Fill in actual shape and strides
-    uint32_t* shape_arr = &push_constants.shape_0;
-    int32_t* strides_arr = &push_constants.strides_0;
-    for (int64_t i = 0; i < ndims && i < 8; ++i) {
-        shape_arr[i] = static_cast<uint32_t>(shape[i]);
-        strides_arr[i] = static_cast<int32_t>(strides[i]);
+    for (int64_t i = 0; i < ndims && i < 4; ++i) {
+        push_constants.shape_0_3[i] = static_cast<uint32_t>(shape[i]);
+        push_constants.strides_0_3[i] = static_cast<int32_t>(strides[i]);
+    }
+    for (int64_t i = 4; i < ndims && i < 8; ++i) {
+        push_constants.shape_4_7[i - 4] = static_cast<uint32_t>(shape[i]);
+        push_constants.strides_4_7[i - 4] = static_cast<int32_t>(strides[i]);
     }
 
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);

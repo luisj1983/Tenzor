@@ -89,12 +89,6 @@ protected:
             }
             device = Device::oneapi(0);
         }
-        else if (param.backend_name == "adaptivecpp") {
-            if (!isBackendAvailable(Device::Type::AdaptiveCpp)) {
-                GTEST_SKIP() << "AdaptiveCpp not available";
-            }
-            device = Device::adaptivecpp(0);
-        }
 
         // Create unique test directory
         std::stringstream ss;
@@ -325,7 +319,7 @@ TEST_P(ModelCheckpointMultiDTypeTest, AutoCheckpointMetricMode) {
 // ==============================================================================
 
 std::vector<BackendDTypeParam> GenerateCheckpointCombinations() {
-    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "adaptivecpp"};
+    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi"};
 
     // Float32 and Float64 for model parameters
     std::vector<std::pair<DType, std::string>> dtypes = {

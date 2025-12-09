@@ -17,20 +17,7 @@ endif()
 # Include GoogleTest module for gtest_discover_tests
 include(GoogleTest)
 
-# Set environment variable to skip AdaptiveCpp during test discovery.
-# AdaptiveCpp with CUDA backend has a known race condition during process exit
-# where CUDA runtime may shut down before AdaptiveCpp cleanup completes, causing
-# CUDA error 4 (cudaErrorCudartUnloading). Since test discovery just lists tests
-# and doesn't actually need GPU backends, we skip AdaptiveCpp to avoid this issue.
-set(TENZOR_TEST_DISCOVERY_ENV "TENZOR_SKIP_ADAPTIVECPP=1")
-
 # Custom function that wraps gtest_discover_tests
-# The AdaptiveCpp backend with CUDA has a known race condition during process exit
-# where CUDA runtime may shut down before AdaptiveCpp cleanup completes, causing
-# CUDA error 4 (cudaErrorCudartUnloading).
-#
-# We set TENZOR_SKIP_ADAPTIVECPP=1 only during test discovery (--gtest_list_tests),
-# not during actual test execution.
 function(tenzor_discover_tests target)
     cmake_parse_arguments(PARSE_ARGV 1 ARG "" "DISCOVERY_TIMEOUT" "PROPERTIES")
     set(TIMEOUT ${ARG_DISCOVERY_TIMEOUT})
@@ -38,25 +25,6 @@ function(tenzor_discover_tests target)
         set(TIMEOUT 30)
     endif()
     set(PROPS ${ARG_PROPERTIES})
-
-    # Create a wrapper script that only skips AdaptiveCpp during discovery (--gtest_list_tests)
-    set(WRAPPER_SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/${target}_discovery_wrapper.sh")
-    file(WRITE ${WRAPPER_SCRIPT}
-"#!/bin/bash
-# Wrapper script - only skip AdaptiveCpp during test discovery, not execution
-# Check if this is a discovery run (--gtest_list_tests argument present)
-for arg in \"\$@\"; do
-    if [[ \"\$arg\" == \"--gtest_list_tests\"* ]]; then
-        export TENZOR_SKIP_ADAPTIVECPP=1
-        break
-    fi
-done
-exec \"\$@\"
-")
-    file(CHMOD ${WRAPPER_SCRIPT} PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE)
-
-    # Set the TEST_LAUNCHER property - used for both discovery and execution
-    set_property(TARGET ${target} PROPERTY TEST_LAUNCHER "${WRAPPER_SCRIPT}")
 
     # Now call gtest_discover_tests
     gtest_discover_tests(${target}
@@ -998,6 +966,44 @@ if(TENZOR_BUILD_CUDA)
         TENZOR_USE_CUDA
     )
 
+    # Phase 2: Offload Engine Diagnostic tests
+    add_executable(test_offload_engine_diagnostic
+        core/test_offload_engine_diagnostic.cpp
+    )
+
+    target_link_libraries(test_offload_engine_diagnostic PRIVATE
+        tenzor_core
+        GTest::gtest_main
+        CUDA::cudart
+    )
+
+    target_include_directories(test_offload_engine_diagnostic PRIVATE
+        ${CUDAToolkit_INCLUDE_DIRS}
+    )
+
+    target_compile_definitions(test_offload_engine_diagnostic PRIVATE
+        TENZOR_USE_CUDA
+    )
+
+    # Phase 2: Offload Engine Stress tests (larger than GPU memory)
+    add_executable(test_offload_engine_stress
+        core/test_offload_engine_stress.cpp
+    )
+
+    target_link_libraries(test_offload_engine_stress PRIVATE
+        tenzor_core
+        GTest::gtest_main
+        CUDA::cudart
+    )
+
+    target_include_directories(test_offload_engine_stress PRIVATE
+        ${CUDAToolkit_INCLUDE_DIRS}
+    )
+
+    target_compile_definitions(test_offload_engine_stress PRIVATE
+        TENZOR_USE_CUDA
+    )
+
     # Phase 2: Parameter Offloading API tests
     add_executable(test_parameter_offload
         nn/test_offload.cpp
@@ -1205,10 +1211,6 @@ endif()
 # )
 
 # Register tests with CTest
-# Note: tenzor_discover_tests function is defined at the top of this file
-# and includes the TENZOR_SKIP_ADAPTIVECPP environment variable to avoid
-# CUDA cleanup race conditions during test discovery.
-
 tenzor_discover_tests(tenzor_unit_tests DISCOVERY_TIMEOUT 30)
 tenzor_discover_tests(tenzor_integration_tests DISCOVERY_TIMEOUT 30)
 tenzor_discover_tests(test_cuda_scalar_debug DISCOVERY_TIMEOUT 30)

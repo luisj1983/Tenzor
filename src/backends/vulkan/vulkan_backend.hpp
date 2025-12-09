@@ -13,6 +13,7 @@
 #include "tenzor/core/device.hpp"
 #include "vulkan_utils.hpp"
 #include <vulkan/vulkan.h>
+#include <array>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -68,10 +69,22 @@ private:
         VkFence pendingFence = VK_NULL_HANDLE;  // Fence for last submitted work
         bool hasPendingWork = false;            // Whether fence needs to be waited on
 
+        // Ring buffer of fences for true async execution
+        static constexpr size_t MAX_FRAMES_IN_FLIGHT = 4;
+        std::array<VkFence, MAX_FRAMES_IN_FLIGHT> frameFences{};
+        std::array<VkCommandBuffer, MAX_FRAMES_IN_FLIGHT> frameCommandBuffers{};
+        size_t currentFrame = 0;
+        size_t submittedFrames = 0;  // Number of frames submitted but not yet waited on
+
         // Command buffer pool for reuse
         std::vector<VkCommandBuffer> commandBufferPool;
         size_t nextCommandBufferIndex = 0;
         static constexpr size_t COMMAND_BUFFER_POOL_SIZE = 32;
+
+        // Active command buffer for batching multiple operations
+        VkCommandBuffer activeCommandBuffer = VK_NULL_HANDLE;
+        size_t operationsInBatch = 0;
+        static constexpr size_t MAX_OPERATIONS_PER_BATCH = 64;
     };
 
     // Staging buffer for host-device transfers
@@ -107,6 +120,13 @@ private:
     void initCommandBufferPool(DeviceContext& ctx);
     VkCommandBuffer acquireCommandBuffer(int32_t device_id);
     void releaseCommandBuffer(VkCommandBuffer cmdBuffer, int32_t device_id);
+
+    // Batched command execution for improved performance
+    void initFrameFences(DeviceContext& ctx);
+    VkCommandBuffer getOrCreateBatchCommandBuffer(int32_t device_id);
+    void recordOperationToBatch(int32_t device_id);
+    void submitBatchIfNeeded(int32_t device_id, bool force = false);
+    void waitForFrame(int32_t device_id, size_t frameIndex);
 
     // Pipeline management
     vulkan::ComputePipeline* getPipeline(const std::string& shader_name, int32_t device_id);

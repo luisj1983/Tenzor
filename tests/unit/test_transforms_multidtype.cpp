@@ -70,12 +70,6 @@ protected:
             }
             device = Device::oneapi(0);
         }
-        else if (param.backend_name == "adaptivecpp") {
-            if (!isBackendAvailable(Device::Type::AdaptiveCpp)) {
-                GTEST_SKIP() << "AdaptiveCpp not available";
-            }
-            device = Device::adaptivecpp(0);
-        }
 
         // Create test tensors
         t2d = zeros({2, 3}, dtype, device);
@@ -350,7 +344,7 @@ TEST_P(TransformMultiDTypeTest, Combined_PermuteTranspose) {
 // ==============================================================================
 
 std::vector<BackendDTypeParam> GenerateTransformCombinations() {
-    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "adaptivecpp"};
+    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi"};
 
     std::vector<std::pair<DType, std::string>> dtypes = {
         {DType::Float32, "float32"},

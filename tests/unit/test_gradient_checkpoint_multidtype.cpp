@@ -83,12 +83,6 @@ protected:
             }
             device = Device::oneapi(0);
         }
-        else if (param.backend_name == "adaptivecpp") {
-            if (!isBackendAvailable(Device::Type::AdaptiveCpp)) {
-                GTEST_SKIP() << "AdaptiveCpp not available";
-            }
-            device = Device::adaptivecpp(0);
-        }
 
         reset_checkpoint_stats();
     }
@@ -390,7 +384,7 @@ TEST_P(GradientCheckpointMultiDTypeTest, MemorySavingsEstimation) {
 // ==============================================================================
 
 std::vector<BackendDTypeParam> GenerateCheckpointCombinations() {
-    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "adaptivecpp"};
+    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi"};
 
     // Only Float32 and Float64 for gradient operations
     std::vector<std::pair<DType, std::string>> dtypes = {
