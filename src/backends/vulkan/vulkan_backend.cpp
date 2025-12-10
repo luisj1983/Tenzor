@@ -30,6 +30,63 @@
 
 namespace tenzor {
 
+// Helper function to insert transfer-to-compute barrier
+// Required when a compute shader reads from a buffer that was just written by a transfer op
+inline void insertTransferToComputeBarrier(VkCommandBuffer cmdBuffer) {
+    if constexpr (vulkan_config::USE_COMMAND_BATCHING) {
+        VkMemoryBarrier memoryBarrier{};
+        memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        memoryBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        memoryBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmdBuffer,
+                            VK_PIPELINE_STAGE_TRANSFER_BIT,
+                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                            0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
+    }
+    // When batching is disabled, each operation is submitted separately so no barrier needed
+}
+
+// Helper function to insert a pre-read barrier
+// Required BEFORE a compute shader that reads from a buffer that may have pending writes
+// from a previous compute operation in the same batch
+inline void insertPreReadBarrier(VkCommandBuffer cmdBuffer) {
+    if constexpr (vulkan_config::USE_COMMAND_BATCHING) {
+        VkMemoryBarrier memoryBarrier{};
+        memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        memoryBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmdBuffer,
+                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                            0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
+    }
+}
+
+// Helper function to insert compute shader memory barrier
+// When batching is enabled, uses compute-to-compute barriers for chained ops
+// When batching is disabled, uses compute-to-host barriers for immediate readback
+inline void insertComputeBarrier(VkCommandBuffer cmdBuffer) {
+    VkMemoryBarrier memoryBarrier{};
+    memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+
+    if constexpr (vulkan_config::USE_COMMAND_BATCHING) {
+        // Batching enabled: barrier for subsequent compute operations
+        memoryBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmdBuffer,
+                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                            0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
+    } else {
+        // Batching disabled: barrier for host/transfer readback
+        memoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
+        vkCmdPipelineBarrier(cmdBuffer,
+                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                            VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
+                            0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
+    }
+}
+
 VulkanBackend::VulkanBackend() {
     try {
         initVulkan();
@@ -362,6 +419,12 @@ auto VulkanBackend::deallocate(void* ptr) -> void {
     auto it = allocations_.find(ptr);
     if (it != allocations_.end()) {
         auto [bytes, device_id] = it->second;
+        // CRITICAL: When batching is enabled, the buffer may be referenced by
+        // a command buffer that hasn't been submitted yet. We must force-submit
+        // the batch and wait for it to complete before freeing the buffer.
+        if constexpr (vulkan_config::USE_COMMAND_BATCHING) {
+            submitBatchIfNeeded(device_id, true);  // Force submit any pending batch
+        }
         // Ensure any pending async GPU work completes before freeing memory
         ensurePendingWorkComplete(device_id);
         freeDeviceMemory(ptr, device_id);
@@ -399,25 +462,41 @@ auto VulkanBackend::copy(void* dst, const void* src, size_t bytes,
             copyRegion.size = bytes;
             vkCmdCopyBuffer(cmdBuffer, staging.buffer->buffer(),
                           dst_buffer, 1, &copyRegion);
+            // Insert barrier for subsequent compute ops that may read this buffer
+            insertTransferToComputeBarrier(cmdBuffer);
             endSingleTimeCommands(cmdBuffer, device_id);
+
+            // CRITICAL: With batching enabled, force submit now to ensure staging buffer
+            // content is copied to device before staging buffer can be reused.
+            // Without this, a subsequent HostToDevice copy could overwrite staging buffer
+            // before our copy command is actually submitted.
+            if constexpr (vulkan_config::USE_COMMAND_BATCHING) {
+                submitBatchIfNeeded(device_id, true);  // Force submit
+                ensurePendingWorkComplete(device_id);   // Wait for copy to complete
+            }
             break;
         }
         case CopyKind::DeviceToHost: {
+            // Flush any batched commands before reading back data
+            if constexpr (vulkan_config::USE_COMMAND_BATCHING) {
+                submitBatchIfNeeded(device_id, true);  // Force submit
+            }
             // Ensure any pending GPU compute work is complete before copying
             ensurePendingWorkComplete(device_id);
 
             auto& staging = getStagingBuffer(device_id, bytes);
 
-            // Copy from device to staging
+            // Copy from device to staging - MUST use immediate execution, not batching
+            // because we need the data available right after this call
             auto [src_buffer, src_offset] = getVulkanBufferAndOffset(src);
-            VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+            VkCommandBuffer cmdBuffer = acquireCommandBuffer(device_id);  // Bypass batching
             VkBufferCopy copyRegion{};
             copyRegion.srcOffset = src_offset;
             copyRegion.dstOffset = 0;  // Staging buffer starts at 0
             copyRegion.size = bytes;
             vkCmdCopyBuffer(cmdBuffer, src_buffer,
                           staging.buffer->buffer(), 1, &copyRegion);
-            endSingleTimeCommands(cmdBuffer, device_id);
+            endSingleTimeCommandsAsync(cmdBuffer, device_id);  // Submit immediately
 
             // Ensure copy is complete before reading from staging buffer
             ensurePendingWorkComplete(device_id);
@@ -437,6 +516,8 @@ auto VulkanBackend::copy(void* dst, const void* src, size_t bytes,
             copyRegion.size = bytes;
             vkCmdCopyBuffer(cmdBuffer, src_buffer,
                           dst_buffer, 1, &copyRegion);
+            // Insert barrier for subsequent compute ops that may read this buffer
+            insertTransferToComputeBarrier(cmdBuffer);
             endSingleTimeCommands(cmdBuffer, device_id);
             break;
         }
@@ -464,13 +545,23 @@ VulkanBackend::StagingBuffer& VulkanBackend::getStagingBuffer(int32_t device_id,
 }
 
 VkCommandBuffer VulkanBackend::beginSingleTimeCommands(int32_t device_id) {
-    // Use pooled command buffer for reduced allocation overhead
-    return acquireCommandBuffer(device_id);
+    if constexpr (vulkan_config::USE_COMMAND_BATCHING) {
+        // Use batched command buffer for reduced submission overhead
+        return getOrCreateBatchCommandBuffer(device_id);
+    } else {
+        // Legacy path: individual command buffer per operation
+        return acquireCommandBuffer(device_id);
+    }
 }
 
 void VulkanBackend::endSingleTimeCommands(VkCommandBuffer commandBuffer, int32_t device_id) {
-    // Use async submission with fence tracking
-    endSingleTimeCommandsAsync(commandBuffer, device_id);
+    if constexpr (vulkan_config::USE_COMMAND_BATCHING) {
+        // Record operation to batch - don't submit yet
+        recordOperationToBatch(device_id);
+    } else {
+        // Legacy path: submit immediately with fence tracking
+        endSingleTimeCommandsAsync(commandBuffer, device_id);
+    }
 }
 
 void VulkanBackend::initCommandBufferPool(DeviceContext& ctx) {
@@ -613,6 +704,11 @@ auto VulkanBackend::synchronize(int32_t device_id) -> void {
     }
     auto& ctx = devices_[device_id];
 
+    // Submit any pending batched commands before synchronizing
+    if constexpr (vulkan_config::USE_COMMAND_BATCHING) {
+        submitBatchIfNeeded(device_id, true);  // Force submit any pending work
+    }
+
     // First ensure any fence-tracked work is complete (legacy pendingFence)
     ensurePendingWorkComplete(device_id);
 
@@ -705,8 +801,8 @@ void VulkanBackend::recordOperationToBatch(int32_t device_id) {
     auto& ctx = devices_[device_id];
     ctx.operationsInBatch++;
 
-    // Auto-submit if batch is full
-    if (ctx.operationsInBatch >= DeviceContext::MAX_OPERATIONS_PER_BATCH) {
+    // Auto-submit if batch is full (use config threshold)
+    if (ctx.operationsInBatch >= vulkan_config::BATCH_SIZE_THRESHOLD) {
         submitBatchIfNeeded(device_id, true);
     }
 }
@@ -844,11 +940,11 @@ vulkan::ComputePipeline* VulkanBackend::getPipeline(const std::string& shader_na
         push_range.size = 8;  // uint32_t + uint32_t (value bits)
         pushConstants.push_back(push_range);
     } else if (shader_name == "ones" || shader_name == "ones_f16" || shader_name == "ones_i8") {
-        // ones/ones_f16/ones_i8: 4 bytes (uint n)
+        // ones/ones_f16/ones_i8: 8 bytes (n_elements, one_value_bits)
         VkPushConstantRange push_range{};
         push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         push_range.offset = 0;
-        push_range.size = 4;  // uint32_t
+        push_range.size = 8;  // 2 uint32_t values
         pushConstants.push_back(push_range);
     } else if (shader_name == "conv2d_forward" || shader_name == "conv2d_forward_f64" || shader_name == "conv2d_forward_f16") {
         // conv2d_forward (all dtype variants): 60 bytes (15 uint32_t)
@@ -943,6 +1039,30 @@ vulkan::ComputePipeline* VulkanBackend::getPipeline(const std::string& shader_na
         push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         push_range.offset = 0;
         push_range.size = 108;  // 3 + 8 + 8 + 8 = 27 uint32_t values
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "reduction" || shader_name == "reduction_f64" ||
+               shader_name == "reduction_f16" || shader_name == "reduction_i32") {
+        // reduction (all variants): 20 bytes (n, reduce_size, outer_size, inner_size, op)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 20;  // 5 uint32_t values
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "strided_copy" || shader_name == "strided_copy_f64" ||
+               shader_name == "strided_copy_f16" || shader_name == "strided_copy_i8") {
+        // strided_copy (all variants): 80 bytes (n_elements, ndims, base_offset, shape_0_3, shape_4_7, strides_0_3, strides_4_7)
+        // 3 uint32_t + 4 uvec4/ivec4 = 12 + 64 = 76 bytes, aligned to 80
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 80;  // 3 uint32_t + 4 vec4 (need alignment)
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "permute" || shader_name == "permute_f64" || shader_name == "permute_f16") {
+        // permute (all variants): 8 bytes (n, ndim)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 8;  // 2 uint32_t values
         pushConstants.push_back(push_range);
     }
 
@@ -1768,6 +1888,9 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         uint32_t workgroups = (n_channels + 255) / 256;
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
+        // Add memory barrier
+        insertComputeBarrier(cmdBuffer);
+
         endSingleTimeCommands(cmdBuffer, device_id);
 
         // Return the updated tensors (modified in-place)
@@ -2182,14 +2305,7 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
         uint32_t workgroups = (a.numel() + 255) / 256;
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
-        VkMemoryBarrier memoryBarrier{};
-        memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-        memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        memoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
-
-        vkCmdPipelineBarrier(cmdBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                            VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
-                            0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
+        insertComputeBarrier(cmdBuffer);
 
         endSingleTimeCommands(cmdBuffer, device_id);
         return output;
@@ -2322,14 +2438,7 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
         }
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
-        VkMemoryBarrier memoryBarrier{};
-        memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-        memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        memoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
-
-        vkCmdPipelineBarrier(cmdBuffer, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                            VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
-                            0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
+        insertComputeBarrier(cmdBuffer);
 
         endSingleTimeCommands(cmdBuffer, device_id);
         return output;
@@ -2467,6 +2576,7 @@ auto VulkanBackend::dispatchUnaryOp(const std::string& op_name,
     uint32_t workgroups = (input.numel() + 255) / 256;
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
+    insertComputeBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return output;
@@ -2557,6 +2667,7 @@ auto VulkanBackend::dispatchUnaryOpWithParam(const std::string& op_name,
     uint32_t workgroups = (input.numel() + 255) / 256;
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
+    insertComputeBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return output;
@@ -2619,6 +2730,9 @@ auto VulkanBackend::dispatchTrigonometricOp(const std::string& op_name,
     uint32_t workgroups = (input.numel() + 255) / 256;
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
+    // Add memory barrier
+    insertComputeBarrier(cmdBuffer);
+
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return output;
@@ -2677,6 +2791,9 @@ auto VulkanBackend::dispatchHyperbolicOp(const std::string& op_name,
 
     uint32_t workgroups = (input.numel() + 255) / 256;
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    // Add memory barrier
+    insertComputeBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -2779,20 +2896,7 @@ auto VulkanBackend::dispatchComparisonOp(const std::string& op_name,
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier to ensure shader writes complete
-    VkMemoryBarrier memoryBarrier{};
-    memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    memoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
-
-    vkCmdPipelineBarrier(
-        cmdBuffer,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
-        0,
-        1, &memoryBarrier,
-        0, nullptr,
-        0, nullptr
-    );
+    insertComputeBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -2958,6 +3062,9 @@ auto VulkanBackend::dispatchReduction(const std::string& op_name,
     }
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
+    // Add memory barrier
+    insertComputeBarrier(cmdBuffer);
+
     endSingleTimeCommands(cmdBuffer, device_id);
 
     // Synchronize to ensure GPU has completed before reading results
@@ -3078,6 +3185,7 @@ auto VulkanBackend::dispatchMatmul(const Tensor& a, const Tensor& b) -> Tensor {
     uint32_t workgroups_y = (push_constants.M + 15) / 16;
     vkCmdDispatch(cmdBuffer, workgroups_x, workgroups_y, 1);
 
+    insertComputeBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return output;
@@ -3178,6 +3286,9 @@ auto VulkanBackend::dispatchConv2d(const Tensor& input, const Tensor& weight,
     uint32_t workgroups_y = (out_height + 15) / 16;
     uint32_t workgroups_z = out_channels;
     vkCmdDispatch(cmdBuffer, workgroups_x, workgroups_y, workgroups_z);
+
+    // Add memory barrier
+    insertComputeBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -3288,6 +3399,9 @@ auto VulkanBackend::dispatchConv2dBackwardInput(
     uint32_t workgroups = static_cast<uint32_t>((total_elements + 255) / 256);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
+    // Add memory barrier
+    insertComputeBarrier(cmdBuffer);
+
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return grad_input;
@@ -3396,6 +3510,9 @@ auto VulkanBackend::dispatchConv2dBackwardWeight(
     uint32_t workgroups = static_cast<uint32_t>((total_weight_elements + 255) / 256);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
+    // Add memory barrier
+    insertComputeBarrier(cmdBuffer);
+
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return grad_weight;
@@ -3469,6 +3586,9 @@ auto VulkanBackend::dispatchConv2dBackwardBias(const Tensor& grad_output) -> Ten
     // Dispatch workgroups (256 threads per workgroup, one thread per output channel)
     uint32_t workgroups = static_cast<uint32_t>((channels_out + 255) / 256);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    // Add memory barrier
+    insertComputeBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -3568,6 +3688,9 @@ auto VulkanBackend::dispatchIm2Col(const Tensor& input, const OpAttributes& attr
     // Dispatch workgroups (256 threads per workgroup)
     uint32_t workgroups = (total_elements + 255) / 256;
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    // Add memory barrier
+    insertComputeBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
     return output;
@@ -3699,6 +3822,9 @@ auto VulkanBackend::dispatchCol2Im(const Tensor& input, const OpAttributes& attr
     uint32_t workgroups = (total_elements + 255) / 256;
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
+    // Add memory barrier
+    insertComputeBarrier(cmdBuffer);
+
     endSingleTimeCommands(cmdBuffer, device_id);
     return output;
 }
@@ -3731,6 +3857,9 @@ auto VulkanBackend::dispatchMaxPool2d(const Tensor& input, int64_t kernel_h, int
     uint32_t workgroups_z = channels;
     vkCmdDispatch(cmdBuffer, workgroups_x, workgroups_y, workgroups_z);
 
+    // Add memory barrier
+    insertComputeBarrier(cmdBuffer);
+
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return {output, indices};
@@ -3761,6 +3890,9 @@ auto VulkanBackend::dispatchAvgPool2d(const Tensor& input, int64_t kernel_h, int
     uint32_t workgroups_y = (out_height + 15) / 16;
     uint32_t workgroups_z = channels;
     vkCmdDispatch(cmdBuffer, workgroups_x, workgroups_y, workgroups_z);
+
+    // Add memory barrier
+    insertComputeBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -3843,15 +3975,7 @@ auto VulkanBackend::dispatchAdaptiveMaxPool2d(const Tensor& input, int64_t out_h
     }
 
     // Add memory barrier
-    VkMemoryBarrier memoryBarrier{};
-    memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    memoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
-
-    vkCmdPipelineBarrier(cmdBuffer,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                        VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
-                        0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
+    insertComputeBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -3946,15 +4070,7 @@ auto VulkanBackend::dispatchAdaptiveAvgPool2d(const Tensor& input, int64_t out_h
     }
 
     // Add memory barrier
-    VkMemoryBarrier memoryBarrier{};
-    memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    memoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
-
-    vkCmdPipelineBarrier(cmdBuffer,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                        VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
-                        0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
+    insertComputeBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -4093,15 +4209,7 @@ auto VulkanBackend::dispatchAdaptiveAvgPool2dBackward(const Tensor& grad_output,
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    VkMemoryBarrier memoryBarrier{};
-    memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    memoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
-
-    vkCmdPipelineBarrier(cmdBuffer,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                        VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
-                        0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
+    insertComputeBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -4125,6 +4233,9 @@ auto VulkanBackend::dispatchMaxPool2dBackward(const Tensor& grad_out, const Tens
     uint32_t workgroups = (input.numel() + 255) / 256;
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
+    // Add memory barrier
+    insertComputeBarrier(cmdBuffer);
+
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return grad_input;
@@ -4145,6 +4256,9 @@ auto VulkanBackend::dispatchBatchNorm2d(const Tensor& input, const Tensor& mean,
 
     uint32_t workgroups = (input.numel() + 255) / 256;
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    // Add memory barrier
+    insertComputeBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -4256,6 +4370,9 @@ auto VulkanBackend::dispatchBatchNorm2dBackward(const Tensor& grad_out, const Te
     uint32_t workgroups = (n_elements + 255) / 256;
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
+    // Add memory barrier
+    insertComputeBarrier(cmdBuffer);
+
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return {grad_input, grad_gamma, grad_beta};
@@ -4363,6 +4480,9 @@ auto VulkanBackend::dispatchBatchNorm2dForward(const Tensor& input, const Tensor
     uint32_t workgroups = static_cast<uint32_t>((input.numel() + 255) / 256);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
+    // Add memory barrier
+    insertComputeBarrier(cmdBuffer);
+
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return output;
@@ -4445,6 +4565,9 @@ auto VulkanBackend::dispatchBatchNorm2dMeanVar(const Tensor& input) -> std::pair
         uint32_t workgroups = static_cast<uint32_t>((input.numel() + 255) / 256);
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
+        // Add memory barrier
+        insertComputeBarrier(cmdBuffer);
+
         endSingleTimeCommands(cmdBuffer, device_id);
     }
 
@@ -4491,6 +4614,9 @@ auto VulkanBackend::dispatchBatchNorm2dMeanVar(const Tensor& input) -> std::pair
         uint32_t workgroups = static_cast<uint32_t>((input.numel() + 255) / 256);
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
+        // Add memory barrier
+        insertComputeBarrier(cmdBuffer);
+
         endSingleTimeCommands(cmdBuffer, device_id);
     }
 
@@ -4524,6 +4650,9 @@ auto VulkanBackend::dispatchLayerNorm(const Tensor& input, int64_t normalized_sh
     uint32_t workgroups = (input.numel() / normalized_shape + 255) / 256;
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
+    // Add memory barrier
+    insertComputeBarrier(cmdBuffer);
+
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return output;
@@ -4543,6 +4672,9 @@ auto VulkanBackend::dispatchGroupNorm(const Tensor& input, int64_t num_groups,
 
     uint32_t workgroups = (num_groups + 255) / 256;
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    // Add memory barrier
+    insertComputeBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -4636,6 +4768,9 @@ auto VulkanBackend::dispatchSoftmax(const Tensor& input, int64_t dim) -> Tensor 
     // Dispatch one workgroup per batch element
     vkCmdDispatch(cmdBuffer, batch_size, 1, 1);
 
+    // Add memory barrier
+    insertComputeBarrier(cmdBuffer);
+
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return output;
@@ -4706,6 +4841,9 @@ auto VulkanBackend::dispatchLogSoftmax(const Tensor& input, int64_t dim) -> Tens
     // Dispatch one workgroup per batch element
     vkCmdDispatch(cmdBuffer, batch_size, 1, 1);
 
+    // Add memory barrier
+    insertComputeBarrier(cmdBuffer);
+
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return output;
@@ -4731,6 +4869,9 @@ auto VulkanBackend::dispatchCrossEntropy(const Tensor& log_probs, const Tensor& 
 
     uint32_t workgroups = (targets.numel() + 255) / 256;
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    // Add memory barrier
+    insertComputeBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -4816,6 +4957,9 @@ auto VulkanBackend::dispatchArgmax(const Tensor& input, int64_t dim, bool keepdi
     uint32_t workgroups = pushConstants.outer_size;
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
+    // Add memory barrier
+    insertComputeBarrier(cmdBuffer);
+
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return output;
@@ -4895,6 +5039,9 @@ auto VulkanBackend::dispatchArgmin(const Tensor& input, int64_t dim, bool keepdi
     // Dispatch one workgroup per output element
     uint32_t workgroups = pushConstants.outer_size;
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    // Add memory barrier
+    insertComputeBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -5066,6 +5213,9 @@ auto VulkanBackend::dispatchProd(const Tensor& input, int64_t dim, bool keepdim)
     uint32_t workgroups = pushConstants.outer_size;
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
+    // Add memory barrier
+    insertComputeBarrier(cmdBuffer);
+
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return output;
@@ -5096,6 +5246,9 @@ auto VulkanBackend::dispatchAll(const Tensor& input, int64_t dim, bool keepdim) 
 
     uint32_t workgroups = (output.numel() + 255) / 256;
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    // Add memory barrier
+    insertComputeBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -5128,6 +5281,9 @@ auto VulkanBackend::dispatchAny(const Tensor& input, int64_t dim, bool keepdim) 
     uint32_t workgroups = (output.numel() + 255) / 256;
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
+    // Add memory barrier
+    insertComputeBarrier(cmdBuffer);
+
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return output;
@@ -5154,6 +5310,9 @@ auto VulkanBackend::dispatchEmbedding(const Tensor& weight, const Tensor& indice
     uint32_t workgroups = (output.numel() + 255) / 256;
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
+    // Add memory barrier
+    insertComputeBarrier(cmdBuffer);
+
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return output;
@@ -5172,6 +5331,9 @@ auto VulkanBackend::dispatchGather(const Tensor& input, int64_t dim, const Tenso
 
     uint32_t workgroups = (output.numel() + 255) / 256;
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    // Add memory barrier
+    insertComputeBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -5296,6 +5458,9 @@ auto VulkanBackend::dispatchScatter(const Tensor& input, int64_t dim, const Tens
     uint32_t workgroups = (indices.numel() + 255) / 256;
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
+    // Add memory barrier
+    insertComputeBarrier(cmdBuffer);
+
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return output;
@@ -5402,14 +5567,7 @@ auto VulkanBackend::dispatchIndexSelect(const Tensor& input, int64_t dim, const 
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    VkMemoryBarrier memoryBarrier{};
-    memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    memoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
-    vkCmdPipelineBarrier(cmdBuffer,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                        VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
-                        0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
+    insertComputeBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -5504,14 +5662,7 @@ auto VulkanBackend::dispatchGatherRelativePositionBias(const Tensor& table, cons
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    VkMemoryBarrier memoryBarrier{};
-    memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    memoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
-    vkCmdPipelineBarrier(cmdBuffer,
-                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                        VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
-                        0, 1, &memoryBarrier, 0, nullptr, 0, nullptr);
+    insertComputeBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -5629,6 +5780,10 @@ auto VulkanBackend::dispatchTranspose(const Tensor& input, int64_t dim0, int64_t
         push_constants.dim1 = static_cast<uint32_t>(dim1);
 
         VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+
+        // Insert pre-read barrier to ensure input data from previous ops is ready
+        insertPreReadBarrier(cmdBuffer);
+
         vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
         vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                                pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
@@ -5638,6 +5793,9 @@ auto VulkanBackend::dispatchTranspose(const Tensor& input, int64_t dim0, int64_t
 
         uint32_t workgroups = (input.numel() + 255) / 256;
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+        // Add memory barrier
+        insertComputeBarrier(cmdBuffer);
 
         endSingleTimeCommands(cmdBuffer, device_id);
         return output;
@@ -5757,7 +5915,19 @@ auto VulkanBackend::dispatchPermute(const Tensor& input, const std::vector<int64
     copyRegion.srcOffset = metadata_size * 2;
     vkCmdCopyBuffer(copyCmd, staging.buffer->buffer(), buffer_perm->buffer(), 1, &copyRegion);
 
+    // Insert transfer-to-compute barrier before the compute dispatch reads this data
+    insertTransferToComputeBarrier(copyCmd);
+
     endSingleTimeCommands(copyCmd, device_id);
+
+    // CRITICAL: With batching enabled, force submit now to ensure staging buffer
+    // content is copied to device buffers before staging buffer can be reused.
+    // The staging buffer is shared and may be overwritten by any other operation
+    // that uses getStagingBuffer() before our batch is submitted.
+    if constexpr (vulkan_config::USE_COMMAND_BATCHING) {
+        submitBatchIfNeeded(device_id, true);  // Force submit the copy commands
+        ensurePendingWorkComplete(device_id);   // Wait for copies to complete
+    }
 
     // Set up descriptor set with all buffers
     std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
@@ -5789,6 +5959,10 @@ auto VulkanBackend::dispatchPermute(const Tensor& input, const std::vector<int64
 
     // Execute compute shader
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+
+    // Insert pre-read barrier to ensure input data from previous ops is ready
+    insertPreReadBarrier(cmdBuffer);
+
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
     vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                            pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
@@ -5799,7 +5973,20 @@ auto VulkanBackend::dispatchPermute(const Tensor& input, const std::vector<int64
     uint32_t workgroups = (output.numel() + 255) / 256;
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
+    // Add memory barrier
+    insertComputeBarrier(cmdBuffer);
+
     endSingleTimeCommands(cmdBuffer, device_id);
+
+    // CRITICAL: Force batch submission before temp buffers go out of scope!
+    // buffer_shape, buffer_strides, and buffer_perm are unique_ptrs that will
+    // be destroyed when this function returns. With batching enabled, the
+    // command buffer still references these buffers. We must submit and wait
+    // for completion before destroying them.
+    if constexpr (vulkan_config::USE_COMMAND_BATCHING) {
+        submitBatchIfNeeded(device_id, true);  // Force submit
+        ensurePendingWorkComplete(device_id);   // Wait for GPU
+    }
 
     return output;
 }
@@ -5983,6 +6170,11 @@ auto VulkanBackend::dispatchContiguous(const Tensor& input) -> Tensor {
     }
 
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+
+    // Insert pre-read barrier to ensure input data from previous ops is ready
+    // This is critical for strided_copy which reads non-contiguous data
+    insertPreReadBarrier(cmdBuffer);
+
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
     vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                            pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
@@ -5992,6 +6184,9 @@ auto VulkanBackend::dispatchContiguous(const Tensor& input) -> Tensor {
 
     uint32_t workgroups = (total_elements + 255) / 256;
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    // Add memory barrier
+    insertComputeBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -6052,6 +6247,9 @@ auto VulkanBackend::dispatchZeros(const std::vector<int64_t>& shape, DType dtype
     uint32_t workgroups = (output.numel() + 255) / 256;
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
+    // Add memory barrier
+    insertComputeBarrier(cmdBuffer);
+
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return output;
@@ -6105,6 +6303,9 @@ auto VulkanBackend::dispatchFill(const Tensor& input, float value) -> Tensor {
 
     uint32_t workgroups = (output.numel() + 255) / 256;
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    // Add memory barrier
+    insertComputeBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -6214,6 +6415,9 @@ auto VulkanBackend::dispatchExpand(const Tensor& input, const std::vector<int64_
     uint32_t num_items = is_float16 ? ((output.numel() + 1) / 2) : output.numel();
     uint32_t workgroups = (num_items + 255) / 256;
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    // Add memory barrier
+    insertComputeBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -6419,6 +6623,9 @@ auto VulkanBackend::dispatchClamp(const Tensor& input, float min_value, float ma
     uint32_t workgroups = (output.numel() + 255) / 256;
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
+    // Add memory barrier
+    insertComputeBarrier(cmdBuffer);
+
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return output;
@@ -6525,20 +6732,7 @@ auto VulkanBackend::dispatchActivation(const std::string& op_name,
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    VkMemoryBarrier memoryBarrier{};
-    memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    memoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
-
-    vkCmdPipelineBarrier(
-        cmdBuffer,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
-        0,
-        1, &memoryBarrier,
-        0, nullptr,
-        0, nullptr
-    );
+    insertComputeBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -6623,20 +6817,7 @@ auto VulkanBackend::dispatchActivationBackward(const std::string& op_name,
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    VkMemoryBarrier memoryBarrier{};
-    memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    memoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
-
-    vkCmdPipelineBarrier(
-        cmdBuffer,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
-        0,
-        1, &memoryBarrier,
-        0, nullptr,
-        0, nullptr
-    );
+    insertComputeBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -6705,20 +6886,7 @@ auto VulkanBackend::dispatchSwishBackward(const Tensor& grad_output,
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    VkMemoryBarrier memoryBarrier{};
-    memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    memoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
-
-    vkCmdPipelineBarrier(
-        cmdBuffer,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
-        0,
-        1, &memoryBarrier,
-        0, nullptr,
-        0, nullptr
-    );
+    insertComputeBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -6812,20 +6980,7 @@ auto VulkanBackend::dispatchSoftmaxBackward(const Tensor& grad_output,
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    VkMemoryBarrier memoryBarrier{};
-    memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    memoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
-
-    vkCmdPipelineBarrier(
-        cmdBuffer,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
-        0,
-        1, &memoryBarrier,
-        0, nullptr,
-        0, nullptr
-    );
+    insertComputeBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -6911,20 +7066,7 @@ auto VulkanBackend::dispatchLogSoftmaxBackward(const Tensor& grad_output,
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    VkMemoryBarrier memoryBarrier{};
-    memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    memoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
-
-    vkCmdPipelineBarrier(
-        cmdBuffer,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
-        0,
-        1, &memoryBarrier,
-        0, nullptr,
-        0, nullptr
-    );
+    insertComputeBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -7034,20 +7176,7 @@ auto VulkanBackend::dispatchAvgPool2dForward(const Tensor& input, const OpAttrib
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    VkMemoryBarrier memoryBarrier{};
-    memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    memoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
-
-    vkCmdPipelineBarrier(
-        cmdBuffer,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
-        0,
-        1, &memoryBarrier,
-        0, nullptr,
-        0, nullptr
-    );
+    insertComputeBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -7158,20 +7287,7 @@ auto VulkanBackend::dispatchMaxPool2dForward(const Tensor& input, const OpAttrib
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    VkMemoryBarrier memoryBarrier{};
-    memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    memoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
-
-    vkCmdPipelineBarrier(
-        cmdBuffer,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
-        0,
-        1, &memoryBarrier,
-        0, nullptr,
-        0, nullptr
-    );
+    insertComputeBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -7280,20 +7396,7 @@ auto VulkanBackend::dispatchAvgPool2dBackward(const Tensor& grad_output, const T
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    VkMemoryBarrier memoryBarrier{};
-    memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    memoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
-
-    vkCmdPipelineBarrier(
-        cmdBuffer,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
-        0,
-        1, &memoryBarrier,
-        0, nullptr,
-        0, nullptr
-    );
+    insertComputeBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -7408,20 +7511,7 @@ auto VulkanBackend::dispatchMaxPool2dBackward(const Tensor& grad_output, const T
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    VkMemoryBarrier memoryBarrier{};
-    memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    memoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
-
-    vkCmdPipelineBarrier(
-        cmdBuffer,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
-        0,
-        1, &memoryBarrier,
-        0, nullptr,
-        0, nullptr
-    );
+    insertComputeBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -7502,6 +7592,9 @@ auto VulkanBackend::dispatchMaxPool2dBackwardWithIndices(const Tensor& grad_outp
 
     uint32_t workgroups = (grad_out_numel + 255) / 256;
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    // Add memory barrier
+    insertComputeBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -7646,20 +7739,7 @@ auto VulkanBackend::dispatchConv2dForward(const Tensor& input, const Tensor& wei
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    VkMemoryBarrier memoryBarrier{};
-    memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    memoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
-
-    vkCmdPipelineBarrier(
-        cmdBuffer,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
-        0,
-        1, &memoryBarrier,
-        0, nullptr,
-        0, nullptr
-    );
+    insertComputeBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -7742,6 +7822,9 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, float value,
         uint32_t workgroups = (output.numel() + 255) / 256;
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
+        // Add memory barrier
+        insertComputeBarrier(cmdBuffer);
+
         endSingleTimeCommands(cmdBuffer, device_id);
         return output;
     }
@@ -7773,20 +7856,7 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, float value,
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
         // Add memory barrier
-        VkMemoryBarrier memoryBarrier{};
-        memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-        memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        memoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
-
-        vkCmdPipelineBarrier(
-            cmdBuffer,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
-            0,
-            1, &memoryBarrier,
-            0, nullptr,
-            0, nullptr
-        );
+        insertComputeBarrier(cmdBuffer);
 
         endSingleTimeCommands(cmdBuffer, device_id);
         return output;
@@ -7818,20 +7888,7 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, float value,
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
         // Add memory barrier
-        VkMemoryBarrier memoryBarrier{};
-        memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-        memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        memoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
-
-        vkCmdPipelineBarrier(
-            cmdBuffer,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
-            0,
-            1, &memoryBarrier,
-            0, nullptr,
-            0, nullptr
-        );
+        insertComputeBarrier(cmdBuffer);
 
         endSingleTimeCommands(cmdBuffer, device_id);
         return output;
@@ -7864,20 +7921,7 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, float value,
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
         // Add memory barrier
-        VkMemoryBarrier memoryBarrier{};
-        memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-        memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        memoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
-
-        vkCmdPipelineBarrier(
-            cmdBuffer,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
-            0,
-            1, &memoryBarrier,
-            0, nullptr,
-            0, nullptr
-        );
+        insertComputeBarrier(cmdBuffer);
 
         endSingleTimeCommands(cmdBuffer, device_id);
         return output;
@@ -7909,20 +7953,7 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, float value,
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
         // Add memory barrier
-        VkMemoryBarrier memoryBarrier{};
-        memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-        memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        memoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
-
-        vkCmdPipelineBarrier(
-            cmdBuffer,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
-            0,
-            1, &memoryBarrier,
-            0, nullptr,
-            0, nullptr
-        );
+        insertComputeBarrier(cmdBuffer);
 
         endSingleTimeCommands(cmdBuffer, device_id);
         return output;
@@ -7956,20 +7987,7 @@ auto VulkanBackend::dispatchFull(const std::vector<int64_t>& shape, float value,
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    VkMemoryBarrier memoryBarrier{};
-    memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    memoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
-
-    vkCmdPipelineBarrier(
-        cmdBuffer,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
-        0,
-        1, &memoryBarrier,
-        0, nullptr,
-        0, nullptr
-    );
+    insertComputeBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -8041,20 +8059,7 @@ auto VulkanBackend::dispatchOnes(const std::vector<int64_t>& shape, DType dtype)
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
         // Add memory barrier
-        VkMemoryBarrier memoryBarrier{};
-        memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-        memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        memoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
-
-        vkCmdPipelineBarrier(
-            cmdBuffer,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
-            0,
-            1, &memoryBarrier,
-            0, nullptr,
-            0, nullptr
-        );
+        insertComputeBarrier(cmdBuffer);
 
         endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -8083,20 +8088,7 @@ auto VulkanBackend::dispatchOnes(const std::vector<int64_t>& shape, DType dtype)
         vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
         // Add memory barrier
-        VkMemoryBarrier memoryBarrier{};
-        memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-        memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        memoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
-
-        vkCmdPipelineBarrier(
-            cmdBuffer,
-            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-            VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
-            0,
-            1, &memoryBarrier,
-            0, nullptr,
-            0, nullptr
-        );
+        insertComputeBarrier(cmdBuffer);
 
         endSingleTimeCommands(cmdBuffer, device_id);
         return output;
@@ -8134,20 +8126,7 @@ auto VulkanBackend::dispatchOnes(const std::vector<int64_t>& shape, DType dtype)
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
-    VkMemoryBarrier memoryBarrier{};
-    memoryBarrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-    memoryBarrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    memoryBarrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_HOST_READ_BIT;
-
-    vkCmdPipelineBarrier(
-        cmdBuffer,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_HOST_BIT,
-        0,
-        1, &memoryBarrier,
-        0, nullptr,
-        0, nullptr
-    );
+    insertComputeBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
@@ -8215,6 +8194,9 @@ auto VulkanBackend::dispatchRand(const std::vector<int64_t>& shape, DType dtype)
     uint32_t workgroups = (numel + 255) / 256;
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
+    // Add memory barrier
+    insertComputeBarrier(cmdBuffer);
+
     endSingleTimeCommands(cmdBuffer, device_id);
 
     return output;
@@ -8280,6 +8262,9 @@ auto VulkanBackend::dispatchRandn(const std::vector<int64_t>& shape, DType dtype
 
     uint32_t workgroups = (numel + 255) / 256;
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    // Add memory barrier
+    insertComputeBarrier(cmdBuffer);
 
     endSingleTimeCommands(cmdBuffer, device_id);
 

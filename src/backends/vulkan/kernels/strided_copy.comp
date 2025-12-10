@@ -25,6 +25,11 @@ void main() {
         return;
     }
 
+    // Safety check: ndims must be valid (0-8)
+    if (params.ndims > 8u) {
+        return;
+    }
+
     // Convert flat output index to multi-dimensional indices
     // Then compute source offset using strides
     uint remaining = idx;
@@ -33,14 +38,14 @@ void main() {
     // Unpack shape and strides
     uint shape[8];
     int strides[8];
-    shape[0] = params.shape_0_3.x;
-    shape[1] = params.shape_0_3.y;
-    shape[2] = params.shape_0_3.z;
-    shape[3] = params.shape_0_3.w;
-    shape[4] = params.shape_4_7.x;
-    shape[5] = params.shape_4_7.y;
-    shape[6] = params.shape_4_7.z;
-    shape[7] = params.shape_4_7.w;
+    shape[0] = max(params.shape_0_3.x, 1u);  // Prevent division by zero
+    shape[1] = max(params.shape_0_3.y, 1u);
+    shape[2] = max(params.shape_0_3.z, 1u);
+    shape[3] = max(params.shape_0_3.w, 1u);
+    shape[4] = max(params.shape_4_7.x, 1u);
+    shape[5] = max(params.shape_4_7.y, 1u);
+    shape[6] = max(params.shape_4_7.z, 1u);
+    shape[7] = max(params.shape_4_7.w, 1u);
     strides[0] = params.strides_0_3.x;
     strides[1] = params.strides_0_3.y;
     strides[2] = params.strides_0_3.z;
@@ -52,9 +57,11 @@ void main() {
 
     // Calculate inner sizes for index decomposition (row-major order)
     // We iterate from the last dimension to the first
+    // Use explicit loop unrolling with bounds check for safety
     for (int dim = int(params.ndims) - 1; dim >= 0; dim--) {
-        uint dim_idx = remaining % shape[dim];
-        remaining /= shape[dim];
+        uint s = shape[dim];  // Already guaranteed >= 1 by max() above
+        uint dim_idx = remaining % s;
+        remaining /= s;
         src_offset += int(dim_idx) * strides[dim];
     }
 

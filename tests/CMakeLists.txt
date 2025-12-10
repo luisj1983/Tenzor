@@ -2354,6 +2354,16 @@ target_link_libraries(vulkan_add_debug PRIVATE
     tenzor_core
 )
 
+# Debug vulkan hang with command batching
+# Uses standard Tenzor initialization with validation layers enabled
+add_executable(debug_vulkan_hang
+    debug_vulkan_hang.cpp
+)
+
+target_link_libraries(debug_vulkan_hang PRIVATE
+    tenzor_core
+)
+
 # Inplace operations multi-dtype tests
 add_executable(test_inplace_operations_multidtype
     unit/test_inplace_operations_multidtype.cpp

@@ -19,13 +19,14 @@ void index_to_coords(uint linear_idx, uint ndims, out int coords[8]) {
     uint remaining = linear_idx;
     // We need the output shape which is shape permuted
     int out_shape[8];
-    for (uint i = 0; i < ndims; i++) {
-        out_shape[i] = shape[perm[i]];
+    for (uint i = 0; i < ndims && i < 8u; i++) {
+        out_shape[i] = max(shape[perm[i]], 1);  // Prevent division by zero
     }
 
     for (int i = int(ndims) - 1; i >= 0; i--) {
-        coords[i] = int(remaining % uint(out_shape[i]));
-        remaining /= uint(out_shape[i]);
+        int s = out_shape[i];  // Already guaranteed >= 1
+        coords[i] = int(remaining % uint(s));
+        remaining /= uint(s);
     }
 }
 
@@ -42,6 +43,11 @@ void main() {
     uint out_idx = gl_GlobalInvocationID.x;
 
     if (out_idx >= params.n) {
+        return;
+    }
+
+    // Safety check: ndim must be valid (0-8)
+    if (params.ndim > 8u) {
         return;
     }
 

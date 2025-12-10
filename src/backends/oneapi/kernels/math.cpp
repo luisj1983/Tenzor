@@ -68,6 +68,7 @@ struct LogKernelFloat32 {};
 struct LogKernelFloat64 {};
 struct ExpKernelFloat32 {};
 struct ExpKernelFloat64 {};
+struct ExpKernelFloat16 {};
 struct PowKernelFloat32 {};
 struct PowKernelFloat64 {};
 struct PowKernelFloat16 {};
@@ -942,6 +943,15 @@ auto exp_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
 
         queue.parallel_for<ExpKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = sycl::exp(in_ptr[idx]);
+        }).wait();
+    }
+    else if (input.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+
+        queue.parallel_for<ExpKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            // Convert to float, compute exp, convert back to half
+            out_ptr[idx] = sycl::half(sycl::exp(static_cast<float>(in_ptr[idx])));
         }).wait();
     }
     else {

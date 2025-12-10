@@ -23,6 +23,19 @@
 
 namespace tenzor {
 
+// Performance tuning configuration
+namespace vulkan_config {
+    // Enable command batching to reduce submission overhead
+    // When true, multiple operations are recorded into a shared command buffer
+    // and submitted together, significantly reducing per-operation latency
+    // Command batching for reduced per-operation overhead.
+    // DEBUGGING: Re-enabled for RenderDoc capture to diagnose GPU hangs.
+    constexpr bool USE_COMMAND_BATCHING = true;
+
+    // Maximum operations to batch before auto-submit
+    constexpr size_t BATCH_SIZE_THRESHOLD = 32;
+}
+
 /**
  * @brief Vulkan compute backend implementation
  *
