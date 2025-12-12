@@ -76,6 +76,7 @@ set(ONEAPI_SYCL_SOURCES
 
 set(ONEAPI_BACKEND_SOURCE
     oneapi_backend.cpp
+    ${CMAKE_SOURCE_DIR}/src/backend/oneapi_caching_allocator.cpp
 )
 
 # Stage 1: Compile SYCL kernels into static library using icpx

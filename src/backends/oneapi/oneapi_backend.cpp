@@ -1,5 +1,6 @@
 #include "tenzor/backend/backend.hpp"
 #include "tenzor/backend/loader.hpp"
+#include "tenzor/backend/oneapi_caching_allocator.hpp"
 #include <sycl/sycl.hpp>
 #include <vector>
 #include <unordered_map>
@@ -313,6 +314,10 @@ public:
                         info.global_mem_size = device.get_info<sycl::info::device::global_mem_size>();
                         info.local_mem_size = device.get_info<sycl::info::device::local_mem_size>();
 
+                        // Initialize caching allocator for this device
+                        backend::OneAPICachingAllocator::get().initialize(
+                            info.queue.get(), static_cast<int>(devices_.size()));
+
                         devices_.push_back(info);
                     } catch (const sycl::exception& e) {
                         // Skip devices that can't create queues
@@ -350,17 +355,13 @@ public:
         validate_device_id(device_id);
 
         try {
-            // Use USM (Unified Shared Memory) shared allocation
-            // IMPORTANT: We use malloc_shared instead of malloc_device because:
-            // 1. SYCL kernels need to directly access tensor memory via raw pointers
-            // 2. Shared memory is accessible from both host and device
-            // 3. This avoids complex buffer/accessor patterns while maintaining correctness
-            // 4. Performance is comparable for most workloads on modern hardware
-            auto& queue = get_queue(device_id);
-            void* ptr = sycl::malloc_shared(bytes, queue);
+            // Use caching allocator for efficient memory reuse
+            // Uses USM (Unified Shared Memory) shared allocation under the hood
+            auto& allocator = backend::OneAPICachingAllocator::get();
+            void* ptr = allocator.allocate_shared(bytes, device_id);
 
             if (ptr == nullptr) {
-                throw std::runtime_error("SYCL malloc_shared failed");
+                throw std::runtime_error("OneAPI caching allocator allocation failed");
             }
 
             // Track allocation for proper deallocation
@@ -385,9 +386,9 @@ public:
         }
 
         int32_t device_id = it->second;
-        auto& queue = get_queue(device_id);
 
-        sycl::free(ptr, queue);
+        // Return memory to caching allocator for reuse
+        backend::OneAPICachingAllocator::get().free(ptr, device_id);
         allocations_.erase(it);
     }
 

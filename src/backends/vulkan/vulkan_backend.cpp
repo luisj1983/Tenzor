@@ -6,6 +6,7 @@
 #include "vulkan_backend.hpp"
 #include "tenzor/core/shape.hpp"
 #include "tenzor/backend/loader.hpp"
+#include "tenzor/backend/vulkan_caching_allocator.hpp"
 
 // Undefine Vulkan Bool macro that conflicts with DType::Bool
 #ifdef Bool
@@ -270,7 +271,8 @@ void VulkanBackend::selectPhysicalDevices() {
 }
 
 void VulkanBackend::createLogicalDevices() {
-    for (auto& ctx : devices_) {
+    for (size_t device_idx = 0; device_idx < devices_.size(); ++device_idx) {
+        auto& ctx = devices_[device_idx];
         // Queue creation
         float queuePriority = 1.0f;
         VkDeviceQueueCreateInfo queueCreateInfo{};
@@ -364,6 +366,10 @@ void VulkanBackend::createLogicalDevices() {
         // Initialize frame fences for batched execution
         initFrameFences(ctx);
 
+        // Initialize VulkanCachingAllocator for this device
+        backend::VulkanCachingAllocator::get().initialize(
+            ctx.device, ctx.physicalDevice, static_cast<int>(device_idx));
+
         // Initialize caches
         stagingBuffers_.push_back({});
         pipelineCaches_.push_back({});
@@ -393,20 +399,17 @@ auto VulkanBackend::allocate(size_t bytes, int32_t device_id) -> void* {
 }
 
 void* VulkanBackend::allocateDeviceMemory(size_t bytes, int32_t device_id) {
-    auto& ctx = devices_[device_id];
+    // Use caching allocator for efficient memory reuse
+    auto& allocator = backend::VulkanCachingAllocator::get();
 
-    auto buffer = std::make_unique<vulkan::VulkanBuffer>(
-        ctx.device, ctx.physicalDevice, bytes,
+    // Allocate via caching allocator - returns mapped pointer
+    void* ptr = allocator.allocate(
+        bytes, device_id,
         VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
         VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+        VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
     );
-
-    // Use buffer handle as opaque pointer for tracking
-    void* ptr = reinterpret_cast<void*>(buffer->buffer());
-
-    // Store buffer object in tracking map
-    bufferMap_[ptr] = std::move(buffer);
 
     return ptr;
 }
@@ -433,8 +436,8 @@ auto VulkanBackend::deallocate(void* ptr) -> void {
 }
 
 void VulkanBackend::freeDeviceMemory(void* ptr, int32_t device_id) {
-    // Remove buffer from tracking map - destructor handles cleanup
-    bufferMap_.erase(ptr);
+    // Return memory to caching allocator for reuse
+    backend::VulkanCachingAllocator::get().free(ptr, device_id);
 }
 
 auto VulkanBackend::copy(void* dst, const void* src, size_t bytes,
@@ -1080,27 +1083,37 @@ vulkan::ComputePipeline* VulkanBackend::getPipeline(const std::string& shader_na
 
 // Helper to get VkBuffer and offset from a potentially-offset pointer
 std::pair<VkBuffer, VkDeviceSize> VulkanBackend::getVulkanBufferAndOffset(const void* ptr) const {
-    // First try direct lookup
-    auto it = bufferMap_.find(const_cast<void*>(ptr));
-    if (it != bufferMap_.end()) {
-        return {it->second->buffer(), 0};
+    auto& allocator = backend::VulkanCachingAllocator::get();
+
+    // First try direct lookup in caching allocator
+    // Find which device this allocation belongs to
+    for (int32_t device_id = 0; device_id < device_count(); ++device_id) {
+        try {
+            VkBuffer buffer = allocator.get_buffer(const_cast<void*>(ptr), device_id);
+            return {buffer, 0};
+        } catch (...) {
+            // Not found on this device, try next
+        }
     }
 
-    // If not found, ptr might be base_ptr + offset
-    // Search for a buffer where: base_ptr <= ptr < base_ptr + size
+    // If not found directly, ptr might be base_ptr + offset
+    // Search through allocations_ to find a buffer where: base_ptr <= ptr < base_ptr + size
     const auto* ptr_as_uint = reinterpret_cast<const uint8_t*>(ptr);
 
-    for (const auto& [base_ptr, buffer_obj] : bufferMap_) {
+    for (const auto& [base_ptr, alloc_info] : allocations_) {
         const auto* base_as_uint = reinterpret_cast<const uint8_t*>(base_ptr);
+        const size_t size = alloc_info.first;
+        const int32_t device_id = alloc_info.second;
 
         // Check if ptr is in the range [base_ptr, base_ptr + size)
-        auto alloc_it = allocations_.find(base_ptr);
-        if (alloc_it != allocations_.end()) {
-            const size_t size = alloc_it->second.first;
-            if (ptr_as_uint >= base_as_uint && ptr_as_uint < base_as_uint + size) {
-                // Found it! ptr is within this buffer's range
-                VkDeviceSize offset = static_cast<VkDeviceSize>(ptr_as_uint - base_as_uint);
-                return {buffer_obj->buffer(), offset};
+        if (ptr_as_uint >= base_as_uint && ptr_as_uint < base_as_uint + size) {
+            // Found it! ptr is within this buffer's range
+            VkDeviceSize offset = static_cast<VkDeviceSize>(ptr_as_uint - base_as_uint);
+            try {
+                VkBuffer buffer = allocator.get_buffer(base_ptr, device_id);
+                return {buffer, offset};
+            } catch (...) {
+                // Continue searching
             }
         }
     }

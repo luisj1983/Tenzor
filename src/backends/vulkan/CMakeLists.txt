@@ -232,6 +232,7 @@ if(GLSLC)
         vulkan_backend.cpp
         vulkan_backend.hpp
         vulkan_utils.hpp
+        ${CMAKE_SOURCE_DIR}/src/backend/vulkan_caching_allocator.cpp
         ${EMBEDDED_SHADERS_IMPL}
     )
 else()
@@ -239,6 +240,7 @@ else()
         vulkan_backend.cpp
         vulkan_backend.hpp
         vulkan_utils.hpp
+        ${CMAKE_SOURCE_DIR}/src/backend/vulkan_caching_allocator.cpp
     )
 endif()
 

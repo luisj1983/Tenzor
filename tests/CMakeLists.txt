@@ -2664,3 +2664,44 @@ target_link_libraries(minimal_swin_debug PRIVATE tenzor_core GTest::gtest_main)
 # Check Float32 gradient validity
 add_executable(check_float32_gradients check_float32_gradients.cpp)
 target_link_libraries(check_float32_gradients PRIVATE tenzor_core)
+
+# ============================================================================
+# Vulkan Caching Allocator Tests
+# ============================================================================
+if(TENZOR_BUILD_VULKAN)
+    find_package(Vulkan REQUIRED)
+
+    add_executable(test_vulkan_caching_allocator
+        backend/test_vulkan_caching_allocator.cpp
+    )
+
+    target_link_libraries(test_vulkan_caching_allocator PRIVATE
+        tenzor_core
+        tenzor_backend_vulkan
+        ${Vulkan_LIBRARIES}
+        GTest::gtest_main
+    )
+
+    target_include_directories(test_vulkan_caching_allocator PRIVATE
+        ${Vulkan_INCLUDE_DIRS}
+    )
+
+    tenzor_discover_tests(test_vulkan_caching_allocator DISCOVERY_TIMEOUT 30)
+endif()
+
+# ============================================================================
+# OneAPI Caching Allocator Tests
+# ============================================================================
+if(TENZOR_BUILD_ONEAPI)
+    add_executable(test_oneapi_caching_allocator
+        backend/test_oneapi_caching_allocator.cpp
+    )
+
+    target_link_libraries(test_oneapi_caching_allocator PRIVATE
+        tenzor_core
+        tenzor_backend_oneapi
+        GTest::gtest_main
+    )
+
+    tenzor_discover_tests(test_oneapi_caching_allocator DISCOVERY_TIMEOUT 30)
+endif()
