@@ -739,3 +739,280 @@ TEST_F(HRMTest, ManyCycles) {
     auto stats = model.last_forward_stats();
     EXPECT_EQ(stats.actual_high_cycles, 16);
 }
+
+// ============================================================================
+// New Feature Tests: Stablemax, Q-Learning ACT, Initialization
+// ============================================================================
+
+TEST_F(HRMTest, StablemaxBasic) {
+    // Test stablemax activation
+    Tensor input = randn({2, 10}, DType::Float32, Device::cpu());
+    Variable x(input, true);
+
+    auto output = stablemax(x, -1, 1e-12);
+
+    // Output should sum to 1 along last dimension
+    auto sum = tenzor::sum(output.tensor(), {-1}, false);
+    for (int64_t i = 0; i < 2; ++i) {
+        float s = sum.data<float>()[i];
+        EXPECT_NEAR(s, 1.0f, 0.01f);
+    }
+
+    // All values should be positive
+    auto min_val = tenzor::min(output.tensor());
+    EXPECT_GE(min_val.item<float>(), 0.0f);
+}
+
+TEST_F(HRMTest, StablemaxNumericalStability) {
+    // Test with extreme values
+    Tensor input({2, 5}, DType::Float32, Device::cpu());
+    float* data = input.data<float>();
+    // Large positive and negative values
+    data[0] = 1000.0f; data[1] = -1000.0f; data[2] = 0.0f; data[3] = 500.0f; data[4] = -500.0f;
+    data[5] = 1e-10f; data[6] = 1e-10f; data[7] = 1e-10f; data[8] = 1e-10f; data[9] = 1e-10f;
+
+    Variable x(input, false);
+    auto output = stablemax(x, -1, 1e-12);
+
+    // Should not have NaN or Inf
+    auto min_val = tenzor::min(output.tensor()).item<float>();
+    auto max_val = tenzor::max(output.tensor()).item<float>();
+    EXPECT_FALSE(std::isnan(min_val));
+    EXPECT_FALSE(std::isnan(max_val));
+    EXPECT_FALSE(std::isinf(min_val));
+    EXPECT_FALSE(std::isinf(max_val));
+}
+
+TEST_F(HRMTest, QLearningACTBasic) {
+    QLearningACT act(64, 8, 0.1, 0.99, 0.01);
+
+    Tensor state = randn({2, 8, 64}, DType::Float32, Device::cpu());
+    Variable s(state, true);
+
+    auto [q_halt, q_continue] = act.compute_q_values(s);
+
+    // Q-values should be bounded to [0, 1]
+    auto halt_min = tenzor::min(q_halt.tensor()).item<float>();
+    auto halt_max = tenzor::max(q_halt.tensor()).item<float>();
+    auto cont_min = tenzor::min(q_continue.tensor()).item<float>();
+    auto cont_max = tenzor::max(q_continue.tensor()).item<float>();
+
+    EXPECT_GE(halt_min, 0.0f);
+    EXPECT_LE(halt_max, 1.0f);
+    EXPECT_GE(cont_min, 0.0f);
+    EXPECT_LE(cont_max, 1.0f);
+}
+
+TEST_F(HRMTest, QLearningACTDecision) {
+    QLearningACT act(64, 8, 0.0, 0.99, 0.01);  // epsilon=0 for deterministic
+
+    Tensor state = randn({2, 8, 64}, DType::Float32, Device::cpu());
+    Variable s(state, false);
+
+    auto [q_halt, q_continue] = act.compute_q_values(s);
+
+    // Action should be deterministic with epsilon=0
+    bool action1 = act.select_action(q_halt, q_continue, false);
+    bool action2 = act.select_action(q_halt, q_continue, false);
+
+    // Both should return same action for same Q-values
+    EXPECT_EQ(action1, action2);
+}
+
+TEST_F(HRMTest, QLearningACTEpsilonDecay) {
+    QLearningACT act(64, 8, 1.0, 0.99, 0.01);
+
+    auto initial_stats = act.stats();
+    EXPECT_EQ(initial_stats.exploration_rate, 1.0);
+
+    // Decay epsilon
+    act.decay_epsilon(0.5, 0.01);
+
+    auto decayed_stats = act.stats();
+    EXPECT_EQ(decayed_stats.exploration_rate, 0.5);
+
+    // Decay to minimum
+    for (int i = 0; i < 100; ++i) {
+        act.decay_epsilon(0.5, 0.01);
+    }
+
+    auto final_stats = act.stats();
+    EXPECT_GE(final_stats.exploration_rate, 0.01);
+}
+
+TEST_F(HRMTest, HRMWithQLearningACT) {
+    config_.use_act = true;
+    config_.use_qlearning_act = true;
+    config_.act_epsilon = 0.1;
+    config_.n_high_cycles = 4;
+    HRM model(config_);
+
+    Tensor input = randn({2, 8, 64}, DType::Float32, Device::cpu());
+    Variable x(input, false);
+
+    model.eval();  // Disable exploration
+    auto output = model.forward(x);
+
+    EXPECT_TRUE(shapes_equal(output.shape(), {2, 8, 64}));
+
+    auto stats = model.last_forward_stats();
+    // With Q-learning ACT, may halt early
+    EXPECT_LE(stats.actual_high_cycles, config_.n_high_cycles);
+    EXPECT_GE(stats.actual_high_cycles, 1);
+}
+
+TEST_F(HRMTest, HRMWithStablemax) {
+    config_.num_classes = 10;
+    config_.use_stablemax = true;
+    HRM model(config_);
+
+    Tensor input = randn({2, 8, 64}, DType::Float32, Device::cpu());
+    Variable x(input, false);
+
+    auto output = model.forward(x);
+
+    EXPECT_TRUE(shapes_equal(output.shape(), {2, 8, 10}));
+
+    // Note: stablemax is applied internally, output should be valid probabilities
+    // (when we get probabilities vs logits depends on implementation)
+}
+
+TEST_F(HRMTest, LeCunInitialization) {
+    config_.use_lecun_init = true;
+    HRM model(config_);
+
+    // After LeCun initialization, weights should have reasonable variance
+    auto params = model.parameters();
+    EXPECT_GT(params.size(), 0u);
+
+    // Check that weights are not all zeros and have reasonable range
+    int weight_count = 0;
+    for (auto& param : params) {
+        auto shape = param->shape();
+
+        // Skip bias parameters (1D tensors) - they may have zero variance
+        if (shape.size() < 2) continue;
+
+        weight_count++;
+        auto mean = tenzor::mean(param->tensor()).item<float>();
+        auto var = tenzor::var(param->tensor()).item<float>();
+
+        EXPECT_FALSE(std::isnan(mean));
+        EXPECT_FALSE(std::isnan(var));
+        EXPECT_GT(var, 0.0f);  // Variance should be positive for weight matrices
+    }
+
+    EXPECT_GT(weight_count, 0);  // Should have some weight matrices
+}
+
+TEST_F(HRMTest, TruncatedNormalInit) {
+    // Test truncated normal initialization
+    Tensor t({1000}, DType::Float32, Device::cpu());
+    truncated_normal_init(t, 0.0, 1.0, -2.0, 2.0);
+
+    float* data = t.data<float>();
+
+    // All values should be within [-2, 2] (in std units)
+    for (int64_t i = 0; i < 1000; ++i) {
+        EXPECT_GE(data[i], -2.0f);
+        EXPECT_LE(data[i], 2.0f);
+    }
+
+    // Mean should be close to 0
+    auto mean = tenzor::mean(t).item<float>();
+    EXPECT_NEAR(mean, 0.0f, 0.2f);
+}
+
+TEST_F(HRMTest, ForwardWithSegments) {
+    config_.use_act = true;
+    config_.use_qlearning_act = true;
+    config_.max_segments = 4;
+    config_.num_classes = 10;
+    HRM model(config_);
+    model.train();
+
+    Tensor input = randn({2, 8, 64}, DType::Float32, Device::cpu());
+    Variable x(input, true);
+
+    // Create fake targets
+    Tensor targets_data({2, 8}, DType::Int64, Device::cpu());
+    for (int64_t i = 0; i < 16; ++i) {
+        targets_data.data<int64_t>()[i] = i % 10;
+    }
+    Variable targets(targets_data, false);
+
+    auto [output, segment_outputs, q_loss] = model.forward_with_segments(x, targets);
+
+    EXPECT_TRUE(shapes_equal(output.shape(), {2, 8, 10}));
+    EXPECT_GT(segment_outputs.size(), 0u);
+
+    auto stats = model.last_forward_stats();
+    EXPECT_GT(stats.actual_segments, 0);
+}
+
+TEST_F(HRMTest, ProperEmbedding) {
+    // Test that vocab_size uses proper Embedding layer
+    config_.vocab_size = 1000;
+    config_.num_classes = 10;
+    HRM model(config_);
+
+    // Create token input
+    Tensor input({2, 8}, DType::Int64, Device::cpu());
+    int64_t* data = input.data<int64_t>();
+    for (int64_t i = 0; i < 16; ++i) {
+        data[i] = i % 1000;  // Random token IDs
+    }
+    Variable x(input, false);
+
+    auto output = model.forward(x);
+
+    // Output should be (batch, seq_len, num_classes)
+    EXPECT_TRUE(shapes_equal(output.shape(), {2, 8, 10}));
+}
+
+// ============================================================================
+// Multi-Backend Tests for New Features
+// ============================================================================
+
+TEST_P(HRMMultiBackendTest, StablemaxOnDevice) {
+    Tensor input = randn({4, 16}, DType::Float32, device_);
+    Variable x(input, true);
+
+    auto output = stablemax(x, -1, 1e-12);
+
+    EXPECT_EQ(output.tensor().device().type, device_.type);
+
+    // Sum should be approximately 1
+    auto sum = tenzor::sum(output.tensor(), {-1}, false);
+    for (int64_t i = 0; i < 4; ++i) {
+        float s = sum.to(Device::cpu()).data<float>()[i];
+        EXPECT_NEAR(s, 1.0f, 0.01f);
+    }
+}
+
+TEST_P(HRMMultiBackendTest, QLearningACTOnDevice) {
+    QLearningACT act(64, 8, 0.1, 0.99, 0.01);
+    act.to(device_);
+
+    Tensor state = randn({2, 8, 64}, DType::Float32, device_);
+    Variable s(state, true);
+
+    auto [q_halt, q_continue] = act.compute_q_values(s);
+
+    EXPECT_EQ(q_halt.tensor().device().type, device_.type);
+    EXPECT_EQ(q_continue.tensor().device().type, device_.type);
+}
+
+TEST_P(HRMMultiBackendTest, HRMWithQLearningACTOnDevice) {
+    config_.use_act = true;
+    config_.use_qlearning_act = true;
+    HRM model(config_);
+    model.to(device_);
+
+    Tensor input = randn({2, 8, 64}, DType::Float32, device_);
+    Variable x(input, false);
+
+    auto output = model.forward(x);
+
+    EXPECT_EQ(output.tensor().device().type, device_.type);
+}

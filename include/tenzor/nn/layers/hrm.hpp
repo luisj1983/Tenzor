@@ -12,7 +12,9 @@
  * - L-module: Rapid, detailed computations (fast updates)
  * - Approximate gradient method for O(1) memory training
  * - Deep supervision at multiple forward passes
- * - Optional Adaptive Computational Time (ACT)
+ * - Q-Learning based Adaptive Computational Time (ACT)
+ * - Stablemax output for numerical stability
+ * - LeCun initialization with truncated normal for hidden states
  */
 
 #pragma once
@@ -20,14 +22,93 @@
 #include <memory>
 #include <vector>
 #include <optional>
+#include <random>
+#include <functional>
 #include "../module.hpp"
 #include "linear.hpp"
 #include "dropout.hpp"
 #include "normalization.hpp"
 #include "attention.hpp"
+#include "embedding.hpp"
 
 namespace tenzor {
 namespace nn {
+
+// ============================================================================
+// Initialization Utilities
+// ============================================================================
+
+/**
+ * @brief LeCun normal initialization
+ *
+ * Initializes weights from N(0, 1/fan_in) for better gradient flow.
+ * Recommended for networks with SELU activation or self-normalizing networks.
+ *
+ * @param tensor Tensor to initialize
+ * @param fan_in Number of input features
+ */
+void lecun_normal_init(Tensor& tensor, int64_t fan_in);
+
+/**
+ * @brief LeCun uniform initialization
+ *
+ * Initializes weights from U(-limit, limit) where limit = sqrt(3/fan_in).
+ *
+ * @param tensor Tensor to initialize
+ * @param fan_in Number of input features
+ */
+void lecun_uniform_init(Tensor& tensor, int64_t fan_in);
+
+/**
+ * @brief Truncated normal initialization
+ *
+ * Samples from a normal distribution but rejects values outside [a, b].
+ * Used in the HRM paper for hidden state initialization.
+ *
+ * @param tensor Tensor to initialize
+ * @param mean Mean of the distribution
+ * @param std Standard deviation
+ * @param a Lower bound (default: -2*std)
+ * @param b Upper bound (default: 2*std)
+ */
+void truncated_normal_init(Tensor& tensor, double mean = 0.0, double std = 1.0,
+                           double a = -2.0, double b = 2.0);
+
+// ============================================================================
+// Stablemax Activation
+// ============================================================================
+
+/**
+ * @brief Stablemax activation function
+ *
+ * A numerically stable variant of softmax that works better with small samples.
+ * From the HRM paper, this provides better stability than standard softmax.
+ *
+ * stablemax(x)_i = exp(x_i - max(x)) / (sum_j exp(x_j - max(x)) + eps)
+ *
+ * The key difference from softmax is the eps term in the denominator which
+ * prevents division by very small numbers.
+ *
+ * @param input Input tensor
+ * @param dim Dimension along which to compute stablemax
+ * @param eps Epsilon for numerical stability (default: 1e-12)
+ * @return Normalized probabilities
+ */
+Variable stablemax(const Variable& input, int64_t dim = -1, double eps = 1e-12);
+
+/**
+ * @brief Stablemax cross-entropy loss
+ *
+ * Cross-entropy loss using stablemax instead of softmax for improved
+ * numerical stability with small sample sizes.
+ *
+ * @param input Logits (batch, num_classes)
+ * @param target Target class indices (batch,)
+ * @param eps Epsilon for numerical stability
+ * @return Scalar loss
+ */
+Variable stablemax_cross_entropy(const Variable& input, const Variable& target,
+                                  double eps = 1e-12);
 
 /**
  * @brief Configuration for Hierarchical Reasoning Model
@@ -41,13 +122,31 @@ struct HRMConfig {
     double dropout = 0.1;           ///< Dropout probability
     bool use_post_norm = true;      ///< Use post-norm (HRM default) vs pre-norm
     bool deep_supervision = true;   ///< Enable deep supervision at each H cycle
-    bool use_act = false;           ///< Enable Adaptive Computational Time
-    double act_threshold = 0.99;    ///< ACT halting threshold
     int64_t max_seq_len = 512;      ///< Maximum sequence length
 
     // Vocab/output settings
     int64_t vocab_size = 0;         ///< Vocabulary size (0 = no embedding/output layers)
     int64_t num_classes = 0;        ///< Number of output classes (0 = use d_model output)
+
+    // Output activation
+    bool use_stablemax = true;      ///< Use stablemax instead of softmax for output
+    double stablemax_eps = 1e-12;   ///< Epsilon for stablemax stability
+
+    // Adaptive Computational Time (ACT) settings
+    bool use_act = false;           ///< Enable Adaptive Computational Time
+    bool use_qlearning_act = true;  ///< Use Q-learning ACT (true) vs simple halting (false)
+    double act_threshold = 0.99;    ///< ACT halting threshold (for simple ACT)
+    double act_epsilon = 0.1;       ///< Exploration rate for Q-learning ACT
+    double act_gamma = 0.99;        ///< Discount factor for Q-learning
+    double act_lr = 0.01;           ///< Learning rate for Q-value updates
+    int64_t max_segments = 16;      ///< Maximum segments for inference-time scaling
+
+    // Initialization settings
+    bool use_lecun_init = true;     ///< Use LeCun initialization for weights
+    bool use_truncated_normal = true; ///< Use truncated normal for hidden state init
+    double init_std = 0.02;         ///< Standard deviation for initialization
+    double truncated_a = -2.0;      ///< Lower bound for truncated normal (in std units)
+    double truncated_b = 2.0;       ///< Upper bound for truncated normal (in std units)
 };
 
 /**
@@ -241,6 +340,128 @@ private:
 };
 
 /**
+ * @brief Q-Learning based Adaptive Computational Time
+ *
+ * Implements the Q-learning ACT mechanism from the HRM paper.
+ * Uses a learned Q-function to decide whether to halt or continue
+ * computation, treating the decision as an episodic MDP.
+ *
+ * Actions:
+ * - halt: Stop computation and output current result
+ * - continue: Perform another computation cycle
+ *
+ * Reward:
+ * - +1 if prediction is correct after halting
+ * - 0 for continuation steps
+ *
+ * The Q-values are updated using temporal difference learning:
+ * Q(s, halt) <- reward
+ * Q(s, continue) <- max(Q(s', halt), Q(s', continue))
+ */
+class QLearningACT : public Module {
+public:
+    /**
+     * @brief Construct Q-Learning ACT module
+     *
+     * @param d_model Model dimension
+     * @param max_segments Maximum number of segments
+     * @param epsilon Exploration rate (epsilon-greedy)
+     * @param gamma Discount factor
+     * @param lr Learning rate for Q-value updates
+     */
+    QLearningACT(int64_t d_model, int64_t max_segments,
+                 double epsilon = 0.1, double gamma = 0.99, double lr = 0.01);
+
+    /**
+     * @brief Compute Q-values for halt and continue actions
+     *
+     * @param state Current H-module state (batch, seq_len, d_model)
+     * @return Pair of (Q_halt, Q_continue) tensors, each (batch, seq_len)
+     */
+    auto compute_q_values(const Variable& state) -> std::pair<Variable, Variable>;
+
+    /**
+     * @brief Select action using epsilon-greedy policy
+     *
+     * @param q_halt Q-value for halt action
+     * @param q_continue Q-value for continue action
+     * @param training Whether in training mode (enables exploration)
+     * @return True if should halt, false if should continue
+     */
+    auto select_action(const Variable& q_halt, const Variable& q_continue,
+                       bool training = true) -> bool;
+
+    /**
+     * @brief Update Q-values based on observed reward
+     *
+     * @param state State where action was taken
+     * @param action Action taken (true = halt, false = continue)
+     * @param reward Observed reward (1.0 for correct, 0.0 otherwise)
+     * @param next_state Next state (for continue action)
+     * @param done Whether episode is done
+     * @return TD error for monitoring
+     */
+    auto update_q_values(const Variable& state, bool action, double reward,
+                         const Variable& next_state, bool done) -> double;
+
+    /**
+     * @brief Compute Q-learning loss for training
+     *
+     * @param states Batch of states
+     * @param actions Batch of actions taken
+     * @param rewards Batch of rewards
+     * @param next_states Batch of next states
+     * @param dones Batch of done flags
+     * @return Q-learning loss (BCE between predicted and target Q-values)
+     */
+    auto compute_loss(const std::vector<Variable>& states,
+                      const std::vector<bool>& actions,
+                      const std::vector<double>& rewards,
+                      const std::vector<Variable>& next_states,
+                      const std::vector<bool>& dones) -> Variable;
+
+    /**
+     * @brief Get statistics from Q-learning
+     */
+    struct QLearningStats {
+        double avg_q_halt;      ///< Average Q-value for halt
+        double avg_q_continue;  ///< Average Q-value for continue
+        double exploration_rate; ///< Current exploration rate
+        int64_t total_decisions; ///< Total number of decisions made
+        int64_t halt_decisions;  ///< Number of halt decisions
+    };
+    auto stats() const -> const QLearningStats& { return stats_; }
+
+    /**
+     * @brief Decay exploration rate
+     *
+     * @param decay_rate Multiplicative decay factor
+     * @param min_epsilon Minimum exploration rate
+     */
+    auto decay_epsilon(double decay_rate = 0.995, double min_epsilon = 0.01) -> void;
+
+    auto forward_impl(const Variable& input) -> Variable override;
+
+private:
+    std::shared_ptr<Linear> q_head_;  ///< Projects state to Q-values [halt, continue]
+    double epsilon_;                   ///< Exploration rate
+    double gamma_;                     ///< Discount factor
+    double lr_;                        ///< Learning rate for Q-updates
+    int64_t max_segments_;
+
+    QLearningStats stats_;
+    std::mt19937 rng_;  ///< Random number generator for exploration
+
+    /**
+     * @brief Pool state across sequence for Q-value computation
+     *
+     * @param state State tensor (batch, seq_len, d_model)
+     * @return Pooled state (batch, d_model)
+     */
+    auto pool_state(const Variable& state) -> Variable;
+};
+
+/**
  * @brief Hierarchical Reasoning Model (HRM)
  *
  * A brain-inspired recurrent architecture with two interdependent modules:
@@ -255,7 +476,9 @@ private:
  * 1. Hierarchical cycling: L converges before H updates
  * 2. Approximate gradient: O(1) memory via hidden state detachment
  * 3. Deep supervision: Loss at each H cycle for stable training
- * 4. Optional ACT: Dynamic compute based on task complexity
+ * 4. Q-Learning ACT: Dynamic compute based on task complexity
+ * 5. Stablemax: Numerically stable output activation
+ * 6. LeCun initialization: Better gradient flow
  *
  * @code
  * HRMConfig config;
@@ -263,6 +486,8 @@ private:
  * config.n_high_cycles = 4;
  * config.t_low_steps = 8;
  * config.vocab_size = 10000;
+ * config.use_qlearning_act = true;
+ * config.use_stablemax = true;
  *
  * HRM model(config);
  * model.to(Device::vulkan());
@@ -302,6 +527,22 @@ public:
         -> std::pair<Variable, std::vector<Variable>>;
 
     /**
+     * @brief Forward pass with segment-based training (for deep supervision)
+     *
+     * Runs multiple segments, each with its own forward pass and gradient.
+     * This is the training mode described in the HRM paper.
+     *
+     * @param input Input tensor
+     * @param targets Target tensor for computing reward (for Q-learning ACT)
+     * @param mask Optional attention mask
+     * @return Tuple of (final_output, segment_outputs, q_learning_loss)
+     */
+    auto forward_with_segments(const Variable& input,
+                               const Variable& targets = Variable{},
+                               const Tensor& mask = Tensor{})
+        -> std::tuple<Variable, std::vector<Variable>, Variable>;
+
+    /**
      * @brief Get configuration
      */
     auto config() const -> const HRMConfig& { return config_; }
@@ -317,17 +558,32 @@ public:
     struct ForwardStats {
         int64_t actual_high_cycles;   ///< Actual H cycles used (may differ with ACT)
         int64_t actual_low_steps;     ///< Actual L steps used
+        int64_t actual_segments;      ///< Actual segments used
         double h_participation_ratio; ///< Dimensionality measure for H
         double l_participation_ratio; ///< Dimensionality measure for L
+        double avg_q_halt;            ///< Average Q-value for halt action
+        double avg_q_continue;        ///< Average Q-value for continue action
     };
     auto last_forward_stats() const -> const ForwardStats& { return stats_; }
+
+    /**
+     * @brief Get Q-Learning ACT module (for external training/monitoring)
+     */
+    auto get_qlearning_act() -> std::shared_ptr<QLearningACT> { return qlearning_act_; }
+
+    /**
+     * @brief Apply proper initialization (LeCun + truncated normal)
+     *
+     * Should be called after construction if using custom initialization.
+     */
+    auto apply_hrm_initialization() -> void;
 
 private:
     HRMConfig config_;
     ForwardStats stats_;
 
-    // Embedding layers (optional, based on vocab_size)
-    std::shared_ptr<Linear> embedding_;
+    // Embedding layer (optional, based on vocab_size)
+    std::shared_ptr<Embedding> embedding_;  ///< Proper embedding layer (not Linear)
 
     // H-module (high-level, slow)
     std::shared_ptr<HRMBlock> h_module_;
@@ -339,15 +595,22 @@ private:
     std::shared_ptr<Linear> h_init_proj_;
     std::shared_ptr<Linear> l_init_proj_;
 
+    // Fixed initial hidden states (sampled from truncated normal)
+    Tensor h_init_state_;  ///< Initial H state template
+    Tensor l_init_state_;  ///< Initial L state template
+
     // Output projection (optional, based on num_classes)
     std::shared_ptr<Linear> output_proj_;
     std::shared_ptr<RMSNorm> output_norm_;
 
-    // Adaptive Computational Time (optional)
-    std::shared_ptr<AdaptiveComputationalTime> act_;
+    // Adaptive Computational Time (mutually exclusive)
+    std::shared_ptr<AdaptiveComputationalTime> act_;  ///< Simple halting ACT
+    std::shared_ptr<QLearningACT> qlearning_act_;     ///< Q-learning based ACT
 
     /**
      * @brief Initialize hidden states from input
+     *
+     * Uses truncated normal initialization as specified in the HRM paper.
      */
     auto init_states(const Variable& x)
         -> std::pair<Variable, Variable>;
@@ -359,9 +622,19 @@ private:
                      const Tensor& mask) -> Variable;
 
     /**
+     * @brief Apply output activation (stablemax or softmax)
+     */
+    auto apply_output_activation(const Variable& logits) -> Variable;
+
+    /**
      * @brief Compute participation ratio for analysis
      */
     auto compute_participation_ratio(const Variable& state) -> double;
+
+    /**
+     * @brief Initialize weights with LeCun initialization
+     */
+    auto apply_lecun_init_to_module(Module* module) -> void;
 };
 
 /**

@@ -65,6 +65,7 @@ set(TENZOR_CORE_SOURCES
     nn/optim/optimizer.cpp
     nn/optim/sgd.cpp
     nn/optim/adam.cpp
+    nn/optim/adam_atan2.cpp
     nn/optim/rmsprop.cpp
     nn/optim/adagrad.cpp
     nn/optim/adadelta.cpp
