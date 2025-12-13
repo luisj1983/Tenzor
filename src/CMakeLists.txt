@@ -53,6 +53,7 @@ set(TENZOR_CORE_SOURCES
     nn/layers/vision.cpp
     nn/layers/mobilenet.cpp
     nn/layers/segmentation.cpp
+    nn/layers/hrm.cpp
     nn/detection/anchors.cpp
     nn/detection/roi_ops.cpp
     nn/detection/rpn.cpp

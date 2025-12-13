@@ -2705,3 +2705,17 @@ if(TENZOR_BUILD_ONEAPI)
 
     tenzor_discover_tests(test_oneapi_caching_allocator DISCOVERY_TIMEOUT 30)
 endif()
+
+# ============================================================================
+# Hierarchical Reasoning Model (HRM) Tests
+# ============================================================================
+add_executable(test_hrm
+    nn/layers/test_hrm.cpp
+)
+
+target_link_libraries(test_hrm PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+tenzor_discover_tests(test_hrm DISCOVERY_TIMEOUT 60)

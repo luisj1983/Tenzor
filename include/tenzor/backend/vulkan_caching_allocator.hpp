@@ -139,6 +139,55 @@ public:
     VkBuffer get_buffer(void* ptr, int device = 0) const;
 
     /**
+     * @brief Check if a pointer refers to host-visible (mappable) memory
+     *
+     * @param ptr Mapped pointer or synthetic address
+     * @param device Device index
+     * @return true if memory is host-visible and can be directly accessed
+     */
+    bool is_memory_host_visible(void* ptr, int device = 0) const;
+
+    /**
+     * @brief Get the actual mapped pointer for host-visible memory
+     *
+     * For host-visible memory, returns the mapped pointer.
+     * For device-local memory, returns nullptr.
+     *
+     * @param ptr Pointer (mapped or synthetic)
+     * @param device Device index
+     * @return Actual mapped pointer or nullptr
+     */
+    void* get_mapped_ptr(void* ptr, int device = 0) const;
+
+    /**
+     * @brief Staging buffer for CPU<->GPU transfers
+     */
+    struct StagingBuffer {
+        VkBuffer buffer;
+        VkDeviceMemory memory;
+        void* mapped_ptr;
+        size_t size;
+        bool in_use;
+    };
+
+    /**
+     * @brief Acquire a staging buffer for data transfer
+     *
+     * @param size Required size in bytes
+     * @param device Device index
+     * @return Staging buffer (caller must release when done)
+     */
+    StagingBuffer* acquire_staging_buffer(size_t size, int device = 0);
+
+    /**
+     * @brief Release a staging buffer back to the pool
+     *
+     * @param staging Staging buffer to release
+     * @param device Device index
+     */
+    void release_staging_buffer(StagingBuffer* staging, int device = 0);
+
+    /**
      * @brief Get currently allocated memory in bytes
      *
      * @param device Device ID (-1 for all devices)
@@ -258,11 +307,24 @@ private:
         // All blocks (free and allocated) by mapped pointer
         std::unordered_map<void*, std::unique_ptr<VulkanBlock>> all_blocks;
 
+        // Staging buffer pool for CPU<->GPU transfers
+        std::vector<std::unique_ptr<StagingBuffer>> staging_pool;
+
         // Statistics
         VulkanMemoryStats stats;
 
         DeviceAllocator() = default;
     };
+
+    /**
+     * @brief Create a new staging buffer
+     */
+    StagingBuffer* create_staging_buffer(size_t size, int device);
+
+    /**
+     * @brief Destroy a staging buffer
+     */
+    void destroy_staging_buffer(StagingBuffer* staging, int device);
 
     // Mutex for thread safety
     mutable std::mutex mutex_;

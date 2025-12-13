@@ -537,8 +537,8 @@ void VulkanCachingAllocator::release_block(VulkanBlock* block) {
     // Remove from free blocks if present
     device_alloc.free_blocks.erase(block);
 
-    // Unmap memory if mapped
-    if (block->mapped_ptr) {
+    // Unmap memory only if it's actually host-visible (mapped)
+    if (block->is_host_visible && block->mapped_ptr) {
         vkUnmapMemory(device_alloc.device, block->memory);
     }
 
@@ -593,6 +593,156 @@ uint32_t VulkanCachingAllocator::find_memory_type(VkPhysicalDevice physical_devi
     }
 
     throw std::runtime_error("VulkanCachingAllocator: Failed to find suitable memory type");
+}
+
+bool VulkanCachingAllocator::is_memory_host_visible(void* ptr, int device) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    auto dev_it = device_allocators_.find(device);
+    if (dev_it == device_allocators_.end()) {
+        return false;
+    }
+
+    auto it = dev_it->second.all_blocks.find(ptr);
+    if (it == dev_it->second.all_blocks.end()) {
+        return false;
+    }
+
+    return it->second->is_host_visible;
+}
+
+void* VulkanCachingAllocator::get_mapped_ptr(void* ptr, int device) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    auto dev_it = device_allocators_.find(device);
+    if (dev_it == device_allocators_.end()) {
+        return nullptr;
+    }
+
+    auto it = dev_it->second.all_blocks.find(ptr);
+    if (it == dev_it->second.all_blocks.end()) {
+        return nullptr;
+    }
+
+    // Return actual mapped pointer only if host-visible
+    if (it->second->is_host_visible) {
+        return it->second->mapped_ptr;
+    }
+    return nullptr;
+}
+
+VulkanCachingAllocator::StagingBuffer* VulkanCachingAllocator::acquire_staging_buffer(size_t size, int device) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    auto it = device_allocators_.find(device);
+    if (it == device_allocators_.end() || !it->second.initialized) {
+        throw std::runtime_error("VulkanCachingAllocator: Device not initialized for staging buffer");
+    }
+
+    auto& device_alloc = it->second;
+
+    // Try to find an existing free staging buffer that's large enough
+    for (auto& staging : device_alloc.staging_pool) {
+        if (!staging->in_use && staging->size >= size) {
+            staging->in_use = true;
+            return staging.get();
+        }
+    }
+
+    // No suitable buffer found, create a new one
+    StagingBuffer* new_staging = create_staging_buffer(size, device);
+    new_staging->in_use = true;
+    return new_staging;
+}
+
+void VulkanCachingAllocator::release_staging_buffer(StagingBuffer* staging, int device) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    if (!staging) return;
+
+    staging->in_use = false;
+}
+
+VulkanCachingAllocator::StagingBuffer* VulkanCachingAllocator::create_staging_buffer(size_t size, int device) {
+    auto& device_alloc = device_allocators_[device];
+
+    // Round up to alignment
+    size = round_size(size);
+
+    // Create staging buffer with HOST_VISIBLE | HOST_COHERENT memory
+    VkBufferCreateInfo buffer_info{};
+    buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    buffer_info.size = size;
+    buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    VkBuffer buffer;
+    VkResult result = vkCreateBuffer(device_alloc.device, &buffer_info, nullptr, &buffer);
+    if (result != VK_SUCCESS) {
+        throw std::runtime_error("VulkanCachingAllocator: Failed to create staging buffer");
+    }
+
+    VkMemoryRequirements mem_requirements;
+    vkGetBufferMemoryRequirements(device_alloc.device, buffer, &mem_requirements);
+
+    // Find host-visible memory type
+    VkMemoryPropertyFlags properties = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                       VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+
+    VkMemoryAllocateInfo alloc_info{};
+    alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    alloc_info.allocationSize = mem_requirements.size;
+    alloc_info.memoryTypeIndex = find_memory_type(device_alloc.physical_device,
+                                                   mem_requirements.memoryTypeBits,
+                                                   properties);
+
+    VkDeviceMemory memory;
+    result = vkAllocateMemory(device_alloc.device, &alloc_info, nullptr, &memory);
+    if (result != VK_SUCCESS) {
+        vkDestroyBuffer(device_alloc.device, buffer, nullptr);
+        throw std::runtime_error("VulkanCachingAllocator: Failed to allocate staging buffer memory");
+    }
+
+    result = vkBindBufferMemory(device_alloc.device, buffer, memory, 0);
+    if (result != VK_SUCCESS) {
+        vkFreeMemory(device_alloc.device, memory, nullptr);
+        vkDestroyBuffer(device_alloc.device, buffer, nullptr);
+        throw std::runtime_error("VulkanCachingAllocator: Failed to bind staging buffer memory");
+    }
+
+    void* mapped_ptr = nullptr;
+    result = vkMapMemory(device_alloc.device, memory, 0, size, 0, &mapped_ptr);
+    if (result != VK_SUCCESS) {
+        vkFreeMemory(device_alloc.device, memory, nullptr);
+        vkDestroyBuffer(device_alloc.device, buffer, nullptr);
+        throw std::runtime_error("VulkanCachingAllocator: Failed to map staging buffer memory");
+    }
+
+    auto staging = std::make_unique<StagingBuffer>();
+    staging->buffer = buffer;
+    staging->memory = memory;
+    staging->mapped_ptr = mapped_ptr;
+    staging->size = size;
+    staging->in_use = false;
+
+    StagingBuffer* staging_ptr = staging.get();
+    device_alloc.staging_pool.push_back(std::move(staging));
+
+    return staging_ptr;
+}
+
+void VulkanCachingAllocator::destroy_staging_buffer(StagingBuffer* staging, int device) {
+    auto& device_alloc = device_allocators_[device];
+
+    if (staging->mapped_ptr) {
+        vkUnmapMemory(device_alloc.device, staging->memory);
+    }
+    if (staging->buffer != VK_NULL_HANDLE) {
+        vkDestroyBuffer(device_alloc.device, staging->buffer, nullptr);
+    }
+    if (staging->memory != VK_NULL_HANDLE) {
+        vkFreeMemory(device_alloc.device, staging->memory, nullptr);
+    }
 }
 
 } // namespace backend
