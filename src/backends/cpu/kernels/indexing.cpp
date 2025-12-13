@@ -6,8 +6,22 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/core/shape.hpp"
+#include "simd_fast_math.hpp"
 #include <cstring>
 #include <stdexcept>
+
+// SIMD support detection
+#if defined(__AVX512F__)
+    #include <immintrin.h>
+    #define INDEXING_HAS_AVX512 1
+#elif defined(__AVX2__)
+    #include <immintrin.h>
+    #define INDEXING_HAS_AVX2 1
+#endif
+
+#ifdef _OPENMP
+    #include <omp.h>
+#endif
 
 namespace tenzor {
 namespace cpu {
@@ -824,8 +838,24 @@ auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y) -> 
         const float* y_ptr = y.data<float>();
         float* output_ptr = output.data<float>();
 
-        for (int64_t i = 0; i < numel; ++i) {
-            output_ptr[i] = is_cond_true(i) ? x_ptr[i] : y_ptr[i];
+        // Use SIMD optimization for Float32 condition with Float32 x,y
+        if (use_float_cond) {
+#if defined(INDEXING_HAS_AVX512)
+            fast_math::where_batch_avx512(float_cond_ptr, x_ptr, y_ptr, output_ptr, static_cast<size_t>(numel));
+#elif defined(INDEXING_HAS_AVX2)
+            fast_math::where_batch_avx2(float_cond_ptr, x_ptr, y_ptr, output_ptr, static_cast<size_t>(numel));
+#else
+            #pragma omp parallel for if(numel > 100000)
+            for (int64_t i = 0; i < numel; ++i) {
+                output_ptr[i] = is_cond_true(i) ? x_ptr[i] : y_ptr[i];
+            }
+#endif
+        } else {
+            // Bool condition - scalar loop with OpenMP
+            #pragma omp parallel for if(numel > 100000)
+            for (int64_t i = 0; i < numel; ++i) {
+                output_ptr[i] = bool_cond_ptr[i] ? x_ptr[i] : y_ptr[i];
+            }
         }
     } else if (x.dtype() == DType::Float64) {
         const double* x_ptr = x.data<double>();

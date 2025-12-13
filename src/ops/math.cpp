@@ -7,6 +7,9 @@
 #include <stdexcept>
 #include <iostream>
 #include <vector>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 namespace tenzor {
 
@@ -60,18 +63,18 @@ auto bmm(const Tensor& a, const Tensor& b) -> Tensor {
     }
 
     int64_t batch_size = a.shape()[0];
-    int64_t n = a.shape()[1];
-    int64_t m = a.shape()[2];
+    int64_t M = a.shape()[1];  // rows of A
+    int64_t K = a.shape()[2];  // cols of A = rows of B
 
-    if (b.shape()[0] != batch_size || b.shape()[1] != m) {
+    if (b.shape()[0] != batch_size || b.shape()[1] != K) {
         throw std::runtime_error(
             "bmm dimension mismatch: expected b.shape=[" +
-            std::to_string(batch_size) + ", " + std::to_string(m) + ", *], got [" +
+            std::to_string(batch_size) + ", " + std::to_string(K) + ", *], got [" +
             std::to_string(b.shape()[0]) + ", " + std::to_string(b.shape()[1]) + ", " +
             std::to_string(b.shape()[2]) + "]");
     }
 
-    int64_t p = b.shape()[2];
+    int64_t N = b.shape()[2];  // cols of B
 
     // Validate dtype support
     if (a.dtype() != DType::Float16 && a.dtype() != DType::Float32 && a.dtype() != DType::Float64) {
@@ -80,37 +83,113 @@ auto bmm(const Tensor& a, const Tensor& b) -> Tensor {
             std::to_string(static_cast<int>(a.dtype())));
     }
 
-    // Process each batch by extracting 2D slices and performing matmul
-    // This preserves the computational graph for autograd operations
-    std::vector<Tensor> batch_results;
-    batch_results.reserve(batch_size);
+    // For non-CPU devices, use the slice/reshape approach for autograd compatibility
+    if (a.device().type != Device::Type::CPU) {
+        std::vector<Tensor> batch_results;
+        batch_results.reserve(batch_size);
 
-    for (int64_t batch = 0; batch < batch_size; ++batch) {
-        // Extract 2D slices from 3D tensors using slice and reshape operations
-        // slice(input, dim, start, end) extracts input[start:end] along dimension dim
-        // Then reshape removes the singleton dimension to get proper 2D tensors
-
-        // Extract a_batch: slice to (1, n, m) then reshape to (n, m)
-        Tensor a_slice = slice(a, 0, batch, batch + 1);  // Shape: (1, n, m)
-        Tensor a_batch = reshape(a_slice, {n, m});        // Shape: (n, m)
-
-        // Extract b_batch: slice to (1, m, p) then reshape to (m, p)
-        Tensor b_slice = slice(b, 0, batch, batch + 1);  // Shape: (1, m, p)
-        Tensor b_batch = reshape(b_slice, {m, p});        // Shape: (m, p)
-
-        // Perform 2D matrix multiplication on this batch
-        // This properly handles both contiguous and non-contiguous tensors
-        // and maintains the autograd computational graph
-        Tensor result_batch = matmul(a_batch, b_batch);  // Shape: (n, p)
-
-        // Store the result for this batch
-        batch_results.push_back(result_batch);
+        for (int64_t batch = 0; batch < batch_size; ++batch) {
+            Tensor a_slice = slice(a, 0, batch, batch + 1);
+            Tensor a_batch = reshape(a_slice, {M, K});
+            Tensor b_slice = slice(b, 0, batch, batch + 1);
+            Tensor b_batch = reshape(b_slice, {K, N});
+            batch_results.push_back(matmul(a_batch, b_batch));
+        }
+        return stack(batch_results, 0);
     }
 
-    // Stack all batch results along dimension 0 to create the 3D output tensor
-    // stack() concatenates tensors and adds a new dimension, creating shape (batch_size, n, p)
-    // This maintains the computational graph connection for autograd
-    return stack(batch_results, 0);
+    // Optimized CPU path: direct memory access with OpenMP parallelization
+    // Make inputs contiguous
+    Tensor a_cont = a.is_contiguous() ? a : a.contiguous();
+    Tensor b_cont = b.is_contiguous() ? b : b.contiguous();
+
+    // Create output tensor
+    Tensor output = zeros({batch_size, M, N}, a.dtype(), Device::cpu());
+
+    // Batch strides
+    int64_t a_batch_stride = M * K;
+    int64_t b_batch_stride = K * N;
+    int64_t c_batch_stride = M * N;
+
+    if (a.dtype() == DType::Float32) {
+        const float* a_data = a_cont.data<float>();
+        const float* b_data = b_cont.data<float>();
+        float* c_data = output.data<float>();
+
+        // Parallelize across batches
+        #pragma omp parallel for if(batch_size > 1)
+        for (int64_t batch = 0; batch < batch_size; ++batch) {
+            const float* a_batch = a_data + batch * a_batch_stride;
+            const float* b_batch = b_data + batch * b_batch_stride;
+            float* c_batch = c_data + batch * c_batch_stride;
+
+            // Simple but fast GEMM for each batch
+            // Zero output first
+            std::memset(c_batch, 0, c_batch_stride * sizeof(float));
+
+            // C = A * B (M x N = M x K * K x N)
+            for (int64_t i = 0; i < M; ++i) {
+                for (int64_t k = 0; k < K; ++k) {
+                    float a_ik = a_batch[i * K + k];
+                    for (int64_t j = 0; j < N; ++j) {
+                        c_batch[i * N + j] += a_ik * b_batch[k * N + j];
+                    }
+                }
+            }
+        }
+    } else if (a.dtype() == DType::Float64) {
+        const double* a_data = a_cont.data<double>();
+        const double* b_data = b_cont.data<double>();
+        double* c_data = output.data<double>();
+
+        #pragma omp parallel for if(batch_size > 1)
+        for (int64_t batch = 0; batch < batch_size; ++batch) {
+            const double* a_batch = a_data + batch * a_batch_stride;
+            const double* b_batch = b_data + batch * b_batch_stride;
+            double* c_batch = c_data + batch * c_batch_stride;
+
+            std::memset(c_batch, 0, c_batch_stride * sizeof(double));
+
+            for (int64_t i = 0; i < M; ++i) {
+                for (int64_t k = 0; k < K; ++k) {
+                    double a_ik = a_batch[i * K + k];
+                    for (int64_t j = 0; j < N; ++j) {
+                        c_batch[i * N + j] += a_ik * b_batch[k * N + j];
+                    }
+                }
+            }
+        }
+    } else if (a.dtype() == DType::Float16) {
+        const Float16* a_data = a_cont.data<Float16>();
+        const Float16* b_data = b_cont.data<Float16>();
+        Float16* c_data = output.data<Float16>();
+
+        #pragma omp parallel for if(batch_size > 1)
+        for (int64_t batch = 0; batch < batch_size; ++batch) {
+            const Float16* a_batch = a_data + batch * a_batch_stride;
+            const Float16* b_batch = b_data + batch * b_batch_stride;
+            Float16* c_batch = c_data + batch * c_batch_stride;
+
+            // Use float accumulator for FP16
+            std::vector<float> c_fp32(c_batch_stride, 0.0f);
+
+            for (int64_t i = 0; i < M; ++i) {
+                for (int64_t k = 0; k < K; ++k) {
+                    float a_ik = static_cast<float>(a_batch[i * K + k]);
+                    for (int64_t j = 0; j < N; ++j) {
+                        c_fp32[i * N + j] += a_ik * static_cast<float>(b_batch[k * N + j]);
+                    }
+                }
+            }
+
+            // Convert back to FP16
+            for (int64_t i = 0; i < c_batch_stride; ++i) {
+                c_batch[i] = Float16(c_fp32[i]);
+            }
+        }
+    }
+
+    return output;
 }
 
 auto dot(const Tensor& a, const Tensor& b) -> Tensor {

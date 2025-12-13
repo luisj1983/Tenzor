@@ -1,9 +1,12 @@
 /**
  * @file activations_simd.cpp
  * @brief SIMD implementations of activation functions
+ *
+ * Uses optimized polynomial approximations for sigmoid, tanh, and GELU.
  */
 
 #include "tenzor/backends/cpu/simd.hpp"
+#include "simd_fast_math.hpp"
 #include <cmath>
 #include <algorithm>
 
@@ -83,20 +86,18 @@ auto relu(const float* a, float* out, size_t size) -> void {
 }
 
 auto sigmoid(const float* a, float* out, size_t size) -> void {
-    // Sigmoid requires exp, which is complex to vectorize efficiently
-    // Use scalar for now
-    scalar::sigmoid(a, out, size);
+    // Use optimized vectorized sigmoid
+    fast_math::sigmoid_batch_avx2(a, out, size);
 }
 
 auto tanh(const float* a, float* out, size_t size) -> void {
-    // Tanh can be approximated, but scalar version is simpler
-    scalar::tanh(a, out, size);
+    // Use optimized vectorized tanh
+    fast_math::tanh_batch_avx2(a, out, size);
 }
 
 auto gelu(const float* a, float* out, size_t size) -> void {
-    // GELU requires tanh and complex arithmetic
-    // Use scalar for now
-    scalar::gelu(a, out, size);
+    // Use optimized vectorized GELU
+    fast_math::gelu_batch_avx2(a, out, size);
 }
 
 #else
@@ -134,15 +135,18 @@ auto relu(const float* a, float* out, size_t size) -> void {
 }
 
 auto sigmoid(const float* a, float* out, size_t size) -> void {
-    scalar::sigmoid(a, out, size);
+    // Use optimized vectorized sigmoid with AVX-512
+    fast_math::sigmoid_batch_avx512(a, out, size);
 }
 
 auto tanh(const float* a, float* out, size_t size) -> void {
-    scalar::tanh(a, out, size);
+    // Use optimized vectorized tanh with AVX-512
+    fast_math::tanh_batch_avx512(a, out, size);
 }
 
 auto gelu(const float* a, float* out, size_t size) -> void {
-    scalar::gelu(a, out, size);
+    // Use optimized vectorized GELU with AVX-512
+    fast_math::gelu_batch_avx512(a, out, size);
 }
 
 #else
@@ -174,14 +178,53 @@ auto relu(const float* a, float* out, size_t size) -> void {
 }
 
 auto sigmoid(const float* a, float* out, size_t size) -> void {
+    const auto& cpu = CPUInfo::get();
+#ifdef TENZOR_HAS_AVX512
+    if (cpu.has_avx512()) {
+        fast_math::sigmoid_batch_avx512(a, out, size);
+        return;
+    }
+#endif
+#ifdef TENZOR_HAS_AVX2
+    if (cpu.has_avx2()) {
+        fast_math::sigmoid_batch_avx2(a, out, size);
+        return;
+    }
+#endif
     scalar::sigmoid(a, out, size);
 }
 
 auto tanh(const float* a, float* out, size_t size) -> void {
+    const auto& cpu = CPUInfo::get();
+#ifdef TENZOR_HAS_AVX512
+    if (cpu.has_avx512()) {
+        fast_math::tanh_batch_avx512(a, out, size);
+        return;
+    }
+#endif
+#ifdef TENZOR_HAS_AVX2
+    if (cpu.has_avx2()) {
+        fast_math::tanh_batch_avx2(a, out, size);
+        return;
+    }
+#endif
     scalar::tanh(a, out, size);
 }
 
 auto gelu(const float* a, float* out, size_t size) -> void {
+    const auto& cpu = CPUInfo::get();
+#ifdef TENZOR_HAS_AVX512
+    if (cpu.has_avx512()) {
+        fast_math::gelu_batch_avx512(a, out, size);
+        return;
+    }
+#endif
+#ifdef TENZOR_HAS_AVX2
+    if (cpu.has_avx2()) {
+        fast_math::gelu_batch_avx2(a, out, size);
+        return;
+    }
+#endif
     scalar::gelu(a, out, size);
 }
 

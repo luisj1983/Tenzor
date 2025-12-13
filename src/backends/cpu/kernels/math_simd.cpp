@@ -3,9 +3,11 @@
  * @brief SIMD implementations of math operations
  *
  * Provides AVX2 and AVX-512 vectorized implementations with scalar fallback.
+ * Uses optimized polynomial approximations for transcendental functions.
  */
 
 #include "tenzor/backends/cpu/simd.hpp"
+#include "simd_fast_math.hpp"
 #include <cmath>
 #include <algorithm>
 
@@ -164,15 +166,13 @@ auto sqrt(const float* a, float* out, size_t size) -> void {
 }
 
 auto exp(const float* a, float* out, size_t size) -> void {
-    // Use scalar exp for now (vectorized exp is complex)
-    // Can be optimized with polynomial approximation
-    scalar::exp(a, out, size);
+    // Use optimized vectorized exp with polynomial approximation
+    fast_math::exp_batch_avx2(a, out, size);
 }
 
 auto log(const float* a, float* out, size_t size) -> void {
-    // Use scalar log for now (vectorized log is complex)
-    // Can be optimized with polynomial approximation
-    scalar::log(a, out, size);
+    // Use optimized vectorized log with polynomial approximation
+    fast_math::log_batch_avx2(a, out, size);
 }
 
 auto fma(const float* a, const float* b, const float* c, float* out, size_t size) -> void {
@@ -286,13 +286,13 @@ auto sqrt(const float* a, float* out, size_t size) -> void {
 }
 
 auto exp(const float* a, float* out, size_t size) -> void {
-    // Use scalar exp for now
-    scalar::exp(a, out, size);
+    // Use optimized vectorized exp with AVX-512
+    fast_math::exp_batch_avx512(a, out, size);
 }
 
 auto log(const float* a, float* out, size_t size) -> void {
-    // Use scalar log for now
-    scalar::log(a, out, size);
+    // Use optimized vectorized log with AVX-512
+    fast_math::log_batch_avx512(a, out, size);
 }
 
 auto fma(const float* a, const float* b, const float* c, float* out, size_t size) -> void {
@@ -388,10 +388,36 @@ auto sqrt(const float* a, float* out, size_t size) -> void {
 }
 
 auto exp(const float* a, float* out, size_t size) -> void {
+    const auto& cpu = CPUInfo::get();
+#ifdef TENZOR_HAS_AVX512
+    if (cpu.has_avx512()) {
+        fast_math::exp_batch_avx512(a, out, size);
+        return;
+    }
+#endif
+#ifdef TENZOR_HAS_AVX2
+    if (cpu.has_avx2()) {
+        fast_math::exp_batch_avx2(a, out, size);
+        return;
+    }
+#endif
     scalar::exp(a, out, size);
 }
 
 auto log(const float* a, float* out, size_t size) -> void {
+    const auto& cpu = CPUInfo::get();
+#ifdef TENZOR_HAS_AVX512
+    if (cpu.has_avx512()) {
+        fast_math::log_batch_avx512(a, out, size);
+        return;
+    }
+#endif
+#ifdef TENZOR_HAS_AVX2
+    if (cpu.has_avx2()) {
+        fast_math::log_batch_avx2(a, out, size);
+        return;
+    }
+#endif
     scalar::log(a, out, size);
 }
 

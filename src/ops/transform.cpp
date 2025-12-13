@@ -2,6 +2,10 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/backend/dispatch.hpp"
 #include <sstream>
+#include <cstring>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 namespace tenzor {
 
@@ -100,159 +104,68 @@ auto cat(std::span<const Tensor> tensors, int64_t dim) -> Tensor {
         return Dispatcher::dispatch("cat", std::span<const Tensor>(tensor_vec), attrs)[0];
     }
 
-    // For CPU, manually concatenate
-    if (tensors[0].device().type == Device::Type::CPU) {
-        auto output = zeros(out_shape, tensors[0].dtype(), Device::cpu());
-        auto dtype = tensors[0].dtype();
+    // Optimized CPU concatenation using memcpy + OpenMP
+    auto output = zeros(out_shape, tensors[0].dtype(), Device::cpu());
+    auto dtype = tensors[0].dtype();
+    size_t elem_size = dtype_size(dtype);
 
-        // Calculate output strides
-        std::vector<int64_t> out_strides(ndim);
-        int64_t stride = 1;
-        for (int64_t i = ndim - 1; i >= 0; --i) {
-            out_strides[i] = stride;
-            stride *= out_shape[i];
-        }
-
-        int64_t offset_at_dim = 0;
-
-        // Dtype-aware concatenation
-        if (dtype == DType::Float32) {
-            float* out_data = output.data<float>();
-            for (const auto& t : tensors) {
-                auto t_cont = t.is_contiguous() ? t : t.contiguous();
-                const float* in_data = t_cont.data<float>();
-                auto in_shape = t_cont.shape();
-
-                int64_t in_size = 1;
-                for (auto s : in_shape) {
-                    in_size *= s;
-                }
-
-                for (int64_t in_idx = 0; in_idx < in_size; ++in_idx) {
-                    int64_t temp = in_idx;
-                    std::vector<int64_t> coords(ndim);
-                    for (int64_t i = ndim - 1; i >= 0; --i) {
-                        coords[i] = temp % in_shape[i];
-                        temp /= in_shape[i];
-                    }
-
-                    coords[dim] += offset_at_dim;
-
-                    int64_t out_idx = 0;
-                    for (int64_t i = 0; i < ndim; ++i) {
-                        out_idx += coords[i] * out_strides[i];
-                    }
-
-                    out_data[out_idx] = in_data[in_idx];
-                }
-
-                offset_at_dim += in_shape[dim];
-            }
-        } else if (dtype == DType::Float64) {
-            double* out_data = output.data<double>();
-            for (const auto& t : tensors) {
-                auto t_cont = t.is_contiguous() ? t : t.contiguous();
-                const double* in_data = t_cont.data<double>();
-                auto in_shape = t_cont.shape();
-
-                int64_t in_size = 1;
-                for (auto s : in_shape) {
-                    in_size *= s;
-                }
-
-                for (int64_t in_idx = 0; in_idx < in_size; ++in_idx) {
-                    int64_t temp = in_idx;
-                    std::vector<int64_t> coords(ndim);
-                    for (int64_t i = ndim - 1; i >= 0; --i) {
-                        coords[i] = temp % in_shape[i];
-                        temp /= in_shape[i];
-                    }
-
-                    coords[dim] += offset_at_dim;
-
-                    int64_t out_idx = 0;
-                    for (int64_t i = 0; i < ndim; ++i) {
-                        out_idx += coords[i] * out_strides[i];
-                    }
-
-                    out_data[out_idx] = in_data[in_idx];
-                }
-
-                offset_at_dim += in_shape[dim];
-            }
-        } else if (dtype == DType::Float16) {
-            Float16* out_data = output.data<Float16>();
-            for (const auto& t : tensors) {
-                auto t_cont = t.is_contiguous() ? t : t.contiguous();
-                const Float16* in_data = t_cont.data<Float16>();
-                auto in_shape = t_cont.shape();
-
-                int64_t in_size = 1;
-                for (auto s : in_shape) {
-                    in_size *= s;
-                }
-
-                for (int64_t in_idx = 0; in_idx < in_size; ++in_idx) {
-                    int64_t temp = in_idx;
-                    std::vector<int64_t> coords(ndim);
-                    for (int64_t i = ndim - 1; i >= 0; --i) {
-                        coords[i] = temp % in_shape[i];
-                        temp /= in_shape[i];
-                    }
-
-                    coords[dim] += offset_at_dim;
-
-                    int64_t out_idx = 0;
-                    for (int64_t i = 0; i < ndim; ++i) {
-                        out_idx += coords[i] * out_strides[i];
-                    }
-
-                    out_data[out_idx] = in_data[in_idx];
-                }
-
-                offset_at_dim += in_shape[dim];
-            }
-        } else if (dtype == DType::Int32) {
-            int32_t* out_data = output.data<int32_t>();
-            for (const auto& t : tensors) {
-                auto t_cont = t.is_contiguous() ? t : t.contiguous();
-                const int32_t* in_data = t_cont.data<int32_t>();
-                auto in_shape = t_cont.shape();
-
-                int64_t in_size = 1;
-                for (auto s : in_shape) {
-                    in_size *= s;
-                }
-
-                for (int64_t in_idx = 0; in_idx < in_size; ++in_idx) {
-                    int64_t temp = in_idx;
-                    std::vector<int64_t> coords(ndim);
-                    for (int64_t i = ndim - 1; i >= 0; --i) {
-                        coords[i] = temp % in_shape[i];
-                        temp /= in_shape[i];
-                    }
-
-                    coords[dim] += offset_at_dim;
-
-                    int64_t out_idx = 0;
-                    for (int64_t i = 0; i < ndim; ++i) {
-                        out_idx += coords[i] * out_strides[i];
-                    }
-
-                    out_data[out_idx] = in_data[in_idx];
-                }
-
-                offset_at_dim += in_shape[dim];
-            }
-        } else {
-            throw std::runtime_error("Unsupported dtype for cat operation");
-        }
-
-        return output;
+    // Calculate dimensions for chunk-based copying:
+    // outer_size = product of dims before `dim`
+    // inner_size = product of dims after `dim` (contiguous chunk size)
+    int64_t outer_size = 1;
+    for (int64_t i = 0; i < dim; ++i) {
+        outer_size *= out_shape[i];
     }
 
-    // Should never reach here - all device types are handled above
-    throw std::runtime_error("Unsupported device type for concatenation");
+    int64_t inner_size = 1;
+    for (int64_t i = dim + 1; i < ndim; ++i) {
+        inner_size *= out_shape[i];
+    }
+
+    // Output stride at concatenation dimension
+    int64_t out_dim_stride = inner_size;  // Elements between adjacent slices at dim
+    int64_t out_slice_size = out_shape[dim] * inner_size;  // Full slice size for one outer index
+
+    char* out_base = reinterpret_cast<char*>(output.data<uint8_t>());
+
+    // Process each input tensor
+    int64_t offset_at_dim = 0;
+    for (const auto& t : tensors) {
+        auto t_cont = t.is_contiguous() ? t : t.contiguous();
+        const char* in_base = reinterpret_cast<const char*>(t_cont.data<uint8_t>());
+        auto in_shape = t_cont.shape();
+        int64_t in_dim_size = in_shape[dim];
+
+        // Fast path: dim=0 and contiguous - single large memcpy per tensor
+        if (dim == 0 && outer_size == 1) {
+            int64_t total_bytes = t_cont.numel() * elem_size;
+            int64_t out_offset = offset_at_dim * inner_size * elem_size;
+            std::memcpy(out_base + out_offset, in_base, total_bytes);
+        }
+        // General case: chunk-based copying with OpenMP
+        else {
+            int64_t copy_chunk_bytes = inner_size * elem_size;
+            int64_t total_chunks = outer_size * in_dim_size;
+
+            // Flatten the nested loops and parallelize over all chunks
+            #pragma omp parallel for if(total_chunks > 64)
+            for (int64_t chunk = 0; chunk < total_chunks; ++chunk) {
+                int64_t outer = chunk / in_dim_size;
+                int64_t d = chunk % in_dim_size;
+
+                // Input position: outer * (in_dim_size * inner_size) + d * inner_size
+                int64_t in_offset = (outer * in_dim_size + d) * inner_size * elem_size;
+                // Output position: outer * out_slice_size + (offset_at_dim + d) * inner_size
+                int64_t out_offset = (outer * out_slice_size + (offset_at_dim + d) * inner_size) * elem_size;
+
+                std::memcpy(out_base + out_offset, in_base + in_offset, copy_chunk_bytes);
+            }
+        }
+
+        offset_at_dim += in_dim_size;
+    }
+
+    return output;
 }
 
 auto stack(std::span<const Tensor> tensors, int64_t dim) -> Tensor {

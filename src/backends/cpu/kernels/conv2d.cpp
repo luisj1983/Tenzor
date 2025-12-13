@@ -1,5 +1,7 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "gemm_optimized.hpp"
+#include "simd_fast_math.hpp"
 #include <stdexcept>
 #include <vector>
 #include <algorithm>
@@ -7,6 +9,17 @@
 
 #ifdef _OPENMP
 #include <omp.h>
+#endif
+
+// SIMD intrinsics for F16C support
+#if defined(__x86_64__) || defined(_M_X64)
+    #include <immintrin.h>
+    #if defined(__AVX2__)
+        #define TENZOR_CONV_AVX2
+    #endif
+    #if defined(__F16C__)
+        #define TENZOR_CONV_F16C
+    #endif
 #endif
 
 namespace tenzor {
@@ -198,7 +211,7 @@ void col2im_cpu(
 // Matrix Multiplication Helper (Row-major GEMM)
 // ============================================================================
 
-// Simple blocked matrix multiplication for C = A @ B^T
+// Optimized GEMM for C = A @ B^T using SIMD micro-kernels
 // A: (M, K) row-major
 // B: (N, K) row-major (will be transposed)
 // C: (M, N) row-major
@@ -213,18 +226,30 @@ void gemm_cpu(
         for (int64_t j = 0; j < N; ++j) {
             T sum = T(0.0f);
             if (transpose_B) {
-                // B is (N, K) row-major, access as B[j][k]
                 for (int64_t k = 0; k < K; ++k) {
                     sum += A[i * K + k] * B[j * K + k];
                 }
             } else {
-                // B is (K, N) row-major, access as B[k][j]
                 for (int64_t k = 0; k < K; ++k) {
                     sum += A[i * K + k] * B[k * N + j];
                 }
             }
             C[i * N + j] = sum;
         }
+    }
+}
+
+// Specialization for float using optimized GEMM
+template<>
+void gemm_cpu<float>(
+    const float* A, const float* B, float* C,
+    int64_t M, int64_t N, int64_t K,
+    bool transpose_B
+) {
+    if (transpose_B) {
+        gemm::gemm_transB_optimized(A, B, C, M, N, K);
+    } else {
+        gemm::gemm_optimized(A, B, C, M, N, K);
     }
 }
 
@@ -248,6 +273,15 @@ void gemm_transA_cpu(
             C[i * N + j] = sum;
         }
     }
+}
+
+// Specialization for float using optimized GEMM
+template<>
+void gemm_transA_cpu<float>(
+    const float* A, const float* B, float* C,
+    int64_t M, int64_t N, int64_t K
+) {
+    gemm::gemm_transA_optimized(A, B, C, M, N, K);
 }
 
 // Specialized version for Float16 (uses Float32 accumulation)

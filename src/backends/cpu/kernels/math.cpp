@@ -2,6 +2,9 @@
 #include "tenzor/core/shape.hpp"
 #include "tenzor/utils/error.hpp"
 #include "broadcast.hpp"
+#include "gemm_optimized.hpp"
+#include "simd_fast_math.hpp"
+#include "float16_simd.hpp"
 #include <cmath>
 #include <stdexcept>
 #include <algorithm>
@@ -19,16 +22,38 @@
 #define TENZOR_HAS_SSE2 1
 #endif
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
+// Adaptive OpenMP thresholds based on operation complexity
+constexpr size_t OMP_THRESHOLD_SIMPLE = 8192;    // add, mul, relu
+constexpr size_t OMP_THRESHOLD_MEDIUM = 4096;    // sigmoid, tanh
+constexpr size_t OMP_THRESHOLD_COMPLEX = 2048;   // softmax, layernorm
+constexpr size_t OMP_THRESHOLD_MATMUL = 1024;    // matrix operations
+
 namespace tenzor {
 namespace cpu {
 
-// Cache-friendly block sizes
-constexpr size_t BLOCK_SIZE_M = 64;
-constexpr size_t BLOCK_SIZE_N = 64;
-constexpr size_t BLOCK_SIZE_K = 64;
+// Optimized cache block sizes for L1/L2/L3 hierarchy
+// L1: 32KB, L2: 256-512KB, L3: 8-32MB (typical modern CPU)
+//
+// Strategy:
+// - BLOCK_SIZE_K: Controls how much of A and B is accessed per iteration
+//   Larger K blocks improve temporal locality for the reduction
+// - BLOCK_SIZE_M/N: Control output tile size
+//   Should fit in L2 along with corresponding A/B panels
+constexpr size_t BLOCK_SIZE_M = 64;   // Output rows per block
+constexpr size_t BLOCK_SIZE_N = 256;  // Output cols per block (wider for better B reuse)
+constexpr size_t BLOCK_SIZE_K = 256;  // Reduction block (fits A panel in L2)
+
+// Prefetch distances (in cache lines)
+constexpr size_t PREFETCH_A = 64;
+constexpr size_t PREFETCH_B = 128;
 
 // Micro-kernel for small block multiplication (Float32)
 // Uses AVX-512 if available for maximum performance
+// Now with software prefetching for better cache utilization
 #ifdef TENZOR_HAS_AVX512
 __attribute__((target("avx512f")))
 #endif
@@ -38,19 +63,25 @@ static void matmul_microkernel_float32(
     int64_t lda, int64_t ldb, int64_t ldc) {
 
 #ifdef TENZOR_HAS_AVX512
-    // AVX-512: Process 16 floats at a time
+    // AVX-512: Process 16 floats at a time with prefetching
     constexpr int64_t simd_width = 16;
 
     for (int64_t i = 0; i < M; ++i) {
         for (int64_t j = 0; j < N; j += simd_width) {
-            // Handle remainder
             int64_t width = std::min(simd_width, N - j);
 
             if (width == simd_width) {
-                // Full SIMD width
                 __m512 c_vec = _mm512_loadu_ps(&C[i * ldc + j]);
 
                 for (int64_t k = 0; k < K; ++k) {
+                    // Prefetch next A and B values
+                    if (k + PREFETCH_A < K) {
+                        _mm_prefetch(reinterpret_cast<const char*>(&A[i * lda + k + PREFETCH_A]), _MM_HINT_T0);
+                    }
+                    if (k + PREFETCH_B < K) {
+                        _mm_prefetch(reinterpret_cast<const char*>(&B[(k + PREFETCH_B) * ldb + j]), _MM_HINT_T0);
+                    }
+
                     __m512 a_vec = _mm512_set1_ps(A[i * lda + k]);
                     __m512 b_vec = _mm512_loadu_ps(&B[k * ldb + j]);
                     c_vec = _mm512_fmadd_ps(a_vec, b_vec, c_vec);
@@ -58,7 +89,6 @@ static void matmul_microkernel_float32(
 
                 _mm512_storeu_ps(&C[i * ldc + j], c_vec);
             } else {
-                // Scalar fallback for remainder
                 for (int64_t jj = j; jj < j + width; ++jj) {
                     float sum = C[i * ldc + jj];
                     for (int64_t k = 0; k < K; ++k) {
@@ -70,7 +100,7 @@ static void matmul_microkernel_float32(
         }
     }
 #elif defined(TENZOR_HAS_AVX2)
-    // AVX2: Process 8 floats at a time
+    // AVX2: Process 8 floats at a time with prefetching
     constexpr int64_t simd_width = 8;
 
     for (int64_t i = 0; i < M; ++i) {
@@ -81,6 +111,14 @@ static void matmul_microkernel_float32(
                 __m256 c_vec = _mm256_loadu_ps(&C[i * ldc + j]);
 
                 for (int64_t k = 0; k < K; ++k) {
+                    // Prefetch for cache optimization
+                    if (k + PREFETCH_A < K) {
+                        _mm_prefetch(reinterpret_cast<const char*>(&A[i * lda + k + PREFETCH_A]), _MM_HINT_T0);
+                    }
+                    if (k + PREFETCH_B < K) {
+                        _mm_prefetch(reinterpret_cast<const char*>(&B[(k + PREFETCH_B) * ldb + j]), _MM_HINT_T0);
+                    }
+
                     __m256 a_vec = _mm256_set1_ps(A[i * lda + k]);
                     __m256 b_vec = _mm256_loadu_ps(&B[k * ldb + j]);
                     c_vec = _mm256_fmadd_ps(a_vec, b_vec, c_vec);
@@ -195,39 +233,14 @@ static void matmul_microkernel_float64(
 #endif
 }
 
-// Cache-blocked matrix multiplication (Float32)
+// High-performance matrix multiplication (Float32)
+// Uses optimized GEMM with 6x16/6x32 micro-kernels, packing, and OpenMP
 static void matmul_blocked_float32(
     const float* A, const float* B, float* C,
     int64_t M, int64_t N, int64_t K) {
 
-    // Zero-initialize output
-    std::fill_n(C, M * N, 0.0f);
-
-    // Cache-friendly blocked algorithm
-    for (int64_t ii = 0; ii < M; ii += BLOCK_SIZE_M) {
-        int64_t i_end = std::min(ii + static_cast<int64_t>(BLOCK_SIZE_M), M);
-
-        for (int64_t jj = 0; jj < N; jj += BLOCK_SIZE_N) {
-            int64_t j_end = std::min(jj + static_cast<int64_t>(BLOCK_SIZE_N), N);
-
-            for (int64_t kk = 0; kk < K; kk += BLOCK_SIZE_K) {
-                int64_t k_end = std::min(kk + static_cast<int64_t>(BLOCK_SIZE_K), K);
-
-                // Process block
-                int64_t block_m = i_end - ii;
-                int64_t block_n = j_end - jj;
-                int64_t block_k = k_end - kk;
-
-                matmul_microkernel_float32(
-                    A + ii * K + kk,
-                    B + kk * N + jj,
-                    C + ii * N + jj,
-                    block_m, block_n, block_k,
-                    K, N, N
-                );
-            }
-        }
-    }
+    // Use the high-performance GEMM implementation
+    gemm::gemm_optimized(A, B, C, M, N, K, 1.0f, 0.0f);
 }
 
 // Cache-blocked matrix multiplication (Float64)
@@ -319,61 +332,111 @@ static void matmul_blocked_int32(
     }
 }
 
-// Micro-kernel for Float16 block multiplication using Float32 accumulation
-static void matmul_microkernel_float16(
-    const Float16* A, const Float16* B, Float16* C,
-    int64_t M, int64_t N, int64_t K,
-    int64_t lda, int64_t ldb, int64_t ldc) {
-
-    // Process each row of the block
-    for (int64_t i = 0; i < M; ++i) {
-        for (int64_t j = 0; j < N; ++j) {
-            // Accumulate in Float32 for better numerical accuracy
-            float sum = static_cast<float>(C[i * ldc + j]);
-
-            for (int64_t k = 0; k < K; ++k) {
-                float a_val = static_cast<float>(A[i * lda + k]);
-                float b_val = static_cast<float>(B[k * ldb + j]);
-                sum += a_val * b_val;
-            }
-
-            // Convert back to Float16 once at the end
-            C[i * ldc + j] = Float16(sum);
-        }
-    }
-}
-
-// Float16 matrix multiplication (performed in Float32 for CPU)
+// High-performance Float16 matrix multiplication
+// Uses F16C SIMD for conversion and FP32 GEMM for computation
 static void matmul_blocked_float16(
     const Float16* A, const Float16* B, Float16* C,
     int64_t M, int64_t N, int64_t K
 ) {
+    // Strategy: Convert blocks to FP32, use optimized GEMM, convert back
+    // F16C provides fast SIMD conversion, FP32 GEMM provides high throughput
+
+    // Block sizes for FP32 workspace (fit in L2 cache)
+    constexpr int64_t TILE_M = 128;
+    constexpr int64_t TILE_N = 128;
+    constexpr int64_t TILE_K = 256;
+
+    // Allocate FP32 workspace
+    alignas(64) float A_fp32[TILE_M * TILE_K];
+    alignas(64) float B_fp32[TILE_K * TILE_N];
+    alignas(64) float C_fp32[TILE_M * TILE_N];
+
     // Zero-initialize output
     std::fill_n(C, M * N, Float16(0.0f));
 
-    // Cache-friendly blocked algorithm with Float32 accumulation
-    for (int64_t ii = 0; ii < M; ii += BLOCK_SIZE_M) {
-        int64_t i_end = std::min(ii + static_cast<int64_t>(BLOCK_SIZE_M), M);
+    #pragma omp parallel for collapse(2) if(M * N > 4096) private(A_fp32, B_fp32, C_fp32)
+    for (int64_t i0 = 0; i0 < M; i0 += TILE_M) {
+        for (int64_t j0 = 0; j0 < N; j0 += TILE_N) {
+            int64_t tile_m = std::min(TILE_M, M - i0);
+            int64_t tile_n = std::min(TILE_N, N - j0);
 
-        for (int64_t jj = 0; jj < N; jj += BLOCK_SIZE_N) {
-            int64_t j_end = std::min(jj + static_cast<int64_t>(BLOCK_SIZE_N), N);
+            // Zero C tile accumulator
+            std::fill_n(C_fp32, tile_m * tile_n, 0.0f);
 
-            for (int64_t kk = 0; kk < K; kk += BLOCK_SIZE_K) {
-                int64_t k_end = std::min(kk + static_cast<int64_t>(BLOCK_SIZE_K), K);
+            for (int64_t k0 = 0; k0 < K; k0 += TILE_K) {
+                int64_t tile_k = std::min(TILE_K, K - k0);
 
-                // Process block using microkernel
-                int64_t block_m = i_end - ii;
-                int64_t block_n = j_end - jj;
-                int64_t block_k = k_end - kk;
+                // Convert A tile to FP32 using F16C SIMD
+                #ifdef __F16C__
+                for (int64_t i = 0; i < tile_m; ++i) {
+                    const Float16* a_row = A + (i0 + i) * K + k0;
+                    float* a32_row = A_fp32 + i * tile_k;
+                    int64_t k = 0;
+                    for (; k + 8 <= tile_k; k += 8) {
+                        __m128i packed = _mm_loadu_si128(reinterpret_cast<const __m128i*>(a_row + k));
+                        __m256 unpacked = _mm256_cvtph_ps(packed);
+                        _mm256_storeu_ps(a32_row + k, unpacked);
+                    }
+                    for (; k < tile_k; ++k) {
+                        a32_row[k] = static_cast<float>(a_row[k]);
+                    }
+                }
 
-                matmul_microkernel_float16(
-                    A + ii * K + kk,
-                    B + kk * N + jj,
-                    C + ii * N + jj,
-                    block_m, block_n, block_k,
-                    K, N, N
-                );
+                // Convert B tile to FP32 using F16C SIMD
+                for (int64_t k = 0; k < tile_k; ++k) {
+                    const Float16* b_row = B + (k0 + k) * N + j0;
+                    float* b32_row = B_fp32 + k * tile_n;
+                    int64_t j = 0;
+                    for (; j + 8 <= tile_n; j += 8) {
+                        __m128i packed = _mm_loadu_si128(reinterpret_cast<const __m128i*>(b_row + j));
+                        __m256 unpacked = _mm256_cvtph_ps(packed);
+                        _mm256_storeu_ps(b32_row + j, unpacked);
+                    }
+                    for (; j < tile_n; ++j) {
+                        b32_row[j] = static_cast<float>(b_row[j]);
+                    }
+                }
+                #else
+                // Scalar fallback
+                for (int64_t i = 0; i < tile_m; ++i) {
+                    for (int64_t k = 0; k < tile_k; ++k) {
+                        A_fp32[i * tile_k + k] = static_cast<float>(A[(i0 + i) * K + k0 + k]);
+                    }
+                }
+                for (int64_t k = 0; k < tile_k; ++k) {
+                    for (int64_t j = 0; j < tile_n; ++j) {
+                        B_fp32[k * tile_n + j] = static_cast<float>(B[(k0 + k) * N + j0 + j]);
+                    }
+                }
+                #endif
+
+                // Compute FP32 GEMM (accumulate into C_fp32)
+                gemm::gemm_optimized(A_fp32, B_fp32, C_fp32, tile_m, tile_n, tile_k, 1.0f, 1.0f);
             }
+
+            // Convert C tile back to FP16 using F16C SIMD
+            #ifdef __F16C__
+            for (int64_t i = 0; i < tile_m; ++i) {
+                Float16* c_row = C + (i0 + i) * N + j0;
+                const float* c32_row = C_fp32 + i * tile_n;
+                int64_t j = 0;
+                for (; j + 8 <= tile_n; j += 8) {
+                    __m256 fp32_vals = _mm256_loadu_ps(c32_row + j);
+                    __m128i packed = _mm256_cvtps_ph(fp32_vals, _MM_FROUND_TO_NEAREST_INT);
+                    _mm_storeu_si128(reinterpret_cast<__m128i*>(c_row + j), packed);
+                }
+                for (; j < tile_n; ++j) {
+                    c_row[j] = Float16(c32_row[j]);
+                }
+            }
+            #else
+            // Scalar fallback
+            for (int64_t i = 0; i < tile_m; ++i) {
+                for (int64_t j = 0; j < tile_n; ++j) {
+                    C[(i0 + i) * N + j0 + j] = Float16(C_fp32[i * tile_n + j]);
+                }
+            }
+            #endif
         }
     }
 }
@@ -481,69 +544,74 @@ inline void div_scalar(const T* a, const T* b, T* c, size_t n) {
 
 __attribute__((target("avx512f")))
 inline void add_avx512_f32(const float* a, const float* b, float* c, size_t n) {
-    size_t i = 0;
     const size_t simd_width = 16;
+    const size_t simd_end = (n / simd_width) * simd_width;
 
-    for (; i + simd_width <= n; i += simd_width) {
+    // OpenMP parallel for large tensors
+    #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+    for (size_t i = 0; i < simd_end; i += simd_width) {
         __m512 va = _mm512_loadu_ps(a + i);
         __m512 vb = _mm512_loadu_ps(b + i);
         __m512 vc = _mm512_add_ps(va, vb);
         _mm512_storeu_ps(c + i, vc);
     }
 
-    // Handle remaining elements
-    for (; i < n; ++i) {
+    // Handle remaining elements (sequential, small)
+    for (size_t i = simd_end; i < n; ++i) {
         c[i] = a[i] + b[i];
     }
 }
 
 __attribute__((target("avx512f")))
 inline void sub_avx512_f32(const float* a, const float* b, float* c, size_t n) {
-    size_t i = 0;
     const size_t simd_width = 16;
+    const size_t simd_end = (n / simd_width) * simd_width;
 
-    for (; i + simd_width <= n; i += simd_width) {
+    #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+    for (size_t i = 0; i < simd_end; i += simd_width) {
         __m512 va = _mm512_loadu_ps(a + i);
         __m512 vb = _mm512_loadu_ps(b + i);
         __m512 vc = _mm512_sub_ps(va, vb);
         _mm512_storeu_ps(c + i, vc);
     }
 
-    for (; i < n; ++i) {
+    for (size_t i = simd_end; i < n; ++i) {
         c[i] = a[i] - b[i];
     }
 }
 
 __attribute__((target("avx512f")))
 inline void mul_avx512_f32(const float* a, const float* b, float* c, size_t n) {
-    size_t i = 0;
     const size_t simd_width = 16;
+    const size_t simd_end = (n / simd_width) * simd_width;
 
-    for (; i + simd_width <= n; i += simd_width) {
+    #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+    for (size_t i = 0; i < simd_end; i += simd_width) {
         __m512 va = _mm512_loadu_ps(a + i);
         __m512 vb = _mm512_loadu_ps(b + i);
         __m512 vc = _mm512_mul_ps(va, vb);
         _mm512_storeu_ps(c + i, vc);
     }
 
-    for (; i < n; ++i) {
+    for (size_t i = simd_end; i < n; ++i) {
         c[i] = a[i] * b[i];
     }
 }
 
 __attribute__((target("avx512f")))
 inline void div_avx512_f32(const float* a, const float* b, float* c, size_t n) {
-    size_t i = 0;
     const size_t simd_width = 16;
+    const size_t simd_end = (n / simd_width) * simd_width;
 
-    for (; i + simd_width <= n; i += simd_width) {
+    #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+    for (size_t i = 0; i < simd_end; i += simd_width) {
         __m512 va = _mm512_loadu_ps(a + i);
         __m512 vb = _mm512_loadu_ps(b + i);
         __m512 vc = _mm512_div_ps(va, vb);
         _mm512_storeu_ps(c + i, vc);
     }
 
-    for (; i < n; ++i) {
+    for (size_t i = simd_end; i < n; ++i) {
         if (b[i] == 0.0f) {
             c[i] = std::numeric_limits<float>::infinity();
         } else {
@@ -717,68 +785,74 @@ inline void sub_avx512_i64(const int64_t* a, const int64_t* b, int64_t* c, size_
 // AVX2 fallback implementations
 __attribute__((target("avx2,fma")))
 inline void add_avx2_f32(const float* a, const float* b, float* c, size_t n) {
-    size_t i = 0;
     const size_t simd_width = 8;
+    const size_t simd_end = (n / simd_width) * simd_width;
 
-    for (; i + simd_width <= n; i += simd_width) {
+    // OpenMP parallel for large tensors
+    #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+    for (size_t i = 0; i < simd_end; i += simd_width) {
         __m256 va = _mm256_loadu_ps(a + i);
         __m256 vb = _mm256_loadu_ps(b + i);
         __m256 vc = _mm256_add_ps(va, vb);
         _mm256_storeu_ps(c + i, vc);
     }
 
-    for (; i < n; ++i) {
+    // Handle remainder
+    for (size_t i = simd_end; i < n; ++i) {
         c[i] = a[i] + b[i];
     }
 }
 
 __attribute__((target("avx2,fma")))
 inline void sub_avx2_f32(const float* a, const float* b, float* c, size_t n) {
-    size_t i = 0;
     const size_t simd_width = 8;
+    const size_t simd_end = (n / simd_width) * simd_width;
 
-    for (; i + simd_width <= n; i += simd_width) {
+    #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+    for (size_t i = 0; i < simd_end; i += simd_width) {
         __m256 va = _mm256_loadu_ps(a + i);
         __m256 vb = _mm256_loadu_ps(b + i);
         __m256 vc = _mm256_sub_ps(va, vb);
         _mm256_storeu_ps(c + i, vc);
     }
 
-    for (; i < n; ++i) {
+    for (size_t i = simd_end; i < n; ++i) {
         c[i] = a[i] - b[i];
     }
 }
 
 __attribute__((target("avx2,fma")))
 inline void mul_avx2_f32(const float* a, const float* b, float* c, size_t n) {
-    size_t i = 0;
     const size_t simd_width = 8;
+    const size_t simd_end = (n / simd_width) * simd_width;
 
-    for (; i + simd_width <= n; i += simd_width) {
+    #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+    for (size_t i = 0; i < simd_end; i += simd_width) {
         __m256 va = _mm256_loadu_ps(a + i);
         __m256 vb = _mm256_loadu_ps(b + i);
         __m256 vc = _mm256_mul_ps(va, vb);
         _mm256_storeu_ps(c + i, vc);
     }
 
-    for (; i < n; ++i) {
+    for (size_t i = simd_end; i < n; ++i) {
         c[i] = a[i] * b[i];
     }
 }
 
 __attribute__((target("avx2,fma")))
 inline void div_avx2_f32(const float* a, const float* b, float* c, size_t n) {
-    size_t i = 0;
     const size_t simd_width = 8;
+    const size_t simd_end = (n / simd_width) * simd_width;
 
-    for (; i + simd_width <= n; i += simd_width) {
+    #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+    for (size_t i = 0; i < simd_end; i += simd_width) {
         __m256 va = _mm256_loadu_ps(a + i);
         __m256 vb = _mm256_loadu_ps(b + i);
         __m256 vc = _mm256_div_ps(va, vb);
         _mm256_storeu_ps(c + i, vc);
     }
 
-    for (; i < n; ++i) {
+    for (size_t i = simd_end; i < n; ++i) {
         if (b[i] == 0.0f) {
             c[i] = std::numeric_limits<float>::infinity();
         } else {
@@ -937,12 +1011,13 @@ auto add_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             const Float16* b_data = b.data<Float16>();
             Float16* c_data = result.data<Float16>();
 
-            // Float16 add with Float32 computation
-            for (size_t i = 0; i < n; ++i) {
-                float a_val = static_cast<float>(a_data[i]);
-                float b_val = static_cast<float>(b_data[i]);
-                c_data[i] = Float16(a_val + b_val);
-            }
+            // Use F16C SIMD for Float16 add
+            float16_simd::add_f16(
+                reinterpret_cast<const uint16_t*>(a_data),
+                reinterpret_cast<const uint16_t*>(b_data),
+                reinterpret_cast<uint16_t*>(c_data),
+                n
+            );
 
         } else if (a.dtype() == DType::Int8) {
             const int8_t* a_data = a.data<int8_t>();
@@ -1263,12 +1338,13 @@ auto mul_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             const Float16* b_data = b.data<Float16>();
             Float16* c_data = result.data<Float16>();
 
-            // Float16 multiply with Float32 computation
-            for (size_t i = 0; i < n; ++i) {
-                float a_val = static_cast<float>(a_data[i]);
-                float b_val = static_cast<float>(b_data[i]);
-                c_data[i] = Float16(a_val * b_val);
-            }
+            // Use F16C SIMD for Float16 mul
+            float16_simd::mul_f16(
+                reinterpret_cast<const uint16_t*>(a_data),
+                reinterpret_cast<const uint16_t*>(b_data),
+                reinterpret_cast<uint16_t*>(c_data),
+                n
+            );
 
         } else {
             throw std::runtime_error("Unsupported dtype for mul operation");
@@ -1602,9 +1678,11 @@ auto sqrt_kernel(const Tensor& input) -> Tensor {
         float* out_data = result.data<float>();
 
 #ifdef TENZOR_HAS_AVX512
-        // Process 16 floats at a time with AVX-512
-        size_t simd_end = (n / 16) * 16;
-        for (size_t i = 0; i < simd_end; i += 16) {
+        // Process 16 floats at a time with AVX-512 + OpenMP
+        const size_t simd_width = 16;
+        const size_t simd_end = (n / simd_width) * simd_width;
+        #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+        for (size_t i = 0; i < simd_end; i += simd_width) {
             __m512 v = _mm512_loadu_ps(&in_data[i]);
             __m512 sqrt_v = _mm512_sqrt_ps(v);
             _mm512_storeu_ps(&out_data[i], sqrt_v);
@@ -1614,9 +1692,11 @@ auto sqrt_kernel(const Tensor& input) -> Tensor {
             out_data[i] = std::sqrt(in_data[i]);
         }
 #elif defined(TENZOR_HAS_AVX2)
-        // Process 8 floats at a time with AVX2
-        size_t simd_end = (n / 8) * 8;
-        for (size_t i = 0; i < simd_end; i += 8) {
+        // Process 8 floats at a time with AVX2 + OpenMP
+        const size_t simd_width = 8;
+        const size_t simd_end = (n / simd_width) * simd_width;
+        #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+        for (size_t i = 0; i < simd_end; i += simd_width) {
             __m256 v = _mm256_loadu_ps(&in_data[i]);
             __m256 sqrt_v = _mm256_sqrt_ps(v);
             _mm256_storeu_ps(&out_data[i], sqrt_v);
@@ -1626,7 +1706,8 @@ auto sqrt_kernel(const Tensor& input) -> Tensor {
             out_data[i] = std::sqrt(in_data[i]);
         }
 #else
-        // Scalar fallback
+        // Scalar fallback with OpenMP
+        #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
         for (size_t i = 0; i < n; ++i) {
             out_data[i] = std::sqrt(in_data[i]);
         }
@@ -1693,20 +1774,22 @@ auto neg_kernel(const Tensor& input) -> Tensor {
         float* out_data = result.data<float>();
 
 #ifdef TENZOR_HAS_AVX2
-        // SIMD: Process 8 floats at a time
-        size_t simd_end = (n / 8) * 8;
-        __m256 zero = _mm256_setzero_ps();
-        for (size_t i = 0; i < simd_end; i += 8) {
-            __m256 v = _mm256_loadu_ps(&in_data[i]);
-            __m256 neg_v = _mm256_sub_ps(zero, v);
-            _mm256_storeu_ps(&out_data[i], neg_v);
-        }
-        // Handle remainder
-        for (size_t i = simd_end; i < n; ++i) {
-            out_data[i] = -in_data[i];
+        // SIMD + OpenMP for large arrays
+        #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+        for (size_t i = 0; i < n; i += 8) {
+            size_t remaining = std::min(size_t(8), n - i);
+            if (remaining == 8) {
+                __m256 v = _mm256_loadu_ps(&in_data[i]);
+                __m256 neg_v = _mm256_sub_ps(_mm256_setzero_ps(), v);
+                _mm256_storeu_ps(&out_data[i], neg_v);
+            } else {
+                for (size_t j = 0; j < remaining; ++j) {
+                    out_data[i + j] = -in_data[i + j];
+                }
+            }
         }
 #else
-        // Scalar fallback
+        #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
         for (size_t i = 0; i < n; ++i) {
             out_data[i] = -in_data[i];
         }
@@ -1717,20 +1800,21 @@ auto neg_kernel(const Tensor& input) -> Tensor {
         double* out_data = result.data<double>();
 
 #ifdef TENZOR_HAS_AVX2
-        // SIMD: Process 4 doubles at a time
-        size_t simd_end = (n / 4) * 4;
-        __m256d zero = _mm256_setzero_pd();
-        for (size_t i = 0; i < simd_end; i += 4) {
-            __m256d v = _mm256_loadu_pd(&in_data[i]);
-            __m256d neg_v = _mm256_sub_pd(zero, v);
-            _mm256_storeu_pd(&out_data[i], neg_v);
-        }
-        // Handle remainder
-        for (size_t i = simd_end; i < n; ++i) {
-            out_data[i] = -in_data[i];
+        #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+        for (size_t i = 0; i < n; i += 4) {
+            size_t remaining = std::min(size_t(4), n - i);
+            if (remaining == 4) {
+                __m256d v = _mm256_loadu_pd(&in_data[i]);
+                __m256d neg_v = _mm256_sub_pd(_mm256_setzero_pd(), v);
+                _mm256_storeu_pd(&out_data[i], neg_v);
+            } else {
+                for (size_t j = 0; j < remaining; ++j) {
+                    out_data[i + j] = -in_data[i + j];
+                }
+            }
         }
 #else
-        // Scalar fallback
+        #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
         for (size_t i = 0; i < n; ++i) {
             out_data[i] = -in_data[i];
         }
@@ -1740,10 +1824,29 @@ auto neg_kernel(const Tensor& input) -> Tensor {
         const Float16* in_data = input.data<Float16>();
         Float16* out_data = result.data<Float16>();
 
-        for (size_t i = 0; i < n; ++i) {
-            float val = static_cast<float>(in_data[i]);
-            out_data[i] = Float16(-val);
+        // Use F16C SIMD for negation (flip sign bit)
+#ifdef __F16C__
+        #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+        for (size_t i = 0; i < n; i += 8) {
+            size_t remaining = std::min(size_t(8), n - i);
+            if (remaining == 8) {
+                __m128i packed = _mm_loadu_si128(reinterpret_cast<const __m128i*>(in_data + i));
+                __m256 fp32 = _mm256_cvtph_ps(packed);
+                __m256 neg = _mm256_sub_ps(_mm256_setzero_ps(), fp32);
+                __m128i out_packed = _mm256_cvtps_ph(neg, _MM_FROUND_TO_NEAREST_INT);
+                _mm_storeu_si128(reinterpret_cast<__m128i*>(out_data + i), out_packed);
+            } else {
+                for (size_t j = 0; j < remaining; ++j) {
+                    out_data[i + j] = Float16(-static_cast<float>(in_data[i + j]));
+                }
+            }
         }
+#else
+        #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+        for (size_t i = 0; i < n; ++i) {
+            out_data[i] = Float16(-static_cast<float>(in_data[i]));
+        }
+#endif
 
     } else if (input.dtype() == DType::Int32) {
         const int32_t* in_data = input.data<int32_t>();
@@ -1770,21 +1873,23 @@ auto abs_kernel(const Tensor& input) -> Tensor {
         float* out_data = result.data<float>();
 
 #ifdef TENZOR_HAS_AVX2
-        // SIMD: Process 8 floats at a time
-        // Use sign bit mask (0x7FFFFFFF) to clear the sign bit
-        size_t simd_end = (n / 8) * 8;
-        __m256 sign_mask = _mm256_castsi256_ps(_mm256_set1_epi32(0x7FFFFFFF));
-        for (size_t i = 0; i < simd_end; i += 8) {
-            __m256 v = _mm256_loadu_ps(&in_data[i]);
-            __m256 abs_v = _mm256_and_ps(v, sign_mask);
-            _mm256_storeu_ps(&out_data[i], abs_v);
-        }
-        // Handle remainder
-        for (size_t i = simd_end; i < n; ++i) {
-            out_data[i] = std::abs(in_data[i]);
+        // SIMD + OpenMP for large arrays
+        const __m256 sign_mask = _mm256_castsi256_ps(_mm256_set1_epi32(0x7FFFFFFF));
+        #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+        for (size_t i = 0; i < n; i += 8) {
+            size_t remaining = std::min(size_t(8), n - i);
+            if (remaining == 8) {
+                __m256 v = _mm256_loadu_ps(&in_data[i]);
+                __m256 abs_v = _mm256_and_ps(v, sign_mask);
+                _mm256_storeu_ps(&out_data[i], abs_v);
+            } else {
+                for (size_t j = 0; j < remaining; ++j) {
+                    out_data[i + j] = std::abs(in_data[i + j]);
+                }
+            }
         }
 #else
-        // Scalar fallback
+        #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
         for (size_t i = 0; i < n; ++i) {
             out_data[i] = std::abs(in_data[i]);
         }
@@ -1795,21 +1900,22 @@ auto abs_kernel(const Tensor& input) -> Tensor {
         double* out_data = result.data<double>();
 
 #ifdef TENZOR_HAS_AVX2
-        // SIMD: Process 4 doubles at a time
-        // Use sign bit mask (0x7FFFFFFFFFFFFFFF) to clear the sign bit
-        size_t simd_end = (n / 4) * 4;
-        __m256d sign_mask = _mm256_castsi256_pd(_mm256_set1_epi64x(0x7FFFFFFFFFFFFFFF));
-        for (size_t i = 0; i < simd_end; i += 4) {
-            __m256d v = _mm256_loadu_pd(&in_data[i]);
-            __m256d abs_v = _mm256_and_pd(v, sign_mask);
-            _mm256_storeu_pd(&out_data[i], abs_v);
-        }
-        // Handle remainder
-        for (size_t i = simd_end; i < n; ++i) {
-            out_data[i] = std::abs(in_data[i]);
+        const __m256d sign_mask = _mm256_castsi256_pd(_mm256_set1_epi64x(0x7FFFFFFFFFFFFFFF));
+        #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+        for (size_t i = 0; i < n; i += 4) {
+            size_t remaining = std::min(size_t(4), n - i);
+            if (remaining == 4) {
+                __m256d v = _mm256_loadu_pd(&in_data[i]);
+                __m256d abs_v = _mm256_and_pd(v, sign_mask);
+                _mm256_storeu_pd(&out_data[i], abs_v);
+            } else {
+                for (size_t j = 0; j < remaining; ++j) {
+                    out_data[i + j] = std::abs(in_data[i + j]);
+                }
+            }
         }
 #else
-        // Scalar fallback
+        #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
         for (size_t i = 0; i < n; ++i) {
             out_data[i] = std::abs(in_data[i]);
         }
@@ -1819,10 +1925,29 @@ auto abs_kernel(const Tensor& input) -> Tensor {
         const Float16* in_data = input.data<Float16>();
         Float16* out_data = result.data<Float16>();
 
-        for (size_t i = 0; i < n; ++i) {
-            float val = static_cast<float>(in_data[i]);
-            out_data[i] = Float16(std::abs(val));
+        // Use F16C SIMD for abs (clear sign bit in FP16: mask 0x7FFF)
+#ifdef __F16C__
+        #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+        for (size_t i = 0; i < n; i += 8) {
+            size_t remaining = std::min(size_t(8), n - i);
+            if (remaining == 8) {
+                __m128i packed = _mm_loadu_si128(reinterpret_cast<const __m128i*>(in_data + i));
+                // Clear sign bit directly in FP16 format (more efficient)
+                __m128i abs_mask = _mm_set1_epi16(0x7FFF);
+                __m128i abs_packed = _mm_and_si128(packed, abs_mask);
+                _mm_storeu_si128(reinterpret_cast<__m128i*>(out_data + i), abs_packed);
+            } else {
+                for (size_t j = 0; j < remaining; ++j) {
+                    out_data[i + j] = Float16(std::abs(static_cast<float>(in_data[i + j])));
+                }
+            }
         }
+#else
+        #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+        for (size_t i = 0; i < n; ++i) {
+            out_data[i] = Float16(std::abs(static_cast<float>(in_data[i])));
+        }
+#endif
 
     } else if (input.dtype() == DType::Int32) {
         const int32_t* in_data = input.data<int32_t>();
@@ -1850,12 +1975,14 @@ auto clamp_kernel(const Tensor& input, float min_val, float max_val) -> Tensor {
         float* out_data = result.data<float>();
 
 #ifdef TENZOR_HAS_AVX2
-        // SIMD: Process 8 floats at a time
-        size_t simd_end = (n / 8) * 8;
-        __m256 min_vec = _mm256_set1_ps(min_val);
-        __m256 max_vec = _mm256_set1_ps(max_val);
+        // SIMD: Process 8 floats at a time with OpenMP
+        const size_t simd_width = 8;
+        const size_t simd_end = (n / simd_width) * simd_width;
+        const __m256 min_vec = _mm256_set1_ps(min_val);
+        const __m256 max_vec = _mm256_set1_ps(max_val);
 
-        for (size_t i = 0; i < simd_end; i += 8) {
+        #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+        for (size_t i = 0; i < simd_end; i += simd_width) {
             __m256 v = _mm256_loadu_ps(&in_data[i]);
             // Clamp: max(min(v, max), min)
             __m256 clamped = _mm256_max_ps(_mm256_min_ps(v, max_vec), min_vec);
@@ -1866,7 +1993,8 @@ auto clamp_kernel(const Tensor& input, float min_val, float max_val) -> Tensor {
             out_data[i] = std::max(std::min(in_data[i], max_val), min_val);
         }
 #else
-        // Scalar fallback
+        // Scalar fallback with OpenMP
+        #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
         for (size_t i = 0; i < n; ++i) {
             out_data[i] = std::max(std::min(in_data[i], max_val), min_val);
         }
@@ -1930,10 +2058,16 @@ auto log_kernel(const Tensor& input) -> Tensor {
         const float* in_data = input.data<float>();
         float* out_data = result.data<float>();
 
-        // Scalar implementation (SIMD log is complex and typically uses SVML)
+        // Use fast polynomial approximation with SIMD
+#ifdef TENZOR_HAS_AVX512
+        fast_math::log_batch_avx512(in_data, out_data, n);
+#elif defined(TENZOR_HAS_AVX2)
+        fast_math::log_batch_avx2(in_data, out_data, n);
+#else
         for (size_t i = 0; i < n; ++i) {
             out_data[i] = std::log(in_data[i]);
         }
+#endif
 
     } else if (input.dtype() == DType::Float64) {
         const double* in_data = input.data<double>();
@@ -1947,10 +2081,26 @@ auto log_kernel(const Tensor& input) -> Tensor {
         const Float16* in_data = input.data<Float16>();
         Float16* out_data = result.data<Float16>();
 
+        // Use F16C + fast SIMD log
+#ifdef __F16C__
+        size_t i = 0;
+        for (; i + 8 <= n; i += 8) {
+            __m128i packed = _mm_loadu_si128(reinterpret_cast<const __m128i*>(in_data + i));
+            __m256 fp32 = _mm256_cvtph_ps(packed);
+            __m256 result_v = fast_math::log_avx2(fp32);
+            __m128i out_packed = _mm256_cvtps_ph(result_v, _MM_FROUND_TO_NEAREST_INT);
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(out_data + i), out_packed);
+        }
+        for (; i < n; ++i) {
+            float val = static_cast<float>(in_data[i]);
+            out_data[i] = Float16(std::log(val));
+        }
+#else
         for (size_t i = 0; i < n; ++i) {
             float val = static_cast<float>(in_data[i]);
             out_data[i] = Float16(std::log(val));
         }
+#endif
 
     } else {
         throw std::runtime_error("log operation only supports Float32, Float64, and Float16 dtypes");
@@ -1969,10 +2119,16 @@ auto exp_kernel(const Tensor& input) -> Tensor {
         const float* in_data = input.data<float>();
         float* out_data = result.data<float>();
 
-        // Scalar implementation (SIMD exp is complex and typically uses SVML)
+        // Use fast polynomial approximation with SIMD
+#ifdef TENZOR_HAS_AVX512
+        fast_math::exp_batch_avx512(in_data, out_data, n);
+#elif defined(TENZOR_HAS_AVX2)
+        fast_math::exp_batch_avx2(in_data, out_data, n);
+#else
         for (size_t i = 0; i < n; ++i) {
             out_data[i] = std::exp(in_data[i]);
         }
+#endif
 
     } else if (input.dtype() == DType::Float64) {
         const double* in_data = input.data<double>();
@@ -1986,10 +2142,26 @@ auto exp_kernel(const Tensor& input) -> Tensor {
         const Float16* in_data = input.data<Float16>();
         Float16* out_data = result.data<Float16>();
 
+        // Use F16C + fast SIMD exp
+#ifdef __F16C__
+        size_t i = 0;
+        for (; i + 8 <= n; i += 8) {
+            __m128i packed = _mm_loadu_si128(reinterpret_cast<const __m128i*>(in_data + i));
+            __m256 fp32 = _mm256_cvtph_ps(packed);
+            __m256 result_v = fast_math::exp_avx2(fp32);
+            __m128i out_packed = _mm256_cvtps_ph(result_v, _MM_FROUND_TO_NEAREST_INT);
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(out_data + i), out_packed);
+        }
+        for (; i < n; ++i) {
+            float val = static_cast<float>(in_data[i]);
+            out_data[i] = Float16(std::exp(val));
+        }
+#else
         for (size_t i = 0; i < n; ++i) {
             float val = static_cast<float>(in_data[i]);
             out_data[i] = Float16(std::exp(val));
         }
+#endif
 
     } else {
         throw std::runtime_error("exp operation only supports Float32, Float64, and Float16 dtypes");
@@ -1998,7 +2170,7 @@ auto exp_kernel(const Tensor& input) -> Tensor {
     return result;
 }
 
-// Pow kernel - power function
+// Pow kernel - power function (SIMD + OpenMP optimized)
 auto pow_kernel(const Tensor& input, float exponent) -> Tensor {
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     Tensor result(shape_vec, input.dtype(), input.device());
@@ -2008,15 +2180,23 @@ auto pow_kernel(const Tensor& input, float exponent) -> Tensor {
         const float* in_data = input.data<float>();
         float* out_data = result.data<float>();
 
+#if defined(TENZOR_HAS_AVX512) || defined(__AVX512F__)
+        fast_math::pow_batch_avx512(in_data, out_data, n, exponent);
+#elif defined(TENZOR_HAS_AVX2) || defined(__AVX2__)
+        fast_math::pow_batch_avx2(in_data, out_data, n, exponent);
+#else
+        #pragma omp parallel for if(n > OMP_THRESHOLD_MEDIUM)
         for (size_t i = 0; i < n; ++i) {
             out_data[i] = std::pow(in_data[i], exponent);
         }
+#endif
 
     } else if (input.dtype() == DType::Float64) {
         const double* in_data = input.data<double>();
         double* out_data = result.data<double>();
         double exp_d = static_cast<double>(exponent);
 
+        #pragma omp parallel for if(n > OMP_THRESHOLD_MEDIUM)
         for (size_t i = 0; i < n; ++i) {
             out_data[i] = std::pow(in_data[i], exp_d);
         }
@@ -2025,11 +2205,23 @@ auto pow_kernel(const Tensor& input, float exponent) -> Tensor {
         const Float16* in_data = input.data<Float16>();
         Float16* out_data = result.data<Float16>();
 
+        // Use temporary float buffer for SIMD
+        std::vector<float> in_f32(n), out_f32(n);
         for (size_t i = 0; i < n; ++i) {
-            // Convert Float16 to float, compute pow, convert back
-            float f32_val = static_cast<float>(in_data[i]);
-            float f32_result = std::pow(f32_val, exponent);
-            out_data[i] = Float16(f32_result);
+            in_f32[i] = static_cast<float>(in_data[i]);
+        }
+
+#if defined(TENZOR_HAS_AVX512) || defined(__AVX512F__)
+        fast_math::pow_batch_avx512(in_f32.data(), out_f32.data(), n, exponent);
+#elif defined(TENZOR_HAS_AVX2) || defined(__AVX2__)
+        fast_math::pow_batch_avx2(in_f32.data(), out_f32.data(), n, exponent);
+#else
+        for (size_t i = 0; i < n; ++i) {
+            out_f32[i] = std::pow(in_f32[i], exponent);
+        }
+#endif
+        for (size_t i = 0; i < n; ++i) {
+            out_data[i] = Float16(out_f32[i]);
         }
 
     } else {
@@ -2105,36 +2297,102 @@ auto eq_kernel(const Tensor& a, const Tensor& b) -> Tensor {
         if (a.dtype() == DType::Float32) {
             const float* a_data = a.data<float>();
             const float* b_data = b.data<float>();
-            for (size_t i = 0; i < n; ++i) {
-                // IEEE 754: NaN != NaN, so if either is NaN, return false
-                if (std::isnan(a_data[i]) || std::isnan(b_data[i])) {
-                    c_data[i] = false;
+
+#ifdef TENZOR_HAS_AVX2
+            // SIMD + OpenMP: _CMP_EQ_OQ handles NaN correctly (returns false)
+            #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+            for (size_t i = 0; i < n; i += 8) {
+                size_t remaining = std::min(size_t(8), n - i);
+                if (remaining == 8) {
+                    __m256 va = _mm256_loadu_ps(&a_data[i]);
+                    __m256 vb = _mm256_loadu_ps(&b_data[i]);
+                    // _CMP_EQ_OQ: equal, ordered (NaN returns false)
+                    __m256 cmp = _mm256_cmp_ps(va, vb, _CMP_EQ_OQ);
+                    int mask = _mm256_movemask_ps(cmp);
+                    for (int j = 0; j < 8; ++j) {
+                        c_data[i + j] = (mask >> j) & 1;
+                    }
                 } else {
-                    c_data[i] = (a_data[i] == b_data[i]);
+                    for (size_t j = 0; j < remaining; ++j) {
+                        c_data[i + j] = (a_data[i + j] == b_data[i + j]) &&
+                                        !std::isnan(a_data[i + j]) && !std::isnan(b_data[i + j]);
+                    }
                 }
             }
+#else
+            #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+            for (size_t i = 0; i < n; ++i) {
+                c_data[i] = (a_data[i] == b_data[i]) &&
+                            !std::isnan(a_data[i]) && !std::isnan(b_data[i]);
+            }
+#endif
         } else if (a.dtype() == DType::Float64) {
             const double* a_data = a.data<double>();
             const double* b_data = b.data<double>();
-            for (size_t i = 0; i < n; ++i) {
-                // IEEE 754: NaN != NaN, so if either is NaN, return false
-                if (std::isnan(a_data[i]) || std::isnan(b_data[i])) {
-                    c_data[i] = false;
+
+#ifdef TENZOR_HAS_AVX2
+            #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+            for (size_t i = 0; i < n; i += 4) {
+                size_t remaining = std::min(size_t(4), n - i);
+                if (remaining == 4) {
+                    __m256d va = _mm256_loadu_pd(&a_data[i]);
+                    __m256d vb = _mm256_loadu_pd(&b_data[i]);
+                    __m256d cmp = _mm256_cmp_pd(va, vb, _CMP_EQ_OQ);
+                    int mask = _mm256_movemask_pd(cmp);
+                    for (int j = 0; j < 4; ++j) {
+                        c_data[i + j] = (mask >> j) & 1;
+                    }
                 } else {
-                    c_data[i] = (a_data[i] == b_data[i]);
+                    for (size_t j = 0; j < remaining; ++j) {
+                        c_data[i + j] = (a_data[i + j] == b_data[i + j]) &&
+                                        !std::isnan(a_data[i + j]) && !std::isnan(b_data[i + j]);
+                    }
                 }
             }
+#else
+            #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+            for (size_t i = 0; i < n; ++i) {
+                c_data[i] = (a_data[i] == b_data[i]) &&
+                            !std::isnan(a_data[i]) && !std::isnan(b_data[i]);
+            }
+#endif
         } else if (a.dtype() == DType::Int32) {
             const int32_t* a_data = a.data<int32_t>();
             const int32_t* b_data = b.data<int32_t>();
+
+#ifdef TENZOR_HAS_AVX2
+            #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+            for (size_t i = 0; i < n; i += 8) {
+                size_t remaining = std::min(size_t(8), n - i);
+                if (remaining == 8) {
+                    __m256i va = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&a_data[i]));
+                    __m256i vb = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&b_data[i]));
+                    __m256i cmp = _mm256_cmpeq_epi32(va, vb);
+                    // Extract mask from comparison result
+                    __m256 cmp_ps = _mm256_castsi256_ps(cmp);
+                    int mask = _mm256_movemask_ps(cmp_ps);
+                    for (int j = 0; j < 8; ++j) {
+                        c_data[i + j] = (mask >> j) & 1;
+                    }
+                } else {
+                    for (size_t j = 0; j < remaining; ++j) {
+                        c_data[i + j] = (a_data[i + j] == b_data[i + j]);
+                    }
+                }
+            }
+#else
+            #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
             for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] == b_data[i]); }
+#endif
         } else if (a.dtype() == DType::Int64) {
             const int64_t* a_data = a.data<int64_t>();
             const int64_t* b_data = b.data<int64_t>();
+            #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
             for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] == b_data[i]); }
         } else if (a.dtype() == DType::Bool) {
             const bool* a_data = a.data<bool>();
             const bool* b_data = b.data<bool>();
+            #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
             for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] == b_data[i]); }
         } else {
             throw std::runtime_error("Unsupported dtype for eq operation");
@@ -2275,19 +2533,95 @@ auto lt_kernel(const Tensor& a, const Tensor& b) -> Tensor {
         if (a.dtype() == DType::Float32) {
             const float* a_data = a.data<float>();
             const float* b_data = b.data<float>();
-            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] < b_data[i]); }
+#ifdef TENZOR_HAS_AVX2
+            #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+            for (size_t i = 0; i < n; i += 8) {
+                size_t remaining = std::min(size_t(8), n - i);
+                if (remaining == 8) {
+                    __m256 va = _mm256_loadu_ps(&a_data[i]);
+                    __m256 vb = _mm256_loadu_ps(&b_data[i]);
+                    // _CMP_LT_OQ: less than, ordered
+                    __m256 cmp = _mm256_cmp_ps(va, vb, _CMP_LT_OQ);
+                    int mask = _mm256_movemask_ps(cmp);
+                    for (int j = 0; j < 8; ++j) {
+                        c_data[i + j] = (mask >> j) & 1;
+                    }
+                } else {
+                    for (size_t j = 0; j < remaining; ++j) {
+                        c_data[i + j] = (a_data[i + j] < b_data[i + j]);
+                    }
+                }
+            }
+#else
+            #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+            for (size_t i = 0; i < n; ++i) {
+                c_data[i] = (a_data[i] < b_data[i]);
+            }
+#endif
         } else if (a.dtype() == DType::Float64) {
             const double* a_data = a.data<double>();
             const double* b_data = b.data<double>();
-            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] < b_data[i]); }
+#ifdef TENZOR_HAS_AVX2
+            #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+            for (size_t i = 0; i < n; i += 4) {
+                size_t remaining = std::min(size_t(4), n - i);
+                if (remaining == 4) {
+                    __m256d va = _mm256_loadu_pd(&a_data[i]);
+                    __m256d vb = _mm256_loadu_pd(&b_data[i]);
+                    __m256d cmp = _mm256_cmp_pd(va, vb, _CMP_LT_OQ);
+                    int mask = _mm256_movemask_pd(cmp);
+                    for (int j = 0; j < 4; ++j) {
+                        c_data[i + j] = (mask >> j) & 1;
+                    }
+                } else {
+                    for (size_t j = 0; j < remaining; ++j) {
+                        c_data[i + j] = (a_data[i + j] < b_data[i + j]);
+                    }
+                }
+            }
+#else
+            #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+            for (size_t i = 0; i < n; ++i) {
+                c_data[i] = (a_data[i] < b_data[i]);
+            }
+#endif
         } else if (a.dtype() == DType::Int32) {
             const int32_t* a_data = a.data<int32_t>();
             const int32_t* b_data = b.data<int32_t>();
-            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] < b_data[i]); }
+#ifdef TENZOR_HAS_AVX2
+            // For less-than on integers: a < b is same as b > a
+            #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+            for (size_t i = 0; i < n; i += 8) {
+                size_t remaining = std::min(size_t(8), n - i);
+                if (remaining == 8) {
+                    __m256i va = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&a_data[i]));
+                    __m256i vb = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&b_data[i]));
+                    // a < b == b > a
+                    __m256i cmp = _mm256_cmpgt_epi32(vb, va);
+                    __m256 cmp_ps = _mm256_castsi256_ps(cmp);
+                    int mask = _mm256_movemask_ps(cmp_ps);
+                    for (int j = 0; j < 8; ++j) {
+                        c_data[i + j] = (mask >> j) & 1;
+                    }
+                } else {
+                    for (size_t j = 0; j < remaining; ++j) {
+                        c_data[i + j] = (a_data[i + j] < b_data[i + j]);
+                    }
+                }
+            }
+#else
+            #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+            for (size_t i = 0; i < n; ++i) {
+                c_data[i] = (a_data[i] < b_data[i]);
+            }
+#endif
         } else if (a.dtype() == DType::Int64) {
             const int64_t* a_data = a.data<int64_t>();
             const int64_t* b_data = b.data<int64_t>();
-            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] < b_data[i]); }
+            #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+            for (size_t i = 0; i < n; ++i) {
+                c_data[i] = (a_data[i] < b_data[i]);
+            }
         } else {
             throw std::runtime_error("Unsupported dtype for lt operation");
         }
@@ -2405,23 +2739,128 @@ auto gt_kernel(const Tensor& a, const Tensor& b) -> Tensor {
         if (a.dtype() == DType::Float16) {
             const Float16* a_data = a.data<Float16>();
             const Float16* b_data = b.data<Float16>();
-            for (size_t i = 0; i < n; ++i) { c_data[i] = (static_cast<float>(a_data[i]) > static_cast<float>(b_data[i])); }
+#if defined(TENZOR_HAS_AVX2) && defined(TENZOR_HAS_F16C)
+            // F16C + AVX2: Convert to float, then compare
+            #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+            for (size_t i = 0; i < n; i += 8) {
+                size_t remaining = std::min(size_t(8), n - i);
+                if (remaining == 8) {
+                    // Load 8 Float16 values
+                    __m128i a_f16 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&a_data[i]));
+                    __m128i b_f16 = _mm_loadu_si128(reinterpret_cast<const __m128i*>(&b_data[i]));
+                    // Convert to float
+                    __m256 va = _mm256_cvtph_ps(a_f16);
+                    __m256 vb = _mm256_cvtph_ps(b_f16);
+                    // Compare: _CMP_GT_OQ = greater than, ordered
+                    __m256 cmp = _mm256_cmp_ps(va, vb, _CMP_GT_OQ);
+                    int mask = _mm256_movemask_ps(cmp);
+                    for (int j = 0; j < 8; ++j) {
+                        c_data[i + j] = (mask >> j) & 1;
+                    }
+                } else {
+                    for (size_t j = 0; j < remaining; ++j) {
+                        float af = static_cast<float>(a_data[i + j]);
+                        float bf = static_cast<float>(b_data[i + j]);
+                        c_data[i + j] = (af > bf);
+                    }
+                }
+            }
+#else
+            #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+            for (size_t i = 0; i < n; ++i) {
+                c_data[i] = (static_cast<float>(a_data[i]) > static_cast<float>(b_data[i]));
+            }
+#endif
         } else if (a.dtype() == DType::Float32) {
             const float* a_data = a.data<float>();
             const float* b_data = b.data<float>();
-            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] > b_data[i]); }
+#ifdef TENZOR_HAS_AVX2
+            #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+            for (size_t i = 0; i < n; i += 8) {
+                size_t remaining = std::min(size_t(8), n - i);
+                if (remaining == 8) {
+                    __m256 va = _mm256_loadu_ps(&a_data[i]);
+                    __m256 vb = _mm256_loadu_ps(&b_data[i]);
+                    // _CMP_GT_OQ: greater than, ordered
+                    __m256 cmp = _mm256_cmp_ps(va, vb, _CMP_GT_OQ);
+                    int mask = _mm256_movemask_ps(cmp);
+                    for (int j = 0; j < 8; ++j) {
+                        c_data[i + j] = (mask >> j) & 1;
+                    }
+                } else {
+                    for (size_t j = 0; j < remaining; ++j) {
+                        c_data[i + j] = (a_data[i + j] > b_data[i + j]);
+                    }
+                }
+            }
+#else
+            #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+            for (size_t i = 0; i < n; ++i) {
+                c_data[i] = (a_data[i] > b_data[i]);
+            }
+#endif
         } else if (a.dtype() == DType::Float64) {
             const double* a_data = a.data<double>();
             const double* b_data = b.data<double>();
-            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] > b_data[i]); }
+#ifdef TENZOR_HAS_AVX2
+            #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+            for (size_t i = 0; i < n; i += 4) {
+                size_t remaining = std::min(size_t(4), n - i);
+                if (remaining == 4) {
+                    __m256d va = _mm256_loadu_pd(&a_data[i]);
+                    __m256d vb = _mm256_loadu_pd(&b_data[i]);
+                    __m256d cmp = _mm256_cmp_pd(va, vb, _CMP_GT_OQ);
+                    int mask = _mm256_movemask_pd(cmp);
+                    for (int j = 0; j < 4; ++j) {
+                        c_data[i + j] = (mask >> j) & 1;
+                    }
+                } else {
+                    for (size_t j = 0; j < remaining; ++j) {
+                        c_data[i + j] = (a_data[i + j] > b_data[i + j]);
+                    }
+                }
+            }
+#else
+            #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+            for (size_t i = 0; i < n; ++i) {
+                c_data[i] = (a_data[i] > b_data[i]);
+            }
+#endif
         } else if (a.dtype() == DType::Int32) {
             const int32_t* a_data = a.data<int32_t>();
             const int32_t* b_data = b.data<int32_t>();
-            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] > b_data[i]); }
+#ifdef TENZOR_HAS_AVX2
+            #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+            for (size_t i = 0; i < n; i += 8) {
+                size_t remaining = std::min(size_t(8), n - i);
+                if (remaining == 8) {
+                    __m256i va = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&a_data[i]));
+                    __m256i vb = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(&b_data[i]));
+                    __m256i cmp = _mm256_cmpgt_epi32(va, vb);
+                    __m256 cmp_ps = _mm256_castsi256_ps(cmp);
+                    int mask = _mm256_movemask_ps(cmp_ps);
+                    for (int j = 0; j < 8; ++j) {
+                        c_data[i + j] = (mask >> j) & 1;
+                    }
+                } else {
+                    for (size_t j = 0; j < remaining; ++j) {
+                        c_data[i + j] = (a_data[i + j] > b_data[i + j]);
+                    }
+                }
+            }
+#else
+            #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+            for (size_t i = 0; i < n; ++i) {
+                c_data[i] = (a_data[i] > b_data[i]);
+            }
+#endif
         } else if (a.dtype() == DType::Int64) {
             const int64_t* a_data = a.data<int64_t>();
             const int64_t* b_data = b.data<int64_t>();
-            for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] > b_data[i]); }
+            #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+            for (size_t i = 0; i < n; ++i) {
+                c_data[i] = (a_data[i] > b_data[i]);
+            }
         } else {
             throw std::runtime_error("Unsupported dtype for gt operation");
         }
@@ -2607,7 +3046,7 @@ auto dot_kernel(const Tensor& a, const Tensor& b) -> Tensor {
     return output;
 }
 
-// Trigonometric functions
+// Trigonometric functions (SIMD + OpenMP optimized)
 auto sin_kernel(const Tensor& input) -> Tensor {
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
     auto output = Tensor(shape_vec, input.dtype(), input.device());
@@ -2617,10 +3056,16 @@ auto sin_kernel(const Tensor& input) -> Tensor {
         case DType::Float32: {
             const float* in_data = input.data<float>();
             float* out_data = output.data<float>();
+#if defined(TENZOR_HAS_AVX512) || defined(__AVX512F__)
+            fast_math::sin_batch_avx512(in_data, out_data, static_cast<size_t>(n));
+#elif defined(TENZOR_HAS_AVX2) || defined(__AVX2__)
+            fast_math::sin_batch_avx2(in_data, out_data, static_cast<size_t>(n));
+#else
             #pragma omp parallel for if(n > 10000)
             for (int64_t i = 0; i < n; i++) {
                 out_data[i] = std::sin(in_data[i]);
             }
+#endif
             break;
         }
         case DType::Float64: {
@@ -2647,10 +3092,16 @@ auto cos_kernel(const Tensor& input) -> Tensor {
         case DType::Float32: {
             const float* in_data = input.data<float>();
             float* out_data = output.data<float>();
+#if defined(TENZOR_HAS_AVX512) || defined(__AVX512F__)
+            fast_math::cos_batch_avx512(in_data, out_data, static_cast<size_t>(n));
+#elif defined(TENZOR_HAS_AVX2) || defined(__AVX2__)
+            fast_math::cos_batch_avx2(in_data, out_data, static_cast<size_t>(n));
+#else
             #pragma omp parallel for if(n > 10000)
             for (int64_t i = 0; i < n; i++) {
                 out_data[i] = std::cos(in_data[i]);
             }
+#endif
             break;
         }
         case DType::Float64: {

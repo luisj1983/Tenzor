@@ -2,10 +2,16 @@
 #include "tenzor/core/shape.hpp"
 #include "tenzor/utils/error.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "simd_fast_math.hpp"
+#include "float16_simd.hpp"
 #include <cmath>
 #include <stdexcept>
 #include <algorithm>
 #include <vector>
+#include <omp.h>
+
+// OpenMP parallelization threshold
+constexpr size_t ACTIVATION_OMP_THRESHOLD = 100000;
 
 // SIMD intrinsics
 #if defined(__AVX512F__)
@@ -201,7 +207,7 @@ auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Ten
 // ============================================================================
 
 // Forward: 1 / (1 + exp(-x))
-// Use numerically stable version: if x >= 0: 1/(1+exp(-x)), else: exp(x)/(1+exp(x))
+// SIMD + OpenMP optimized using fast_math sigmoid approximation
 auto sigmoid_kernel(const Tensor& input) -> Tensor {
     auto output = zeros_like(input);
 
@@ -210,45 +216,96 @@ auto sigmoid_kernel(const Tensor& input) -> Tensor {
         float* out_data = output.data<float>();
         size_t n = input.numel();
 
-        // Numerically stable sigmoid
-        for (size_t i = 0; i < n; ++i) {
-            if (in_data[i] >= 0.0f) {
-                out_data[i] = 1.0f / (1.0f + std::exp(-in_data[i]));
-            } else {
-                float exp_x = std::exp(in_data[i]);
-                out_data[i] = exp_x / (1.0f + exp_x);
-            }
+#ifdef TENZOR_HAS_AVX512
+        const size_t simd_width = 16;
+        const size_t simd_end = (n / simd_width) * simd_width;
+
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < simd_end; i += simd_width) {
+            __m512 x = _mm512_loadu_ps(in_data + i);
+            __m512 result = fast_math::sigmoid_avx512(x);
+            _mm512_storeu_ps(out_data + i, result);
         }
+
+        // Scalar remainder
+        for (size_t i = simd_end; i < n; ++i) {
+            float x = in_data[i];
+            out_data[i] = 1.0f / (1.0f + std::exp(-x));
+        }
+#elif defined(TENZOR_HAS_AVX2)
+        const size_t simd_width = 8;
+        const size_t simd_end = (n / simd_width) * simd_width;
+
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < simd_end; i += simd_width) {
+            __m256 x = _mm256_loadu_ps(in_data + i);
+            __m256 result = fast_math::sigmoid_avx2(x);
+            _mm256_storeu_ps(out_data + i, result);
+        }
+
+        // Scalar remainder
+        for (size_t i = simd_end; i < n; ++i) {
+            float x = in_data[i];
+            out_data[i] = 1.0f / (1.0f + std::exp(-x));
+        }
+#else
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            float x = in_data[i];
+            out_data[i] = 1.0f / (1.0f + std::exp(-x));
+        }
+#endif
+
     } else if (input.dtype() == DType::Float64) {
         const double* in_data = input.data<double>();
         double* out_data = output.data<double>();
         size_t n = input.numel();
 
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
-            if (in_data[i] >= 0.0) {
-                out_data[i] = 1.0 / (1.0 + std::exp(-in_data[i]));
-            } else {
-                double exp_x = std::exp(in_data[i]);
-                out_data[i] = exp_x / (1.0 + exp_x);
-            }
+            double x = in_data[i];
+            out_data[i] = 1.0 / (1.0 + std::exp(-x));
         }
     } else if (input.dtype() == DType::Float16) {
         const Float16* in_data = input.data<Float16>();
         Float16* out_data = output.data<Float16>();
         size_t n = input.numel();
 
-        // Process Float16 by converting to float for computation
+#if defined(TENZOR_HAS_AVX2)
+        // Convert to float, process with SIMD, convert back
+        std::vector<float> in_f32(n), out_f32(n);
+
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            in_f32[i] = static_cast<float>(in_data[i]);
+        }
+
+        const size_t simd_width = 8;
+        const size_t simd_end = (n / simd_width) * simd_width;
+
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < simd_end; i += simd_width) {
+            __m256 x = _mm256_loadu_ps(in_f32.data() + i);
+            __m256 result = fast_math::sigmoid_avx2(x);
+            _mm256_storeu_ps(out_f32.data() + i, result);
+        }
+
+        for (size_t i = simd_end; i < n; ++i) {
+            float x = in_f32[i];
+            out_f32[i] = 1.0f / (1.0f + std::exp(-x));
+        }
+
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            out_data[i] = Float16(out_f32[i]);
+        }
+#else
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             float val = static_cast<float>(in_data[i]);
-            float result;
-            if (val >= 0.0f) {
-                result = 1.0f / (1.0f + std::exp(-val));
-            } else {
-                float exp_x = std::exp(val);
-                result = exp_x / (1.0f + exp_x);
-            }
-            out_data[i] = Float16(result);
+            out_data[i] = Float16(1.0f / (1.0f + std::exp(-val)));
         }
+#endif
     } else {
         throw std::runtime_error("Sigmoid only supports Float32, Float64, and Float16");
     }
@@ -300,14 +357,22 @@ auto tanh_kernel(const Tensor& input) -> Tensor {
         float* out_data = output.data<float>();
         size_t n = input.numel();
 
+        // Use fast polynomial approximation with SIMD
+#ifdef TENZOR_HAS_AVX512
+        fast_math::tanh_batch_avx512(in_data, out_data, n);
+#elif defined(TENZOR_HAS_AVX2)
+        fast_math::tanh_batch_avx2(in_data, out_data, n);
+#else
         for (size_t i = 0; i < n; ++i) {
             out_data[i] = std::tanh(in_data[i]);
         }
+#endif
     } else if (input.dtype() == DType::Float64) {
         const double* in_data = input.data<double>();
         double* out_data = output.data<double>();
         size_t n = input.numel();
 
+        // No fast double version yet, use std::tanh
         for (size_t i = 0; i < n; ++i) {
             out_data[i] = std::tanh(in_data[i]);
         }
@@ -316,10 +381,26 @@ auto tanh_kernel(const Tensor& input) -> Tensor {
         Float16* out_data = output.data<Float16>();
         size_t n = input.numel();
 
+        // Convert to FP32, apply fast tanh, convert back
+#ifdef __F16C__
+        size_t i = 0;
+        for (; i + 8 <= n; i += 8) {
+            __m128i packed = _mm_loadu_si128(reinterpret_cast<const __m128i*>(in_data + i));
+            __m256 fp32 = _mm256_cvtph_ps(packed);
+            __m256 result = fast_math::tanh_avx2(fp32);
+            __m128i out_packed = _mm256_cvtps_ph(result, _MM_FROUND_TO_NEAREST_INT);
+            _mm_storeu_si128(reinterpret_cast<__m128i*>(out_data + i), out_packed);
+        }
+        for (; i < n; ++i) {
+            float val = static_cast<float>(in_data[i]);
+            out_data[i] = Float16(std::tanh(val));
+        }
+#else
         for (size_t i = 0; i < n; ++i) {
             float val = static_cast<float>(in_data[i]);
             out_data[i] = Float16(std::tanh(val));
         }
+#endif
     } else {
         throw std::runtime_error("Tanh only supports Float32, Float64, and Float16");
     }
@@ -572,40 +653,43 @@ auto leaky_relu_kernel(const Tensor& input, float alpha) -> Tensor {
         size_t n = input.numel();
 
 #ifdef TENZOR_HAS_AVX512
-        size_t i = 0;
         const size_t simd_width = 16;
-        __m512 alpha_vec = _mm512_set1_ps(alpha);
-        __m512 zero = _mm512_setzero_ps();
+        const size_t simd_end = (n / simd_width) * simd_width;
 
-        for (; i + simd_width <= n; i += simd_width) {
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < simd_end; i += simd_width) {
             __m512 x = _mm512_loadu_ps(in_data + i);
+            __m512 alpha_vec = _mm512_set1_ps(alpha);
+            __m512 zero = _mm512_setzero_ps();
             __mmask16 mask = _mm512_cmp_ps_mask(x, zero, _CMP_GT_OQ);
             __m512 negative_part = _mm512_mul_ps(x, alpha_vec);
             __m512 result = _mm512_mask_blend_ps(mask, negative_part, x);
             _mm512_storeu_ps(out_data + i, result);
         }
 
-        for (; i < n; ++i) {
+        for (size_t i = simd_end; i < n; ++i) {
             out_data[i] = in_data[i] > 0.0f ? in_data[i] : alpha * in_data[i];
         }
 #elif defined(TENZOR_HAS_AVX2)
-        size_t i = 0;
         const size_t simd_width = 8;
-        __m256 alpha_vec = _mm256_set1_ps(alpha);
-        __m256 zero = _mm256_setzero_ps();
+        const size_t simd_end = (n / simd_width) * simd_width;
 
-        for (; i + simd_width <= n; i += simd_width) {
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < simd_end; i += simd_width) {
             __m256 x = _mm256_loadu_ps(in_data + i);
+            __m256 alpha_vec = _mm256_set1_ps(alpha);
+            __m256 zero = _mm256_setzero_ps();
             __m256 mask = _mm256_cmp_ps(x, zero, _CMP_GT_OQ);
             __m256 negative_part = _mm256_mul_ps(x, alpha_vec);
             __m256 result = _mm256_blendv_ps(negative_part, x, mask);
             _mm256_storeu_ps(out_data + i, result);
         }
 
-        for (; i < n; ++i) {
+        for (size_t i = simd_end; i < n; ++i) {
             out_data[i] = in_data[i] > 0.0f ? in_data[i] : alpha * in_data[i];
         }
 #else
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             out_data[i] = in_data[i] > 0.0f ? in_data[i] : alpha * in_data[i];
         }
@@ -616,6 +700,7 @@ auto leaky_relu_kernel(const Tensor& input, float alpha) -> Tensor {
         size_t n = input.numel();
         double alpha_d = static_cast<double>(alpha);
 
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
         for (size_t i = 0; i < n; ++i) {
             out_data[i] = in_data[i] > 0.0 ? in_data[i] : alpha_d * in_data[i];
         }

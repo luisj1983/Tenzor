@@ -7,6 +7,7 @@
  */
 
 #include <tenzor/tenzor.hpp>
+#include <tenzor/ops/fused_ops.hpp>
 #include <iostream>
 #include <iomanip>
 #include <chrono>
@@ -799,6 +800,502 @@ void benchmarkCat(BackendBenchmark& bench, std::vector<BenchmarkResult>& results
 }
 
 // ============================================================================
+// Additional Benchmark Functions (Extended Coverage)
+// ============================================================================
+
+void benchmarkMoreElementwise(BackendBenchmark& bench, std::vector<BenchmarkResult>& results) {
+    std::cout << "\n" << std::string(60, '=') << "\n";
+    std::cout << "  ADDITIONAL ELEMENTWISE (sub, div, pow)\n";
+    std::cout << std::string(60, '=') << "\n\n";
+    bench.printHeader();
+
+    auto backends = bench.getAvailableBackends();
+
+    std::vector<std::vector<int64_t>> shapes = {
+        {1000000},
+        {10000000},
+        {2048, 2048},
+    };
+
+    for (const auto& shape : shapes) {
+        int64_t numel = shapeToNumel(shape);
+        std::string shape_str = shapeToString(shape);
+        int64_t bytes = numel * 4 * 3;
+
+        for (const auto& device : backends) {
+            std::string backend_name = device.to_string();
+
+            Tensor a, b;
+            try {
+                a = full(shape, 4.0f, DType::Float32, device);
+                b = full(shape, 2.0f, DType::Float32, device);
+            } catch (...) {
+                continue;
+            }
+
+            // Sub
+            {
+                auto r = bench.runBenchmark(backend_name, "sub", shape_str, "fp32",
+                                            numel, numel, bytes, device,
+                                            [&]() { auto c = sub(a, b); });
+                results.push_back(r);
+                bench.printResult(r);
+            }
+
+            // Div
+            {
+                auto r = bench.runBenchmark(backend_name, "div", shape_str, "fp32",
+                                            numel, numel, bytes, device,
+                                            [&]() { auto c = div(a, b); });
+                results.push_back(r);
+                bench.printResult(r);
+            }
+
+            // Pow
+            {
+                auto r = bench.runBenchmark(backend_name, "pow", shape_str, "fp32",
+                                            numel, numel * 10, bytes, device,
+                                            [&]() { auto c = pow(a, 2.0f); });
+                results.push_back(r);
+                bench.printResult(r);
+            }
+        }
+    }
+}
+
+void benchmarkTrigonometric(BackendBenchmark& bench, std::vector<BenchmarkResult>& results) {
+    std::cout << "\n" << std::string(60, '=') << "\n";
+    std::cout << "  TRIGONOMETRIC (sin, cos)\n";
+    std::cout << std::string(60, '=') << "\n\n";
+    bench.printHeader();
+
+    auto backends = bench.getAvailableBackends();
+
+    std::vector<std::vector<int64_t>> shapes = {
+        {1000000},
+        {10000000},
+        {2048, 2048},
+    };
+
+    for (const auto& shape : shapes) {
+        int64_t numel = shapeToNumel(shape);
+        std::string shape_str = shapeToString(shape);
+        int64_t bytes = numel * 4 * 2;
+
+        for (const auto& device : backends) {
+            std::string backend_name = device.to_string();
+
+            Tensor a;
+            try {
+                a = full(shape, 1.0f, DType::Float32, device);
+            } catch (...) {
+                continue;
+            }
+
+            // Sin
+            {
+                auto r = bench.runBenchmark(backend_name, "sin", shape_str, "fp32",
+                                            numel, numel * 10, bytes, device,
+                                            [&]() { auto c = sin(a); });
+                results.push_back(r);
+                bench.printResult(r);
+            }
+
+            // Cos
+            {
+                auto r = bench.runBenchmark(backend_name, "cos", shape_str, "fp32",
+                                            numel, numel * 10, bytes, device,
+                                            [&]() { auto c = cos(a); });
+                results.push_back(r);
+                bench.printResult(r);
+            }
+        }
+    }
+}
+
+void benchmarkMoreActivations(BackendBenchmark& bench, std::vector<BenchmarkResult>& results) {
+    std::cout << "\n" << std::string(60, '=') << "\n";
+    std::cout << "  MORE ACTIVATIONS (sigmoid, tanh, leaky_relu)\n";
+    std::cout << std::string(60, '=') << "\n\n";
+    bench.printHeader();
+
+    auto backends = bench.getAvailableBackends();
+
+    std::vector<std::vector<int64_t>> shapes = {
+        {1000000},
+        {10000000},
+        {2048, 2048},
+    };
+
+    for (const auto& shape : shapes) {
+        int64_t numel = shapeToNumel(shape);
+        std::string shape_str = shapeToString(shape);
+        int64_t bytes = numel * 4 * 2;
+
+        for (const auto& device : backends) {
+            std::string backend_name = device.to_string();
+
+            Tensor a;
+            try {
+                a = randn(shape, DType::Float32, device);
+            } catch (...) {
+                continue;
+            }
+
+            // Sigmoid: 1 / (1 + exp(-x))
+            {
+                auto r = bench.runBenchmark(backend_name, "sigmoid", shape_str, "fp32",
+                                            numel, numel * 5, bytes, device,
+                                            [&]() {
+                                                auto neg_a = neg(a);
+                                                auto exp_neg = exp(neg_a);
+                                                auto one_plus = add(full(shape, 1.0f, DType::Float32, device), exp_neg);
+                                                auto c = div(full(shape, 1.0f, DType::Float32, device), one_plus);
+                                            });
+                results.push_back(r);
+                bench.printResult(r);
+            }
+
+            // Tanh: (exp(2x) - 1) / (exp(2x) + 1)
+            {
+                auto r = bench.runBenchmark(backend_name, "tanh", shape_str, "fp32",
+                                            numel, numel * 6, bytes, device,
+                                            [&]() {
+                                                auto two_x = mul(a, full(shape, 2.0f, DType::Float32, device));
+                                                auto exp_2x = exp(two_x);
+                                                auto one = full(shape, 1.0f, DType::Float32, device);
+                                                auto num = sub(exp_2x, one);
+                                                auto denom = add(exp_2x, one);
+                                                auto c = div(num, denom);
+                                            });
+                results.push_back(r);
+                bench.printResult(r);
+            }
+
+            // Leaky ReLU via clamp + where pattern
+            {
+                auto r = bench.runBenchmark(backend_name, "leaky_relu", shape_str, "fp32",
+                                            numel, numel * 2, bytes, device,
+                                            [&]() {
+                                                auto alpha = full(shape, 0.01f, DType::Float32, device);
+                                                auto scaled = mul(a, alpha);
+                                                auto mask = gt(a, zeros(shape, DType::Float32, device));
+                                                auto c = where(mask, a, scaled);
+                                            });
+                results.push_back(r);
+                bench.printResult(r);
+            }
+        }
+    }
+}
+
+void benchmarkSoftmax(BackendBenchmark& bench, std::vector<BenchmarkResult>& results) {
+    std::cout << "\n" << std::string(60, '=') << "\n";
+    std::cout << "  SOFTMAX OPERATIONS\n";
+    std::cout << std::string(60, '=') << "\n\n";
+    bench.printHeader();
+
+    auto backends = bench.getAvailableBackends();
+
+    // Typical shapes for softmax (batch, seq_len, vocab or hidden)
+    std::vector<std::vector<int64_t>> shapes = {
+        {128, 1000},      // Classification
+        {128, 50000},     // Large vocabulary
+        {32, 128, 128},   // Attention scores
+        {16, 12, 128, 128}, // Multi-head attention
+        {1024, 1024},     // Square
+    };
+
+    for (const auto& shape : shapes) {
+        int64_t numel = shapeToNumel(shape);
+        std::string shape_str = shapeToString(shape);
+        // Softmax: exp + sum + div per element
+        int64_t flops = numel * 5;
+        int64_t bytes = numel * 4 * 2;
+
+        for (const auto& device : backends) {
+            std::string backend_name = device.to_string();
+
+            Tensor a;
+            try {
+                a = randn(shape, DType::Float32, device);
+            } catch (...) {
+                continue;
+            }
+
+            // Manual softmax: exp(x - max) / sum(exp(x - max))
+            {
+                int64_t dim = shape.size() - 1;
+                auto r = bench.runBenchmark(backend_name, "softmax", shape_str, "fp32",
+                                            numel, flops, bytes, device,
+                                            [&]() {
+                                                // Approximate softmax via exp/sum pattern
+                                                auto e = exp(a);
+                                                auto s = sum(e, dim, true);
+                                                auto c = div(e, s);
+                                            });
+                results.push_back(r);
+                bench.printResult(r);
+            }
+        }
+    }
+}
+
+void benchmarkConv2d(BackendBenchmark& bench, std::vector<BenchmarkResult>& results) {
+    std::cout << "\n" << std::string(60, '=') << "\n";
+    std::cout << "  CONVOLUTION 2D (via fused_conv2d_relu)\n";
+    std::cout << std::string(60, '=') << "\n\n";
+    bench.printHeader();
+
+    auto backends = bench.getAvailableBackends();
+
+    // (batch, in_channels, H, W, out_channels, kernel_size)
+    std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t>> configs = {
+        {1, 3, 224, 224, 64, 7},      // ResNet first layer
+        {1, 64, 56, 56, 64, 3},       // ResNet conv
+        {1, 128, 28, 28, 128, 3},     // Deeper layer
+        {1, 256, 14, 14, 256, 3},     // Even deeper
+        {8, 64, 56, 56, 64, 3},       // Batched
+        {16, 128, 28, 28, 128, 3},    // Larger batch
+        {32, 64, 32, 32, 128, 3},     // Common size
+    };
+
+    for (auto [N, C_in, H, W, C_out, K] : configs) {
+        std::string shape_str = "N=" + std::to_string(N) + " C=" + std::to_string(C_in) +
+                                "->" + std::to_string(C_out) + " " + std::to_string(H) +
+                                "x" + std::to_string(W) + " k=" + std::to_string(K);
+
+        int64_t H_out = H - K + 1;  // No padding, stride=1
+        int64_t W_out = W - K + 1;
+        // FLOPs: 2 * N * C_out * H_out * W_out * C_in * K * K
+        int64_t flops = 2 * N * C_out * H_out * W_out * C_in * K * K;
+        // Bytes: input + weight + output
+        int64_t bytes = (N * C_in * H * W + C_out * C_in * K * K + N * C_out * H_out * W_out) * 4;
+        int64_t numel = N * C_out * H_out * W_out;
+
+        for (const auto& device : backends) {
+            std::string backend_name = device.to_string();
+
+            Tensor input, weight, bias;
+            try {
+                input = randn({N, C_in, H, W}, DType::Float32, device);
+                weight = randn({C_out, C_in, K, K}, DType::Float32, device);
+                bias = zeros({C_out}, DType::Float32, device);
+            } catch (...) {
+                continue;
+            }
+
+            auto r = bench.runBenchmark(backend_name, "conv2d+relu", shape_str, "fp32",
+                                        numel, flops, bytes, device,
+                                        [&]() { auto c = ops::fused_conv2d_relu(input, weight, &bias); });
+            results.push_back(r);
+            bench.printResult(r);
+        }
+    }
+}
+
+void benchmarkArgOps(BackendBenchmark& bench, std::vector<BenchmarkResult>& results) {
+    std::cout << "\n" << std::string(60, '=') << "\n";
+    std::cout << "  ARGMAX / ARGMIN\n";
+    std::cout << std::string(60, '=') << "\n\n";
+    bench.printHeader();
+
+    auto backends = bench.getAvailableBackends();
+
+    std::vector<std::vector<int64_t>> shapes = {
+        {1000000},
+        {10000000},
+        {128, 50000},   // Classification output
+        {2048, 2048},
+    };
+
+    for (const auto& shape : shapes) {
+        int64_t numel = shapeToNumel(shape);
+        std::string shape_str = shapeToString(shape);
+        int64_t bytes = numel * 4 + 8;  // input + output index
+
+        for (const auto& device : backends) {
+            std::string backend_name = device.to_string();
+
+            Tensor a;
+            try {
+                a = randn(shape, DType::Float32, device);
+            } catch (...) {
+                continue;
+            }
+
+            // Argmax along last dim
+            {
+                int64_t dim = shape.size() - 1;
+                auto r = bench.runBenchmark(backend_name, "argmax", shape_str, "fp32",
+                                            numel, numel, bytes, device,
+                                            [&]() { auto c = argmax(a, dim); });
+                results.push_back(r);
+                bench.printResult(r);
+            }
+
+            // Argmin along last dim
+            {
+                int64_t dim = shape.size() - 1;
+                auto r = bench.runBenchmark(backend_name, "argmin", shape_str, "fp32",
+                                            numel, numel, bytes, device,
+                                            [&]() { auto c = argmin(a, dim); });
+                results.push_back(r);
+                bench.printResult(r);
+            }
+        }
+    }
+}
+
+void benchmarkWhere(BackendBenchmark& bench, std::vector<BenchmarkResult>& results) {
+    std::cout << "\n" << std::string(60, '=') << "\n";
+    std::cout << "  WHERE (CONDITIONAL SELECT)\n";
+    std::cout << std::string(60, '=') << "\n\n";
+    bench.printHeader();
+
+    auto backends = bench.getAvailableBackends();
+
+    std::vector<std::vector<int64_t>> shapes = {
+        {1000000},
+        {10000000},
+        {2048, 2048},
+    };
+
+    for (const auto& shape : shapes) {
+        int64_t numel = shapeToNumel(shape);
+        std::string shape_str = shapeToString(shape);
+        // condition + x + y + output
+        int64_t bytes = numel * (1 + 4 + 4 + 4);
+
+        for (const auto& device : backends) {
+            std::string backend_name = device.to_string();
+
+            Tensor cond, x, y;
+            try {
+                auto temp = randn(shape, DType::Float32, device);
+                cond = gt(temp, zeros(shape, DType::Float32, device));
+                x = full(shape, 1.0f, DType::Float32, device);
+                y = full(shape, -1.0f, DType::Float32, device);
+            } catch (...) {
+                continue;
+            }
+
+            auto r = bench.runBenchmark(backend_name, "where", shape_str, "fp32",
+                                        numel, numel, bytes, device,
+                                        [&]() { auto c = where(cond, x, y); });
+            results.push_back(r);
+            bench.printResult(r);
+        }
+    }
+}
+
+void benchmarkIndexSelect(BackendBenchmark& bench, std::vector<BenchmarkResult>& results) {
+    std::cout << "\n" << std::string(60, '=') << "\n";
+    std::cout << "  INDEX SELECT (EMBEDDING LOOKUP)\n";
+    std::cout << std::string(60, '=') << "\n\n";
+    bench.printHeader();
+
+    auto backends = bench.getAvailableBackends();
+
+    // (vocab_size, embed_dim, batch_size, seq_len)
+    std::vector<std::tuple<int64_t, int64_t, int64_t, int64_t>> configs = {
+        {50000, 768, 1, 128},     // BERT-like single
+        {50000, 768, 16, 128},    // BERT-like batched
+        {50000, 1024, 8, 256},    // Larger model
+        {100000, 512, 32, 64},    // Large vocab
+    };
+
+    for (auto [vocab, embed, batch, seq] : configs) {
+        std::string shape_str = "V=" + std::to_string(vocab) + " E=" + std::to_string(embed) +
+                                " B=" + std::to_string(batch) + " S=" + std::to_string(seq);
+
+        int64_t numel = batch * seq * embed;
+        // Read: indices + embedding rows, Write: output
+        int64_t bytes = (batch * seq * 8) + (batch * seq * embed * 4) + numel * 4;
+
+        for (const auto& device : backends) {
+            std::string backend_name = device.to_string();
+
+            Tensor embedding, indices;
+            try {
+                embedding = randn({vocab, embed}, DType::Float32, device);
+                // Create indices: floor(rand() * vocab) cast to Int64
+                auto rand_vals = rand({batch, seq}, DType::Float32, device);
+                auto scaled = mul(rand_vals, full({batch, seq}, static_cast<float>(vocab - 1), DType::Float32, device));
+                indices = scaled.to(DType::Int64);
+            } catch (...) {
+                continue;
+            }
+
+            auto r = bench.runBenchmark(backend_name, "index_select", shape_str, "fp32",
+                                        numel, numel, bytes, device,
+                                        [&]() { auto c = index_select(embedding, 0, indices.flatten()); });
+            results.push_back(r);
+            bench.printResult(r);
+        }
+    }
+}
+
+void benchmarkMoreReductions(BackendBenchmark& bench, std::vector<BenchmarkResult>& results) {
+    std::cout << "\n" << std::string(60, '=') << "\n";
+    std::cout << "  MORE REDUCTIONS (var, std, prod)\n";
+    std::cout << std::string(60, '=') << "\n\n";
+    bench.printHeader();
+
+    auto backends = bench.getAvailableBackends();
+
+    std::vector<std::vector<int64_t>> shapes = {
+        {1000000},
+        {10000000},
+        {2048, 2048},
+    };
+
+    for (const auto& shape : shapes) {
+        int64_t numel = shapeToNumel(shape);
+        std::string shape_str = shapeToString(shape);
+        int64_t bytes = numel * 4 + 4;
+
+        for (const auto& device : backends) {
+            std::string backend_name = device.to_string();
+
+            Tensor a;
+            try {
+                a = randn(shape, DType::Float32, device);
+            } catch (...) {
+                continue;
+            }
+
+            // Variance
+            {
+                auto r = bench.runBenchmark(backend_name, "var", shape_str, "fp32",
+                                            numel, numel * 3, bytes, device,
+                                            [&]() { auto c = var(a); });
+                results.push_back(r);
+                bench.printResult(r);
+            }
+
+            // Std (via sqrt(var))
+            {
+                auto r = bench.runBenchmark(backend_name, "std", shape_str, "fp32",
+                                            numel, numel * 3 + 1, bytes, device,
+                                            [&]() { auto c = sqrt(var(a)); });
+                results.push_back(r);
+                bench.printResult(r);
+            }
+
+            // Min
+            {
+                auto r = bench.runBenchmark(backend_name, "min", shape_str, "fp32",
+                                            numel, numel, bytes, device,
+                                            [&]() { auto c = min(a); });
+                results.push_back(r);
+                bench.printResult(r);
+            }
+        }
+    }
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 
@@ -852,14 +1349,23 @@ int main(int argc, char** argv) {
 
     // Run all benchmarks
     benchmarkElementwise(bench, results);
+    benchmarkMoreElementwise(bench, results);
+    benchmarkTrigonometric(bench, results);
     benchmarkReductions(bench, results);
+    benchmarkMoreReductions(bench, results);
     benchmarkMatmul(bench, results);
     benchmarkBMM(bench, results);
     benchmarkActivations(bench, results);
+    benchmarkMoreActivations(bench, results);
+    benchmarkSoftmax(bench, results);
     benchmarkPow(bench, results);
     benchmarkComparison(bench, results);
     benchmarkTranspose(bench, results);
     benchmarkCat(bench, results);
+    benchmarkConv2d(bench, results);
+    benchmarkArgOps(bench, results);
+    benchmarkWhere(bench, results);
+    benchmarkIndexSelect(bench, results);
 
     // Summary
     std::cout << "\n" << std::string(60, '=') << "\n";
