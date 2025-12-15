@@ -372,22 +372,47 @@ void conv2d_forward_impl(
             out_w
         );
 
-        // Matrix multiplication
+        // Matrix multiplication into temporary buffer
+        // GEMM output is (batch * out_h * out_w, out_channels_per_group) row-major
         int64_t M = col_rows;
         int64_t K = col_cols;
         int64_t N = out_channels_per_group;
 
         const T* weight_ptr = weight.data<T>() + out_start * in_channels_per_group * kernel_h * kernel_w;
-        T* output_ptr = output.data<T>() + out_start * out_h * out_w;
+        std::vector<T> gemm_output(M * N);
 
         // Perform GEMM: C = A @ B^T
         gemm_cpu(
             col_buffer.data(),  // A: (M, K)
             weight_ptr,         // B: (N, K) - will be transposed
-            output_ptr,         // C: (M, N)
+            gemm_output.data(), // C: (M, N)
             M, N, K,
             true  // transpose B
         );
+
+        // Transpose GEMM output from (batch*out_h*out_w, out_channels) to NCHW format
+        // GEMM output: element at (m, n) where m = b*out_h*out_w + oh*out_w + ow, n = c
+        // NCHW output: element at (b, c + out_start, oh, ow)
+        T* output_data = output.data<T>();
+        #pragma omp parallel for collapse(4) if(batch * out_channels_per_group * out_h * out_w > 10000)
+        for (int64_t b = 0; b < batch; ++b) {
+            for (int64_t c = 0; c < out_channels_per_group; ++c) {
+                for (int64_t oh = 0; oh < out_h; ++oh) {
+                    for (int64_t ow = 0; ow < out_w; ++ow) {
+                        // Source index in GEMM output (row-major)
+                        int64_t gemm_row = b * out_h * out_w + oh * out_w + ow;
+                        int64_t gemm_idx = gemm_row * out_channels_per_group + c;
+
+                        // Destination index in NCHW output
+                        int64_t nchw_idx = b * (out_channels * out_h * out_w) +
+                                          (c + out_start) * (out_h * out_w) +
+                                          oh * out_w + ow;
+
+                        output_data[nchw_idx] = gemm_output[gemm_idx];
+                    }
+                }
+            }
+        }
     }
 
     // Add bias if present
