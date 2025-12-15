@@ -55,12 +55,114 @@ namespace py = pybind11;
 // Forward declaration for compression bindings
 void bind_compression(py::module& m);
 
+// ============================================================================
+// PyModule: Trampoline class for Python subclassing of nn::Module
+// ============================================================================
+// This enables Python users to create custom modules by subclassing tz.nn.Module
+// and overriding forward_impl() method. The trampoline intercepts virtual calls
+// and routes them to Python implementations.
+
+// Type aliases to help with PYBIND11_OVERRIDE macros (avoid template comma issues)
+using VariablePtr = std::shared_ptr<tenzor::Variable>;
+using VariablePtrVec = std::vector<VariablePtr>;
+using NamedParamPair = std::pair<std::string, VariablePtr>;
+using NamedParamVec = std::vector<NamedParamPair>;
+using StateDict = std::unordered_map<std::string, tenzor::Tensor>;
+
+class PyModule : public tenzor::nn::Module {
+public:
+    // Inherit constructors
+    using tenzor::nn::Module::Module;
+
+    // Override forward_impl to call Python's forward_impl() method
+    auto forward_impl(const tenzor::Variable& input) -> tenzor::Variable override {
+        PYBIND11_OVERRIDE_PURE(
+            tenzor::Variable,           // Return type
+            tenzor::nn::Module,         // Parent class
+            forward_impl,               // Name of function in C++
+            input                       // Arguments
+        );
+    }
+
+    // Override parameters() to allow Python customization
+    auto parameters() -> VariablePtrVec override {
+        PYBIND11_OVERRIDE(
+            VariablePtrVec,
+            tenzor::nn::Module,
+            parameters
+        );
+    }
+
+    // Override own_parameters() to allow Python customization
+    auto own_parameters() -> VariablePtrVec override {
+        PYBIND11_OVERRIDE(
+            VariablePtrVec,
+            tenzor::nn::Module,
+            own_parameters
+        );
+    }
+
+    // Override named_parameters() to allow Python customization
+    auto named_parameters() -> NamedParamVec override {
+        PYBIND11_OVERRIDE(
+            NamedParamVec,
+            tenzor::nn::Module,
+            named_parameters
+        );
+    }
+
+    // Override state_dict() for custom serialization
+    auto state_dict() const -> StateDict override {
+        PYBIND11_OVERRIDE(
+            StateDict,
+            tenzor::nn::Module,
+            state_dict
+        );
+    }
+
+    // Override load_state_dict() for custom deserialization
+    auto load_state_dict(const StateDict& state) -> void override {
+        PYBIND11_OVERRIDE(
+            void,
+            tenzor::nn::Module,
+            load_state_dict,
+            state
+        );
+    }
+
+    // Expose protected methods to Python
+    void py_register_parameter(const std::string& name, tenzor::Variable param) {
+        register_parameter(name, std::move(param));
+    }
+
+    void py_register_buffer(const std::string& name, tenzor::Variable buffer) {
+        register_buffer(name, std::move(buffer));
+    }
+
+    void py_register_module(const std::string& name, std::shared_ptr<tenzor::nn::Module> module) {
+        register_module(name, std::move(module));
+    }
+};
+
 PYBIND11_MODULE(tenzor_core, m) {
     m.doc() = "Tenzor: High-performance tensor library";
 
     // Library initialization
     m.def("initialize", &tenzor::initialize,
           "Initialize the Tenzor library (registers backends and operations)");
+
+    // Device availability checks
+    m.def("cuda_is_available", []() {
+        auto& loader = tenzor::backend_registry();
+        auto* cuda_backend = loader.get_backend("cuda");
+        return cuda_backend != nullptr && cuda_backend->is_available();
+    }, "Check if CUDA is available");
+
+    m.def("cuda_device_count", []() {
+        auto& loader = tenzor::backend_registry();
+        auto* cuda_backend = loader.get_backend("cuda");
+        return cuda_backend ? cuda_backend->device_count() : 0;
+    }, "Get number of available CUDA devices");
 
     // Device::Type enum (must be defined before Device class for default args)
     py::enum_<tenzor::Device::Type>(m, "DeviceType")
@@ -867,19 +969,42 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("gradient") = py::none(),
              py::arg("retain_graph") = false,
              "Compute gradients via backpropagation")
+        // Tensor access - both as property and method for compatibility
         .def_property_readonly("data", py::overload_cast<>(&tenzor::Variable::tensor, py::const_))
+        .def("tensor", py::overload_cast<>(&tenzor::Variable::tensor),
+             "Get the underlying tensor (mutable)")
+        .def("tensor", py::overload_cast<>(&tenzor::Variable::tensor, py::const_),
+             "Get the underlying tensor (const)")
+        // Gradient access
         .def_property_readonly("grad", py::overload_cast<>(&tenzor::Variable::grad, py::const_))
         .def_property_readonly("grad_fn", &tenzor::Variable::grad_fn,
              "Get gradient function that created this variable")
         .def_property_readonly("is_leaf", &tenzor::Variable::is_leaf,
              "Check if variable is a leaf node")
+        // Gradient control
+        .def("requires_grad", &tenzor::Variable::requires_grad,
+             "Check if variable requires gradient")
+        .def("requires_grad_", &tenzor::Variable::set_requires_grad,
+             py::arg("requires_grad") = true,
+             "Set requires_grad in-place")
+        .def("zero_grad", &tenzor::Variable::zero_grad,
+             "Zero the gradient")
+        // Hook registration
         .def("register_hook", &tenzor::Variable::register_hook,
              py::arg("hook"),
              "Register a backward hook function")
         .def("retain_grad", &tenzor::Variable::retain_grad,
              "Enable gradient retention for non-leaf variables")
         .def_property_readonly("retains_grad", &tenzor::Variable::retains_grad,
-             "Check if variable retains gradient");
+             "Check if variable retains gradient")
+        // Shape convenience
+        .def("shape", [](const tenzor::Variable& self) {
+            auto s = self.tensor().shape();
+            return std::vector<int64_t>(s.begin(), s.end());
+        }, "Get the shape of the underlying tensor")
+        .def("numel", [](const tenzor::Variable& self) {
+            return self.tensor().numel();
+        }, "Get the number of elements");
 
     // NoGradGuard for RAII-style gradient control
     py::class_<tenzor::NoGradGuard>(m, "NoGradGuard")
@@ -916,20 +1041,234 @@ PYBIND11_MODULE(tenzor_core, m) {
     // Neural network
     auto nn = m.def_submodule("nn", "Neural network components");
 
-    py::class_<tenzor::nn::Module, std::shared_ptr<tenzor::nn::Module>>(nn, "Module")
-        .def("forward", &tenzor::nn::Module::forward)
-        .def("__call__", &tenzor::nn::Module::operator())
-        .def("parameters", &tenzor::nn::Module::parameters)
-        .def("train", &tenzor::nn::Module::train, py::arg("mode") = true)
-        .def("eval", &tenzor::nn::Module::eval)
-        .def("cuda", &tenzor::nn::Module::cuda, py::arg("device_id") = 0)
-        .def("cpu", &tenzor::nn::Module::cpu);
+    // ========================================================================
+    // Module base class with full Python subclassing support
+    // ========================================================================
+    // Uses PyModule trampoline to enable Python users to create custom modules.
+    // Python users can:
+    //   1. Subclass tz.nn.Module
+    //   2. Call super().__init__() in __init__
+    //   3. Override forward_impl() OR forward() method
+    //   4. Use register_parameter/buffer/module for explicit registration
+    //   5. Store submodules as attributes for automatic discovery
+
+    py::class_<tenzor::nn::Module, PyModule, std::shared_ptr<tenzor::nn::Module>>(nn, "Module")
+        // Default constructor for Python subclasses
+        .def(py::init<>())
+
+        // ====================================================================
+        // Forward pass methods
+        // ====================================================================
+        .def("forward", &tenzor::nn::Module::forward,
+             py::arg("input"),
+             "Perform forward pass (calls forward_impl with hooks)")
+        .def("forward_impl", &tenzor::nn::Module::forward_impl,
+             py::arg("input"),
+             "Implementation of forward pass - override this in subclasses")
+        .def("__call__", &tenzor::nn::Module::operator(),
+             py::arg("input"),
+             "Callable interface - equivalent to forward()")
+
+        // ====================================================================
+        // Parameter and buffer management
+        // ====================================================================
+        .def("parameters", &tenzor::nn::Module::parameters,
+             "Get all parameters (recursive through submodules)")
+        .def("own_parameters", &tenzor::nn::Module::own_parameters,
+             "Get only this module's direct parameters (not submodules')")
+        .def("named_parameters", &tenzor::nn::Module::named_parameters,
+             "Get all parameters with their names")
+        .def("buffers", &tenzor::nn::Module::buffers,
+             "Get all buffers (non-trainable tensors, recursive)")
+        .def("own_buffers", &tenzor::nn::Module::own_buffers,
+             "Get only this module's direct buffers")
+        .def("named_buffers", &tenzor::nn::Module::named_buffers,
+             "Get all buffers with their names")
+        .def("get_submodules", &tenzor::nn::Module::get_submodules,
+             "Get direct submodules as a dictionary")
+
+        // ====================================================================
+        // Parameter/buffer/module registration (exposed from protected via lambda)
+        // ====================================================================
+        .def("register_parameter", [](tenzor::nn::Module& self, const std::string& name, tenzor::Variable param) {
+            static_cast<PyModule&>(self).py_register_parameter(name, std::move(param));
+        }, py::arg("name"), py::arg("param"),
+             "Register a trainable parameter")
+        .def("register_buffer", [](tenzor::nn::Module& self, const std::string& name, tenzor::Variable buffer) {
+            static_cast<PyModule&>(self).py_register_buffer(name, std::move(buffer));
+        }, py::arg("name"), py::arg("buffer"),
+             "Register a non-trainable buffer (e.g., running stats)")
+        .def("register_module", [](tenzor::nn::Module& self, const std::string& name, std::shared_ptr<tenzor::nn::Module> module) {
+            static_cast<PyModule&>(self).py_register_module(name, std::move(module));
+        }, py::arg("name"), py::arg("module"),
+             "Register a child module")
+
+        // ====================================================================
+        // Training mode
+        // ====================================================================
+        .def("train", &tenzor::nn::Module::train,
+             py::arg("mode") = true,
+             "Set training mode (affects dropout, batchnorm, etc.)")
+        .def("eval", &tenzor::nn::Module::eval,
+             "Set evaluation mode - equivalent to train(False)")
+        .def("is_training", &tenzor::nn::Module::is_training,
+             "Check if module is in training mode")
+
+        // ====================================================================
+        // Device management
+        // ====================================================================
+        .def("to", py::overload_cast<tenzor::Device>(&tenzor::nn::Module::to),
+             py::arg("device"),
+             "Move module to specified device")
+        .def("to", py::overload_cast<tenzor::DType>(&tenzor::nn::Module::to),
+             py::arg("dtype"),
+             "Convert module parameters to specified dtype")
+        .def("cuda", &tenzor::nn::Module::cuda,
+             py::arg("device_id") = 0,
+             "Move module to CUDA device")
+        .def("cpu", &tenzor::nn::Module::cpu,
+             "Move module to CPU")
+
+        // ====================================================================
+        // Gradient management
+        // ====================================================================
+        .def("zero_grad", &tenzor::nn::Module::zero_grad,
+             "Zero all parameter gradients")
+
+        // ====================================================================
+        // Serialization
+        // ====================================================================
+        .def("state_dict", &tenzor::nn::Module::state_dict,
+             "Get module state as dictionary (parameters + buffers)")
+        .def("load_state_dict", &tenzor::nn::Module::load_state_dict,
+             py::arg("state"),
+             "Load module state from dictionary")
+        .def("save", &tenzor::nn::Module::save,
+             py::arg("path"),
+             "Save module to file")
+        .def("load", &tenzor::nn::Module::load,
+             py::arg("path"),
+             "Load module from file")
+
+        // ====================================================================
+        // Hook system (PyTorch-compatible naming)
+        // ====================================================================
+        // Forward hooks - called after forward pass
+        .def("register_forward_hook", [](tenzor::nn::Module& self, py::function hook) {
+            return self.register_forward_post_hook([hook](tenzor::nn::Module* m) {
+                py::gil_scoped_acquire acquire;
+                // Call with PyTorch-compatible signature: hook(module, input, output)
+                // We only have module access in C++, so pass None for input/output
+                hook(m, py::none(), py::none());
+            });
+        }, py::arg("hook"),
+           "Register hook called after forward pass (PyTorch-compatible)")
+        .def("register_forward_pre_hook", [](tenzor::nn::Module& self, py::function hook) {
+            return self.register_forward_pre_hook([hook](tenzor::nn::Module* m) {
+                py::gil_scoped_acquire acquire;
+                // Call with signature: hook(module, input)
+                hook(m, py::none());
+            });
+        }, py::arg("hook"),
+           "Register hook called before forward pass")
+        // Backward hooks
+        .def("register_backward_hook", [](tenzor::nn::Module& self, py::function hook) {
+            return self.register_backward_post_hook([hook](tenzor::nn::Module* m) {
+                py::gil_scoped_acquire acquire;
+                hook(m, py::none(), py::none());
+            });
+        }, py::arg("hook"),
+           "Register hook called after backward pass (PyTorch-compatible)")
+        .def("register_full_backward_hook", [](tenzor::nn::Module& self, py::function hook) {
+            return self.register_backward_post_hook([hook](tenzor::nn::Module* m) {
+                py::gil_scoped_acquire acquire;
+                hook(m, py::none(), py::none());
+            });
+        }, py::arg("hook"),
+           "Register hook called after backward pass with full gradients")
+        .def("register_full_backward_pre_hook", [](tenzor::nn::Module& self, py::function hook) {
+            return self.register_backward_pre_hook([hook](tenzor::nn::Module* m) {
+                py::gil_scoped_acquire acquire;
+                hook(m, py::none());
+            });
+        }, py::arg("hook"),
+           "Register hook called before backward pass")
+        // Keep original names for compatibility
+        .def("register_forward_post_hook", [](tenzor::nn::Module& self, py::function hook) {
+            return self.register_forward_post_hook([hook](tenzor::nn::Module* m) {
+                py::gil_scoped_acquire acquire;
+                hook(m);
+            });
+        }, py::arg("hook"),
+           "Register hook called after forward pass")
+        .def("remove_hook", &tenzor::nn::Module::remove_hook,
+             py::arg("hook_id"),
+             "Remove a registered hook by ID")
+
+        // ====================================================================
+        // Python-friendly utilities
+        // ====================================================================
+        .def("__repr__", [](const tenzor::nn::Module& self) {
+            auto params = const_cast<tenzor::nn::Module&>(self).parameters();
+            size_t total_params = 0;
+            for (const auto& p : params) {
+                total_params += p->tensor().numel();
+            }
+            return "Module(parameters=" + std::to_string(total_params) + ")";
+        })
+        .def("num_parameters", [](tenzor::nn::Module& self) {
+            size_t total = 0;
+            for (const auto& p : self.parameters()) {
+                total += p->tensor().numel();
+            }
+            return total;
+        }, "Count total number of parameters")
+        .def("num_trainable_parameters", [](tenzor::nn::Module& self) {
+            size_t total = 0;
+            for (const auto& p : self.parameters()) {
+                if (p->requires_grad()) {
+                    total += p->tensor().numel();
+                }
+            }
+            return total;
+        }, "Count number of trainable parameters")
+
+        // ====================================================================
+        // Attribute-based submodule discovery (PyTorch-like behavior)
+        // ====================================================================
+        // This allows Python users to store modules as attributes and have
+        // them automatically discovered by parameters() and state_dict()
+        .def("_register_submodule_from_attr", [](tenzor::nn::Module& self,
+                                                  const std::string& name,
+                                                  std::shared_ptr<tenzor::nn::Module> module) {
+            // Helper for __setattr__ to auto-register modules
+            // Use dynamic_cast for safety in case of non-PyModule instances
+            auto* pymod = dynamic_cast<PyModule*>(&self);
+            if (pymod) {
+                pymod->py_register_module(name, std::move(module));
+            }
+        }, py::arg("name"), py::arg("module"));
 
     py::class_<tenzor::nn::Linear, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::Linear>>(nn, "Linear")
         .def(py::init<int64_t, int64_t, bool>(),
              py::arg("in_features"), py::arg("out_features"),
-             py::arg("bias") = true);
+             py::arg("bias") = true)
+        .def("__repr__", [](const tenzor::nn::Linear& self) {
+            auto params = const_cast<tenzor::nn::Linear&>(self).own_parameters();
+            int64_t in_f = 0, out_f = 0;
+            if (!params.empty()) {
+                auto shape = params[0]->tensor().shape();
+                if (shape.size() >= 2) {
+                    out_f = shape[0];
+                    in_f = shape[1];
+                }
+            }
+            bool has_bias = params.size() > 1;
+            return "Linear(in_features=" + std::to_string(in_f) +
+                   ", out_features=" + std::to_string(out_f) +
+                   ", bias=" + (has_bias ? "True" : "False") + ")";
+        });
 
     // Convolution layers
     py::class_<tenzor::nn::Conv2d, tenzor::nn::Module,
@@ -942,7 +1281,23 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("padding") = 0,
              py::arg("dilation") = 1,
              py::arg("groups") = 1,
-             py::arg("bias") = true);
+             py::arg("bias") = true)
+        .def("__repr__", [](const tenzor::nn::Conv2d& self) {
+            auto params = const_cast<tenzor::nn::Conv2d&>(self).own_parameters();
+            int64_t in_c = 0, out_c = 0, k = 0;
+            if (!params.empty()) {
+                auto shape = params[0]->tensor().shape();
+                if (shape.size() >= 4) {
+                    out_c = shape[0];
+                    in_c = shape[1];
+                    k = shape[2];
+                }
+            }
+            bool has_bias = params.size() > 1;
+            return "Conv2d(" + std::to_string(in_c) + ", " + std::to_string(out_c) +
+                   ", kernel_size=(" + std::to_string(k) + ", " + std::to_string(k) + ")" +
+                   ", bias=" + (has_bias ? "True" : "False") + ")";
+        });
 
     // Conv1d - verified implemented in conv.cpp (lines 989-1216)
     py::class_<tenzor::nn::Conv1d, tenzor::nn::Module,
@@ -1008,7 +1363,10 @@ PYBIND11_MODULE(tenzor_core, m) {
     py::class_<tenzor::nn::Dropout, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::Dropout>>(nn, "Dropout")
         .def(py::init<double>(),
-             py::arg("p") = 0.5);
+             py::arg("p") = 0.5)
+        .def("__repr__", [](const tenzor::nn::Dropout&) {
+            return "Dropout()";
+        });
 
     py::class_<tenzor::nn::Dropout2d, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::Dropout2d>>(nn, "Dropout2d")
@@ -1062,15 +1420,40 @@ PYBIND11_MODULE(tenzor_core, m) {
             }
             return seq;
         }), "Create Sequential container with variadic modules")
+        .def(py::init([](py::list modules) {
+            auto seq = std::make_shared<tenzor::nn::Sequential>();
+            for (auto module : modules) {
+                seq->add_module(module.cast<std::shared_ptr<tenzor::nn::Module>>());
+            }
+            return seq;
+        }), py::arg("modules"),
+           "Create Sequential container from list of modules")
         .def("add_module", &tenzor::nn::Sequential::add_module,
              py::return_value_policy::reference_internal,
              py::arg("module"),
-             "Add a module to the sequential container");
+             "Add a module to the sequential container")
+        .def("__len__", [](const tenzor::nn::Sequential& self) {
+            return self.get_submodules().size();
+        }, "Return number of modules in sequence")
+        .def("__getitem__", [](tenzor::nn::Sequential& self, size_t idx) {
+            auto& submodules = self.get_submodules();
+            std::string key = "module_" + std::to_string(idx);
+            auto it = submodules.find(key);
+            if (it == submodules.end()) {
+                throw py::index_error("Index out of range");
+            }
+            return it->second;
+        }, py::arg("index"), "Get module at index")
+        .def("append", [](tenzor::nn::Sequential& self, std::shared_ptr<tenzor::nn::Module> module) {
+            self.add_module(module);
+            return; // No chaining for append (PyTorch-compatible)
+        }, py::arg("module"), "Append a module to the sequence");
 
     // Activation function classes
     py::class_<tenzor::nn::ReLU, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::ReLU>>(nn, "ReLU")
-        .def(py::init<>());
+        .def(py::init<>())
+        .def("__repr__", [](const tenzor::nn::ReLU&) { return "ReLU()"; });
 
     py::class_<tenzor::nn::LeakyReLU, tenzor::nn::Module,
                std::shared_ptr<tenzor::nn::LeakyReLU>>(nn, "LeakyReLU")

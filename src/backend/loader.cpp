@@ -52,7 +52,13 @@ auto BackendLoader::load_backend(const std::filesystem::path& library_path)
 
     auto handle = load_library(library_path);
     if (!handle) {
+        #ifndef _WIN32
+        const char* error = dlerror();
+        std::string error_msg = error ? error : "unknown error";
+        return std::unexpected("Failed to load library: " + library_path.string() + " - " + error_msg);
+        #else
         return std::unexpected("Failed to load library: " + library_path.string());
+        #endif
     }
 
     // Get factory function
@@ -143,6 +149,8 @@ auto BackendLoader::load_library(const std::filesystem::path& path) -> LibHandle
     #ifdef _WIN32
         return LoadLibraryA(path.string().c_str());
     #else
+        // Clear any existing error
+        dlerror();
         return dlopen(path.c_str(), RTLD_LAZY | RTLD_GLOBAL);
     #endif
 }
