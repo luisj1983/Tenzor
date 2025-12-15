@@ -1,7 +1,7 @@
 <map id="tenzor::TransposeBackward" name="tenzor::TransposeBackward">
 <area shape="rect" id="Node000001" title="Transpose gradient function." alt="" coords="5,174,205,201"/>
 <area shape="rect" id="Node000002" href="$classtenzor_1_1Function.html" title="Base class for autograd differentiable functions." alt="" coords="42,98,168,126"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="108,141,108,173,102,173,102,141"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="107,140,107,174,103,172,103,143"/>
 <area shape="rect" id="Node000003" title=" " alt="" coords="17,5,193,50"/>
-<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="108,66,108,97,102,97,102,66"/>
+<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="106,63,108,98,102,97,104,68"/>
 </map>

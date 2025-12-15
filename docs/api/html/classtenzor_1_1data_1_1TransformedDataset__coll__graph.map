@@ -1,5 +1,5 @@
 <map id="tenzor::data::TransformedDataset" name="tenzor::data::TransformedDataset">
 <area shape="rect" id="Node000001" title="Dataset wrapper that applies transforms to samples." alt="" coords="5,81,194,126"/>
 <area shape="rect" id="Node000002" href="$classtenzor_1_1data_1_1Dataset.html" title="Abstract base class for datasets." alt="" coords="20,5,179,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="102,49,102,80,97,80,97,49"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="101,47,102,81,97,79,98,51"/>
 </map>

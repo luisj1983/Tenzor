@@ -1,4 +1,0 @@
-var classtenzor_1_1MemoryException =
-[
-    [ "location", "classtenzor_1_1MemoryException.html#a36d12533f96fadc0c95afaba6a6f27e6", null ]
-];

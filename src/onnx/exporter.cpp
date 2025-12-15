@@ -196,49 +196,49 @@ auto ONNXTensor::size_bytes() const -> size_t {
 }
 
 // ============================================================================
-// ONNXValueInfo Implementation
+// ONNXExportValueInfo Implementation
 // ============================================================================
 
-ONNXValueInfo::ONNXValueInfo(const std::string& name, ONNXDataType dtype,
+ONNXExportValueInfo::ONNXExportValueInfo(const std::string& name, ONNXDataType dtype,
                              const std::vector<int64_t>& shape)
     : name(name), dtype(dtype), shape(shape) {}
 
 // ============================================================================
-// ONNXNode Implementation
+// ONNXExportNode Implementation
 // ============================================================================
 
-ONNXNode::ONNXNode(const std::string& op_type, const std::string& name)
+ONNXExportNode::ONNXExportNode(const std::string& op_type, const std::string& name)
     : op_type(op_type), name(name) {}
 
-auto ONNXNode::add_input(const std::string& input) -> void {
+auto ONNXExportNode::add_input(const std::string& input) -> void {
     inputs.push_back(input);
 }
 
-auto ONNXNode::add_output(const std::string& output) -> void {
+auto ONNXExportNode::add_output(const std::string& output) -> void {
     outputs.push_back(output);
 }
 
-auto ONNXNode::set_attr(const std::string& key, int64_t value) -> void {
+auto ONNXExportNode::set_attr(const std::string& key, int64_t value) -> void {
     int_attrs[key] = value;
 }
 
-auto ONNXNode::set_attr(const std::string& key, float value) -> void {
+auto ONNXExportNode::set_attr(const std::string& key, float value) -> void {
     float_attrs[key] = value;
 }
 
-auto ONNXNode::set_attr(const std::string& key, const std::string& value) -> void {
+auto ONNXExportNode::set_attr(const std::string& key, const std::string& value) -> void {
     string_attrs[key] = value;
 }
 
-auto ONNXNode::set_attr(const std::string& key, const std::vector<int64_t>& value) -> void {
+auto ONNXExportNode::set_attr(const std::string& key, const std::vector<int64_t>& value) -> void {
     ints_attrs[key] = value;
 }
 
-auto ONNXNode::set_attr(const std::string& key, const std::vector<float>& value) -> void {
+auto ONNXExportNode::set_attr(const std::string& key, const std::vector<float>& value) -> void {
     floats_attrs[key] = value;
 }
 
-auto ONNXNode::set_attr(const std::string& key, const ONNXTensor& value) -> void {
+auto ONNXExportNode::set_attr(const std::string& key, const ONNXTensor& value) -> void {
     tensor_attrs[key] = value;
 }
 
@@ -248,15 +248,15 @@ auto ONNXNode::set_attr(const std::string& key, const ONNXTensor& value) -> void
 
 ONNXGraph::ONNXGraph(const std::string& name) : name(name) {}
 
-auto ONNXGraph::add_node(const ONNXNode& node) -> void {
+auto ONNXGraph::add_node(const ONNXExportNode& node) -> void {
     nodes.push_back(node);
 }
 
-auto ONNXGraph::add_input(const ONNXValueInfo& input) -> void {
+auto ONNXGraph::add_input(const ONNXExportValueInfo& input) -> void {
     inputs.push_back(input);
 }
 
-auto ONNXGraph::add_output(const ONNXValueInfo& output) -> void {
+auto ONNXGraph::add_output(const ONNXExportValueInfo& output) -> void {
     outputs.push_back(output);
 }
 
@@ -264,7 +264,7 @@ auto ONNXGraph::add_initializer(const ONNXTensor& tensor) -> void {
     initializers.push_back(tensor);
 }
 
-auto ONNXGraph::add_value_info(const ONNXValueInfo& info) -> void {
+auto ONNXGraph::add_value_info(const ONNXExportValueInfo& info) -> void {
     value_info[info.name] = info;
 }
 
@@ -340,7 +340,7 @@ auto ONNXExporter::add_input(const Tensor& tensor, const std::string& name,
         }
     }
 
-    ONNXValueInfo input_info(name, dtype_to_onnx(tensor.dtype()), shape);
+    ONNXExportValueInfo input_info(name, dtype_to_onnx(tensor.dtype()), shape);
     graph_.add_input(input_info);
     context_.register_tensor(tensor, name);
 }
@@ -349,7 +349,7 @@ auto ONNXExporter::add_output(const Tensor& tensor, const std::string& name) -> 
     auto shape_span = tensor.shape();
     std::vector<int64_t> shape(shape_span.begin(), shape_span.end());
 
-    ONNXValueInfo output_info(name, dtype_to_onnx(tensor.dtype()), shape);
+    ONNXExportValueInfo output_info(name, dtype_to_onnx(tensor.dtype()), shape);
     graph_.add_output(output_info);
     context_.register_tensor(tensor, name);
 }
@@ -358,7 +358,7 @@ auto ONNXExporter::add_output(const Tensor& tensor, const std::string& name) -> 
 
 auto ONNXExporter::export_add(const Tensor& a, const Tensor& b, const Tensor& output,
                                const std::string& output_name) -> void {
-    ONNXNode node("Add", context_.generate_name("add"));
+    ONNXExportNode node("Add", context_.generate_name("add"));
 
     std::string a_name = get_tensor_name(a, "add_input_a");
     std::string b_name = get_tensor_name(b, "add_input_b");
@@ -373,7 +373,7 @@ auto ONNXExporter::export_add(const Tensor& a, const Tensor& b, const Tensor& ou
 
 auto ONNXExporter::export_sub(const Tensor& a, const Tensor& b, const Tensor& output,
                                const std::string& output_name) -> void {
-    ONNXNode node("Sub", context_.generate_name("sub"));
+    ONNXExportNode node("Sub", context_.generate_name("sub"));
 
     std::string a_name = get_tensor_name(a, "sub_input_a");
     std::string b_name = get_tensor_name(b, "sub_input_b");
@@ -388,7 +388,7 @@ auto ONNXExporter::export_sub(const Tensor& a, const Tensor& b, const Tensor& ou
 
 auto ONNXExporter::export_mul(const Tensor& a, const Tensor& b, const Tensor& output,
                                const std::string& output_name) -> void {
-    ONNXNode node("Mul", context_.generate_name("mul"));
+    ONNXExportNode node("Mul", context_.generate_name("mul"));
 
     std::string a_name = get_tensor_name(a, "mul_input_a");
     std::string b_name = get_tensor_name(b, "mul_input_b");
@@ -403,7 +403,7 @@ auto ONNXExporter::export_mul(const Tensor& a, const Tensor& b, const Tensor& ou
 
 auto ONNXExporter::export_div(const Tensor& a, const Tensor& b, const Tensor& output,
                                const std::string& output_name) -> void {
-    ONNXNode node("Div", context_.generate_name("div"));
+    ONNXExportNode node("Div", context_.generate_name("div"));
 
     std::string a_name = get_tensor_name(a, "div_input_a");
     std::string b_name = get_tensor_name(b, "div_input_b");
@@ -418,7 +418,7 @@ auto ONNXExporter::export_div(const Tensor& a, const Tensor& b, const Tensor& ou
 
 auto ONNXExporter::export_matmul(const Tensor& a, const Tensor& b, const Tensor& output,
                                   const std::string& output_name) -> void {
-    ONNXNode node("MatMul", context_.generate_name("matmul"));
+    ONNXExportNode node("MatMul", context_.generate_name("matmul"));
 
     std::string a_name = get_tensor_name(a, "matmul_input_a");
     std::string b_name = get_tensor_name(b, "matmul_input_b");
@@ -433,7 +433,7 @@ auto ONNXExporter::export_matmul(const Tensor& a, const Tensor& b, const Tensor&
 
 auto ONNXExporter::export_reshape(const Tensor& input, const std::vector<int64_t>& new_shape,
                                    const Tensor& output, const std::string& output_name) -> void {
-    ONNXNode node("Reshape", context_.generate_name("reshape"));
+    ONNXExportNode node("Reshape", context_.generate_name("reshape"));
 
     std::string input_name = get_tensor_name(input, "reshape_input");
 
@@ -453,7 +453,7 @@ auto ONNXExporter::export_reshape(const Tensor& input, const std::vector<int64_t
 
 auto ONNXExporter::export_transpose(const Tensor& input, const std::vector<int64_t>& perm,
                                      const Tensor& output, const std::string& output_name) -> void {
-    ONNXNode node("Transpose", context_.generate_name("transpose"));
+    ONNXExportNode node("Transpose", context_.generate_name("transpose"));
 
     std::string input_name = get_tensor_name(input, "transpose_input");
 
@@ -467,7 +467,7 @@ auto ONNXExporter::export_transpose(const Tensor& input, const std::vector<int64
 
 auto ONNXExporter::export_concat(const std::vector<Tensor>& inputs, int64_t axis,
                                   const Tensor& output, const std::string& output_name) -> void {
-    ONNXNode node("Concat", context_.generate_name("concat"));
+    ONNXExportNode node("Concat", context_.generate_name("concat"));
 
     for (size_t i = 0; i < inputs.size(); ++i) {
         std::string input_name = get_tensor_name(inputs[i], "concat_input_" + std::to_string(i));
@@ -483,7 +483,7 @@ auto ONNXExporter::export_concat(const std::vector<Tensor>& inputs, int64_t axis
 
 auto ONNXExporter::export_split(const Tensor& input, int64_t axis, const std::vector<int64_t>& split_sizes,
                                  const std::vector<Tensor>& outputs, const std::vector<std::string>& output_names) -> void {
-    ONNXNode node("Split", context_.generate_name("split"));
+    ONNXExportNode node("Split", context_.generate_name("split"));
 
     std::string input_name = get_tensor_name(input, "split_input");
     node.add_input(input_name);
@@ -514,7 +514,7 @@ auto ONNXExporter::export_linear(const Tensor& input, const Tensor& weight,
     // For Linear: Y = X @ W^T + bias
     // We need to transpose W
 
-    ONNXNode gemm_node("Gemm", context_.generate_name("gemm"));
+    ONNXExportNode gemm_node("Gemm", context_.generate_name("gemm"));
 
     std::string input_name = get_tensor_name(input, "linear_input");
 
@@ -551,7 +551,7 @@ auto ONNXExporter::export_conv2d(const Tensor& input, const Tensor& weight,
                                   int64_t groups,
                                   const Tensor& output,
                                   const std::string& output_name) -> void {
-    ONNXNode node("Conv", context_.generate_name("conv"));
+    ONNXExportNode node("Conv", context_.generate_name("conv"));
 
     std::string input_name = get_tensor_name(input, "conv_input");
 
@@ -586,7 +586,7 @@ auto ONNXExporter::export_conv1d(const Tensor& input, const Tensor& weight,
                                   int64_t dilation, int64_t groups,
                                   const Tensor& output,
                                   const std::string& output_name) -> void {
-    ONNXNode node("Conv", context_.generate_name("conv1d"));
+    ONNXExportNode node("Conv", context_.generate_name("conv1d"));
 
     std::string input_name = get_tensor_name(input, "conv1d_input");
 
@@ -620,7 +620,7 @@ auto ONNXExporter::export_batchnorm2d(const Tensor& input, const Tensor& scale,
                                        const Tensor& var, double eps,
                                        const Tensor& output,
                                        const std::string& output_name) -> void {
-    ONNXNode node("BatchNormalization", context_.generate_name("batchnorm"));
+    ONNXExportNode node("BatchNormalization", context_.generate_name("batchnorm"));
 
     std::string input_name = get_tensor_name(input, "bn_input");
 
@@ -664,7 +664,7 @@ auto ONNXExporter::export_batchnorm1d(const Tensor& input, const Tensor& scale,
 
 auto ONNXExporter::export_relu(const Tensor& input, const Tensor& output,
                                 const std::string& output_name) -> void {
-    ONNXNode node("Relu", context_.generate_name("relu"));
+    ONNXExportNode node("Relu", context_.generate_name("relu"));
 
     std::string input_name = get_tensor_name(input, "relu_input");
 
@@ -677,7 +677,7 @@ auto ONNXExporter::export_relu(const Tensor& input, const Tensor& output,
 
 auto ONNXExporter::export_leaky_relu(const Tensor& input, double alpha,
                                       const Tensor& output, const std::string& output_name) -> void {
-    ONNXNode node("LeakyRelu", context_.generate_name("leaky_relu"));
+    ONNXExportNode node("LeakyRelu", context_.generate_name("leaky_relu"));
 
     std::string input_name = get_tensor_name(input, "leaky_relu_input");
 
@@ -691,7 +691,7 @@ auto ONNXExporter::export_leaky_relu(const Tensor& input, double alpha,
 
 auto ONNXExporter::export_sigmoid(const Tensor& input, const Tensor& output,
                                    const std::string& output_name) -> void {
-    ONNXNode node("Sigmoid", context_.generate_name("sigmoid"));
+    ONNXExportNode node("Sigmoid", context_.generate_name("sigmoid"));
 
     std::string input_name = get_tensor_name(input, "sigmoid_input");
 
@@ -704,7 +704,7 @@ auto ONNXExporter::export_sigmoid(const Tensor& input, const Tensor& output,
 
 auto ONNXExporter::export_tanh(const Tensor& input, const Tensor& output,
                                 const std::string& output_name) -> void {
-    ONNXNode node("Tanh", context_.generate_name("tanh"));
+    ONNXExportNode node("Tanh", context_.generate_name("tanh"));
 
     std::string input_name = get_tensor_name(input, "tanh_input");
 
@@ -721,7 +721,7 @@ auto ONNXExporter::export_gelu(const Tensor& input, const Tensor& output,
     // For ONNX opset 20+, there's a Gelu op. For earlier versions, we decompose it.
 
     if (opset_version_ >= 20) {
-        ONNXNode node("Gelu", context_.generate_name("gelu"));
+        ONNXExportNode node("Gelu", context_.generate_name("gelu"));
         std::string input_name = get_tensor_name(input, "gelu_input");
         node.add_input(input_name);
         node.add_output(output_name);
@@ -748,7 +748,7 @@ auto ONNXExporter::export_gelu(const Tensor& input, const Tensor& output,
 
         // x^3
         std::string x3_name = context_.generate_name("gelu_x3");
-        ONNXNode pow_node("Pow", context_.generate_name("gelu_pow"));
+        ONNXExportNode pow_node("Pow", context_.generate_name("gelu_pow"));
         std::string three_name = context_.generate_name("gelu_three");
         Tensor three_tensor({1}, DType::Float32, Device::cpu());
         three_tensor.fill_(3.0f);
@@ -760,7 +760,7 @@ auto ONNXExporter::export_gelu(const Tensor& input, const Tensor& output,
 
         // 0.044715 * x^3
         std::string scaled_x3_name = context_.generate_name("gelu_scaled_x3");
-        ONNXNode mul1_node("Mul", context_.generate_name("gelu_mul1"));
+        ONNXExportNode mul1_node("Mul", context_.generate_name("gelu_mul1"));
         mul1_node.add_input(coef_name);
         mul1_node.add_input(x3_name);
         mul1_node.add_output(scaled_x3_name);
@@ -768,7 +768,7 @@ auto ONNXExporter::export_gelu(const Tensor& input, const Tensor& output,
 
         // x + 0.044715 * x^3
         std::string sum1_name = context_.generate_name("gelu_sum1");
-        ONNXNode add1_node("Add", context_.generate_name("gelu_add1"));
+        ONNXExportNode add1_node("Add", context_.generate_name("gelu_add1"));
         add1_node.add_input(input_name);
         add1_node.add_input(scaled_x3_name);
         add1_node.add_output(sum1_name);
@@ -776,7 +776,7 @@ auto ONNXExporter::export_gelu(const Tensor& input, const Tensor& output,
 
         // sqrt(2/pi) * (x + 0.044715 * x^3)
         std::string mul2_name = context_.generate_name("gelu_mul2");
-        ONNXNode mul2_node("Mul", context_.generate_name("gelu_mul2"));
+        ONNXExportNode mul2_node("Mul", context_.generate_name("gelu_mul2"));
         mul2_node.add_input(sqrt_2_pi_name);
         mul2_node.add_input(sum1_name);
         mul2_node.add_output(mul2_name);
@@ -784,7 +784,7 @@ auto ONNXExporter::export_gelu(const Tensor& input, const Tensor& output,
 
         // tanh(...)
         std::string tanh_name = context_.generate_name("gelu_tanh");
-        ONNXNode tanh_node("Tanh", context_.generate_name("gelu_tanh"));
+        ONNXExportNode tanh_node("Tanh", context_.generate_name("gelu_tanh"));
         tanh_node.add_input(mul2_name);
         tanh_node.add_output(tanh_name);
         graph_.add_node(tanh_node);
@@ -796,7 +796,7 @@ auto ONNXExporter::export_gelu(const Tensor& input, const Tensor& output,
         add_initializer_tensor(one_tensor, one_name);
 
         std::string add2_name = context_.generate_name("gelu_add2");
-        ONNXNode add2_node("Add", context_.generate_name("gelu_add2"));
+        ONNXExportNode add2_node("Add", context_.generate_name("gelu_add2"));
         add2_node.add_input(one_name);
         add2_node.add_input(tanh_name);
         add2_node.add_output(add2_name);
@@ -804,14 +804,14 @@ auto ONNXExporter::export_gelu(const Tensor& input, const Tensor& output,
 
         // x * (1 + tanh(...))
         std::string mul3_name = context_.generate_name("gelu_mul3");
-        ONNXNode mul3_node("Mul", context_.generate_name("gelu_mul3"));
+        ONNXExportNode mul3_node("Mul", context_.generate_name("gelu_mul3"));
         mul3_node.add_input(input_name);
         mul3_node.add_input(add2_name);
         mul3_node.add_output(mul3_name);
         graph_.add_node(mul3_node);
 
         // 0.5 * x * (1 + tanh(...))
-        ONNXNode mul4_node("Mul", context_.generate_name("gelu_mul4"));
+        ONNXExportNode mul4_node("Mul", context_.generate_name("gelu_mul4"));
         mul4_node.add_input(half_name);
         mul4_node.add_input(mul3_name);
         mul4_node.add_output(output_name);
@@ -823,7 +823,7 @@ auto ONNXExporter::export_gelu(const Tensor& input, const Tensor& output,
 
 auto ONNXExporter::export_softmax(const Tensor& input, int64_t axis,
                                    const Tensor& output, const std::string& output_name) -> void {
-    ONNXNode node("Softmax", context_.generate_name("softmax"));
+    ONNXExportNode node("Softmax", context_.generate_name("softmax"));
 
     std::string input_name = get_tensor_name(input, "softmax_input");
 
@@ -837,7 +837,7 @@ auto ONNXExporter::export_softmax(const Tensor& input, int64_t axis,
 
 auto ONNXExporter::export_log_softmax(const Tensor& input, int64_t axis,
                                        const Tensor& output, const std::string& output_name) -> void {
-    ONNXNode node("LogSoftmax", context_.generate_name("log_softmax"));
+    ONNXExportNode node("LogSoftmax", context_.generate_name("log_softmax"));
 
     std::string input_name = get_tensor_name(input, "log_softmax_input");
 
@@ -851,7 +851,7 @@ auto ONNXExporter::export_log_softmax(const Tensor& input, int64_t axis,
 
 auto ONNXExporter::export_elu(const Tensor& input, double alpha,
                                const Tensor& output, const std::string& output_name) -> void {
-    ONNXNode node("Elu", context_.generate_name("elu"));
+    ONNXExportNode node("Elu", context_.generate_name("elu"));
 
     std::string input_name = get_tensor_name(input, "elu_input");
 
@@ -865,7 +865,7 @@ auto ONNXExporter::export_elu(const Tensor& input, double alpha,
 
 auto ONNXExporter::export_selu(const Tensor& input, const Tensor& output,
                                 const std::string& output_name) -> void {
-    ONNXNode node("Selu", context_.generate_name("selu"));
+    ONNXExportNode node("Selu", context_.generate_name("selu"));
 
     std::string input_name = get_tensor_name(input, "selu_input");
 
@@ -887,13 +887,13 @@ auto ONNXExporter::export_swish(const Tensor& input, const Tensor& output,
 
     // Sigmoid
     std::string sigmoid_out_name = context_.generate_name("swish_sigmoid");
-    ONNXNode sigmoid_node("Sigmoid", context_.generate_name("swish_sigmoid"));
+    ONNXExportNode sigmoid_node("Sigmoid", context_.generate_name("swish_sigmoid"));
     sigmoid_node.add_input(input_name);
     sigmoid_node.add_output(sigmoid_out_name);
     graph_.add_node(sigmoid_node);
 
     // Multiply
-    ONNXNode mul_node("Mul", context_.generate_name("swish_mul"));
+    ONNXExportNode mul_node("Mul", context_.generate_name("swish_mul"));
     mul_node.add_input(input_name);
     mul_node.add_input(sigmoid_out_name);
     mul_node.add_output(output_name);
@@ -907,7 +907,7 @@ auto ONNXExporter::export_swish(const Tensor& input, const Tensor& output,
 auto ONNXExporter::export_maxpool2d(const Tensor& input, int64_t kernel_size,
                                      int64_t stride, int64_t padding,
                                      const Tensor& output, const std::string& output_name) -> void {
-    ONNXNode node("MaxPool", context_.generate_name("maxpool"));
+    ONNXExportNode node("MaxPool", context_.generate_name("maxpool"));
 
     std::string input_name = get_tensor_name(input, "maxpool_input");
 
@@ -925,7 +925,7 @@ auto ONNXExporter::export_maxpool2d(const Tensor& input, int64_t kernel_size,
 auto ONNXExporter::export_avgpool2d(const Tensor& input, int64_t kernel_size,
                                      int64_t stride, int64_t padding,
                                      const Tensor& output, const std::string& output_name) -> void {
-    ONNXNode node("AveragePool", context_.generate_name("avgpool"));
+    ONNXExportNode node("AveragePool", context_.generate_name("avgpool"));
 
     std::string input_name = get_tensor_name(input, "avgpool_input");
 
@@ -948,7 +948,7 @@ auto ONNXExporter::export_adaptive_avgpool2d(const Tensor& input,
 
     if (output_size.size() == 2 && output_size[0] == 1 && output_size[1] == 1) {
         // Use GlobalAveragePool
-        ONNXNode node("GlobalAveragePool", context_.generate_name("global_avgpool"));
+        ONNXExportNode node("GlobalAveragePool", context_.generate_name("global_avgpool"));
         std::string input_name = get_tensor_name(input, "adaptive_avgpool_input");
         node.add_input(input_name);
         node.add_output(output_name);
@@ -966,7 +966,7 @@ auto ONNXExporter::export_adaptive_avgpool2d(const Tensor& input,
         int64_t kernel_h = h_in - (h_out - 1) * stride_h;
         int64_t kernel_w = w_in - (w_out - 1) * stride_w;
 
-        ONNXNode node("AveragePool", context_.generate_name("adaptive_avgpool"));
+        ONNXExportNode node("AveragePool", context_.generate_name("adaptive_avgpool"));
         std::string input_name = get_tensor_name(input, "adaptive_avgpool_input");
 
         node.add_input(input_name);

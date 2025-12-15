@@ -26,12 +26,15 @@ var searchData=
   ['tracer_23',['Tracer',['../classtenzor_1_1jit_1_1Tracer.html',1,'tenzor::jit']]],
   ['tracingguard_24',['TracingGuard',['../classtenzor_1_1jit_1_1TracingGuard.html',1,'tenzor::jit']]],
   ['trainingmetadata_25',['TrainingMetadata',['../structtenzor_1_1nn_1_1TrainingMetadata.html',1,'tenzor::nn']]],
-  ['transform_26',['Transform',['../classtenzor_1_1data_1_1transforms_1_1Transform.html',1,'tenzor::data::transforms']]],
-  ['transformeddataset_27',['TransformedDataset',['../classtenzor_1_1data_1_1TransformedDataset.html',1,'tenzor::data']]],
-  ['transformer_28',['Transformer',['../classtenzor_1_1nn_1_1Transformer.html',1,'tenzor::nn']]],
-  ['transformerdecoder_29',['TransformerDecoder',['../classtenzor_1_1nn_1_1TransformerDecoder.html',1,'tenzor::nn']]],
-  ['transformerdecoderlayer_30',['TransformerDecoderLayer',['../classtenzor_1_1nn_1_1TransformerDecoderLayer.html',1,'tenzor::nn']]],
-  ['transformerencoder_31',['TransformerEncoder',['../classtenzor_1_1nn_1_1TransformerEncoder.html',1,'tenzor::nn']]],
-  ['transformerencoderlayer_32',['TransformerEncoderLayer',['../classtenzor_1_1nn_1_1TransformerEncoderLayer.html',1,'tenzor::nn']]],
-  ['transposebackward_33',['TransposeBackward',['../classtenzor_1_1TransposeBackward.html',1,'tenzor']]]
+  ['transferengine_26',['TransferEngine',['../classtenzor_1_1core_1_1TransferEngine.html',1,'tenzor::core']]],
+  ['transferhandle_27',['TransferHandle',['../classtenzor_1_1core_1_1TransferHandle.html',1,'tenzor::core']]],
+  ['transferstate_28',['TransferState',['../classtenzor_1_1core_1_1TransferState.html',1,'tenzor::core']]],
+  ['transform_29',['Transform',['../classtenzor_1_1data_1_1transforms_1_1Transform.html',1,'tenzor::data::transforms']]],
+  ['transformeddataset_30',['TransformedDataset',['../classtenzor_1_1data_1_1TransformedDataset.html',1,'tenzor::data']]],
+  ['transformer_31',['Transformer',['../classtenzor_1_1nn_1_1Transformer.html',1,'tenzor::nn']]],
+  ['transformerdecoder_32',['TransformerDecoder',['../classtenzor_1_1nn_1_1TransformerDecoder.html',1,'tenzor::nn']]],
+  ['transformerdecoderlayer_33',['TransformerDecoderLayer',['../classtenzor_1_1nn_1_1TransformerDecoderLayer.html',1,'tenzor::nn']]],
+  ['transformerencoder_34',['TransformerEncoder',['../classtenzor_1_1nn_1_1TransformerEncoder.html',1,'tenzor::nn']]],
+  ['transformerencoderlayer_35',['TransformerEncoderLayer',['../classtenzor_1_1nn_1_1TransformerEncoderLayer.html',1,'tenzor::nn']]],
+  ['transposebackward_36',['TransposeBackward',['../classtenzor_1_1TransposeBackward.html',1,'tenzor']]]
 ];

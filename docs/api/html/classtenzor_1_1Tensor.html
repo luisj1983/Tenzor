@@ -238,6 +238,7 @@ Friends</h2></td></tr>
 <tr class="memitem:a9b0a9a1a9dc58fc36b535bb33c612b49" id="r_a9b0a9a1a9dc58fc36b535bb33c612b49"><td class="memItemLeft" align="right" valign="top">class&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a9b0a9a1a9dc58fc36b535bb33c612b49">Variable</a></td></tr>
 <tr class="memitem:ab5c8d4c59f0e31de367d7ca8f13ad7b7" id="r_ab5c8d4c59f0e31de367d7ca8f13ad7b7"><td class="memItemLeft" align="right" valign="top">class&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#ab5c8d4c59f0e31de367d7ca8f13ad7b7">cuda::CUDAKernelAccess</a></td></tr>
 <tr class="memitem:a54897816a5ef73dfba089e34041f273d" id="r_a54897816a5ef73dfba089e34041f273d"><td class="memItemLeft" align="right" valign="top">class&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a54897816a5ef73dfba089e34041f273d">rocm::HIPKernelAccess</a></td></tr>
+<tr class="memitem:a435b553dea38b2ef32d01a2c3478cd01" id="r_a435b553dea38b2ef32d01a2c3478cd01"><td class="memItemLeft" align="right" valign="top">class&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a435b553dea38b2ef32d01a2c3478cd01">VulkanBackend</a></td></tr>
 <tr class="memitem:a2137159d10b0a95ad7e6a087a1891c82" id="r_a2137159d10b0a95ad7e6a087a1891c82"><td class="memItemLeft" align="right" valign="top"><a id="a2137159d10b0a95ad7e6a087a1891c82" name="a2137159d10b0a95ad7e6a087a1891c82"></a>
 auto&#160;</td><td class="memItemRight" valign="bottom"><b>cpu::clone_kernel</b> (const <a class="el" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a> &amp;input) -&gt; <a class="el" href="#a15578a9c8ca0b8787975a7c785822fc6">Tensor</a></td></tr>
 <tr class="memitem:a27d5fc22939e12f03a45e846ee10a172" id="r_a27d5fc22939e12f03a45e846ee10a172"><td class="memItemLeft" align="right" valign="top"><a id="a27d5fc22939e12f03a45e846ee10a172" name="a27d5fc22939e12f03a45e846ee10a172"></a>
@@ -285,14 +286,14 @@ auto&#160;</td><td class="memItemRight" valign="bottom"><b>cuda::contiguous_kern
 <div class="line"><span class="comment">// Operations</span></div>
 <div class="line"><a class="code hl_class" href="classtenzor_1_1Tensor.html">Tensor</a> c = a + b;</div>
 <div class="line"><a class="code hl_class" href="classtenzor_1_1Tensor.html">Tensor</a> d = c.<a class="code hl_function" href="#ab898ad1bdc9a05c9be2583061fa6827c">reshape</a>({12});</div>
-<div class="ttc" id="aclasstenzor_1_1Tensor_html"><div class="ttname"><a href="classtenzor_1_1Tensor.html">tenzor::Tensor</a></div><div class="ttdoc">Multi-dimensional array with automatic differentiation support.</div><div class="ttdef"><b>Definition</b> <a href="tensor_8hpp_source.html#l00075">tensor.hpp:75</a></div></div>
+<div class="ttc" id="aclasstenzor_1_1Tensor_html"><div class="ttname"><a href="classtenzor_1_1Tensor.html">tenzor::Tensor</a></div><div class="ttdoc">Multi-dimensional array with automatic differentiation support.</div><div class="ttdef"><b>Definition</b> <a href="tensor_8hpp_source.html#l00078">tensor.hpp:78</a></div></div>
 <div class="ttc" id="aclasstenzor_1_1Tensor_html_a15578a9c8ca0b8787975a7c785822fc6"><div class="ttname"><a href="#a15578a9c8ca0b8787975a7c785822fc6">tenzor::Tensor::Tensor</a></div><div class="ttdeci">Tensor()=default</div><div class="ttdoc">Default constructor creating an empty tensor.</div></div>
 <div class="ttc" id="aclasstenzor_1_1Tensor_html_a8c91a334452a95c43ed7536d55cf0275"><div class="ttname"><a href="#a8c91a334452a95c43ed7536d55cf0275">tenzor::Tensor::cuda</a></div><div class="ttdeci">auto cuda(int32_t device_id=0) const -&gt; Tensor</div><div class="ttdoc">Move tensor to CUDA device.</div></div>
 <div class="ttc" id="aclasstenzor_1_1Tensor_html_ab898ad1bdc9a05c9be2583061fa6827c"><div class="ttname"><a href="#ab898ad1bdc9a05c9be2583061fa6827c">tenzor::Tensor::reshape</a></div><div class="ttdeci">auto reshape(std::vector&lt; int64_t &gt; new_shape) const -&gt; Tensor</div><div class="ttdoc">Reshape tensor to new dimensions.</div></div>
 <div class="ttc" id="anamespacetenzor_html_a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204"><div class="ttname"><a href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">tenzor::DType::Float32</a></div><div class="ttdeci">@ Float32</div><div class="ttdoc">32-bit floating point (float)</div><div class="ttdef"><b>Definition</b> <a href="dtype_8hpp_source.html#l00029">dtype.hpp:29</a></div></div>
 <div class="ttc" id="astructtenzor_1_1Device_html_a77290e32e1fa7560bef5d05457f6157a"><div class="ttname"><a href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">tenzor::Device::cpu</a></div><div class="ttdeci">static auto cpu() -&gt; Device</div><div class="ttdoc">Create a CPU device.</div><div class="ttdef"><b>Definition</b> <a href="device_8hpp_source.html#l00059">device.hpp:59</a></div></div>
 </div><!-- fragment --> 
-<p class="definition">Definition at line <a class="el" href="tensor_8hpp_source.html#l00075">75</a> of file <a class="el" href="tensor_8hpp_source.html">tensor.hpp</a>.</p>
+<p class="definition">Definition at line <a class="el" href="tensor_8hpp_source.html#l00078">78</a> of file <a class="el" href="tensor_8hpp_source.html">tensor.hpp</a>.</p>
 </div><a name="doc-constructors" id="doc-constructors"></a><h2 id="header-doc-constructors" class="groupheader">Constructor &amp; Destructor Documentation</h2>
 <a id="a25a3affbf301315135e07846f8465a2a" name="a25a3affbf301315135e07846f8465a2a"></a>
 <h2 class="memtitle"><span class="permalink"><a href="#a25a3affbf301315135e07846f8465a2a">&#9670;&#160;</a></span>Tensor()</h2>
@@ -793,7 +794,7 @@ template&lt;typename T&gt; </div>
 </table>
 </div><div class="memdoc">
 
-<p class="definition">Definition at line <a class="el" href="tensor_8hpp_source.html#l00750">750</a> of file <a class="el" href="tensor_8hpp_source.html">tensor.hpp</a>.</p>
+<p class="definition">Definition at line <a class="el" href="tensor_8hpp_source.html#l00753">753</a> of file <a class="el" href="tensor_8hpp_source.html">tensor.hpp</a>.</p>
 
 </div>
 </div>
@@ -2034,7 +2035,7 @@ requires ScalarType&lt;T&gt;</div>
 </table>
 </div><div class="memdoc">
 
-<p class="definition">Definition at line <a class="el" href="tensor_8hpp_source.html#l00756">756</a> of file <a class="el" href="tensor_8hpp_source.html">tensor.hpp</a>.</p>
+<p class="definition">Definition at line <a class="el" href="tensor_8hpp_source.html#l00759">759</a> of file <a class="el" href="tensor_8hpp_source.html">tensor.hpp</a>.</p>
 
 </div>
 </div>
@@ -2058,7 +2059,7 @@ requires ScalarType&lt;T&gt;</div>
 </table>
 </div><div class="memdoc">
 
-<p class="definition">Definition at line <a class="el" href="tensor_8hpp_source.html#l00757">757</a> of file <a class="el" href="tensor_8hpp_source.html">tensor.hpp</a>.</p>
+<p class="definition">Definition at line <a class="el" href="tensor_8hpp_source.html#l00760">760</a> of file <a class="el" href="tensor_8hpp_source.html">tensor.hpp</a>.</p>
 
 </div>
 </div>
@@ -2082,7 +2083,31 @@ requires ScalarType&lt;T&gt;</div>
 </table>
 </div><div class="memdoc">
 
-<p class="definition">Definition at line <a class="el" href="tensor_8hpp_source.html#l00755">755</a> of file <a class="el" href="tensor_8hpp_source.html">tensor.hpp</a>.</p>
+<p class="definition">Definition at line <a class="el" href="tensor_8hpp_source.html#l00758">758</a> of file <a class="el" href="tensor_8hpp_source.html">tensor.hpp</a>.</p>
+
+</div>
+</div>
+<a id="a435b553dea38b2ef32d01a2c3478cd01" name="a435b553dea38b2ef32d01a2c3478cd01"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a435b553dea38b2ef32d01a2c3478cd01">&#9670;&#160;</a></span>VulkanBackend</h2>
+
+<div class="memitem">
+<div class="memproto">
+<table class="mlabels">
+  <tr>
+  <td class="mlabels-left">
+      <table class="memname">
+        <tr>
+          <td class="memname">friend class VulkanBackend</td>
+        </tr>
+      </table>
+  </td>
+  <td class="mlabels-right">
+<span class="mlabels"><span class="mlabel friend">friend</span></span>  </td>
+  </tr>
+</table>
+</div><div class="memdoc">
+
+<p class="definition">Definition at line <a class="el" href="tensor_8hpp_source.html#l00761">761</a> of file <a class="el" href="tensor_8hpp_source.html">tensor.hpp</a>.</p>
 
 </div>
 </div>

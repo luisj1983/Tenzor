@@ -1,5 +1,5 @@
 <map id="tenzor::data::transforms::RandomHorizontalFlip" name="tenzor::data::transforms::RandomHorizontalFlip">
 <area shape="rect" id="Node000001" title="Random horizontal flip transform." alt="" coords="5,98,184,143"/>
 <area shape="rect" id="Node000002" href="$classtenzor_1_1data_1_1transforms_1_1Transform.html" title="Base class for data transforms." alt="" coords="5,5,184,50"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="97,66,97,98,92,98,92,66"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="96,64,97,99,92,97,93,68"/>
 </map>

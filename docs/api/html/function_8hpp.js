@@ -20,6 +20,7 @@ var function_8hpp =
     [ "tenzor::ReshapeBackward", "classtenzor_1_1ReshapeBackward.html", "classtenzor_1_1ReshapeBackward" ],
     [ "tenzor::PermuteBackward", "classtenzor_1_1PermuteBackward.html", "classtenzor_1_1PermuteBackward" ],
     [ "tenzor::TransposeBackward", "classtenzor_1_1TransposeBackward.html", "classtenzor_1_1TransposeBackward" ],
+    [ "tenzor::RollBackward", "classtenzor_1_1RollBackward.html", "classtenzor_1_1RollBackward" ],
     [ "tenzor::SqueezeBackward", "classtenzor_1_1SqueezeBackward.html", "classtenzor_1_1SqueezeBackward" ],
     [ "tenzor::BmmBackward", "classtenzor_1_1BmmBackward.html", "classtenzor_1_1BmmBackward" ],
     [ "tenzor::CatBackward", "classtenzor_1_1CatBackward.html", "classtenzor_1_1CatBackward" ],

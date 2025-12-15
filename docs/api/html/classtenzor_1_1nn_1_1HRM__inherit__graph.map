@@ -1,0 +1,5 @@
+<map id="tenzor::nn::HRM" name="tenzor::nn::HRM">
+<area shape="rect" id="Node000001" title="Hierarchical Reasoning Model (HRM)." alt="" coords="14,81,139,109"/>
+<area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="5,5,148,33"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="78,47,79,81,74,80,75,51"/>
+</map>

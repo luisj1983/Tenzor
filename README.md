@@ -1,20 +1,23 @@
-# Tenzor: World-Class Neural Network & Tensor Library
+# Tenzor: High-Performance Neural Network & Tensor Library
 
-[![Build Status](https://img.shields.io/badge/build-passing-brightgreen)]()
-[![License](https://img.shields.io/badge/license-MIT-blue)]()
+[![Build Status](https://img.shields.io/badge/build-passing-brightgreen)](https://github.com/leelee222/tenzor/actions)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![C++](https://img.shields.io/badge/C%2B%2B-23-blue)]()
 [![CUDA](https://img.shields.io/badge/CUDA-12.0%2B-green)]()
+[![Python](https://img.shields.io/badge/Python-3.8--3.13-blue)]()
 
-A high-performance, production-grade tensor computation and neural network library built with modern C++23.
+A high-performance, production-grade tensor computation and deep learning library built with modern C++23. Designed for researchers and engineers who need PyTorch-like flexibility with C++ performance.
 
 ## Features
 
-- 🚀 **Multi-Backend Support**: CPU (SIMD-optimized), CUDA, ROCm, OneAPI
-- 🔥 **Automatic Differentiation**: Full reverse-mode autodiff with computational graph
-- 🧵 **Thread-Safe**: Lockless algorithms and parallel execution
-- 🐍 **Python Bindings**: First-class Python support via pybind11
-- ⚡ **High Performance**: SIMD vectorization, kernel fusion, memory pooling
-- 🎯 **Easy to Use**: Intuitive PyTorch-like API
+- **Multi-Backend Support**: CPU (SIMD-optimized), CUDA, ROCm, OneAPI, Vulkan, Metal
+- **Automatic Differentiation**: Full reverse-mode autodiff with computational graph
+- **Thread-Safe**: Lockless algorithms and parallel execution
+- **Python Bindings**: First-class Python support via pybind11
+- **High Performance**: SIMD vectorization, kernel fusion, memory pooling
+- **Easy to Use**: Intuitive PyTorch-like API
+- **Pre-built Models**: ResNet, BERT, ViT, YOLO, and more
+- **ONNX Support**: Import and export models
 
 ## Quick Start
 
@@ -88,7 +91,7 @@ optimizer.step()
 
 ```bash
 # Clone repository
-git clone https://github.com/yourusername/tenzor.git
+git clone https://github.com/leelee222/tenzor.git
 cd tenzor
 
 # Create build directory
@@ -121,9 +124,13 @@ sudo cmake --install .
 
 ## Documentation
 
-- [Design Document](docs/DESIGN.md) - Comprehensive architecture and design
-- [API Reference](docs/API.md) - Complete API documentation
+- [Getting Started](docs/GETTING_STARTED.md) - Quick introduction and tutorials
+- [Installation Guide](INSTALL.md) - Detailed installation instructions
+- [Architecture](docs/ARCHITECTURE.md) - System design and internals
+- [API Reference](docs/api/html/index.html) - Complete API documentation (Doxygen)
 - [Examples](examples/) - Code examples and tutorials
+- [FAQ](docs/FAQ.md) - Frequently asked questions
+- [Changelog](CHANGELOG.md) - Version history and release notes
 - [Contributing](CONTRIBUTING.md) - Contribution guidelines
 
 ## Performance
@@ -191,17 +198,28 @@ Tenzor is designed for maximum performance:
 
 ## Roadmap
 
+### Completed
 - [x] Core tensor infrastructure
-- [x] CPU backend with SIMD
-- [x] Autograd engine
-- [x] Neural network API
-- [ ] CUDA backend
-- [ ] Python bindings
-- [ ] ROCm backend
-- [ ] OneAPI backend
-- [ ] Distributed training
-- [ ] Model compression
-- [ ] ONNX export
+- [x] CPU backend with SIMD optimization
+- [x] Autograd engine with gradient checkpointing
+- [x] Neural network API (50+ layers)
+- [x] CUDA backend with cuBLAS/cuDNN
+- [x] Python bindings via pybind11
+- [x] ROCm backend for AMD GPUs
+- [x] OneAPI backend for Intel GPUs
+- [x] Vulkan compute backend
+- [x] Metal backend for Apple Silicon
+- [x] ONNX import and export
+- [x] Pre-built models (ResNet, BERT, ViT, etc.)
+- [x] Mixed precision training (FP16/BF16)
+- [x] Model quantization (INT8)
+- [x] JIT compilation and tracing
+
+### In Progress
+- [ ] WebGPU backend for browser deployment
+- [ ] Distributed training improvements
+- [ ] Enhanced model compression (pruning, distillation)
+- [ ] Additional pre-built architectures
 
 ## License
 
@@ -217,10 +235,10 @@ If you use Tenzor in your research, please cite:
 
 ```bibtex
 @software{tenzor2025,
-  title={Tenzor: World-Class Neural Network & Tensor Library},
-  author={Your Name},
+  title={Tenzor: High-Performance Neural Network \& Tensor Library},
+  author={Lee},
   year={2025},
-  url={https://github.com/yourusername/tenzor}
+  url={https://github.com/leelee222/tenzor}
 }
 ```
 
@@ -230,5 +248,5 @@ Inspired by PyTorch, TensorFlow, and other great deep learning frameworks.
 
 ## Contact
 
-- GitHub Issues: [https://github.com/yourusername/tenzor/issues](https://github.com/yourusername/tenzor/issues)
-- Email: your.email@example.com
+- **GitHub Issues**: [Report bugs and request features](https://github.com/leelee222/tenzor/issues)
+- **Discussions**: [Ask questions and share projects](https://github.com/leelee222/tenzor/discussions)

@@ -208,7 +208,7 @@ TEST_F(ONNXImportTest, ONNXAttributeGetters) {
 }
 
 TEST_F(ONNXImportTest, ONNXNodeStructure) {
-    ONNXNode node;
+    ONNXImportNode node;
     node.op_type = "Conv";
     node.name = "conv1";
     node.inputs = {"input", "weight", "bias"};
@@ -232,8 +232,8 @@ TEST_F(ONNXImportTest, ONNXNodeStructure) {
     EXPECT_FALSE(missing_attr.has_value());
 }
 
-TEST_F(ONNXImportTest, ONNXValueInfo) {
-    ONNXValueInfo value_info;
+TEST_F(ONNXImportTest, ONNXImportValueInfo) {
+    ONNXImportValueInfo value_info;
     value_info.name = "tensor1";
     value_info.dtype = ONNXDataType::FLOAT;
     value_info.shape = {1, 3, 224, 224};
@@ -252,21 +252,21 @@ TEST_F(ONNXImportTest, ONNXGraphStructure) {
     graph.name = "test_graph";
 
     // Add input
-    ONNXValueInfo input;
+    ONNXImportValueInfo input;
     input.name = "input";
     input.dtype = ONNXDataType::FLOAT;
     input.shape = {1, 3, 224, 224};
     graph.inputs.push_back(input);
 
     // Add output
-    ONNXValueInfo output;
+    ONNXImportValueInfo output;
     output.name = "output";
     output.dtype = ONNXDataType::FLOAT;
     output.shape = {1, 1000};
     graph.outputs.push_back(output);
 
     // Add node
-    ONNXNode node;
+    ONNXImportNode node;
     node.op_type = "ReLU";
     node.name = "relu1";
     node.inputs = {"input"};

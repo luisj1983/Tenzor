@@ -13,6 +13,7 @@ var dir_2996a04abcb928fe38186b609b0d69a7 =
     [ "checkpoint.hpp", "nn_2checkpoint_8hpp.html", "nn_2checkpoint_8hpp" ],
     [ "mixed_precision.hpp", "mixed__precision_8hpp.html", "mixed__precision_8hpp" ],
     [ "module.hpp", "module_8hpp.html", "module_8hpp" ],
+    [ "offload.hpp", "offload_8hpp.html", "offload_8hpp" ],
     [ "quantization.hpp", "quantization_8hpp.html", "quantization_8hpp" ],
     [ "serialize.hpp", "serialize_8hpp.html", "serialize_8hpp" ],
     [ "training.hpp", "training_8hpp.html", "training_8hpp" ]

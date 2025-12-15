@@ -1,4 +1,4 @@
 var searchData=
 [
-  ['reductionfunc_0',['ReductionFunc',['../simd__dispatch_8hpp.html#a2760e1345fc3b23dbbadd6f920288091',1,'tenzor::backend']]]
+  ['opattributes_0',['OpAttributes',['../namespacetenzor.html#a4b3b536bbfc180a1baca3de19c0cd2cc',1,'tenzor']]]
 ];

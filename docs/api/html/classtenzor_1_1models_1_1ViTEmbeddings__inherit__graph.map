@@ -1,5 +1,5 @@
 <map id="tenzor::models::ViTEmbeddings" name="tenzor::models::ViTEmbeddings">
 <area shape="rect" id="Node000001" title="Vision Transformer Embeddings." alt="" coords="5,81,233,109"/>
 <area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="48,5,190,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="122,49,122,81,116,81,116,49"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="121,47,121,82,117,79,117,51"/>
 </map>

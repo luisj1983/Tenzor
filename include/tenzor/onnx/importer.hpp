@@ -12,18 +12,10 @@
 #include <optional>
 #include "../core/tensor.hpp"
 #include "../nn/module.hpp"
+#include "types.hpp"
 
 namespace tenzor {
 namespace onnx {
-
-enum class ONNXDataType {
-    UNDEFINED = 0, FLOAT = 1, UINT8 = 2, INT8 = 3, UINT16 = 4,
-    INT16 = 5, INT32 = 6, INT64 = 7, STRING = 8, BOOL = 9,
-    FLOAT16 = 10, DOUBLE = 11, UINT32 = 12, UINT64 = 13,
-    COMPLEX64 = 14, COMPLEX128 = 15, BFLOAT16 = 16
-};
-
-auto onnx_dtype_to_tenzor(ONNXDataType onnx_type) -> DType;
 
 struct ONNXTensorData {
     std::string name;
@@ -50,7 +42,7 @@ struct ONNXAttribute {
     auto get_floats(const std::vector<float>& default_val = {}) const -> std::vector<float>;
 };
 
-struct ONNXNode {
+struct ONNXImportNode {
     std::string op_type;
     std::string name;
     std::vector<std::string> inputs;
@@ -60,7 +52,7 @@ struct ONNXNode {
     auto get_attr(const std::string& name) const -> std::optional<ONNXAttribute>;
 };
 
-struct ONNXValueInfo {
+struct ONNXImportValueInfo {
     std::string name;
     ONNXDataType dtype;
     std::vector<int64_t> shape;
@@ -68,11 +60,11 @@ struct ONNXValueInfo {
 
 struct ONNXGraphData {
     std::string name;
-    std::vector<ONNXNode> nodes;
-    std::vector<ONNXValueInfo> inputs;
-    std::vector<ONNXValueInfo> outputs;
+    std::vector<ONNXImportNode> nodes;
+    std::vector<ONNXImportValueInfo> inputs;
+    std::vector<ONNXImportValueInfo> outputs;
     std::unordered_map<std::string, ONNXTensorData> initializers;
-    std::unordered_map<std::string, ONNXValueInfo> value_info;
+    std::unordered_map<std::string, ONNXImportValueInfo> value_info;
 };
 
 struct ONNXModelData {
@@ -114,42 +106,42 @@ private:
     auto validate_model(const ONNXModelData& model) -> void;
     auto convert_graph(const ONNXGraphData& graph) -> std::shared_ptr<nn::Module>;
     auto load_initializers(const ONNXGraphData& graph) -> void;
-    auto convert_node(const ONNXNode& node) -> std::optional<std::shared_ptr<nn::Module>>;
+    auto convert_node(const ONNXImportNode& node) -> std::optional<std::shared_ptr<nn::Module>>;
 
     // Tensor operations
-    auto convert_add(const ONNXNode& node) -> void;
-    auto convert_sub(const ONNXNode& node) -> void;
-    auto convert_mul(const ONNXNode& node) -> void;
-    auto convert_div(const ONNXNode& node) -> void;
-    auto convert_matmul(const ONNXNode& node) -> void;
-    auto convert_gemm(const ONNXNode& node) -> std::shared_ptr<nn::Module>;
+    auto convert_add(const ONNXImportNode& node) -> void;
+    auto convert_sub(const ONNXImportNode& node) -> void;
+    auto convert_mul(const ONNXImportNode& node) -> void;
+    auto convert_div(const ONNXImportNode& node) -> void;
+    auto convert_matmul(const ONNXImportNode& node) -> void;
+    auto convert_gemm(const ONNXImportNode& node) -> std::shared_ptr<nn::Module>;
 
     // Shape operations
-    auto convert_reshape(const ONNXNode& node) -> void;
-    auto convert_transpose(const ONNXNode& node) -> void;
-    auto convert_concat(const ONNXNode& node) -> void;
-    auto convert_split(const ONNXNode& node) -> void;
-    auto convert_flatten(const ONNXNode& node) -> void;
+    auto convert_reshape(const ONNXImportNode& node) -> void;
+    auto convert_transpose(const ONNXImportNode& node) -> void;
+    auto convert_concat(const ONNXImportNode& node) -> void;
+    auto convert_split(const ONNXImportNode& node) -> void;
+    auto convert_flatten(const ONNXImportNode& node) -> void;
 
     // Layer conversion
-    auto convert_conv(const ONNXNode& node) -> std::shared_ptr<nn::Module>;
-    auto convert_batch_normalization(const ONNXNode& node) -> std::shared_ptr<nn::Module>;
+    auto convert_conv(const ONNXImportNode& node) -> std::shared_ptr<nn::Module>;
+    auto convert_batch_normalization(const ONNXImportNode& node) -> std::shared_ptr<nn::Module>;
 
     // Activation functions
-    auto convert_relu(const ONNXNode& node) -> void;
-    auto convert_leaky_relu(const ONNXNode& node) -> void;
-    auto convert_sigmoid(const ONNXNode& node) -> void;
-    auto convert_tanh(const ONNXNode& node) -> void;
-    auto convert_gelu(const ONNXNode& node) -> void;
-    auto convert_softmax(const ONNXNode& node) -> void;
-    auto convert_log_softmax(const ONNXNode& node) -> void;
-    auto convert_elu(const ONNXNode& node) -> void;
-    auto convert_selu(const ONNXNode& node) -> void;
+    auto convert_relu(const ONNXImportNode& node) -> void;
+    auto convert_leaky_relu(const ONNXImportNode& node) -> void;
+    auto convert_sigmoid(const ONNXImportNode& node) -> void;
+    auto convert_tanh(const ONNXImportNode& node) -> void;
+    auto convert_gelu(const ONNXImportNode& node) -> void;
+    auto convert_softmax(const ONNXImportNode& node) -> void;
+    auto convert_log_softmax(const ONNXImportNode& node) -> void;
+    auto convert_elu(const ONNXImportNode& node) -> void;
+    auto convert_selu(const ONNXImportNode& node) -> void;
 
     // Pooling layers
-    auto convert_maxpool(const ONNXNode& node) -> std::shared_ptr<nn::Module>;
-    auto convert_avgpool(const ONNXNode& node) -> std::shared_ptr<nn::Module>;
-    auto convert_global_avgpool(const ONNXNode& node) -> std::shared_ptr<nn::Module>;
+    auto convert_maxpool(const ONNXImportNode& node) -> std::shared_ptr<nn::Module>;
+    auto convert_avgpool(const ONNXImportNode& node) -> std::shared_ptr<nn::Module>;
+    auto convert_global_avgpool(const ONNXImportNode& node) -> std::shared_ptr<nn::Module>;
 
     // Helper functions
     auto get_input(const std::string& name) -> Tensor;

@@ -31,5 +31,8 @@ var searchData=
   ['block_28',['Block',['../structtenzor_1_1backend_1_1Block.html',1,'tenzor::backend::Block'],['../structtenzor_1_1backend_1_1rocm_1_1Block.html',1,'tenzor::backend::rocm::Block']]],
   ['blockcomparator_29',['BlockComparator',['../structtenzor_1_1backend_1_1BlockComparator.html',1,'tenzor::backend::BlockComparator'],['../structtenzor_1_1backend_1_1rocm_1_1BlockComparator.html',1,'tenzor::backend::rocm::BlockComparator']]],
   ['bmmbackward_30',['BmmBackward',['../classtenzor_1_1BmmBackward.html',1,'tenzor']]],
-  ['bottleneck_31',['Bottleneck',['../classtenzor_1_1models_1_1Bottleneck.html',1,'tenzor::models']]]
+  ['bottleneck_31',['Bottleneck',['../classtenzor_1_1models_1_1Bottleneck.html',1,'tenzor::models']]],
+  ['bucketconfig_32',['BucketConfig',['../structtenzor_1_1optim_1_1BucketConfig.html',1,'tenzor::optim']]],
+  ['bucketinfo_33',['BucketInfo',['../structtenzor_1_1optim_1_1BucketInfo.html',1,'tenzor::optim']]],
+  ['bucketstats_34',['BucketStats',['../structtenzor_1_1optim_1_1ZeROStage2Optimizer_1_1BucketStats.html',1,'tenzor::optim::ZeROStage2Optimizer']]]
 ];

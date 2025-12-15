@@ -1,13 +1,13 @@
 <map id="include/tenzor/nn/layers" name="include/tenzor/nn/layers">
 <area shape="rect" id="node1" href="dir_45805aaa1ae28ac35c2473b4557a60d3.html" title="activations" alt="" coords="27,130,120,158"/>
 <area shape="rect" id="node2" href="dir_94e238e13457c10774be877e00275e8f.html" title="layers" alt="" coords="59,54,120,82"/>
-<area shape="poly" id="edge2" href="dir_000013_000000.html" alt="" coords="89,83,82,115,77,114,84,82"/>
-<area shape="rect" id="edge2-headlabel" href="dir_000013_000000.html" title="1" alt="" coords="84,105,92,122"/>
+<area shape="poly" id="edge2" href="dir_000014_000000.html" alt="" coords="88,80,82,116,77,114,85,85"/>
+<area shape="rect" id="edge2-headlabel" href="dir_000014_000000.html" title="1" alt="" coords="84,105,92,122"/>
 <area shape="rect" id="node3" href="dir_1204adbf8d2f8e90c5fef395b6535c41.html" title="autograd" alt="" coords="144,130,224,158"/>
-<area shape="poly" id="edge1" href="dir_000013_000002.html" alt="" coords="108,80,157,118,154,122,105,85"/>
-<area shape="rect" id="edge1-headlabel" href="dir_000013_000002.html" title="1" alt="" coords="154,103,162,120"/>
+<area shape="poly" id="edge1" href="dir_000014_000002.html" alt="" coords="107,80,158,120,153,121,106,85"/>
+<area shape="rect" id="edge1-headlabel" href="dir_000014_000002.html" title="1" alt="" coords="154,103,162,120"/>
 <area shape="rect" id="node4" href="dir_5f1567d5508bbd804950a140dd8a1981.html" title="core" alt="" coords="247,130,297,158"/>
-<area shape="poly" id="edge3" href="dir_000013_000006.html" alt="" coords="121,79,234,124,232,129,119,84"/>
-<area shape="rect" id="edge3-headlabel" href="dir_000013_000006.html" title="1" alt="" coords="229,109,237,126"/>
+<area shape="poly" id="edge3" href="dir_000014_000006.html" alt="" coords="121,79,235,125,231,128,120,85"/>
+<area shape="rect" id="edge3-headlabel" href="dir_000014_000006.html" title="1" alt="" coords="229,109,237,126"/>
 <area shape="rect" id="clust1" href="dir_2996a04abcb928fe38186b609b0d69a7.html" title="nn" alt="" coords="16,16,131,168"/>
 </map>

@@ -1,11 +1,11 @@
 <map id="tenzor::optim::RMSprop" name="tenzor::optim::RMSprop">
 <area shape="rect" id="Node000001" title="RMSprop (Root Mean Square Propagation) optimizer." alt="" coords="15,418,189,446"/>
 <area shape="rect" id="Node000002" href="$classtenzor_1_1optim_1_1Optimizer.html" title="Abstract base class for all optimizers." alt="" coords="12,341,192,369"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="105,384,105,418,99,418,99,384"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="104,383,104,419,100,417,100,386"/>
 <area shape="rect" id="Node000003" title=" " alt="" coords="5,224,199,268"/>
-<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="105,284,105,341,99,341,99,284"/>
+<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="103,282,105,342,99,340,101,286"/>
 <area shape="rect" id="Node000004" title=" " alt="" coords="15,106,189,151"/>
-<area shape="poly" id="edge3_Node000003_Node000004" title=" " alt="" coords="105,167,105,223,99,223,99,167"/>
+<area shape="poly" id="edge3_Node000003_Node000004" title=" " alt="" coords="103,164,105,224,99,223,101,169"/>
 <area shape="rect" id="Node000005" href="$classtenzor_1_1Variable.html" title="Gradient&#45;enabled tensor wrapper for automatic differentiation." alt="" coords="40,5,164,33"/>
-<area shape="poly" id="edge4_Node000004_Node000005" title=" " alt="" coords="105,49,105,105,99,105,99,49"/>
+<area shape="poly" id="edge4_Node000004_Node000005" title=" " alt="" coords="102,46,105,106,99,105,102,51"/>
 </map>

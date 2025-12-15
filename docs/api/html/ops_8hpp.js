@@ -14,6 +14,7 @@ var ops_8hpp =
     [ "tenzor::neg", "namespacetenzor.html#a5383a54a7e2308e24bf8ece5adc3bfc3", null ],
     [ "tenzor::permute", "namespacetenzor.html#ababeae6346a43a4d6e47bfa76236b12d", null ],
     [ "tenzor::reshape", "namespacetenzor.html#a8e744ed892dcaa04a8bf1e8734458793", null ],
+    [ "tenzor::roll", "namespacetenzor.html#a234ceb1bf41e6b5442c10957f89aefd0", null ],
     [ "tenzor::slice", "namespacetenzor.html#a26d7b812409cc78ff1f054f865e2f4d1", null ],
     [ "tenzor::ops::softmax", "ops_8hpp.html#aa13959ecfeb065be7e4487b31664c3af", null ],
     [ "tenzor::softmax", "namespacetenzor.html#aa13959ecfeb065be7e4487b31664c3af", null ],

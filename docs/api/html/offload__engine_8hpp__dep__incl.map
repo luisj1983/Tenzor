@@ -1,0 +1,5 @@
+<map id="include/tenzor/core/offload_engine.hpp" name="include/tenzor/core/offload_engine.hpp">
+<area shape="rect" id="Node000001" title="High&#45;level offload engine for ZeRO optimizer Phase 2." alt="" coords="18,5,168,50"/>
+<area shape="rect" id="Node000002" href="$zero__optimizer_8hpp.html" title="ZeRO Stage 1 Optimizer with state partitioning and CPU offload." alt="" coords="5,98,181,143"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="95,64,96,99,90,97,91,68"/>
+</map>

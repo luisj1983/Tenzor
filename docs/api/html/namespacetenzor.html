@@ -140,6 +140,8 @@ Classes</h2></td></tr>
 <tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Permute gradient function.  <a href="classtenzor_1_1PermuteBackward.html#details">More...</a><br /></td></tr>
 <tr class="memitem:TransposeBackward" id="r_TransposeBackward"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1TransposeBackward.html">TransposeBackward</a></td></tr>
 <tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Transpose gradient function.  <a href="classtenzor_1_1TransposeBackward.html#details">More...</a><br /></td></tr>
+<tr class="memitem:RollBackward" id="r_RollBackward"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1RollBackward.html">RollBackward</a></td></tr>
+<tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Roll gradient function.  <a href="classtenzor_1_1RollBackward.html#details">More...</a><br /></td></tr>
 <tr class="memitem:SqueezeBackward" id="r_SqueezeBackward"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1SqueezeBackward.html">SqueezeBackward</a></td></tr>
 <tr class="memdesc:"><td class="mdescLeft">&#160;</td><td class="mdescRight">Squeeze gradient function.  <a href="classtenzor_1_1SqueezeBackward.html#details">More...</a><br /></td></tr>
 <tr class="memitem:BmmBackward" id="r_BmmBackward"><td class="memItemLeft" align="right" valign="top">class &#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="classtenzor_1_1BmmBackward.html">BmmBackward</a></td></tr>
@@ -379,6 +381,8 @@ Functions</h2></td></tr>
 <tr class="memdesc:a3a5b09a7576a7a8ff9b2479da7d816cb"><td class="mdescLeft">&#160;</td><td class="mdescRight">Transpose two dimensions with gradient tracking.  <br /></td></tr>
 <tr class="memitem:a92f4581d310f865019e8d09a7f7a5eca" id="r_a92f4581d310f865019e8d09a7f7a5eca"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a92f4581d310f865019e8d09a7f7a5eca">squeeze</a> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input, int64_t dim) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
 <tr class="memdesc:a92f4581d310f865019e8d09a7f7a5eca"><td class="mdescLeft">&#160;</td><td class="mdescRight">Remove dimensions of size 1 with gradient tracking.  <br /></td></tr>
+<tr class="memitem:a234ceb1bf41e6b5442c10957f89aefd0" id="r_a234ceb1bf41e6b5442c10957f89aefd0"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a234ceb1bf41e6b5442c10957f89aefd0">roll</a> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input, int64_t shifts, int64_t dim) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
+<tr class="memdesc:a234ceb1bf41e6b5442c10957f89aefd0"><td class="mdescLeft">&#160;</td><td class="mdescRight">Roll tensor elements along dimension with gradient tracking.  <br /></td></tr>
 <tr class="memitem:ac9d5495c85e36243af272d02cb42d66a" id="r_ac9d5495c85e36243af272d02cb42d66a"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#ac9d5495c85e36243af272d02cb42d66a">cat</a> (const std::vector&lt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &gt; &amp;inputs, int64_t dim) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
 <tr class="memdesc:ac9d5495c85e36243af272d02cb42d66a"><td class="mdescLeft">&#160;</td><td class="mdescRight">Concatenate variables along dimension with gradient tracking.  <br /></td></tr>
 <tr class="memitem:a26d7b812409cc78ff1f054f865e2f4d1" id="r_a26d7b812409cc78ff1f054f865e2f4d1"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a26d7b812409cc78ff1f054f865e2f4d1">slice</a> (const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;input, int64_t dim, int64_t start, int64_t end, int64_t step=1) -&gt; <a class="el" href="classtenzor_1_1Variable.html">Variable</a></td></tr>
@@ -446,6 +450,8 @@ Functions</h2></td></tr>
 <tr class="memdesc:ga53b9520133d939bf68493eb8bb4ffd53"><td class="mdescLeft">&#160;</td><td class="mdescRight">Create tensor filled with ones.  <br /></td></tr>
 <tr class="memitem:ga9c65fe2701c31f23197f9d3b69780640" id="r_ga9c65fe2701c31f23197f9d3b69780640"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="group__tensor__creation.html#ga9c65fe2701c31f23197f9d3b69780640">full</a> (std::vector&lt; int64_t &gt; shape, float value, <a class="el" href="#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a> dtype=<a class="el" href="#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="el" href="structtenzor_1_1Device.html">Device</a> device=<a class="el" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
 <tr class="memdesc:ga9c65fe2701c31f23197f9d3b69780640"><td class="mdescLeft">&#160;</td><td class="mdescRight">Create tensor filled with specific value.  <br /></td></tr>
+<tr class="memitem:ga532a3083161c8330239aa1ea85239c60" id="r_ga532a3083161c8330239aa1ea85239c60"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="group__tensor__creation.html#ga532a3083161c8330239aa1ea85239c60">full</a> (std::vector&lt; int64_t &gt; shape, double value, <a class="el" href="#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a> dtype, <a class="el" href="structtenzor_1_1Device.html">Device</a> device) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
+<tr class="memdesc:ga532a3083161c8330239aa1ea85239c60"><td class="mdescLeft">&#160;</td><td class="mdescRight">Create tensor filled with specific value (double precision).  <br /></td></tr>
 <tr class="memitem:gaa275eaf45fd54ad8e2cb448eb25632cc" id="r_gaa275eaf45fd54ad8e2cb448eb25632cc"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="group__tensor__creation.html#gaa275eaf45fd54ad8e2cb448eb25632cc">empty</a> (std::vector&lt; int64_t &gt; shape, <a class="el" href="#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a> dtype=<a class="el" href="#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="el" href="structtenzor_1_1Device.html">Device</a> device=<a class="el" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
 <tr class="memdesc:gaa275eaf45fd54ad8e2cb448eb25632cc"><td class="mdescLeft">&#160;</td><td class="mdescRight">Create uninitialized tensor.  <br /></td></tr>
 <tr class="memitem:gaec66c6ef5f1a23ddd4664cf83c5ba4a6" id="r_gaec66c6ef5f1a23ddd4664cf83c5ba4a6"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="group__tensor__creation.html#gaec66c6ef5f1a23ddd4664cf83c5ba4a6">rand</a> (std::vector&lt; int64_t &gt; shape, <a class="el" href="#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a> dtype=<a class="el" href="#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="el" href="structtenzor_1_1Device.html">Device</a> device=<a class="el" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
@@ -471,6 +477,8 @@ Functions</h2></td></tr>
 <tr class="memdesc:ga5f82d208679b8558089aa16229bc171b"><td class="mdescLeft">&#160;</td><td class="mdescRight">Create uniform random tensor with same shape/dtype/device as input.  <br /></td></tr>
 <tr class="memitem:gaab1ee393d9b3fd4a77935ebf4f6ce6fe" id="r_gaab1ee393d9b3fd4a77935ebf4f6ce6fe"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="group__tensor__creation.html#gaab1ee393d9b3fd4a77935ebf4f6ce6fe">randn_like</a> (const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &amp;tensor) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
 <tr class="memdesc:gaab1ee393d9b3fd4a77935ebf4f6ce6fe"><td class="mdescLeft">&#160;</td><td class="mdescRight">Create normal random tensor with same shape/dtype/device as input.  <br /></td></tr>
+<tr class="memitem:gac6051d6e4cabb9e4534ff4c5d5a4b485" id="r_gac6051d6e4cabb9e4534ff4c5d5a4b485"><td class="memItemLeft" align="right" valign="top">void&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="group__tensor__creation.html#gac6051d6e4cabb9e4534ff4c5d5a4b485">manual_seed</a> (unsigned int seed)</td></tr>
+<tr class="memdesc:gac6051d6e4cabb9e4534ff4c5d5a4b485"><td class="mdescLeft">&#160;</td><td class="mdescRight">Set the seed for random number generation.  <br /></td></tr>
 <tr class="memitem:gab91d851e57cb0bb469bc6e8e444a2e98" id="r_gab91d851e57cb0bb469bc6e8e444a2e98"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="group__tensor__indexing.html#gab91d851e57cb0bb469bc6e8e444a2e98">slice</a> (const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &amp;input, int64_t dim, int64_t start, int64_t end, int64_t step=1) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
 <tr class="memdesc:gab91d851e57cb0bb469bc6e8e444a2e98"><td class="mdescLeft">&#160;</td><td class="mdescRight">Slice tensor along dimension.  <br /></td></tr>
 <tr class="memitem:ga7213bd0a2cd18c806e7f6ec0a39b0048" id="r_ga7213bd0a2cd18c806e7f6ec0a39b0048"><td class="memItemLeft" align="right" valign="top">
@@ -1157,6 +1165,8 @@ template&lt;typename T&gt; </div>
 <div class="ttc" id="anamespacetenzor_html_a213a7afe4ab23924a33c2d826d6ef066"><div class="ttname"><a href="#a213a7afe4ab23924a33c2d826d6ef066">tenzor::backend_registry</a></div><div class="ttdeci">auto backend_registry() -&gt; BackendLoader &amp;</div><div class="ttdoc">Get global backend registry singleton.</div></div>
 </div><!-- fragment --><dl class="section note"><dt>Note</dt><dd>This function is thread-safe (uses static local initialization). </dd></dl>
 
+<p class="reference">Referenced by <a class="el" href="creation_8hpp_source.html#l00212">from_data()</a>.</p>
+
 </div>
 </div>
 <a id="a6bc71614dfd27bfaf3db9a1d3ceeb58d" name="a6bc71614dfd27bfaf3db9a1d3ceeb58d"></a>
@@ -1215,7 +1225,7 @@ template&lt;typename T&gt; </div>
 <div class="fragment"><div class="line"><a class="code hl_class" href="classtenzor_1_1Variable.html">Variable</a> a(<a class="code hl_class" href="classtenzor_1_1Tensor.html">Tensor</a>({32, 10, 20}, <a class="code hl_enumvalue" href="#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()), <span class="keyword">true</span>);</div>
 <div class="line">Variable b(Tensor({32, 20, 30}, <a class="code hl_enumvalue" href="#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()), <span class="keyword">true</span>);</div>
 <div class="line"><a class="code hl_class" href="classtenzor_1_1Variable.html">Variable</a> c = <a class="code hl_function" href="#a62771fc1c1d406d718f6568cd9fb860f">bmm</a>(a, b);  <span class="comment">// Shape: {32, 10, 30}</span></div>
-<div class="ttc" id="aclasstenzor_1_1Tensor_html"><div class="ttname"><a href="classtenzor_1_1Tensor.html">tenzor::Tensor</a></div><div class="ttdoc">Multi-dimensional array with automatic differentiation support.</div><div class="ttdef"><b>Definition</b> <a href="tensor_8hpp_source.html#l00075">tensor.hpp:75</a></div></div>
+<div class="ttc" id="aclasstenzor_1_1Tensor_html"><div class="ttname"><a href="classtenzor_1_1Tensor.html">tenzor::Tensor</a></div><div class="ttdoc">Multi-dimensional array with automatic differentiation support.</div><div class="ttdef"><b>Definition</b> <a href="tensor_8hpp_source.html#l00078">tensor.hpp:78</a></div></div>
 <div class="ttc" id="aclasstenzor_1_1Variable_html"><div class="ttname"><a href="classtenzor_1_1Variable.html">tenzor::Variable</a></div><div class="ttdoc">Gradient-enabled tensor wrapper for automatic differentiation.</div><div class="ttdef"><b>Definition</b> <a href="variable_8hpp_source.html#l00108">variable.hpp:108</a></div></div>
 <div class="ttc" id="anamespacetenzor_html_a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204"><div class="ttname"><a href="#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">tenzor::DType::Float32</a></div><div class="ttdeci">@ Float32</div><div class="ttdoc">32-bit floating point (float)</div><div class="ttdef"><b>Definition</b> <a href="dtype_8hpp_source.html#l00029">dtype.hpp:29</a></div></div>
 <div class="ttc" id="anamespacetenzor_html_a62771fc1c1d406d718f6568cd9fb860f"><div class="ttname"><a href="#a62771fc1c1d406d718f6568cd9fb860f">tenzor::bmm</a></div><div class="ttdeci">auto bmm(const Variable &amp;a, const Variable &amp;b) -&gt; Variable</div><div class="ttdoc">Batch matrix multiplication with gradient tracking.</div></div>
@@ -2041,7 +2051,7 @@ template&lt;typename T&gt; </div>
 <div class="ttc" id="anamespacetenzor_html_ade6a75a53fb370fbce043bd1d526fa3b"><div class="ttname"><a href="#ade6a75a53fb370fbce043bd1d526fa3b">tenzor::mean</a></div><div class="ttdeci">auto mean(const Variable &amp;input, std::optional&lt; int64_t &gt; dim=std::nullopt, bool keepdim=false) -&gt; Variable</div><div class="ttdoc">Mean reduction with gradient tracking.</div></div>
 </div><!-- fragment --><dl class="section see"><dt>See also</dt><dd><a class="el" href="classtenzor_1_1MeanBackward.html" title="Mean reduction gradient function.">MeanBackward</a> for gradient implementation </dd></dl>
 
-<p class="reference">Referenced by <a class="el" href="classtenzor_1_1onnx_1_1ONNXExporter.html#a3b6e3de26df10ecfbac0c786671b8fa7">tenzor::onnx::ONNXExporter::export_batchnorm1d()</a>, <a class="el" href="classtenzor_1_1onnx_1_1ONNXExporter.html#ac4b22215a90186acc483f732d76f6571">tenzor::onnx::ONNXExporter::export_batchnorm2d()</a>, <a class="el" href="transforms_8hpp_source.html#l00040">tenzor::data::transforms::Normalize::Normalize()</a>, and <a class="el" href="transforms_8hpp_source.html#l00047">tenzor::data::transforms::Normalize::operator()()</a>.</p>
+<p class="reference">Referenced by <a class="el" href="classtenzor_1_1onnx_1_1ONNXExporter.html#a3b6e3de26df10ecfbac0c786671b8fa7">tenzor::onnx::ONNXExporter::export_batchnorm1d()</a>, <a class="el" href="classtenzor_1_1onnx_1_1ONNXExporter.html#ac4b22215a90186acc483f732d76f6571">tenzor::onnx::ONNXExporter::export_batchnorm2d()</a>, <a class="el" href="transforms_8hpp_source.html#l00040">tenzor::data::transforms::Normalize::Normalize()</a>, <a class="el" href="transforms_8hpp_source.html#l00047">tenzor::data::transforms::Normalize::operator()()</a>, and <a class="el" href="hrm_8hpp.html#a556c2ba5a996e6d10a7c9eb401781333">tenzor::nn::truncated_normal_init()</a>.</p>
 
 </div>
 </div>
@@ -2397,6 +2407,48 @@ template&lt;typename T, typename F, typename R&gt; </div>
 <div class="line"><a class="code hl_class" href="classtenzor_1_1Variable.html">Variable</a> z = <a class="code hl_function" href="#a8e744ed892dcaa04a8bf1e8734458793">reshape</a>(x, {2, 6}); <span class="comment">// Shape: {2, 6}</span></div>
 <div class="ttc" id="anamespacetenzor_html_a8e744ed892dcaa04a8bf1e8734458793"><div class="ttname"><a href="#a8e744ed892dcaa04a8bf1e8734458793">tenzor::reshape</a></div><div class="ttdeci">auto reshape(const Variable &amp;input, const std::vector&lt; int64_t &gt; &amp;shape) -&gt; Variable</div><div class="ttdoc">Reshape tensor with gradient tracking.</div></div>
 </div><!-- fragment --><dl class="section see"><dt>See also</dt><dd><a class="el" href="classtenzor_1_1ReshapeBackward.html" title="Reshape gradient function.">ReshapeBackward</a> for gradient implementation </dd></dl>
+
+</div>
+</div>
+<a id="a234ceb1bf41e6b5442c10957f89aefd0" name="a234ceb1bf41e6b5442c10957f89aefd0"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#a234ceb1bf41e6b5442c10957f89aefd0">&#9670;&#160;</a></span>roll()</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname">auto tenzor::roll </td>
+          <td>(</td>
+          <td class="paramtype">const <a class="el" href="classtenzor_1_1Variable.html">Variable</a> &amp;</td>          <td class="paramname"><span class="paramname"><em>input</em></span>, </td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype">int64_t</td>          <td class="paramname"><span class="paramname"><em>shifts</em></span>, </td>
+        </tr>
+        <tr>
+          <td class="paramkey"></td>
+          <td></td>
+          <td class="paramtype">int64_t</td>          <td class="paramname"><span class="paramname"><em>dim</em></span>&#160;)-&gt;<a class="el" href="classtenzor_1_1Variable.html">Variable</a></td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>Roll tensor elements along dimension with gradient tracking. </p>
+<p>Rolls elements of input variable along the specified dimension. Gradients are rolled back in opposite direction during backpropagation.</p>
+<dl class="params"><dt>Parameters</dt><dd>
+  <table class="params">
+    <tr><td class="paramname">input</td><td>Input variable </td></tr>
+    <tr><td class="paramname">shifts</td><td>Number of positions to roll (positive = forward, negative = backward) </td></tr>
+    <tr><td class="paramname">dim</td><td>Dimension along which to roll </td></tr>
+  </table>
+  </dd>
+</dl>
+<dl class="section return"><dt>Returns</dt><dd><a class="el" href="classtenzor_1_1Variable.html" title="Gradient-enabled tensor wrapper for automatic differentiation.">Variable</a> containing rolled tensor with gradient function</dd></dl>
+<div class="fragment"><div class="line"><a class="code hl_class" href="classtenzor_1_1Variable.html">Variable</a> x(<a class="code hl_class" href="classtenzor_1_1Tensor.html">Tensor</a>({3, 4}, <a class="code hl_enumvalue" href="#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()), <span class="keyword">true</span>);</div>
+<div class="line">Variable y = <a class="code hl_function" href="#a234ceb1bf41e6b5442c10957f89aefd0">roll</a>(x, 2, 1);  <span class="comment">// Roll along dim 1 by 2 positions</span></div>
+<div class="ttc" id="anamespacetenzor_html_a234ceb1bf41e6b5442c10957f89aefd0"><div class="ttname"><a href="#a234ceb1bf41e6b5442c10957f89aefd0">tenzor::roll</a></div><div class="ttdeci">auto roll(const Variable &amp;input, int64_t shifts, int64_t dim) -&gt; Variable</div><div class="ttdoc">Roll tensor elements along dimension with gradient tracking.</div></div>
+</div><!-- fragment --><dl class="section see"><dt>See also</dt><dd><a class="el" href="classtenzor_1_1RollBackward.html" title="Roll gradient function.">RollBackward</a> for gradient implementation </dd></dl>
 
 </div>
 </div>

@@ -4,7 +4,7 @@ var classtenzor_1_1nn_1_1DistributedDataParallel =
     [ "~DistributedDataParallel", "classtenzor_1_1nn_1_1DistributedDataParallel.html#abaf2492da5e6f416efd30df66b282e31", null ],
     [ "device_ids", "classtenzor_1_1nn_1_1DistributedDataParallel.html#a0dec8fce4b92e3f737c8ffac415b39b6", null ],
     [ "eval", "classtenzor_1_1nn_1_1DistributedDataParallel.html#a16d3bf4e0e8de208a5046f82188e6099", null ],
-    [ "forward", "classtenzor_1_1nn_1_1DistributedDataParallel.html#abc0b684d7da3a54133431ad07e813782", null ],
+    [ "forward_impl", "classtenzor_1_1nn_1_1DistributedDataParallel.html#aafa1d6ce17fbdf05f8c3c75938988449", null ],
     [ "join", "classtenzor_1_1nn_1_1DistributedDataParallel.html#a73fdd7a07538aa296e007264432f9989", null ],
     [ "module", "classtenzor_1_1nn_1_1DistributedDataParallel.html#a6181ccf5015895604f8051bc1b2c34c7", null ],
     [ "named_parameters", "classtenzor_1_1nn_1_1DistributedDataParallel.html#a290b220e6b03b1c0809b5915857334a1", null ],

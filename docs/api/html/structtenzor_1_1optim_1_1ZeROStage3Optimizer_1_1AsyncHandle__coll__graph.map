@@ -1,0 +1,9 @@
+<map id="tenzor::optim::ZeROStage3Optimizer::AsyncHandle" name="tenzor::optim::ZeROStage3Optimizer::AsyncHandle">
+<area shape="rect" id="Node000001" title="Async handle for non&#45;blocking operations (definition)." alt="" coords="131,106,328,151"/>
+<area shape="rect" id="Node000002" href="$classtenzor_1_1Tensor.html" title="Multi&#45;dimensional array with automatic differentiation support." alt="" coords="5,5,118,33"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="96,39,198,104,193,107,94,44"/>
+<area shape="rect" id="Node000003" title=" " alt="" coords="141,5,318,33"/>
+<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="231,47,232,107,227,104,228,51"/>
+<area shape="rect" id="Node000004" title=" " alt="" coords="341,5,432,33"/>
+<area shape="poly" id="edge3_Node000001_Node000004" title=" " alt="" coords="372,44,356,66,336,84,294,108,292,103,333,80,352,63,368,47"/>
+</map>

@@ -1,7 +1,7 @@
 <map id="include/tenzor/backend/simd_dispatch.hpp" name="include/tenzor/backend/simd_dispatch.hpp">
 <area shape="rect" id="Node000001" title="Runtime SIMD dispatch system for optimal kernel selection." alt="" coords="5,5,177,50"/>
 <area shape="rect" id="Node000002" title=" " alt="" coords="6,98,75,126"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="80,52,59,86,54,83,75,49"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="80,49,59,86,54,83,76,52"/>
 <area shape="rect" id="Node000003" title=" " alt="" coords="98,98,185,126"/>
-<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="107,49,128,83,123,86,102,52"/>
+<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="106,48,128,85,123,85,103,53"/>
 </map>

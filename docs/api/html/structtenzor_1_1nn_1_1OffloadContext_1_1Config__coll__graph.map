@@ -1,0 +1,5 @@
+<map id="tenzor::nn::OffloadContext::Config" name="tenzor::nn::OffloadContext::Config">
+<area shape="rect" id="Node000001" title="Configuration for offload context." alt="" coords="5,106,198,151"/>
+<area shape="rect" id="Node000002" href="$structtenzor_1_1Device.html" title="Device specification for tensor placement." alt="" coords="44,5,159,33"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="103,47,104,106,99,105,100,51"/>
+</map>

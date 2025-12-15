@@ -1,0 +1,7 @@
+<map id="tenzor::nn::OffloadContext" name="tenzor::nn::OffloadContext">
+<area shape="rect" id="Node000001" title="Automatic parameter offloading context for entire model." alt="" coords="85,195,277,223"/>
+<area shape="rect" id="Node000002" title=" " alt="" coords="5,5,168,33"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="82,46,81,76,82,108,88,141,103,170,116,183,134,195,128,195,113,187,98,173,83,142,77,109,76,76,81,51"/>
+<area shape="rect" id="Node000003" title=" " alt="" coords="192,5,360,33"/>
+<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="279,47,274,109,265,142,249,173,235,187,218,197,216,192,232,183,244,170,260,140,269,108,275,51"/>
+</map>

@@ -1,9 +1,9 @@
 <map id="tenzor::TensorBoardException" name="tenzor::TensorBoardException">
 <area shape="rect" id="Node000001" title="Exception for TensorBoard&#45;related errors." alt="" coords="5,232,220,260"/>
 <area shape="rect" id="Node000002" href="$classtenzor_1_1TenzorException.html" title="Base exception class for all Tenzor errors." alt="" coords="24,157,201,184"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="115,200,115,232,110,232,110,200"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="114,198,115,233,110,231,111,202"/>
 <area shape="rect" id="Node000003" title=" " alt="" coords="43,81,182,109"/>
-<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="115,124,115,156,110,156,110,124"/>
+<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="114,122,115,157,110,155,111,127"/>
 <area shape="rect" id="Node000004" title=" " alt="" coords="56,5,169,33"/>
-<area shape="poly" id="edge3_Node000003_Node000004" title=" " alt="" coords="115,49,115,81,110,81,110,49"/>
+<area shape="poly" id="edge3_Node000003_Node000004" title=" " alt="" coords="113,46,115,81,110,80,112,51"/>
 </map>

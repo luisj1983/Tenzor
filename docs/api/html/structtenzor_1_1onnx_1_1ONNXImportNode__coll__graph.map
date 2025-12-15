@@ -1,0 +1,16 @@
+<map id="tenzor::onnx::ONNXImportNode" name="tenzor::onnx::ONNXImportNode">
+<area shape="rect" id="Node000001" title=" " alt="" coords="1135,135,1362,163"/>
+<area shape="rect" id="Node000002" title=" " alt="" coords="193,138,279,166"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="271,127,302,115,408,87,499,67,580,55,656,50,733,51,816,57,1017,82,1122,105,1210,135,1205,134,1120,110,1016,88,815,63,733,57,657,56,581,61,500,73,409,92,304,120,273,132"/>
+<area shape="rect" id="Node000004" title=" " alt="" coords="627,121,812,148"/>
+<area shape="poly" id="edge4_Node000004_Node000002" title=" " alt="" coords="294,147,628,135,625,140,295,152"/>
+<area shape="rect" id="Node000005" title=" " alt="" coords="836,197,1016,259"/>
+<area shape="poly" id="edge6_Node000005_Node000002" title=" " alt="" coords="295,159,397,174,513,182,605,184,696,186,812,198,838,205,833,205,812,204,696,191,604,189,513,188,396,179,295,165"/>
+<area shape="rect" id="Node000006" href="$structtenzor_1_1onnx_1_1ONNXAttribute.html" title=" " alt="" coords="396,230,603,258"/>
+<area shape="poly" id="edge8_Node000006_Node000002" title=" " alt="" coords="255,176,277,203,305,224,349,239,399,249,393,249,348,244,302,228,273,207,253,181"/>
+<area shape="rect" id="Node000003" title=" " alt="" coords="5,129,144,174"/>
+<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="159,149,195,151,190,153,160,154"/>
+<area shape="poly" id="edge3_Node000001_Node000004" title=" " alt="" coords="827,135,1138,146,1132,146,828,140"/>
+<area shape="poly" id="edge5_Node000001_Node000005" title=" " alt="" coords="1031,208,1111,190,1204,164,1210,163,1112,195,1032,213"/>
+<area shape="poly" id="edge7_Node000005_Node000006" title=" " alt="" coords="618,237,833,231,838,231,618,242"/>
+</map>

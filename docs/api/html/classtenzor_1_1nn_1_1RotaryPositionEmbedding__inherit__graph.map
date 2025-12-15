@@ -1,0 +1,5 @@
+<map id="tenzor::nn::RotaryPositionEmbedding" name="tenzor::nn::RotaryPositionEmbedding">
+<area shape="rect" id="Node000001" title="Rotary Position Embedding (RoPE)." alt="" coords="5,81,195,126"/>
+<area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="29,5,171,33"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="102,47,102,81,98,79,98,51"/>
+</map>

@@ -1,7 +1,7 @@
 <map id="tenzor::data::TensorDataset" name="tenzor::data::TensorDataset">
 <area shape="rect" id="Node000001" title="Simple tensor dataset holding data in memory." alt="" coords="5,157,206,184"/>
 <area shape="rect" id="Node000002" href="$classtenzor_1_1data_1_1MapDataset.html" title="Map&#45;style dataset that supports random access." alt="" coords="12,81,199,109"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="108,124,108,156,103,156,103,124"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="107,123,108,157,103,155,104,126"/>
 <area shape="rect" id="Node000003" href="$classtenzor_1_1data_1_1Dataset.html" title="Abstract base class for datasets." alt="" coords="26,5,185,33"/>
-<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="108,49,108,81,103,81,103,49"/>
+<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="107,46,108,81,103,80,104,51"/>
 </map>

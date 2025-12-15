@@ -1,5 +1,5 @@
 <map id="tenzor::jit::FuseConvBatchNormPass" name="tenzor::jit::FuseConvBatchNormPass">
 <area shape="rect" id="Node000001" title="Operator fusion pass &#45; Conv2d + BatchNorm2d." alt="" coords="5,81,197,126"/>
 <area shape="rect" id="Node000002" href="$classtenzor_1_1jit_1_1Pass.html" title="Base class for optimization passes." alt="" coords="41,5,161,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="104,49,104,80,98,80,98,49"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="103,47,103,81,99,79,99,51"/>
 </map>

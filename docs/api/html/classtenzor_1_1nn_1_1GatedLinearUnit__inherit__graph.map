@@ -1,0 +1,5 @@
+<map id="tenzor::nn::GatedLinearUnit" name="tenzor::nn::GatedLinearUnit">
+<area shape="rect" id="Node000001" title="Gated Linear Unit (GLU) activation." alt="" coords="5,81,206,109"/>
+<area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="34,5,177,33"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="107,47,108,82,103,79,104,51"/>
+</map>

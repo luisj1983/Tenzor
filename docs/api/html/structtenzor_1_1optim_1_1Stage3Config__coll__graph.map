@@ -1,0 +1,11 @@
+<map id="tenzor::optim::Stage3Config" name="tenzor::optim::Stage3Config">
+<area shape="rect" id="Node000001" title="Configuration for ZeRO Stage 3 Optimizer." alt="" coords="10,429,212,456"/>
+<area shape="rect" id="Node000002" href="$structtenzor_1_1optim_1_1ZeROStage2Config.html" title="Configuration for ZeRO Stage 2 Optimizer." alt="" coords="12,335,210,379"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="113,393,113,429,109,427,109,397"/>
+<area shape="rect" id="Node000003" href="$structtenzor_1_1optim_1_1ZeROStage1Config.html" title="Configuration for ZeRO Stage 1 Optimizer." alt="" coords="12,241,210,285"/>
+<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="112,299,114,335,108,334,110,303"/>
+<area shape="rect" id="Node000004" title=" " alt="" coords="5,123,217,168"/>
+<area shape="poly" id="edge3_Node000003_Node000004" title=" " alt="" coords="112,181,114,241,108,240,110,186"/>
+<area shape="rect" id="Node000005" href="$classtenzor_1_1distributed_1_1ProcessGroup.html" title="Process group for distributed training." alt="" coords="41,5,181,50"/>
+<area shape="poly" id="edge4_Node000004_Node000005" title=" " alt="" coords="111,63,114,123,108,122,111,69"/>
+</map>

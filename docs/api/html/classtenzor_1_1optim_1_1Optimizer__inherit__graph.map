@@ -1,15 +1,23 @@
 <map id="tenzor::optim::Optimizer" name="tenzor::optim::Optimizer">
-<area shape="rect" id="Node000001" title="Abstract base class for all optimizers." alt="" coords="5,136,186,164"/>
-<area shape="rect" id="Node000002" href="$classtenzor_1_1optim_1_1Adadelta.html" title="Adadelta optimizer (parameter&#45;free adaptive learning)." alt="" coords="234,5,408,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="122,123,171,83,232,43,262,31,264,36,235,48,174,87,125,127"/>
-<area shape="rect" id="Node000003" href="$classtenzor_1_1optim_1_1Adagrad.html" title="Adagrad (Adaptive Gradient) optimizer." alt="" coords="236,57,406,85"/>
-<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="146,128,233,95,270,83,272,88,235,100,148,133"/>
-<area shape="rect" id="Node000004" href="$classtenzor_1_1optim_1_1Adam.html" title="Adam (Adaptive Moment Estimation) optimizer." alt="" coords="244,109,398,137"/>
-<area shape="poly" id="edge3_Node000001_Node000004" title=" " alt="" coords="201,135,243,130,243,135,202,140"/>
-<area shape="rect" id="Node000005" href="$classtenzor_1_1optim_1_1AdamW.html" title="AdamW optimizer (Adam with decoupled weight decay)." alt="" coords="237,161,404,189"/>
-<area shape="poly" id="edge4_Node000001_Node000005" title=" " alt="" coords="201,159,237,163,236,168,201,164"/>
-<area shape="rect" id="Node000006" href="$classtenzor_1_1optim_1_1RMSprop.html" title="RMSprop (Root Mean Square Propagation) optimizer." alt="" coords="234,213,408,241"/>
-<area shape="poly" id="edge5_Node000001_Node000006" title=" " alt="" coords="149,167,235,198,272,210,270,215,233,203,147,172"/>
-<area shape="rect" id="Node000007" href="$classtenzor_1_1optim_1_1SGD.html" title="Stochastic Gradient Descent (SGD) optimizer." alt="" coords="249,265,393,293"/>
-<area shape="poly" id="edge6_Node000001_Node000007" title=" " alt="" coords="125,172,174,212,235,250,264,262,262,267,232,255,171,216,122,176"/>
+<area shape="rect" id="Node000001" title="Abstract base class for all optimizers." alt="" coords="5,188,186,216"/>
+<area shape="rect" id="Node000002" href="$classtenzor_1_1optim_1_1Adadelta.html" title="Adadelta optimizer (parameter&#45;free adaptive learning)." alt="" coords="245,5,420,33"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="111,173,160,108,194,73,232,44,261,32,257,35,235,48,197,77,164,111,115,176"/>
+<area shape="rect" id="Node000003" href="$classtenzor_1_1optim_1_1Adagrad.html" title="Adagrad (Adaptive Gradient) optimizer." alt="" coords="247,57,418,85"/>
+<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="121,176,170,134,232,95,267,84,263,87,235,100,174,139,125,179"/>
+<area shape="rect" id="Node000004" href="$classtenzor_1_1optim_1_1Adam.html" title="Adam (Adaptive Moment Estimation) optimizer." alt="" coords="255,109,410,137"/>
+<area shape="poly" id="edge3_Node000001_Node000004" title=" " alt="" coords="145,180,233,147,277,136,272,139,235,152,147,184"/>
+<area shape="rect" id="Node000005" href="$classtenzor_1_1optim_1_1AdamAtan2.html" title="Adam&#45;atan2 optimizer." alt="" coords="236,161,428,189"/>
+<area shape="poly" id="edge4_Node000001_Node000005" title=" " alt="" coords="200,188,238,185,234,187,202,192"/>
+<area shape="rect" id="Node000006" href="$classtenzor_1_1optim_1_1AdamW.html" title="AdamW optimizer (Adam with decoupled weight decay)." alt="" coords="249,213,416,241"/>
+<area shape="poly" id="edge5_Node000001_Node000006" title=" " alt="" coords="200,211,251,217,246,219,202,216"/>
+<area shape="rect" id="Node000007" href="$classtenzor_1_1optim_1_1RMSprop.html" title="RMSprop (Root Mean Square Propagation) optimizer." alt="" coords="245,265,420,293"/>
+<area shape="poly" id="edge6_Node000001_Node000007" title=" " alt="" coords="147,219,234,250,278,264,273,265,233,255,147,224"/>
+<area shape="rect" id="Node000008" href="$classtenzor_1_1optim_1_1SGD.html" title="Stochastic Gradient Descent (SGD) optimizer." alt="" coords="260,317,404,345"/>
+<area shape="poly" id="edge7_Node000001_Node000008" title=" " alt="" coords="123,224,174,264,235,302,267,316,262,317,232,307,171,269,123,229"/>
+<area shape="rect" id="Node000009" href="$classtenzor_1_1optim_1_1ZeROStage1Optimizer.html" title="ZeRO Stage 1: Optimizer State Partitioning." alt="" coords="234,369,431,414"/>
+<area shape="poly" id="edge8_Node000001_Node000009" title=" " alt="" coords="115,226,165,290,198,325,235,354,257,369,252,368,232,359,195,329,161,294,113,231"/>
+<area shape="rect" id="Node000010" href="$classtenzor_1_1optim_1_1ZeROStage2Optimizer.html" title="ZeRO Stage 2: Gradient + Optimizer State Partitioning." alt="" coords="479,369,676,414"/>
+<area shape="poly" id="edge9_Node000009_Node000010" title=" " alt="" coords="446,389,481,391,476,391,446,394"/>
+<area shape="rect" id="Node000011" href="$classtenzor_1_1optim_1_1ZeROStage3Optimizer.html" title="ZeRO Stage 3: Full Model Partitioning." alt="" coords="724,369,922,414"/>
+<area shape="poly" id="edge10_Node000010_Node000011" title=" " alt="" coords="692,389,726,391,721,391,692,394"/>
 </map>

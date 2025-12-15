@@ -11,7 +11,7 @@ var searchData=
   ['deeplabv3plusdecoder_8',['DeepLabV3PlusDecoder',['../classtenzor_1_1models_1_1DeepLabV3PlusDecoder.html',1,'tenzor::models']]],
   ['deeplabv3plusencoder_9',['DeepLabV3PlusEncoder',['../classtenzor_1_1models_1_1DeepLabV3PlusEncoder.html',1,'tenzor::models']]],
   ['defaultqconfigs_10',['DefaultQConfigs',['../classtenzor_1_1nn_1_1quantization_1_1DefaultQConfigs.html',1,'tenzor::nn::quantization']]],
-  ['dequantizationstub_11',['DequantizationStub',['../classtenzor_1_1nn_1_1quantization_1_1DequantizationStub.html',1,'tenzor::nn::quantization']]],
+  ['dequantstub_11',['DeQuantStub',['../classtenzor_1_1nn_1_1quantization_1_1DeQuantStub.html',1,'tenzor::nn::quantization']]],
   ['device_12',['Device',['../structtenzor_1_1Device.html',1,'tenzor']]],
   ['deviceexception_13',['DeviceException',['../classtenzor_1_1DeviceException.html',1,'tenzor']]],
   ['deviceproperties_14',['DeviceProperties',['../structtenzor_1_1backend_1_1rocm_1_1DeviceProperties.html',1,'tenzor::backend::rocm']]],

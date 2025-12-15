@@ -1,4 +1,4 @@
 var classtenzor_1_1nn_1_1SELU =
 [
-    [ "forward", "classtenzor_1_1nn_1_1SELU.html#ab489d44eb550ca23dc9cd1e8c0562697", null ]
+    [ "forward_impl", "classtenzor_1_1nn_1_1SELU.html#a624790999f3bae5004c1dbf2e51392b4", null ]
 ];

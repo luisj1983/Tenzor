@@ -1,5 +1,5 @@
 <map id="tenzor::nn::quantization::QuantizedConv2dBnReLU" name="tenzor::nn::quantization::QuantizedConv2dBnReLU">
 <area shape="rect" id="Node000001" title="Fused quantized Conv2d + BatchNorm2d + ReLU layer." alt="" coords="5,81,201,126"/>
 <area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="32,5,174,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="106,49,106,80,100,80,100,49"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="105,47,105,81,101,79,101,51"/>
 </map>

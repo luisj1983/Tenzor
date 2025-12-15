@@ -16,5 +16,6 @@ var structtenzor_1_1models_1_1T5Config =
     [ "num_layers", "structtenzor_1_1models_1_1T5Config.html#a56005f489811369b02a3877400c685c4", null ],
     [ "relative_attention_max_distance", "structtenzor_1_1models_1_1T5Config.html#a3c28842aab3279bf29661232ae0c678b", null ],
     [ "relative_attention_num_buckets", "structtenzor_1_1models_1_1T5Config.html#a73fdaaaad3e4891ef8bc0a9eee3d96b8", null ],
+    [ "use_checkpoint", "structtenzor_1_1models_1_1T5Config.html#ae39910cb344a56e6faf1997844a07d6c", null ],
     [ "vocab_size", "structtenzor_1_1models_1_1T5Config.html#ae81433daf1d247337663ce3a40915122", null ]
 ];

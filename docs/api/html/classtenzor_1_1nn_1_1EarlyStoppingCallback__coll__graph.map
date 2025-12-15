@@ -1,5 +1,5 @@
 <map id="tenzor::nn::EarlyStoppingCallback" name="tenzor::nn::EarlyStoppingCallback">
 <area shape="rect" id="Node000001" title="Callback for early stopping based on validation loss." alt="" coords="5,81,190,126"/>
 <area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Callback.html" title="Base callback interface for training loop hooks." alt="" coords="22,5,173,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="100,49,100,80,95,80,95,49"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="99,47,100,81,95,79,96,51"/>
 </map>

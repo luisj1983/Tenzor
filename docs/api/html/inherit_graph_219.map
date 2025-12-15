@@ -1,0 +1,17 @@
+<map id="Graphical Class Hierarchy" name="Graphical Class Hierarchy">
+<area shape="rect" id="Node000000" href="$classtenzor_1_1optim_1_1LRScheduler.html" title="Base class for learning rate schedulers." alt="" coords="5,177,202,205"/>
+<area shape="rect" id="Node000001" href="$classtenzor_1_1optim_1_1CosineAnnealingLR.html" title="Cosine annealing learning rate scheduler." alt="" coords="250,5,491,33"/>
+<area shape="poly" id="edge390_Node000000_Node000001" title=" " alt="" coords="121,163,174,101,209,69,248,42,277,32,273,35,251,47,212,73,177,105,126,166"/>
+<area shape="rect" id="Node000002" href="$classtenzor_1_1optim_1_1CosineAnnealingWarmRestarts.html" title="Cosine annealing with warm restarts." alt="" coords="258,57,483,102"/>
+<area shape="poly" id="edge391_Node000000_Node000002" title=" " alt="" coords="140,167,191,139,249,111,284,101,280,104,251,116,193,143,143,171"/>
+<area shape="rect" id="Node000003" href="$classtenzor_1_1optim_1_1CyclicLR.html" title="Cyclic learning rate scheduler." alt="" coords="285,125,456,153"/>
+<area shape="poly" id="edge392_Node000000_Node000003" title=" " alt="" coords="192,171,297,152,293,155,194,176"/>
+<area shape="rect" id="Node000004" href="$classtenzor_1_1optim_1_1ExponentialLR.html" title="Exponential learning rate scheduler." alt="" coords="266,177,475,205"/>
+<area shape="poly" id="edge393_Node000000_Node000004" title=" " alt="" coords="217,189,268,190,263,192,218,194"/>
+<area shape="rect" id="Node000005" href="$classtenzor_1_1optim_1_1OneCycleLR.html" title="One cycle learning rate scheduler." alt="" coords="273,229,468,257"/>
+<area shape="poly" id="edge394_Node000000_Node000005" title=" " alt="" coords="193,206,298,227,293,230,193,211"/>
+<area shape="rect" id="Node000006" href="$classtenzor_1_1optim_1_1ReduceLROnPlateau.html" title="Reduce learning rate on plateau scheduler." alt="" coords="271,281,470,326"/>
+<area shape="poly" id="edge395_Node000000_Node000006" title=" " alt="" coords="141,211,193,239,251,266,285,280,280,280,249,271,191,244,141,216"/>
+<area shape="rect" id="Node000007" href="$classtenzor_1_1optim_1_1StepLR.html" title="Step learning rate scheduler." alt="" coords="290,349,451,377"/>
+<area shape="poly" id="edge396_Node000000_Node000007" title=" " alt="" coords="124,215,177,277,212,309,251,335,292,353,286,353,248,340,209,313,174,281,123,220"/>
+</map>

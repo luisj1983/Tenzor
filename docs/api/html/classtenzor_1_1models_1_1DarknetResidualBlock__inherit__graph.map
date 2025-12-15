@@ -1,5 +1,5 @@
 <map id="tenzor::models::DarknetResidualBlock" name="tenzor::models::DarknetResidualBlock">
 <area shape="rect" id="Node000001" title="Residual block for Darknet architectures." alt="" coords="5,81,240,126"/>
 <area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="51,5,194,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="125,49,125,80,120,80,120,49"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="124,47,125,81,120,79,121,51"/>
 </map>

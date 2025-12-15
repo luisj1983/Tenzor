@@ -23,8 +23,8 @@ var namespacetenzor_1_1nn_1_1quantization =
     [ "QuantizedBatchNorm2d", "classtenzor_1_1nn_1_1quantization_1_1QuantizedBatchNorm2d.html", "classtenzor_1_1nn_1_1quantization_1_1QuantizedBatchNorm2d" ],
     [ "QuantizedConv2dReLU", "classtenzor_1_1nn_1_1quantization_1_1QuantizedConv2dReLU.html", "classtenzor_1_1nn_1_1quantization_1_1QuantizedConv2dReLU" ],
     [ "QuantizedConv2dBnReLU", "classtenzor_1_1nn_1_1quantization_1_1QuantizedConv2dBnReLU.html", "classtenzor_1_1nn_1_1quantization_1_1QuantizedConv2dBnReLU" ],
-    [ "QuantizationStub", "classtenzor_1_1nn_1_1quantization_1_1QuantizationStub.html", "classtenzor_1_1nn_1_1quantization_1_1QuantizationStub" ],
-    [ "DequantizationStub", "classtenzor_1_1nn_1_1quantization_1_1DequantizationStub.html", "classtenzor_1_1nn_1_1quantization_1_1DequantizationStub" ],
+    [ "QuantStub", "classtenzor_1_1nn_1_1quantization_1_1QuantStub.html", "classtenzor_1_1nn_1_1quantization_1_1QuantStub" ],
+    [ "DeQuantStub", "classtenzor_1_1nn_1_1quantization_1_1DeQuantStub.html", "classtenzor_1_1nn_1_1quantization_1_1DeQuantStub" ],
     [ "QuantDType", "namespacetenzor_1_1nn_1_1quantization.html#a54bd139db7b10aa2979a2e98052abe7e", [
       [ "INT8", "namespacetenzor_1_1nn_1_1quantization.html#a54bd139db7b10aa2979a2e98052abe7eaee9d73311ff0658494edfff14c3ec1e3", null ],
       [ "UINT8", "namespacetenzor_1_1nn_1_1quantization.html#a54bd139db7b10aa2979a2e98052abe7eaecfc091ed2a607335524c8389cfa41b5", null ]

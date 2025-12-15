@@ -1,5 +1,5 @@
 <map id="tenzor::nn::ModelCheckpointCallback" name="tenzor::nn::ModelCheckpointCallback">
 <area shape="rect" id="Node000001" title="Callback for saving model checkpoints during training." alt="" coords="5,81,213,126"/>
 <area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Callback.html" title="Base callback interface for training loop hooks." alt="" coords="34,5,184,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="112,49,112,80,106,80,106,49"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="111,47,111,81,107,79,107,51"/>
 </map>

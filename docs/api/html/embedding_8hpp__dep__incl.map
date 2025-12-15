@@ -1,29 +1,31 @@
 <map id="include/tenzor/nn/layers/embedding.hpp" name="include/tenzor/nn/layers/embedding.hpp">
-<area shape="rect" id="Node000001" title="Embedding layers for discrete input representations." alt="" coords="359,5,537,50"/>
+<area shape="rect" id="Node000001" title="Embedding layers for discrete input representations." alt="" coords="385,5,562,50"/>
 <area shape="rect" id="Node000002" href="$albert_8hpp.html" title="ALBERT (A Lite BERT) model implementation." alt="" coords="56,98,221,143"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="360,57,213,100,212,95,358,52"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="377,56,220,100,217,95,380,52"/>
 <area shape="rect" id="Node000003" href="$bert_8hpp.html" title="BERT (Bidirectional Encoder Representations from Transformers) model family." alt="" coords="245,98,411,143"/>
-<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="409,62,358,100,355,95,406,57"/>
+<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="424,60,364,100,361,96,427,57"/>
 <area shape="rect" id="Node000005" href="$tenzor_8hpp.html" title="Main header &#45; includes all public Tenzor APIs." alt="" coords="235,283,421,311"/>
-<area shape="poly" id="edge15_Node000001_Node000005" title=" " alt="" coords="455,65,456,103,454,148,444,194,425,237,412,253,397,266,364,285,361,280,394,262,408,249,420,234,439,192,448,147,451,103,450,66"/>
+<area shape="poly" id="edge16_Node000001_Node000005" title=" " alt="" coords="474,63,471,104,463,149,448,195,425,237,395,266,362,285,359,281,392,261,421,234,443,192,458,147,466,103,471,68"/>
 <area shape="rect" id="Node000011" href="$gpt_8hpp.html" title="GPT (Generative Pre&#45;trained Transformer) models for language modeling." alt="" coords="485,191,651,235"/>
-<area shape="poly" id="edge12_Node000001_Node000011" title=" " alt="" coords="473,62,556,189,552,192,468,64"/>
+<area shape="poly" id="edge12_Node000001_Node000011" title=" " alt="" coords="488,62,526,141,556,191,551,190,522,144,487,67"/>
 <area shape="rect" id="Node000012" href="$t5_8hpp.html" title="T5 (Text&#45;to&#45;Text Transfer Transformer) model implementation." alt="" coords="536,98,701,143"/>
-<area shape="poly" id="edge14_Node000001_Node000012" title=" " alt="" coords="504,55,579,95,577,100,501,60"/>
+<area shape="poly" id="edge14_Node000001_Node000012" title=" " alt="" coords="521,56,587,97,582,98,521,61"/>
+<area shape="rect" id="Node000013" href="$hrm_8hpp.html" title="Hierarchical Reasoning Model (HRM) implementation." alt="" coords="726,98,903,143"/>
+<area shape="poly" id="edge15_Node000001_Node000013" title=" " alt="" coords="569,52,735,97,730,98,570,57"/>
 <area shape="rect" id="Node000004" href="$electra_8hpp.html" title="ELECTRA (Efficiently Learning an Encoder that Classifies Token Replacements Accurately)." alt="" coords="5,191,171,235"/>
-<area shape="poly" id="edge3_Node000003_Node000004" title=" " alt="" coords="257,151,146,193,144,188,255,146"/>
-<area shape="poly" id="edge11_Node000003_Node000005" title=" " alt="" coords="271,154,251,171,236,192,229,213,236,234,247,249,261,262,292,280,290,285,257,266,243,253,231,237,224,213,231,189,247,167,267,150"/>
+<area shape="poly" id="edge3_Node000003_Node000004" title=" " alt="" coords="255,151,147,192,144,188,258,146"/>
+<area shape="poly" id="edge11_Node000003_Node000005" title=" " alt="" coords="267,154,251,171,236,192,229,213,236,234,247,249,261,262,294,282,289,283,257,266,243,253,231,237,224,213,231,189,247,167,271,150"/>
 <area shape="rect" id="Node000010" href="$roberta_8hpp.html" title="RoBERTa (Robustly Optimized BERT) model family." alt="" coords="245,191,411,235"/>
-<area shape="poly" id="edge9_Node000003_Node000010" title=" " alt="" coords="331,158,331,190,325,190,325,158"/>
-<area shape="poly" id="edge4_Node000004_Node000005" title=" " alt="" coords="167,238,290,280,289,285,165,243"/>
+<area shape="poly" id="edge9_Node000003_Node000010" title=" " alt="" coords="329,156,331,191,325,190,327,161"/>
+<area shape="poly" id="edge4_Node000004_Node000005" title=" " alt="" coords="166,238,292,281,287,284,166,243"/>
 <area shape="rect" id="Node000006" href="$dataset_8hpp_source.html" title=" " alt="" coords="170,359,316,404"/>
-<area shape="poly" id="edge5_Node000005_Node000006" title=" " alt="" coords="305,324,267,360,263,356,301,320"/>
+<area shape="poly" id="edge5_Node000005_Node000006" title=" " alt="" coords="305,320,267,360,264,356,301,324"/>
 <area shape="rect" id="Node000009" href="$transforms_8hpp_source.html" title=" " alt="" coords="340,359,486,404"/>
-<area shape="poly" id="edge8_Node000005_Node000009" title=" " alt="" coords="355,320,393,356,389,360,351,324"/>
+<area shape="poly" id="edge8_Node000005_Node000009" title=" " alt="" coords="353,319,393,358,388,358,352,325"/>
 <area shape="rect" id="Node000007" href="$dataloader_8hpp_source.html" title=" " alt="" coords="170,452,316,496"/>
-<area shape="poly" id="edge6_Node000006_Node000007" title=" " alt="" coords="245,419,245,451,240,451,240,419"/>
+<area shape="poly" id="edge6_Node000006_Node000007" title=" " alt="" coords="244,417,245,453,240,450,241,421"/>
 <area shape="rect" id="Node000008" href="$quantize__api_8hpp.html" title="High&#45;level quantization API for model conversion." alt="" coords="144,544,342,589"/>
-<area shape="poly" id="edge7_Node000007_Node000008" title=" " alt="" coords="245,512,245,544,240,544,240,512"/>
-<area shape="poly" id="edge10_Node000010_Node000005" title=" " alt="" coords="331,251,331,283,325,283,325,251"/>
-<area shape="poly" id="edge13_Node000011_Node000005" title=" " alt="" coords="491,243,367,285,366,280,489,238"/>
+<area shape="poly" id="edge7_Node000007_Node000008" title=" " alt="" coords="245,510,245,546,240,543,241,514"/>
+<area shape="poly" id="edge10_Node000010_Node000005" title=" " alt="" coords="329,249,330,284,326,282,327,254"/>
+<area shape="poly" id="edge13_Node000011_Node000005" title=" " alt="" coords="488,242,368,285,365,280,492,239"/>
 </map>

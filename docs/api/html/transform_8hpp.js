@@ -14,7 +14,7 @@ var transform_8hpp =
     [ "tenzor::repeat", "group__tensor__transform.html#ga4263647f9075dd8c29d30e50602a9b57", null ],
     [ "tenzor::ops::reshape", "transform_8hpp.html#a8e744ed892dcaa04a8bf1e8734458793", null ],
     [ "tenzor::reshape", "group__tensor__transform.html#gada1b02734260e1a25d879751633ad857", null ],
-    [ "tenzor::ops::roll", "transform_8hpp.html#a0659d0452a043d009c886f34ef2617f7", null ],
+    [ "tenzor::ops::roll", "transform_8hpp.html#a234ceb1bf41e6b5442c10957f89aefd0", null ],
     [ "tenzor::roll", "group__tensor__transform.html#ga0659d0452a043d009c886f34ef2617f7", null ],
     [ "tenzor::split", "group__tensor__transform.html#ga88c1c72106c9fb8afea7df0915e0be76", null ],
     [ "tenzor::ops::squeeze", "transform_8hpp.html#a92f4581d310f865019e8d09a7f7a5eca", null ],

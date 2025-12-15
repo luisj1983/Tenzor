@@ -205,23 +205,27 @@ $(function(){initNavTree('gloo__backend_8hpp_source.html','',''); });
 <div class="line"><a id="l00165" name="l00165"></a><span class="lineno">  165</span></div>
 <div class="line"><a id="l00169" name="l00169"></a><span class="lineno">  169</span>    <span class="keyword">auto</span> connect_to_rank(<span class="keywordtype">int</span> peer_rank) -&gt; std::shared_ptr&lt;TCPConnection&gt;;</div>
 <div class="line"><a id="l00170" name="l00170"></a><span class="lineno">  170</span></div>
-<div class="line"><a id="l00174" name="l00174"></a><span class="lineno">  174</span>    <span class="keyword">auto</span> send_tensor(<span class="keyword">const</span> Tensor&amp; tensor, <span class="keywordtype">int</span> peer_rank) -&gt; void;</div>
+<div class="line"><a id="l00174" name="l00174"></a><span class="lineno">  174</span>    <span class="keyword">auto</span> write_port_to_store(<span class="keywordtype">int</span> rank, <span class="keywordtype">int</span> port) -&gt; void;</div>
 <div class="line"><a id="l00175" name="l00175"></a><span class="lineno">  175</span></div>
-<div class="line"><a id="l00179" name="l00179"></a><span class="lineno">  179</span>    <span class="keyword">auto</span> recv_tensor(Tensor&amp; tensor, <span class="keywordtype">int</span> peer_rank) -&gt; void;</div>
+<div class="line"><a id="l00179" name="l00179"></a><span class="lineno">  179</span>    <span class="keyword">auto</span> read_port_from_store(<span class="keywordtype">int</span> rank) -&gt; int;</div>
 <div class="line"><a id="l00180" name="l00180"></a><span class="lineno">  180</span></div>
-<div class="line"><a id="l00184" name="l00184"></a><span class="lineno">  184</span>    <span class="keyword">auto</span> apply_reduce_op(Tensor&amp; result, <span class="keyword">const</span> Tensor&amp; operand, ReduceOp op) -&gt; void;</div>
+<div class="line"><a id="l00184" name="l00184"></a><span class="lineno">  184</span>    <span class="keyword">auto</span> send_tensor(<span class="keyword">const</span> Tensor&amp; tensor, <span class="keywordtype">int</span> peer_rank) -&gt; void;</div>
 <div class="line"><a id="l00185" name="l00185"></a><span class="lineno">  185</span></div>
-<div class="line"><a id="l00191" name="l00191"></a><span class="lineno">  191</span>    <span class="keyword">auto</span> ring_all_reduce(Tensor&amp; tensor, ReduceOp op) -&gt; void;</div>
-<div class="line"><a id="l00192" name="l00192"></a><span class="lineno">  192</span></div>
-<div class="line"><a id="l00196" name="l00196"></a><span class="lineno">  196</span>    <span class="keyword">auto</span> get_cpu_buffer(<span class="keyword">const</span> Tensor&amp; tensor) -&gt; Tensor;</div>
-<div class="line"><a id="l00197" name="l00197"></a><span class="lineno">  197</span></div>
-<div class="line"><a id="l00201" name="l00201"></a><span class="lineno">  201</span>    <span class="keyword">auto</span> validate_cpu_accessible(<span class="keyword">const</span> Tensor&amp; tensor) -&gt; void;</div>
-<div class="line"><a id="l00202" name="l00202"></a><span class="lineno">  202</span>};</div>
+<div class="line"><a id="l00189" name="l00189"></a><span class="lineno">  189</span>    <span class="keyword">auto</span> recv_tensor(Tensor&amp; tensor, <span class="keywordtype">int</span> peer_rank) -&gt; void;</div>
+<div class="line"><a id="l00190" name="l00190"></a><span class="lineno">  190</span></div>
+<div class="line"><a id="l00194" name="l00194"></a><span class="lineno">  194</span>    <span class="keyword">auto</span> apply_reduce_op(Tensor&amp; result, <span class="keyword">const</span> Tensor&amp; operand, ReduceOp op) -&gt; void;</div>
+<div class="line"><a id="l00195" name="l00195"></a><span class="lineno">  195</span></div>
+<div class="line"><a id="l00201" name="l00201"></a><span class="lineno">  201</span>    <span class="keyword">auto</span> ring_all_reduce(Tensor&amp; tensor, ReduceOp op) -&gt; void;</div>
+<div class="line"><a id="l00202" name="l00202"></a><span class="lineno">  202</span></div>
+<div class="line"><a id="l00206" name="l00206"></a><span class="lineno">  206</span>    <span class="keyword">auto</span> get_cpu_buffer(<span class="keyword">const</span> Tensor&amp; tensor) -&gt; Tensor;</div>
+<div class="line"><a id="l00207" name="l00207"></a><span class="lineno">  207</span></div>
+<div class="line"><a id="l00211" name="l00211"></a><span class="lineno">  211</span>    <span class="keyword">auto</span> validate_cpu_accessible(<span class="keyword">const</span> Tensor&amp; tensor) -&gt; void;</div>
+<div class="line"><a id="l00212" name="l00212"></a><span class="lineno">  212</span>};</div>
 </div>
-<div class="line"><a id="l00203" name="l00203"></a><span class="lineno">  203</span> </div>
-<div class="line"><a id="l00204" name="l00204"></a><span class="lineno">  204</span>} <span class="comment">// namespace distributed</span></div>
-<div class="line"><a id="l00205" name="l00205"></a><span class="lineno">  205</span>} <span class="comment">// namespace tenzor</span></div>
-<div class="ttc" id="aclasstenzor_1_1Tensor_html"><div class="ttname"><a href="classtenzor_1_1Tensor.html">tenzor::Tensor</a></div><div class="ttdoc">Multi-dimensional array with automatic differentiation support.</div><div class="ttdef"><b>Definition</b> <a href="tensor_8hpp_source.html#l00075">tensor.hpp:75</a></div></div>
+<div class="line"><a id="l00213" name="l00213"></a><span class="lineno">  213</span> </div>
+<div class="line"><a id="l00214" name="l00214"></a><span class="lineno">  214</span>} <span class="comment">// namespace distributed</span></div>
+<div class="line"><a id="l00215" name="l00215"></a><span class="lineno">  215</span>} <span class="comment">// namespace tenzor</span></div>
+<div class="ttc" id="aclasstenzor_1_1Tensor_html"><div class="ttname"><a href="classtenzor_1_1Tensor.html">tenzor::Tensor</a></div><div class="ttdoc">Multi-dimensional array with automatic differentiation support.</div><div class="ttdef"><b>Definition</b> <a href="tensor_8hpp_source.html#l00078">tensor.hpp:78</a></div></div>
 <div class="ttc" id="aclasstenzor_1_1distributed_1_1CommunicationBackend_html"><div class="ttname"><a href="classtenzor_1_1distributed_1_1CommunicationBackend.html">tenzor::distributed::CommunicationBackend</a></div><div class="ttdoc">Abstract communication backend interface.</div><div class="ttdef"><b>Definition</b> <a href="distributed_8hpp_source.html#l00062">distributed.hpp:62</a></div></div>
 <div class="ttc" id="aclasstenzor_1_1distributed_1_1GlooBackend_html_a0e70c4aef6e1bb48d2f2502007fbfc80"><div class="ttname"><a href="classtenzor_1_1distributed_1_1GlooBackend.html#a0e70c4aef6e1bb48d2f2502007fbfc80">tenzor::distributed::GlooBackend::supports_device</a></div><div class="ttdeci">auto supports_device(Device::Type device_type) const -&gt; bool override</div><div class="ttdoc">Check if backend supports device type.</div></div>
 <div class="ttc" id="aclasstenzor_1_1distributed_1_1GlooBackend_html_a14bb6f0d86930f31c6dde54f5efb72f1"><div class="ttname"><a href="classtenzor_1_1distributed_1_1GlooBackend.html#a14bb6f0d86930f31c6dde54f5efb72f1">tenzor::distributed::GlooBackend::GlooBackend</a></div><div class="ttdeci">GlooBackend()</div><div class="ttdoc">Construct Gloo backend.</div></div>

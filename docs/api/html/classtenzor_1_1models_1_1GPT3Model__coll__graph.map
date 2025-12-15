@@ -1,48 +1,56 @@
 <map id="tenzor::models::GPT3Model" name="tenzor::models::GPT3Model">
 <area shape="rect" id="Node000001" title="GPT&#45;3 model (architecture similar to GPT&#45;2, scaled up)." alt="" coords="2645,343,2845,371"/>
 <area shape="rect" id="Node000002" href="$classtenzor_1_1models_1_1GPT2Model.html" title="GPT&#45;2 base model (returns hidden states)." alt="" coords="2395,343,2596,371"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="2611,354,2645,354,2645,360,2611,360"/>
-<area shape="rect" id="Node000003" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="1000,292,1142,320"/>
-<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="1158,305,1671,315,2018,327,2371,344,2395,345,2395,351,2371,349,2018,332,1671,320,1158,310"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="2611,354,2647,357,2642,357,2611,360"/>
+<area shape="rect" id="Node000003" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="1000,306,1142,334"/>
+<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="1157,318,2282,341,2371,344,2398,348,2392,348,2371,349,2282,346,1157,324"/>
 <area shape="rect" id="Node000010" title=" " alt="" coords="1245,181,1419,226"/>
-<area shape="poly" id="edge11_Node000010_Node000003" title=" " alt="" coords="1109,282,1165,255,1250,224,1252,229,1167,259,1111,287"/>
-<area shape="rect" id="Node000013" href="$classtenzor_1_1models_1_1GPTEmbeddings.html" title="GPT embeddings layer." alt="" coords="1216,374,1448,402"/>
-<area shape="poly" id="edge16_Node000013_Node000003" title=" " alt="" coords="1109,326,1167,353,1232,371,1231,376,1165,358,1106,331"/>
-<area shape="rect" id="Node000016" href="$classtenzor_1_1models_1_1GPTDecoderLayer.html" title="GPT decoder layer (transformer block)." alt="" coords="1229,427,1435,471"/>
-<area shape="poly" id="edge20_Node000016_Node000003" title=" " alt="" coords="1101,329,1153,370,1217,411,1247,424,1245,428,1215,415,1150,375,1098,333"/>
-<area shape="rect" id="Node000018" href="$classtenzor_1_1nn_1_1LayerNorm.html" title="Layer Normalization." alt="" coords="1249,515,1415,543"/>
-<area shape="poly" id="edge23_Node000018_Node000003" title=" " alt="" coords="1090,332,1141,405,1177,446,1218,482,1247,499,1279,512,1277,517,1245,504,1214,486,1173,450,1137,409,1086,335"/>
-<area shape="rect" id="Node000020" href="$classtenzor_1_1nn_1_1Dropout.html" title="Standard dropout layer." alt="" coords="1259,130,1405,158"/>
-<area shape="poly" id="edge26_Node000020_Node000003" title=" " alt="" coords="1090,279,1142,221,1177,192,1215,167,1258,151,1260,156,1217,171,1180,196,1146,225,1094,282"/>
-<area shape="rect" id="Node000004" title=" " alt="" coords="513,194,750,256"/>
-<area shape="poly" id="edge3_Node000003_Node000004" title=" " alt="" coords="766,247,1000,291,999,296,765,252"/>
+<area shape="poly" id="edge11_Node000010_Node000003" title=" " alt="" coords="1101,294,1165,255,1242,227,1247,226,1167,259,1103,299"/>
+<area shape="rect" id="Node000017" href="$classtenzor_1_1models_1_1GPTEmbeddings.html" title="GPT embeddings layer." alt="" coords="1216,374,1448,402"/>
+<area shape="poly" id="edge20_Node000017_Node000003" title=" " alt="" coords="1120,337,1167,353,1244,373,1239,373,1165,358,1119,342"/>
+<area shape="rect" id="Node000020" href="$classtenzor_1_1models_1_1GPTDecoderLayer.html" title="GPT decoder layer (transformer block)." alt="" coords="1229,428,1435,473"/>
+<area shape="poly" id="edge24_Node000020_Node000003" title=" " alt="" coords="1104,340,1156,376,1217,411,1254,428,1249,427,1215,415,1153,381,1102,346"/>
+<area shape="rect" id="Node000022" href="$classtenzor_1_1nn_1_1LayerNorm.html" title="Layer Normalization." alt="" coords="1249,499,1415,527"/>
+<area shape="poly" id="edge27_Node000022_Node000003" title=" " alt="" coords="1089,344,1141,415,1177,452,1217,483,1251,500,1246,499,1215,487,1173,456,1137,418,1087,349"/>
+<area shape="rect" id="Node000024" href="$classtenzor_1_1nn_1_1Dropout.html" title="Standard dropout layer." alt="" coords="1259,130,1405,158"/>
+<area shape="poly" id="edge30_Node000024_Node000003" title=" " alt="" coords="1088,291,1138,227,1174,194,1215,167,1256,154,1261,152,1217,171,1177,198,1142,231,1091,295"/>
+<area shape="rect" id="Node000004" title=" " alt="" coords="513,278,750,340"/>
+<area shape="poly" id="edge3_Node000003_Node000004" title=" " alt="" coords="765,310,1002,317,997,319,766,315"/>
 <area shape="rect" id="Node000005" title=" " alt="" coords="262,79,348,107"/>
-<area shape="poly" id="edge4_Node000004_Node000005" title=" " alt="" coords="356,111,554,191,552,196,354,116"/>
+<area shape="poly" id="edge4_Node000004_Node000005" title=" " alt="" coords="330,115,409,188,460,228,514,264,538,277,532,278,512,269,457,233,406,192,330,120"/>
 <area shape="rect" id="Node000009" title=" " alt="" coords="1588,192,1759,271"/>
-<area shape="poly" id="edge9_Node000009_Node000005" title=" " alt="" coords="364,90,630,90,1334,90,1371,92,1403,97,1455,116,1567,179,1589,190,1587,195,1564,183,1453,121,1402,102,1371,97,1333,96,630,96,364,96"/>
-<area shape="rect" id="Node000011" href="$structtenzor_1_1models_1_1GPT2Config.html" title="Configuration for GPT&#45;2 model." alt="" coords="774,20,976,48"/>
-<area shape="poly" id="edge13_Node000011_Node000005" title=" " alt="" coords="363,80,416,72,606,51,774,38,774,43,606,57,416,77,364,85"/>
+<area shape="poly" id="edge9_Node000009_Node000005" title=" " alt="" coords="363,90,630,90,1334,90,1367,92,1393,96,1449,116,1532,151,1607,192,1602,192,1530,156,1447,121,1391,102,1366,97,1333,96,630,96,364,96"/>
+<area shape="rect" id="Node000015" href="$structtenzor_1_1models_1_1GPT2Config.html" title="Configuration for GPT&#45;2 model." alt="" coords="774,19,976,47"/>
+<area shape="poly" id="edge17_Node000015_Node000005" title=" " alt="" coords="362,80,416,72,606,51,776,39,771,41,606,56,416,77,365,85"/>
 <area shape="rect" id="Node000006" title=" " alt="" coords="5,71,144,115"/>
-<area shape="poly" id="edge5_Node000005_Node000006" title=" " alt="" coords="159,90,261,90,261,96,159,96"/>
-<area shape="rect" id="Node000007" title=" " alt="" coords="218,203,392,247"/>
-<area shape="poly" id="edge6_Node000004_Node000007" title=" " alt="" coords="408,222,512,222,512,228,408,228"/>
-<area shape="rect" id="Node000008" href="$classtenzor_1_1Variable.html" title="Gradient&#45;enabled tensor wrapper for automatic differentiation." alt="" coords="13,211,136,239"/>
-<area shape="poly" id="edge7_Node000007_Node000008" title=" " alt="" coords="151,222,217,222,217,228,151,228"/>
-<area shape="poly" id="edge8_Node000003_Node000009" title=" " alt="" coords="1573,249,1449,266,1143,301,1142,296,1448,261,1572,244"/>
-<area shape="poly" id="edge10_Node000009_Node000010" title=" " alt="" coords="1435,209,1588,222,1588,227,1434,215"/>
-<area shape="poly" id="edge12_Node000002_Node000011" title=" " alt="" coords="991,29,1178,28,2161,28,2194,31,2226,39,2257,51,2286,68,2338,111,2384,161,2422,215,2453,266,2491,341,2486,344,2449,268,2418,217,2380,164,2335,114,2283,72,2254,56,2225,44,2193,36,2160,33,1178,33,991,35"/>
-<area shape="rect" id="Node000012" title=" " alt="" coords="1806,365,2012,410"/>
-<area shape="poly" id="edge14_Node000002_Node000012" title=" " alt="" coords="2028,379,2282,366,2395,360,2395,365,2282,371,2028,384"/>
-<area shape="poly" id="edge15_Node000012_Node000013" title=" " alt="" coords="1464,385,1805,385,1805,390,1464,390"/>
-<area shape="rect" id="Node000014" title=" " alt="" coords="2036,436,2282,497"/>
-<area shape="poly" id="edge17_Node000002_Node000014" title=" " alt="" coords="2297,449,2370,429,2429,400,2474,369,2477,373,2431,404,2372,434,2299,454"/>
-<area shape="rect" id="Node000015" title=" " alt="" coords="1565,439,1782,483"/>
-<area shape="poly" id="edge18_Node000014_Node000015" title=" " alt="" coords="1797,460,2036,462,2036,468,1797,465"/>
-<area shape="poly" id="edge19_Node000015_Node000016" title=" " alt="" coords="1451,450,1565,455,1565,460,1451,456"/>
-<area shape="rect" id="Node000017" title=" " alt="" coords="1822,515,1996,559"/>
-<area shape="poly" id="edge21_Node000002_Node000017" title=" " alt="" coords="2012,552,2074,557,2143,557,2214,549,2281,531,2315,516,2347,497,2405,451,2451,405,2481,370,2485,373,2455,409,2409,455,2350,501,2318,521,2283,537,2214,555,2143,562,2074,562,2011,557"/>
-<area shape="poly" id="edge22_Node000017_Node000018" title=" " alt="" coords="1431,528,1821,533,1821,538,1431,533"/>
-<area shape="rect" id="Node000019" title=" " alt="" coords="2072,181,2246,226"/>
-<area shape="poly" id="edge24_Node000002_Node000019" title=" " alt="" coords="2225,230,2464,340,2462,345,2223,235"/>
-<area shape="poly" id="edge25_Node000019_Node000020" title=" " alt="" coords="1421,147,2072,195,2072,200,1421,153"/>
+<area shape="poly" id="edge5_Node000005_Node000006" title=" " alt="" coords="158,91,263,91,259,95,160,95"/>
+<area shape="rect" id="Node000007" title=" " alt="" coords="218,287,392,331"/>
+<area shape="poly" id="edge6_Node000004_Node000007" title=" " alt="" coords="407,306,515,308,510,310,408,312"/>
+<area shape="rect" id="Node000008" href="$classtenzor_1_1Variable.html" title="Gradient&#45;enabled tensor wrapper for automatic differentiation." alt="" coords="13,295,136,323"/>
+<area shape="poly" id="edge7_Node000007_Node000008" title=" " alt="" coords="150,307,219,307,215,311,152,311"/>
+<area shape="poly" id="edge8_Node000003_Node000009" title=" " alt="" coords="1570,247,1143,312,1142,307,1575,246"/>
+<area shape="poly" id="edge10_Node000009_Node000010" title=" " alt="" coords="1435,209,1590,224,1585,225,1435,215"/>
+<area shape="rect" id="Node000011" title=" " alt="" coords="518,364,745,392"/>
+<area shape="poly" id="edge12_Node000003_Node000011" title=" " alt="" coords="761,370,866,361,975,345,1024,335,1030,334,976,350,867,366,761,375"/>
+<area shape="rect" id="Node000012" title=" " alt="" coords="539,416,724,461"/>
+<area shape="poly" id="edge13_Node000003_Node000012" title=" " alt="" coords="740,441,796,439,856,432,917,420,975,400,1000,385,1023,367,1056,335,1061,332,1026,371,1003,390,977,404,918,425,857,437,796,444,740,446"/>
+<area shape="rect" id="Node000013" title=" " alt="" coords="536,140,727,185"/>
+<area shape="poly" id="edge14_Node000003_Node000013" title=" " alt="" coords="742,150,799,151,860,157,920,172,977,196,1008,220,1034,250,1066,306,1061,304,1029,253,1005,224,974,201,919,177,859,163,799,156,743,155"/>
+<area shape="rect" id="Node000014" title=" " alt="" coords="533,209,730,254"/>
+<area shape="poly" id="edge15_Node000003_Node000014" title=" " alt="" coords="745,225,859,233,919,243,977,259,1019,279,1055,306,1049,305,1017,284,975,263,918,248,858,238,746,231"/>
+<area shape="poly" id="edge16_Node000002_Node000015" title=" " alt="" coords="991,29,1178,28,2161,28,2194,31,2226,39,2257,51,2286,68,2338,111,2384,161,2422,215,2453,266,2491,344,2486,341,2449,268,2418,217,2380,164,2335,114,2283,72,2254,56,2225,44,2193,36,2160,33,1178,33,992,34"/>
+<area shape="rect" id="Node000016" title=" " alt="" coords="1806,365,2012,410"/>
+<area shape="poly" id="edge18_Node000002_Node000016" title=" " alt="" coords="2028,379,2282,366,2398,362,2392,363,2282,371,2028,384"/>
+<area shape="poly" id="edge19_Node000016_Node000017" title=" " alt="" coords="1464,385,1808,387,1803,388,1464,390"/>
+<area shape="rect" id="Node000018" title=" " alt="" coords="2036,436,2282,497"/>
+<area shape="poly" id="edge21_Node000002_Node000018" title=" " alt="" coords="2297,449,2370,429,2429,400,2473,372,2478,370,2431,404,2372,434,2298,454"/>
+<area shape="rect" id="Node000019" title=" " alt="" coords="1565,440,1782,485"/>
+<area shape="poly" id="edge22_Node000018_Node000019" title=" " alt="" coords="1797,461,2038,465,2033,465,1797,466"/>
+<area shape="poly" id="edge23_Node000019_Node000020" title=" " alt="" coords="1451,452,1568,458,1562,459,1451,457"/>
+<area shape="rect" id="Node000021" title=" " alt="" coords="1822,519,1996,563"/>
+<area shape="poly" id="edge25_Node000002_Node000021" title=" " alt="" coords="2011,554,2074,558,2143,558,2213,550,2281,531,2315,516,2347,497,2405,451,2451,405,2481,372,2486,370,2455,409,2408,455,2350,501,2317,521,2283,537,2214,555,2143,563,2074,564,2011,559"/>
+<area shape="poly" id="edge26_Node000021_Node000022" title=" " alt="" coords="1431,515,1824,537,1819,537,1431,520"/>
+<area shape="rect" id="Node000023" title=" " alt="" coords="2072,156,2246,201"/>
+<area shape="poly" id="edge28_Node000002_Node000023" title=" " alt="" coords="2217,206,2470,343,2465,342,2216,211"/>
+<area shape="poly" id="edge29_Node000023_Node000024" title=" " alt="" coords="1421,145,2074,174,2069,175,1421,150"/>
 </map>

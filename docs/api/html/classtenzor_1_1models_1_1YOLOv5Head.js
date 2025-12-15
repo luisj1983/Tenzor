@@ -1,4 +1,4 @@
 var classtenzor_1_1models_1_1YOLOv5Head =
 [
-    [ "forward", "classtenzor_1_1models_1_1YOLOv5Head.html#ac2f6c7b1bb524039fbc457330d05ca99", null ]
+    [ "forward_impl", "classtenzor_1_1models_1_1YOLOv5Head.html#aa7d0927b9648debcb42dc10d37c83385", null ]
 ];

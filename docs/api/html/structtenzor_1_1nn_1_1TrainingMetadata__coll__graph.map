@@ -1,10 +1,10 @@
 <map id="tenzor::nn::TrainingMetadata" name="tenzor::nn::TrainingMetadata">
 <area shape="rect" id="Node000001" title="Training metadata stored with checkpoint." alt="" coords="5,318,213,345"/>
 <area shape="rect" id="Node000002" title=" " alt="" coords="66,99,152,127"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="108,142,102,200,102,245,110,317,104,318,97,245,97,200,102,142"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="106,140,102,200,102,245,110,318,104,317,97,245,97,200,104,144"/>
 <area shape="rect" id="Node000004" title=" " alt="" coords="190,200,358,245"/>
-<area shape="poly" id="edge4_Node000004_Node000002" title=" " alt="" coords="143,133,242,197,239,202,140,138"/>
+<area shape="poly" id="edge4_Node000004_Node000002" title=" " alt="" coords="142,133,243,198,238,200,141,138"/>
 <area shape="rect" id="Node000003" title=" " alt="" coords="40,5,178,50"/>
-<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="112,65,112,99,106,99,106,65"/>
-<area shape="poly" id="edge3_Node000001_Node000004" title=" " alt="" coords="230,256,131,319,128,315,227,251"/>
+<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="110,63,112,99,106,98,108,68"/>
+<area shape="poly" id="edge3_Node000001_Node000004" title=" " alt="" coords="231,254,131,319,128,315,225,253"/>
 </map>

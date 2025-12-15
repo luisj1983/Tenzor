@@ -1,5 +1,5 @@
 <map id="tenzor::models::CSPDarknet" name="tenzor::models::CSPDarknet">
 <area shape="rect" id="Node000001" title="CSPDarknet backbone for YOLOv5." alt="" coords="5,81,209,109"/>
 <area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="36,5,178,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="110,49,110,81,104,81,104,49"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="109,47,109,82,105,79,105,51"/>
 </map>

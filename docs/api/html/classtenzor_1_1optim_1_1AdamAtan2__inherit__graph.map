@@ -1,0 +1,5 @@
+<map id="tenzor::optim::AdamAtan2" name="tenzor::optim::AdamAtan2">
+<area shape="rect" id="Node000001" title="Adam&#45;atan2 optimizer." alt="" coords="5,81,198,109"/>
+<area shape="rect" id="Node000002" href="$classtenzor_1_1optim_1_1Optimizer.html" title="Abstract base class for all optimizers." alt="" coords="11,5,192,33"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="103,47,104,82,99,80,100,51"/>
+</map>

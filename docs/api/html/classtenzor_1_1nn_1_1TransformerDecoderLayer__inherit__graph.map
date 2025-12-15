@@ -1,5 +1,5 @@
 <map id="tenzor::nn::TransformerDecoderLayer" name="tenzor::nn::TransformerDecoderLayer">
 <area shape="rect" id="Node000001" title="Transformer Decoder Layer." alt="" coords="5,81,232,126"/>
 <area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="47,5,190,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="121,49,121,80,116,80,116,49"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="120,47,121,81,116,79,117,51"/>
 </map>

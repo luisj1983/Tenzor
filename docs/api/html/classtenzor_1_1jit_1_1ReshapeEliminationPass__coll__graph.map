@@ -1,5 +1,5 @@
 <map id="tenzor::jit::ReshapeEliminationPass" name="tenzor::jit::ReshapeEliminationPass">
 <area shape="rect" id="Node000001" title="Reshape elimination pass." alt="" coords="5,81,256,109"/>
 <area shape="rect" id="Node000002" href="$classtenzor_1_1jit_1_1Pass.html" title="Base class for optimization passes." alt="" coords="70,5,191,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="133,49,133,81,128,81,128,49"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="132,47,133,82,128,79,129,51"/>
 </map>

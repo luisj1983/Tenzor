@@ -1,5 +1,5 @@
 <map id="tenzor::models::InceptionAux" name="tenzor::models::InceptionAux">
 <area shape="rect" id="Node000001" title="Auxiliary classifier for GoogLeNet." alt="" coords="5,81,217,109"/>
 <area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="40,5,182,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="114,49,114,81,108,81,108,49"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="113,47,113,82,109,79,109,51"/>
 </map>

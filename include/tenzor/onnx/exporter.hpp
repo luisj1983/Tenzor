@@ -18,46 +18,16 @@
 #include <fstream>
 #include "../core/tensor.hpp"
 #include "../nn/module.hpp"
+#include "types.hpp"
 
 namespace tenzor {
 namespace onnx {
 
 // Forward declarations
 class ONNXGraph;
-class ONNXNode;
-class ONNXValueInfo;
+class ONNXExportNode;
+class ONNXExportValueInfo;
 class ONNXTensor;
-
-/**
- * @brief ONNX data type enumeration mapping to Tenzor DType
- */
-enum class ONNXDataType : int32_t {
-    UNDEFINED = 0,
-    FLOAT = 1,      // float32
-    UINT8 = 2,      // uint8
-    INT8 = 3,       // int8
-    UINT16 = 4,     // uint16
-    INT16 = 5,      // int16
-    INT32 = 6,      // int32
-    INT64 = 7,      // int64
-    STRING = 8,     // string
-    BOOL = 9,       // bool
-    FLOAT16 = 10,   // float16
-    DOUBLE = 11,    // float64
-    UINT32 = 12,    // uint32
-    UINT64 = 13,    // uint64
-    COMPLEX64 = 14, // complex64
-    COMPLEX128 = 15,// complex128
-    BFLOAT16 = 16   // bfloat16
-};
-
-/**
- * @brief Convert Tenzor DType to ONNX data type
- *
- * @param dtype Tenzor data type
- * @return Corresponding ONNX data type
- */
-auto dtype_to_onnx(DType dtype) -> ONNXDataType;
 
 /**
  * @brief ONNX tensor representation
@@ -93,23 +63,23 @@ public:
 };
 
 /**
- * @brief ONNX value info (input/output/intermediate value metadata)
+ * @brief ONNX value info (input/output/intermediate value metadata) for export
  */
-class ONNXValueInfo {
+class ONNXExportValueInfo {
 public:
     std::string name;                    ///< Value name
     ONNXDataType dtype;                  ///< Data type
     std::vector<int64_t> shape;          ///< Shape (-1 for dynamic dimensions)
 
-    ONNXValueInfo() = default;
-    ONNXValueInfo(const std::string& name, ONNXDataType dtype,
+    ONNXExportValueInfo() = default;
+    ONNXExportValueInfo(const std::string& name, ONNXDataType dtype,
                   const std::vector<int64_t>& shape);
 };
 
 /**
- * @brief ONNX graph node (operation)
+ * @brief ONNX graph node (operation) for export
  */
-class ONNXNode {
+class ONNXExportNode {
 public:
     std::string op_type;                                    ///< ONNX operator type
     std::string name;                                       ///< Node name
@@ -122,7 +92,7 @@ public:
     std::unordered_map<std::string, std::vector<float>> floats_attrs; ///< Float array attributes
     std::unordered_map<std::string, ONNXTensor> tensor_attrs; ///< Tensor attributes
 
-    ONNXNode(const std::string& op_type, const std::string& name);
+    ONNXExportNode(const std::string& op_type, const std::string& name);
 
     /**
      * @brief Add input value
@@ -171,28 +141,28 @@ public:
 class ONNXGraph {
 public:
     std::string name;                           ///< Graph name
-    std::vector<ONNXNode> nodes;                ///< Graph nodes (operations)
-    std::vector<ONNXValueInfo> inputs;          ///< Graph inputs
-    std::vector<ONNXValueInfo> outputs;         ///< Graph outputs
+    std::vector<ONNXExportNode> nodes;                ///< Graph nodes (operations)
+    std::vector<ONNXExportValueInfo> inputs;          ///< Graph inputs
+    std::vector<ONNXExportValueInfo> outputs;         ///< Graph outputs
     std::vector<ONNXTensor> initializers;       ///< Constant tensors (weights, biases)
-    std::unordered_map<std::string, ONNXValueInfo> value_info; ///< Intermediate values
+    std::unordered_map<std::string, ONNXExportValueInfo> value_info; ///< Intermediate values
 
     explicit ONNXGraph(const std::string& name = "graph");
 
     /**
      * @brief Add node to graph
      */
-    auto add_node(const ONNXNode& node) -> void;
+    auto add_node(const ONNXExportNode& node) -> void;
 
     /**
      * @brief Add input to graph
      */
-    auto add_input(const ONNXValueInfo& input) -> void;
+    auto add_input(const ONNXExportValueInfo& input) -> void;
 
     /**
      * @brief Add output to graph
      */
-    auto add_output(const ONNXValueInfo& output) -> void;
+    auto add_output(const ONNXExportValueInfo& output) -> void;
 
     /**
      * @brief Add initializer tensor
@@ -202,7 +172,7 @@ public:
     /**
      * @brief Register intermediate value info
      */
-    auto add_value_info(const ONNXValueInfo& info) -> void;
+    auto add_value_info(const ONNXExportValueInfo& info) -> void;
 
     /**
      * @brief Get unique name for intermediate value

@@ -244,8 +244,8 @@ auto parse_attribute(const std::vector<uint8_t>& data) -> ONNXAttribute {
 /**
  * @brief Parse ONNX NodeProto
  */
-auto parse_node(const std::vector<uint8_t>& data) -> ONNXNode {
-    ONNXNode node;
+auto parse_node(const std::vector<uint8_t>& data) -> ONNXImportNode {
+    ONNXImportNode node;
     const uint8_t* ptr = data.data();
     const uint8_t* end = ptr + data.size();
 
@@ -297,8 +297,8 @@ auto parse_node(const std::vector<uint8_t>& data) -> ONNXNode {
 /**
  * @brief Parse ONNX ValueInfoProto
  */
-auto parse_value_info(const std::vector<uint8_t>& data) -> ONNXValueInfo {
-    ONNXValueInfo value_info;
+auto parse_value_info(const std::vector<uint8_t>& data) -> ONNXImportValueInfo {
+    ONNXImportValueInfo value_info;
     const uint8_t* ptr = data.data();
     const uint8_t* end = ptr + data.size();
 
@@ -568,10 +568,10 @@ auto ONNXAttribute::get_floats(const std::vector<float>& default_val) const -> s
 }
 
 // ============================================================================
-// ONNXNode Implementation
+// ONNXImportNode Implementation
 // ============================================================================
 
-auto ONNXNode::get_attr(const std::string& name) const -> std::optional<ONNXAttribute> {
+auto ONNXImportNode::get_attr(const std::string& name) const -> std::optional<ONNXAttribute> {
     auto it = attributes.find(name);
     if (it != attributes.end()) {
         return it->second;
@@ -803,7 +803,7 @@ auto ONNXImporter::load_initializers(const ONNXGraphData& graph) -> void {
     }
 }
 
-auto ONNXImporter::convert_node(const ONNXNode& node) -> std::optional<std::shared_ptr<nn::Module>> {
+auto ONNXImporter::convert_node(const ONNXImportNode& node) -> std::optional<std::shared_ptr<nn::Module>> {
     // Tensor operations (in-place, return nullopt as they modify context)
     if (node.op_type == "Add") {
         convert_add(node);
@@ -894,42 +894,42 @@ auto ONNXImporter::convert_node(const ONNXNode& node) -> std::optional<std::shar
 // Tensor Operations
 // ============================================================================
 
-auto ONNXImporter::convert_add(const ONNXNode& node) -> void {
+auto ONNXImporter::convert_add(const ONNXImportNode& node) -> void {
     auto a = get_input(node.inputs[0]);
     auto b = get_input(node.inputs[1]);
     auto result = add(a, b);
     register_output(node.outputs[0], result);
 }
 
-auto ONNXImporter::convert_sub(const ONNXNode& node) -> void {
+auto ONNXImporter::convert_sub(const ONNXImportNode& node) -> void {
     auto a = get_input(node.inputs[0]);
     auto b = get_input(node.inputs[1]);
     auto result = sub(a, b);
     register_output(node.outputs[0], result);
 }
 
-auto ONNXImporter::convert_mul(const ONNXNode& node) -> void {
+auto ONNXImporter::convert_mul(const ONNXImportNode& node) -> void {
     auto a = get_input(node.inputs[0]);
     auto b = get_input(node.inputs[1]);
     auto result = mul(a, b);
     register_output(node.outputs[0], result);
 }
 
-auto ONNXImporter::convert_div(const ONNXNode& node) -> void {
+auto ONNXImporter::convert_div(const ONNXImportNode& node) -> void {
     auto a = get_input(node.inputs[0]);
     auto b = get_input(node.inputs[1]);
     auto result = div(a, b);
     register_output(node.outputs[0], result);
 }
 
-auto ONNXImporter::convert_matmul(const ONNXNode& node) -> void {
+auto ONNXImporter::convert_matmul(const ONNXImportNode& node) -> void {
     auto a = get_input(node.inputs[0]);
     auto b = get_input(node.inputs[1]);
     auto result = matmul(a, b);
     register_output(node.outputs[0], result);
 }
 
-auto ONNXImporter::convert_gemm(const ONNXNode& node) -> std::shared_ptr<nn::Module> {
+auto ONNXImporter::convert_gemm(const ONNXImportNode& node) -> std::shared_ptr<nn::Module> {
     // ONNX Gemm: Y = alpha * A @ B^T + beta * C
     // Tenzor Linear: Y = X @ W^T + b
     // For standard Linear layer: alpha=1, beta=1, transB=1
@@ -971,7 +971,7 @@ auto ONNXImporter::convert_gemm(const ONNXNode& node) -> std::shared_ptr<nn::Mod
     return linear;
 }
 
-auto ONNXImporter::convert_reshape(const ONNXNode& node) -> void {
+auto ONNXImporter::convert_reshape(const ONNXImportNode& node) -> void {
     auto input = get_input(node.inputs[0]);
     auto shape = get_input(node.inputs[1]); // Shape tensor
 
@@ -986,7 +986,7 @@ auto ONNXImporter::convert_reshape(const ONNXNode& node) -> void {
     register_output(node.outputs[0], result);
 }
 
-auto ONNXImporter::convert_transpose(const ONNXNode& node) -> void {
+auto ONNXImporter::convert_transpose(const ONNXImportNode& node) -> void {
     auto input = get_input(node.inputs[0]);
     auto perm_attr = node.get_attr("perm");
 
@@ -999,7 +999,7 @@ auto ONNXImporter::convert_transpose(const ONNXNode& node) -> void {
     register_output(node.outputs[0], result);
 }
 
-auto ONNXImporter::convert_concat(const ONNXNode& node) -> void {
+auto ONNXImporter::convert_concat(const ONNXImportNode& node) -> void {
     std::vector<Tensor> inputs;
     for (const auto& input_name : node.inputs) {
         inputs.push_back(get_input(input_name));
@@ -1012,7 +1012,7 @@ auto ONNXImporter::convert_concat(const ONNXNode& node) -> void {
     register_output(node.outputs[0], result);
 }
 
-auto ONNXImporter::convert_split(const ONNXNode& node) -> void {
+auto ONNXImporter::convert_split(const ONNXImportNode& node) -> void {
     auto input = get_input(node.inputs[0]);
     auto axis_attr = node.get_attr("axis");
     int64_t axis = axis_attr.has_value() ? axis_attr->get_int(0) : 0;
@@ -1041,7 +1041,7 @@ auto ONNXImporter::convert_split(const ONNXNode& node) -> void {
     }
 }
 
-auto ONNXImporter::convert_flatten(const ONNXNode& node) -> void {
+auto ONNXImporter::convert_flatten(const ONNXImportNode& node) -> void {
     auto input = get_input(node.inputs[0]);
     auto axis_attr = node.get_attr("axis");
     int64_t axis = axis_attr.has_value() ? axis_attr->get_int(1) : 1;
@@ -1054,7 +1054,7 @@ auto ONNXImporter::convert_flatten(const ONNXNode& node) -> void {
 // Neural Network Layers
 // ============================================================================
 
-auto ONNXImporter::convert_conv(const ONNXNode& node) -> std::shared_ptr<nn::Module> {
+auto ONNXImporter::convert_conv(const ONNXImportNode& node) -> std::shared_ptr<nn::Module> {
     auto weight = get_input(node.inputs[1]);
     std::optional<Tensor> bias;
     if (node.inputs.size() > 2) {
@@ -1126,7 +1126,7 @@ auto ONNXImporter::convert_conv(const ONNXNode& node) -> std::shared_ptr<nn::Mod
     }
 }
 
-auto ONNXImporter::convert_batch_normalization(const ONNXNode& node) -> std::shared_ptr<nn::Module> {
+auto ONNXImporter::convert_batch_normalization(const ONNXImportNode& node) -> std::shared_ptr<nn::Module> {
     auto scale = get_input(node.inputs[1]);  // gamma
     auto bias = get_input(node.inputs[2]);   // beta
     auto mean = get_input(node.inputs[3]);   // running mean
@@ -1167,14 +1167,14 @@ auto ONNXImporter::convert_batch_normalization(const ONNXNode& node) -> std::sha
 // Activation Functions
 // ============================================================================
 
-auto ONNXImporter::convert_relu(const ONNXNode& node) -> void {
+auto ONNXImporter::convert_relu(const ONNXImportNode& node) -> void {
     auto input = get_input(node.inputs[0]);
     Variable var_input(input);
     auto result = nn::relu(var_input).tensor();
     register_output(node.outputs[0], result);
 }
 
-auto ONNXImporter::convert_leaky_relu(const ONNXNode& node) -> void {
+auto ONNXImporter::convert_leaky_relu(const ONNXImportNode& node) -> void {
     auto input = get_input(node.inputs[0]);
     float alpha = node.get_attr("alpha").value_or(ONNXAttribute{}).get_float(0.01f);
     Variable var_input(input);
@@ -1182,28 +1182,28 @@ auto ONNXImporter::convert_leaky_relu(const ONNXNode& node) -> void {
     register_output(node.outputs[0], result);
 }
 
-auto ONNXImporter::convert_sigmoid(const ONNXNode& node) -> void {
+auto ONNXImporter::convert_sigmoid(const ONNXImportNode& node) -> void {
     auto input = get_input(node.inputs[0]);
     Variable var_input(input);
     auto result = nn::sigmoid(var_input).tensor();
     register_output(node.outputs[0], result);
 }
 
-auto ONNXImporter::convert_tanh(const ONNXNode& node) -> void {
+auto ONNXImporter::convert_tanh(const ONNXImportNode& node) -> void {
     auto input = get_input(node.inputs[0]);
     Variable var_input(input);
     auto result = nn::tanh(var_input).tensor();
     register_output(node.outputs[0], result);
 }
 
-auto ONNXImporter::convert_gelu(const ONNXNode& node) -> void {
+auto ONNXImporter::convert_gelu(const ONNXImportNode& node) -> void {
     auto input = get_input(node.inputs[0]);
     Variable var_input(input);
     auto result = nn::gelu(var_input).tensor();
     register_output(node.outputs[0], result);
 }
 
-auto ONNXImporter::convert_softmax(const ONNXNode& node) -> void {
+auto ONNXImporter::convert_softmax(const ONNXImportNode& node) -> void {
     auto input = get_input(node.inputs[0]);
     int64_t axis = node.get_attr("axis").value_or(ONNXAttribute{}).get_int(-1);
     Variable var_input(input);
@@ -1211,7 +1211,7 @@ auto ONNXImporter::convert_softmax(const ONNXNode& node) -> void {
     register_output(node.outputs[0], result);
 }
 
-auto ONNXImporter::convert_log_softmax(const ONNXNode& node) -> void {
+auto ONNXImporter::convert_log_softmax(const ONNXImportNode& node) -> void {
     auto input = get_input(node.inputs[0]);
     int64_t axis = node.get_attr("axis").value_or(ONNXAttribute{}).get_int(-1);
     Variable var_input(input);
@@ -1219,7 +1219,7 @@ auto ONNXImporter::convert_log_softmax(const ONNXNode& node) -> void {
     register_output(node.outputs[0], result);
 }
 
-auto ONNXImporter::convert_elu(const ONNXNode& node) -> void {
+auto ONNXImporter::convert_elu(const ONNXImportNode& node) -> void {
     auto input = get_input(node.inputs[0]);
     float alpha = node.get_attr("alpha").value_or(ONNXAttribute{}).get_float(1.0f);
     Variable var_input(input);
@@ -1227,7 +1227,7 @@ auto ONNXImporter::convert_elu(const ONNXNode& node) -> void {
     register_output(node.outputs[0], result);
 }
 
-auto ONNXImporter::convert_selu(const ONNXNode& node) -> void {
+auto ONNXImporter::convert_selu(const ONNXImportNode& node) -> void {
     auto input = get_input(node.inputs[0]);
     Variable var_input(input);
     auto result = nn::selu(var_input).tensor();
@@ -1238,7 +1238,7 @@ auto ONNXImporter::convert_selu(const ONNXNode& node) -> void {
 // Pooling Layers
 // ============================================================================
 
-auto ONNXImporter::convert_maxpool(const ONNXNode& node) -> std::shared_ptr<nn::Module> {
+auto ONNXImporter::convert_maxpool(const ONNXImportNode& node) -> std::shared_ptr<nn::Module> {
     auto kernel_shape = node.get_attr("kernel_shape")->get_ints();
     auto strides = node.get_attr("strides").value_or(ONNXAttribute{}).get_ints({1, 1});
     auto pads = node.get_attr("pads").value_or(ONNXAttribute{}).get_ints({0, 0, 0, 0});
@@ -1259,7 +1259,7 @@ auto ONNXImporter::convert_maxpool(const ONNXNode& node) -> std::shared_ptr<nn::
     }
 }
 
-auto ONNXImporter::convert_avgpool(const ONNXNode& node) -> std::shared_ptr<nn::Module> {
+auto ONNXImporter::convert_avgpool(const ONNXImportNode& node) -> std::shared_ptr<nn::Module> {
     auto kernel_shape = node.get_attr("kernel_shape")->get_ints();
     auto strides = node.get_attr("strides").value_or(ONNXAttribute{}).get_ints({1, 1});
     auto pads = node.get_attr("pads").value_or(ONNXAttribute{}).get_ints({0, 0, 0, 0});
@@ -1280,7 +1280,7 @@ auto ONNXImporter::convert_avgpool(const ONNXNode& node) -> std::shared_ptr<nn::
     }
 }
 
-auto ONNXImporter::convert_global_avgpool(const ONNXNode& node) -> std::shared_ptr<nn::Module> {
+auto ONNXImporter::convert_global_avgpool(const ONNXImportNode& node) -> std::shared_ptr<nn::Module> {
     // GlobalAveragePool is AdaptiveAvgPool with output_size=(1, 1)
     auto pool = std::make_shared<nn::AdaptiveAvgPool2d>(1, 1);
     return pool;

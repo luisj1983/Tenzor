@@ -11,5 +11,10 @@ var searchData=
   ['vitencoder_8',['ViTEncoder',['../classtenzor_1_1models_1_1ViTEncoder.html',1,'tenzor::models']]],
   ['vitforimageclassification_9',['ViTForImageClassification',['../classtenzor_1_1models_1_1ViTForImageClassification.html',1,'tenzor::models']]],
   ['vitmodelhub_10',['ViTModelHub',['../classtenzor_1_1models_1_1ViTModelHub.html',1,'tenzor::models']]],
-  ['vitoutput_11',['ViTOutput',['../structtenzor_1_1models_1_1ViTOutput.html',1,'tenzor::models']]]
+  ['vitoutput_11',['ViTOutput',['../structtenzor_1_1models_1_1ViTOutput.html',1,'tenzor::models']]],
+  ['vulkanblock_12',['VulkanBlock',['../structtenzor_1_1backend_1_1VulkanBlock.html',1,'tenzor::backend']]],
+  ['vulkanblockcomparator_13',['VulkanBlockComparator',['../structtenzor_1_1backend_1_1VulkanBlockComparator.html',1,'tenzor::backend']]],
+  ['vulkancachedmemoryguard_14',['VulkanCachedMemoryGuard',['../classtenzor_1_1backend_1_1VulkanCachedMemoryGuard.html',1,'tenzor::backend']]],
+  ['vulkancachingallocator_15',['VulkanCachingAllocator',['../classtenzor_1_1backend_1_1VulkanCachingAllocator.html',1,'tenzor::backend']]],
+  ['vulkanmemorystats_16',['VulkanMemoryStats',['../structtenzor_1_1backend_1_1VulkanMemoryStats.html',1,'tenzor::backend']]]
 ];

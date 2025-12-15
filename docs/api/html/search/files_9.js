@@ -1,9 +1,7 @@
 var searchData=
 [
-  ['mask_5fhead_2ehpp_0',['mask_head.hpp',['../mask__head_8hpp.html',1,'']]],
-  ['mask_5frcnn_2ehpp_1',['mask_rcnn.hpp',['../mask__rcnn_8hpp.html',1,'']]],
-  ['math_2ehpp_2',['math.hpp',['../math_8hpp.html',1,'']]],
-  ['mixed_5fprecision_2ehpp_3',['mixed_precision.hpp',['../mixed__precision_8hpp.html',1,'']]],
-  ['mobilenet_2ehpp_4',['mobilenet.hpp',['../models_2mobilenet_8hpp.html',1,'(Global Namespace)'],['../nn_2layers_2mobilenet_8hpp.html',1,'(Global Namespace)']]],
-  ['module_2ehpp_5',['module.hpp',['../module_8hpp.html',1,'']]]
+  ['linear_2ehpp_0',['linear.hpp',['../linear_8hpp.html',1,'']]],
+  ['loader_2ehpp_1',['loader.hpp',['../loader_8hpp.html',1,'']]],
+  ['logging_2ehpp_2',['logging.hpp',['../logging_8hpp.html',1,'']]],
+  ['losses_2ehpp_3',['losses.hpp',['../losses_8hpp.html',1,'']]]
 ];

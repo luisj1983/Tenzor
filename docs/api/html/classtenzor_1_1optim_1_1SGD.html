@@ -104,7 +104,7 @@ Inheritance diagram for tenzor::optim::SGD:</div>
 <map name="atenzor_1_1optim_1_1SGD_inherit__map" id="atenzor_1_1optim_1_1SGD_inherit__map">
 <area shape="rect" title="Stochastic Gradient Descent (SGD) optimizer." alt="" coords="23,81,168,109"/>
 <area shape="rect" href="classtenzor_1_1optim_1_1Optimizer.html" title="Abstract base class for all optimizers." alt="" coords="5,5,186,33"/>
-<area shape="poly" title=" " alt="" coords="98,49,98,81,93,81,93,49"/>
+<area shape="poly" title=" " alt="" coords="97,47,98,82,93,80,94,51"/>
 </map>
 <center><span class="legend">[<a target="top" href="graph_legend.html">legend</a>]</span></center></div>
 <div class="dynheader">
@@ -114,13 +114,13 @@ Collaboration diagram for tenzor::optim::SGD:</div>
 <map name="atenzor_1_1optim_1_1SGD_coll__map" id="atenzor_1_1optim_1_1SGD_coll__map">
 <area shape="rect" title="Stochastic Gradient Descent (SGD) optimizer." alt="" coords="30,418,174,446"/>
 <area shape="rect" href="classtenzor_1_1optim_1_1Optimizer.html" title="Abstract base class for all optimizers." alt="" coords="12,341,192,369"/>
-<area shape="poly" title=" " alt="" coords="105,384,105,418,99,418,99,384"/>
+<area shape="poly" title=" " alt="" coords="104,383,104,419,100,417,100,386"/>
 <area shape="rect" title=" " alt="" coords="5,224,199,268"/>
-<area shape="poly" title=" " alt="" coords="105,284,105,341,99,341,99,284"/>
+<area shape="poly" title=" " alt="" coords="103,282,105,342,99,340,101,286"/>
 <area shape="rect" title=" " alt="" coords="15,106,189,151"/>
-<area shape="poly" title=" " alt="" coords="105,167,105,223,99,223,99,167"/>
+<area shape="poly" title=" " alt="" coords="103,164,105,224,99,223,101,169"/>
 <area shape="rect" href="classtenzor_1_1Variable.html" title="Gradient&#45;enabled tensor wrapper for automatic differentiation." alt="" coords="40,5,164,33"/>
-<area shape="poly" title=" " alt="" coords="105,49,105,105,99,105,99,49"/>
+<area shape="poly" title=" " alt="" coords="102,46,105,106,99,105,102,51"/>
 </map>
 <center><span class="legend">[<a target="top" href="graph_legend.html">legend</a>]</span></center></div>
 <table class="memberdecls">
@@ -163,25 +163,25 @@ Additional Inherited Members</h2></td></tr>
 <div class="textblock"><p>Stochastic Gradient Descent (<a class="el" href="classtenzor_1_1optim_1_1SGD.html" title="Stochastic Gradient Descent (SGD) optimizer.">SGD</a>) optimizer. </p>
 <p>Implements the <a class="el" href="classtenzor_1_1optim_1_1SGD.html" title="Stochastic Gradient Descent (SGD) optimizer.">SGD</a> algorithm with optional momentum and Nesterov acceleration:</p>
 <p><b>Without Momentum:</b>   </p><p class="formulaDsp">
-<picture><source srcset="form_66_dark.png" media="(prefers-color-scheme: dark)"/><img class="formulaDsp" alt="\&zwj;[\theta_{t+1} = \theta_t - \eta \nabla L(\theta_t)
-\&zwj;]" src="form_66.png"/></picture>
-</p>
-<p><b>With Momentum:</b>    </p><p class="formulaDsp">
-<picture><source srcset="form_67_dark.png" media="(prefers-color-scheme: dark)"/><img class="formulaDsp" alt="\&zwj;[v_{t+1} = \mu v_t + \nabla L(\theta_t) \\
-\theta_{t+1} = \theta_t - \eta v_{t+1}
+<picture><source srcset="form_67_dark.png" media="(prefers-color-scheme: dark)"/><img class="formulaDsp" alt="\&zwj;[\theta_{t+1} = \theta_t - \eta \nabla L(\theta_t)
 \&zwj;]" src="form_67.png"/></picture>
 </p>
-<p><b>With Nesterov Momentum:</b>    </p><p class="formulaDsp">
+<p><b>With Momentum:</b>    </p><p class="formulaDsp">
 <picture><source srcset="form_68_dark.png" media="(prefers-color-scheme: dark)"/><img class="formulaDsp" alt="\&zwj;[v_{t+1} = \mu v_t + \nabla L(\theta_t) \\
-\theta_{t+1} = \theta_t - \eta(\mu v_{t+1} + \nabla L(\theta_t))
+\theta_{t+1} = \theta_t - \eta v_{t+1}
 \&zwj;]" src="form_68.png"/></picture>
 </p>
+<p><b>With Nesterov Momentum:</b>    </p><p class="formulaDsp">
+<picture><source srcset="form_69_dark.png" media="(prefers-color-scheme: dark)"/><img class="formulaDsp" alt="\&zwj;[v_{t+1} = \mu v_t + \nabla L(\theta_t) \\
+\theta_{t+1} = \theta_t - \eta(\mu v_{t+1} + \nabla L(\theta_t))
+\&zwj;]" src="form_69.png"/></picture>
+</p>
 <p>where:</p><ul>
-<li><picture><source srcset="form_69_dark.png" media="(prefers-color-scheme: dark)"/><img class="formulaInl" alt="$\theta$" src="form_69.png"/></picture>: parameters</li>
+<li><picture><source srcset="form_70_dark.png" media="(prefers-color-scheme: dark)"/><img class="formulaInl" alt="$\theta$" src="form_70.png"/></picture>: parameters</li>
 <li><picture><source srcset="form_42_dark.png" media="(prefers-color-scheme: dark)"/><img class="formulaInl" alt="$\eta$" src="form_42.png"/></picture>: learning rate</li>
-<li><picture><source srcset="form_70_dark.png" media="(prefers-color-scheme: dark)"/><img class="formulaInl" alt="$\mu$" src="form_70.png"/></picture>: momentum coefficient (0.9 typical)</li>
-<li><picture><source srcset="form_71_dark.png" media="(prefers-color-scheme: dark)"/><img class="formulaInl" alt="$v$" src="form_71.png"/></picture>: velocity (momentum buffer)</li>
-<li><picture><source srcset="form_72_dark.png" media="(prefers-color-scheme: dark)"/><img class="formulaInl" alt="$\nabla L$" src="form_72.png"/></picture>: gradient</li>
+<li><picture><source srcset="form_71_dark.png" media="(prefers-color-scheme: dark)"/><img class="formulaInl" alt="$\mu$" src="form_71.png"/></picture>: momentum coefficient (0.9 typical)</li>
+<li><picture><source srcset="form_72_dark.png" media="(prefers-color-scheme: dark)"/><img class="formulaInl" alt="$v$" src="form_72.png"/></picture>: velocity (momentum buffer)</li>
+<li><picture><source srcset="form_73_dark.png" media="(prefers-color-scheme: dark)"/><img class="formulaInl" alt="$\nabla L$" src="form_73.png"/></picture>: gradient</li>
 </ul>
 <p><b>Momentum Benefits:</b></p><ul>
 <li>Accelerates convergence in relevant directions</li>

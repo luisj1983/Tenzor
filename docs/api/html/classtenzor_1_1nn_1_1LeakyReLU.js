@@ -1,4 +1,4 @@
 var classtenzor_1_1nn_1_1LeakyReLU =
 [
-    [ "forward", "classtenzor_1_1nn_1_1LeakyReLU.html#ad0ea7e95d20fc47ff2b3afaff9ee3af2", null ]
+    [ "forward_impl", "classtenzor_1_1nn_1_1LeakyReLU.html#af6d922793df5d7bf92ffdf77a774529b", null ]
 ];

@@ -26,13 +26,28 @@
 #include <tenzor/nn/mixed_precision.hpp>
 #include <tenzor/nn/amp/grad_scaler.hpp>
 #include <tenzor/nn/amp/autocast.hpp>
-#include <tenzor/nn/parallel/distributed_data_parallel.hpp> // Now enabled!
+// #include <tenzor/nn/parallel/distributed_data_parallel.hpp> // Disabled - source file not compiled
 #include <tenzor/models/hub.hpp>
 #include <tenzor/onnx/exporter.hpp>
 #include <tenzor/data/dataset.hpp>
 #include <tenzor/data/dataloader.hpp>
 #include <tenzor/nn/compression/pruning.hpp>
 #include <tenzor/nn/quantization.hpp>
+#include <tenzor/jit/tracer.hpp>
+#include <tenzor/jit/compiler.hpp>
+#include <tenzor/jit/graph.hpp>
+#include <tenzor/jit/serialization.hpp>
+#include <tenzor/ops/vision.hpp>
+#include <tenzor/ops/detection.hpp>
+#include <tenzor/ops/async_ops.hpp>
+#include <tenzor/ops/fused_ops.hpp>
+#include <tenzor/data/transforms.hpp>
+#include <tenzor/utils/tensorboard.hpp>
+#include <tenzor/utils/benchmark.hpp>
+#include <tenzor/nn/optim/adam_atan2.hpp>
+#include <tenzor/nn/layers/hrm.hpp>
+#include <tenzor/models/resnet.hpp>
+#include <tenzor/onnx/importer.hpp>
 #include "numpy_interop.hpp"
 
 namespace py = pybind11;
@@ -46,6 +61,16 @@ PYBIND11_MODULE(tenzor_core, m) {
     // Library initialization
     m.def("initialize", &tenzor::initialize,
           "Initialize the Tenzor library (registers backends and operations)");
+
+    // Device::Type enum (must be defined before Device class for default args)
+    py::enum_<tenzor::Device::Type>(m, "DeviceType")
+        .value("CPU", tenzor::Device::Type::CPU)
+        .value("CUDA", tenzor::Device::Type::CUDA)
+        .value("ROCm", tenzor::Device::Type::ROCm)
+        .value("OneAPI", tenzor::Device::Type::OneAPI)
+        .value("Vulkan", tenzor::Device::Type::Vulkan)
+        .value("Metal", tenzor::Device::Type::Metal)
+        .value("WebGPU", tenzor::Device::Type::WebGPU);
 
     // Device
     py::class_<tenzor::Device>(m, "Device")
@@ -2189,116 +2214,10 @@ PYBIND11_MODULE(tenzor_core, m) {
              "Get optimizer");
 
     // ========================================================================
-    // Distributed training - NOW ENABLED!
+    // Distributed training - DISABLED (source file not compiled)
+    // TODO: Re-enable when distributed_data_parallel.cpp is enabled in CMakeLists
     // ========================================================================
-    auto distributed = nn.def_submodule("parallel", "Distributed and parallel training");
-
-    // ProcessGroup
-    py::class_<tenzor::nn::ProcessGroup, std::shared_ptr<tenzor::nn::ProcessGroup>>(distributed, "ProcessGroup",
-        R"pbdoc(
-            Process group for distributed training coordination.
-
-            Manages NCCL/RCCL communicators for multi-node/multi-GPU training.
-
-            Example:
-                >>> # On each process
-                >>> rank = int(os.environ['RANK'])
-                >>> world_size = int(os.environ['WORLD_SIZE'])
-                >>> pg = tz.nn.parallel.ProcessGroup(rank, world_size, backend='nccl')
-                >>> print(f"Process {pg.rank} of {pg.world_size}")
-        )pbdoc")
-        .def(py::init<int, int, const std::string&>(),
-             py::arg("rank"), py::arg("world_size"), py::arg("backend") = "nccl",
-             "Create a process group for distributed training")
-        .def_property_readonly("rank", &tenzor::nn::ProcessGroup::rank,
-             "Get process rank (0-indexed)")
-        .def_property_readonly("world_size", &tenzor::nn::ProcessGroup::world_size,
-             "Get world size (total number of processes)")
-        .def_property_readonly("backend", &tenzor::nn::ProcessGroup::backend,
-             "Get backend name (nccl, gloo, or mpi)")
-        .def("barrier", &tenzor::nn::ProcessGroup::barrier,
-             "Synchronize all processes at this barrier");
-
-    // DistributedDataParallel
-    py::class_<tenzor::nn::DistributedDataParallel, tenzor::nn::Module,
-               std::shared_ptr<tenzor::nn::DistributedDataParallel>>(distributed, "DistributedDataParallel",
-        R"pbdoc(
-            Distributed Data Parallel training wrapper.
-
-            Wraps a module for multi-GPU/multi-node training with automatic gradient
-            synchronization using NCCL all-reduce. Similar to PyTorch DDP.
-
-            Features:
-            - Automatic gradient synchronization across processes
-            - Bucket-based gradient communication for efficiency
-            - Broadcast parameters at initialization
-            - Optional unused parameter detection
-
-            Example:
-                >>> model = MyModel().cuda()
-                >>> process_group = tz.nn.parallel.ProcessGroup(rank, world_size)
-                >>> ddp_model = tz.nn.parallel.DistributedDataParallel(
-                ...     model, process_group, device_ids=[rank]
-                ... )
-                >>> # Train normally - gradients auto-sync
-                >>> for batch in dataloader:
-                ...     loss = ddp_model(batch)
-                ...     loss.backward()
-                ...     optimizer.step()
-        )pbdoc")
-        .def(py::init<std::shared_ptr<tenzor::nn::Module>,
-                     std::shared_ptr<tenzor::nn::ProcessGroup>,
-                     std::vector<int>, int, bool, bool, bool, size_t>(),
-             py::arg("module"),
-             py::arg("process_group"),
-             py::arg("device_ids") = std::vector<int>{},
-             py::arg("output_device") = -1,
-             py::arg("broadcast_buffers") = true,
-             py::arg("find_unused_parameters") = false,
-             py::arg("gradient_as_bucket_view") = false,
-             py::arg("bucket_size_mb") = 25,
-             "Wrap module for distributed data parallel training")
-        .def("forward", &tenzor::nn::DistributedDataParallel::forward,
-             py::arg("input"),
-             "Forward pass with automatic gradient synchronization")
-        .def_property_readonly("module", &tenzor::nn::DistributedDataParallel::module,
-             "Get underlying module")
-        .def_property_readonly("process_group", &tenzor::nn::DistributedDataParallel::process_group,
-             "Get process group")
-        .def_property_readonly("device_ids", &tenzor::nn::DistributedDataParallel::device_ids,
-             "Get local device IDs")
-        .def_property_readonly("output_device", &tenzor::nn::DistributedDataParallel::output_device,
-             "Get master device ID")
-        .def("join", &tenzor::nn::DistributedDataParallel::join,
-             "Wait for all processes to finish current iteration");
-
-    // Helper functions
-    distributed.def("init_process_group", &tenzor::nn::init_process_group,
-         py::arg("backend") = "nccl",
-         R"pbdoc(
-             Initialize distributed training environment from environment variables.
-
-             Reads RANK, WORLD_SIZE, MASTER_ADDR, MASTER_PORT from environment
-             and creates a process group.
-
-             Args:
-                 backend: Communication backend ('nccl', 'gloo', or 'mpi')
-
-             Returns:
-                 ProcessGroup instance
-
-             Example:
-                 >>> # Set environment variables first:
-                 >>> # export RANK=0
-                 >>> # export WORLD_SIZE=4
-                 >>> # export MASTER_ADDR=localhost
-                 >>> # export MASTER_PORT=29500
-                 >>> pg = tz.nn.parallel.init_process_group(backend='nccl')
-         )pbdoc");
-
-    distributed.def("destroy_process_group", &tenzor::nn::destroy_process_group,
-         py::arg("process_group"),
-         "Destroy process group and cleanup resources");
+    auto distributed = nn.def_submodule("parallel", "Distributed and parallel training (placeholder)");
 
     // ModelHub for pretrained weight management
     auto models = m.def_submodule("models", "Pretrained model hub");
@@ -2648,24 +2567,24 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def("size_bytes", &tenzor::onnx::ONNXTensor::size_bytes,
              "Get size in bytes");
 
-    // ONNXValueInfo class
-    py::class_<tenzor::onnx::ONNXValueInfo>(onnx_mod, "ValueInfo")
+    // ONNXExportValueInfo class (for exporting)
+    py::class_<tenzor::onnx::ONNXExportValueInfo>(onnx_mod, "ValueInfo")
         .def(py::init<const std::string&, tenzor::onnx::ONNXDataType, const std::vector<int64_t>&>(),
              py::arg("name"), py::arg("dtype"), py::arg("shape"))
-        .def_readwrite("name", &tenzor::onnx::ONNXValueInfo::name)
-        .def_readwrite("dtype", &tenzor::onnx::ONNXValueInfo::dtype)
-        .def_readwrite("shape", &tenzor::onnx::ONNXValueInfo::shape);
+        .def_readwrite("name", &tenzor::onnx::ONNXExportValueInfo::name)
+        .def_readwrite("dtype", &tenzor::onnx::ONNXExportValueInfo::dtype)
+        .def_readwrite("shape", &tenzor::onnx::ONNXExportValueInfo::shape);
 
-    // ONNXNode class
-    py::class_<tenzor::onnx::ONNXNode>(onnx_mod, "Node")
+    // ONNXExportNode class (for exporting)
+    py::class_<tenzor::onnx::ONNXExportNode>(onnx_mod, "Node")
         .def(py::init<const std::string&, const std::string&>(),
              py::arg("op_type"), py::arg("name"))
-        .def_readwrite("op_type", &tenzor::onnx::ONNXNode::op_type)
-        .def_readwrite("name", &tenzor::onnx::ONNXNode::name)
-        .def_readwrite("inputs", &tenzor::onnx::ONNXNode::inputs)
-        .def_readwrite("outputs", &tenzor::onnx::ONNXNode::outputs)
-        .def("add_input", &tenzor::onnx::ONNXNode::add_input, py::arg("input"))
-        .def("add_output", &tenzor::onnx::ONNXNode::add_output, py::arg("output"));
+        .def_readwrite("op_type", &tenzor::onnx::ONNXExportNode::op_type)
+        .def_readwrite("name", &tenzor::onnx::ONNXExportNode::name)
+        .def_readwrite("inputs", &tenzor::onnx::ONNXExportNode::inputs)
+        .def_readwrite("outputs", &tenzor::onnx::ONNXExportNode::outputs)
+        .def("add_input", &tenzor::onnx::ONNXExportNode::add_input, py::arg("input"))
+        .def("add_output", &tenzor::onnx::ONNXExportNode::add_output, py::arg("output"));
 
     // ONNXGraph class
     py::class_<tenzor::onnx::ONNXGraph>(onnx_mod, "Graph")
@@ -2771,6 +2690,65 @@ PYBIND11_MODULE(tenzor_core, m) {
     onnx_mod.def("dtype_to_onnx", &tenzor::onnx::dtype_to_onnx,
                  py::arg("dtype"),
                  "Convert Tenzor DType to ONNX DataType");
+
+    // Utility function to convert ONNX DataType to DType
+    onnx_mod.def("onnx_to_dtype", &tenzor::onnx::onnx_to_dtype,
+                 py::arg("onnx_dtype"),
+                 "Convert ONNX DataType to Tenzor DType");
+
+    // =========================================================================
+    // ONNX Importer
+    // =========================================================================
+
+    // ONNXImporter class
+    py::class_<tenzor::onnx::ONNXImporter>(onnx_mod, "Importer",
+        "Import ONNX models into Tenzor")
+        .def(py::init<bool>(),
+             py::arg("verbose") = false,
+             "Create ONNX importer with optional verbose output")
+        .def("import_from_file", &tenzor::onnx::ONNXImporter::import_from_file,
+             py::arg("filepath"),
+             "Import model from ONNX file")
+        .def("import_from_bytes", &tenzor::onnx::ONNXImporter::import_from_bytes,
+             py::arg("bytes"),
+             "Import model from ONNX bytes")
+        .def("get_model_data", &tenzor::onnx::ONNXImporter::get_model_data,
+             py::return_value_policy::reference_internal,
+             "Get the parsed ONNX model data")
+        .def("set_verbose", &tenzor::onnx::ONNXImporter::set_verbose,
+             py::arg("verbose"),
+             "Enable or disable verbose output")
+        .def("set_device", &tenzor::onnx::ONNXImporter::set_device,
+             py::arg("device"),
+             "Set target device for imported model");
+
+    // ONNXModelData struct (read-only access)
+    py::class_<tenzor::onnx::ONNXModelData>(onnx_mod, "ModelData",
+        "ONNX model metadata")
+        .def_readonly("ir_version", &tenzor::onnx::ONNXModelData::ir_version)
+        .def_readonly("opset_version", &tenzor::onnx::ONNXModelData::opset_version)
+        .def_readonly("model_version", &tenzor::onnx::ONNXModelData::model_version)
+        .def_readonly("producer_name", &tenzor::onnx::ONNXModelData::producer_name)
+        .def_readonly("doc_string", &tenzor::onnx::ONNXModelData::doc_string);
+
+    // High-level import function
+    onnx_mod.def("load", &tenzor::onnx::import_onnx,
+                 py::arg("filepath"),
+                 py::arg("verbose") = false,
+                 R"pbdoc(
+            Load an ONNX model and convert it to a Tenzor module.
+
+            Args:
+                filepath: Path to the ONNX model file
+                verbose: Print import progress (default: False)
+
+            Returns:
+                A Tenzor nn.Module representing the imported model
+
+            Example:
+                >>> model = tenzor.onnx.load("model.onnx", verbose=True)
+                >>> output = model(input_tensor)
+        )pbdoc");
 
     // ========== Automatic Mixed Precision (AMP) ==========
     auto amp = m.def_submodule("amp", "Automatic Mixed Precision utilities");
@@ -2937,6 +2915,650 @@ PYBIND11_MODULE(tenzor_core, m) {
     m.def("create_bfloat16_trainer", &tenzor::nn::create_bfloat16_trainer,
           py::arg("model"), py::arg("optimizer"), py::arg("loss_fn"),
           "Create BFloat16 mixed precision trainer");
+
+    // =========================================================================
+    // JIT Module - Tracing, Compilation, and Graph Optimization
+    // =========================================================================
+    auto jit = m.def_submodule("jit", "JIT compilation and tracing");
+
+    // OpType enum
+    py::enum_<tenzor::jit::OpType>(jit, "OpType")
+        .value("Add", tenzor::jit::OpType::Add)
+        .value("Sub", tenzor::jit::OpType::Sub)
+        .value("Mul", tenzor::jit::OpType::Mul)
+        .value("Div", tenzor::jit::OpType::Div)
+        .value("MatMul", tenzor::jit::OpType::MatMul)
+        .value("ReLU", tenzor::jit::OpType::ReLU)
+        .value("Sigmoid", tenzor::jit::OpType::Sigmoid)
+        .value("Tanh", tenzor::jit::OpType::Tanh)
+        .value("Softmax", tenzor::jit::OpType::Softmax)
+        .value("Conv2d", tenzor::jit::OpType::Conv2d)
+        .value("BatchNorm2d", tenzor::jit::OpType::BatchNorm2d)
+        .value("LayerNorm", tenzor::jit::OpType::LayerNorm)
+        .value("MaxPool2d", tenzor::jit::OpType::MaxPool2d)
+        .value("AvgPool2d", tenzor::jit::OpType::AvgPool2d)
+        .value("Reshape", tenzor::jit::OpType::Reshape)
+        .value("Transpose", tenzor::jit::OpType::Transpose)
+        .value("Flatten", tenzor::jit::OpType::Flatten)
+        .value("Linear", tenzor::jit::OpType::Linear)
+        .value("Constant", tenzor::jit::OpType::Constant)
+        .value("Input", tenzor::jit::OpType::Input)
+        .value("Output", tenzor::jit::OpType::Output);
+
+    // Value class
+    py::class_<tenzor::jit::Value, std::shared_ptr<tenzor::jit::Value>>(jit, "Value",
+        "Represents a tensor value in the IR graph")
+        .def_property_readonly("id", &tenzor::jit::Value::id)
+        .def_property_readonly("shape", &tenzor::jit::Value::shape)
+        .def_property_readonly("dtype", &tenzor::jit::Value::dtype)
+        .def_property_readonly("device", &tenzor::jit::Value::device);
+
+    // Node class
+    py::class_<tenzor::jit::Node, std::shared_ptr<tenzor::jit::Node>>(jit, "Node",
+        "Represents an operation node in the IR graph")
+        .def_property_readonly("op_type", &tenzor::jit::Node::op_type)
+        .def_property_readonly("name", &tenzor::jit::Node::name)
+        .def("set_name", &tenzor::jit::Node::set_name)
+        .def("get_attr", &tenzor::jit::Node::get_attr)
+        .def("get_int_attr", &tenzor::jit::Node::get_int_attr)
+        .def("get_vec_attr", &tenzor::jit::Node::get_vec_attr)
+        .def("get_bool_attr", &tenzor::jit::Node::get_bool_attr)
+        .def("has_attr", &tenzor::jit::Node::has_attr);
+
+    // Graph class
+    py::class_<tenzor::jit::Graph, std::shared_ptr<tenzor::jit::Graph>>(jit, "Graph",
+        "IR graph representing a complete computation")
+        .def(py::init<>())
+        .def("num_nodes", &tenzor::jit::Graph::num_nodes)
+        .def("num_values", &tenzor::jit::Graph::num_values)
+        .def("forward", &tenzor::jit::Graph::forward,
+             py::arg("inputs"),
+             "Execute graph with runtime inputs")
+        .def("save", &tenzor::jit::Graph::save,
+             py::arg("path"),
+             "Save graph to file")
+        .def_static("load", &tenzor::jit::Graph::load,
+             py::arg("path"),
+             "Load graph from file")
+        .def("to_string", &tenzor::jit::Graph::to_string,
+             "Get string representation of graph")
+        .def("topological_sort", &tenzor::jit::Graph::topological_sort)
+        .def("infer_types", &tenzor::jit::Graph::infer_types)
+        .def("__repr__", &tenzor::jit::Graph::to_string);
+
+    // Tracer class
+    py::class_<tenzor::jit::Tracer>(jit, "Tracer",
+        "Tracing context for recording operations")
+        .def(py::init<>())
+        .def("start_trace", &tenzor::jit::Tracer::start_trace,
+             "Start recording operations")
+        .def("end_trace", &tenzor::jit::Tracer::end_trace,
+             py::arg("inputs"), py::arg("outputs"),
+             "Stop recording and build IR graph")
+        .def("is_tracing", &tenzor::jit::Tracer::is_tracing,
+             "Check if tracing is active")
+        .def("clear", &tenzor::jit::Tracer::clear,
+             "Clear all recorded operations")
+        .def_static("get_instance", &tenzor::jit::Tracer::get_instance,
+             py::return_value_policy::reference,
+             "Get thread-local tracer instance");
+
+    // TracingGuard RAII class
+    py::class_<tenzor::jit::TracingGuard>(jit, "TracingGuard",
+        "RAII guard for tracing scope")
+        .def(py::init<>())
+        .def("get_graph", &tenzor::jit::TracingGuard::get_graph,
+             py::arg("inputs"), py::arg("outputs"),
+             "Get traced graph");
+
+    // Compiler class
+    py::class_<tenzor::jit::Compiler>(jit, "Compiler",
+        "Graph optimization compiler")
+        .def(py::init<bool>(),
+             py::arg("enable_default_passes") = true,
+             "Create compiler with optional default passes")
+        .def("optimize", &tenzor::jit::Compiler::optimize,
+             py::arg("graph"), py::arg("max_iterations") = 10,
+             "Optimize graph with all passes")
+        .def("set_verbose", &tenzor::jit::Compiler::set_verbose,
+             py::arg("enable"),
+             "Enable verbose logging")
+        .def("clear_stats", &tenzor::jit::Compiler::clear_stats);
+
+    // JIT Free functions
+    jit.def("trace", py::overload_cast<std::shared_ptr<tenzor::nn::Module>,
+            const tenzor::Variable&>(&tenzor::jit::trace),
+            py::arg("module"), py::arg("dummy_input"),
+            "Trace a module's forward pass");
+
+    jit.def("optimize_graph", &tenzor::jit::optimize_graph,
+            py::arg("graph"),
+            "Apply standard optimizations to graph");
+
+    jit.def("save_graph", &tenzor::jit::save_graph,
+            py::arg("graph"), py::arg("path"),
+            "Save graph to file");
+
+    jit.def("load_graph", &tenzor::jit::load_graph,
+            py::arg("path"),
+            "Load graph from file");
+
+    jit.def("export_graph_text", &tenzor::jit::export_graph_text,
+            py::arg("graph"), py::arg("path"),
+            "Export graph as text for debugging");
+
+    jit.def("export_graph_dot", &tenzor::jit::export_graph_dot,
+            py::arg("graph"), py::arg("path"),
+            "Export graph as DOT file for visualization");
+
+    jit.def("get_graph_stats", &tenzor::jit::get_graph_stats,
+            py::arg("graph"),
+            "Get graph statistics");
+
+    jit.def("verify_graph", &tenzor::jit::verify_graph,
+            py::arg("graph"),
+            "Verify graph integrity, returns list of errors");
+
+    // =========================================================================
+    // Vision Operations
+    // =========================================================================
+    auto vision = m.def_submodule("vision", "Vision operations");
+
+    vision.def("unfold", &tenzor::ops::unfold,
+               py::arg("input"),
+               py::arg("kernel_size"),
+               py::arg("stride") = 1,
+               py::arg("padding") = 0,
+               py::arg("dilation") = 1,
+               "Extract sliding local blocks (im2col)");
+
+    vision.def("fold", &tenzor::ops::fold,
+               py::arg("input"),
+               py::arg("output_size"),
+               py::arg("kernel_size"),
+               py::arg("stride") = 1,
+               py::arg("padding") = 0,
+               py::arg("dilation") = 1,
+               "Fold tensor back to spatial dimensions (col2im)");
+
+    vision.def("interpolate", &tenzor::ops::interpolate,
+               py::arg("input"),
+               py::arg("size"),
+               py::arg("mode") = "bilinear",
+               py::arg("align_corners") = false,
+               "Resize tensor using interpolation");
+
+    // =========================================================================
+    // Detection Operations
+    // =========================================================================
+    auto detection = m.def_submodule("detection", "Object detection operations");
+
+    py::enum_<tenzor::ops::IoUType>(detection, "IoUType")
+        .value("IoU", tenzor::ops::IoUType::IoU)
+        .value("GIoU", tenzor::ops::IoUType::GIoU)
+        .value("DIoU", tenzor::ops::IoUType::DIoU)
+        .value("CIoU", tenzor::ops::IoUType::CIoU);
+
+    detection.def("box_iou", &tenzor::ops::box_iou,
+                  py::arg("boxes1"), py::arg("boxes2"),
+                  py::arg("iou_type") = tenzor::ops::IoUType::IoU,
+                  "Compute IoU between box sets");
+
+    detection.def("nms", &tenzor::ops::nms,
+                  py::arg("boxes"), py::arg("scores"),
+                  py::arg("iou_threshold") = 0.5,
+                  "Non-Maximum Suppression");
+
+    detection.def("batched_nms", &tenzor::ops::batched_nms,
+                  py::arg("boxes"), py::arg("scores"),
+                  py::arg("iou_threshold") = 0.5,
+                  py::arg("score_threshold") = 0.05,
+                  py::arg("max_output_boxes") = 100,
+                  "Batched NMS for multiple classes");
+
+    detection.def("encode_boxes", &tenzor::ops::encode_boxes,
+                  py::arg("boxes"), py::arg("anchors"),
+                  py::arg("weights") = std::vector<double>{1.0, 1.0, 1.0, 1.0},
+                  "Encode boxes relative to anchors");
+
+    detection.def("decode_boxes", &tenzor::ops::decode_boxes,
+                  py::arg("deltas"), py::arg("anchors"),
+                  py::arg("weights") = std::vector<double>{1.0, 1.0, 1.0, 1.0},
+                  "Decode boxes from deltas and anchors");
+
+    detection.def("clip_boxes_to_image", &tenzor::ops::clip_boxes_to_image,
+                  py::arg("boxes"), py::arg("height"), py::arg("width"),
+                  "Clip boxes to image boundaries");
+
+    detection.def("remove_small_boxes", &tenzor::ops::remove_small_boxes,
+                  py::arg("boxes"), py::arg("scores"), py::arg("min_size"),
+                  "Remove boxes smaller than min_size");
+
+    // =========================================================================
+    // Async Operations
+    // =========================================================================
+    auto async_ops = m.def_submodule("async_ops", "Asynchronous tensor operations");
+
+    async_ops.def("async_matmul", &tenzor::async_matmul,
+                  py::arg("a"), py::arg("b"),
+                  "Asynchronous matrix multiplication");
+
+    async_ops.def("async_add", &tenzor::async_add,
+                  py::arg("a"), py::arg("b"),
+                  "Asynchronous element-wise addition");
+
+    async_ops.def("async_mul", &tenzor::async_mul,
+                  py::arg("a"), py::arg("b"),
+                  "Asynchronous element-wise multiplication");
+
+    async_ops.def("async_sub", &tenzor::async_sub,
+                  py::arg("a"), py::arg("b"),
+                  "Asynchronous element-wise subtraction");
+
+    async_ops.def("async_div", &tenzor::async_div,
+                  py::arg("a"), py::arg("b"),
+                  "Asynchronous element-wise division");
+
+    async_ops.def("async_relu", &tenzor::async_relu,
+                  py::arg("input"),
+                  "Asynchronous ReLU activation");
+
+    async_ops.def("async_sigmoid", &tenzor::async_sigmoid,
+                  py::arg("input"),
+                  "Asynchronous sigmoid activation");
+
+    async_ops.def("async_tanh", &tenzor::async_tanh,
+                  py::arg("input"),
+                  "Asynchronous tanh activation");
+
+    async_ops.def("async_softmax", &tenzor::async_softmax,
+                  py::arg("input"), py::arg("dim") = -1,
+                  "Asynchronous softmax");
+
+    // =========================================================================
+    // Fused Operations
+    // =========================================================================
+    auto fused = m.def_submodule("fused", "Fused kernel operations");
+
+    fused.def("fused_linear_relu", &tenzor::ops::fused_linear_relu,
+              py::arg("input"), py::arg("weight"), py::arg("bias") = nullptr,
+              "Fused linear + ReLU (1.5-2x faster)");
+
+    fused.def("fused_conv2d_relu", &tenzor::ops::fused_conv2d_relu,
+              py::arg("input"), py::arg("weight"), py::arg("bias") = nullptr,
+              py::arg("stride") = 1, py::arg("padding") = 0,
+              "Fused conv2d + ReLU (1.8-2.5x faster)");
+
+    fused.def("fused_batchnorm_relu", &tenzor::ops::fused_batchnorm_relu,
+              py::arg("input"), py::arg("running_mean"), py::arg("running_var"),
+              py::arg("weight"), py::arg("bias"), py::arg("eps") = 1e-5f,
+              "Fused batchnorm + ReLU (1.6-2.2x faster)");
+
+    fused.def("fused_softmax_cross_entropy", &tenzor::ops::fused_softmax_cross_entropy,
+              py::arg("logits"), py::arg("targets"), py::arg("reduction") = "mean",
+              "Fused softmax + cross-entropy (2-3x faster, 50% less memory)");
+
+    fused.def("fused_add_relu", &tenzor::ops::fused_add_relu,
+              py::arg("a"), py::arg("b"),
+              "Fused add + ReLU for residual connections");
+
+    fused.def("fused_gelu", &tenzor::ops::fused_gelu,
+              py::arg("input"),
+              "Fused GELU activation (1.5x faster)");
+
+    fused.def("fused_layer_norm", &tenzor::ops::fused_layer_norm,
+              py::arg("input"), py::arg("normalized_shape"),
+              py::arg("weight"), py::arg("bias"), py::arg("eps") = 1e-5f,
+              "Fused layer normalization (1.4-2x faster)");
+
+    // =========================================================================
+    // Data Transforms
+    // =========================================================================
+    auto transforms = data_mod.def_submodule("transforms", "Data augmentation transforms");
+
+    py::class_<tenzor::data::transforms::Transform,
+               std::shared_ptr<tenzor::data::transforms::Transform>>(transforms, "Transform",
+        "Base class for data transforms")
+        .def("__call__", &tenzor::data::transforms::Transform::operator());
+
+    py::class_<tenzor::data::transforms::Normalize,
+               tenzor::data::transforms::Transform,
+               std::shared_ptr<tenzor::data::transforms::Normalize>>(transforms, "Normalize",
+        "Normalize tensor with mean and std")
+        .def(py::init<std::vector<float>, std::vector<float>>(),
+             py::arg("mean"), py::arg("std"));
+
+    py::class_<tenzor::data::transforms::ToTensor,
+               tenzor::data::transforms::Transform,
+               std::shared_ptr<tenzor::data::transforms::ToTensor>>(transforms, "ToTensor",
+        "Convert to tensor (identity for tensors)")
+        .def(py::init<>());
+
+    py::class_<tenzor::data::transforms::Compose,
+               tenzor::data::transforms::Transform,
+               std::shared_ptr<tenzor::data::transforms::Compose>>(transforms, "Compose",
+        "Compose multiple transforms")
+        .def(py::init<std::vector<std::shared_ptr<tenzor::data::transforms::Transform>>>(),
+             py::arg("transforms"));
+
+    py::class_<tenzor::data::transforms::RandomHorizontalFlip,
+               tenzor::data::transforms::Transform,
+               std::shared_ptr<tenzor::data::transforms::RandomHorizontalFlip>>(transforms, "RandomHorizontalFlip",
+        "Random horizontal flip")
+        .def(py::init<float>(),
+             py::arg("p") = 0.5f);
+
+    // =========================================================================
+    // TensorBoard Integration
+    // =========================================================================
+    auto tensorboard = m.def_submodule("tensorboard", "TensorBoard logging");
+
+    py::class_<tenzor::SummaryWriter>(tensorboard, "SummaryWriter",
+        "Writer for TensorBoard event files")
+        .def(py::init<std::string_view, int, int>(),
+             py::arg("log_dir"),
+             py::arg("max_queue") = 10,
+             py::arg("flush_secs") = 120,
+             "Create SummaryWriter for specified log directory")
+        .def("add_scalar", &tenzor::SummaryWriter::add_scalar,
+             py::arg("tag"), py::arg("value"), py::arg("step"),
+             "Log scalar value")
+        .def("add_histogram", &tenzor::SummaryWriter::add_histogram,
+             py::arg("tag"), py::arg("tensor"), py::arg("step"),
+             py::arg("bins") = 30,
+             "Log histogram of tensor values")
+        .def("add_image", &tenzor::SummaryWriter::add_image,
+             py::arg("tag"), py::arg("tensor"), py::arg("step"),
+             py::arg("dataformats") = "CHW",
+             "Log image tensor")
+        .def("add_graph", &tenzor::SummaryWriter::add_graph,
+             py::arg("model_name"), py::arg("input_shape"),
+             "Log computation graph structure")
+        .def("flush", &tenzor::SummaryWriter::flush,
+             "Flush all pending events to disk")
+        .def("close", &tenzor::SummaryWriter::close,
+             "Close writer and release resources")
+        .def("is_open", &tenzor::SummaryWriter::is_open,
+             "Check if writer is open");
+
+    // =========================================================================
+    // Benchmark Utilities
+    // =========================================================================
+    auto benchmark_m = m.def_submodule("benchmark", "Performance benchmarking");
+
+    py::class_<tenzor::benchmark::Timer>(benchmark_m, "Timer",
+        "High-resolution timer")
+        .def(py::init<>())
+        .def("start", &tenzor::benchmark::Timer::start)
+        .def("stop", &tenzor::benchmark::Timer::stop)
+        .def("elapsed", &tenzor::benchmark::Timer::elapsed);
+
+    py::class_<tenzor::benchmark::BenchmarkStats>(benchmark_m, "BenchmarkStats",
+        "Benchmark statistics")
+        .def_readonly("mean", &tenzor::benchmark::BenchmarkStats::mean)
+        .def_readonly("std_dev", &tenzor::benchmark::BenchmarkStats::std_dev)
+        .def_readonly("min", &tenzor::benchmark::BenchmarkStats::min)
+        .def_readonly("max", &tenzor::benchmark::BenchmarkStats::max)
+        .def_readonly("median", &tenzor::benchmark::BenchmarkStats::median)
+        .def_readonly("p95", &tenzor::benchmark::BenchmarkStats::p95)
+        .def_readonly("p99", &tenzor::benchmark::BenchmarkStats::p99)
+        .def_readonly("num_runs", &tenzor::benchmark::BenchmarkStats::num_runs)
+        .def("ops_per_sec", &tenzor::benchmark::BenchmarkStats::ops_per_sec)
+        .def("tflops", &tenzor::benchmark::BenchmarkStats::tflops)
+        .def("gflops", &tenzor::benchmark::BenchmarkStats::gflops)
+        .def("bandwidth_gbs", &tenzor::benchmark::BenchmarkStats::bandwidth_gbs);
+
+    py::class_<tenzor::benchmark::BenchmarkResult>(benchmark_m, "BenchmarkResult",
+        "Benchmark result")
+        .def_readonly("name", &tenzor::benchmark::BenchmarkResult::name)
+        .def_readonly("stats", &tenzor::benchmark::BenchmarkResult::stats)
+        .def_readonly("num_flops", &tenzor::benchmark::BenchmarkResult::num_flops)
+        .def_readonly("num_bytes", &tenzor::benchmark::BenchmarkResult::num_bytes)
+        .def_readonly("tflops", &tenzor::benchmark::BenchmarkResult::tflops)
+        .def_readonly("bandwidth_gbs", &tenzor::benchmark::BenchmarkResult::bandwidth_gbs)
+        .def("print", &tenzor::benchmark::BenchmarkResult::print)
+        .def("to_json", &tenzor::benchmark::BenchmarkResult::to_json);
+
+    py::class_<tenzor::benchmark::Benchmark>(benchmark_m, "Benchmark",
+        "Benchmark runner")
+        .def(py::init<const std::string&, size_t, size_t>(),
+             py::arg("name"),
+             py::arg("num_warmup") = 5,
+             py::arg("num_runs") = 100)
+        .def("run", py::overload_cast<const std::function<void()>&>(
+             &tenzor::benchmark::Benchmark::run),
+             py::arg("fn"),
+             "Run benchmark")
+        .def("set_flops", &tenzor::benchmark::Benchmark::set_flops)
+        .def("set_bytes", &tenzor::benchmark::Benchmark::set_bytes);
+
+    py::class_<tenzor::benchmark::BenchmarkSuite>(benchmark_m, "BenchmarkSuite",
+        "Benchmark suite for running multiple benchmarks")
+        .def(py::init<const std::string&>(),
+             py::arg("name"))
+        .def("add", &tenzor::benchmark::BenchmarkSuite::add)
+        .def("run_all", &tenzor::benchmark::BenchmarkSuite::run_all)
+        .def("print_summary", &tenzor::benchmark::BenchmarkSuite::print_summary)
+        .def("export_json", &tenzor::benchmark::BenchmarkSuite::export_json)
+        .def("save_json", &tenzor::benchmark::BenchmarkSuite::save_json);
+
+    // FLOPS calculation helpers
+    auto flops_m = benchmark_m.def_submodule("flops", "FLOPS calculation utilities");
+    flops_m.def("matmul", &tenzor::benchmark::flops::matmul,
+                  py::arg("M"), py::arg("N"), py::arg("K"));
+    flops_m.def("conv2d", &tenzor::benchmark::flops::conv2d,
+                  py::arg("batch"), py::arg("out_h"), py::arg("out_w"),
+                  py::arg("in_channels"), py::arg("out_channels"),
+                  py::arg("kernel_h"), py::arg("kernel_w"));
+    flops_m.def("elementwise", &tenzor::benchmark::flops::elementwise,
+                  py::arg("num_elements"), py::arg("ops_per_element") = 1);
+
+    // Memory calculation helpers
+    auto memory_m = benchmark_m.def_submodule("memory", "Memory calculation utilities");
+    memory_m.def("matmul", &tenzor::benchmark::memory::matmul,
+                   py::arg("M"), py::arg("N"), py::arg("K"),
+                   py::arg("element_size") = 4);
+    memory_m.def("elementwise", &tenzor::benchmark::memory::elementwise,
+                   py::arg("num_elements"),
+                   py::arg("num_inputs") = 2,
+                   py::arg("num_outputs") = 1,
+                   py::arg("element_size") = 4);
+
+    // =========================================================================
+    // Adam-atan2 Optimizer
+    // =========================================================================
+    py::class_<tenzor::optim::AdamAtan2>(optim, "AdamAtan2",
+        "Adam-atan2 optimizer for HRM training with bounded updates")
+        .def(py::init<std::vector<std::shared_ptr<tenzor::Variable>>, double, double, double, double, double, bool>(),
+             py::arg("params"),
+             py::arg("lr") = 1e-3,
+             py::arg("beta1") = 0.9,
+             py::arg("beta2") = 0.999,
+             py::arg("eps") = 1e-8,
+             py::arg("weight_decay") = 0.01,
+             py::arg("amsgrad") = false)
+        .def("step", &tenzor::optim::AdamAtan2::step)
+        .def("set_lr", &tenzor::optim::AdamAtan2::set_lr)
+        .def("get_lr", &tenzor::optim::AdamAtan2::get_lr)
+        .def("state_dict", &tenzor::optim::AdamAtan2::state_dict)
+        .def("load_state_dict", &tenzor::optim::AdamAtan2::load_state_dict);
+
+    // =========================================================================
+    // HRM (Hierarchical Reasoning Model) Layers
+    // =========================================================================
+    auto hrm = nn.def_submodule("hrm", "Hierarchical Reasoning Model components");
+
+    // HRM Configuration
+    py::class_<tenzor::nn::HRMConfig>(hrm, "HRMConfig",
+        "Configuration for Hierarchical Reasoning Model")
+        .def(py::init<>())
+        .def_readwrite("d_model", &tenzor::nn::HRMConfig::d_model)
+        .def_readwrite("n_heads", &tenzor::nn::HRMConfig::n_heads)
+        .def_readwrite("d_feedforward", &tenzor::nn::HRMConfig::d_feedforward)
+        .def_readwrite("n_high_cycles", &tenzor::nn::HRMConfig::n_high_cycles)
+        .def_readwrite("t_low_steps", &tenzor::nn::HRMConfig::t_low_steps)
+        .def_readwrite("dropout", &tenzor::nn::HRMConfig::dropout)
+        .def_readwrite("use_post_norm", &tenzor::nn::HRMConfig::use_post_norm)
+        .def_readwrite("deep_supervision", &tenzor::nn::HRMConfig::deep_supervision)
+        .def_readwrite("max_seq_len", &tenzor::nn::HRMConfig::max_seq_len)
+        .def_readwrite("vocab_size", &tenzor::nn::HRMConfig::vocab_size)
+        .def_readwrite("num_classes", &tenzor::nn::HRMConfig::num_classes)
+        .def_readwrite("use_stablemax", &tenzor::nn::HRMConfig::use_stablemax)
+        .def_readwrite("stablemax_eps", &tenzor::nn::HRMConfig::stablemax_eps)
+        .def_readwrite("use_act", &tenzor::nn::HRMConfig::use_act)
+        .def_readwrite("use_qlearning_act", &tenzor::nn::HRMConfig::use_qlearning_act)
+        .def_readwrite("act_threshold", &tenzor::nn::HRMConfig::act_threshold)
+        .def_readwrite("act_epsilon", &tenzor::nn::HRMConfig::act_epsilon)
+        .def_readwrite("act_gamma", &tenzor::nn::HRMConfig::act_gamma)
+        .def_readwrite("act_lr", &tenzor::nn::HRMConfig::act_lr)
+        .def_readwrite("max_segments", &tenzor::nn::HRMConfig::max_segments)
+        .def_readwrite("use_lecun_init", &tenzor::nn::HRMConfig::use_lecun_init)
+        .def_readwrite("use_truncated_normal", &tenzor::nn::HRMConfig::use_truncated_normal)
+        .def_readwrite("init_std", &tenzor::nn::HRMConfig::init_std);
+
+    // RMSNorm layer
+    py::class_<tenzor::nn::RMSNorm, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::RMSNorm>>(hrm, "RMSNorm",
+        "RMS Layer Normalization")
+        .def(py::init<int64_t, double>(),
+             py::arg("normalized_shape"), py::arg("eps") = 1e-6);
+
+    // GatedLinearUnit
+    py::class_<tenzor::nn::GatedLinearUnit, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::GatedLinearUnit>>(hrm, "GatedLinearUnit",
+        "Gated Linear Unit (GLU/SwiGLU)")
+        .def(py::init<int64_t, int64_t, bool, bool>(),
+             py::arg("in_features"), py::arg("hidden_features"),
+             py::arg("use_silu") = true, py::arg("bias") = false);
+
+    // RotaryPositionEmbedding
+    py::class_<tenzor::nn::RotaryPositionEmbedding, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::RotaryPositionEmbedding>>(hrm, "RotaryPositionEmbedding",
+        "Rotary Position Embedding (RoPE)")
+        .def(py::init<int64_t, int64_t, double>(),
+             py::arg("dim"), py::arg("max_seq_len") = 2048,
+             py::arg("base") = 10000.0);
+
+    // HRMBlock
+    py::class_<tenzor::nn::HRMBlock, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::HRMBlock>>(hrm, "HRMBlock",
+        "HRM Transformer block with RoPE and optional cross-attention")
+        .def(py::init<int64_t, int64_t, int64_t, double, bool, int64_t>(),
+             py::arg("d_model"), py::arg("n_heads"), py::arg("d_feedforward"),
+             py::arg("dropout") = 0.1, py::arg("use_post_norm") = true,
+             py::arg("max_seq_len") = 512);
+
+    // QLearningACT
+    py::class_<tenzor::nn::QLearningACT, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::QLearningACT>>(hrm, "QLearningACT",
+        "Q-Learning based Adaptive Computational Time")
+        .def(py::init<int64_t, int64_t, double, double, double>(),
+             py::arg("d_model"), py::arg("max_segments"),
+             py::arg("epsilon") = 0.1, py::arg("gamma") = 0.99, py::arg("lr") = 0.01)
+        .def("decay_epsilon", &tenzor::nn::QLearningACT::decay_epsilon,
+             py::arg("decay_rate") = 0.995, py::arg("min_epsilon") = 0.01);
+
+    // HRM Model
+    py::class_<tenzor::nn::HRM, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::HRM>>(hrm, "HRM",
+        "Hierarchical Reasoning Model - brain-inspired recurrent architecture")
+        .def(py::init<const tenzor::nn::HRMConfig&>(),
+             py::arg("config"))
+        .def("forward_with_aux", &tenzor::nn::HRM::forward_with_aux,
+             py::arg("input"), py::arg("mask") = tenzor::Tensor{},
+             "Forward with auxiliary outputs for deep supervision")
+        .def("forward_with_segments", &tenzor::nn::HRM::forward_with_segments,
+             py::arg("input"), py::arg("targets") = tenzor::Variable{},
+             py::arg("mask") = tenzor::Tensor{},
+             "Forward with segment-based training")
+        .def("config", &tenzor::nn::HRM::config,
+             py::return_value_policy::reference)
+        .def("num_parameters", &tenzor::nn::HRM::num_parameters)
+        .def("apply_hrm_initialization", &tenzor::nn::HRM::apply_hrm_initialization)
+        .def("get_qlearning_act", &tenzor::nn::HRM::get_qlearning_act);
+
+    // Stablemax functions
+    hrm.def("stablemax", &tenzor::nn::stablemax,
+            py::arg("input"), py::arg("dim") = -1, py::arg("eps") = 1e-12,
+            "Numerically stable softmax variant");
+
+    hrm.def("stablemax_cross_entropy", &tenzor::nn::stablemax_cross_entropy,
+            py::arg("input"), py::arg("target"), py::arg("eps") = 1e-12,
+            "Cross-entropy loss with stablemax");
+
+    hrm.def("hrm_deep_supervision_loss", &tenzor::nn::hrm_deep_supervision_loss,
+            py::arg("outputs"), py::arg("targets"), py::arg("loss_fn"),
+            py::arg("weight_decay") = 0.5,
+            "Deep supervision loss for HRM training");
+
+    // Initialization utilities
+    hrm.def("lecun_normal_init", &tenzor::nn::lecun_normal_init,
+            py::arg("tensor"), py::arg("fan_in"),
+            "LeCun normal initialization");
+
+    hrm.def("lecun_uniform_init", &tenzor::nn::lecun_uniform_init,
+            py::arg("tensor"), py::arg("fan_in"),
+            "LeCun uniform initialization");
+
+    hrm.def("truncated_normal_init", &tenzor::nn::truncated_normal_init,
+            py::arg("tensor"), py::arg("mean") = 0.0, py::arg("std") = 1.0,
+            py::arg("a") = -2.0, py::arg("b") = 2.0,
+            "Truncated normal initialization");
+
+    // =========================================================================
+    // Model Architectures
+    // =========================================================================
+
+    // ResNet
+    py::class_<tenzor::models::BasicBlock, tenzor::nn::Module,
+               std::shared_ptr<tenzor::models::BasicBlock>>(models, "BasicBlock",
+        "ResNet BasicBlock (for ResNet-18/34)")
+        .def(py::init<int64_t, int64_t, int64_t, int64_t, int64_t, std::shared_ptr<tenzor::nn::Module>>(),
+             py::arg("in_channels"), py::arg("out_channels"),
+             py::arg("stride") = 1, py::arg("groups") = 1, py::arg("base_width") = 64,
+             py::arg("downsample") = nullptr);
+
+    py::class_<tenzor::models::Bottleneck, tenzor::nn::Module,
+               std::shared_ptr<tenzor::models::Bottleneck>>(models, "Bottleneck",
+        "ResNet Bottleneck (for ResNet-50/101/152)")
+        .def(py::init<int64_t, int64_t, int64_t, int64_t, int64_t, std::shared_ptr<tenzor::nn::Module>>(),
+             py::arg("in_channels"), py::arg("out_channels"),
+             py::arg("stride") = 1, py::arg("groups") = 1, py::arg("base_width") = 64,
+             py::arg("downsample") = nullptr);
+
+    py::class_<tenzor::models::ResNet, tenzor::nn::Module,
+               std::shared_ptr<tenzor::models::ResNet>>(models, "ResNet",
+        "ResNet architecture")
+        .def(py::init<std::vector<int64_t>, int64_t, bool, int64_t, int64_t>(),
+             py::arg("layers"), py::arg("num_classes") = 1000,
+             py::arg("use_basic_block") = true,
+             py::arg("groups") = 1, py::arg("base_width") = 64);
+
+    // Convenience functions for standard ResNet variants
+    models.def("resnet18", [](int64_t num_classes) {
+        return std::make_shared<tenzor::models::ResNet>(
+            std::vector<int64_t>{2, 2, 2, 2}, num_classes, true);
+    }, py::arg("num_classes") = 1000, "Create ResNet-18");
+
+    models.def("resnet34", [](int64_t num_classes) {
+        return std::make_shared<tenzor::models::ResNet>(
+            std::vector<int64_t>{3, 4, 6, 3}, num_classes, true);
+    }, py::arg("num_classes") = 1000, "Create ResNet-34");
+
+    models.def("resnet50", [](int64_t num_classes) {
+        return std::make_shared<tenzor::models::ResNet>(
+            std::vector<int64_t>{3, 4, 6, 3}, num_classes, false);
+    }, py::arg("num_classes") = 1000, "Create ResNet-50");
+
+    models.def("resnet101", [](int64_t num_classes) {
+        return std::make_shared<tenzor::models::ResNet>(
+            std::vector<int64_t>{3, 4, 23, 3}, num_classes, false);
+    }, py::arg("num_classes") = 1000, "Create ResNet-101");
+
+    models.def("resnet152", [](int64_t num_classes) {
+        return std::make_shared<tenzor::models::ResNet>(
+            std::vector<int64_t>{3, 8, 36, 3}, num_classes, false);
+    }, py::arg("num_classes") = 1000, "Create ResNet-152");
 
     // ========== Model Compression (Pruning + Quantization) ==========
     bind_compression(m);

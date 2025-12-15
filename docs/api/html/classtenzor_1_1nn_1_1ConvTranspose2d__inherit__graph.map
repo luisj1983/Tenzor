@@ -1,5 +1,5 @@
 <map id="tenzor::nn::ConvTranspose2d" name="tenzor::nn::ConvTranspose2d">
 <area shape="rect" id="Node000001" title="Transposed 2D convolution (deconvolution) layer." alt="" coords="5,81,214,109"/>
 <area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="38,5,181,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="112,49,112,81,107,81,107,49"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="111,47,112,82,107,79,108,51"/>
 </map>

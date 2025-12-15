@@ -1,5 +1,5 @@
 <map id="tenzor::optim::Adagrad" name="tenzor::optim::Adagrad">
 <area shape="rect" id="Node000001" title="Adagrad (Adaptive Gradient) optimizer." alt="" coords="10,81,181,109"/>
 <area shape="rect" id="Node000002" href="$classtenzor_1_1optim_1_1Optimizer.html" title="Abstract base class for all optimizers." alt="" coords="5,5,186,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="98,49,98,81,93,81,93,49"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="97,47,98,82,93,80,94,51"/>
 </map>

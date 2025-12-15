@@ -15,7 +15,11 @@ var searchData=
   ['head_5fdim_12',['head_dim',['../classtenzor_1_1nn_1_1MultiheadAttention.html#a5fef4d3fd7740c26573aab3352546809',1,'tenzor::nn::MultiheadAttention']]],
   ['high_5faccuracy_5fqconfig_13',['high_accuracy_qconfig',['../classtenzor_1_1nn_1_1quantization_1_1DefaultQConfigs.html#a59a46e5f072fb16755fc867f10b2db3a',1,'tenzor::nn::quantization::DefaultQConfigs']]],
   ['histogramobserver_14',['HistogramObserver',['../classtenzor_1_1nn_1_1quantization_1_1HistogramObserver.html#a0e66ee281f40e23648907ae48430a245',1,'tenzor::nn::quantization::HistogramObserver']]],
-  ['huber_5floss_15',['huber_loss',['../group__functional__advanced__losses.html#gad2d80db8a198a671b7b129636ea69e9e',1,'tenzor::nn']]],
-  ['huge_5fpatch14_16',['huge_patch14',['../structtenzor_1_1models_1_1ViTConfig.html#a2ff053a8b18856e00ce3ced61555725a',1,'tenzor::models::ViTConfig']]],
-  ['huge_5fpatch16_17',['huge_patch16',['../structtenzor_1_1models_1_1ViTConfig.html#a69d0921b38d83259812b04d63335500c',1,'tenzor::models::ViTConfig']]]
+  ['hooks_5fregistered_15',['hooks_registered',['../classtenzor_1_1optim_1_1ZeROStage2Optimizer.html#a4da5194fa3d695cafdbb160c842ce67e',1,'tenzor::optim::ZeROStage2Optimizer']]],
+  ['hrm_16',['HRM',['../classtenzor_1_1nn_1_1HRM.html#a8ae8770a412c2e34f066b1da636fcc19',1,'tenzor::nn::HRM']]],
+  ['hrm_5fdeep_5fsupervision_5floss_17',['hrm_deep_supervision_loss',['../hrm_8hpp.html#ae946d6b10eba6b5b16b272dc2ce95cb8',1,'tenzor::nn']]],
+  ['hrmblock_18',['HRMBlock',['../classtenzor_1_1nn_1_1HRMBlock.html#ab323818c96a871624e771bcad84a7d05',1,'tenzor::nn::HRMBlock']]],
+  ['huber_5floss_19',['huber_loss',['../group__functional__advanced__losses.html#gad2d80db8a198a671b7b129636ea69e9e',1,'tenzor::nn']]],
+  ['huge_5fpatch14_20',['huge_patch14',['../structtenzor_1_1models_1_1ViTConfig.html#a2ff053a8b18856e00ce3ced61555725a',1,'tenzor::models::ViTConfig']]],
+  ['huge_5fpatch16_21',['huge_patch16',['../structtenzor_1_1models_1_1ViTConfig.html#a69d0921b38d83259812b04d63335500c',1,'tenzor::models::ViTConfig']]]
 ];

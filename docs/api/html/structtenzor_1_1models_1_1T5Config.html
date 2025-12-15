@@ -104,9 +104,9 @@ Collaboration diagram for tenzor::models::T5Config:</div>
 <map name="atenzor_1_1models_1_1T5Config_coll__map" id="atenzor_1_1models_1_1T5Config_coll__map">
 <area shape="rect" title="Configuration for T5 models." alt="" coords="5,200,189,228"/>
 <area shape="rect" title=" " alt="" coords="54,99,140,127"/>
-<area shape="poly" title=" " alt="" coords="100,143,100,199,94,199,94,143"/>
+<area shape="poly" title=" " alt="" coords="99,141,100,200,94,199,95,144"/>
 <area shape="rect" title=" " alt="" coords="28,5,166,50"/>
-<area shape="poly" title=" " alt="" coords="100,65,100,99,94,99,94,65"/>
+<area shape="poly" title=" " alt="" coords="98,63,100,99,94,98,96,68"/>
 </map>
 <center><span class="legend">[<a target="top" href="graph_legend.html">legend</a>]</span></center></div>
 <table class="memberdecls">
@@ -149,6 +149,8 @@ Public Attributes</h2></td></tr>
 <tr class="memdesc:ad9c171eadc052777cf368497d4a898e5"><td class="mdescLeft">&#160;</td><td class="mdescRight">Activation function (T5 uses ReLU).  <br /></td></tr>
 <tr class="memitem:a1e3390045be27fb61d42b534949b2538" id="r_a1e3390045be27fb61d42b534949b2538"><td class="memItemLeft" align="right" valign="top">bool&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a1e3390045be27fb61d42b534949b2538">is_gated_act</a> = false</td></tr>
 <tr class="memdesc:a1e3390045be27fb61d42b534949b2538"><td class="mdescLeft">&#160;</td><td class="mdescRight">Use gated activation (T5.1.1).  <br /></td></tr>
+<tr class="memitem:ae39910cb344a56e6faf1997844a07d6c" id="r_ae39910cb344a56e6faf1997844a07d6c"><td class="memItemLeft" align="right" valign="top">bool&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#ae39910cb344a56e6faf1997844a07d6c">use_checkpoint</a> = false</td></tr>
+<tr class="memdesc:ae39910cb344a56e6faf1997844a07d6c"><td class="mdescLeft">&#160;</td><td class="mdescRight">Enable gradient checkpointing for memory savings.  <br /></td></tr>
 </table>
 <a name="details" id="details"></a><h2 id="header-details" class="groupheader">Detailed Description</h2>
 <div class="textblock"><p>Configuration for T5 models. </p>
@@ -180,7 +182,7 @@ Public Attributes</h2></td></tr>
 
 <p>Create T5-base configuration (220M params). </p>
 
-<p class="definition">Definition at line <a class="el" href="t5_8hpp_source.html#l00064">64</a> of file <a class="el" href="t5_8hpp_source.html">t5.hpp</a>.</p>
+<p class="definition">Definition at line <a class="el" href="t5_8hpp_source.html#l00065">65</a> of file <a class="el" href="t5_8hpp_source.html">t5.hpp</a>.</p>
 
 <p class="reference">References <a class="el" href="t5_8hpp_source.html#l00038">d_ff</a>, <a class="el" href="t5_8hpp_source.html#l00037">d_kv</a>, <a class="el" href="t5_8hpp_source.html#l00036">d_model</a>, <a class="el" href="t5_8hpp_source.html#l00040">num_heads</a>, and <a class="el" href="t5_8hpp_source.html#l00039">num_layers</a>.</p>
 
@@ -211,7 +213,7 @@ Public Attributes</h2></td></tr>
 
 <p>Create T5-large configuration (770M params). </p>
 
-<p class="definition">Definition at line <a class="el" href="t5_8hpp_source.html#l00077">77</a> of file <a class="el" href="t5_8hpp_source.html">t5.hpp</a>.</p>
+<p class="definition">Definition at line <a class="el" href="t5_8hpp_source.html#l00078">78</a> of file <a class="el" href="t5_8hpp_source.html">t5.hpp</a>.</p>
 
 <p class="reference">References <a class="el" href="t5_8hpp_source.html#l00038">d_ff</a>, <a class="el" href="t5_8hpp_source.html#l00037">d_kv</a>, <a class="el" href="t5_8hpp_source.html#l00036">d_model</a>, <a class="el" href="t5_8hpp_source.html#l00040">num_heads</a>, and <a class="el" href="t5_8hpp_source.html#l00039">num_layers</a>.</p>
 
@@ -242,7 +244,7 @@ Public Attributes</h2></td></tr>
 
 <p>Create T5-small configuration (60M params). </p>
 
-<p class="definition">Definition at line <a class="el" href="t5_8hpp_source.html#l00051">51</a> of file <a class="el" href="t5_8hpp_source.html">t5.hpp</a>.</p>
+<p class="definition">Definition at line <a class="el" href="t5_8hpp_source.html#l00052">52</a> of file <a class="el" href="t5_8hpp_source.html">t5.hpp</a>.</p>
 
 <p class="reference">References <a class="el" href="t5_8hpp_source.html#l00038">d_ff</a>, <a class="el" href="t5_8hpp_source.html#l00037">d_kv</a>, <a class="el" href="t5_8hpp_source.html#l00036">d_model</a>, <a class="el" href="t5_8hpp_source.html#l00040">num_heads</a>, and <a class="el" href="t5_8hpp_source.html#l00039">num_layers</a>.</p>
 
@@ -273,7 +275,7 @@ Public Attributes</h2></td></tr>
 
 <p>Create T5-xl configuration (3B params). </p>
 
-<p class="definition">Definition at line <a class="el" href="t5_8hpp_source.html#l00090">90</a> of file <a class="el" href="t5_8hpp_source.html">t5.hpp</a>.</p>
+<p class="definition">Definition at line <a class="el" href="t5_8hpp_source.html#l00091">91</a> of file <a class="el" href="t5_8hpp_source.html">t5.hpp</a>.</p>
 
 <p class="reference">References <a class="el" href="t5_8hpp_source.html#l00038">d_ff</a>, <a class="el" href="t5_8hpp_source.html#l00037">d_kv</a>, <a class="el" href="t5_8hpp_source.html#l00036">d_model</a>, <a class="el" href="t5_8hpp_source.html#l00040">num_heads</a>, and <a class="el" href="t5_8hpp_source.html#l00039">num_layers</a>.</p>
 
@@ -304,7 +306,7 @@ Public Attributes</h2></td></tr>
 
 <p>Create T5-xxl configuration (11B params). </p>
 
-<p class="definition">Definition at line <a class="el" href="t5_8hpp_source.html#l00103">103</a> of file <a class="el" href="t5_8hpp_source.html">t5.hpp</a>.</p>
+<p class="definition">Definition at line <a class="el" href="t5_8hpp_source.html#l00104">104</a> of file <a class="el" href="t5_8hpp_source.html">t5.hpp</a>.</p>
 
 <p class="reference">References <a class="el" href="t5_8hpp_source.html#l00038">d_ff</a>, <a class="el" href="t5_8hpp_source.html#l00037">d_kv</a>, <a class="el" href="t5_8hpp_source.html#l00036">d_model</a>, <a class="el" href="t5_8hpp_source.html#l00040">num_heads</a>, and <a class="el" href="t5_8hpp_source.html#l00039">num_layers</a>.</p>
 
@@ -327,7 +329,7 @@ Public Attributes</h2></td></tr>
 
 <p class="definition">Definition at line <a class="el" href="t5_8hpp_source.html#l00038">38</a> of file <a class="el" href="t5_8hpp_source.html">t5.hpp</a>.</p>
 
-<p class="reference">Referenced by <a class="el" href="t5_8hpp_source.html#l00064">base()</a>, <a class="el" href="t5_8hpp_source.html#l00077">large()</a>, <a class="el" href="t5_8hpp_source.html#l00051">small()</a>, <a class="el" href="t5_8hpp_source.html#l00090">xl()</a>, and <a class="el" href="t5_8hpp_source.html#l00103">xxl()</a>.</p>
+<p class="reference">Referenced by <a class="el" href="t5_8hpp_source.html#l00065">base()</a>, <a class="el" href="t5_8hpp_source.html#l00078">large()</a>, <a class="el" href="t5_8hpp_source.html#l00052">small()</a>, <a class="el" href="t5_8hpp_source.html#l00091">xl()</a>, and <a class="el" href="t5_8hpp_source.html#l00104">xxl()</a>.</p>
 
 </div>
 </div>
@@ -347,7 +349,7 @@ Public Attributes</h2></td></tr>
 
 <p class="definition">Definition at line <a class="el" href="t5_8hpp_source.html#l00037">37</a> of file <a class="el" href="t5_8hpp_source.html">t5.hpp</a>.</p>
 
-<p class="reference">Referenced by <a class="el" href="t5_8hpp_source.html#l00064">base()</a>, <a class="el" href="t5_8hpp_source.html#l00077">large()</a>, <a class="el" href="t5_8hpp_source.html#l00051">small()</a>, <a class="el" href="t5_8hpp_source.html#l00090">xl()</a>, and <a class="el" href="t5_8hpp_source.html#l00103">xxl()</a>.</p>
+<p class="reference">Referenced by <a class="el" href="t5_8hpp_source.html#l00065">base()</a>, <a class="el" href="t5_8hpp_source.html#l00078">large()</a>, <a class="el" href="t5_8hpp_source.html#l00052">small()</a>, <a class="el" href="t5_8hpp_source.html#l00091">xl()</a>, and <a class="el" href="t5_8hpp_source.html#l00104">xxl()</a>.</p>
 
 </div>
 </div>
@@ -367,7 +369,7 @@ Public Attributes</h2></td></tr>
 
 <p class="definition">Definition at line <a class="el" href="t5_8hpp_source.html#l00036">36</a> of file <a class="el" href="t5_8hpp_source.html">t5.hpp</a>.</p>
 
-<p class="reference">Referenced by <a class="el" href="t5_8hpp_source.html#l00064">base()</a>, <a class="el" href="t5_8hpp_source.html#l00077">large()</a>, <a class="el" href="t5_8hpp_source.html#l00051">small()</a>, <a class="el" href="t5_8hpp_source.html#l00090">xl()</a>, and <a class="el" href="t5_8hpp_source.html#l00103">xxl()</a>.</p>
+<p class="reference">Referenced by <a class="el" href="t5_8hpp_source.html#l00065">base()</a>, <a class="el" href="t5_8hpp_source.html#l00078">large()</a>, <a class="el" href="t5_8hpp_source.html#l00052">small()</a>, <a class="el" href="t5_8hpp_source.html#l00091">xl()</a>, and <a class="el" href="t5_8hpp_source.html#l00104">xxl()</a>.</p>
 
 </div>
 </div>
@@ -459,7 +461,7 @@ Public Attributes</h2></td></tr>
 
 <p class="definition">Definition at line <a class="el" href="t5_8hpp_source.html#l00040">40</a> of file <a class="el" href="t5_8hpp_source.html">t5.hpp</a>.</p>
 
-<p class="reference">Referenced by <a class="el" href="t5_8hpp_source.html#l00064">base()</a>, <a class="el" href="t5_8hpp_source.html#l00077">large()</a>, <a class="el" href="t5_8hpp_source.html#l00051">small()</a>, <a class="el" href="t5_8hpp_source.html#l00090">xl()</a>, and <a class="el" href="t5_8hpp_source.html#l00103">xxl()</a>.</p>
+<p class="reference">Referenced by <a class="el" href="t5_8hpp_source.html#l00065">base()</a>, <a class="el" href="t5_8hpp_source.html#l00078">large()</a>, <a class="el" href="t5_8hpp_source.html#l00052">small()</a>, <a class="el" href="t5_8hpp_source.html#l00091">xl()</a>, and <a class="el" href="t5_8hpp_source.html#l00104">xxl()</a>.</p>
 
 </div>
 </div>
@@ -479,7 +481,7 @@ Public Attributes</h2></td></tr>
 
 <p class="definition">Definition at line <a class="el" href="t5_8hpp_source.html#l00039">39</a> of file <a class="el" href="t5_8hpp_source.html">t5.hpp</a>.</p>
 
-<p class="reference">Referenced by <a class="el" href="t5_8hpp_source.html#l00064">base()</a>, <a class="el" href="t5_8hpp_source.html#l00077">large()</a>, <a class="el" href="t5_8hpp_source.html#l00051">small()</a>, <a class="el" href="t5_8hpp_source.html#l00090">xl()</a>, and <a class="el" href="t5_8hpp_source.html#l00103">xxl()</a>.</p>
+<p class="reference">Referenced by <a class="el" href="t5_8hpp_source.html#l00065">base()</a>, <a class="el" href="t5_8hpp_source.html#l00078">large()</a>, <a class="el" href="t5_8hpp_source.html#l00052">small()</a>, <a class="el" href="t5_8hpp_source.html#l00091">xl()</a>, and <a class="el" href="t5_8hpp_source.html#l00104">xxl()</a>.</p>
 
 </div>
 </div>
@@ -516,6 +518,24 @@ Public Attributes</h2></td></tr>
 <p>Number of relative position buckets. </p>
 
 <p class="definition">Definition at line <a class="el" href="t5_8hpp_source.html#l00041">41</a> of file <a class="el" href="t5_8hpp_source.html">t5.hpp</a>.</p>
+
+</div>
+</div>
+<a id="ae39910cb344a56e6faf1997844a07d6c" name="ae39910cb344a56e6faf1997844a07d6c"></a>
+<h2 class="memtitle"><span class="permalink"><a href="#ae39910cb344a56e6faf1997844a07d6c">&#9670;&#160;</a></span>use_checkpoint</h2>
+
+<div class="memitem">
+<div class="memproto">
+      <table class="memname">
+        <tr>
+          <td class="memname">bool tenzor::models::T5Config::use_checkpoint = false</td>
+        </tr>
+      </table>
+</div><div class="memdoc">
+
+<p>Enable gradient checkpointing for memory savings. </p>
+
+<p class="definition">Definition at line <a class="el" href="t5_8hpp_source.html#l00047">47</a> of file <a class="el" href="t5_8hpp_source.html">t5.hpp</a>.</p>
 
 </div>
 </div>

@@ -1,0 +1,5 @@
+<map id="tenzor::nn::RMSNorm" name="tenzor::nn::RMSNorm">
+<area shape="rect" id="Node000001" title="RMS Layer Normalization (used in modern transformers)." alt="" coords="5,81,165,109"/>
+<area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="14,5,156,33"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="87,47,87,81,83,80,83,51"/>
+</map>

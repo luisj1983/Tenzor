@@ -1,0 +1,9 @@
+<map id="tenzor::onnx::ONNXImportValueInfo" name="tenzor::onnx::ONNXImportValueInfo">
+<area shape="rect" id="Node000001" title=" " alt="" coords="53,200,245,245"/>
+<area shape="rect" id="Node000002" title=" " alt="" coords="31,99,118,127"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="94,138,137,199,131,200,91,142"/>
+<area shape="rect" id="Node000003" title=" " alt="" coords="5,5,144,50"/>
+<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="75,63,77,99,72,98,74,68"/>
+<area shape="rect" id="Node000004" title=" " alt="" coords="141,99,306,127"/>
+<area shape="poly" id="edge3_Node000001_Node000004" title=" " alt="" coords="208,139,166,201,162,197,203,141"/>
+</map>

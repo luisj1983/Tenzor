@@ -1,5 +1,5 @@
 <map id="tenzor::jit::CommonSubexpressionEliminationPass" name="tenzor::jit::CommonSubexpressionEliminationPass">
 <area shape="rect" id="Node000001" title="Common subexpression elimination pass." alt="" coords="5,81,251,126"/>
 <area shape="rect" id="Node000002" href="$classtenzor_1_1jit_1_1Pass.html" title="Base class for optimization passes." alt="" coords="68,5,188,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="131,49,131,80,125,80,125,49"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="130,47,130,81,126,79,126,51"/>
 </map>

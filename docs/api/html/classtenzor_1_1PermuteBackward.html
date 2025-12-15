@@ -104,9 +104,9 @@ Inheritance diagram for tenzor::PermuteBackward:</div>
 <map name="atenzor_1_1PermuteBackward_inherit__map" id="atenzor_1_1PermuteBackward_inherit__map">
 <area shape="rect" title="Permute gradient function." alt="" coords="5,174,195,201"/>
 <area shape="rect" href="classtenzor_1_1Function.html" title="Base class for autograd differentiable functions." alt="" coords="37,98,163,126"/>
-<area shape="poly" title=" " alt="" coords="103,141,103,173,97,173,97,141"/>
+<area shape="poly" title=" " alt="" coords="102,140,102,174,98,172,98,143"/>
 <area shape="rect" title=" " alt="" coords="12,5,188,50"/>
-<area shape="poly" title=" " alt="" coords="103,66,103,97,97,97,97,66"/>
+<area shape="poly" title=" " alt="" coords="101,63,103,98,97,97,99,68"/>
 </map>
 <center><span class="legend">[<a target="top" href="graph_legend.html">legend</a>]</span></center></div>
 <div class="dynheader">
@@ -116,22 +116,22 @@ Collaboration diagram for tenzor::PermuteBackward:</div>
 <map name="atenzor_1_1PermuteBackward_coll__map" id="atenzor_1_1PermuteBackward_coll__map">
 <area shape="rect" title="Permute gradient function." alt="" coords="783,23,973,51"/>
 <area shape="rect" href="classtenzor_1_1Function.html" title="Base class for autograd differentiable functions." alt="" coords="584,83,709,111"/>
-<area shape="poly" title=" " alt="" coords="698,75,733,64,795,49,796,54,734,69,700,80"/>
+<area shape="poly" title=" " alt="" coords="698,75,733,64,793,52,798,51,734,69,700,80"/>
 <area shape="rect" title=" " alt="" coords="791,75,965,119"/>
-<area shape="poly" title=" " alt="" coords="725,94,790,94,790,100,725,100"/>
+<area shape="poly" title=" " alt="" coords="725,94,793,97,788,97,725,100"/>
 <area shape="rect" title=" " alt="" coords="246,5,421,50"/>
-<area shape="poly" title=" " alt="" coords="437,39,561,64,610,80,609,85,559,69,436,44"/>
+<area shape="poly" title=" " alt="" coords="436,39,561,64,612,83,607,83,559,69,436,44"/>
 <area shape="rect" title=" " alt="" coords="260,75,406,119"/>
-<area shape="poly" title=" " alt="" coords="422,94,584,94,584,100,422,100"/>
+<area shape="poly" title=" " alt="" coords="422,94,586,97,581,97,422,100"/>
 <area shape="rect" href="classtenzor_1_1Tensor.html" title="Multi&#45;dimensional array with automatic differentiation support." alt="" coords="11,83,123,111"/>
-<area shape="poly" title=" " alt="" coords="139,94,260,94,260,100,139,100"/>
+<area shape="poly" title=" " alt="" coords="138,94,262,95,258,99,139,100"/>
 <area shape="rect" title=" " alt="" coords="1090,125,1285,170"/>
-<area shape="poly" title=" " alt="" coords="1075,166,1008,172,935,174,858,170,783,159,721,139,671,114,674,109,723,134,784,154,858,165,935,168,1008,166,1074,161"/>
-<area shape="poly" title=" " alt="" coords="981,111,1090,129,1089,134,980,116"/>
+<area shape="poly" title=" " alt="" coords="1077,164,1008,172,935,174,858,170,783,159,721,139,672,114,673,109,723,134,784,154,858,165,935,168,1008,166,1072,164"/>
+<area shape="poly" title=" " alt="" coords="980,111,1092,132,1086,132,980,116"/>
 <area shape="rect" title=" " alt="" coords="260,144,406,189"/>
-<area shape="poly" title=" " alt="" coords="422,152,489,140,559,125,608,109,610,114,561,130,490,146,422,157"/>
+<area shape="poly" title=" " alt="" coords="422,152,489,140,559,125,607,112,612,111,561,130,490,146,422,157"/>
 <area shape="rect" href="classtenzor_1_1Variable.html" title="Gradient&#45;enabled tensor wrapper for automatic differentiation." alt="" coords="5,152,129,180"/>
-<area shape="poly" title=" " alt="" coords="144,164,260,164,260,169,144,169"/>
+<area shape="poly" title=" " alt="" coords="144,164,262,165,257,167,144,169"/>
 </map>
 <center><span class="legend">[<a target="top" href="graph_legend.html">legend</a>]</span></center></div>
 <table class="memberdecls">
@@ -175,7 +175,7 @@ Additional Inherited Members</h2></td></tr>
 <div class="fragment"><div class="line">Variable x(<a class="code hl_class" href="classtenzor_1_1Tensor.html">Tensor</a>({2, 3, 4}, <a class="code hl_enumvalue" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="code hl_function" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()), <span class="keyword">true</span>);</div>
 <div class="line"><a class="code hl_class" href="classtenzor_1_1Variable.html">Variable</a> y = <a class="code hl_function" href="namespacetenzor.html#ababeae6346a43a4d6e47bfa76236b12d">permute</a>(x, {2, 0, 1});  <span class="comment">// Forward: {2, 3, 4} -&gt; {4, 2, 3}</span></div>
 <div class="line"><span class="comment">// Backward: gradient permuted from {4, 2, 3} back to {2, 3, 4}</span></div>
-<div class="ttc" id="aclasstenzor_1_1Tensor_html"><div class="ttname"><a href="classtenzor_1_1Tensor.html">tenzor::Tensor</a></div><div class="ttdoc">Multi-dimensional array with automatic differentiation support.</div><div class="ttdef"><b>Definition</b> <a href="tensor_8hpp_source.html#l00075">tensor.hpp:75</a></div></div>
+<div class="ttc" id="aclasstenzor_1_1Tensor_html"><div class="ttname"><a href="classtenzor_1_1Tensor.html">tenzor::Tensor</a></div><div class="ttdoc">Multi-dimensional array with automatic differentiation support.</div><div class="ttdef"><b>Definition</b> <a href="tensor_8hpp_source.html#l00078">tensor.hpp:78</a></div></div>
 <div class="ttc" id="aclasstenzor_1_1Variable_html"><div class="ttname"><a href="classtenzor_1_1Variable.html">tenzor::Variable</a></div><div class="ttdoc">Gradient-enabled tensor wrapper for automatic differentiation.</div><div class="ttdef"><b>Definition</b> <a href="variable_8hpp_source.html#l00108">variable.hpp:108</a></div></div>
 <div class="ttc" id="anamespacetenzor_html_a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204"><div class="ttname"><a href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">tenzor::DType::Float32</a></div><div class="ttdeci">@ Float32</div><div class="ttdoc">32-bit floating point (float)</div><div class="ttdef"><b>Definition</b> <a href="dtype_8hpp_source.html#l00029">dtype.hpp:29</a></div></div>
 <div class="ttc" id="anamespacetenzor_html_ababeae6346a43a4d6e47bfa76236b12d"><div class="ttname"><a href="namespacetenzor.html#ababeae6346a43a4d6e47bfa76236b12d">tenzor::permute</a></div><div class="ttdeci">auto permute(const Variable &amp;input, const std::vector&lt; int64_t &gt; &amp;dims) -&gt; Variable</div><div class="ttdoc">Permute dimensions with gradient tracking.</div></div>

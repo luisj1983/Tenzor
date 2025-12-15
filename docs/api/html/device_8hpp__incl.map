@@ -1,9 +1,9 @@
 <map id="include/tenzor/core/device.hpp" name="include/tenzor/core/device.hpp">
 <area shape="rect" id="Node000001" title="Device specification and management for tensors." alt="" coords="51,5,196,50"/>
 <area shape="rect" id="Node000002" title=" " alt="" coords="5,98,71,126"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="103,52,65,89,61,85,99,48"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="103,49,65,89,61,85,99,52"/>
 <area shape="rect" id="Node000003" title=" " alt="" coords="94,98,152,126"/>
-<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="126,50,126,82,121,82,121,50"/>
+<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="125,48,126,83,121,81,122,52"/>
 <area shape="rect" id="Node000004" title=" " alt="" coords="176,98,273,126"/>
-<area shape="poly" id="edge3_Node000001_Node000004" title=" " alt="" coords="152,48,198,86,195,90,148,52"/>
+<area shape="poly" id="edge3_Node000001_Node000004" title=" " alt="" coords="151,48,199,88,194,88,149,53"/>
 </map>

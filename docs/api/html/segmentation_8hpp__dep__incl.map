@@ -1,5 +1,5 @@
 <map id="include/tenzor/nn/layers/segmentation.hpp" name="include/tenzor/nn/layers/segmentation.hpp">
 <area shape="rect" id="Node000001" title="Specialized layers for semantic segmentation." alt="" coords="5,5,183,50"/>
 <area shape="rect" id="Node000002" href="$deeplabv3plus_8hpp.html" title="DeepLab v3+ &#45; State&#45;of&#45;the&#45;art semantic segmentation." alt="" coords="11,98,177,143"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="97,66,97,98,91,98,91,66"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="96,64,97,99,91,97,92,68"/>
 </map>

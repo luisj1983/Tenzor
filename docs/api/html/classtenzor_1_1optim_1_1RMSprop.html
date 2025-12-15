@@ -104,7 +104,7 @@ Inheritance diagram for tenzor::optim::RMSprop:</div>
 <map name="atenzor_1_1optim_1_1RMSprop_inherit__map" id="atenzor_1_1optim_1_1RMSprop_inherit__map">
 <area shape="rect" title="RMSprop (Root Mean Square Propagation) optimizer." alt="" coords="8,81,183,109"/>
 <area shape="rect" href="classtenzor_1_1optim_1_1Optimizer.html" title="Abstract base class for all optimizers." alt="" coords="5,5,186,33"/>
-<area shape="poly" title=" " alt="" coords="98,49,98,81,93,81,93,49"/>
+<area shape="poly" title=" " alt="" coords="97,47,98,82,93,80,94,51"/>
 </map>
 <center><span class="legend">[<a target="top" href="graph_legend.html">legend</a>]</span></center></div>
 <div class="dynheader">
@@ -114,13 +114,13 @@ Collaboration diagram for tenzor::optim::RMSprop:</div>
 <map name="atenzor_1_1optim_1_1RMSprop_coll__map" id="atenzor_1_1optim_1_1RMSprop_coll__map">
 <area shape="rect" title="RMSprop (Root Mean Square Propagation) optimizer." alt="" coords="15,418,189,446"/>
 <area shape="rect" href="classtenzor_1_1optim_1_1Optimizer.html" title="Abstract base class for all optimizers." alt="" coords="12,341,192,369"/>
-<area shape="poly" title=" " alt="" coords="105,384,105,418,99,418,99,384"/>
+<area shape="poly" title=" " alt="" coords="104,383,104,419,100,417,100,386"/>
 <area shape="rect" title=" " alt="" coords="5,224,199,268"/>
-<area shape="poly" title=" " alt="" coords="105,284,105,341,99,341,99,284"/>
+<area shape="poly" title=" " alt="" coords="103,282,105,342,99,340,101,286"/>
 <area shape="rect" title=" " alt="" coords="15,106,189,151"/>
-<area shape="poly" title=" " alt="" coords="105,167,105,223,99,223,99,167"/>
+<area shape="poly" title=" " alt="" coords="103,164,105,224,99,223,101,169"/>
 <area shape="rect" href="classtenzor_1_1Variable.html" title="Gradient&#45;enabled tensor wrapper for automatic differentiation." alt="" coords="40,5,164,33"/>
-<area shape="poly" title=" " alt="" coords="105,49,105,105,99,105,99,49"/>
+<area shape="poly" title=" " alt="" coords="102,46,105,106,99,105,102,51"/>
 </map>
 <center><span class="legend">[<a target="top" href="graph_legend.html">legend</a>]</span></center></div>
 <table class="memberdecls">
@@ -164,26 +164,26 @@ Additional Inherited Members</h2></td></tr>
 <div class="textblock"><p><a class="el" href="classtenzor_1_1optim_1_1RMSprop.html" title="RMSprop (Root Mean Square Propagation) optimizer.">RMSprop</a> (Root Mean Square Propagation) optimizer. </p>
 <p>Adapts learning rates for each parameter by dividing by a running average of recent gradient magnitudes. Addresses <a class="el" href="classtenzor_1_1optim_1_1Adagrad.html" title="Adagrad (Adaptive Gradient) optimizer.">Adagrad</a>'s monotonically decreasing learning rates.</p>
 <p><b>Standard <a class="el" href="classtenzor_1_1optim_1_1RMSprop.html" title="RMSprop (Root Mean Square Propagation) optimizer.">RMSprop</a> Update:</b>    </p><p class="formulaDsp">
-<picture><source srcset="form_52_dark.png" media="(prefers-color-scheme: dark)"/><img class="formulaDsp" alt="\&zwj;[v_t = \alpha v_{t-1} + (1 - \alpha) g_t^2 \\
-\theta_t = \theta_{t-1} - \frac{\eta}{\sqrt{v_t} + \epsilon} g_t
-\&zwj;]" src="form_52.png"/></picture>
-</p>
-<p><b>With Momentum:</b>     </p><p class="formulaDsp">
 <picture><source srcset="form_53_dark.png" media="(prefers-color-scheme: dark)"/><img class="formulaDsp" alt="\&zwj;[v_t = \alpha v_{t-1} + (1 - \alpha) g_t^2 \\
-b_t = \rho b_{t-1} + \frac{g_t}{\sqrt{v_t} + \epsilon} \\
-\theta_t = \theta_{t-1} - \eta b_t
+\theta_t = \theta_{t-1} - \frac{\eta}{\sqrt{v_t} + \epsilon} g_t
 \&zwj;]" src="form_53.png"/></picture>
 </p>
-<p><b>Centered <a class="el" href="classtenzor_1_1optim_1_1RMSprop.html" title="RMSprop (Root Mean Square Propagation) optimizer.">RMSprop</a> (Reduces Variance):</b>     </p><p class="formulaDsp">
+<p><b>With Momentum:</b>     </p><p class="formulaDsp">
 <picture><source srcset="form_54_dark.png" media="(prefers-color-scheme: dark)"/><img class="formulaDsp" alt="\&zwj;[v_t = \alpha v_{t-1} + (1 - \alpha) g_t^2 \\
+b_t = \rho b_{t-1} + \frac{g_t}{\sqrt{v_t} + \epsilon} \\
+\theta_t = \theta_{t-1} - \eta b_t
+\&zwj;]" src="form_54.png"/></picture>
+</p>
+<p><b>Centered <a class="el" href="classtenzor_1_1optim_1_1RMSprop.html" title="RMSprop (Root Mean Square Propagation) optimizer.">RMSprop</a> (Reduces Variance):</b>     </p><p class="formulaDsp">
+<picture><source srcset="form_55_dark.png" media="(prefers-color-scheme: dark)"/><img class="formulaDsp" alt="\&zwj;[v_t = \alpha v_{t-1} + (1 - \alpha) g_t^2 \\
 m_t = \alpha m_{t-1} + (1 - \alpha) g_t \\
 \theta_t = \theta_{t-1} - \frac{\eta}{\sqrt{v_t - m_t^2} + \epsilon} g_t
-\&zwj;]" src="form_54.png"/></picture>
+\&zwj;]" src="form_55.png"/></picture>
 </p>
 <p>where:</p><ul>
 <li><picture><source srcset="form_49_dark.png" media="(prefers-color-scheme: dark)"/><img class="formulaInl" alt="$v_t$" src="form_49.png"/></picture>: Moving average of squared gradients (second moment)</li>
 <li><picture><source srcset="form_48_dark.png" media="(prefers-color-scheme: dark)"/><img class="formulaInl" alt="$m_t$" src="form_48.png"/></picture>: Moving average of gradients (first moment, if centered)</li>
-<li><picture><source srcset="form_55_dark.png" media="(prefers-color-scheme: dark)"/><img class="formulaInl" alt="$b_t$" src="form_55.png"/></picture>: Momentum buffer</li>
+<li><picture><source srcset="form_56_dark.png" media="(prefers-color-scheme: dark)"/><img class="formulaInl" alt="$b_t$" src="form_56.png"/></picture>: Momentum buffer</li>
 <li><picture><source srcset="form_2_dark.png" media="(prefers-color-scheme: dark)"/><img class="formulaInl" alt="$\alpha$" src="form_2.png"/></picture>: Decay rate for moving average (typical: 0.99)</li>
 <li><picture><source srcset="form_40_dark.png" media="(prefers-color-scheme: dark)"/><img class="formulaInl" alt="$\rho$" src="form_40.png"/></picture>: Momentum coefficient (typical: 0.9)</li>
 <li><picture><source srcset="form_42_dark.png" media="(prefers-color-scheme: dark)"/><img class="formulaInl" alt="$\eta$" src="form_42.png"/></picture>: Learning rate</li>

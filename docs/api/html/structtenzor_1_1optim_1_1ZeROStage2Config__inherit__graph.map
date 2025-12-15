@@ -1,0 +1,7 @@
+<map id="tenzor::optim::ZeROStage2Config" name="tenzor::optim::ZeROStage2Config">
+<area shape="rect" id="Node000001" title="Configuration for ZeRO Stage 2 Optimizer." alt="" coords="8,98,205,143"/>
+<area shape="rect" id="Node000003" href="$structtenzor_1_1optim_1_1Stage3Config.html" title="Configuration for ZeRO Stage 3 Optimizer." alt="" coords="5,191,208,218"/>
+<area shape="poly" id="edge2_Node000001_Node000003" title=" " alt="" coords="108,157,109,191,104,189,105,160"/>
+<area shape="rect" id="Node000002" href="$structtenzor_1_1optim_1_1ZeROStage1Config.html" title="Configuration for ZeRO Stage 1 Optimizer." alt="" coords="8,5,205,50"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="108,63,109,98,104,97,105,68"/>
+</map>

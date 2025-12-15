@@ -102,53 +102,77 @@ $(function(){initNavTree('creation_8hpp.html','',''); });
 <code>#include &quot;<a class="el" href="tensor_8hpp_source.html">../core/tensor.hpp</a>&quot;</code><br />
 <code>#include &quot;<a class="el" href="dtype_8hpp_source.html">../core/dtype.hpp</a>&quot;</code><br />
 <code>#include &quot;<a class="el" href="device_8hpp_source.html">../core/device.hpp</a>&quot;</code><br />
+<code>#include &quot;<a class="el" href="loader_8hpp_source.html">../backend/loader.hpp</a>&quot;</code><br />
 </div><div class="textblock"><div class="dynheader">
 Include dependency graph for creation.hpp:</div>
 <div class="dyncontent">
 <div class="center"><img src="creation_8hpp__incl.png" border="0" usemap="#ainclude_2tenzor_2ops_2creation_8hpp" loading="lazy" alt=""/></div>
 <map name="ainclude_2tenzor_2ops_2creation_8hpp" id="ainclude_2tenzor_2ops_2creation_8hpp">
-<area shape="rect" title="Tensor creation and initialization operations." alt="" coords="434,5,575,50"/>
-<area shape="rect" title=" " alt="" coords="5,174,68,201"/>
-<area shape="poly" title=" " alt="" coords="435,45,336,68,228,101,145,135,75,169,73,164,143,130,226,95,334,63,433,40"/>
-<area shape="rect" title=" " alt="" coords="91,174,166,201"/>
-<area shape="poly" title=" " alt="" coords="435,50,362,72,287,100,220,134,163,167,160,163,217,129,285,96,361,67,433,45"/>
-<area shape="rect" title=" " alt="" coords="702,98,768,126"/>
-<area shape="poly" title=" " alt="" coords="567,48,689,91,687,96,565,53"/>
-<area shape="rect" title=" " alt="" coords="699,249,790,277"/>
-<area shape="poly" title=" " alt="" coords="529,49,723,237,719,241,525,52"/>
-<area shape="rect" href="tensor_8hpp.html" title="Core tensor class for multi&#45;dimensional array operations." alt="" coords="298,98,431,126"/>
-<area shape="poly" title=" " alt="" coords="469,53,401,92,398,88,466,48"/>
-<area shape="rect" href="dtype_8hpp.html" title="Data type system for Tenzor tensors." alt="" coords="541,174,628,201"/>
-<area shape="poly" title=" " alt="" coords="518,49,573,158,569,161,513,51"/>
-<area shape="rect" href="device_8hpp.html" title="Device specification and management for tensors." alt="" coords="380,249,472,277"/>
-<area shape="poly" title=" " alt="" coords="501,51,452,202,440,236,435,234,447,200,496,50"/>
-<area shape="poly" title=" " alt="" coords="298,129,83,176,82,170,297,123"/>
-<area shape="poly" title=" " alt="" coords="323,129,181,173,180,168,322,124"/>
-<area shape="rect" title=" " alt="" coords="94,249,171,277"/>
-<area shape="poly" title=" " alt="" coords="327,129,280,149,230,176,189,208,156,240,152,236,186,204,227,171,277,144,325,124"/>
-<area shape="rect" title=" " alt="" coords="364,174,416,201"/>
-<area shape="poly" title=" " alt="" coords="372,125,383,158,378,160,367,127"/>
-<area shape="poly" title=" " alt="" coords="405,124,532,166,530,171,403,129"/>
-<area shape="poly" title=" " alt="" coords="387,124,411,145,431,173,437,204,435,235,430,234,432,205,426,175,407,148,384,128"/>
-<area shape="rect" href="storage_8hpp.html" title="Memory storage abstraction for tensor data." alt="" coords="241,174,339,201"/>
-<area shape="poly" title=" " alt="" coords="353,128,316,164,312,161,349,124"/>
-<area shape="poly" title=" " alt="" coords="614,199,703,240,701,245,612,204"/>
-<area shape="rect" title=" " alt="" coords="501,325,566,353"/>
-<area shape="poly" title=" " alt="" coords="590,202,594,236,593,257,588,278,577,299,563,316,558,313,573,296,583,276,588,257,589,237,585,202"/>
-<area shape="rect" title=" " alt="" coords="602,325,698,353"/>
-<area shape="poly" title=" " alt="" coords="593,200,640,309,635,312,588,203"/>
-<area shape="rect" title=" " alt="" coords="496,249,574,277"/>
-<area shape="poly" title=" " alt="" coords="578,203,555,238,550,235,573,200"/>
-<area shape="poly" title=" " alt="" coords="447,275,504,314,501,318,444,280"/>
-<area shape="poly" title=" " alt="" coords="467,275,597,317,595,322,465,280"/>
-<area shape="rect" title=" " alt="" coords="397,325,455,353"/>
-<area shape="poly" title=" " alt="" coords="428,278,428,309,423,309,423,278"/>
-<area shape="poly" title=" " alt="" coords="263,204,175,245,173,240,261,199"/>
-<area shape="poly" title=" " alt="" coords="315,200,390,239,387,244,313,204"/>
-<area shape="rect" title=" " alt="" coords="195,249,264,277"/>
-<area shape="poly" title=" " alt="" coords="281,204,252,239,248,235,277,200"/>
-<area shape="rect" title=" " alt="" coords="289,249,355,277"/>
-<area shape="poly" title=" " alt="" coords="298,201,313,234,308,236,293,203"/>
+<area shape="rect" title="Tensor creation and initialization operations." alt="" coords="184,5,324,50"/>
+<area shape="rect" title=" " alt="" coords="770,325,833,353"/>
+<area shape="poly" title=" " alt="" coords="293,48,767,315,763,318,291,53"/>
+<area shape="rect" title=" " alt="" coords="276,325,351,353"/>
+<area shape="poly" title=" " alt="" coords="260,48,311,310,306,310,256,52"/>
+<area shape="rect" title=" " alt="" coords="125,98,190,126"/>
+<area shape="poly" title=" " alt="" coords="227,53,187,89,183,86,230,48"/>
+<area shape="rect" title=" " alt="" coords="5,401,97,428"/>
+<area shape="poly" title=" " alt="" coords="181,50,135,71,88,100,68,118,53,138,43,161,39,186,39,264,43,329,49,385,44,385,37,330,34,265,34,186,37,159,48,135,64,114,84,95,132,66,185,46"/>
+<area shape="rect" href="tensor_8hpp.html" title="Core tensor class for multi&#45;dimensional array operations." alt="" coords="316,249,450,277"/>
+<area shape="poly" title=" " alt="" coords="268,48,300,97,373,235,367,235,295,99,268,53"/>
+<area shape="rect" href="dtype_8hpp.html" title="Data type system for Tenzor tensors." alt="" coords="105,325,192,353"/>
+<area shape="poly" title=" " alt="" coords="181,48,145,69,128,83,115,99,103,125,97,153,97,183,101,212,117,267,136,311,131,311,112,268,96,213,92,183,92,153,98,124,110,97,124,79,142,64,185,44"/>
+<area shape="rect" href="device_8hpp.html" title="Device specification and management for tensors." alt="" coords="396,401,488,428"/>
+<area shape="poly" title=" " alt="" coords="249,48,238,111,231,186,231,264,232,292,237,313,248,331,266,351,292,370,321,385,383,405,377,406,319,390,289,375,263,355,244,334,232,315,227,292,226,265,226,186,233,111,247,53"/>
+<area shape="rect" href="loader_8hpp.html" title="Dynamic backend loading and management system." alt="" coords="839,98,999,126"/>
+<area shape="poly" title=" " alt="" coords="324,35,825,97,822,101,324,40"/>
+<area shape="poly" title=" " alt="" coords="450,273,757,324,753,326,450,278"/>
+<area shape="poly" title=" " alt="" coords="373,276,338,316,335,311,368,279"/>
+<area shape="rect" title=" " alt="" coords="820,401,896,428"/>
+<area shape="poly" title=" " alt="" coords="450,273,538,293,632,323,658,336,683,350,746,375,807,398,802,397,744,380,681,355,655,341,630,327,537,298,450,279"/>
+<area shape="rect" title=" " alt="" coords="694,325,746,353"/>
+<area shape="poly" title=" " alt="" coords="450,274,676,322,682,326,676,326,674,328,450,280"/>
+<area shape="poly" title=" " alt="" coords="339,279,206,322,203,318,343,276"/>
+<area shape="poly" title=" " alt="" coords="389,275,434,387,428,386,387,279"/>
+<area shape="rect" href="storage_8hpp.html" title="Memory storage abstraction for tensor data." alt="" coords="520,325,619,353"/>
+<area shape="poly" title=" " alt="" coords="417,275,525,319,520,320,416,280"/>
+<area shape="poly" title=" " alt="" coords="129,355,82,393,78,389,132,351"/>
+<area shape="rect" title=" " alt="" coords="210,476,276,504"/>
+<area shape="poly" title=" " alt="" coords="151,351,159,388,176,427,193,447,213,467,208,466,189,451,171,430,154,389,149,355"/>
+<area shape="rect" title=" " alt="" coords="394,476,490,504"/>
+<area shape="poly" title=" " alt="" coords="177,351,276,398,407,468,402,469,274,403,176,356"/>
+<area shape="rect" title=" " alt="" coords="186,401,263,428"/>
+<area shape="poly" title=" " alt="" coords="163,351,203,390,197,390,161,356"/>
+<area shape="poly" title=" " alt="" coords="409,428,291,474,290,469,404,429"/>
+<area shape="poly" title=" " alt="" coords="444,427,444,462,440,459,440,431"/>
+<area shape="rect" title=" " alt="" coords="1119,476,1178,504"/>
+<area shape="poly" title=" " alt="" coords="488,422,509,426,681,447,851,464,1107,486,1102,486,851,469,681,452,508,431,488,428"/>
+<area shape="poly" title=" " alt="" coords="619,350,807,399,801,400,619,355"/>
+<area shape="poly" title=" " alt="" coords="549,352,478,395,476,390,544,354"/>
+<area shape="rect" title=" " alt="" coords="611,401,680,428"/>
+<area shape="poly" title=" " alt="" coords="584,351,624,390,619,389,582,356"/>
+<area shape="rect" title=" " alt="" coords="520,401,587,428"/>
+<area shape="poly" title=" " alt="" coords="569,351,562,387,558,384,565,355"/>
+<area shape="poly" title=" " alt="" coords="917,124,907,174,907,201,915,224,923,249,926,264,923,278,908,296,889,311,848,329,847,324,886,306,904,293,918,276,921,264,918,250,910,226,902,202,902,173,913,128"/>
+<area shape="poly" title=" " alt="" coords="998,115,1051,124,1097,140,1115,151,1127,165,1131,182,1125,202,1105,237,1080,269,1020,324,958,366,903,396,901,391,955,362,1017,320,1076,266,1101,234,1121,200,1125,182,1122,168,1111,155,1095,145,1050,129,999,121"/>
+<area shape="poly" title=" " alt="" coords="999,119,1066,134,1100,146,1131,160,1159,179,1182,202,1196,229,1202,262,1202,340,1198,375,1189,408,1165,465,1162,460,1184,406,1193,374,1196,340,1196,262,1191,231,1177,205,1156,183,1129,165,1098,150,1065,139,999,124"/>
+<area shape="rect" title=" " alt="" coords="916,174,1005,201"/>
+<area shape="poly" title=" " alt="" coords="927,124,948,161,943,159,925,129"/>
+<area shape="rect" title=" " alt="" coords="1029,174,1110,201"/>
+<area shape="poly" title=" " alt="" coords="946,124,1032,167,1027,167,946,129"/>
+<area shape="rect" title=" " alt="" coords="473,249,597,277"/>
+<area shape="poly" title=" " alt="" coords="868,127,801,150,724,176,643,211,574,244,572,240,641,206,722,171,799,144,873,125"/>
+<area shape="rect" href="backend_8hpp.html" title="Abstract backend interface for device&#45;specific implementations." alt="" coords="735,174,839,201"/>
+<area shape="poly" title=" " alt="" coords="898,125,825,168,823,163,893,127"/>
+<area shape="poly" title=" " alt="" coords="790,199,801,311,797,308,787,204"/>
+<area shape="poly" title=" " alt="" coords="733,200,466,250,465,244,737,197"/>
+<area shape="poly" title=" " alt="" coords="839,196,885,214,906,229,923,248,931,266,933,286,924,325,905,361,881,391,879,387,900,358,919,323,928,286,926,268,918,251,902,233,883,219,839,201"/>
+<area shape="poly" title=" " alt="" coords="783,200,734,312,731,309,779,203"/>
+<area shape="poly" title=" " alt="" coords="839,191,868,198,898,209,925,225,946,248,961,273,970,298,972,322,970,345,962,368,949,390,910,430,879,448,837,461,727,479,608,488,505,491,505,486,607,483,726,474,835,456,877,443,907,426,945,386,957,366,964,344,967,322,964,299,956,275,942,251,921,229,895,214,867,203,839,196"/>
+<area shape="poly" title=" " alt="" coords="763,201,609,279,557,300,535,310,510,327,481,357,458,389,455,385,477,354,507,323,533,305,555,295,607,275,759,203"/>
+<area shape="poly" title=" " alt="" coords="839,194,906,213,941,228,973,247,1002,271,1029,298,1077,358,1113,415,1138,464,1133,461,1109,418,1072,361,1025,302,998,275,969,252,938,233,904,218,839,200"/>
+<area shape="poly" title=" " alt="" coords="739,203,596,247,594,242,744,201"/>
+<area shape="rect" title=" " alt="" coords="822,249,909,277"/>
+<area shape="poly" title=" " alt="" coords="802,199,843,239,838,238,800,204"/>
 </map>
 </div>
 </div><div class="textblock"><div class="dynheader">
@@ -158,15 +182,15 @@ This graph shows which files directly or indirectly include this file:</div>
 <map name="ainclude_2tenzor_2ops_2creation_8hppdep" id="ainclude_2tenzor_2ops_2creation_8hppdep">
 <area shape="rect" title="Tensor creation and initialization operations." alt="" coords="120,5,260,50"/>
 <area shape="rect" href="tenzor_8hpp.html" title="Main header &#45; includes all public Tenzor APIs." alt="" coords="97,98,282,126"/>
-<area shape="poly" title=" " alt="" coords="192,66,192,97,187,97,187,66"/>
+<area shape="poly" title=" " alt="" coords="191,63,192,98,187,97,189,68"/>
 <area shape="rect" href="dataset_8hpp_source.html" title=" " alt="" coords="31,174,178,218"/>
-<area shape="poly" title=" " alt="" coords="167,139,129,175,125,171,163,135"/>
+<area shape="poly" title=" " alt="" coords="164,139,129,175,125,171,167,135"/>
 <area shape="rect" href="transforms_8hpp_source.html" title=" " alt="" coords="202,174,348,218"/>
-<area shape="poly" title=" " alt="" coords="216,135,254,171,251,175,213,139"/>
+<area shape="poly" title=" " alt="" coords="215,134,255,173,250,173,214,139"/>
 <area shape="rect" href="dataloader_8hpp_source.html" title=" " alt="" coords="31,266,178,311"/>
-<area shape="poly" title=" " alt="" coords="107,234,107,266,102,266,102,234"/>
+<area shape="poly" title=" " alt="" coords="105,231,107,267,102,266,104,236"/>
 <area shape="rect" href="quantize__api_8hpp.html" title="High&#45;level quantization API for model conversion." alt="" coords="5,359,204,404"/>
-<area shape="poly" title=" " alt="" coords="107,327,107,359,102,359,102,327"/>
+<area shape="poly" title=" " alt="" coords="106,325,107,360,102,358,103,329"/>
 </map>
 </div>
 </div>
@@ -185,6 +209,8 @@ Functions</h2></td></tr>
 <tr class="memdesc:ga53b9520133d939bf68493eb8bb4ffd53"><td class="mdescLeft">&#160;</td><td class="mdescRight">Create tensor filled with ones.  <br /></td></tr>
 <tr class="memitem:ga9c65fe2701c31f23197f9d3b69780640" id="r_ga9c65fe2701c31f23197f9d3b69780640"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="group__tensor__creation.html#ga9c65fe2701c31f23197f9d3b69780640">tenzor::full</a> (std::vector&lt; int64_t &gt; shape, float value, <a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a> dtype=<a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="el" href="structtenzor_1_1Device.html">Device</a> device=<a class="el" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
 <tr class="memdesc:ga9c65fe2701c31f23197f9d3b69780640"><td class="mdescLeft">&#160;</td><td class="mdescRight">Create tensor filled with specific value.  <br /></td></tr>
+<tr class="memitem:ga532a3083161c8330239aa1ea85239c60" id="r_ga532a3083161c8330239aa1ea85239c60"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="group__tensor__creation.html#ga532a3083161c8330239aa1ea85239c60">tenzor::full</a> (std::vector&lt; int64_t &gt; shape, double value, <a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a> dtype, <a class="el" href="structtenzor_1_1Device.html">Device</a> device) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
+<tr class="memdesc:ga532a3083161c8330239aa1ea85239c60"><td class="mdescLeft">&#160;</td><td class="mdescRight">Create tensor filled with specific value (double precision).  <br /></td></tr>
 <tr class="memitem:gaa275eaf45fd54ad8e2cb448eb25632cc" id="r_gaa275eaf45fd54ad8e2cb448eb25632cc"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="group__tensor__creation.html#gaa275eaf45fd54ad8e2cb448eb25632cc">tenzor::empty</a> (std::vector&lt; int64_t &gt; shape, <a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a> dtype=<a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="el" href="structtenzor_1_1Device.html">Device</a> device=<a class="el" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
 <tr class="memdesc:gaa275eaf45fd54ad8e2cb448eb25632cc"><td class="mdescLeft">&#160;</td><td class="mdescRight">Create uninitialized tensor.  <br /></td></tr>
 <tr class="memitem:gaec66c6ef5f1a23ddd4664cf83c5ba4a6" id="r_gaec66c6ef5f1a23ddd4664cf83c5ba4a6"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="group__tensor__creation.html#gaec66c6ef5f1a23ddd4664cf83c5ba4a6">tenzor::rand</a> (std::vector&lt; int64_t &gt; shape, <a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a> dtype=<a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="el" href="structtenzor_1_1Device.html">Device</a> device=<a class="el" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
@@ -210,6 +236,8 @@ Functions</h2></td></tr>
 <tr class="memdesc:ga5f82d208679b8558089aa16229bc171b"><td class="mdescLeft">&#160;</td><td class="mdescRight">Create uniform random tensor with same shape/dtype/device as input.  <br /></td></tr>
 <tr class="memitem:gaab1ee393d9b3fd4a77935ebf4f6ce6fe" id="r_gaab1ee393d9b3fd4a77935ebf4f6ce6fe"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="group__tensor__creation.html#gaab1ee393d9b3fd4a77935ebf4f6ce6fe">tenzor::randn_like</a> (const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &amp;tensor) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
 <tr class="memdesc:gaab1ee393d9b3fd4a77935ebf4f6ce6fe"><td class="mdescLeft">&#160;</td><td class="mdescRight">Create normal random tensor with same shape/dtype/device as input.  <br /></td></tr>
+<tr class="memitem:gac6051d6e4cabb9e4534ff4c5d5a4b485" id="r_gac6051d6e4cabb9e4534ff4c5d5a4b485"><td class="memItemLeft" align="right" valign="top">void&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="group__tensor__creation.html#gac6051d6e4cabb9e4534ff4c5d5a4b485">tenzor::manual_seed</a> (unsigned int seed)</td></tr>
+<tr class="memdesc:gac6051d6e4cabb9e4534ff4c5d5a4b485"><td class="mdescLeft">&#160;</td><td class="mdescRight">Set the seed for random number generation.  <br /></td></tr>
 <tr class="memitem:a280a2dbed0ffe44cfc9bdfe1f172a1bb" id="r_a280a2dbed0ffe44cfc9bdfe1f172a1bb"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a280a2dbed0ffe44cfc9bdfe1f172a1bb">tenzor::ops::zeros</a> (std::vector&lt; int64_t &gt; shape, <a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14fee">DType</a> dtype=<a class="el" href="namespacetenzor.html#a5e94edb9b77a2828dfc7fa02bbc14feea166495adc0d0f53bee6baecc577f5204">DType::Float32</a>, <a class="el" href="structtenzor_1_1Device.html">Device</a> device=<a class="el" href="structtenzor_1_1Device.html#a77290e32e1fa7560bef5d05457f6157a">Device::cpu</a>()) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>
 <tr class="memdesc:a280a2dbed0ffe44cfc9bdfe1f172a1bb"><td class="mdescLeft">&#160;</td><td class="mdescRight">Create tensor filled with zeros.  <br /></td></tr>
 <tr class="memitem:a7cc2f693db94b734e01662a503f33e7d" id="r_a7cc2f693db94b734e01662a503f33e7d"><td class="memItemLeft" align="right" valign="top">auto&#160;</td><td class="memItemRight" valign="bottom"><a class="el" href="#a7cc2f693db94b734e01662a503f33e7d">tenzor::ops::zeros_like</a> (const <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a> &amp;tensor) -&gt; <a class="el" href="classtenzor_1_1Tensor.html">Tensor</a></td></tr>

@@ -1,0 +1,7 @@
+<map id="include/tenzor/core/pinned_allocator.hpp" name="include/tenzor/core/pinned_allocator.hpp">
+<area shape="rect" id="Node000001" title="Pinned (page&#45;locked) memory allocator for fast CPU&lt;&#45;&gt;GPU transfers." alt="" coords="13,5,173,50"/>
+<area shape="rect" id="Node000002" href="$offload__engine_8hpp.html" title="High&#45;level offload engine for ZeRO optimizer Phase 2." alt="" coords="18,98,168,143"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="94,63,96,98,90,97,92,68"/>
+<area shape="rect" id="Node000003" href="$zero__optimizer_8hpp.html" title="ZeRO Stage 1 Optimizer with state partitioning and CPU offload." alt="" coords="5,191,181,235"/>
+<area shape="poly" id="edge2_Node000002_Node000003" title=" " alt="" coords="95,156,96,191,90,190,91,160"/>
+</map>

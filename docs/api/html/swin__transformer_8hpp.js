@@ -6,8 +6,8 @@ var swin__transformer_8hpp =
     [ "tenzor::models::BasicLayer", "classtenzor_1_1models_1_1BasicLayer.html", "classtenzor_1_1models_1_1BasicLayer" ],
     [ "tenzor::models::PatchEmbed", "classtenzor_1_1models_1_1PatchEmbed.html", "classtenzor_1_1models_1_1PatchEmbed" ],
     [ "tenzor::models::SwinTransformer", "classtenzor_1_1models_1_1SwinTransformer.html", "classtenzor_1_1models_1_1SwinTransformer" ],
-    [ "tenzor::models::swin_base", "swin__transformer_8hpp.html#a8ac531e1ac0bf5f8dff0460cc4037063", null ],
-    [ "tenzor::models::swin_large", "swin__transformer_8hpp.html#a99d8c997b9ff309ab971f59cb0337720", null ],
-    [ "tenzor::models::swin_small", "swin__transformer_8hpp.html#a55b019d2cbf3b3d6e3493df6920a8b55", null ],
-    [ "tenzor::models::swin_tiny", "swin__transformer_8hpp.html#aff3476e58481b05b597260df75c783e6", null ]
+    [ "tenzor::models::swin_base", "swin__transformer_8hpp.html#a3b8f3ece089b6bd8943c0b35eec04a4b", null ],
+    [ "tenzor::models::swin_large", "swin__transformer_8hpp.html#ae2d67ab124fc4330f39274672891b543", null ],
+    [ "tenzor::models::swin_small", "swin__transformer_8hpp.html#add8b96e6082e071faa1b3275dbc687d0", null ],
+    [ "tenzor::models::swin_tiny", "swin__transformer_8hpp.html#aa9c770d9c4c6d4af56bbf714126a4905", null ]
 ];

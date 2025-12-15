@@ -1,5 +1,5 @@
 <map id="tenzor::models::ViTOutput" name="tenzor::models::ViTOutput">
 <area shape="rect" id="Node000001" title="Output structure for ViT models." alt="" coords="5,128,197,156"/>
 <area shape="rect" id="Node000002" href="$classtenzor_1_1Variable.html" title="Gradient&#45;enabled tensor wrapper for automatic differentiation." alt="" coords="39,5,163,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="104,49,104,128,98,128,98,49"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="103,47,104,128,98,127,99,50"/>
 </map>

@@ -1,5 +1,5 @@
 <map id="tenzor::models::PatchMerging" name="tenzor::models::PatchMerging">
 <area shape="rect" id="Node000001" title="Patch merging layer for downsampling." alt="" coords="5,81,220,109"/>
 <area shape="rect" id="Node000002" href="$classtenzor_1_1nn_1_1Module.html" title="Base class for all neural network modules." alt="" coords="41,5,184,33"/>
-<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="115,49,115,81,110,81,110,49"/>
+<area shape="poly" id="edge1_Node000001_Node000002" title=" " alt="" coords="114,47,115,82,110,79,111,51"/>
 </map>

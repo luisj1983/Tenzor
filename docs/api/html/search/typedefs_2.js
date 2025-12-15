@@ -1,5 +1,4 @@
 var searchData=
 [
-  ['kernelfunc_0',['KernelFunc',['../simd__dispatch_8hpp.html#a96df44619bb8a070c17e57d28948dd11',1,'tenzor::backend']]],
-  ['kernelfunction_1',['KernelFunction',['../namespacetenzor.html#a829391672bef2f5df6ec94a9aafa7230',1,'tenzor']]]
+  ['forwardprehook_0',['ForwardPreHook',['../classtenzor_1_1nn_1_1Module.html#a0aaefebe2853d4bab4a1cf7da77c3c1c',1,'tenzor::nn::Module::ForwardPreHook'],['../classtenzor_1_1optim_1_1Module.html#a0aaefebe2853d4bab4a1cf7da77c3c1c',1,'tenzor::optim::Module::ForwardPreHook']]]
 ];
