@@ -10,8 +10,11 @@ This example shows how to:
 5. Manage cache
 """
 
-import tenzor_core as tz
+import tenzor as tz
 import os
+
+# Initialize Tenzor library
+tz.initialize()
 
 def format_size(bytes):
     """Format bytes to human-readable size."""

@@ -20,6 +20,9 @@ import os
 import time
 from typing import Tuple, List
 
+# Initialize Tenzor library (registers backends)
+tz.initialize()
+
 # Configuration
 BATCH_SIZE = 128
 EPOCHS = 100
@@ -27,6 +30,7 @@ LEARNING_RATE = 0.1
 MOMENTUM = 0.9
 WEIGHT_DECAY = 5e-4
 NUM_CLASSES = 10
+# Use CUDA if available (Python modules in Sequential now work with device placement)
 DEVICE = tz.Device.cuda(0) if tz.cuda_is_available() else tz.Device.cpu()
 USE_MIXED_PRECISION = tz.cuda_is_available()
 
@@ -89,11 +93,13 @@ class ResNet18(tz.nn.Module):
         self.layer4 = self._make_layer(256, 512, 2, stride=2)
 
         # Classifier
-        self.avgpool = tz.nn.AdaptiveAvgPool2d((1, 1))
+        self.avgpool = tz.nn.AdaptiveAvgPool2d(1, 1)
+        self.flatten = tz.nn.Flatten(1)  # Flatten from dim 1 onwards
         self.fc = tz.nn.Linear(512, num_classes)
 
     def _make_layer(self, in_channels: int, out_channels: int,
                     num_blocks: int, stride: int) -> tz.nn.Sequential:
+        # Use Sequential now that Python modules are properly supported
         layers = []
 
         # First block (may have stride > 1)
@@ -111,7 +117,7 @@ class ResNet18(tz.nn.Module):
         x = self.bn1(x)
         x = tz.nn.relu(x)
 
-        # ResNet layers
+        # ResNet layers (now Sequential works with Python modules!)
         x = self.layer1(x)
         x = self.layer2(x)
         x = self.layer3(x)
@@ -119,7 +125,7 @@ class ResNet18(tz.nn.Module):
 
         # Classifier
         x = self.avgpool(x)
-        x = tz.flatten(x, 1)
+        x = self.flatten(x)
         x = self.fc(x)
 
         return x
@@ -165,7 +171,7 @@ def augment_batch(images: np.ndarray) -> np.ndarray:
     return augmented
 
 
-def train_epoch(model: tz.nn.Module, optimizer: tz.nn.Optimizer,
+def train_epoch(model: tz.nn.Module, optimizer,
                 criterion: tz.nn.Module, train_data: Tuple[np.ndarray, np.ndarray],
                 epoch: int, scaler=None) -> Tuple[float, float]:
     """Train for one epoch"""
@@ -199,7 +205,7 @@ def train_epoch(model: tz.nn.Module, optimizer: tz.nn.Optimizer,
         if USE_MIXED_PRECISION and scaler is not None:
             # Mixed precision forward pass
             outputs = model.forward(inputs)
-            loss = criterion(outputs, tz.Variable(targets))
+            loss = criterion(outputs, targets)
 
             # Backward pass with gradient scaling
             scaled_loss = scaler.scale(loss)
@@ -210,7 +216,7 @@ def train_epoch(model: tz.nn.Module, optimizer: tz.nn.Optimizer,
         else:
             # Regular precision
             outputs = model.forward(inputs)
-            loss = criterion(outputs, tz.Variable(targets))
+            loss = criterion(outputs, targets)
 
             optimizer.zero_grad()
             loss.backward()
@@ -264,7 +270,7 @@ def evaluate(model: tz.nn.Module, criterion: tz.nn.Module,
 
             # Forward pass
             outputs = model.forward(inputs)
-            loss = criterion(outputs, tz.Variable(targets))
+            loss = criterion(outputs, targets)
 
             # Statistics
             total_loss += loss.tensor().item()
@@ -291,11 +297,11 @@ def main():
     model.to(DEVICE)
 
     # Count parameters
-    num_params = sum(p.tensor().numel() for p in model.parameters())
+    num_params = sum(p.tensor().numel for p in model.parameters())
     print(f"Model parameters: {num_params:,}")
 
     # Optimizer with momentum and weight decay
-    optimizer = tz.nn.optim.SGD(
+    optimizer = tz.optim.SGD(
         model.parameters(),
         lr=LEARNING_RATE,
         momentum=MOMENTUM,
@@ -303,13 +309,13 @@ def main():
     )
 
     # Learning rate scheduler (multi-step decay)
-    scheduler = tz.nn.optim.StepLR(optimizer, step_size=30, gamma=0.1)
+    scheduler = tz.optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
 
     # Loss function
     criterion = tz.nn.CrossEntropyLoss()
 
     # Gradient scaler for mixed precision
-    scaler = tz.nn.amp.GradScaler() if USE_MIXED_PRECISION else None
+    scaler = tz.amp.GradScaler() if USE_MIXED_PRECISION else None
 
     # Load data
     train_data, test_data = load_cifar10()
@@ -331,7 +337,7 @@ def main():
 
         # Update learning rate
         scheduler.step()
-        current_lr = optimizer.param_groups[0]['lr']
+        current_lr = scheduler.get_last_lr()
 
         # Print epoch summary
         epoch_time = time.time() - start_time

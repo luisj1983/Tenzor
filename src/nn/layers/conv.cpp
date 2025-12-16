@@ -398,17 +398,21 @@ Conv2d::Conv2d(int64_t in_channels, int64_t out_channels, int64_t kernel_size,
               int64_t groups, bool bias)
     : in_channels_(in_channels), out_channels_(out_channels),
       kernel_size_(kernel_size), stride_(stride),
-      padding_(padding), dilation_(dilation), groups_(groups) {
+      padding_(padding), dilation_(dilation), groups_(groups <= 0 ? 1 : groups) {
 
-    if (in_channels % groups != 0) {
+    // Ensure groups is valid (must be >= 1)
+    if (groups_ <= 0) {
+        groups_ = 1;
+    }
+    if (in_channels % groups_ != 0) {
         throw std::invalid_argument("in_channels must be divisible by groups");
     }
-    if (out_channels % groups != 0) {
+    if (out_channels % groups_ != 0) {
         throw std::invalid_argument("out_channels must be divisible by groups");
     }
 
-    std::vector<int64_t> weight_shape = {out_channels, in_channels / groups, kernel_size, kernel_size};
-    int64_t fan_in = (in_channels / groups) * kernel_size * kernel_size;
+    std::vector<int64_t> weight_shape = {out_channels, in_channels / groups_, kernel_size, kernel_size};
+    int64_t fan_in = (in_channels / groups_) * kernel_size * kernel_size;
     float std_init = std::sqrt(2.0f / fan_in);
     auto weight_tensor = randn(weight_shape) * std_init;
     auto weight_init = Variable(weight_tensor, true);

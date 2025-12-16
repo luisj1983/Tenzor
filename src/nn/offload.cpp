@@ -211,19 +211,20 @@ auto OffloadContext::register_hooks_recursive(Module* module) -> void {
     if (!module) return;
 
     // Register hooks on this module
-    module->register_forward_pre_hook([this](Module* m) {
+    // Note: hooks now receive input/output but offload only needs module reference
+    module->register_forward_pre_hook([this](Module* m, const Variable&) {
         this->forward_pre_hook(m);
     });
 
-    module->register_forward_post_hook([this](Module* m) {
+    module->register_forward_post_hook([this](Module* m, const Variable&, const Variable&) {
         this->forward_post_hook(m);
     });
 
-    module->register_backward_pre_hook([this](Module* m) {
+    module->register_backward_pre_hook([this](Module* m, const Variable&) {
         this->backward_pre_hook(m);
     });
 
-    module->register_backward_post_hook([this](Module* m) {
+    module->register_backward_post_hook([this](Module* m, const Variable&, const Variable&) {
         this->backward_post_hook(m);
     });
 

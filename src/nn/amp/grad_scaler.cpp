@@ -15,25 +15,6 @@ namespace tenzor {
 namespace nn {
 namespace amp {
 
-namespace {
-    // Helper function to manually copy tensor data without using clone()
-    auto copy_tensor(const Tensor& src) -> Tensor {
-        // Create new tensor with same properties
-        Tensor dst(std::vector<int64_t>(src.shape().begin(), src.shape().end()),
-                   src.dtype(),
-                   src.device());
-
-        // Copy data manually
-        const void* src_ptr = src.data_ptr();
-        void* dst_ptr = dst.data_ptr();
-        const size_t bytes = src.numel() * src.dtype_size();
-
-        std::memcpy(dst_ptr, src_ptr, bytes);
-
-        return dst;
-    }
-} // anonymous namespace
-
 GradScaler::GradScaler(float init_scale,
                        float growth_factor,
                        float backoff_factor,
@@ -61,17 +42,9 @@ GradScaler::GradScaler(float init_scale,
 }
 
 auto GradScaler::scale(const Variable& loss) -> Variable {
-    // Create a copy of the loss tensor and scale it directly
-    // This avoids dependency on tensor operations being registered
-    auto scaled_tensor = copy_tensor(loss.tensor());
-
-    // Get raw data and scale in-place
-    float* data = scaled_tensor.data<float>();
-    const int64_t numel = scaled_tensor.numel();
-
-    for (int64_t i = 0; i < numel; ++i) {
-        data[i] *= scale_;
-    }
+    // Scale the loss tensor using tensor multiplication
+    // This properly handles both CPU and CUDA tensors
+    auto scaled_tensor = loss.tensor() * scale_;
 
     // Return as Variable with same requires_grad as input
     return Variable(scaled_tensor, loss.requires_grad());
@@ -95,15 +68,9 @@ auto GradScaler::unscale_(optim::Optimizer& optimizer) -> void {
             continue;
         }
 
-        // Get gradient data and unscale in-place
-        // This avoids dependency on tensor operations being registered
-        float* grad_data = grad->data<float>();
-        const int64_t numel = grad->numel();
-
-        // Unscale gradient: grad = grad / scale
-        for (int64_t i = 0; i < numel; ++i) {
-            grad_data[i] *= inv_scale;
-        }
+        // Unscale gradient using tensor multiplication
+        // This properly handles both CPU and CUDA tensors
+        *grad = *grad * inv_scale;
     }
 
     has_unscaled_ = true;
@@ -121,10 +88,11 @@ auto GradScaler::check_inf_nan_(const optim::Optimizer& optimizer) const -> bool
             continue;
         }
 
-        // Get gradient data as float pointer
+        // Copy gradient to CPU for inspection (handles CUDA tensors)
         const auto& grad_tensor = *grad;
-        const float* data_ptr = grad_tensor.data<float>();
-        const int64_t numel = grad_tensor.numel();
+        auto cpu_grad = grad_tensor.cpu();
+        const float* data_ptr = cpu_grad.data<float>();
+        const int64_t numel = cpu_grad.numel();
 
         // Check each element for inf or nan
         for (int64_t i = 0; i < numel; ++i) {

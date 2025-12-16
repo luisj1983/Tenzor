@@ -20,6 +20,12 @@ import sys
 import tenzor as tz
 import numpy as np
 
+# Initialize Tenzor library (registers backends)
+tz.initialize()
+
+# Check if distributed training APIs are available
+DISTRIBUTED_AVAILABLE = hasattr(tz.nn.parallel, 'init_process_group')
+
 def setup_distributed():
     """Initialize distributed training from environment variables."""
     rank = int(os.environ.get('RANK', 0))
@@ -151,6 +157,20 @@ def main():
 
 
 if __name__ == '__main__':
+    if not DISTRIBUTED_AVAILABLE:
+        print("=" * 60)
+        print("DISTRIBUTED TRAINING APIs NOT YET IMPLEMENTED")
+        print("=" * 60)
+        print("\nThis example requires the following APIs which are not yet available:")
+        print("  - tz.nn.parallel.init_process_group()")
+        print("  - tz.nn.parallel.DistributedDataParallel()")
+        print("  - tz.nn.parallel.destroy_process_group()")
+        print("\nThese APIs will be added in a future release of Tenzor.")
+        print("\nThe example demonstrates the intended usage pattern for when")
+        print("distributed training support is implemented.")
+        print("=" * 60)
+        sys.exit(0)
+
     if int(os.environ.get('WORLD_SIZE', 1)) == 1:
         print("=" * 60)
         print("SINGLE GPU MODE")

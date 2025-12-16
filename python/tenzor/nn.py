@@ -256,5 +256,61 @@ class Module(_CppModule):
         return '\n'.join(lines) if len(lines) > 2 else f"{self.__class__.__name__}()"
 
 
-# Override the nn module's Module with our wrapper
+# Store reference to original C++ Sequential BEFORE overriding
+_CppSequential = _core.nn.Sequential
+
+
+class Sequential(_CppSequential):
+    """
+    A sequential container that holds modules in the order they were added.
+
+    Modules can be passed as arguments to the constructor, or added using append().
+
+    Example::
+
+        import tenzor as tz
+
+        # Using constructor arguments
+        model = tz.nn.Sequential(
+            tz.nn.Linear(10, 20),
+            tz.nn.ReLU(),
+            tz.nn.Linear(20, 10)
+        )
+
+        # Using append
+        model = tz.nn.Sequential()
+        model.append(tz.nn.Linear(10, 20))
+        model.append(tz.nn.ReLU())
+
+        # Forward pass applies modules in order
+        output = model(input)
+    """
+
+    def __init__(self, *args):
+        """
+        Initialize Sequential container.
+
+        Args:
+            *args: Variable number of modules to add in order
+        """
+        super().__init__()
+        # Keep Python references alive to prevent garbage collection
+        self._py_modules = list(args)
+        for module in args:
+            self.append(module)
+
+    def __repr__(self) -> str:
+        """Return a string representation of the sequential container."""
+        lines = ["Sequential("]
+        # Use __len__ and __getitem__ to iterate modules
+        for i in range(len(self)):
+            mod = self[i]
+            mod_str = repr(mod).replace('\n', '\n  ')
+            lines.append(f"  ({i}): {mod_str}")
+        lines.append(")")
+        return '\n'.join(lines) if len(self) > 0 else "Sequential()"
+
+
+# Override the nn module's Module and Sequential with our wrappers
 _core.nn.Module = Module
+_core.nn.Sequential = Sequential

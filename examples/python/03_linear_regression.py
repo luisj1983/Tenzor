@@ -122,8 +122,8 @@ def main():
 
     for epoch in range(n_epochs):
         # Forward pass: compute predictions
-        # y_pred = w @ x + b
-        wx = tz.Variable(tz.matmul(w.data, x_data), requires_grad=True)
+        # y_pred = x @ w + b (note: x is [100,1], w is [1,1], so x @ w gives [100,1])
+        wx = tz.Variable(tz.matmul(x_data, w.data), requires_grad=True)
         y_pred = wx + b
 
         # Compute loss
@@ -159,7 +159,7 @@ def main():
     print("\n[6.2] Making predictions on test data...")
     # Create test data
     x_test = tz.randn([10, 1])
-    wx_test = tz.Variable(tz.matmul(w.data, x_test), requires_grad=False)
+    wx_test = tz.Variable(tz.matmul(x_test, w.data), requires_grad=False)
     y_test_pred = wx_test + b
 
     print(f"  Test input shape: {x_test.shape}")

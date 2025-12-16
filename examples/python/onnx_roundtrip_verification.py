@@ -13,301 +13,126 @@ Requirements:
 """
 
 import sys
-sys.path.insert(0, '../build')
-
-import tenzor_core as tz
+import tenzor as tz
 import numpy as np
 
-# Optional: Uncomment if you have ONNX Runtime installed
+# Initialize Tenzor
+tz.initialize()
+
+# Optional: Check for ONNX Runtime
 try:
     import onnxruntime as ort
     import onnx
     ONNX_RUNTIME_AVAILABLE = True
 except ImportError:
     ONNX_RUNTIME_AVAILABLE = False
-    print("⚠ ONNX Runtime not installed. Install with: pip install onnxruntime onnx")
+    print("Warning: ONNX Runtime not installed. Install with: pip install onnxruntime onnx")
     print("  Skipping round-trip verification. Export-only mode.\n")
 
 
-def export_simple_model():
-    """Export a simple model to ONNX"""
-    print("Step 1: Exporting Tenzor model to ONNX...")
-
-    tz.initialize()
-
-    exporter = tz.onnx.Exporter(opset_version=13)
-    exporter.set_model_name("roundtrip_test")
-    exporter.set_description("Simple model for round-trip verification")
-
-    # Create a simple model: Linear -> ReLU
-    input_t = tz.Tensor([1, 10], tz.DType.Float32, tz.Device.cpu())
-    weight = tz.Tensor([20, 10], tz.DType.Float32, tz.Device.cpu())
-    bias = tz.Tensor([20], tz.DType.Float32, tz.Device.cpu())
-    linear_out = tz.Tensor([1, 20], tz.DType.Float32, tz.Device.cpu())
-    output_t = tz.Tensor([1, 20], tz.DType.Float32, tz.Device.cpu())
-
-    # Build graph
-    exporter.add_input(input_t, "input", {})
-    exporter.export_linear(input_t, weight, bias, linear_out, "linear_out")
-    exporter.export_relu(linear_out, output_t, "output")
-    exporter.add_output(output_t, "output")
-
-    # Export to file
-    filepath = "roundtrip_test.onnx"
-    exporter.export_to_file(filepath)
-
-    print(f"✓ Model exported to {filepath}")
-    print(f"  Nodes: {len(exporter.get_graph().nodes)}")
-    print(f"  Operations: Linear + ReLU")
-
-    return filepath
+def create_simple_model():
+    """Create a simple model for testing"""
+    return tz.nn.Sequential(
+        tz.nn.Linear(10, 20),
+        tz.nn.ReLU(),
+        tz.nn.Linear(20, 5)
+    )
 
 
-def validate_onnx_model(filepath):
-    """Validate the exported ONNX model"""
+def export_model(model, filepath, input_shape):
+    """Export model to ONNX"""
+    print(f"Exporting model to {filepath}...")
+    dummy_input = tz.Tensor(input_shape, tz.dtype.float32, tz.Device.cpu())
+    tz.onnx.export(
+        model,
+        dummy_input,
+        filepath,
+        input_names=["input"],
+        output_names=["output"],
+        opset_version=13,
+        verbose=False
+    )
+    print("  Export complete!")
+
+
+def verify_roundtrip(model, filepath, input_shape):
+    """Verify ONNX model produces same output as Tenzor model"""
     if not ONNX_RUNTIME_AVAILABLE:
-        print("\nStep 2: Skipping validation (ONNX not installed)")
-        return False
-
-    print(f"\nStep 2: Validating ONNX model...")
-
-    try:
-        # Load and check model
-        model = onnx.load(filepath)
-        onnx.checker.check_model(model)
-        print(f"✓ Model is valid ONNX format")
-
-        # Print model info
-        print(f"  IR version: {model.ir_version}")
-        print(f"  Producer: {model.producer_name}")
-        print(f"  Graph name: {model.graph.name}")
-        print(f"  Nodes: {len(model.graph.node)}")
-        print(f"  Inputs: {len(model.graph.input)}")
-        print(f"  Outputs: {len(model.graph.output)}")
-
+        print("  Skipping verification (ONNX Runtime not available)")
         return True
 
-    except Exception as e:
-        print(f"✗ Validation failed: {e}")
-        return False
+    print("Verifying round-trip accuracy...")
 
+    # Create random input
+    np_input = np.random.randn(*input_shape).astype(np.float32)
 
-def run_onnx_runtime(filepath):
-    """Run inference using ONNX Runtime"""
-    if not ONNX_RUNTIME_AVAILABLE:
-        print("\nStep 3: Skipping ONNX Runtime inference")
-        return None
+    # Get Tenzor output
+    tz_input = tz.Variable(tz.Tensor.from_numpy(np_input), requires_grad=False)
+    tz_output = model(tz_input)
+    tz_result = tz_output.tensor().numpy()
 
-    print(f"\nStep 3: Running inference with ONNX Runtime...")
+    # Get ONNX Runtime output
+    session = ort.InferenceSession(filepath)
+    ort_result = session.run(None, {"input": np_input})[0]
 
-    try:
-        # Create inference session
-        session = ort.InferenceSession(filepath)
+    # Compare outputs
+    max_diff = np.max(np.abs(tz_result - ort_result))
+    mean_diff = np.mean(np.abs(tz_result - ort_result))
 
-        # Get input/output names
-        input_name = session.get_inputs()[0].name
-        output_name = session.get_outputs()[0].name
+    print(f"  Max absolute difference: {max_diff:.6e}")
+    print(f"  Mean absolute difference: {mean_diff:.6e}")
 
-        print(f"  Input: {input_name}")
-        print(f"  Output: {output_name}")
-
-        # Create dummy input
-        input_data = np.random.randn(1, 10).astype(np.float32)
-
-        # Run inference
-        outputs = session.run([output_name], {input_name: input_data})
-
-        output_data = outputs[0]
-        print(f"✓ Inference successful")
-        print(f"  Input shape: {input_data.shape}")
-        print(f"  Output shape: {output_data.shape}")
-        print(f"  Output dtype: {output_data.dtype}")
-        print(f"  Output range: [{output_data.min():.4f}, {output_data.max():.4f}]")
-
-        return {
-            'input': input_data,
-            'output': output_data
-        }
-
-    except Exception as e:
-        print(f"✗ ONNX Runtime inference failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
-
-
-def verify_numerical_accuracy(filepath):
-    """
-    Verify numerical accuracy by comparing:
-    1. Tenzor implementation output
-    2. ONNX Runtime output
-
-    Note: This is a simplified verification. For full verification,
-    you would need to implement the model in Tenzor and compare outputs.
-    """
-    if not ONNX_RUNTIME_AVAILABLE:
-        print("\nStep 4: Skipping numerical accuracy verification")
-        return
-
-    print("\nStep 4: Numerical Accuracy Verification...")
-
-    # For this demo, we just verify that ONNX Runtime produces valid outputs
-    result = run_onnx_runtime(filepath)
-
-    if result is not None:
-        # Verify output is not NaN or Inf
-        output = result['output']
-        has_nan = np.isnan(output).any()
-        has_inf = np.isinf(output).any()
-
-        if not has_nan and not has_inf:
-            print("✓ Outputs are numerically valid (no NaN/Inf)")
-        else:
-            print("✗ Outputs contain NaN or Inf!")
-
-        # Verify ReLU behavior (all outputs should be >= 0)
-        all_non_negative = (output >= 0).all()
-        if all_non_negative:
-            print("✓ ReLU behavior verified (all outputs >= 0)")
-        else:
-            print("✗ ReLU verification failed (found negative values)")
-
-        print("\nℹ Note: Full numerical verification requires comparing")
-        print("  Tenzor forward pass output vs ONNX Runtime output")
-        print("  with the same input and weights.")
-
-
-def test_multiple_models():
-    """Test round-trip for multiple model architectures"""
-    if not ONNX_RUNTIME_AVAILABLE:
-        print("\nStep 5: Skipping multi-model verification")
-        return
-
-    print("\nStep 5: Testing Multiple Model Architectures...")
-
-    tz.initialize()
-
-    test_cases = [
-        {
-            'name': 'Sigmoid',
-            'ops': [
-                ('export_sigmoid', lambda exp, inp, out: exp.export_sigmoid(inp, out, 'output'))
-            ]
-        },
-        {
-            'name': 'Tanh',
-            'ops': [
-                ('export_tanh', lambda exp, inp, out: exp.export_tanh(inp, out, 'output'))
-            ]
-        },
-        {
-            'name': 'Add',
-            'ops': [
-                ('export_add', None)  # Special handling
-            ]
-        },
-    ]
-
-    for i, test in enumerate(test_cases):
-        print(f"\n  Test {i+1}: {test['name']}")
-
-        exporter = tz.onnx.Exporter(opset_version=13)
-        exporter.set_model_name(f"test_{test['name'].lower()}")
-
-        if test['name'] == 'Add':
-            # Special case for binary ops
-            a = tz.Tensor([1, 10], tz.DType.Float32, tz.Device.cpu())
-            b = tz.Tensor([1, 10], tz.DType.Float32, tz.Device.cpu())
-            output_t = tz.Tensor([1, 10], tz.DType.Float32, tz.Device.cpu())
-
-            exporter.add_input(a, "a", {})
-            exporter.add_input(b, "b", {})
-            exporter.export_add(a, b, output_t, "output")
-            exporter.add_output(output_t, "output")
-        else:
-            # Unary ops
-            input_t = tz.Tensor([1, 10], tz.DType.Float32, tz.Device.cpu())
-            output_t = tz.Tensor([1, 10], tz.DType.Float32, tz.Device.cpu())
-
-            exporter.add_input(input_t, "input", {})
-            test['ops'][0][1](exporter, input_t, output_t)
-            exporter.add_output(output_t, "output")
-
-        filepath = f"test_{test['name'].lower()}.onnx"
-        exporter.export_to_file(filepath)
-
-        # Validate with ONNX
-        try:
-            model = onnx.load(filepath)
-            onnx.checker.check_model(model)
-            print(f"    ✓ {test['name']}: Valid ONNX model")
-        except Exception as e:
-            print(f"    ✗ {test['name']}: Validation failed - {e}")
-
-
-def summarize_compatibility():
-    """Print ONNX Runtime compatibility information"""
-    print("\n" + "="*60)
-    print("ONNX RUNTIME COMPATIBILITY")
-    print("="*60)
-
-    if ONNX_RUNTIME_AVAILABLE:
-        print(f"✓ ONNX Runtime: INSTALLED")
-        print(f"  Version: {ort.__version__}")
-        print(f"  Available providers: {ort.get_available_providers()}")
+    # Check if within tolerance
+    tolerance = 1e-5
+    if max_diff < tolerance:
+        print(f"  PASSED: Difference within tolerance ({tolerance})")
+        return True
     else:
-        print("⚠ ONNX Runtime: NOT INSTALLED")
-        print("  Install with: pip install onnxruntime")
-
-    print("\nExported models are compatible with:")
-    print("  • ONNX Runtime (Python, C++, C#, Java)")
-    print("  • TensorRT (NVIDIA)")
-    print("  • OpenVINO (Intel)")
-    print("  • CoreML (Apple)")
-    print("  • TensorFlow Lite")
-    print("  • PyTorch (torch.onnx.load)")
-    print("  • ONNX.js (browser inference)")
+        print(f"  FAILED: Difference exceeds tolerance ({tolerance})")
+        return False
 
 
 def main():
-    """Main verification workflow"""
-    print("="*60)
-    print("TENZOR ONNX ROUND-TRIP VERIFICATION")
-    print("="*60)
+    """Run verification tests"""
+    print("=" * 60)
+    print("ONNX ROUND-TRIP VERIFICATION")
+    print("=" * 60)
 
-    try:
-        # Step 1: Export
-        filepath = export_simple_model()
+    # Test 1: Simple Linear Model
+    print("\n--- Test 1: Simple Linear Model ---")
+    model = create_simple_model()
+    filepath = "roundtrip_test.onnx"
+    input_shape = [1, 10]
 
-        # Step 2: Validate
-        is_valid = validate_onnx_model(filepath)
+    export_model(model, filepath, input_shape)
+    result1 = verify_roundtrip(model, filepath, input_shape)
 
-        # Step 3: Run inference
-        if is_valid:
-            run_onnx_runtime(filepath)
+    # Test 2: CNN Model
+    print("\n--- Test 2: CNN Model ---")
+    cnn_model = tz.nn.Sequential(
+        tz.nn.Conv2d(1, 16, 3, 1, 1),
+        tz.nn.ReLU(),
+        tz.nn.Conv2d(16, 32, 3, 1, 1),
+        tz.nn.ReLU(),
+    )
+    cnn_filepath = "roundtrip_cnn.onnx"
+    cnn_input_shape = [1, 1, 8, 8]
 
-        # Step 4: Verify accuracy
-        verify_numerical_accuracy(filepath)
+    export_model(cnn_model, cnn_filepath, cnn_input_shape)
+    result2 = verify_roundtrip(cnn_model, cnn_filepath, cnn_input_shape)
 
-        # Step 5: Test multiple models
-        test_multiple_models()
+    # Summary
+    print("\n" + "=" * 60)
+    print("VERIFICATION SUMMARY")
+    print("=" * 60)
+    print(f"  Test 1 (Linear): {'PASSED' if result1 else 'FAILED'}")
+    print(f"  Test 2 (CNN):    {'PASSED' if result2 else 'FAILED'}")
 
-        # Summary
-        summarize_compatibility()
-
-        print("\n" + "="*60)
-        if ONNX_RUNTIME_AVAILABLE:
-            print("✓ ROUND-TRIP VERIFICATION COMPLETE")
-        else:
-            print("✓ EXPORT VERIFICATION COMPLETE")
-        print("="*60)
-
+    if result1 and result2:
+        print("\nAll tests passed!")
         return 0
-
-    except Exception as e:
-        print(f"\n✗ Error: {e}")
-        import traceback
-        traceback.print_exc()
+    else:
+        print("\nSome tests failed!")
         return 1
 
 

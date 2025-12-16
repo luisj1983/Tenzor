@@ -97,7 +97,7 @@ class CustomLinear:
 
     print("\n[3.3] Forward pass:")
     batch_size = 3
-    x = tz.Variable(tz.randn([in_features, batch_size]), requires_grad=False)
+    x = tz.Variable(tz.randn([batch_size, in_features]), requires_grad=False)
     print(f"  Input shape: {x.data.shape}")
 
     y = layer(x)
@@ -288,7 +288,7 @@ class ResidualBlock:
         return output
 
     print("\n[7.2] Testing forward pass:")
-    x = tz.Variable(tz.randn([20, 5]), requires_grad=False)
+    x = tz.Variable(tz.randn([5, 20]), requires_grad=False)  # [batch_size, in_features]
     y = forward(x)
     print(f"  Input shape: {x.data.shape}")
     print(f"  Output shape: {y.data.shape}")

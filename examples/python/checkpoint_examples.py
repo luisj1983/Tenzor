@@ -16,6 +16,11 @@ Date: 2024
 import tenzor
 import tenzor.nn as nn
 
+# Initialize Tenzor library (registers backends)
+tenzor.initialize()
+
+# Access optim module after initialization
+optim = tenzor.optim
 
 # ============================================================================
 # Example 1: Basic Model Save/Load
@@ -100,10 +105,10 @@ def example_save_with_optimizer():
     )
 
     # Create optimizer
-    optimizer = nn.optim.Adam(model.parameters(), lr=0.001)
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
 
     # Create scheduler
-    scheduler = nn.optim.StepLR(optimizer, step_size=10, gamma=0.1)
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
 
     # Create metadata
     metadata = nn.TrainingMetadata()
@@ -137,7 +142,10 @@ def example_save_with_optimizer():
     print(f"  Train loss: {loaded_checkpoint.metadata.train_loss:.4f}")
     print(f"  Val loss: {loaded_checkpoint.metadata.val_loss:.4f}")
     print(f"  Learning rate: {loaded_checkpoint.metadata.learning_rate:.6f}")
-    print(f"  F1 score: {loaded_checkpoint.metadata.custom_metrics['f1_score']:.4f}")
+    if 'f1_score' in loaded_checkpoint.metadata.custom_metrics:
+        print(f"  F1 score: {loaded_checkpoint.metadata.custom_metrics['f1_score']:.4f}")
+    else:
+        print("  F1 score: (custom_metrics not preserved in checkpoint)")
 
     # Restore model
     new_model = nn.Sequential(
@@ -148,7 +156,7 @@ def example_save_with_optimizer():
     new_model.load_state_dict(loaded_checkpoint.model_state)
 
     # Restore optimizer
-    new_optimizer = nn.optim.Adam(new_model.parameters(), lr=0.001)
+    new_optimizer = optim.Adam(new_model.parameters(), lr=0.001)
     new_optimizer.load_state_dict(loaded_checkpoint.optimizer_state)
 
     print("Training state restored successfully!")
@@ -183,7 +191,7 @@ def example_auto_checkpoint():
     )
 
     # Create optimizer
-    optimizer = nn.optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
+    optimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.9)
 
     # Setup AutoCheckpoint
     auto_checkpoint = nn.AutoCheckpoint(
@@ -258,7 +266,7 @@ def example_training_resumption():
         nn.ReLU(),
         nn.Linear(30, 10)
     )
-    optimizer = nn.optim.Adam(model.parameters(), lr=0.001)
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
 
     # Train for 5 epochs
     for epoch in range(5):
@@ -294,7 +302,7 @@ def example_training_resumption():
     )
     new_model.load_state_dict(loaded.model_state)
 
-    new_optimizer = nn.optim.Adam(new_model.parameters(), lr=0.001)
+    new_optimizer = optim.Adam(new_model.parameters(), lr=0.001)
     new_optimizer.load_state_dict(loaded.optimizer_state)
 
     start_epoch = loaded.metadata.epoch
@@ -401,8 +409,8 @@ def example_complete_workflow():
         nn.Linear(32, 10)
     )
 
-    optimizer = nn.optim.Adam(model.parameters(), lr=0.001)
-    scheduler = nn.optim.StepLR(optimizer, step_size=5, gamma=0.1)
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.1)
 
     # Setup AutoCheckpoint
     auto_checkpoint = nn.AutoCheckpoint(

@@ -141,32 +141,21 @@ class LSTMTextClassifier:
         # 1. Embedding lookup: (batch, seq_len) -> (batch, seq_len, embed_dim)
         embedded = self.embedding(x)
 
-        # 2. LSTM processing: returns (output, (h_n, c_n))
-        #    - output: (batch, seq_len, hidden_size * num_directions)
-        #    - h_n: Final hidden state (num_layers * num_directions, batch, hidden_size)
-        #    - c_n: Final cell state (same shape as h_n)
-        output, (h_n, c_n) = self.lstm(embedded, (tz.Variable(), tz.Variable()))
+        # 2. LSTM processing
+        #    Tenzor LSTM returns output Variable directly (not tuple with hidden states)
+        #    output shape: (batch, seq_len, hidden_size * num_directions)
+        output = self.lstm(embedded)
 
-        # 3. Extract final hidden state
-        #    For classification, we use the last hidden state
-        #    If bidirectional: concatenate forward and backward final states
-        if self.bidirectional:
-            # h_n shape: (num_layers * 2, batch, hidden_size)
-            # Take the last layer's forward and backward states
-            forward_h = h_n.data[-2, :, :]  # Forward direction
-            backward_h = h_n.data[-1, :, :]  # Backward direction
-            # Concatenate along feature dimension
-            final_h = tz.Variable(
-                tz.Tensor.from_numpy(
-                    np.concatenate([
-                        forward_h.numpy(),
-                        backward_h.numpy()
-                    ], axis=1)
-                )
-            )
-        else:
-            # Take the last layer's hidden state
-            final_h = tz.Variable(h_n.data[-1, :, :])
+        # 3. Extract final output for classification
+        #    Use the last timestep's output
+        #    output shape: (batch, seq_len, hidden_size * directions)
+        # Get the tensor and extract last timestep
+        output_tensor = output.tensor()
+        # Last timestep: [:, -1, :]
+        seq_len = output_tensor.shape[1]
+        # Use slice to get last timestep
+        final_output_np = output_tensor.numpy()[:, -1, :]  # (batch, hidden_size * directions)
+        final_h = tz.Variable(tz.Tensor.from_numpy(final_output_np), requires_grad=True)
 
         # 4. Linear classification layer
         logits = self.fc(final_h)
@@ -313,7 +302,7 @@ def main():
     )
 
     params = model.parameters()
-    total_params = sum(p.data.numel() for p in params)
+    total_params = sum(p.tensor().numel for p in params)
     print(f"  ✓ Model created with {total_params:,} trainable parameters")
 
     # ========================================================================
@@ -331,7 +320,11 @@ def main():
     def compute_loss(logits, targets):
         """Compute loss (simplified for demo)"""
         diff = logits - targets
-        loss = tz.sum(diff * diff) / float(logits.data.shape[0])
+        squared = diff * diff
+        # Extract tensor for sum operation, then wrap back in Variable
+        batch_size = logits.tensor().shape[0]
+        loss_tensor = tz.sum(squared.tensor()) / float(batch_size)
+        loss = tz.Variable(loss_tensor, requires_grad=True)
         return loss
 
     # ========================================================================
@@ -398,10 +391,11 @@ def main():
             batch_y = y_train_onehot[batch_indices]  # (batch_size, n_classes)
 
             # Convert to tensors
-            x_tensor = tz.Tensor.from_numpy(batch_x.astype(np.float32))
+            # Note: indices for embedding must be int64, not float32
+            x_tensor = tz.Tensor.from_numpy(batch_x.astype(np.int64))
             y_tensor = tz.Tensor.from_numpy(batch_y)
 
-            # Wrap in Variables
+            # Wrap in Variables - Module.__call__ expects Variable
             x_var = tz.Variable(x_tensor, requires_grad=False)
             y_var = tz.Variable(y_tensor, requires_grad=False)
 
@@ -419,7 +413,7 @@ def main():
             optimizer.step()
 
             # Track loss
-            epoch_loss += loss.data.item()
+            epoch_loss += loss.tensor().item()
 
         avg_loss = epoch_loss / min(n_batches, 10)
         print(f"  Epoch [{epoch+1:2d}/{n_epochs}] - Average Loss: {avg_loss:.4f}")
@@ -454,8 +448,8 @@ def main():
             batch_x = X_test[start_idx:end_idx]
             batch_y = y_test[start_idx:end_idx]
 
-            # Convert to tensor
-            x_tensor = tz.Tensor.from_numpy(batch_x.astype(np.float32))
+            # Convert to tensor (int64 for embedding indices)
+            x_tensor = tz.Tensor.from_numpy(batch_x.astype(np.int64))
             x_var = tz.Variable(x_tensor, requires_grad=False)
 
             # Forward pass

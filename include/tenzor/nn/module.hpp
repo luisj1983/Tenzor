@@ -13,10 +13,18 @@
 #include <vector>
 #include <unordered_map>
 #include "../autograd/variable.hpp"
+#include "../autograd/function.hpp"
 #include "../core/device.hpp"
 
 namespace tenzor {
 namespace nn {
+
+// Forward declarations
+class Module;
+class ModuleHookFunction;
+
+// Forward declaration of wrap function (defined after Module class)
+auto wrap_with_backward_hooks(Module* module, const Variable& input, Variable output) -> Variable;
 
 /**
  * @brief Base class for all neural network modules.
@@ -51,6 +59,8 @@ namespace nn {
  * @endcode
  */
 class Module {
+    friend class ModuleHookFunction;  // Allow access to backward hook vectors
+
 public:
     virtual ~Module() = default;
 
@@ -67,10 +77,18 @@ public:
     auto forward(const Variable& input) -> Variable {
         // Only call hooks if this specific module has hooks registered
         // This avoids overhead for modules without hooks
-        if (has_forward_hooks_) {
-            call_own_forward_pre_hooks();
+        if (has_forward_hooks_ || has_backward_hooks_) {
+            if (has_forward_hooks_) {
+                call_own_forward_pre_hooks(input);
+            }
             auto output = forward_impl(input);
-            call_own_forward_post_hooks();
+            if (has_forward_hooks_) {
+                call_own_forward_post_hooks(input, output);
+            }
+            // Wrap output with backward hook function if backward hooks are registered
+            if (has_backward_hooks_) {
+                output = wrap_with_backward_hooks(this, input, std::move(output));
+            }
             return output;
         }
         return forward_impl(input);
@@ -213,11 +231,16 @@ public:
 
     /**
      * @brief Hook function types for forward and backward passes.
+     *
+     * ForwardPreHook receives: (module, input)
+     * ForwardPostHook receives: (module, input, output)
+     * BackwardPreHook receives: (module, grad_output)
+     * BackwardPostHook receives: (module, grad_input, grad_output)
      */
-    using ForwardPreHook = std::function<void(Module*)>;
-    using ForwardPostHook = std::function<void(Module*)>;
-    using BackwardPreHook = std::function<void(Module*)>;
-    using BackwardPostHook = std::function<void(Module*)>;
+    using ForwardPreHook = std::function<void(Module*, const Variable& input)>;
+    using ForwardPostHook = std::function<void(Module*, const Variable& input, const Variable& output)>;
+    using BackwardPreHook = std::function<void(Module*, const Variable& grad_output)>;
+    using BackwardPostHook = std::function<void(Module*, const Variable& grad_input, const Variable& grad_output)>;
 
     /**
      * @brief Register a forward pre-hook.
@@ -270,6 +293,15 @@ public:
      * @brief Call all registered forward pre-hooks.
      *
      * Called internally before forward() execution.
+     * @param input The input variable being passed to forward
+     */
+    auto call_forward_pre_hooks(const Variable& input) -> void;
+
+    /**
+     * @brief Call all registered forward pre-hooks (no-argument version).
+     *
+     * For modules with multiple inputs that manually call hooks.
+     * Passes an empty Variable to hooks.
      */
     auto call_forward_pre_hooks() -> void;
 
@@ -277,6 +309,16 @@ public:
      * @brief Call all registered forward post-hooks.
      *
      * Called internally after forward() execution.
+     * @param input The input variable passed to forward
+     * @param output The output variable produced by forward
+     */
+    auto call_forward_post_hooks(const Variable& input, const Variable& output) -> void;
+
+    /**
+     * @brief Call all registered forward post-hooks (no-argument version).
+     *
+     * For modules with multiple inputs that manually call hooks.
+     * Passes empty Variables to hooks.
      */
     auto call_forward_post_hooks() -> void;
 
@@ -284,15 +326,18 @@ public:
      * @brief Call all registered backward pre-hooks.
      *
      * Called before backward pass execution.
+     * @param grad_output The gradient w.r.t. module output
      */
-    auto call_backward_pre_hooks() -> void;
+    auto call_backward_pre_hooks(const Variable& grad_output) -> void;
 
     /**
      * @brief Call all registered backward post-hooks.
      *
      * Called after backward pass execution.
+     * @param grad_input The gradient w.r.t. module input
+     * @param grad_output The gradient w.r.t. module output
      */
-    auto call_backward_post_hooks() -> void;
+    auto call_backward_post_hooks(const Variable& grad_input, const Variable& grad_output) -> void;
 
     // ============================================================================
     // Device Management
@@ -423,25 +468,85 @@ protected:
     std::vector<BackwardPostHook> backward_post_hooks_;                           ///< Backward post-hooks
     size_t next_hook_id_{0};                                                      ///< Next hook ID for tracking
     bool has_forward_hooks_{false};                                               ///< True if this module has forward hooks
+    bool has_backward_hooks_{false};                                              ///< True if this module has backward hooks
 
     /**
      * @brief Call only this module's forward pre-hooks (no recursion).
+     * @param input The input variable being passed to forward
      */
-    auto call_own_forward_pre_hooks() -> void {
+    auto call_own_forward_pre_hooks(const Variable& input) -> void {
         for (auto& hook : forward_pre_hooks_) {
-            hook(this);
+            hook(this, input);
         }
     }
 
     /**
      * @brief Call only this module's forward post-hooks (no recursion).
+     * @param input The input variable passed to forward
+     * @param output The output variable produced by forward
      */
-    auto call_own_forward_post_hooks() -> void {
+    auto call_own_forward_post_hooks(const Variable& input, const Variable& output) -> void {
         for (auto& hook : forward_post_hooks_) {
-            hook(this);
+            hook(this, input, output);
         }
     }
 };
+
+/**
+ * @brief Autograd function for module backward hook integration.
+ *
+ * This function is inserted into the computation graph when a module has
+ * backward hooks registered. It acts as an identity function on forward
+ * (passing through the tensor unchanged) but triggers the module's backward
+ * hooks during the backward pass.
+ *
+ * This enables PyTorch-compatible backward hooks that are called automatically
+ * during loss.backward().
+ */
+class ModuleHookFunction : public Function {
+public:
+    /**
+     * @brief Construct with module reference and input variable.
+     *
+     * @param module The module whose backward hooks to call
+     * @param input The input that was passed to the module's forward
+     */
+    ModuleHookFunction(Module* module, Variable input)
+        : module_(module), input_(std::move(input)) {}
+
+    /**
+     * @brief Forward pass - identity function.
+     *
+     * Simply returns the input unchanged. The function exists only to
+     * insert a node in the computation graph for backward hook triggering.
+     */
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+
+    /**
+     * @brief Backward pass - triggers module hooks and passes gradient through.
+     *
+     * Calls the module's backward pre-hooks and post-hooks, then returns
+     * the gradient unchanged (identity gradient).
+     */
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+
+private:
+    Module* module_;  ///< Module whose hooks to call (non-owning)
+    Variable input_;  ///< Original input for hook context
+};
+
+/**
+ * @brief Wrap a module's output with backward hook support.
+ *
+ * If the module has backward hooks registered, wraps the output variable
+ * with a ModuleHookFunction so backward hooks are triggered during backprop.
+ *
+ * @param module The module
+ * @param input The input passed to forward
+ * @param output The output from forward_impl
+ * @return Output wrapped with hook function if needed, otherwise unchanged
+ */
+auto wrap_with_backward_hooks(Module* module, const Variable& input, Variable output) -> Variable;
 
 /**
  * @brief Sequential container for chaining modules.

@@ -380,11 +380,13 @@ auto Module::register_forward_post_hook(ForwardPostHook hook) -> size_t {
 
 auto Module::register_backward_pre_hook(BackwardPreHook hook) -> size_t {
     backward_pre_hooks_.push_back(std::move(hook));
+    has_backward_hooks_ = true;  // Enable backward hook wrapping in forward()
     return next_hook_id_++;
 }
 
 auto Module::register_backward_post_hook(BackwardPostHook hook) -> size_t {
     backward_post_hooks_.push_back(std::move(hook));
+    has_backward_hooks_ = true;  // Enable backward hook wrapping in forward()
     return next_hook_id_++;
 }
 
@@ -394,44 +396,128 @@ auto Module::remove_hook(size_t hook_id) -> void {
     (void)hook_id;  // Suppress unused parameter warning
 }
 
-auto Module::call_forward_pre_hooks() -> void {
+auto Module::call_forward_pre_hooks(const Variable& input) -> void {
     for (auto& hook : forward_pre_hooks_) {
-        hook(this);
+        hook(this, input);
     }
     // Recursively call hooks on submodules
     for (auto& [name, module] : submodules_) {
-        module->call_forward_pre_hooks();
+        module->call_forward_pre_hooks(input);
+    }
+}
+
+auto Module::call_forward_pre_hooks() -> void {
+    // No-argument version for modules with multiple inputs
+    Variable empty;
+    call_forward_pre_hooks(empty);
+}
+
+auto Module::call_forward_post_hooks(const Variable& input, const Variable& output) -> void {
+    for (auto& hook : forward_post_hooks_) {
+        hook(this, input, output);
+    }
+    // Recursively call hooks on submodules
+    for (auto& [name, module] : submodules_) {
+        module->call_forward_post_hooks(input, output);
     }
 }
 
 auto Module::call_forward_post_hooks() -> void {
-    for (auto& hook : forward_post_hooks_) {
-        hook(this);
-    }
-    // Recursively call hooks on submodules
-    for (auto& [name, module] : submodules_) {
-        module->call_forward_post_hooks();
-    }
+    // No-argument version for modules with multiple inputs
+    Variable empty;
+    call_forward_post_hooks(empty, empty);
 }
 
-auto Module::call_backward_pre_hooks() -> void {
+auto Module::call_backward_pre_hooks(const Variable& grad_output) -> void {
     for (auto& hook : backward_pre_hooks_) {
-        hook(this);
+        hook(this, grad_output);
     }
     // Recursively call hooks on submodules
     for (auto& [name, module] : submodules_) {
-        module->call_backward_pre_hooks();
+        module->call_backward_pre_hooks(grad_output);
     }
 }
 
-auto Module::call_backward_post_hooks() -> void {
+auto Module::call_backward_post_hooks(const Variable& grad_input, const Variable& grad_output) -> void {
     for (auto& hook : backward_post_hooks_) {
-        hook(this);
+        hook(this, grad_input, grad_output);
     }
     // Recursively call hooks on submodules
     for (auto& [name, module] : submodules_) {
-        module->call_backward_post_hooks();
+        module->call_backward_post_hooks(grad_input, grad_output);
     }
+}
+
+// ============================================================================
+// ModuleHookFunction Implementation
+// ============================================================================
+
+auto ModuleHookFunction::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
+    // Identity function - just pass through the input
+    // Save the input for backward (to pass to hooks)
+    if (!inputs.empty()) {
+        save_for_backward({inputs[0].tensor()});
+    }
+    return inputs;
+}
+
+auto ModuleHookFunction::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    if (grad_outputs.empty() || !module_) {
+        return grad_outputs;
+    }
+
+    // Create Variables from gradients for hook calls
+    Variable grad_output_var(grad_outputs[0], false);
+
+    // Call backward pre-hooks
+    for (auto& hook : module_->backward_pre_hooks_) {
+        hook(module_, grad_output_var);
+    }
+
+    // The gradient passes through unchanged (identity)
+    Variable grad_input_var = grad_output_var;
+
+    // Call backward post-hooks
+    for (auto& hook : module_->backward_post_hooks_) {
+        hook(module_, grad_input_var, grad_output_var);
+    }
+
+    // Return gradient unchanged
+    return grad_outputs;
+}
+
+auto wrap_with_backward_hooks(Module* module, const Variable& input, Variable output) -> Variable {
+    // Only wrap if the output requires grad (to be part of autograd graph)
+    if (!output.requires_grad()) {
+        return output;
+    }
+
+    // Create a ModuleHookFunction and apply it to the output
+    auto hook_fn = std::make_shared<ModuleHookFunction>(module, input);
+
+    // Apply the function to wrap the output in the computation graph
+    auto result = hook_fn->forward({output});
+
+    if (!result.empty()) {
+        // Link the hook function into the computation graph
+        auto& wrapped_output = result[0];
+
+        // Set the grad_fn to our hook function so it gets called during backward
+        // We need to chain it with the existing grad_fn
+        auto existing_grad_fn = output.grad_fn();
+        if (existing_grad_fn) {
+            hook_fn->set_next_functions({existing_grad_fn});
+        }
+        hook_fn->set_input_variables({output});
+
+        // Create new Variable with the hook function as grad_fn
+        Variable hooked_output(wrapped_output.tensor(), true);
+        hooked_output.set_grad_fn(hook_fn);
+
+        return hooked_output;
+    }
+
+    return output;
 }
 
 } // namespace tenzor::nn

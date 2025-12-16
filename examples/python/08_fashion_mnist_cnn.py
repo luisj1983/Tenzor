@@ -241,6 +241,7 @@ class FashionMNISTCNN:
         self.conv1b = tz.nn.Conv2d(32, 32, kernel_size=3, padding=1)
         self.bn1b = tz.nn.BatchNorm2d(32)
         self.pool1 = tz.nn.MaxPool2d(kernel_size=2, stride=2)
+        self.drop1 = tz.nn.Dropout(0.25)
         print("  Conv2d(1→32, 3x3) + BN + ReLU")
         print("  Conv2d(32→32, 3x3) + BN + ReLU")
         print("  MaxPool2d(2x2) → Output: (32, 14, 14)")
@@ -253,6 +254,7 @@ class FashionMNISTCNN:
         self.conv2b = tz.nn.Conv2d(64, 64, kernel_size=3, padding=1)
         self.bn2b = tz.nn.BatchNorm2d(64)
         self.pool2 = tz.nn.MaxPool2d(kernel_size=2, stride=2)
+        self.drop2 = tz.nn.Dropout(0.25)
         print("  Conv2d(32→64, 3x3) + BN + ReLU")
         print("  Conv2d(64→64, 3x3) + BN + ReLU")
         print("  MaxPool2d(2x2) → Output: (64, 7, 7)")
@@ -263,6 +265,7 @@ class FashionMNISTCNN:
         self.conv3 = tz.nn.Conv2d(64, 128, kernel_size=3, padding=1)
         self.bn3 = tz.nn.BatchNorm2d(128)
         self.pool3 = tz.nn.MaxPool2d(kernel_size=2, stride=2)
+        self.drop3 = tz.nn.Dropout(0.25)
         print("  Conv2d(64→128, 3x3) + BN + ReLU")
         print("  MaxPool2d(2x2) → Output: (128, 3, 3)")
         print("  Dropout(0.25)")
@@ -271,6 +274,7 @@ class FashionMNISTCNN:
         print("\n[Classifier] Fully connected layers:")
         self.fc1 = tz.nn.Linear(128 * 3 * 3, 256)
         self.bn_fc = tz.nn.BatchNorm1d(256)
+        self.drop_fc = tz.nn.Dropout(Config.DROPOUT_RATE)
         self.fc2 = tz.nn.Linear(256, Config.NUM_CLASSES)
         print("  Flatten → 1152 features")
         print("  Linear(1152→256) + BN + ReLU")
@@ -318,7 +322,7 @@ class FashionMNISTCNN:
 
         x = self.pool1(x)
         if training:
-            x = tz.nn.dropout(x, p=0.25)
+            x = self.drop1(x)
 
         # Block 2
         x = self.conv2a(x)
@@ -331,7 +335,7 @@ class FashionMNISTCNN:
 
         x = self.pool2(x)
         if training:
-            x = tz.nn.dropout(x, p=0.25)
+            x = self.drop2(x)
 
         # Block 3
         x = self.conv3(x)
@@ -340,18 +344,21 @@ class FashionMNISTCNN:
 
         x = self.pool3(x)
         if training:
-            x = tz.nn.dropout(x, p=0.25)
+            x = self.drop3(x)
 
         # Flatten
-        batch_size = x.shape()[0]
-        x = tz.reshape(x, [batch_size, -1])
+        batch_size = x.tensor().shape[0]
+        flat_size = 1
+        for dim in x.tensor().shape[1:]:
+            flat_size *= dim
+        x = tz.Variable(x.tensor().reshape([batch_size, flat_size]), requires_grad=x.requires_grad())
 
         # Classifier
         x = self.fc1(x)
         x = self.bn_fc(x)
         x = tz.nn.relu(x)
         if training:
-            x = tz.nn.dropout(x, p=Config.DROPOUT_RATE)
+            x = self.drop_fc(x)
 
         x = self.fc2(x)
 
@@ -622,7 +629,11 @@ def compute_cross_entropy_loss(logits: tz.Variable, labels: np.ndarray) -> tz.Va
     # MSE loss as approximation (for demo purposes)
     targets_var = tz.Variable(tz.Tensor.from_numpy(targets), requires_grad=False)
     diff = logits - targets_var
-    loss = tz.mean(diff * diff)
+    # diff is a Variable, extract tensor for mean operation
+    squared = diff * diff
+    loss_tensor = tz.mean(squared.tensor())
+    # Wrap back in Variable to maintain gradient tracking
+    loss = tz.Variable(loss_tensor, requires_grad=True)
 
     return loss
 
