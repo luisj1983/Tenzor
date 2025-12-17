@@ -478,16 +478,12 @@ auto BatchNorm1d::forward_impl(const Variable& input) -> Variable {
             auto& rm_var_ptr = buffers_["running_mean"];
             auto& rv_var_ptr = buffers_["running_var"];
 
-            // Exponential moving average update
-            auto rm_data = rm_var_ptr->tensor().data<float>();
-            auto rv_data = rv_var_ptr->tensor().data<float>();
-            auto mean_data = batch_mean.data<float>();
-            auto var_data = unbiased_var.data<float>();
-
-            for (int64_t i = 0; i < C; i++) {
-                rm_data[i] = (1 - momentum_) * rm_data[i] + momentum_ * mean_data[i];
-                rv_data[i] = (1 - momentum_) * rv_data[i] + momentum_ * var_data[i];
-            }
+            // Exponential moving average update using tensor operations
+            // This properly handles both CPU and CUDA/GPU tensors
+            auto& rm_tensor = rm_var_ptr->tensor();
+            auto& rv_tensor = rv_var_ptr->tensor();
+            rm_tensor = rm_tensor * (1.0f - momentum_) + batch_mean * momentum_;
+            rv_tensor = rv_tensor * (1.0f - momentum_) + unbiased_var * momentum_;
 
             num_batches_tracked_++;
         }

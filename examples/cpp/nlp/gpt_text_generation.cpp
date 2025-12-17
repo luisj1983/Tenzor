@@ -13,9 +13,9 @@
 #include <vector>
 #include <string>
 #include <chrono>
-#include "../../include/tenzor/models/gpt.hpp"
-#include "../../include/tenzor/autograd/variable.hpp"
-#include "../../include/tenzor/core/tensor.hpp"
+#include <tenzor/models/gpt.hpp>
+#include <tenzor/autograd/variable.hpp>
+#include <tenzor/core/tensor.hpp>
 
 using namespace tenzor;
 using namespace tenzor::models;

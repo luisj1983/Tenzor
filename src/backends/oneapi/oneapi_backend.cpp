@@ -303,22 +303,22 @@ public:
                             sycl::property_list{sycl::property::queue::in_order{}});
 
                         // Store device info
-                        DeviceInfo info;
-                        info.queue = queue;
-                        info.device = device;
-                        info.name = device.get_info<sycl::info::device::name>();
-                        info.type = device.is_gpu() ? "gpu" :
+                        OneAPIDeviceData dev_data;
+                        dev_data.queue = queue;
+                        dev_data.device = device;
+                        dev_data.name = device.get_info<sycl::info::device::name>();
+                        dev_data.type = device.is_gpu() ? "gpu" :
                                    device.is_cpu() ? "cpu" : "accelerator";
-                        info.max_compute_units = device.get_info<sycl::info::device::max_compute_units>();
-                        info.max_work_group_size = device.get_info<sycl::info::device::max_work_group_size>();
-                        info.global_mem_size = device.get_info<sycl::info::device::global_mem_size>();
-                        info.local_mem_size = device.get_info<sycl::info::device::local_mem_size>();
+                        dev_data.max_compute_units = device.get_info<sycl::info::device::max_compute_units>();
+                        dev_data.max_work_group_size = device.get_info<sycl::info::device::max_work_group_size>();
+                        dev_data.global_mem_size = device.get_info<sycl::info::device::global_mem_size>();
+                        dev_data.local_mem_size = device.get_info<sycl::info::device::local_mem_size>();
 
                         // Initialize caching allocator for this device
                         backend::OneAPICachingAllocator::get().initialize(
-                            info.queue.get(), static_cast<int>(devices_.size()));
+                            dev_data.queue.get(), static_cast<int>(devices_.size()));
 
-                        devices_.push_back(info);
+                        devices_.push_back(dev_data);
                     } catch (const sycl::exception& e) {
                         // Skip devices that can't create queues
                         continue;
@@ -345,6 +345,64 @@ public:
 
     auto is_available() const -> bool override {
         return !devices_.empty();
+    }
+
+    auto get_device_info(int32_t device_id) const -> tenzor::DeviceInfo override {
+        if (device_id < 0 || device_id >= static_cast<int32_t>(devices_.size())) {
+            throw std::out_of_range("Invalid OneAPI device ID: " + std::to_string(device_id) +
+                                    " (available: 0-" + std::to_string(devices_.size() - 1) + ")");
+        }
+
+        const auto& dev = devices_[device_id];
+        tenzor::DeviceInfo info;
+
+        info.name = dev.name;
+
+        // Determine vendor from device name or platform
+        auto platform_name = dev.device.get_platform().get_info<sycl::info::platform::name>();
+        if (platform_name.find("Intel") != std::string::npos) {
+            info.vendor = "Intel";
+        } else if (platform_name.find("AMD") != std::string::npos) {
+            info.vendor = "AMD";
+        } else if (platform_name.find("NVIDIA") != std::string::npos) {
+            info.vendor = "NVIDIA";
+        } else {
+            info.vendor = platform_name;
+        }
+
+        // Driver version from platform
+        info.driver_version = dev.device.get_platform().get_info<sycl::info::platform::version>();
+
+        // Memory info
+        info.total_memory = dev.global_mem_size;
+        info.available_memory = dev.global_mem_size;  // SYCL doesn't easily provide free memory
+
+        // Compute info
+        info.compute_units = dev.max_compute_units;
+        info.max_threads_per_block = static_cast<int>(dev.max_work_group_size);
+        info.max_shared_memory = static_cast<int>(dev.local_mem_size);
+
+        // SYCL sub-group size is like warp size
+        try {
+            auto sub_group_sizes = dev.device.get_info<sycl::info::device::sub_group_sizes>();
+            if (!sub_group_sizes.empty()) {
+                info.warp_size = static_cast<int>(sub_group_sizes.front());
+            }
+        } catch (...) {
+            info.warp_size = 32;  // Default
+        }
+
+        // Feature support
+        info.supports_fp16 = dev.device.has(sycl::aspect::fp16);
+        info.supports_fp64 = dev.device.has(sycl::aspect::fp64);
+        info.supports_int8 = true;  // Generally supported
+
+        // Device type
+        info.is_integrated = !dev.device.is_gpu() ||
+            (dev.device.get_info<sycl::info::device::host_unified_memory>());
+        info.is_discrete = dev.device.is_gpu() && !info.is_integrated;
+
+        return info;
     }
 
     auto allocate(size_t bytes, int32_t device_id) -> void* override {
@@ -1341,7 +1399,7 @@ public:
     }
 
 private:
-    struct DeviceInfo {
+    struct OneAPIDeviceData {
         std::shared_ptr<sycl::queue> queue;
         sycl::device device;
         std::string name;
@@ -1352,7 +1410,7 @@ private:
         uint64_t local_mem_size;
     };
 
-    std::vector<DeviceInfo> devices_;
+    std::vector<OneAPIDeviceData> devices_;
     std::unordered_map<void*, int32_t> allocations_;
 
     auto get_queue(int32_t device_id) -> sycl::queue& {

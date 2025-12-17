@@ -10,13 +10,13 @@
  * - Parameter inspection
  */
 
-#include "../../include/tenzor/models/vgg.hpp"
-#include "../../include/tenzor/models/alexnet.hpp"
-#include "../../include/tenzor/models/googlenet.hpp"
-#include "../../include/tenzor/core/tensor.hpp"
-#include "../../include/tenzor/autograd/variable.hpp"
-#include "../../include/tenzor/nn/loss/losses.hpp"
-#include "../../include/tenzor/nn/optim/adam.hpp"
+#include <tenzor/models/vgg.hpp>
+#include <tenzor/models/alexnet.hpp>
+#include <tenzor/models/googlenet.hpp>
+#include <tenzor/core/tensor.hpp>
+#include <tenzor/autograd/variable.hpp>
+#include <tenzor/nn/loss/losses.hpp>
+#include <tenzor/nn/optim/adam.hpp>
 #include <iostream>
 #include <iomanip>
 #include <memory>

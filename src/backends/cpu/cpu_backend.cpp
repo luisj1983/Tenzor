@@ -1,6 +1,15 @@
 #include "tenzor/backend/backend.hpp"
 #include <cstring>
 #include <stdexcept>
+#include <thread>
+#include <fstream>
+#include <string>
+
+#ifdef _WIN32
+#include <windows.h>
+#elif defined(__APPLE__)
+#include <sys/sysctl.h>
+#endif
 
 namespace tenzor {
 
@@ -141,6 +150,59 @@ public:
 
     auto is_available() const -> bool override {
         return true;
+    }
+
+    auto get_device_info(int32_t device_id) const -> DeviceInfo override {
+        if (device_id != 0) {
+            throw std::out_of_range("CPU backend only has device 0");
+        }
+
+        DeviceInfo info;
+        info.name = "CPU";
+        info.vendor = "System";
+
+        // Get number of hardware threads
+        info.compute_units = std::thread::hardware_concurrency();
+        if (info.compute_units == 0) {
+            info.compute_units = 1;  // Fallback
+        }
+
+        // CPU always supports FP64 and usually FP16 via software
+        info.supports_fp64 = true;
+        info.supports_fp16 = true;
+        info.is_integrated = true;
+
+        // Try to get system memory info
+        #ifdef __linux__
+        std::ifstream meminfo("/proc/meminfo");
+        std::string line;
+        while (std::getline(meminfo, line)) {
+            if (line.find("MemTotal:") == 0) {
+                size_t kb = 0;
+                sscanf(line.c_str(), "MemTotal: %zu kB", &kb);
+                info.total_memory = kb * 1024;
+            } else if (line.find("MemAvailable:") == 0) {
+                size_t kb = 0;
+                sscanf(line.c_str(), "MemAvailable: %zu kB", &kb);
+                info.available_memory = kb * 1024;
+            }
+        }
+        #elif defined(_WIN32)
+        MEMORYSTATUSEX memStatus;
+        memStatus.dwLength = sizeof(memStatus);
+        if (GlobalMemoryStatusEx(&memStatus)) {
+            info.total_memory = memStatus.ullTotalPhys;
+            info.available_memory = memStatus.ullAvailPhys;
+        }
+        #elif defined(__APPLE__)
+        int64_t memsize;
+        size_t len = sizeof(memsize);
+        if (sysctlbyname("hw.memsize", &memsize, &len, nullptr, 0) == 0) {
+            info.total_memory = static_cast<size_t>(memsize);
+        }
+        #endif
+
+        return info;
     }
 
     auto allocate(size_t bytes, int32_t device_id) -> void* override {

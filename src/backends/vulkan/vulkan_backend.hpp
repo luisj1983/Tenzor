@@ -52,6 +52,7 @@ public:
     auto name() const -> std::string_view override { return "vulkan"; }
     auto device_count() const -> int32_t override;
     auto is_available() const -> bool override;
+    auto get_device_info(int32_t device_id) const -> DeviceInfo override;
 
     auto allocate(size_t bytes, int32_t device_id) -> void* override;
     auto deallocate(void* ptr) -> void override;

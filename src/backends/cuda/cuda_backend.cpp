@@ -187,6 +187,62 @@ public:
         return device_count() > 0;
     }
 
+    auto get_device_info(int32_t device_id) const -> DeviceInfo override {
+        int count = device_count();
+        if (device_id < 0 || device_id >= count) {
+            throw std::out_of_range("Invalid CUDA device ID: " + std::to_string(device_id) +
+                                    " (available: 0-" + std::to_string(count - 1) + ")");
+        }
+
+        cudaDeviceProp props;
+        cudaGetDeviceProperties(&props, device_id);
+
+        DeviceInfo info;
+        info.name = props.name;
+        info.vendor = "NVIDIA";
+
+        // Get driver version
+        int driver_version = 0;
+        cudaDriverGetVersion(&driver_version);
+        info.driver_version = std::to_string(driver_version / 1000) + "." +
+                              std::to_string((driver_version % 1000) / 10);
+
+        // Memory info
+        info.total_memory = props.totalGlobalMem;
+        size_t free_mem = 0, total_mem = 0;
+        int current_device;
+        cudaGetDevice(&current_device);
+        cudaSetDevice(device_id);
+        cudaMemGetInfo(&free_mem, &total_mem);
+        cudaSetDevice(current_device);
+        info.available_memory = free_mem;
+
+        // Compute info
+        info.compute_units = props.multiProcessorCount;
+        info.max_threads_per_block = props.maxThreadsPerBlock;
+        info.max_shared_memory = static_cast<int>(props.sharedMemPerBlock);
+        info.warp_size = props.warpSize;
+
+        // Compute capability
+        info.major_version = props.major;
+        info.minor_version = props.minor;
+
+        // Feature support
+        info.supports_fp16 = (props.major >= 6);  // Pascal+
+        info.supports_fp64 = (props.major >= 2);  // Fermi+
+        info.supports_int8 = (props.major >= 6 && props.minor >= 1);  // Tensor cores on Volta+
+
+        // Device type
+        info.is_integrated = (props.integrated != 0);
+        info.is_discrete = !info.is_integrated;
+
+        // PCI info
+        info.pci_bus_id = props.pciBusID;
+        info.pci_device_id = props.pciDeviceID;
+
+        return info;
+    }
+
     auto allocate(size_t bytes, int32_t device_id) -> void* override {
         // Handle empty tensors - CUDA doesn't like 0-byte allocations
         if (bytes == 0) {

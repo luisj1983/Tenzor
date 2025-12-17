@@ -36,8 +36,11 @@ float cross_entropy_loss(const Tensor& probs, const Tensor& targets) {
     int batch_size = probs.shape()[0];
     int num_classes = probs.shape()[1];
 
-    const float* prob_data = probs.cpu().data<float>();
-    const int64_t* target_data = targets.cpu().data<int64_t>();
+    // Copy tensors to CPU first to avoid dangling pointer from temporary
+    auto probs_cpu = probs.cpu();
+    auto targets_cpu = targets.cpu();
+    const float* prob_data = probs_cpu.data<float>();
+    const int64_t* target_data = targets_cpu.data<int64_t>();
 
     float total_loss = 0.0f;
     const float eps = 1e-7f;

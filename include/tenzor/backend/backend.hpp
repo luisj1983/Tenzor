@@ -55,6 +55,46 @@ using StreamHandle = void*;
 using OpAttributes = std::unordered_map<std::string, std::string>;
 
 /**
+ * @brief Device information structure.
+ *
+ * Contains detailed information about a specific device in a backend.
+ * Properties vary by device type - GPU devices have more fields populated.
+ *
+ * @code
+ * Backend* cuda = get_backend("cuda");
+ * for (int i = 0; i < cuda->device_count(); i++) {
+ *     auto info = cuda->get_device_info(i);
+ *     std::cout << info.name << ": " << info.total_memory / 1e9 << " GB\n";
+ * }
+ * @endcode
+ */
+struct DeviceInfo {
+    std::string name;              ///< Device name (e.g., "NVIDIA GeForce RTX 3080")
+    std::string vendor;            ///< Vendor name (e.g., "NVIDIA", "AMD", "Intel")
+    std::string driver_version;    ///< Driver version string
+
+    size_t total_memory{0};        ///< Total device memory in bytes
+    size_t available_memory{0};    ///< Currently available memory in bytes
+
+    int compute_units{0};          ///< Number of compute units/SMs/CUs
+    int max_threads_per_block{0};  ///< Maximum threads per block/workgroup
+    int max_shared_memory{0};      ///< Maximum shared/local memory per block (bytes)
+    int warp_size{0};              ///< Warp/wavefront size (32 for NVIDIA, 64 for AMD)
+
+    int major_version{0};          ///< Compute capability major (CUDA) or similar
+    int minor_version{0};          ///< Compute capability minor
+
+    bool supports_fp16{false};     ///< Hardware FP16 support
+    bool supports_fp64{false};     ///< Hardware FP64 (double) support
+    bool supports_int8{false};     ///< Hardware INT8 support (tensor cores)
+    bool is_integrated{false};     ///< Integrated GPU (shares system memory)
+    bool is_discrete{false};       ///< Discrete GPU (dedicated memory)
+
+    int pci_bus_id{-1};            ///< PCI bus ID (-1 if not applicable)
+    int pci_device_id{-1};         ///< PCI device ID (-1 if not applicable)
+};
+
+/**
  * @brief Abstract base class for device backend implementations.
  *
  * Defines the interface that all backend implementations must provide,
@@ -95,6 +135,25 @@ public:
      * @return true if backend can be used (drivers loaded, hardware present)
      */
     virtual auto is_available() const -> bool = 0;
+
+    /**
+     * @brief Get detailed information about a specific device.
+     *
+     * @param device_id Device index (0 to device_count()-1)
+     * @return DeviceInfo structure with device properties
+     * @throws std::out_of_range if device_id is invalid
+     *
+     * @code
+     * Backend* cuda = get_backend("cuda");
+     * for (int i = 0; i < cuda->device_count(); i++) {
+     *     auto info = cuda->get_device_info(i);
+     *     std::cout << "Device " << i << ": " << info.name << "\n";
+     *     std::cout << "  Memory: " << info.total_memory / (1024*1024*1024) << " GB\n";
+     *     std::cout << "  Compute: " << info.major_version << "." << info.minor_version << "\n";
+     * }
+     * @endcode
+     */
+    virtual auto get_device_info(int32_t device_id) const -> DeviceInfo = 0;
 
     /**
      * @brief Allocate device memory.

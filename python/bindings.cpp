@@ -212,6 +212,142 @@ PYBIND11_MODULE(tenzor_core, m) {
         return cuda_backend ? cuda_backend->device_count() : 0;
     }, "Get number of available CUDA devices");
 
+    // Vulkan device availability
+    m.def("vulkan_is_available", []() {
+        auto& loader = tenzor::backend_registry();
+        auto* vulkan_backend = loader.get_backend("vulkan");
+        return vulkan_backend != nullptr && vulkan_backend->is_available();
+    }, "Check if Vulkan is available");
+
+    m.def("vulkan_device_count", []() {
+        auto& loader = tenzor::backend_registry();
+        auto* vulkan_backend = loader.get_backend("vulkan");
+        return vulkan_backend ? vulkan_backend->device_count() : 0;
+    }, "Get number of available Vulkan devices");
+
+    // OneAPI device availability
+    m.def("oneapi_is_available", []() {
+        auto& loader = tenzor::backend_registry();
+        auto* oneapi_backend = loader.get_backend("oneapi");
+        return oneapi_backend != nullptr && oneapi_backend->is_available();
+    }, "Check if OneAPI (SYCL) is available");
+
+    m.def("oneapi_device_count", []() {
+        auto& loader = tenzor::backend_registry();
+        auto* oneapi_backend = loader.get_backend("oneapi");
+        return oneapi_backend ? oneapi_backend->device_count() : 0;
+    }, "Get number of available OneAPI devices");
+
+    // ROCm device availability
+    m.def("rocm_is_available", []() {
+        auto& loader = tenzor::backend_registry();
+        auto* rocm_backend = loader.get_backend("rocm");
+        return rocm_backend != nullptr && rocm_backend->is_available();
+    }, "Check if ROCm (AMD GPU) is available");
+
+    m.def("rocm_device_count", []() {
+        auto& loader = tenzor::backend_registry();
+        auto* rocm_backend = loader.get_backend("rocm");
+        return rocm_backend ? rocm_backend->device_count() : 0;
+    }, "Get number of available ROCm devices");
+
+    // List all available backends
+    m.def("list_backends", []() {
+        auto& loader = tenzor::backend_registry();
+        return loader.available_backends();
+    }, "Get list of all registered backend names");
+
+    // Generic is_available for any backend
+    m.def("is_backend_available", [](const std::string& backend_name) {
+        auto& loader = tenzor::backend_registry();
+        auto* backend = loader.get_backend(backend_name);
+        return backend != nullptr && backend->is_available();
+    }, py::arg("backend_name"),
+    "Check if a specific backend is available");
+
+    // Generic device_count for any backend
+    m.def("backend_device_count", [](const std::string& backend_name) {
+        auto& loader = tenzor::backend_registry();
+        auto* backend = loader.get_backend(backend_name);
+        return backend ? backend->device_count() : 0;
+    }, py::arg("backend_name"),
+    "Get number of devices for a specific backend");
+
+    // Get device info for a specific device
+    m.def("get_device_info", [](const std::string& backend_name, int32_t device_id) {
+        auto& loader = tenzor::backend_registry();
+        auto* backend = loader.get_backend(backend_name);
+        if (!backend) {
+            throw std::runtime_error("Backend not found: " + backend_name);
+        }
+        if (device_id < 0 || device_id >= backend->device_count()) {
+            throw std::out_of_range("Invalid device ID: " + std::to_string(device_id));
+        }
+
+        auto info = backend->get_device_info(device_id);
+
+        py::dict result;
+        result["name"] = info.name;
+        result["vendor"] = info.vendor;
+        result["driver_version"] = info.driver_version;
+        result["total_memory"] = info.total_memory;
+        result["available_memory"] = info.available_memory;
+        result["compute_units"] = info.compute_units;
+        result["max_threads_per_block"] = info.max_threads_per_block;
+        result["max_shared_memory"] = info.max_shared_memory;
+        result["warp_size"] = info.warp_size;
+        result["major_version"] = info.major_version;
+        result["minor_version"] = info.minor_version;
+        result["supports_fp16"] = info.supports_fp16;
+        result["supports_fp64"] = info.supports_fp64;
+        result["supports_int8"] = info.supports_int8;
+        result["is_integrated"] = info.is_integrated;
+        result["is_discrete"] = info.is_discrete;
+        result["pci_bus_id"] = info.pci_bus_id;
+        result["pci_device_id"] = info.pci_device_id;
+        return result;
+    }, py::arg("backend_name"), py::arg("device_id") = 0,
+    "Get detailed information about a specific device");
+
+    // Get all devices across all backends
+    m.def("get_all_devices", []() {
+        auto& loader = tenzor::backend_registry();
+        py::list devices;
+
+        for (const auto& backend_name : loader.available_backends()) {
+            auto* backend = loader.get_backend(backend_name);
+            if (backend && backend->is_available()) {
+                for (int32_t i = 0; i < backend->device_count(); ++i) {
+                    auto info = backend->get_device_info(i);
+
+                    py::dict device;
+                    device["backend"] = backend_name;
+                    device["device_id"] = i;
+                    device["name"] = info.name;
+                    device["vendor"] = info.vendor;
+                    device["driver_version"] = info.driver_version;
+                    device["total_memory"] = info.total_memory;
+                    device["available_memory"] = info.available_memory;
+                    device["compute_units"] = info.compute_units;
+                    device["max_threads_per_block"] = info.max_threads_per_block;
+                    device["max_shared_memory"] = info.max_shared_memory;
+                    device["warp_size"] = info.warp_size;
+                    device["major_version"] = info.major_version;
+                    device["minor_version"] = info.minor_version;
+                    device["supports_fp16"] = info.supports_fp16;
+                    device["supports_fp64"] = info.supports_fp64;
+                    device["supports_int8"] = info.supports_int8;
+                    device["is_integrated"] = info.is_integrated;
+                    device["is_discrete"] = info.is_discrete;
+                    device["pci_bus_id"] = info.pci_bus_id;
+                    device["pci_device_id"] = info.pci_device_id;
+                    devices.append(device);
+                }
+            }
+        }
+        return devices;
+    }, "Get list of all available devices across all backends with their properties");
+
     // Device::Type enum (must be defined before Device class for default args)
     py::enum_<tenzor::Device::Type>(m, "DeviceType")
         .value("CPU", tenzor::Device::Type::CPU)

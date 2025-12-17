@@ -384,6 +384,120 @@ auto VulkanBackend::is_available() const -> bool {
     return !devices_.empty();
 }
 
+auto VulkanBackend::get_device_info(int32_t device_id) const -> DeviceInfo {
+    if (device_id < 0 || device_id >= device_count()) {
+        throw std::out_of_range("Invalid device ID: " + std::to_string(device_id));
+    }
+
+    DeviceInfo info;
+    const auto& ctx = devices_[device_id];
+
+    // Get physical device properties
+    VkPhysicalDeviceProperties props;
+    vkGetPhysicalDeviceProperties(ctx.physicalDevice, &props);
+
+    info.name = props.deviceName;
+
+    // Determine vendor from vendorID
+    switch (props.vendorID) {
+        case 0x1002: info.vendor = "AMD"; break;
+        case 0x10DE: info.vendor = "NVIDIA"; break;
+        case 0x8086: info.vendor = "Intel"; break;
+        case 0x13B5: info.vendor = "ARM"; break;
+        case 0x5143: info.vendor = "Qualcomm"; break;
+        default: info.vendor = "Unknown (0x" + std::to_string(props.vendorID) + ")"; break;
+    }
+
+    // Driver version - format varies by vendor
+    uint32_t driverVersion = props.driverVersion;
+    if (props.vendorID == 0x10DE) {
+        // NVIDIA uses custom format
+        info.driver_version = std::to_string((driverVersion >> 22) & 0x3ff) + "." +
+                             std::to_string((driverVersion >> 14) & 0x0ff) + "." +
+                             std::to_string((driverVersion >> 6) & 0x0ff) + "." +
+                             std::to_string(driverVersion & 0x003f);
+    } else {
+        // Standard Vulkan version format
+        info.driver_version = std::to_string(VK_VERSION_MAJOR(driverVersion)) + "." +
+                             std::to_string(VK_VERSION_MINOR(driverVersion)) + "." +
+                             std::to_string(VK_VERSION_PATCH(driverVersion));
+    }
+
+    // Memory info from memory properties
+    const auto& memProps = ctx.memoryProperties;
+    for (uint32_t i = 0; i < memProps.memoryHeapCount; ++i) {
+        if (memProps.memoryHeaps[i].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
+            info.total_memory = memProps.memoryHeaps[i].size;
+            break;
+        }
+    }
+    // Vulkan doesn't provide direct available memory query, set to total
+    info.available_memory = info.total_memory;
+
+    // Compute units - Vulkan doesn't expose SM count directly
+    // Use maxComputeWorkGroupCount as a rough indicator
+    info.compute_units = 0;  // Not directly available in Vulkan
+
+    // Thread/workgroup limits
+    info.max_threads_per_block = static_cast<int>(props.limits.maxComputeWorkGroupInvocations);
+    info.max_shared_memory = static_cast<int>(props.limits.maxComputeSharedMemorySize);
+
+    // Subgroup size (equivalent to warp size)
+    VkPhysicalDeviceSubgroupProperties subgroupProps{};
+    subgroupProps.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
+
+    VkPhysicalDeviceProperties2 props2{};
+    props2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    props2.pNext = &subgroupProps;
+    vkGetPhysicalDeviceProperties2(ctx.physicalDevice, &props2);
+
+    info.warp_size = static_cast<int>(subgroupProps.subgroupSize);
+
+    // API version as compute capability equivalent
+    info.major_version = VK_VERSION_MAJOR(props.apiVersion);
+    info.minor_version = VK_VERSION_MINOR(props.apiVersion);
+
+    // Feature support - check physical device features
+    VkPhysicalDeviceFeatures features;
+    vkGetPhysicalDeviceFeatures(ctx.physicalDevice, &features);
+
+    info.supports_fp64 = features.shaderFloat64;
+    info.supports_int8 = false;  // Would need VK_KHR_shader_integer_dot_product extension check
+
+    // Check for FP16 support via VK_KHR_shader_float16_int8
+    VkPhysicalDeviceFloat16Int8FeaturesKHR f16i8Features{};
+    f16i8Features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FLOAT16_INT8_FEATURES_KHR;
+
+    VkPhysicalDeviceFeatures2 features2{};
+    features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    features2.pNext = &f16i8Features;
+    vkGetPhysicalDeviceFeatures2(ctx.physicalDevice, &features2);
+
+    info.supports_fp16 = f16i8Features.shaderFloat16;
+
+    // Device type
+    info.is_integrated = (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU);
+    info.is_discrete = (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU);
+
+    // PCI info - requires VK_KHR_driver_properties extension
+    // Try to get it if available
+    VkPhysicalDevicePCIBusInfoPropertiesEXT pciInfo{};
+    pciInfo.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PCI_BUS_INFO_PROPERTIES_EXT;
+
+    VkPhysicalDeviceProperties2 propsWithPci{};
+    propsWithPci.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    propsWithPci.pNext = &pciInfo;
+    vkGetPhysicalDeviceProperties2(ctx.physicalDevice, &propsWithPci);
+
+    // Only set if the extension filled in valid values
+    if (pciInfo.pciBus != 0 || pciInfo.pciDevice != 0) {
+        info.pci_bus_id = static_cast<int>(pciInfo.pciBus);
+        info.pci_device_id = static_cast<int>(pciInfo.pciDevice);
+    }
+
+    return info;
+}
+
 auto VulkanBackend::allocate(size_t bytes, int32_t device_id) -> void* {
     if (bytes == 0) {
         return nullptr;

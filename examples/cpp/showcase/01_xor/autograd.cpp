@@ -158,7 +158,8 @@ int main(int argc, char* argv[]) {
     std::cout << "Input\t\tTarget\tPrediction\tRounded\n";
     std::cout << "----------------------------------------------\n";
 
-    const float* input_ptr = X_tensor.cpu().data<float>();
+    auto input_cpu = X_tensor.cpu();
+    const float* input_ptr = input_cpu.data<float>();
     const float* target_ptr = target_cpu.data<float>();
     const float* pred_ptr = pred_cpu.data<float>();
 
