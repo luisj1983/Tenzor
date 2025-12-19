@@ -1378,5 +1378,276 @@ auto conv2d_backward_kernel(
     return std::make_tuple(grad_input, grad_weight, grad_bias);
 }
 
+// ============================================================================
+// ConvTranspose2d Forward GPU Implementation
+// ============================================================================
+
+// Calculate output size for transposed convolution
+__host__ __device__ inline int64_t calculate_transpose_output_size(
+    int64_t input_size, int64_t kernel_size,
+    int64_t stride, int64_t padding, int64_t output_padding, int64_t dilation
+) {
+    return (input_size - 1) * stride - 2 * padding + dilation * (kernel_size - 1) + output_padding + 1;
+}
+
+// ConvTranspose2d forward kernel using gather approach
+// Each thread computes one output element by gathering from all contributing input positions
+template<typename T>
+__global__ void conv_transpose2d_forward_kernel_impl(
+    const T* input,           // (batch, in_channels, in_h, in_w)
+    const T* weight,          // (in_channels, out_channels/groups, kernel_h, kernel_w)
+    const T* bias,            // (out_channels) or nullptr
+    T* output,                // (batch, out_channels, out_h, out_w)
+    int64_t batch,
+    int64_t in_channels,
+    int64_t in_h,
+    int64_t in_w,
+    int64_t out_channels,
+    int64_t out_h,
+    int64_t out_w,
+    int64_t kernel_h,
+    int64_t kernel_w,
+    int64_t stride,
+    int64_t padding,
+    int64_t dilation,
+    int64_t groups,
+    int64_t in_channels_per_group,
+    int64_t out_channels_per_group,
+    bool has_bias
+) {
+    int64_t total_output = batch * out_channels * out_h * out_w;
+
+    CUDA_KERNEL_LOOP(idx, total_output) {
+        // Decode output position
+        int64_t w = idx % out_w;
+        int64_t h = (idx / out_w) % out_h;
+        int64_t c = (idx / (out_w * out_h)) % out_channels;
+        int64_t b = idx / (out_w * out_h * out_channels);
+
+        // Determine group
+        int64_t g = c / out_channels_per_group;
+        int64_t oc = c % out_channels_per_group;  // Output channel within group
+        int64_t in_start = g * in_channels_per_group;
+
+        // Initialize accumulator
+        float sum = 0.0f;
+
+        // Gather from all input positions that contribute to this output position
+        for (int64_t ic = 0; ic < in_channels_per_group; ++ic) {
+            for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                    // For transposed conv: out = (in - 1) * stride - 2*padding + dilation * (kernel - 1) + out_padding + 1
+                    // Inverse: which input position (ih, iw) with kernel (kh, kw) contributes to (h, w)?
+                    // oh = ih * stride - padding + kh * dilation
+                    // ih * stride = oh + padding - kh * dilation
+                    // ih = (oh + padding - kh * dilation) / stride (must be integer and in bounds)
+
+                    int64_t h_shifted = h + padding - kh * dilation;
+                    int64_t w_shifted = w + padding - kw * dilation;
+
+                    // Check if this maps to a valid input position
+                    if (h_shifted >= 0 && h_shifted % stride == 0 &&
+                        w_shifted >= 0 && w_shifted % stride == 0) {
+
+                        int64_t ih = h_shifted / stride;
+                        int64_t iw = w_shifted / stride;
+
+                        if (ih >= 0 && ih < in_h && iw >= 0 && iw < in_w) {
+                            // Get input value
+                            int64_t input_idx = b * (in_channels * in_h * in_w) +
+                                               (in_start + ic) * (in_h * in_w) +
+                                               ih * in_w + iw;
+                            float input_val = float(input[input_idx]);
+
+                            // Get weight value
+                            // Weight shape: (in_channels, out_channels/groups, kernel_h, kernel_w)
+                            int64_t weight_idx = (in_start + ic) * (out_channels_per_group * kernel_h * kernel_w) +
+                                                oc * (kernel_h * kernel_w) +
+                                                kh * kernel_w + kw;
+                            float weight_val = float(weight[weight_idx]);
+
+                            sum += input_val * weight_val;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Add bias if present
+        if (has_bias) {
+            sum += float(bias[c]);
+        }
+
+        output[idx] = T(sum);
+    }
+}
+
+// FP16 specialization of ConvTranspose2d kernel
+__global__ void conv_transpose2d_forward_kernel_f16(
+    const __half* input,
+    const __half* weight,
+    const __half* bias,
+    __half* output,
+    int64_t batch,
+    int64_t in_channels,
+    int64_t in_h,
+    int64_t in_w,
+    int64_t out_channels,
+    int64_t out_h,
+    int64_t out_w,
+    int64_t kernel_h,
+    int64_t kernel_w,
+    int64_t stride,
+    int64_t padding,
+    int64_t dilation,
+    int64_t groups,
+    int64_t in_channels_per_group,
+    int64_t out_channels_per_group,
+    bool has_bias
+) {
+    int64_t total_output = batch * out_channels * out_h * out_w;
+
+    CUDA_KERNEL_LOOP(idx, total_output) {
+        // Decode output position
+        int64_t w = idx % out_w;
+        int64_t h = (idx / out_w) % out_h;
+        int64_t c = (idx / (out_w * out_h)) % out_channels;
+        int64_t b = idx / (out_w * out_h * out_channels);
+
+        // Determine group
+        int64_t g = c / out_channels_per_group;
+        int64_t oc = c % out_channels_per_group;
+        int64_t in_start = g * in_channels_per_group;
+
+        // Use float for accumulation to avoid precision loss
+        float sum = 0.0f;
+
+        // Gather from all input positions
+        for (int64_t ic = 0; ic < in_channels_per_group; ++ic) {
+            for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                    int64_t h_shifted = h + padding - kh * dilation;
+                    int64_t w_shifted = w + padding - kw * dilation;
+
+                    if (h_shifted >= 0 && h_shifted % stride == 0 &&
+                        w_shifted >= 0 && w_shifted % stride == 0) {
+
+                        int64_t ih = h_shifted / stride;
+                        int64_t iw = w_shifted / stride;
+
+                        if (ih >= 0 && ih < in_h && iw >= 0 && iw < in_w) {
+                            int64_t input_idx = b * (in_channels * in_h * in_w) +
+                                               (in_start + ic) * (in_h * in_w) +
+                                               ih * in_w + iw;
+                            float input_val = __half2float(input[input_idx]);
+
+                            int64_t weight_idx = (in_start + ic) * (out_channels_per_group * kernel_h * kernel_w) +
+                                                oc * (kernel_h * kernel_w) +
+                                                kh * kernel_w + kw;
+                            float weight_val = __half2float(weight[weight_idx]);
+
+                            sum += input_val * weight_val;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Add bias if present
+        if (has_bias) {
+            sum += __half2float(bias[c]);
+        }
+
+        output[idx] = __float2half(sum);
+    }
+}
+
+// ConvTranspose2d forward wrapper function
+auto conv_transpose2d_forward_kernel(
+    const Tensor& input,          // (batch, in_channels, in_h, in_w)
+    const Tensor& weight,         // (in_channels, out_channels/groups, kernel_h, kernel_w)
+    const Tensor* bias,           // (out_channels) or nullptr
+    int64_t stride,
+    int64_t padding,
+    int64_t output_padding,
+    int64_t dilation,
+    int64_t groups,
+    cudaStream_t stream
+) -> Tensor {
+    // Extract dimensions
+    auto input_shape = input.shape();
+    auto weight_shape = weight.shape();
+
+    int64_t batch = input_shape[0];
+    int64_t in_channels = input_shape[1];
+    int64_t in_h = input_shape[2];
+    int64_t in_w = input_shape[3];
+
+    int64_t in_channels_per_group = weight_shape[0] / groups;
+    int64_t out_channels_per_group = weight_shape[1];
+    int64_t out_channels = out_channels_per_group * groups;
+    int64_t kernel_h = weight_shape[2];
+    int64_t kernel_w = weight_shape[3];
+
+    // Calculate output dimensions for transposed convolution
+    int64_t out_h = calculate_transpose_output_size(in_h, kernel_h, stride, padding, output_padding, dilation);
+    int64_t out_w = calculate_transpose_output_size(in_w, kernel_w, stride, padding, output_padding, dilation);
+
+    if (out_h <= 0 || out_w <= 0) {
+        throw std::invalid_argument(
+            "Invalid ConvTranspose2d configuration: output dimensions are non-positive (out_h=" +
+            std::to_string(out_h) + ", out_w=" + std::to_string(out_w) + ")"
+        );
+    }
+
+    // Create output tensor
+    std::vector<int64_t> output_shape = {batch, out_channels, out_h, out_w};
+    Tensor output(output_shape, input.dtype(), input.device());
+
+    // Compute launch configuration
+    int64_t total_output = batch * out_channels * out_h * out_w;
+    dim3 grid, block;
+    compute_launch_config_1d(total_output, grid, block);
+
+    bool has_bias = (bias != nullptr);
+
+    // Dispatch based on dtype
+    if (input.dtype() == DType::Float16) {
+        const __half* input_ptr = reinterpret_cast<const __half*>(input.data<Float16>());
+        const __half* weight_ptr = reinterpret_cast<const __half*>(weight.data<Float16>());
+        const __half* bias_ptr = has_bias ? reinterpret_cast<const __half*>(bias->data<Float16>()) : nullptr;
+        __half* output_ptr = reinterpret_cast<__half*>(output.data<Float16>());
+
+        conv_transpose2d_forward_kernel_f16<<<grid, block, 0, stream>>>(
+            input_ptr, weight_ptr, bias_ptr, output_ptr,
+            batch, in_channels, in_h, in_w,
+            out_channels, out_h, out_w,
+            kernel_h, kernel_w,
+            stride, padding, dilation, groups,
+            in_channels_per_group, out_channels_per_group,
+            has_bias
+        );
+    } else {
+        // Float32 path
+        const float* input_ptr = input.data<float>();
+        const float* weight_ptr = weight.data<float>();
+        const float* bias_ptr = has_bias ? bias->data<float>() : nullptr;
+        float* output_ptr = output.data<float>();
+
+        conv_transpose2d_forward_kernel_impl<float><<<grid, block, 0, stream>>>(
+            input_ptr, weight_ptr, bias_ptr, output_ptr,
+            batch, in_channels, in_h, in_w,
+            out_channels, out_h, out_w,
+            kernel_h, kernel_w,
+            stride, padding, dilation, groups,
+            in_channels_per_group, out_channels_per_group,
+            has_bias
+        );
+    }
+
+    CUDA_CHECK(cudaGetLastError());
+    return output;
+}
+
 } // namespace cuda
 } // namespace tenzor

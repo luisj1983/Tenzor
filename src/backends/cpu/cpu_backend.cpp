@@ -86,6 +86,14 @@ namespace cpu {
     auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Tensor;
     auto leaky_relu_kernel(const Tensor& input, float alpha) -> Tensor;
     auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, float alpha) -> Tensor;
+    auto elu_kernel(const Tensor& input, float alpha) -> Tensor;
+    auto elu_backward_kernel(const Tensor& grad_output, const Tensor& input, float alpha) -> Tensor;
+    auto selu_kernel(const Tensor& input) -> Tensor;
+    auto selu_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Tensor;
+    auto mish_kernel(const Tensor& input) -> Tensor;
+    auto mish_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Tensor;
+    auto softplus_kernel(const Tensor& input, float beta, float threshold) -> Tensor;
+    auto softplus_backward_kernel(const Tensor& grad_output, const Tensor& input, float beta, float threshold) -> Tensor;
     auto softmax_kernel(const Tensor& input, int64_t dim) -> Tensor;
     auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, int64_t dim) -> Tensor;
     auto log_softmax_kernel(const Tensor& input, int64_t dim) -> Tensor;
@@ -119,6 +127,7 @@ namespace cpu {
     auto conv2d_backward_input_kernel(const Tensor& grad_output, const Tensor& weight, const std::vector<int64_t>& input_shape, int64_t stride, int64_t padding, int64_t dilation, int64_t groups) -> Tensor;
     auto conv2d_backward_weight_kernel(const Tensor& grad_output, const Tensor& input, const std::vector<int64_t>& weight_shape, int64_t stride, int64_t padding, int64_t dilation, int64_t groups) -> Tensor;
     auto conv2d_backward_bias_kernel(const Tensor& grad_output) -> Tensor;
+    auto conv_transpose2d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t output_padding, int64_t dilation, int64_t groups) -> Tensor;
 
     // Fused operation kernels
     auto fused_linear_relu_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias) -> Tensor;
@@ -628,6 +637,78 @@ public:
             }
             return {cpu::leaky_relu_backward_kernel(inputs[0], inputs[1], alpha)};
         }
+        else if (op_name == "elu") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("elu operation requires exactly 1 input");
+            }
+            float alpha = 1.0f;
+            if (attrs.contains("alpha")) {
+                alpha = std::stof(attrs.at("alpha"));
+            }
+            return {cpu::elu_kernel(inputs[0], alpha)};
+        }
+        else if (op_name == "elu_backward") {
+            if (inputs.size() != 2) {
+                throw std::invalid_argument("elu_backward operation requires exactly 2 inputs");
+            }
+            float alpha = 1.0f;
+            if (attrs.contains("alpha")) {
+                alpha = std::stof(attrs.at("alpha"));
+            }
+            return {cpu::elu_backward_kernel(inputs[0], inputs[1], alpha)};
+        }
+        else if (op_name == "selu") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("selu operation requires exactly 1 input");
+            }
+            return {cpu::selu_kernel(inputs[0])};
+        }
+        else if (op_name == "selu_backward") {
+            if (inputs.size() != 2) {
+                throw std::invalid_argument("selu_backward operation requires exactly 2 inputs");
+            }
+            return {cpu::selu_backward_kernel(inputs[0], inputs[1])};
+        }
+        else if (op_name == "mish") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("mish operation requires exactly 1 input");
+            }
+            return {cpu::mish_kernel(inputs[0])};
+        }
+        else if (op_name == "mish_backward") {
+            if (inputs.size() != 2) {
+                throw std::invalid_argument("mish_backward operation requires exactly 2 inputs");
+            }
+            return {cpu::mish_backward_kernel(inputs[0], inputs[1])};
+        }
+        else if (op_name == "softplus") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("softplus operation requires exactly 1 input");
+            }
+            float beta = 1.0f;
+            float threshold = 20.0f;
+            if (attrs.contains("beta")) {
+                beta = std::stof(attrs.at("beta"));
+            }
+            if (attrs.contains("threshold")) {
+                threshold = std::stof(attrs.at("threshold"));
+            }
+            return {cpu::softplus_kernel(inputs[0], beta, threshold)};
+        }
+        else if (op_name == "softplus_backward") {
+            if (inputs.size() != 2) {
+                throw std::invalid_argument("softplus_backward operation requires exactly 2 inputs");
+            }
+            float beta = 1.0f;
+            float threshold = 20.0f;
+            if (attrs.contains("beta")) {
+                beta = std::stof(attrs.at("beta"));
+            }
+            if (attrs.contains("threshold")) {
+                threshold = std::stof(attrs.at("threshold"));
+            }
+            return {cpu::softplus_backward_kernel(inputs[0], inputs[1], beta, threshold)};
+        }
         else if (op_name == "softmax") {
             if (inputs.size() != 1) {
                 throw std::invalid_argument("softmax operation requires exactly 1 input");
@@ -1075,6 +1156,33 @@ public:
                 throw std::invalid_argument("conv2d_backward_bias operation requires exactly 1 input (grad_output)");
             }
             return {cpu::conv2d_backward_bias_kernel(inputs[0])};
+        }
+        else if (op_name == "conv_transpose2d_forward") {
+            if (inputs.size() < 2) {
+                throw std::invalid_argument("conv_transpose2d_forward operation requires at least 2 inputs (input, weight)");
+            }
+            const Tensor* bias = (inputs.size() >= 3) ? &inputs[2] : nullptr;
+            int64_t stride = 1;
+            int64_t padding = 0;
+            int64_t output_padding = 0;
+            int64_t dilation = 1;
+            int64_t groups = 1;
+            if (attrs.contains("stride")) {
+                stride = std::stoll(attrs.at("stride"));
+            }
+            if (attrs.contains("padding")) {
+                padding = std::stoll(attrs.at("padding"));
+            }
+            if (attrs.contains("output_padding")) {
+                output_padding = std::stoll(attrs.at("output_padding"));
+            }
+            if (attrs.contains("dilation")) {
+                dilation = std::stoll(attrs.at("dilation"));
+            }
+            if (attrs.contains("groups")) {
+                groups = std::stoll(attrs.at("groups"));
+            }
+            return {cpu::conv_transpose2d_forward_kernel(inputs[0], inputs[1], bias, stride, padding, output_padding, dilation, groups)};
         }
         else if (op_name == "fused_linear_relu") {
             if (inputs.size() < 2) {

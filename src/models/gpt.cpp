@@ -57,8 +57,10 @@ auto GPTEmbeddings::forward(const Variable& input_ids, const Variable& position_
         std::vector<int64_t> pos_data(seq_len);
         std::iota(pos_data.begin(), pos_data.end(), 0);
 
-        Tensor pos_tensor(std::vector<int64_t>{1, seq_len}, DType::Int64, input_ids.tensor().device());
-        std::copy(pos_data.begin(), pos_data.end(), pos_tensor.data<int64_t>());
+        // Create on CPU first, then move to target device
+        Tensor pos_tensor_cpu(std::vector<int64_t>{1, seq_len}, DType::Int64, Device::cpu());
+        std::copy(pos_data.begin(), pos_data.end(), pos_tensor_cpu.data<int64_t>());
+        Tensor pos_tensor = pos_tensor_cpu.to(input_ids.tensor().device());
 
         pos_ids = Variable(pos_tensor, false);
     }
@@ -279,8 +281,10 @@ auto TextGenerator::apply_temperature(const Variable& logits, double temperature
         return logits;
     }
     // Scale logits by dividing by temperature
-    auto temp_tensor = Tensor(std::vector<int64_t>{1}, DType::Float32, logits.tensor().device());
-    temp_tensor.data<float>()[0] = static_cast<float>(temperature);
+    // Create on CPU first, then move to target device
+    auto temp_tensor_cpu = Tensor(std::vector<int64_t>{1}, DType::Float32, Device::cpu());
+    temp_tensor_cpu.data<float>()[0] = static_cast<float>(temperature);
+    auto temp_tensor = temp_tensor_cpu.to(logits.tensor().device());
     Variable temp_var(temp_tensor, false);
     return logits / temp_var;
 }
@@ -291,8 +295,9 @@ auto TextGenerator::logits_to_probs(const Variable& logits, double temperature) 
 }
 
 auto TextGenerator::sample_from_probs(const Tensor& probs) -> int64_t {
-    // Sample from categorical distribution
-    const float* probs_data = probs.data<float>();
+    // Sample from categorical distribution (move to CPU for data access)
+    Tensor probs_cpu = probs.to(Device::cpu());
+    const float* probs_data = probs_cpu.data<float>();
     auto vocab_size = probs.shape()[probs.ndim() - 1];
 
     std::uniform_real_distribution<float> dist(0.0f, 1.0f);
@@ -310,11 +315,14 @@ auto TextGenerator::sample_from_probs(const Tensor& probs) -> int64_t {
 
 auto TextGenerator::top_k_filter(const Tensor& logits, int64_t k) const -> std::pair<Tensor, Tensor> {
     auto vocab_size = logits.shape()[logits.ndim() - 1];
+    auto original_device = logits.device();
+
+    // Move to CPU for processing
+    Tensor logits_cpu = logits.to(Device::cpu());
+    const float* logits_data = logits_cpu.data<float>();
 
     // Get logits for last position
     std::vector<std::pair<float, int64_t>> logit_pairs;
-    const float* logits_data = logits.data<float>();
-
     for (int64_t i = 0; i < vocab_size; ++i) {
         logit_pairs.push_back({logits_data[i], i});
     }
@@ -323,28 +331,32 @@ auto TextGenerator::top_k_filter(const Tensor& logits, int64_t k) const -> std::
     std::partial_sort(logit_pairs.begin(), logit_pairs.begin() + k, logit_pairs.end(),
                      [](const auto& a, const auto& b) { return a.first > b.first; });
 
-    // Create filtered tensors
-    Tensor filtered_logits(std::vector<int64_t>{k}, DType::Float32, logits.device());
-    Tensor indices(std::vector<int64_t>{k}, DType::Int64, logits.device());
+    // Create filtered tensors on CPU
+    Tensor filtered_logits_cpu(std::vector<int64_t>{k}, DType::Float32, Device::cpu());
+    Tensor indices_cpu(std::vector<int64_t>{k}, DType::Int64, Device::cpu());
 
-    float* filtered_data = filtered_logits.data<float>();
-    int64_t* indices_data = indices.data<int64_t>();
+    float* filtered_data = filtered_logits_cpu.data<float>();
+    int64_t* indices_data = indices_cpu.data<int64_t>();
 
     for (int64_t i = 0; i < k; ++i) {
         filtered_data[i] = logit_pairs[i].first;
         indices_data[i] = logit_pairs[i].second;
     }
 
-    return {filtered_logits, indices};
+    // Move back to original device
+    return {filtered_logits_cpu.to(original_device), indices_cpu.to(original_device)};
 }
 
 auto TextGenerator::top_p_filter(const Tensor& probs, double p) const -> std::pair<Tensor, Tensor> {
     auto vocab_size = probs.shape()[probs.ndim() - 1];
+    auto original_device = probs.device();
+
+    // Move to CPU for processing
+    Tensor probs_cpu = probs.to(Device::cpu());
+    const float* probs_data = probs_cpu.data<float>();
 
     // Get probs for last position
     std::vector<std::pair<float, int64_t>> prob_pairs;
-    const float* probs_data = probs.data<float>();
-
     for (int64_t i = 0; i < vocab_size; ++i) {
         prob_pairs.push_back({probs_data[i], i});
     }
@@ -365,12 +377,12 @@ auto TextGenerator::top_p_filter(const Tensor& probs, double p) const -> std::pa
         }
     }
 
-    // Create filtered tensors
-    Tensor filtered_probs(std::vector<int64_t>{nucleus_size}, DType::Float32, probs.device());
-    Tensor indices(std::vector<int64_t>{nucleus_size}, DType::Int64, probs.device());
+    // Create filtered tensors on CPU
+    Tensor filtered_probs_cpu(std::vector<int64_t>{nucleus_size}, DType::Float32, Device::cpu());
+    Tensor indices_cpu(std::vector<int64_t>{nucleus_size}, DType::Int64, Device::cpu());
 
-    float* filtered_data = filtered_probs.data<float>();
-    int64_t* indices_data = indices.data<int64_t>();
+    float* filtered_data = filtered_probs_cpu.data<float>();
+    int64_t* indices_data = indices_cpu.data<int64_t>();
 
     // Renormalize probabilities
     float renorm_sum = 0.0f;
@@ -383,7 +395,8 @@ auto TextGenerator::top_p_filter(const Tensor& probs, double p) const -> std::pa
         indices_data[i] = prob_pairs[i].second;
     }
 
-    return {filtered_probs, indices};
+    // Move back to original device
+    return {filtered_probs_cpu.to(original_device), indices_cpu.to(original_device)};
 }
 
 auto TextGenerator::generate(const Tensor& input_ids) -> Tensor {
@@ -404,16 +417,20 @@ auto TextGenerator::generate(const Tensor& input_ids) -> Tensor {
 auto TextGenerator::greedy_search(const Tensor& input_ids) -> Tensor {
     model_.eval();
 
+    auto original_device = input_ids.device();
     auto batch_size = input_ids.shape()[0];
     auto current_len = input_ids.shape()[1];
 
-    // Copy input to output buffer
+    // Work on CPU for data manipulation
+    Tensor input_cpu = input_ids.to(Device::cpu());
+
+    // Copy input to output buffer (on CPU)
     std::vector<int64_t> output_shape = {batch_size, config_.max_length};
-    Tensor output(output_shape, DType::Int64, input_ids.device());
+    Tensor output_cpu(output_shape, DType::Int64, Device::cpu());
 
     // Copy input_ids to output
-    auto input_data = input_ids.data<int64_t>();
-    auto output_data = output.data<int64_t>();
+    auto input_data = input_cpu.data<int64_t>();
+    auto output_data = output_cpu.data<int64_t>();
 
     for (int64_t b = 0; b < batch_size; ++b) {
         for (int64_t i = 0; i < current_len; ++i) {
@@ -427,18 +444,20 @@ auto TextGenerator::greedy_search(const Tensor& input_ids) -> Tensor {
 
     // Generate tokens autoregressively
     for (int64_t step = current_len; step < config_.max_length; ++step) {
-        // Get current sequence
-        Tensor current_seq = output.slice(1, 0, step, 1);
+        // Get current sequence and move to GPU for forward pass
+        Tensor current_seq_cpu = output_cpu.slice(1, 0, step, 1);
+        Tensor current_seq = current_seq_cpu.to(original_device);
         Variable current_var(current_seq, false);
 
         // Forward pass - explicitly use the 3-argument overload
         auto logits = model_.forward(current_var, Variable{}, Tensor{});
 
-        // Get logits for last position [batch, vocab_size]
+        // Get logits for last position [batch, vocab_size] and move to CPU
         auto last_logits = logits.tensor().slice(1, step - 1, step, 1).squeeze(1);
+        Tensor last_logits_cpu = last_logits.to(Device::cpu());
 
         // Get argmax (greedy)
-        const float* logits_data = last_logits.data<float>();
+        const float* logits_data = last_logits_cpu.data<float>();
         auto vocab_size = last_logits.shape()[last_logits.ndim() - 1];
 
         for (int64_t b = 0; b < batch_size; ++b) {
@@ -462,21 +481,26 @@ auto TextGenerator::greedy_search(const Tensor& input_ids) -> Tensor {
         }
     }
 
-    return output;
+    // Return output on original device
+    return output_cpu.to(original_device);
 }
 
 auto TextGenerator::top_k_sampling(const Tensor& input_ids, int64_t top_k, double temperature) -> Tensor {
     model_.eval();
 
+    auto original_device = input_ids.device();
     auto batch_size = input_ids.shape()[0];
     auto current_len = input_ids.shape()[1];
 
-    // Copy input to output buffer
-    std::vector<int64_t> output_shape = {batch_size, config_.max_length};
-    Tensor output(output_shape, DType::Int64, input_ids.device());
+    // Work on CPU for data manipulation
+    Tensor input_cpu = input_ids.to(Device::cpu());
 
-    auto input_data = input_ids.data<int64_t>();
-    auto output_data = output.data<int64_t>();
+    // Copy input to output buffer (on CPU)
+    std::vector<int64_t> output_shape = {batch_size, config_.max_length};
+    Tensor output_cpu(output_shape, DType::Int64, Device::cpu());
+
+    auto input_data = input_cpu.data<int64_t>();
+    auto output_data = output_cpu.data<int64_t>();
 
     for (int64_t b = 0; b < batch_size; ++b) {
         for (int64_t i = 0; i < current_len; ++i) {
@@ -489,52 +513,61 @@ auto TextGenerator::top_k_sampling(const Tensor& input_ids, int64_t top_k, doubl
 
     // Generate tokens with top-k sampling
     for (int64_t step = current_len; step < config_.max_length; ++step) {
-        Tensor current_seq = output.slice(1, 0, step, 1);
+        // Move current sequence to GPU for forward pass
+        Tensor current_seq_cpu = output_cpu.slice(1, 0, step, 1);
+        Tensor current_seq = current_seq_cpu.to(original_device);
         Variable current_var(current_seq, false);
 
         auto logits = model_.forward(current_var, Variable{}, Tensor{});
         auto last_logits = logits.tensor().slice(1, step - 1, step, 1).squeeze(1);
+        Tensor last_logits_cpu = last_logits.to(Device::cpu());
 
         for (int64_t b = 0; b < batch_size; ++b) {
-            // Get logits for this batch item
+            // Get logits for this batch item (on CPU)
             auto batch_start = b * last_logits.shape()[last_logits.ndim() - 1];
             Tensor batch_logits(std::vector<int64_t>{last_logits.shape()[last_logits.ndim() - 1]},
-                               DType::Float32, input_ids.device());
+                               DType::Float32, Device::cpu());
 
-            const float* src_data = last_logits.data<float>() + batch_start;
+            const float* src_data = last_logits_cpu.data<float>() + batch_start;
             float* dst_data = batch_logits.data<float>();
             std::copy(src_data, src_data + batch_logits.numel(), dst_data);
 
-            // Apply top-k filter
+            // Apply top-k filter (works on CPU internally)
             auto [filtered_logits, indices] = top_k_filter(batch_logits, top_k);
 
             // Convert to probabilities
             Variable filtered_var(filtered_logits, false);
             auto probs = logits_to_probs(filtered_var, temperature);
 
-            // Sample from filtered distribution
+            // Sample from filtered distribution (works on CPU internally)
             int64_t sampled_idx = sample_from_probs(probs.tensor());
-            int64_t token_id = indices.data<int64_t>()[sampled_idx];
+            Tensor indices_cpu = indices.to(Device::cpu());
+            int64_t token_id = indices_cpu.data<int64_t>()[sampled_idx];
 
             output_data[b * config_.max_length + step] = token_id;
         }
     }
 
-    return output;
+    // Return output on original device
+    return output_cpu.to(original_device);
 }
 
 auto TextGenerator::top_p_sampling(const Tensor& input_ids, double top_p, double temperature) -> Tensor {
     model_.eval();
 
+    auto original_device = input_ids.device();
     auto batch_size = input_ids.shape()[0];
     auto current_len = input_ids.shape()[1];
 
-    // Copy input to output buffer
-    std::vector<int64_t> output_shape = {batch_size, config_.max_length};
-    Tensor output(output_shape, DType::Int64, input_ids.device());
+    // Work on CPU for data manipulation
+    Tensor input_cpu = input_ids.to(Device::cpu());
 
-    auto input_data = input_ids.data<int64_t>();
-    auto output_data = output.data<int64_t>();
+    // Copy input to output buffer (on CPU)
+    std::vector<int64_t> output_shape = {batch_size, config_.max_length};
+    Tensor output_cpu(output_shape, DType::Int64, Device::cpu());
+
+    auto input_data = input_cpu.data<int64_t>();
+    auto output_data = output_cpu.data<int64_t>();
 
     for (int64_t b = 0; b < batch_size; ++b) {
         for (int64_t i = 0; i < current_len; ++i) {
@@ -547,19 +580,22 @@ auto TextGenerator::top_p_sampling(const Tensor& input_ids, double top_p, double
 
     // Generate tokens with top-p (nucleus) sampling
     for (int64_t step = current_len; step < config_.max_length; ++step) {
-        Tensor current_seq = output.slice(1, 0, step, 1);
+        // Move current sequence to GPU for forward pass
+        Tensor current_seq_cpu = output_cpu.slice(1, 0, step, 1);
+        Tensor current_seq = current_seq_cpu.to(original_device);
         Variable current_var(current_seq, false);
 
         auto logits = model_.forward(current_var, Variable{}, Tensor{});
         auto last_logits = logits.tensor().slice(1, step - 1, step, 1).squeeze(1);
+        Tensor last_logits_cpu = last_logits.to(Device::cpu());
 
         for (int64_t b = 0; b < batch_size; ++b) {
-            // Get logits for this batch item
+            // Get logits for this batch item (on CPU)
             auto batch_start = b * last_logits.shape()[last_logits.ndim() - 1];
             Tensor batch_logits(std::vector<int64_t>{last_logits.shape()[last_logits.ndim() - 1]},
-                               DType::Float32, input_ids.device());
+                               DType::Float32, Device::cpu());
 
-            const float* src_data = last_logits.data<float>() + batch_start;
+            const float* src_data = last_logits_cpu.data<float>() + batch_start;
             float* dst_data = batch_logits.data<float>();
             std::copy(src_data, src_data + batch_logits.numel(), dst_data);
 
@@ -567,23 +603,26 @@ auto TextGenerator::top_p_sampling(const Tensor& input_ids, double top_p, double
             Variable batch_var(batch_logits, false);
             auto probs = logits_to_probs(batch_var, temperature);
 
-            // Apply top-p filter
+            // Apply top-p filter (works on CPU internally)
             auto [filtered_probs, indices] = top_p_filter(probs.tensor(), top_p);
 
-            // Sample from filtered distribution
+            // Sample from filtered distribution (works on CPU internally)
             int64_t sampled_idx = sample_from_probs(filtered_probs);
-            int64_t token_id = indices.data<int64_t>()[sampled_idx];
+            Tensor indices_cpu = indices.to(Device::cpu());
+            int64_t token_id = indices_cpu.data<int64_t>()[sampled_idx];
 
             output_data[b * config_.max_length + step] = token_id;
         }
     }
 
-    return output;
+    // Return output on original device
+    return output_cpu.to(original_device);
 }
 
 auto TextGenerator::beam_search(const Tensor& input_ids, int64_t num_beams) -> Tensor {
     model_.eval();
 
+    auto original_device = input_ids.device();
     auto batch_size = input_ids.shape()[0];
     auto current_len = input_ids.shape()[1];
 
@@ -599,8 +638,9 @@ auto TextGenerator::beam_search(const Tensor& input_ids, int64_t num_beams) -> T
 
     std::vector<Beam> beams(num_beams);
 
-    // Initialize with input sequence
-    auto input_data = input_ids.data<int64_t>();
+    // Initialize with input sequence (move to CPU for data access)
+    Tensor input_cpu = input_ids.to(Device::cpu());
+    auto input_data = input_cpu.data<int64_t>();
     for (int64_t b = 0; b < num_beams; ++b) {
         beams[b].tokens.resize(current_len);
         for (int64_t i = 0; i < current_len; ++i) {
@@ -614,11 +654,14 @@ auto TextGenerator::beam_search(const Tensor& input_ids, int64_t num_beams) -> T
         std::vector<Beam> candidates;
 
         for (int64_t b = 0; b < num_beams; ++b) {
-            // Create tensor from beam tokens
-            Tensor beam_tensor(std::vector<int64_t>{1, static_cast<int64_t>(beams[b].tokens.size())},
-                              DType::Int64, input_ids.device());
-            int64_t* beam_data = beam_tensor.data<int64_t>();
+            // Create tensor from beam tokens on CPU first
+            Tensor beam_tensor_cpu(std::vector<int64_t>{1, static_cast<int64_t>(beams[b].tokens.size())},
+                              DType::Int64, Device::cpu());
+            int64_t* beam_data = beam_tensor_cpu.data<int64_t>();
             std::copy(beams[b].tokens.begin(), beams[b].tokens.end(), beam_data);
+
+            // Move to original device for forward pass
+            Tensor beam_tensor = beam_tensor_cpu.to(original_device);
 
             // Forward pass
             Variable beam_var(beam_tensor, false);
@@ -630,7 +673,9 @@ auto TextGenerator::beam_search(const Tensor& input_ids, int64_t num_beams) -> T
             auto log_probs_var = nn::log_softmax(last_var, -1);
             auto log_probs = log_probs_var.tensor();
 
-            const float* log_probs_data = log_probs.data<float>();
+            // Move to CPU for data access
+            Tensor log_probs_cpu = log_probs.to(Device::cpu());
+            const float* log_probs_data = log_probs_cpu.data<float>();
             auto vocab_size = log_probs.numel();
 
             // Create candidates by extending current beam with each token
@@ -653,15 +698,16 @@ auto TextGenerator::beam_search(const Tensor& input_ids, int64_t num_beams) -> T
         }
     }
 
-    // Return best beam
-    Tensor output(std::vector<int64_t>{1, config_.max_length}, DType::Int64, input_ids.device());
-    int64_t* output_data = output.data<int64_t>();
+    // Return best beam (create on CPU first)
+    Tensor output_cpu(std::vector<int64_t>{1, config_.max_length}, DType::Int64, Device::cpu());
+    int64_t* output_data = output_cpu.data<int64_t>();
 
     for (int64_t i = 0; i < config_.max_length && i < static_cast<int64_t>(beams[0].tokens.size()); ++i) {
         output_data[i] = beams[0].tokens[i];
     }
 
-    return output;
+    // Return on original device
+    return output_cpu.to(original_device);
 }
 
 } // namespace models

@@ -84,6 +84,14 @@ namespace cuda {
     auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaStream_t stream) -> Tensor;
     auto leaky_relu_kernel(const Tensor& input, float alpha, cudaStream_t stream) -> Tensor;
     auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, float alpha, cudaStream_t stream) -> Tensor;
+    auto elu_kernel(const Tensor& input, float alpha, cudaStream_t stream) -> Tensor;
+    auto elu_backward_kernel(const Tensor& grad_output, const Tensor& input, float alpha, cudaStream_t stream) -> Tensor;
+    auto selu_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
+    auto selu_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaStream_t stream) -> Tensor;
+    auto mish_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
+    auto mish_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaStream_t stream) -> Tensor;
+    auto softplus_kernel(const Tensor& input, float beta, float threshold, cudaStream_t stream) -> Tensor;
+    auto softplus_backward_kernel(const Tensor& grad_output, const Tensor& input, float beta, float threshold, cudaStream_t stream) -> Tensor;
 
     // Softmax operations
     auto softmax_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Tensor;
@@ -140,6 +148,7 @@ namespace cuda {
     // Conv2d operations (custom kernels - fallback)
     auto conv2d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t dilation, int64_t groups, cudaStream_t stream) -> Tensor;
     auto conv2d_backward_kernel(const Tensor& grad_output, const Tensor& input, const Tensor& weight, int64_t stride, int64_t padding, int64_t dilation, int64_t groups, bool compute_grad_input, bool compute_grad_weight, bool compute_grad_bias, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
+    auto conv_transpose2d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t output_padding, int64_t dilation, int64_t groups, cudaStream_t stream) -> Tensor;
 
     // LSTM operations (custom kernels - fallback)
     auto lstm_cell_forward_kernel(const Tensor& gates, const Tensor& c_prev, int64_t batch_size, int64_t hidden_size, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
@@ -815,6 +824,78 @@ public:
                     alpha = std::stof(attrs.at("alpha"));
                 }
                 return {cuda::leaky_relu_backward_kernel(inputs[0], inputs[1], alpha, stream)};
+            }
+            else if (op_name == "elu") {
+                if (inputs.size() != 1) {
+                    throw std::invalid_argument("elu operation requires exactly 1 input");
+                }
+                float alpha = 1.0f;
+                if (attrs.contains("alpha")) {
+                    alpha = std::stof(attrs.at("alpha"));
+                }
+                return {cuda::elu_kernel(inputs[0], alpha, stream)};
+            }
+            else if (op_name == "elu_backward") {
+                if (inputs.size() != 2) {
+                    throw std::invalid_argument("elu_backward operation requires exactly 2 inputs");
+                }
+                float alpha = 1.0f;
+                if (attrs.contains("alpha")) {
+                    alpha = std::stof(attrs.at("alpha"));
+                }
+                return {cuda::elu_backward_kernel(inputs[0], inputs[1], alpha, stream)};
+            }
+            else if (op_name == "selu") {
+                if (inputs.size() != 1) {
+                    throw std::invalid_argument("selu operation requires exactly 1 input");
+                }
+                return {cuda::selu_kernel(inputs[0], stream)};
+            }
+            else if (op_name == "selu_backward") {
+                if (inputs.size() != 2) {
+                    throw std::invalid_argument("selu_backward operation requires exactly 2 inputs");
+                }
+                return {cuda::selu_backward_kernel(inputs[0], inputs[1], stream)};
+            }
+            else if (op_name == "mish") {
+                if (inputs.size() != 1) {
+                    throw std::invalid_argument("mish operation requires exactly 1 input");
+                }
+                return {cuda::mish_kernel(inputs[0], stream)};
+            }
+            else if (op_name == "mish_backward") {
+                if (inputs.size() != 2) {
+                    throw std::invalid_argument("mish_backward operation requires exactly 2 inputs");
+                }
+                return {cuda::mish_backward_kernel(inputs[0], inputs[1], stream)};
+            }
+            else if (op_name == "softplus") {
+                if (inputs.size() != 1) {
+                    throw std::invalid_argument("softplus operation requires exactly 1 input");
+                }
+                float beta = 1.0f;
+                float threshold = 20.0f;
+                if (attrs.contains("beta")) {
+                    beta = std::stof(attrs.at("beta"));
+                }
+                if (attrs.contains("threshold")) {
+                    threshold = std::stof(attrs.at("threshold"));
+                }
+                return {cuda::softplus_kernel(inputs[0], beta, threshold, stream)};
+            }
+            else if (op_name == "softplus_backward") {
+                if (inputs.size() != 2) {
+                    throw std::invalid_argument("softplus_backward operation requires exactly 2 inputs");
+                }
+                float beta = 1.0f;
+                float threshold = 20.0f;
+                if (attrs.contains("beta")) {
+                    beta = std::stof(attrs.at("beta"));
+                }
+                if (attrs.contains("threshold")) {
+                    threshold = std::stof(attrs.at("threshold"));
+                }
+                return {cuda::softplus_backward_kernel(inputs[0], inputs[1], beta, threshold, stream)};
             }
             else if (op_name == "softmax") {
                 if (inputs.size() != 1) {
@@ -1542,6 +1623,24 @@ public:
                 );
                 return std::vector<Tensor>{gb};
                 #endif
+            }
+            else if (op_name == "conv_transpose2d_forward") {
+                // Parse conv_transpose2d parameters
+                int64_t stride = 1, padding = 0, output_padding = 0, dilation = 1, groups = 1;
+                if (attrs.contains("stride")) stride = std::stoll(attrs.at("stride"));
+                if (attrs.contains("padding")) padding = std::stoll(attrs.at("padding"));
+                if (attrs.contains("output_padding")) output_padding = std::stoll(attrs.at("output_padding"));
+                if (attrs.contains("dilation")) dilation = std::stoll(attrs.at("dilation"));
+                if (attrs.contains("groups")) groups = std::stoll(attrs.at("groups"));
+
+                const Tensor* bias_ptr = nullptr;
+                if (inputs.size() == 3) {
+                    bias_ptr = &inputs[2];
+                } else if (inputs.size() != 2) {
+                    throw std::invalid_argument("conv_transpose2d_forward requires 2 or 3 inputs (input, weight, optional bias)");
+                }
+
+                return {cuda::conv_transpose2d_forward_kernel(inputs[0], inputs[1], bias_ptr, stride, padding, output_padding, dilation, groups, stream)};
             }
             else if (op_name == "lstm_cell_forward") {
                 // Parse LSTM parameters

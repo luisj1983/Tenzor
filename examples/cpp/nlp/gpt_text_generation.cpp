@@ -13,6 +13,7 @@
 #include <vector>
 #include <string>
 #include <chrono>
+#include <tenzor/tenzor.hpp>
 #include <tenzor/models/gpt.hpp>
 #include <tenzor/autograd/variable.hpp>
 #include <tenzor/core/tensor.hpp>
@@ -79,8 +80,18 @@ double measure_time(Func&& func) {
 }
 
 int main(int argc, char** argv) {
+    tenzor::initialize();
+
     std::cout << "GPT Text Generation Example\n";
     std::cout << "============================\n\n";
+
+    // Parse device argument
+    Device device = Device::cpu();
+    if (argc > 1) {
+        std::string backend = argv[1];
+        if (backend == "cuda") device = Device::cuda();
+        else if (backend == "vulkan") device = Device::vulkan();
+    }
 
     // ============================================================================
     // 1. Model Setup
@@ -103,9 +114,10 @@ int main(int argc, char** argv) {
 
     // Create model
     GPT2LMHeadModel model(config);
+    model.to(device);
     model.eval();  // Set to evaluation mode
 
-    std::cout << "Model created with:\n";
+    std::cout << "Model created on " << device.to_string() << " with:\n";
     std::cout << "  - Vocabulary size: " << config.vocab_size << "\n";
     std::cout << "  - Hidden size: " << config.n_embd << "\n";
     std::cout << "  - Layers: " << config.n_layer << "\n";
@@ -134,12 +146,13 @@ int main(int argc, char** argv) {
 
     // Encode prompt
     auto prompt_tokens = tokenizer.encode(prompt);
-    Tensor input_ids({1, static_cast<int64_t>(prompt_tokens.size())},
-                     DType::Int64, Device::cpu());
-    auto input_data = input_ids.data<int64_t>();
+    Tensor input_ids_cpu({1, static_cast<int64_t>(prompt_tokens.size())},
+                         DType::Int64, Device::cpu());
+    auto input_data = input_ids_cpu.data<int64_t>();
     for (size_t i = 0; i < prompt_tokens.size(); ++i) {
         input_data[i] = prompt_tokens[i];
     }
+    Tensor input_ids = input_ids_cpu.to(device);
 
     // ============================================================================
     // 3.1. Greedy Search
@@ -158,9 +171,10 @@ int main(int argc, char** argv) {
         greedy_output = greedy_generator.greedy_search(input_ids);
     });
 
-    // Decode
+    // Decode (move to CPU first if on GPU)
+    Tensor greedy_output_cpu = greedy_output.to(Device::cpu());
     std::vector<int64_t> greedy_tokens(greedy_config.max_length);
-    auto greedy_data = greedy_output.data<int64_t>();
+    auto greedy_data = greedy_output_cpu.data<int64_t>();
     for (int64_t i = 0; i < greedy_config.max_length; ++i) {
         greedy_tokens[i] = greedy_data[i];
     }
@@ -189,8 +203,9 @@ int main(int argc, char** argv) {
                                                      topk_config.temperature);
     });
 
+    Tensor topk_output_cpu = topk_output.to(Device::cpu());
     std::vector<int64_t> topk_tokens(topk_config.max_length);
-    auto topk_data = topk_output.data<int64_t>();
+    auto topk_data = topk_output_cpu.data<int64_t>();
     for (int64_t i = 0; i < topk_config.max_length; ++i) {
         topk_tokens[i] = topk_data[i];
     }
@@ -219,8 +234,9 @@ int main(int argc, char** argv) {
                                                      topp_config.temperature);
     });
 
+    Tensor topp_output_cpu = topp_output.to(Device::cpu());
     std::vector<int64_t> topp_tokens(topp_config.max_length);
-    auto topp_data = topp_output.data<int64_t>();
+    auto topp_data = topp_output_cpu.data<int64_t>();
     for (int64_t i = 0; i < topp_config.max_length; ++i) {
         topp_tokens[i] = topp_data[i];
     }
@@ -246,8 +262,9 @@ int main(int argc, char** argv) {
         beam_output = beam_generator.beam_search(input_ids, beam_config.num_beams);
     });
 
+    Tensor beam_output_cpu = beam_output.to(Device::cpu());
     std::vector<int64_t> beam_tokens(beam_config.max_length);
-    auto beam_data = beam_output.data<int64_t>();
+    auto beam_data = beam_output_cpu.data<int64_t>();
     for (int64_t i = 0; i < beam_config.max_length; ++i) {
         beam_tokens[i] = beam_data[i];
     }

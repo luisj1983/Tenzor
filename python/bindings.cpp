@@ -1874,6 +1874,11 @@ PYBIND11_MODULE(tenzor_core, m) {
                std::shared_ptr<tenzor::nn::Mish>>(nn, "Mish")
         .def(py::init<>());
 
+    py::class_<tenzor::nn::ReLU6, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::ReLU6>>(nn, "ReLU6")
+        .def(py::init<>())
+        .def("__repr__", [](const tenzor::nn::ReLU6&) { return "ReLU6()"; });
+
     // RNN layers
     py::class_<tenzor::nn::RNNCell, tenzor::nn::Module, std::shared_ptr<tenzor::nn::RNNCell>>(nn, "RNNCell")
         .def(py::init<int64_t, int64_t, const std::string&, bool>(),
@@ -2336,6 +2341,18 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("optimizer"),
              py::arg("step_size"),
              py::arg("gamma") = 0.1)
+        .def(py::init<tenzor::optim::RMSprop&, int, double>(),
+             py::arg("optimizer"),
+             py::arg("step_size"),
+             py::arg("gamma") = 0.1)
+        .def(py::init<tenzor::optim::Adagrad&, int, double>(),
+             py::arg("optimizer"),
+             py::arg("step_size"),
+             py::arg("gamma") = 0.1)
+        .def(py::init<tenzor::optim::Adadelta&, int, double>(),
+             py::arg("optimizer"),
+             py::arg("step_size"),
+             py::arg("gamma") = 0.1)
         .def("get_epoch", &tenzor::optim::StepLR::get_epoch,
              "Get current epoch number");
 
@@ -2349,6 +2366,15 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("optimizer"),
              py::arg("gamma"))
         .def(py::init<tenzor::optim::AdamW&, double>(),
+             py::arg("optimizer"),
+             py::arg("gamma"))
+        .def(py::init<tenzor::optim::RMSprop&, double>(),
+             py::arg("optimizer"),
+             py::arg("gamma"))
+        .def(py::init<tenzor::optim::Adagrad&, double>(),
+             py::arg("optimizer"),
+             py::arg("gamma"))
+        .def(py::init<tenzor::optim::Adadelta&, double>(),
              py::arg("optimizer"),
              py::arg("gamma"))
         .def("get_epoch", &tenzor::optim::ExponentialLR::get_epoch,
@@ -2366,6 +2392,18 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("T_max"),
              py::arg("eta_min") = 0.0)
         .def(py::init<tenzor::optim::AdamW&, int, double>(),
+             py::arg("optimizer"),
+             py::arg("T_max"),
+             py::arg("eta_min") = 0.0)
+        .def(py::init<tenzor::optim::RMSprop&, int, double>(),
+             py::arg("optimizer"),
+             py::arg("T_max"),
+             py::arg("eta_min") = 0.0)
+        .def(py::init<tenzor::optim::Adagrad&, int, double>(),
+             py::arg("optimizer"),
+             py::arg("T_max"),
+             py::arg("eta_min") = 0.0)
+        .def(py::init<tenzor::optim::Adadelta&, int, double>(),
              py::arg("optimizer"),
              py::arg("T_max"),
              py::arg("eta_min") = 0.0)

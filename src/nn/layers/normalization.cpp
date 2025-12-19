@@ -680,12 +680,16 @@ public:
         auto& rstd_orig = saved[2];
         auto& weight_orig = saved[3];
 
-        // Make all tensors contiguous for pointer-based access
-        auto grad_output = grad_output_orig.contiguous();
-        auto input = input_orig.contiguous();
-        auto mean = mean_orig.contiguous();
-        auto rstd = rstd_orig.contiguous();
-        auto weight = weight_orig.contiguous();
+        // Save original device for returning results
+        auto original_device = grad_output_orig.device();
+
+        // Move tensors to CPU for backward computation if on GPU
+        // TODO: Implement CUDA kernel for GroupNorm backward for better performance
+        auto grad_output = grad_output_orig.to(Device::cpu()).contiguous();
+        auto input = input_orig.to(Device::cpu()).contiguous();
+        auto mean = mean_orig.to(Device::cpu()).contiguous();
+        auto rstd = rstd_orig.to(Device::cpu()).contiguous();
+        auto weight = weight_orig.to(Device::cpu()).contiguous();
 
         auto shape = input.shape();
         int64_t N = shape[0];
@@ -759,7 +763,10 @@ public:
             }
         }
 
-        return {grad_input.contiguous(), grad_weight.contiguous(), grad_bias.contiguous()};
+        // Move results back to original device
+        return {grad_input.to(original_device).contiguous(),
+                grad_weight.to(original_device).contiguous(),
+                grad_bias.to(original_device).contiguous()};
     }
 
 private:

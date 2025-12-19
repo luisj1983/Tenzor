@@ -160,6 +160,7 @@ private:
                        const Tensor* bias, int64_t stride, int64_t padding,
                        int64_t dilation, int64_t groups) -> Tensor;
     auto dispatchConv2dForward(const Tensor& input, const Tensor& weight, const OpAttributes& attrs) -> Tensor;
+    auto dispatchConvTranspose2dForward(const Tensor& input, const Tensor& weight, const Tensor* bias, const OpAttributes& attrs) -> Tensor;
 
     // Conv2d backward operations
     auto dispatchConv2dBackwardInput(const Tensor& grad_output, const Tensor& weight,

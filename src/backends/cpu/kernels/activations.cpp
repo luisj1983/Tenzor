@@ -1346,5 +1346,476 @@ auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output
     return grad_input;
 }
 
+// ============================================================================
+// ELU Activation
+// ============================================================================
+
+// Forward: x if x > 0 else alpha * (exp(x) - 1)
+auto elu_kernel(const Tensor& input, float alpha) -> Tensor {
+    auto output = zeros_like(input);
+
+    if (input.dtype() == DType::Float32) {
+        const float* in_data = input.data<float>();
+        float* out_data = output.data<float>();
+        size_t n = input.numel();
+
+        #pragma omp parallel for if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            float x = in_data[i];
+            out_data[i] = (x > 0.0f) ? x : alpha * (std::exp(x) - 1.0f);
+        }
+    } else if (input.dtype() == DType::Float64) {
+        const double* in_data = input.data<double>();
+        double* out_data = output.data<double>();
+        size_t n = input.numel();
+
+        #pragma omp parallel for if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            double x = in_data[i];
+            out_data[i] = (x > 0.0) ? x : static_cast<double>(alpha) * (std::exp(x) - 1.0);
+        }
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* in_data = input.data<Float16>();
+        Float16* out_data = output.data<Float16>();
+        size_t n = input.numel();
+
+        for (size_t i = 0; i < n; ++i) {
+            float x = static_cast<float>(in_data[i]);
+            float result = (x > 0.0f) ? x : alpha * (std::exp(x) - 1.0f);
+            out_data[i] = Float16(result);
+        }
+    } else {
+        throw std::runtime_error("ELU only supports Float32, Float64, and Float16");
+    }
+
+    return output;
+}
+
+// Backward: grad_out * (1 if x > 0 else alpha * exp(x))
+auto elu_backward_kernel(const Tensor& grad_output, const Tensor& input, float alpha) -> Tensor {
+    auto grad_input = zeros_like(input);
+
+    if (input.dtype() == DType::Float32) {
+        const float* grad_out_data = grad_output.data<float>();
+        const float* in_data = input.data<float>();
+        float* grad_in_data = grad_input.data<float>();
+        size_t n = input.numel();
+
+        #pragma omp parallel for if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            float x = in_data[i];
+            grad_in_data[i] = grad_out_data[i] * ((x > 0.0f) ? 1.0f : alpha * std::exp(x));
+        }
+    } else if (input.dtype() == DType::Float64) {
+        const double* grad_out_data = grad_output.data<double>();
+        const double* in_data = input.data<double>();
+        double* grad_in_data = grad_input.data<double>();
+        size_t n = input.numel();
+
+        #pragma omp parallel for if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            double x = in_data[i];
+            grad_in_data[i] = grad_out_data[i] * ((x > 0.0) ? 1.0 : static_cast<double>(alpha) * std::exp(x));
+        }
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* grad_out_data = grad_output.data<Float16>();
+        const Float16* in_data = input.data<Float16>();
+        Float16* grad_in_data = grad_input.data<Float16>();
+        size_t n = input.numel();
+
+        for (size_t i = 0; i < n; ++i) {
+            float x = static_cast<float>(in_data[i]);
+            float grad_out = static_cast<float>(grad_out_data[i]);
+            float result = grad_out * ((x > 0.0f) ? 1.0f : alpha * std::exp(x));
+            grad_in_data[i] = Float16(result);
+        }
+    } else {
+        throw std::runtime_error("ELU backward only supports Float32, Float64, and Float16");
+    }
+
+    return grad_input;
+}
+
+// ============================================================================
+// SELU Activation
+// ============================================================================
+
+// SELU constants from the original paper
+constexpr float SELU_ALPHA = 1.6732632423543772848170429916717f;
+constexpr float SELU_SCALE = 1.0507009873554804934193349852946f;
+
+// Forward: scale * (x if x > 0 else alpha * (exp(x) - 1))
+auto selu_kernel(const Tensor& input) -> Tensor {
+    auto output = zeros_like(input);
+
+    if (input.dtype() == DType::Float32) {
+        const float* in_data = input.data<float>();
+        float* out_data = output.data<float>();
+        size_t n = input.numel();
+
+        #pragma omp parallel for if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            float x = in_data[i];
+            out_data[i] = SELU_SCALE * ((x > 0.0f) ? x : SELU_ALPHA * (std::exp(x) - 1.0f));
+        }
+    } else if (input.dtype() == DType::Float64) {
+        const double* in_data = input.data<double>();
+        double* out_data = output.data<double>();
+        size_t n = input.numel();
+
+        #pragma omp parallel for if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            double x = in_data[i];
+            out_data[i] = static_cast<double>(SELU_SCALE) *
+                ((x > 0.0) ? x : static_cast<double>(SELU_ALPHA) * (std::exp(x) - 1.0));
+        }
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* in_data = input.data<Float16>();
+        Float16* out_data = output.data<Float16>();
+        size_t n = input.numel();
+
+        for (size_t i = 0; i < n; ++i) {
+            float x = static_cast<float>(in_data[i]);
+            float result = SELU_SCALE * ((x > 0.0f) ? x : SELU_ALPHA * (std::exp(x) - 1.0f));
+            out_data[i] = Float16(result);
+        }
+    } else {
+        throw std::runtime_error("SELU only supports Float32, Float64, and Float16");
+    }
+
+    return output;
+}
+
+// Backward: grad_out * scale * (1 if x > 0 else alpha * exp(x))
+auto selu_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Tensor {
+    auto grad_input = zeros_like(input);
+
+    if (input.dtype() == DType::Float32) {
+        const float* grad_out_data = grad_output.data<float>();
+        const float* in_data = input.data<float>();
+        float* grad_in_data = grad_input.data<float>();
+        size_t n = input.numel();
+
+        #pragma omp parallel for if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            float x = in_data[i];
+            grad_in_data[i] = grad_out_data[i] * SELU_SCALE *
+                ((x > 0.0f) ? 1.0f : SELU_ALPHA * std::exp(x));
+        }
+    } else if (input.dtype() == DType::Float64) {
+        const double* grad_out_data = grad_output.data<double>();
+        const double* in_data = input.data<double>();
+        double* grad_in_data = grad_input.data<double>();
+        size_t n = input.numel();
+
+        #pragma omp parallel for if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            double x = in_data[i];
+            grad_in_data[i] = grad_out_data[i] * static_cast<double>(SELU_SCALE) *
+                ((x > 0.0) ? 1.0 : static_cast<double>(SELU_ALPHA) * std::exp(x));
+        }
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* grad_out_data = grad_output.data<Float16>();
+        const Float16* in_data = input.data<Float16>();
+        Float16* grad_in_data = grad_input.data<Float16>();
+        size_t n = input.numel();
+
+        for (size_t i = 0; i < n; ++i) {
+            float x = static_cast<float>(in_data[i]);
+            float grad_out = static_cast<float>(grad_out_data[i]);
+            float result = grad_out * SELU_SCALE * ((x > 0.0f) ? 1.0f : SELU_ALPHA * std::exp(x));
+            grad_in_data[i] = Float16(result);
+        }
+    } else {
+        throw std::runtime_error("SELU backward only supports Float32, Float64, and Float16");
+    }
+
+    return grad_input;
+}
+
+// ============================================================================
+// Mish Activation
+// ============================================================================
+
+// Forward: x * tanh(softplus(x)) = x * tanh(ln(1 + exp(x)))
+auto mish_kernel(const Tensor& input) -> Tensor {
+    auto output = zeros_like(input);
+
+    if (input.dtype() == DType::Float32) {
+        const float* in_data = input.data<float>();
+        float* out_data = output.data<float>();
+        size_t n = input.numel();
+
+        #pragma omp parallel for if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            float x = in_data[i];
+            // Numerically stable softplus: log(1 + exp(x))
+            // For large x: softplus(x) ≈ x
+            // For small x: use standard formula
+            float softplus;
+            if (x > 20.0f) {
+                softplus = x;
+            } else if (x < -20.0f) {
+                softplus = std::exp(x);
+            } else {
+                softplus = std::log1p(std::exp(x));
+            }
+            out_data[i] = x * std::tanh(softplus);
+        }
+    } else if (input.dtype() == DType::Float64) {
+        const double* in_data = input.data<double>();
+        double* out_data = output.data<double>();
+        size_t n = input.numel();
+
+        #pragma omp parallel for if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            double x = in_data[i];
+            double softplus;
+            if (x > 20.0) {
+                softplus = x;
+            } else if (x < -20.0) {
+                softplus = std::exp(x);
+            } else {
+                softplus = std::log1p(std::exp(x));
+            }
+            out_data[i] = x * std::tanh(softplus);
+        }
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* in_data = input.data<Float16>();
+        Float16* out_data = output.data<Float16>();
+        size_t n = input.numel();
+
+        for (size_t i = 0; i < n; ++i) {
+            float x = static_cast<float>(in_data[i]);
+            float softplus;
+            if (x > 20.0f) {
+                softplus = x;
+            } else if (x < -20.0f) {
+                softplus = std::exp(x);
+            } else {
+                softplus = std::log1p(std::exp(x));
+            }
+            out_data[i] = Float16(x * std::tanh(softplus));
+        }
+    } else {
+        throw std::runtime_error("Mish only supports Float32, Float64, and Float16");
+    }
+
+    return output;
+}
+
+// Backward: d/dx[x * tanh(softplus(x))]
+// = tanh(softplus(x)) + x * sech^2(softplus(x)) * sigmoid(x)
+auto mish_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Tensor {
+    auto grad_input = zeros_like(input);
+
+    if (input.dtype() == DType::Float32) {
+        const float* grad_out_data = grad_output.data<float>();
+        const float* in_data = input.data<float>();
+        float* grad_in_data = grad_input.data<float>();
+        size_t n = input.numel();
+
+        #pragma omp parallel for if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            float x = in_data[i];
+            float softplus;
+            if (x > 20.0f) {
+                softplus = x;
+            } else if (x < -20.0f) {
+                softplus = std::exp(x);
+            } else {
+                softplus = std::log1p(std::exp(x));
+            }
+            float tanh_sp = std::tanh(softplus);
+            float sigmoid_x = 1.0f / (1.0f + std::exp(-x));
+            float sech2 = 1.0f - tanh_sp * tanh_sp;
+            grad_in_data[i] = grad_out_data[i] * (tanh_sp + x * sech2 * sigmoid_x);
+        }
+    } else if (input.dtype() == DType::Float64) {
+        const double* grad_out_data = grad_output.data<double>();
+        const double* in_data = input.data<double>();
+        double* grad_in_data = grad_input.data<double>();
+        size_t n = input.numel();
+
+        #pragma omp parallel for if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            double x = in_data[i];
+            double softplus;
+            if (x > 20.0) {
+                softplus = x;
+            } else if (x < -20.0) {
+                softplus = std::exp(x);
+            } else {
+                softplus = std::log1p(std::exp(x));
+            }
+            double tanh_sp = std::tanh(softplus);
+            double sigmoid_x = 1.0 / (1.0 + std::exp(-x));
+            double sech2 = 1.0 - tanh_sp * tanh_sp;
+            grad_in_data[i] = grad_out_data[i] * (tanh_sp + x * sech2 * sigmoid_x);
+        }
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* grad_out_data = grad_output.data<Float16>();
+        const Float16* in_data = input.data<Float16>();
+        Float16* grad_in_data = grad_input.data<Float16>();
+        size_t n = input.numel();
+
+        for (size_t i = 0; i < n; ++i) {
+            float x = static_cast<float>(in_data[i]);
+            float grad_out = static_cast<float>(grad_out_data[i]);
+            float softplus;
+            if (x > 20.0f) {
+                softplus = x;
+            } else if (x < -20.0f) {
+                softplus = std::exp(x);
+            } else {
+                softplus = std::log1p(std::exp(x));
+            }
+            float tanh_sp = std::tanh(softplus);
+            float sigmoid_x = 1.0f / (1.0f + std::exp(-x));
+            float sech2 = 1.0f - tanh_sp * tanh_sp;
+            grad_in_data[i] = Float16(grad_out * (tanh_sp + x * sech2 * sigmoid_x));
+        }
+    } else {
+        throw std::runtime_error("Mish backward only supports Float32, Float64, and Float16");
+    }
+
+    return grad_input;
+}
+
+// ============================================================================
+// Softplus Activation: softplus(x) = ln(1 + exp(x))
+// ============================================================================
+
+auto softplus_kernel(const Tensor& input, float beta, float threshold) -> Tensor {
+    auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    Tensor output = empty(shape_vec, input.dtype(), input.device());
+
+    if (input.dtype() == DType::Float32) {
+        const float* in_data = input.data<float>();
+        float* out_data = output.data<float>();
+        size_t n = input.numel();
+
+        #pragma omp parallel for if(n > 1000)
+        for (size_t i = 0; i < n; ++i) {
+            float x = in_data[i] * beta;
+            // Numerically stable softplus
+            if (x > threshold) {
+                out_data[i] = in_data[i];  // softplus(x) ≈ x for large x
+            } else if (x < -threshold) {
+                out_data[i] = std::exp(x) / beta;  // softplus(x) ≈ exp(x)/beta for very negative x
+            } else {
+                out_data[i] = std::log1p(std::exp(x)) / beta;
+            }
+        }
+    } else if (input.dtype() == DType::Float64) {
+        const double* in_data = input.data<double>();
+        double* out_data = output.data<double>();
+        size_t n = input.numel();
+
+        #pragma omp parallel for if(n > 1000)
+        for (size_t i = 0; i < n; ++i) {
+            double x = in_data[i] * static_cast<double>(beta);
+            double thresh = static_cast<double>(threshold);
+            if (x > thresh) {
+                out_data[i] = in_data[i];
+            } else if (x < -thresh) {
+                out_data[i] = std::exp(x) / static_cast<double>(beta);
+            } else {
+                out_data[i] = std::log1p(std::exp(x)) / static_cast<double>(beta);
+            }
+        }
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* in_data = input.data<Float16>();
+        Float16* out_data = output.data<Float16>();
+        size_t n = input.numel();
+
+        for (size_t i = 0; i < n; ++i) {
+            float x = static_cast<float>(in_data[i]) * beta;
+            float result;
+            if (x > threshold) {
+                result = static_cast<float>(in_data[i]);
+            } else if (x < -threshold) {
+                result = std::exp(x) / beta;
+            } else {
+                result = std::log1p(std::exp(x)) / beta;
+            }
+            out_data[i] = Float16(result);
+        }
+    } else {
+        throw std::runtime_error("Softplus only supports Float32, Float64, and Float16");
+    }
+
+    return output;
+}
+
+auto softplus_backward_kernel(const Tensor& grad_output, const Tensor& input, float beta, float threshold) -> Tensor {
+    auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    Tensor grad_input = empty(shape_vec, input.dtype(), input.device());
+
+    // d(softplus)/dx = sigmoid(beta * x)
+    if (input.dtype() == DType::Float32) {
+        const float* grad_out_data = grad_output.data<float>();
+        const float* in_data = input.data<float>();
+        float* grad_in_data = grad_input.data<float>();
+        size_t n = input.numel();
+
+        #pragma omp parallel for if(n > 1000)
+        for (size_t i = 0; i < n; ++i) {
+            float x = in_data[i] * beta;
+            float sigmoid_x;
+            if (x > threshold) {
+                sigmoid_x = 1.0f;
+            } else if (x < -threshold) {
+                sigmoid_x = std::exp(x);
+            } else {
+                sigmoid_x = 1.0f / (1.0f + std::exp(-x));
+            }
+            grad_in_data[i] = grad_out_data[i] * sigmoid_x;
+        }
+    } else if (input.dtype() == DType::Float64) {
+        const double* grad_out_data = grad_output.data<double>();
+        const double* in_data = input.data<double>();
+        double* grad_in_data = grad_input.data<double>();
+        size_t n = input.numel();
+
+        #pragma omp parallel for if(n > 1000)
+        for (size_t i = 0; i < n; ++i) {
+            double x = in_data[i] * static_cast<double>(beta);
+            double thresh = static_cast<double>(threshold);
+            double sigmoid_x;
+            if (x > thresh) {
+                sigmoid_x = 1.0;
+            } else if (x < -thresh) {
+                sigmoid_x = std::exp(x);
+            } else {
+                sigmoid_x = 1.0 / (1.0 + std::exp(-x));
+            }
+            grad_in_data[i] = grad_out_data[i] * sigmoid_x;
+        }
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* grad_out_data = grad_output.data<Float16>();
+        const Float16* in_data = input.data<Float16>();
+        Float16* grad_in_data = grad_input.data<Float16>();
+        size_t n = input.numel();
+
+        for (size_t i = 0; i < n; ++i) {
+            float x = static_cast<float>(in_data[i]) * beta;
+            float sigmoid_x;
+            if (x > threshold) {
+                sigmoid_x = 1.0f;
+            } else if (x < -threshold) {
+                sigmoid_x = std::exp(x);
+            } else {
+                sigmoid_x = 1.0f / (1.0f + std::exp(-x));
+            }
+            grad_in_data[i] = Float16(static_cast<float>(grad_out_data[i]) * sigmoid_x);
+        }
+    } else {
+        throw std::runtime_error("Softplus backward only supports Float32, Float64, and Float16");
+    }
+
+    return grad_input;
+}
+
 } // namespace cpu
 } // namespace tenzor

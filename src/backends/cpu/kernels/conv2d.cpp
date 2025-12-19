@@ -754,5 +754,176 @@ auto conv2d_backward_bias_kernel(
     return grad_bias;
 }
 
+// ============================================================================
+// ConvTranspose2d Forward CPU Implementation
+// ============================================================================
+
+// Calculate output size for transposed convolution
+inline int64_t calculate_transpose_output_size(
+    int64_t input_size, int64_t kernel_size,
+    int64_t stride, int64_t padding, int64_t output_padding, int64_t dilation
+) {
+    return (input_size - 1) * stride - 2 * padding + dilation * (kernel_size - 1) + output_padding + 1;
+}
+
+// Template helper for dtype-generic conv_transpose2d forward using gather approach
+// Gather approach iterates over output positions and gathers contributions from input
+// This is parallelizable since each output position is independent
+template<typename T>
+void conv_transpose2d_forward_impl(
+    const Tensor& input,          // (batch, in_channels, in_h, in_w)
+    const Tensor& weight,         // (in_channels, out_channels/groups, kernel_h, kernel_w)
+    const Tensor* bias,           // (out_channels) or nullptr
+    Tensor& output,               // (batch, out_channels, out_h, out_w)
+    int64_t stride,
+    int64_t padding,
+    int64_t output_padding,
+    int64_t dilation,
+    int64_t groups
+) {
+    auto input_shape = input.shape();
+    auto weight_shape = weight.shape();
+    auto output_shape = output.shape();
+
+    int64_t batch = input_shape[0];
+    int64_t in_channels = input_shape[1];
+    int64_t in_h = input_shape[2];
+    int64_t in_w = input_shape[3];
+
+    int64_t in_channels_per_group = weight_shape[0] / groups;
+    int64_t out_channels_per_group = weight_shape[1];
+    int64_t out_channels = out_channels_per_group * groups;
+    int64_t kernel_h = weight_shape[2];
+    int64_t kernel_w = weight_shape[3];
+
+    int64_t out_h = output_shape[2];
+    int64_t out_w = output_shape[3];
+
+    const T* input_data = input.data<T>();
+    const T* weight_data = weight.data<T>();
+    T* output_data = output.data<T>();
+
+    // Use gather approach: iterate over output positions and gather from input
+    // This is parallelizable since each output position is independent
+    int64_t total_output = batch * out_channels * out_h * out_w;
+
+    #pragma omp parallel for if(total_output > 1000)
+    for (int64_t idx = 0; idx < total_output; ++idx) {
+        // Decode output position
+        int64_t w = idx % out_w;
+        int64_t h = (idx / out_w) % out_h;
+        int64_t c = (idx / (out_w * out_h)) % out_channels;
+        int64_t b = idx / (out_w * out_h * out_channels);
+
+        // Determine group
+        int64_t g = c / out_channels_per_group;
+        int64_t oc = c % out_channels_per_group;  // Output channel within group
+        int64_t in_start = g * in_channels_per_group;
+
+        // Initialize accumulator
+        float sum = 0.0f;
+
+        // Gather from all input positions that contribute to this output position
+        for (int64_t ic = 0; ic < in_channels_per_group; ++ic) {
+            for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                    // For transposed conv: out = (in - 1) * stride - 2*padding + dilation * (kernel - 1) + out_padding + 1
+                    // Inverse: which input position (ih, iw) with kernel (kh, kw) contributes to (h, w)?
+                    // oh = ih * stride - padding + kh * dilation
+                    // ih * stride = oh + padding - kh * dilation
+                    // ih = (oh + padding - kh * dilation) / stride (must be integer and in bounds)
+
+                    int64_t h_shifted = h + padding - kh * dilation;
+                    int64_t w_shifted = w + padding - kw * dilation;
+
+                    // Check if this maps to a valid input position
+                    if (h_shifted >= 0 && h_shifted % stride == 0 &&
+                        w_shifted >= 0 && w_shifted % stride == 0) {
+
+                        int64_t ih = h_shifted / stride;
+                        int64_t iw = w_shifted / stride;
+
+                        if (ih >= 0 && ih < in_h && iw >= 0 && iw < in_w) {
+                            // Get input value
+                            int64_t input_idx = b * (in_channels * in_h * in_w) +
+                                               (in_start + ic) * (in_h * in_w) +
+                                               ih * in_w + iw;
+                            float input_val = static_cast<float>(input_data[input_idx]);
+
+                            // Get weight value
+                            // Weight shape: (in_channels, out_channels/groups, kernel_h, kernel_w)
+                            int64_t weight_idx = (in_start + ic) * (out_channels_per_group * kernel_h * kernel_w) +
+                                                oc * (kernel_h * kernel_w) +
+                                                kh * kernel_w + kw;
+                            float weight_val = static_cast<float>(weight_data[weight_idx]);
+
+                            sum += input_val * weight_val;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Add bias if present
+        if (bias != nullptr) {
+            sum += static_cast<float>(bias->data<T>()[c]);
+        }
+
+        output_data[idx] = T(sum);
+    }
+}
+
+auto conv_transpose2d_forward_kernel(
+    const Tensor& input,          // (batch, in_channels, in_h, in_w)
+    const Tensor& weight,         // (in_channels, out_channels/groups, kernel_h, kernel_w)
+    const Tensor* bias,           // (out_channels) or nullptr
+    int64_t stride,
+    int64_t padding,
+    int64_t output_padding,
+    int64_t dilation,
+    int64_t groups
+) -> Tensor {
+    // Extract dimensions
+    auto input_shape = input.shape();
+    auto weight_shape = weight.shape();
+
+    int64_t batch = input_shape[0];
+    int64_t in_h = input_shape[2];
+    int64_t in_w = input_shape[3];
+
+    int64_t out_channels_per_group = weight_shape[1];
+    int64_t out_channels = out_channels_per_group * groups;
+    int64_t kernel_h = weight_shape[2];
+    int64_t kernel_w = weight_shape[3];
+
+    // Calculate output dimensions for transposed convolution
+    int64_t out_h = calculate_transpose_output_size(in_h, kernel_h, stride, padding, output_padding, dilation);
+    int64_t out_w = calculate_transpose_output_size(in_w, kernel_w, stride, padding, output_padding, dilation);
+
+    if (out_h <= 0 || out_w <= 0) {
+        throw std::invalid_argument(
+            "Invalid ConvTranspose2d configuration: output dimensions are non-positive (out_h=" +
+            std::to_string(out_h) + ", out_w=" + std::to_string(out_w) + ")"
+        );
+    }
+
+    // Create output tensor with correct dtype
+    std::vector<int64_t> output_shape = {batch, out_channels, out_h, out_w};
+    Tensor output(output_shape, input.dtype(), input.device());
+
+    // Dispatch based on dtype
+    if (input.dtype() == DType::Float32) {
+        conv_transpose2d_forward_impl<float>(input, weight, bias, output, stride, padding, output_padding, dilation, groups);
+    } else if (input.dtype() == DType::Float64) {
+        conv_transpose2d_forward_impl<double>(input, weight, bias, output, stride, padding, output_padding, dilation, groups);
+    } else if (input.dtype() == DType::Float16) {
+        conv_transpose2d_forward_impl<Float16>(input, weight, bias, output, stride, padding, output_padding, dilation, groups);
+    } else {
+        throw std::runtime_error("Unsupported dtype for conv_transpose2d_forward");
+    }
+
+    return output;
+}
+
 } // namespace cpu
 } // namespace tenzor

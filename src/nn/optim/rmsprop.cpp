@@ -74,8 +74,22 @@ auto RMSprop::step() -> void {
             continue;  // Skip parameters without gradients
         }
 
-        const auto& grad = param->grad().value();
-        const auto& param_data = param->tensor();
+        const auto& grad_orig = param->grad().value();
+        const auto& param_data_orig = param->tensor();
+        auto original_device = param_data_orig.device();
+
+        // Move all tensors to CPU for data access
+        Tensor grad = grad_orig.to(Device::cpu());
+        Tensor param_data = param_data_orig.to(Device::cpu());
+        Tensor square_avg_cpu = square_avg_[i].to(Device::cpu());
+        Tensor grad_avg_cpu;
+        if (centered_) {
+            grad_avg_cpu = grad_avg_[i].to(Device::cpu());
+        }
+        Tensor momentum_buffer_cpu;
+        if (momentum_ > 0.0) {
+            momentum_buffer_cpu = momentum_buffer_[i].to(Device::cpu());
+        }
 
         int64_t numel = param_data.numel();
         DType dtype = param_data.dtype();
@@ -84,7 +98,7 @@ auto RMSprop::step() -> void {
         if (dtype == DType::Float64) {
             auto grad_ptr = const_cast<double*>(grad.data<double>());
             auto param_ptr = const_cast<double*>(param_data.data<double>());
-            auto square_avg_ptr = square_avg_[i].data<double>();
+            auto square_avg_ptr = square_avg_cpu.data<double>();
 
             // Apply weight decay if specified
             if (weight_decay_ > 0.0) {
@@ -103,7 +117,7 @@ auto RMSprop::step() -> void {
 
             if (centered_) {
                 // Update grad_avg: m_t = alpha * m_{t-1} + (1 - alpha) * g_t
-                avg_ptr = grad_avg_[i].data<double>();
+                avg_ptr = grad_avg_cpu.data<double>();
                 for (int64_t j = 0; j < numel; ++j) {
                     avg_ptr[j] = alpha_ * avg_ptr[j] + (1.0 - alpha_) * grad_ptr[j];
                 }
@@ -111,7 +125,7 @@ auto RMSprop::step() -> void {
 
             if (momentum_ > 0.0) {
                 // With momentum: buf_t = momentum * buf_{t-1} + g_t / (sqrt(v_t) + eps)
-                auto buf_ptr = momentum_buffer_[i].data<double>();
+                auto buf_ptr = momentum_buffer_cpu.data<double>();
 
                 for (int64_t j = 0; j < numel; ++j) {
                     double denom;
@@ -143,7 +157,7 @@ auto RMSprop::step() -> void {
             // Float32 path (default)
             auto grad_ptr = const_cast<float*>(grad.data<float>());
             auto param_ptr = const_cast<float*>(param_data.data<float>());
-            auto square_avg_ptr = square_avg_[i].data<float>();
+            auto square_avg_ptr = square_avg_cpu.data<float>();
 
             // Apply weight decay if specified
             if (weight_decay_ > 0.0) {
@@ -162,7 +176,7 @@ auto RMSprop::step() -> void {
 
             if (centered_) {
                 // Update grad_avg: m_t = alpha * m_{t-1} + (1 - alpha) * g_t
-                avg_ptr = grad_avg_[i].data<float>();
+                avg_ptr = grad_avg_cpu.data<float>();
                 for (int64_t j = 0; j < numel; ++j) {
                     avg_ptr[j] = alpha_ * avg_ptr[j] + (1.0f - alpha_) * grad_ptr[j];
                 }
@@ -170,7 +184,7 @@ auto RMSprop::step() -> void {
 
             if (momentum_ > 0.0) {
                 // With momentum: buf_t = momentum * buf_{t-1} + g_t / (sqrt(v_t) + eps)
-                auto buf_ptr = momentum_buffer_[i].data<float>();
+                auto buf_ptr = momentum_buffer_cpu.data<float>();
 
                 for (int64_t j = 0; j < numel; ++j) {
                     float denom;
@@ -198,6 +212,19 @@ auto RMSprop::step() -> void {
                     param_ptr[j] -= lr_ * grad_ptr[j] / denom;
                 }
             }
+        }
+
+        // Copy updated values back to original device
+        // Update param data by assigning new tensor
+        param->tensor() = param_data.to(original_device);
+
+        // Update state buffers
+        square_avg_[i] = square_avg_cpu.to(original_device);
+        if (centered_) {
+            grad_avg_[i] = grad_avg_cpu.to(original_device);
+        }
+        if (momentum_ > 0.0) {
+            momentum_buffer_[i] = momentum_buffer_cpu.to(original_device);
         }
     }
 }

@@ -465,6 +465,267 @@ extern "C" {
 }
 
 // ============================================================================
+// ELU Activation: f(x) = x if x > 0 else alpha * (exp(x) - 1)
+// ============================================================================
+
+template<typename T>
+__global__ void elu_forward_kernel(const T* input, T* output, int64_t n, float alpha) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        T x = input[idx];
+        output[idx] = (x > T(0)) ? x : T(alpha * (exp(float(x)) - 1.0f));
+    }
+}
+
+template<typename T>
+__global__ void elu_backward_kernel(const T* grad_output, const T* input,
+                                     T* grad_input, int64_t n, float alpha) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        T x = input[idx];
+        T grad = (x > T(0)) ? T(1) : T(alpha * exp(float(x)));
+        grad_input[idx] = grad_output[idx] * grad;
+    }
+}
+
+extern "C" {
+    void elu_forward_float(const float* input, float* output, int64_t n, float alpha) {
+        int num_blocks = get_num_blocks(n);
+        elu_forward_kernel<float><<<num_blocks, BLOCK_SIZE>>>(input, output, n, alpha);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+    void elu_forward_double(const double* input, double* output, int64_t n, float alpha) {
+        int num_blocks = get_num_blocks(n);
+        elu_forward_kernel<double><<<num_blocks, BLOCK_SIZE>>>(input, output, n, alpha);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+    void elu_backward_float(const float* grad_output, const float* input,
+                            float* grad_input, int64_t n, float alpha) {
+        int num_blocks = get_num_blocks(n);
+        elu_backward_kernel<float><<<num_blocks, BLOCK_SIZE>>>(
+            grad_output, input, grad_input, n, alpha);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+    void elu_backward_double(const double* grad_output, const double* input,
+                             double* grad_input, int64_t n, float alpha) {
+        int num_blocks = get_num_blocks(n);
+        elu_backward_kernel<double><<<num_blocks, BLOCK_SIZE>>>(
+            grad_output, input, grad_input, n, alpha);
+        CUDA_CHECK(cudaGetLastError());
+    }
+}
+
+// ============================================================================
+// SELU Activation: f(x) = scale * (x if x > 0 else alpha * (exp(x) - 1))
+// ============================================================================
+
+constexpr float SELU_ALPHA = 1.6732632423543772848170429916717f;
+constexpr float SELU_SCALE = 1.0507009873554804934193349852946f;
+
+template<typename T>
+__global__ void selu_forward_kernel(const T* input, T* output, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float x = float(input[idx]);
+        float result = (x > 0.0f) ? x : SELU_ALPHA * (expf(x) - 1.0f);
+        output[idx] = T(SELU_SCALE * result);
+    }
+}
+
+template<typename T>
+__global__ void selu_backward_kernel(const T* grad_output, const T* input,
+                                      T* grad_input, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float x = float(input[idx]);
+        float grad = (x > 0.0f) ? SELU_SCALE : SELU_SCALE * SELU_ALPHA * expf(x);
+        grad_input[idx] = T(float(grad_output[idx]) * grad);
+    }
+}
+
+extern "C" {
+    void selu_forward_float(const float* input, float* output, int64_t n) {
+        int num_blocks = get_num_blocks(n);
+        selu_forward_kernel<float><<<num_blocks, BLOCK_SIZE>>>(input, output, n);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+    void selu_forward_double(const double* input, double* output, int64_t n) {
+        int num_blocks = get_num_blocks(n);
+        selu_forward_kernel<double><<<num_blocks, BLOCK_SIZE>>>(input, output, n);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+    void selu_backward_float(const float* grad_output, const float* input,
+                             float* grad_input, int64_t n) {
+        int num_blocks = get_num_blocks(n);
+        selu_backward_kernel<float><<<num_blocks, BLOCK_SIZE>>>(
+            grad_output, input, grad_input, n);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+    void selu_backward_double(const double* grad_output, const double* input,
+                              double* grad_input, int64_t n) {
+        int num_blocks = get_num_blocks(n);
+        selu_backward_kernel<double><<<num_blocks, BLOCK_SIZE>>>(
+            grad_output, input, grad_input, n);
+        CUDA_CHECK(cudaGetLastError());
+    }
+}
+
+// ============================================================================
+// Mish Activation: f(x) = x * tanh(softplus(x)) = x * tanh(ln(1 + exp(x)))
+// ============================================================================
+
+template<typename T>
+__global__ void mish_forward_kernel(const T* input, T* output, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float x = float(input[idx]);
+        // Numerically stable softplus
+        float softplus;
+        if (x > 20.0f) {
+            softplus = x;
+        } else if (x < -20.0f) {
+            softplus = expf(x);
+        } else {
+            softplus = log1pf(expf(x));
+        }
+        output[idx] = T(x * tanhf(softplus));
+    }
+}
+
+template<typename T>
+__global__ void mish_backward_kernel(const T* grad_output, const T* input,
+                                      T* grad_input, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float x = float(input[idx]);
+        float softplus;
+        if (x > 20.0f) {
+            softplus = x;
+        } else if (x < -20.0f) {
+            softplus = expf(x);
+        } else {
+            softplus = log1pf(expf(x));
+        }
+        float tanh_sp = tanhf(softplus);
+        float sigmoid_x = 1.0f / (1.0f + expf(-x));
+        float sech2 = 1.0f - tanh_sp * tanh_sp;
+        float grad = tanh_sp + x * sech2 * sigmoid_x;
+        grad_input[idx] = T(float(grad_output[idx]) * grad);
+    }
+}
+
+extern "C" {
+    void mish_forward_float(const float* input, float* output, int64_t n) {
+        int num_blocks = get_num_blocks(n);
+        mish_forward_kernel<float><<<num_blocks, BLOCK_SIZE>>>(input, output, n);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+    void mish_forward_double(const double* input, double* output, int64_t n) {
+        int num_blocks = get_num_blocks(n);
+        mish_forward_kernel<double><<<num_blocks, BLOCK_SIZE>>>(input, output, n);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+    void mish_backward_float(const float* grad_output, const float* input,
+                             float* grad_input, int64_t n) {
+        int num_blocks = get_num_blocks(n);
+        mish_backward_kernel<float><<<num_blocks, BLOCK_SIZE>>>(
+            grad_output, input, grad_input, n);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+    void mish_backward_double(const double* grad_output, const double* input,
+                              double* grad_input, int64_t n) {
+        int num_blocks = get_num_blocks(n);
+        mish_backward_kernel<double><<<num_blocks, BLOCK_SIZE>>>(
+            grad_output, input, grad_input, n);
+        CUDA_CHECK(cudaGetLastError());
+    }
+}
+
+// ============================================================================
+// Softplus Activation: f(x) = ln(1 + exp(beta * x)) / beta
+// ============================================================================
+
+template<typename T>
+__global__ void softplus_forward_kernel(const T* input, T* output, int64_t n,
+                                         float beta, float threshold) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float x = float(input[idx]) * beta;
+        float result;
+        if (x > threshold) {
+            result = float(input[idx]);
+        } else if (x < -threshold) {
+            result = expf(x) / beta;
+        } else {
+            result = log1pf(expf(x)) / beta;
+        }
+        output[idx] = T(result);
+    }
+}
+
+template<typename T>
+__global__ void softplus_backward_kernel(const T* grad_output, const T* input,
+                                          T* grad_input, int64_t n,
+                                          float beta, float threshold) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float x = float(input[idx]) * beta;
+        float sigmoid_x;
+        if (x > threshold) {
+            sigmoid_x = 1.0f;
+        } else if (x < -threshold) {
+            sigmoid_x = expf(x);
+        } else {
+            sigmoid_x = 1.0f / (1.0f + expf(-x));
+        }
+        grad_input[idx] = T(float(grad_output[idx]) * sigmoid_x);
+    }
+}
+
+extern "C" {
+    void softplus_forward_float(const float* input, float* output, int64_t n,
+                                float beta, float threshold) {
+        int num_blocks = get_num_blocks(n);
+        softplus_forward_kernel<float><<<num_blocks, BLOCK_SIZE>>>(input, output, n, beta, threshold);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+    void softplus_forward_double(const double* input, double* output, int64_t n,
+                                 float beta, float threshold) {
+        int num_blocks = get_num_blocks(n);
+        softplus_forward_kernel<double><<<num_blocks, BLOCK_SIZE>>>(input, output, n, beta, threshold);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+    void softplus_backward_float(const float* grad_output, const float* input,
+                                 float* grad_input, int64_t n,
+                                 float beta, float threshold) {
+        int num_blocks = get_num_blocks(n);
+        softplus_backward_kernel<float><<<num_blocks, BLOCK_SIZE>>>(
+            grad_output, input, grad_input, n, beta, threshold);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+    void softplus_backward_double(const double* grad_output, const double* input,
+                                  double* grad_input, int64_t n,
+                                  float beta, float threshold) {
+        int num_blocks = get_num_blocks(n);
+        softplus_backward_kernel<double><<<num_blocks, BLOCK_SIZE>>>(
+            grad_output, input, grad_input, n, beta, threshold);
+        CUDA_CHECK(cudaGetLastError());
+    }
+}
+
+// ============================================================================
 // Softmax Activation
 // ============================================================================
 
@@ -1194,6 +1455,254 @@ auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         throw std::runtime_error(std::string("CUDA error in leaky_relu_backward_kernel: ") + cudaGetErrorString(err));
+    }
+
+    return result;
+}
+
+// ELU wrapper
+auto elu_kernel(const Tensor& input, float alpha, cudaStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+
+    if (n == 0) {
+        cudaStreamSynchronize(stream);
+        return result;
+    }
+
+    if (input.dtype() == DType::Float32) {
+        int num_blocks = get_num_blocks(n);
+        elu_forward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            input.data<float>(), result.data<float>(), n, alpha);
+    } else if (input.dtype() == DType::Float64) {
+        int num_blocks = get_num_blocks(n);
+        elu_forward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            input.data<double>(), result.data<double>(), n, alpha);
+    } else {
+        throw std::runtime_error("ELU only supports Float32 and Float64 dtypes");
+    }
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        throw std::runtime_error(std::string("CUDA error in elu_kernel: ") + cudaGetErrorString(err));
+    }
+
+    return result;
+}
+
+// ELU backward wrapper
+auto elu_backward_kernel(const Tensor& grad_output, const Tensor& input, float alpha, cudaStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+
+    if (n == 0) {
+        cudaStreamSynchronize(stream);
+        return result;
+    }
+
+    if (input.dtype() == DType::Float32) {
+        int num_blocks = get_num_blocks(n);
+        elu_backward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            grad_output.data<float>(), input.data<float>(), result.data<float>(), n, alpha);
+    } else if (input.dtype() == DType::Float64) {
+        int num_blocks = get_num_blocks(n);
+        elu_backward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            grad_output.data<double>(), input.data<double>(), result.data<double>(), n, alpha);
+    } else {
+        throw std::runtime_error("ELU backward only supports Float32 and Float64 dtypes");
+    }
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        throw std::runtime_error(std::string("CUDA error in elu_backward_kernel: ") + cudaGetErrorString(err));
+    }
+
+    return result;
+}
+
+// SELU wrapper
+auto selu_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+
+    if (n == 0) {
+        cudaStreamSynchronize(stream);
+        return result;
+    }
+
+    if (input.dtype() == DType::Float32) {
+        int num_blocks = get_num_blocks(n);
+        selu_forward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        int num_blocks = get_num_blocks(n);
+        selu_forward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            input.data<double>(), result.data<double>(), n);
+    } else {
+        throw std::runtime_error("SELU only supports Float32 and Float64 dtypes");
+    }
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        throw std::runtime_error(std::string("CUDA error in selu_kernel: ") + cudaGetErrorString(err));
+    }
+
+    return result;
+}
+
+// SELU backward wrapper
+auto selu_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+
+    if (n == 0) {
+        cudaStreamSynchronize(stream);
+        return result;
+    }
+
+    if (input.dtype() == DType::Float32) {
+        int num_blocks = get_num_blocks(n);
+        selu_backward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            grad_output.data<float>(), input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        int num_blocks = get_num_blocks(n);
+        selu_backward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            grad_output.data<double>(), input.data<double>(), result.data<double>(), n);
+    } else {
+        throw std::runtime_error("SELU backward only supports Float32 and Float64 dtypes");
+    }
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        throw std::runtime_error(std::string("CUDA error in selu_backward_kernel: ") + cudaGetErrorString(err));
+    }
+
+    return result;
+}
+
+// Mish wrapper
+auto mish_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+
+    if (n == 0) {
+        cudaStreamSynchronize(stream);
+        return result;
+    }
+
+    if (input.dtype() == DType::Float32) {
+        int num_blocks = get_num_blocks(n);
+        mish_forward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        int num_blocks = get_num_blocks(n);
+        mish_forward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            input.data<double>(), result.data<double>(), n);
+    } else {
+        throw std::runtime_error("Mish only supports Float32 and Float64 dtypes");
+    }
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        throw std::runtime_error(std::string("CUDA error in mish_kernel: ") + cudaGetErrorString(err));
+    }
+
+    return result;
+}
+
+// Mish backward wrapper
+auto mish_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+
+    if (n == 0) {
+        cudaStreamSynchronize(stream);
+        return result;
+    }
+
+    if (input.dtype() == DType::Float32) {
+        int num_blocks = get_num_blocks(n);
+        mish_backward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            grad_output.data<float>(), input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        int num_blocks = get_num_blocks(n);
+        mish_backward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            grad_output.data<double>(), input.data<double>(), result.data<double>(), n);
+    } else {
+        throw std::runtime_error("Mish backward only supports Float32 and Float64 dtypes");
+    }
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        throw std::runtime_error(std::string("CUDA error in mish_backward_kernel: ") + cudaGetErrorString(err));
+    }
+
+    return result;
+}
+
+// Softplus wrapper
+auto softplus_kernel(const Tensor& input, float beta, float threshold, cudaStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+
+    if (n == 0) {
+        cudaStreamSynchronize(stream);
+        return result;
+    }
+
+    if (input.dtype() == DType::Float32) {
+        int num_blocks = get_num_blocks(n);
+        softplus_forward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            input.data<float>(), result.data<float>(), n, beta, threshold);
+    } else if (input.dtype() == DType::Float64) {
+        int num_blocks = get_num_blocks(n);
+        softplus_forward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            input.data<double>(), result.data<double>(), n, beta, threshold);
+    } else {
+        throw std::runtime_error("Softplus only supports Float32 and Float64 dtypes");
+    }
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        throw std::runtime_error(std::string("CUDA error in softplus_kernel: ") + cudaGetErrorString(err));
+    }
+
+    return result;
+}
+
+// Softplus backward wrapper
+auto softplus_backward_kernel(const Tensor& grad_output, const Tensor& input, float beta, float threshold, cudaStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+
+    if (n == 0) {
+        cudaStreamSynchronize(stream);
+        return result;
+    }
+
+    if (input.dtype() == DType::Float32) {
+        int num_blocks = get_num_blocks(n);
+        softplus_backward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            grad_output.data<float>(), input.data<float>(), result.data<float>(), n, beta, threshold);
+    } else if (input.dtype() == DType::Float64) {
+        int num_blocks = get_num_blocks(n);
+        softplus_backward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            grad_output.data<double>(), input.data<double>(), result.data<double>(), n, beta, threshold);
+    } else {
+        throw std::runtime_error("Softplus backward only supports Float32 and Float64 dtypes");
+    }
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        throw std::runtime_error(std::string("CUDA error in softplus_backward_kernel: ") + cudaGetErrorString(err));
     }
 
     return result;

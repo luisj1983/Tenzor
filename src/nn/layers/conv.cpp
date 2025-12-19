@@ -763,10 +763,84 @@ auto ConvTranspose2d::forward_impl(const Variable& input) -> Variable {
         throw std::invalid_argument("ConvTranspose2d expects 4D input [batch, channels, height, width]");
     }
 
-    // ConvTranspose forward implementation
-    // (Would use similar structure with transposed convolution operations)
+    int64_t in_channels = input_shape[1];
+    if (in_channels != in_channels_) {
+        throw std::invalid_argument("Input channels mismatch");
+    }
 
-    throw std::runtime_error("ConvTranspose2d forward not yet fully implemented");
+    auto& weight = *parameters_["weight"];
+    auto bias_it = parameters_.find("bias");
+    Device original_device = input.tensor().device();
+
+    // Handle dtype and device mismatch
+    Variable weight_matched = weight;
+    bool weight_needs_conversion = (input.dtype() != weight.dtype()) ||
+                                   (input.tensor().device().type != weight.tensor().device().type);
+    if (weight_needs_conversion) {
+        auto weight_converted = weight.tensor();
+        if (input.tensor().device().type != weight.tensor().device().type) {
+            weight_converted = weight_converted.to(original_device);
+        }
+        if (input.dtype() != weight_converted.dtype()) {
+            weight_converted = weight_converted.to(input.dtype());
+        }
+        weight_matched = Variable(weight_converted, weight.requires_grad());
+        weight_matched.set_grad_fn(weight.grad_fn());
+    }
+
+    const Tensor* bias_ptr = nullptr;
+    Variable bias_matched;
+    if (bias_it != parameters_.end()) {
+        auto& bias = *bias_it->second;
+        bool bias_needs_conversion = (input.dtype() != bias.dtype()) ||
+                                     (input.tensor().device().type != bias.tensor().device().type);
+        if (bias_needs_conversion) {
+            auto bias_converted = bias.tensor();
+            if (input.tensor().device().type != bias.tensor().device().type) {
+                bias_converted = bias_converted.to(original_device);
+            }
+            if (input.dtype() != bias_converted.dtype()) {
+                bias_converted = bias_converted.to(input.dtype());
+            }
+            bias_matched = Variable(bias_converted, bias.requires_grad());
+            bias_matched.set_grad_fn(bias.grad_fn());
+            bias_ptr = &bias_matched.tensor();
+        } else {
+            bias_ptr = &bias.tensor();
+        }
+    }
+
+    Tensor output;
+
+    // Use CPU backend through operation registry
+    std::vector<Tensor> tensors_for_dispatch = {input.tensor()};
+    auto* backend = Dispatcher::get_backend(tensors_for_dispatch);
+
+    std::vector<Tensor> inputs_vec = {input.tensor(), weight_matched.tensor()};
+    if (bias_ptr != nullptr) {
+        inputs_vec.push_back(*bias_ptr);
+    }
+
+    OpAttributes forward_attrs = {
+        {"stride", std::to_string(stride_)},
+        {"padding", std::to_string(padding_)},
+        {"output_padding", std::to_string(output_padding_)},
+        {"dilation", "1"},  // ConvTranspose2d uses dilation=1
+        {"groups", std::to_string(groups_)}
+    };
+    auto output_result = backend->dispatch(
+        "conv_transpose2d_forward",
+        std::span<const Tensor>(inputs_vec),
+        forward_attrs
+    );
+    output = output_result[0];
+
+    auto result = Variable(output, input.requires_grad() || weight.requires_grad());
+
+    // TODO: Implement backward autograd function for ConvTranspose2d
+    // For now, we support forward pass only
+
+    return result;
 }
 
 auto ConvTranspose2d::reset_parameters() -> void {

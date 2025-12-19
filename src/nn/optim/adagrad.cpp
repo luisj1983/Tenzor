@@ -48,28 +48,31 @@ auto Adagrad::initialize_buffers() -> void {
     for (auto& param : parameters_) {
         if (!param) continue;
         const auto& param_data = param->tensor();
+        auto original_device = param_data.device();
 
         // Initialize accumulator G_0
         if (initial_accumulator_value_ == 0.0) {
             sum_.push_back(zeros_like(param_data));
         } else {
-            auto accumulator = zeros_like(param_data);
-            int64_t numel = accumulator.numel();
+            // Create on CPU for data access, then move to target device
+            std::vector<int64_t> shape_vec(param_data.shape().begin(), param_data.shape().end());
+            Tensor accumulator_cpu = zeros(shape_vec, param_data.dtype(), Device::cpu());
+            int64_t numel = accumulator_cpu.numel();
             DType dtype = param_data.dtype();
 
             if (dtype == DType::Float64) {
-                auto acc_ptr = accumulator.data<double>();
+                double* acc_ptr = accumulator_cpu.data<double>();
                 for (int64_t i = 0; i < numel; ++i) {
                     acc_ptr[i] = initial_accumulator_value_;
                 }
             } else {
-                auto acc_ptr = accumulator.data<float>();
+                float* acc_ptr = accumulator_cpu.data<float>();
                 for (int64_t i = 0; i < numel; ++i) {
                     acc_ptr[i] = static_cast<float>(initial_accumulator_value_);
                 }
             }
 
-            sum_.push_back(accumulator);
+            sum_.push_back(accumulator_cpu.to(original_device));
         }
     }
 }
@@ -92,8 +95,14 @@ auto Adagrad::step() -> void {
             continue;  // Skip parameters without gradients
         }
 
-        const auto& grad = param->grad().value();
-        const auto& param_data = param->tensor();
+        const auto& grad_orig = param->grad().value();
+        const auto& param_data_orig = param->tensor();
+        auto original_device = param_data_orig.device();
+
+        // Move all tensors to CPU for data access
+        Tensor grad = grad_orig.to(Device::cpu());
+        Tensor param_data = param_data_orig.to(Device::cpu());
+        Tensor sum_cpu = sum_[i].to(Device::cpu());
 
         int64_t numel = param_data.numel();
         DType dtype = param_data.dtype();
@@ -102,7 +111,7 @@ auto Adagrad::step() -> void {
         if (dtype == DType::Float64) {
             auto grad_ptr = const_cast<double*>(grad.data<double>());
             auto param_ptr = const_cast<double*>(param_data.data<double>());
-            auto sum_ptr = sum_[i].data<double>();
+            auto sum_ptr = sum_cpu.data<double>();
 
             // Apply weight decay if specified
             if (weight_decay_ > 0.0) {
@@ -122,7 +131,7 @@ auto Adagrad::step() -> void {
             // Float32 path (default)
             auto grad_ptr = const_cast<float*>(grad.data<float>());
             auto param_ptr = const_cast<float*>(param_data.data<float>());
-            auto sum_ptr = sum_[i].data<float>();
+            auto sum_ptr = sum_cpu.data<float>();
 
             // Apply weight decay if specified
             if (weight_decay_ > 0.0) {
@@ -139,6 +148,10 @@ auto Adagrad::step() -> void {
                 param_ptr[j] -= static_cast<float>(current_lr) * grad_ptr[j] / std_dev;
             }
         }
+
+        // Copy updated values back to original device
+        param->tensor() = param_data.to(original_device);
+        sum_[i] = sum_cpu.to(original_device);
     }
 }
 

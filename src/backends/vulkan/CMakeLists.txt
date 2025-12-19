@@ -139,6 +139,7 @@ set(SHADERS
     conv2d_forward
     conv2d_forward_f64
     conv2d_forward_f16
+    conv_transpose2d_forward
     full
     full_f64
     full_f16

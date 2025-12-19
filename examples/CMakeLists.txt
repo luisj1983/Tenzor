@@ -51,6 +51,34 @@ add_executable(mixed_precision_training cpp/tutorials/mixed_precision_training.c
 target_link_libraries(mixed_precision_training PRIVATE tenzor_core)
 
 # ============================================================================
+# Training Examples (Complete training pipelines covering all components)
+# ============================================================================
+
+add_executable(gru_time_series cpp/training/gru_time_series.cpp)
+target_link_libraries(gru_time_series PRIVATE tenzor_core)
+
+add_executable(vit_image_classification cpp/training/vit_image_classification.cpp)
+target_link_libraries(vit_image_classification PRIVATE tenzor_core)
+
+add_executable(transformer_seq2seq cpp/training/transformer_seq2seq.cpp)
+target_link_libraries(transformer_seq2seq PRIVATE tenzor_core)
+
+add_executable(vae_autoencoder cpp/training/vae_autoencoder.cpp)
+target_link_libraries(vae_autoencoder PRIVATE tenzor_core)
+
+add_executable(yolo_object_detection cpp/training/yolo_object_detection.cpp)
+target_link_libraries(yolo_object_detection PRIVATE tenzor_core)
+
+add_executable(unet_semantic_segmentation cpp/training/unet_semantic_segmentation.cpp)
+target_link_libraries(unet_semantic_segmentation PRIVATE tenzor_core)
+
+add_executable(gpt_text_generation_training cpp/training/gpt_text_generation.cpp)
+target_link_libraries(gpt_text_generation_training PRIVATE tenzor_core)
+
+add_executable(gradient_checkpointing cpp/training/gradient_checkpointing.cpp)
+target_link_libraries(gradient_checkpointing PRIVATE tenzor_core)
+
+# ============================================================================
 # Showcase Examples (Demonstrate library features at 3 abstraction levels)
 # ============================================================================
 

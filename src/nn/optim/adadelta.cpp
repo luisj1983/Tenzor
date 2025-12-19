@@ -60,8 +60,15 @@ auto Adadelta::step() -> void {
             continue;  // Skip parameters without gradients
         }
 
-        const auto& grad = param->grad().value();
-        const auto& param_data = param->tensor();
+        const auto& grad_orig = param->grad().value();
+        const auto& param_data_orig = param->tensor();
+        auto original_device = param_data_orig.device();
+
+        // Move all tensors to CPU for data access
+        Tensor grad = grad_orig.to(Device::cpu());
+        Tensor param_data = param_data_orig.to(Device::cpu());
+        Tensor square_avg_cpu = square_avg_[i].to(Device::cpu());
+        Tensor acc_delta_cpu = acc_delta_[i].to(Device::cpu());
 
         int64_t numel = param_data.numel();
         DType dtype = param_data.dtype();
@@ -70,8 +77,8 @@ auto Adadelta::step() -> void {
         if (dtype == DType::Float64) {
             auto grad_ptr = const_cast<double*>(grad.data<double>());
             auto param_ptr = const_cast<double*>(param_data.data<double>());
-            auto square_avg_ptr = square_avg_[i].data<double>();
-            auto acc_delta_ptr = acc_delta_[i].data<double>();
+            auto square_avg_ptr = square_avg_cpu.data<double>();
+            auto acc_delta_ptr = acc_delta_cpu.data<double>();
 
             // Apply weight decay if specified
             if (weight_decay_ > 0.0) {
@@ -106,8 +113,8 @@ auto Adadelta::step() -> void {
             // Float32 path (default)
             auto grad_ptr = const_cast<float*>(grad.data<float>());
             auto param_ptr = const_cast<float*>(param_data.data<float>());
-            auto square_avg_ptr = square_avg_[i].data<float>();
-            auto acc_delta_ptr = acc_delta_[i].data<float>();
+            auto square_avg_ptr = square_avg_cpu.data<float>();
+            auto acc_delta_ptr = acc_delta_cpu.data<float>();
 
             // Apply weight decay if specified
             if (weight_decay_ > 0.0) {
@@ -139,6 +146,11 @@ auto Adadelta::step() -> void {
                                    (1.0f - rho_) * delta * delta;
             }
         }
+
+        // Copy updated values back to original device
+        param->tensor() = param_data.to(original_device);
+        square_avg_[i] = square_avg_cpu.to(original_device);
+        acc_delta_[i] = acc_delta_cpu.to(original_device);
     }
 }
 

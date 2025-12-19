@@ -1,6 +1,6 @@
 #version 450
 
-// Activation functions: ReLU, Sigmoid, Tanh, GELU, LeakyReLU, Swish
+// Activation functions: ReLU, Sigmoid, Tanh, GELU, LeakyReLU, Swish, ELU, SELU, Mish, Softplus
 layout(local_size_x = 256) in;
 
 layout(binding = 0) buffer Input { float input_data[]; };
@@ -8,11 +8,13 @@ layout(binding = 1) buffer Output { float output_data[]; };
 
 layout(push_constant) uniform PushConstants {
     uint n;          // Number of elements
-    uint activation; // 0=ReLU, 1=Sigmoid, 2=Tanh, 3=GELU, 4=LeakyReLU, 5=Swish
-    float alpha;     // Parameter for LeakyReLU
+    uint activation; // 0=ReLU, 1=Sigmoid, 2=Tanh, 3=GELU, 4=LeakyReLU, 5=Swish, 6=ELU, 7=SELU, 8=Mish, 9=Softplus
+    float alpha;     // Parameter for LeakyReLU, ELU, Softplus beta
 } params;
 
 const float PI = 3.14159265359;
+const float SELU_ALPHA = 1.6732632423543772848170429916717;
+const float SELU_SCALE = 1.0507009873554804934193349852946;
 
 float relu(float x) {
     return max(0.0, x);
@@ -35,6 +37,31 @@ float leaky_relu(float x, float alpha) {
 float swish(float x) {
     // Swish/SiLU: x * sigmoid(x) = x / (1 + exp(-x))
     return x / (1.0 + exp(-x));
+}
+
+float elu(float x, float alpha) {
+    // ELU: x if x > 0, alpha * (exp(x) - 1) otherwise
+    return x > 0.0 ? x : alpha * (exp(x) - 1.0);
+}
+
+float selu(float x) {
+    // SELU: scale * (x if x > 0, alpha * (exp(x) - 1) otherwise)
+    return x > 0.0 ? SELU_SCALE * x : SELU_SCALE * SELU_ALPHA * (exp(x) - 1.0);
+}
+
+float softplus(float x, float beta) {
+    // Softplus: (1/beta) * log(1 + exp(beta * x))
+    // Numerically stable version
+    float bx = beta * x;
+    if (bx > 20.0) return x;
+    if (bx < -20.0) return exp(bx) / beta;
+    return log(1.0 + exp(bx)) / beta;
+}
+
+float mish(float x) {
+    // Mish: x * tanh(softplus(x)) = x * tanh(ln(1 + exp(x)))
+    float sp = x > 20.0 ? x : (x < -20.0 ? exp(x) : log(1.0 + exp(x)));
+    return x * tanh(sp);
 }
 
 void main() {
@@ -65,6 +92,18 @@ void main() {
             break;
         case 5: // Swish
             result = swish(x);
+            break;
+        case 6: // ELU
+            result = elu(x, params.alpha);
+            break;
+        case 7: // SELU
+            result = selu(x);
+            break;
+        case 8: // Mish
+            result = mish(x);
+            break;
+        case 9: // Softplus
+            result = softplus(x, params.alpha);
             break;
         default:
             result = x;

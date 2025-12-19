@@ -1,6 +1,9 @@
 #include "tenzor/nn/optim/scheduler.hpp"
 #include "tenzor/nn/optim/sgd.hpp"
 #include "tenzor/nn/optim/adam.hpp"
+#include "tenzor/nn/optim/rmsprop.hpp"
+#include "tenzor/nn/optim/adagrad.hpp"
+#include "tenzor/nn/optim/adadelta.hpp"
 #include <cmath>
 #include <numbers>
 
@@ -34,6 +37,30 @@ StepLR::StepLR(AdamW& optimizer, int step_size, double gamma)
     last_lr_ = base_lr_;
 }
 
+StepLR::StepLR(RMSprop& optimizer, int step_size, double gamma)
+    : step_size_(step_size), gamma_(gamma), epoch_(0) {
+    optimizer_.rmsprop = &optimizer;
+    optimizer_type_ = OptimizerType::RMSprop;
+    base_lr_ = optimizer.get_lr();
+    last_lr_ = base_lr_;
+}
+
+StepLR::StepLR(Adagrad& optimizer, int step_size, double gamma)
+    : step_size_(step_size), gamma_(gamma), epoch_(0) {
+    optimizer_.adagrad = &optimizer;
+    optimizer_type_ = OptimizerType::Adagrad;
+    base_lr_ = optimizer.get_lr();
+    last_lr_ = base_lr_;
+}
+
+StepLR::StepLR(Adadelta& optimizer, int step_size, double gamma)
+    : step_size_(step_size), gamma_(gamma), epoch_(0) {
+    optimizer_.adadelta = &optimizer;
+    optimizer_type_ = OptimizerType::Adadelta;
+    base_lr_ = optimizer.get_lr();
+    last_lr_ = base_lr_;
+}
+
 auto StepLR::step() -> void {
     epoch_++;
     update_lr();
@@ -58,6 +85,12 @@ auto StepLR::get_current_lr() const -> double {
             return optimizer_.adam->get_lr();
         case OptimizerType::AdamW:
             return optimizer_.adamw->get_lr();
+        case OptimizerType::RMSprop:
+            return optimizer_.rmsprop->get_lr();
+        case OptimizerType::Adagrad:
+            return optimizer_.adagrad->get_lr();
+        case OptimizerType::Adadelta:
+            return optimizer_.adadelta->get_lr();
     }
     return 0.0;
 }
@@ -72,6 +105,15 @@ auto StepLR::set_optimizer_lr(double lr) -> void {
             break;
         case OptimizerType::AdamW:
             optimizer_.adamw->set_lr(lr);
+            break;
+        case OptimizerType::RMSprop:
+            optimizer_.rmsprop->set_lr(lr);
+            break;
+        case OptimizerType::Adagrad:
+            optimizer_.adagrad->set_lr(lr);
+            break;
+        case OptimizerType::Adadelta:
+            optimizer_.adadelta->set_lr(lr);
             break;
     }
 }
@@ -104,6 +146,30 @@ ExponentialLR::ExponentialLR(AdamW& optimizer, double gamma)
     last_lr_ = base_lr_;
 }
 
+ExponentialLR::ExponentialLR(RMSprop& optimizer, double gamma)
+    : gamma_(gamma), epoch_(0) {
+    optimizer_.rmsprop = &optimizer;
+    optimizer_type_ = OptimizerType::RMSprop;
+    base_lr_ = optimizer.get_lr();
+    last_lr_ = base_lr_;
+}
+
+ExponentialLR::ExponentialLR(Adagrad& optimizer, double gamma)
+    : gamma_(gamma), epoch_(0) {
+    optimizer_.adagrad = &optimizer;
+    optimizer_type_ = OptimizerType::Adagrad;
+    base_lr_ = optimizer.get_lr();
+    last_lr_ = base_lr_;
+}
+
+ExponentialLR::ExponentialLR(Adadelta& optimizer, double gamma)
+    : gamma_(gamma), epoch_(0) {
+    optimizer_.adadelta = &optimizer;
+    optimizer_type_ = OptimizerType::Adadelta;
+    base_lr_ = optimizer.get_lr();
+    last_lr_ = base_lr_;
+}
+
 auto ExponentialLR::step() -> void {
     epoch_++;
     update_lr();
@@ -124,6 +190,12 @@ auto ExponentialLR::get_current_lr() const -> double {
             return optimizer_.adam->get_lr();
         case OptimizerType::AdamW:
             return optimizer_.adamw->get_lr();
+        case OptimizerType::RMSprop:
+            return optimizer_.rmsprop->get_lr();
+        case OptimizerType::Adagrad:
+            return optimizer_.adagrad->get_lr();
+        case OptimizerType::Adadelta:
+            return optimizer_.adadelta->get_lr();
     }
     return 0.0;
 }
@@ -138,6 +210,15 @@ auto ExponentialLR::set_optimizer_lr(double lr) -> void {
             break;
         case OptimizerType::AdamW:
             optimizer_.adamw->set_lr(lr);
+            break;
+        case OptimizerType::RMSprop:
+            optimizer_.rmsprop->set_lr(lr);
+            break;
+        case OptimizerType::Adagrad:
+            optimizer_.adagrad->set_lr(lr);
+            break;
+        case OptimizerType::Adadelta:
+            optimizer_.adadelta->set_lr(lr);
             break;
     }
 }
@@ -170,6 +251,30 @@ CosineAnnealingLR::CosineAnnealingLR(AdamW& optimizer, int T_max, double eta_min
     last_lr_ = base_lr_;
 }
 
+CosineAnnealingLR::CosineAnnealingLR(RMSprop& optimizer, int T_max, double eta_min)
+    : T_max_(T_max), eta_min_(eta_min), epoch_(0) {
+    optimizer_.rmsprop = &optimizer;
+    optimizer_type_ = OptimizerType::RMSprop;
+    base_lr_ = optimizer.get_lr();
+    last_lr_ = base_lr_;
+}
+
+CosineAnnealingLR::CosineAnnealingLR(Adagrad& optimizer, int T_max, double eta_min)
+    : T_max_(T_max), eta_min_(eta_min), epoch_(0) {
+    optimizer_.adagrad = &optimizer;
+    optimizer_type_ = OptimizerType::Adagrad;
+    base_lr_ = optimizer.get_lr();
+    last_lr_ = base_lr_;
+}
+
+CosineAnnealingLR::CosineAnnealingLR(Adadelta& optimizer, int T_max, double eta_min)
+    : T_max_(T_max), eta_min_(eta_min), epoch_(0) {
+    optimizer_.adadelta = &optimizer;
+    optimizer_type_ = OptimizerType::Adadelta;
+    base_lr_ = optimizer.get_lr();
+    last_lr_ = base_lr_;
+}
+
 auto CosineAnnealingLR::step() -> void {
     epoch_++;
     update_lr();
@@ -194,6 +299,12 @@ auto CosineAnnealingLR::get_current_lr() const -> double {
             return optimizer_.adam->get_lr();
         case OptimizerType::AdamW:
             return optimizer_.adamw->get_lr();
+        case OptimizerType::RMSprop:
+            return optimizer_.rmsprop->get_lr();
+        case OptimizerType::Adagrad:
+            return optimizer_.adagrad->get_lr();
+        case OptimizerType::Adadelta:
+            return optimizer_.adadelta->get_lr();
     }
     return 0.0;
 }
@@ -208,6 +319,15 @@ auto CosineAnnealingLR::set_optimizer_lr(double lr) -> void {
             break;
         case OptimizerType::AdamW:
             optimizer_.adamw->set_lr(lr);
+            break;
+        case OptimizerType::RMSprop:
+            optimizer_.rmsprop->set_lr(lr);
+            break;
+        case OptimizerType::Adagrad:
+            optimizer_.adagrad->set_lr(lr);
+            break;
+        case OptimizerType::Adadelta:
+            optimizer_.adadelta->set_lr(lr);
             break;
     }
 }

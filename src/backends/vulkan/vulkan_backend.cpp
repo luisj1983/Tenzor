@@ -1377,6 +1377,32 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         return {dispatchActivation("swish", inputs[0], 5, 0.0f)};
     }
 
+    // ELU activation
+    if (op_name == "elu") {
+        if (inputs.size() != 1) throw std::invalid_argument("elu requires 1 input");
+        float alpha = attrs.contains("alpha") ? std::stof(attrs.at("alpha")) : 1.0f;
+        return {dispatchActivation("elu", inputs[0], 6, alpha)};
+    }
+
+    // SELU activation
+    if (op_name == "selu") {
+        if (inputs.size() != 1) throw std::invalid_argument("selu requires 1 input");
+        return {dispatchActivation("selu", inputs[0], 7, 0.0f)};
+    }
+
+    // Mish activation
+    if (op_name == "mish") {
+        if (inputs.size() != 1) throw std::invalid_argument("mish requires 1 input");
+        return {dispatchActivation("mish", inputs[0], 8, 0.0f)};
+    }
+
+    // Softplus activation
+    if (op_name == "softplus") {
+        if (inputs.size() != 1) throw std::invalid_argument("softplus requires 1 input");
+        float beta = attrs.contains("beta") ? std::stof(attrs.at("beta")) : 1.0f;
+        return {dispatchActivation("softplus", inputs[0], 9, beta)};
+    }
+
     // Unary math operations (use math shader)
     if (op_name == "sqrt" || op_name == "exp" || op_name == "log" ||
         op_name == "neg" || op_name == "abs" || op_name == "sign" ||
@@ -1439,6 +1465,28 @@ auto VulkanBackend::dispatch(const std::string& op_name,
     if (op_name == "gelu_backward") {
         if (inputs.size() != 2) throw std::invalid_argument("gelu_backward requires 2 inputs");
         return {dispatchActivationBackward("gelu_backward", inputs[0], inputs[1], 4, 0.0f)};
+    }
+
+    if (op_name == "elu_backward") {
+        if (inputs.size() != 2) throw std::invalid_argument("elu_backward requires 2 inputs");
+        float alpha = attrs.contains("alpha") ? std::stof(attrs.at("alpha")) : 1.0f;
+        return {dispatchActivationBackward("elu_backward", inputs[0], inputs[1], 5, alpha)};
+    }
+
+    if (op_name == "selu_backward") {
+        if (inputs.size() != 2) throw std::invalid_argument("selu_backward requires 2 inputs");
+        return {dispatchActivationBackward("selu_backward", inputs[0], inputs[1], 6, 0.0f)};
+    }
+
+    if (op_name == "mish_backward") {
+        if (inputs.size() != 2) throw std::invalid_argument("mish_backward requires 2 inputs");
+        return {dispatchActivationBackward("mish_backward", inputs[0], inputs[1], 7, 0.0f)};
+    }
+
+    if (op_name == "softplus_backward") {
+        if (inputs.size() != 2) throw std::invalid_argument("softplus_backward requires 2 inputs");
+        float beta = attrs.contains("beta") ? std::stof(attrs.at("beta")) : 1.0f;
+        return {dispatchActivationBackward("softplus_backward", inputs[0], inputs[1], 8, beta)};
     }
 
     if (op_name == "swish_backward") {
@@ -2062,6 +2110,15 @@ auto VulkanBackend::dispatch(const std::string& op_name,
             throw std::invalid_argument("conv2d_forward requires at least 2 inputs (input, weight)");
         }
         return {dispatchConv2dForward(inputs[0], inputs[1], attrs)};
+    }
+
+    // ConvTranspose2d forward operation
+    if (op_name == "conv_transpose2d_forward") {
+        if (inputs.size() < 2) {
+            throw std::invalid_argument("conv_transpose2d_forward requires at least 2 inputs (input, weight)");
+        }
+        const Tensor* bias_ptr = (inputs.size() >= 3) ? &inputs[2] : nullptr;
+        return {dispatchConvTranspose2dForward(inputs[0], inputs[1], bias_ptr, attrs)};
     }
 
     // Full operation - create tensor filled with specific value
@@ -7851,6 +7908,148 @@ auto VulkanBackend::dispatchConv2dForward(const Tensor& input, const Tensor& wei
     push_constants.kernel_w = static_cast<uint32_t>(kernel_w);
     push_constants.stride = static_cast<uint32_t>(stride);
     push_constants.padding = static_cast<uint32_t>(padding);
+    push_constants.dilation = static_cast<uint32_t>(dilation);
+    push_constants.groups = static_cast<uint32_t>(groups);
+    push_constants.out_h = static_cast<uint32_t>(out_height);
+    push_constants.out_w = static_cast<uint32_t>(out_width);
+    push_constants.has_bias = has_bias ? 1u : 0u;
+
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(PushConstants), &push_constants);
+
+    // Dispatch workgroups
+    uint32_t workgroups = static_cast<uint32_t>((output.numel() + 255) / 256);
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+    // Add memory barrier
+    insertComputeBarrier(cmdBuffer);
+
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return output;
+}
+
+// ============================================================================
+// ConvTranspose2d Forward Operation
+// ============================================================================
+
+auto VulkanBackend::dispatchConvTranspose2dForward(const Tensor& input, const Tensor& weight, const Tensor* bias, const OpAttributes& attrs) -> Tensor {
+    auto input_shape = input.shape();
+    auto weight_shape = weight.shape();
+
+    if (input_shape.size() != 4) {
+        throw std::invalid_argument("conv_transpose2d_forward requires 4D input (N, C, H, W)");
+    }
+    if (weight_shape.size() != 4) {
+        throw std::invalid_argument("conv_transpose2d_forward requires 4D weight (in_channels, out_channels/groups, kH, kW)");
+    }
+
+    // Extract attributes
+    int64_t stride = attrs.contains("stride") ? std::stoll(attrs.at("stride")) : 1;
+    int64_t padding = attrs.contains("padding") ? std::stoll(attrs.at("padding")) : 0;
+    int64_t output_padding = attrs.contains("output_padding") ? std::stoll(attrs.at("output_padding")) : 0;
+    int64_t dilation = attrs.contains("dilation") ? std::stoll(attrs.at("dilation")) : 1;
+    int64_t groups = attrs.contains("groups") ? std::stoll(attrs.at("groups")) : 1;
+    bool has_bias = (bias != nullptr);
+
+    int64_t batch = input_shape[0];
+    int64_t in_channels = input_shape[1];
+    int64_t in_height = input_shape[2];
+    int64_t in_width = input_shape[3];
+
+    // Weight shape for transposed conv: [in_channels, out_channels/groups, kH, kW]
+    int64_t out_channels_per_group = weight_shape[1];
+    int64_t out_channels = out_channels_per_group * groups;
+    int64_t kernel_h = weight_shape[2];
+    int64_t kernel_w = weight_shape[3];
+
+    // Calculate output dimensions for transposed convolution
+    // out = (in - 1) * stride - 2 * padding + dilation * (kernel - 1) + output_padding + 1
+    int64_t out_height = (in_height - 1) * stride - 2 * padding + dilation * (kernel_h - 1) + output_padding + 1;
+    int64_t out_width = (in_width - 1) * stride - 2 * padding + dilation * (kernel_w - 1) + output_padding + 1;
+
+    if (out_height <= 0 || out_width <= 0) {
+        throw std::invalid_argument("Invalid conv_transpose2d configuration: output dimensions are non-positive");
+    }
+
+    int32_t device_id = input.device().index;
+
+    // Get pipeline (using Float32 for now)
+    auto* pipeline = getPipeline("conv_transpose2d_forward", device_id);
+
+    // Create output tensor
+    std::vector<int64_t> output_shape = {batch, out_channels, out_height, out_width};
+    Tensor output(output_shape, input.dtype(), input.device());
+
+    // Get VkBuffer handles
+    VkBuffer buffer_input = getVulkanBuffer(input.data_ptr());
+    VkBuffer buffer_weight = getVulkanBuffer(weight.data_ptr());
+    VkBuffer buffer_output = getVulkanBuffer(output.data_ptr());
+    VkBuffer buffer_bias = has_bias ? getVulkanBuffer(bias->data_ptr()) : buffer_output;
+
+    // Calculate buffer sizes
+    size_t buffer_size_input = input.numel() * input.dtype_size();
+    size_t buffer_size_weight = weight.numel() * weight.dtype_size();
+    size_t buffer_size_output = output.numel() * output.dtype_size();
+    size_t buffer_size_bias = has_bias ? (bias->numel() * bias->dtype_size()) : 4;
+
+    // Setup descriptor set bindings (input, weight, bias, output)
+    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+        {0, buffer_input},
+        {1, buffer_weight},
+        {2, buffer_bias},
+        {3, buffer_output}
+    };
+    std::vector<size_t> sizes = {
+        buffer_size_input,
+        buffer_size_weight,
+        buffer_size_bias,
+        buffer_size_output
+    };
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
+    // Create command buffer
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+
+    // Bind descriptor sets
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+
+    // Set push constants
+    struct PushConstants {
+        uint32_t n_elements;
+        uint32_t batch;
+        uint32_t in_channels;
+        uint32_t out_channels;
+        uint32_t in_height;
+        uint32_t in_width;
+        uint32_t kernel_h;
+        uint32_t kernel_w;
+        uint32_t stride;
+        uint32_t padding;
+        uint32_t output_padding;
+        uint32_t dilation;
+        uint32_t groups;
+        uint32_t out_h;
+        uint32_t out_w;
+        uint32_t has_bias;
+    } push_constants;
+
+    push_constants.n_elements = static_cast<uint32_t>(output.numel());
+    push_constants.batch = static_cast<uint32_t>(batch);
+    push_constants.in_channels = static_cast<uint32_t>(in_channels);
+    push_constants.out_channels = static_cast<uint32_t>(out_channels);
+    push_constants.in_height = static_cast<uint32_t>(in_height);
+    push_constants.in_width = static_cast<uint32_t>(in_width);
+    push_constants.kernel_h = static_cast<uint32_t>(kernel_h);
+    push_constants.kernel_w = static_cast<uint32_t>(kernel_w);
+    push_constants.stride = static_cast<uint32_t>(stride);
+    push_constants.padding = static_cast<uint32_t>(padding);
+    push_constants.output_padding = static_cast<uint32_t>(output_padding);
     push_constants.dilation = static_cast<uint32_t>(dilation);
     push_constants.groups = static_cast<uint32_t>(groups);
     push_constants.out_h = static_cast<uint32_t>(out_height);

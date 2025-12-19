@@ -196,6 +196,46 @@ auto initialize() -> void {
             return cpu_backend->dispatch("leaky_relu_backward", inputs, attrs);
         });
 
+    registry.register_kernel("elu", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("elu", inputs, attrs);
+        });
+
+    registry.register_kernel("elu_backward", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("elu_backward", inputs, attrs);
+        });
+
+    registry.register_kernel("selu", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("selu", inputs, attrs);
+        });
+
+    registry.register_kernel("selu_backward", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("selu_backward", inputs, attrs);
+        });
+
+    registry.register_kernel("mish", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("mish", inputs, attrs);
+        });
+
+    registry.register_kernel("mish_backward", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("mish_backward", inputs, attrs);
+        });
+
+    registry.register_kernel("softplus", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("softplus", inputs, attrs);
+        });
+
+    registry.register_kernel("softplus_backward", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("softplus_backward", inputs, attrs);
+        });
+
     registry.register_kernel("softmax", Device::Type::CPU,
         [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             return cpu_backend->dispatch("softmax", inputs, attrs);
@@ -516,6 +556,11 @@ auto initialize() -> void {
             return cpu_backend->dispatch("conv2d_backward_bias", inputs, attrs);
         });
 
+    registry.register_kernel("conv_transpose2d_forward", Device::Type::CPU,
+        [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+            return cpu_backend->dispatch("conv_transpose2d_forward", inputs, attrs);
+        });
+
     registry.register_kernel("im2col", Device::Type::CPU,
         [cpu_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
             return cpu_backend->dispatch("im2col", inputs, attrs);
@@ -718,6 +763,46 @@ auto initialize() -> void {
                 registry.register_kernel("leaky_relu_backward", Device::Type::CUDA,
                     [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
                         return cuda_backend->dispatch("leaky_relu_backward", inputs, attrs);
+                    });
+
+                registry.register_kernel("elu", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("elu", inputs, attrs);
+                    });
+
+                registry.register_kernel("elu_backward", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("elu_backward", inputs, attrs);
+                    });
+
+                registry.register_kernel("selu", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("selu", inputs, attrs);
+                    });
+
+                registry.register_kernel("selu_backward", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("selu_backward", inputs, attrs);
+                    });
+
+                registry.register_kernel("mish", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("mish", inputs, attrs);
+                    });
+
+                registry.register_kernel("mish_backward", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("mish_backward", inputs, attrs);
+                    });
+
+                registry.register_kernel("softplus", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("softplus", inputs, attrs);
+                    });
+
+                registry.register_kernel("softplus_backward", Device::Type::CUDA,
+                    [cuda_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return cuda_backend->dispatch("softplus_backward", inputs, attrs);
                     });
 
                 registry.register_kernel("softmax", Device::Type::CUDA,
@@ -2047,6 +2132,26 @@ auto initialize() -> void {
                         return vulkan_backend->dispatch("swish", inputs, attrs);
                     });
 
+                registry.register_kernel("elu", Device::Type::Vulkan,
+                    [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return vulkan_backend->dispatch("elu", inputs, attrs);
+                    });
+
+                registry.register_kernel("selu", Device::Type::Vulkan,
+                    [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return vulkan_backend->dispatch("selu", inputs, attrs);
+                    });
+
+                registry.register_kernel("mish", Device::Type::Vulkan,
+                    [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return vulkan_backend->dispatch("mish", inputs, attrs);
+                    });
+
+                registry.register_kernel("softplus", Device::Type::Vulkan,
+                    [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return vulkan_backend->dispatch("softplus", inputs, attrs);
+                    });
+
                 registry.register_kernel("sqrt", Device::Type::Vulkan,
                     [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
                         return vulkan_backend->dispatch("sqrt", inputs, attrs);
@@ -2331,6 +2436,26 @@ auto initialize() -> void {
                         return vulkan_backend->dispatch("gelu_backward", inputs, attrs);
                     });
 
+                registry.register_kernel("elu_backward", Device::Type::Vulkan,
+                    [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return vulkan_backend->dispatch("elu_backward", inputs, attrs);
+                    });
+
+                registry.register_kernel("selu_backward", Device::Type::Vulkan,
+                    [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return vulkan_backend->dispatch("selu_backward", inputs, attrs);
+                    });
+
+                registry.register_kernel("mish_backward", Device::Type::Vulkan,
+                    [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return vulkan_backend->dispatch("mish_backward", inputs, attrs);
+                    });
+
+                registry.register_kernel("softplus_backward", Device::Type::Vulkan,
+                    [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return vulkan_backend->dispatch("softplus_backward", inputs, attrs);
+                    });
+
                 registry.register_kernel("swish_backward", Device::Type::Vulkan,
                     [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
                         return vulkan_backend->dispatch("swish_backward", inputs, attrs);
@@ -2450,6 +2575,11 @@ auto initialize() -> void {
                 registry.register_kernel("conv2d_forward", Device::Type::Vulkan,
                     [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
                         return vulkan_backend->dispatch("conv2d_forward", inputs, attrs);
+                    });
+
+                registry.register_kernel("conv_transpose2d_forward", Device::Type::Vulkan,
+                    [vulkan_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return vulkan_backend->dispatch("conv_transpose2d_forward", inputs, attrs);
                     });
 
                 registry.register_kernel("full", Device::Type::Vulkan,

@@ -20,6 +20,9 @@ namespace optim {
 class SGD;
 class Adam;
 class AdamW;
+class RMSprop;
+class Adagrad;
+class Adadelta;
 
 /**
  * @brief Base class for learning rate schedulers
@@ -130,6 +133,15 @@ public:
     // Constructor for AdamW optimizer
     StepLR(AdamW& optimizer, int step_size, double gamma = 0.1);
 
+    // Constructor for RMSprop optimizer
+    StepLR(RMSprop& optimizer, int step_size, double gamma = 0.1);
+
+    // Constructor for Adagrad optimizer
+    StepLR(Adagrad& optimizer, int step_size, double gamma = 0.1);
+
+    // Constructor for Adadelta optimizer
+    StepLR(Adadelta& optimizer, int step_size, double gamma = 0.1);
+
     auto step() -> void override;
     auto get_last_lr() const -> double override { return last_lr_; }
 
@@ -137,12 +149,15 @@ public:
     auto get_epoch() const -> int { return epoch_; }
 
 private:
-    enum class OptimizerType { SGD, Adam, AdamW };
+    enum class OptimizerType { SGD, Adam, AdamW, RMSprop, Adagrad, Adadelta };
 
     union OptimizerPtr {
         SGD* sgd;
         Adam* adam;
         AdamW* adamw;
+        RMSprop* rmsprop;
+        Adagrad* adagrad;
+        Adadelta* adadelta;
         OptimizerPtr() : sgd(nullptr) {}
     };
 
@@ -201,6 +216,15 @@ public:
     // Constructor for AdamW optimizer
     ExponentialLR(AdamW& optimizer, double gamma);
 
+    // Constructor for RMSprop optimizer
+    ExponentialLR(RMSprop& optimizer, double gamma);
+
+    // Constructor for Adagrad optimizer
+    ExponentialLR(Adagrad& optimizer, double gamma);
+
+    // Constructor for Adadelta optimizer
+    ExponentialLR(Adadelta& optimizer, double gamma);
+
     auto step() -> void override;
     auto get_last_lr() const -> double override { return last_lr_; }
 
@@ -208,12 +232,15 @@ public:
     auto get_epoch() const -> int { return epoch_; }
 
 private:
-    enum class OptimizerType { SGD, Adam, AdamW };
+    enum class OptimizerType { SGD, Adam, AdamW, RMSprop, Adagrad, Adadelta };
 
     union OptimizerPtr {
         SGD* sgd;
         Adam* adam;
         AdamW* adamw;
+        RMSprop* rmsprop;
+        Adagrad* adagrad;
+        Adadelta* adadelta;
         OptimizerPtr() : sgd(nullptr) {}
     };
 
@@ -280,6 +307,15 @@ public:
     // Constructor for AdamW optimizer
     CosineAnnealingLR(AdamW& optimizer, int T_max, double eta_min = 0.0);
 
+    // Constructor for RMSprop optimizer
+    CosineAnnealingLR(RMSprop& optimizer, int T_max, double eta_min = 0.0);
+
+    // Constructor for Adagrad optimizer
+    CosineAnnealingLR(Adagrad& optimizer, int T_max, double eta_min = 0.0);
+
+    // Constructor for Adadelta optimizer
+    CosineAnnealingLR(Adadelta& optimizer, int T_max, double eta_min = 0.0);
+
     auto step() -> void override;
     auto get_last_lr() const -> double override { return last_lr_; }
 
@@ -287,12 +323,15 @@ public:
     auto get_epoch() const -> int { return epoch_; }
 
 private:
-    enum class OptimizerType { SGD, Adam, AdamW };
+    enum class OptimizerType { SGD, Adam, AdamW, RMSprop, Adagrad, Adadelta };
 
     union OptimizerPtr {
         SGD* sgd;
         Adam* adam;
         AdamW* adamw;
+        RMSprop* rmsprop;
+        Adagrad* adagrad;
+        Adadelta* adadelta;
         OptimizerPtr() : sgd(nullptr) {}
     };
 
