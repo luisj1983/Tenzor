@@ -1,8 +1,28 @@
 # Tenzor Benchmark Suite
 
-Comprehensive performance benchmarking suite for the Tenzor deep learning framework.
+Comprehensive performance benchmarking suite comparing Tenzor with PyTorch and other frameworks.
 
 ## Quick Start
+
+### Python Benchmarks (Recommended - Compares with PyTorch)
+
+```bash
+cd /home/lee/Projects/Tenzor
+
+# Quick benchmark (fewer iterations, fast)
+PYTHONPATH=python:$PYTHONPATH python benchmarks/python/run_benchmarks.py --quick
+
+# Full benchmark suite
+PYTHONPATH=python:$PYTHONPATH python benchmarks/python/run_benchmarks.py
+
+# Specific category
+PYTHONPATH=python:$PYTHONPATH python benchmarks/python/run_benchmarks.py --category matmul
+
+# Generate report from results
+python benchmarks/python/generate_report.py results/benchmark_*.json
+```
+
+### C++ Benchmarks
 
 ```bash
 # Build with benchmarks enabled
@@ -18,6 +38,70 @@ make run_benchmarks
 ./bin/benchmark_convolutions
 ./bin/benchmark_memory
 ./bin/benchmark_training
+```
+
+## Python Benchmark Suite
+
+The Python benchmark suite provides direct comparison between Tenzor and PyTorch.
+
+### Features
+
+- **Direct Comparison**: Side-by-side timing with PyTorch
+- **Multiple Categories**: MatMul, Conv2d, NN layers, Training
+- **Statistical Rigor**: Warmup, multiple iterations, percentiles
+- **Report Generation**: Markdown, CSV, HTML reports with charts
+- **Configurable**: Quick/full modes, device selection, iteration count
+
+### Benchmark Categories
+
+| Category | Description |
+|----------|-------------|
+| `matmul` | Matrix multiplication (128x128 to 4096x4096) |
+| `conv2d` | 2D convolutions including ResNet-50 layers |
+| `nn_layers` | Linear, activations, normalization, pooling |
+| `training` | End-to-end training iterations |
+
+### Usage Examples
+
+```bash
+# Compare only on CPU
+python run_benchmarks.py --device cpu
+
+# Skip PyTorch comparison (Tenzor only)
+python run_benchmarks.py --no-pytorch
+
+# Custom iteration count
+python run_benchmarks.py --iterations 50
+
+# Generate all report formats
+python generate_report.py results/benchmark.json --format all
+```
+
+### Output Example
+
+```
+================================================================================
+  MATRIX MULTIPLICATION BENCHMARKS
+================================================================================
+
+  Device: CUDA
+================================================================================
+
+--- Tenzor MatMul ---
+
+============================================================
+  MatMul 1024x1024 @ 1024x1024
+  Framework: tenzor | Device: cuda
+============================================================
+  Mean:           4.235 ms
+  Std Dev:        0.123 ms
+  Min:            4.102 ms
+  Max:            4.891 ms
+  GFLOPS:       508.32
+
+--- PyTorch MatMul ---
+
+  MatMul 1024x1024 @ 1024x1024: Tenzor is 1.15x FASTER than PyTorch
 ```
 
 ## Benchmark Files
