@@ -29,8 +29,12 @@ sudo cmake --install .
 ### Python Package
 
 ```bash
-cd tenzor/build
-pip install python/
+# From the project root directory
+cd tenzor
+pip install .
+
+# Or for development (editable install)
+pip install -e .
 ```
 
 ## System Requirements
@@ -312,18 +316,37 @@ x = tz.zeros([3, 3], device=tz.Device.cuda(0))
 
 ## Python Bindings
 
-### Install from Build Directory
+### Install from Source (Recommended)
+
+This will automatically build the C++ library and install Python bindings:
 
 ```bash
-cd tenzor/build
-pip install python/
+# From the project root directory
+cd tenzor
+pip install .
 ```
 
 ### Development Install
 
+For development with live code updates:
+
 ```bash
-cd tenzor/build
-pip install -e python/
+cd tenzor
+pip install -e .
+```
+
+### Alternative: Using PYTHONPATH
+
+If you've already built the library with CMake and want to use the Python bindings without pip:
+
+```bash
+# Build first
+mkdir build && cd build
+cmake .. -DTENZOR_BUILD_PYTHON=ON
+cmake --build . -j$(nproc)
+
+# Add to PYTHONPATH
+export PYTHONPATH=/path/to/tenzor/python:$PYTHONPATH
 ```
 
 ### Verify Python Installation

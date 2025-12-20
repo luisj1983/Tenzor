@@ -345,14 +345,15 @@ sycl-ls
 
 ### ImportError: No module named 'tenzor'
 
-**Solution 1**: Install the package
+**Solution 1**: Install the package from source (recommended)
 ```bash
-cd build && pip install python/
+cd tenzor
+pip install .
 ```
 
-**Solution 2**: Add to PYTHONPATH
+**Solution 2**: Add to PYTHONPATH (after building with CMake)
 ```bash
-export PYTHONPATH=/path/to/tenzor/build/python:$PYTHONPATH
+export PYTHONPATH=/path/to/tenzor/python:$PYTHONPATH
 ```
 
 ### NumPy interoperability

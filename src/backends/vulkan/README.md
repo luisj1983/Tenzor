@@ -57,12 +57,22 @@ A cross-platform GPU compute backend using Vulkan API, providing high-performanc
 ### Vulkan SDK
 Install the Vulkan SDK from [LunarG](https://vulkan.lunarg.com/):
 
-**Linux:**
+**Linux (Ubuntu/Debian):**
 ```bash
-wget -qO - https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo apt-key add -
-sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-focal.list https://packages.lunarg.com/vulkan/lunarg-vulkan-focal.list
+# Add LunarG GPG key (modern method)
+wget -qO- https://packages.lunarg.com/lunarg-signing-key-pub.asc | sudo tee /etc/apt/keyrings/lunarg.asc
+
+# Add repository (adjust version for your Ubuntu release)
+sudo wget -qO /etc/apt/sources.list.d/lunarg-vulkan-jammy.list https://packages.lunarg.com/vulkan/lunarg-vulkan-jammy.list
+
+# Install Vulkan SDK
 sudo apt update
 sudo apt install vulkan-sdk
+```
+
+**Arch Linux:**
+```bash
+sudo pacman -S vulkan-devel vulkan-icd-loader
 ```
 
 **macOS:**

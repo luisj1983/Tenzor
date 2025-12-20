@@ -299,7 +299,7 @@ Linear(256→10)
 
 ## Technical Requirements
 
-- Python 3.7+
+- Python 3.8+
 - NumPy (for data generation in examples)
 - Tenzor library (built from source)
 - Optional: CUDA for GPU acceleration

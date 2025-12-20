@@ -596,7 +596,6 @@ Now that you understand the basics, explore these resources:
 
 ### API Reference
 - [C++ API Documentation](api/html/index.html) - Full API reference
-- [Python API](api/python.md) - Python bindings reference
 
 ### Community
 - [GitHub Issues](https://github.com/leelee222/tenzor/issues) - Report bugs, request features
