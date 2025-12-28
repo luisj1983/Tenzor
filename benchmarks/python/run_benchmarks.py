@@ -28,6 +28,12 @@ from bench_matmul import run_matmul_benchmarks
 from bench_conv2d import run_conv2d_benchmarks
 from bench_nn_layers import run_nn_layer_benchmarks
 from bench_training import run_training_benchmarks
+from bench_attention import run_attention_benchmarks
+from bench_normalization import run_normalization_benchmarks
+from bench_mixed_precision import run_mixed_precision_benchmarks
+from bench_models import run_model_benchmarks
+from bench_embeddings import run_embedding_benchmarks
+from bench_rnn import run_rnn_benchmarks
 
 
 def parse_args():
@@ -50,7 +56,9 @@ def parse_args():
 
     parser.add_argument(
         "--category", "-c",
-        choices=["all", "matmul", "conv2d", "nn_layers", "training"],
+        choices=["all", "matmul", "conv2d", "nn_layers", "training",
+                 "attention", "normalization", "mixed_precision",
+                 "models", "embeddings", "rnn"],
         default="all",
         help="Benchmark category to run"
     )
@@ -136,6 +144,42 @@ def run_all_benchmarks(config: BenchmarkConfig, category: str) -> List[Benchmark
         print("  SECTION 4: TRAINING")
         print("=" * 80)
         all_results.extend(run_training_benchmarks(config))
+
+    if category in ["all", "attention"]:
+        print("\n" + "=" * 80)
+        print("  SECTION 5: ATTENTION / TRANSFORMERS")
+        print("=" * 80)
+        all_results.extend(run_attention_benchmarks(config))
+
+    if category in ["all", "normalization"]:
+        print("\n" + "=" * 80)
+        print("  SECTION 6: NORMALIZATION LAYERS")
+        print("=" * 80)
+        all_results.extend(run_normalization_benchmarks(config))
+
+    if category in ["all", "mixed_precision"]:
+        print("\n" + "=" * 80)
+        print("  SECTION 7: MIXED PRECISION")
+        print("=" * 80)
+        all_results.extend(run_mixed_precision_benchmarks(config))
+
+    if category in ["all", "models"]:
+        print("\n" + "=" * 80)
+        print("  SECTION 8: END-TO-END MODELS")
+        print("=" * 80)
+        all_results.extend(run_model_benchmarks(config))
+
+    if category in ["all", "embeddings"]:
+        print("\n" + "=" * 80)
+        print("  SECTION 9: EMBEDDING LAYERS")
+        print("=" * 80)
+        all_results.extend(run_embedding_benchmarks(config))
+
+    if category in ["all", "rnn"]:
+        print("\n" + "=" * 80)
+        print("  SECTION 10: RNN / LSTM / GRU")
+        print("=" * 80)
+        all_results.extend(run_rnn_benchmarks(config))
 
     return all_results
 
