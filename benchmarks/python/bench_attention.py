@@ -54,11 +54,11 @@ ATTENTION_CONFIGS = [
     (8, 128, 768, 12, "BERT-base seq=128"),
     (8, 512, 768, 12, "BERT-base seq=512"),
     (4, 256, 768, 12, "GPT-2 Small seq=256"),
-    (4, 1024, 768, 12, "GPT-2 Small seq=1024"),
-    (2, 512, 1024, 16, "GPT-2 Medium"),
-    (1, 512, 1600, 25, "GPT-2 XL"),
+    #(4, 1024, 768, 12, "GPT-2 Small seq=1024"),
+    #(2, 512, 1024, 16, "GPT-2 Medium"),
+    #(1, 512, 1600, 25, "GPT-2 XL"),
     (32, 197, 768, 12, "ViT-Base"),
-    (1, 2048, 768, 12, "Long sequence"),
+    #(1, 2048, 768, 12, "Long sequence"),
 ]
 
 
@@ -196,8 +196,8 @@ def benchmark_scaled_dot_product_tenzor(
 
     configs = [
         (8, 12, 512, 512, 64, "Self-Attn 512x512"),
-        (4, 16, 1024, 1024, 64, "Self-Attn 1024x1024"),
-        (2, 12, 2048, 2048, 64, "Self-Attn 2048x2048"),
+        # (4, 16, 1024, 1024, 64, "Self-Attn 1024x1024"),  # Too slow on CPU
+        # (2, 12, 2048, 2048, 64, "Self-Attn 2048x2048"),  # Too slow on CPU
         (8, 12, 128, 512, 64, "Cross-Attn 128x512"),
     ]
 
@@ -265,8 +265,8 @@ def benchmark_scaled_dot_product_pytorch(
 
     configs = [
         (8, 12, 512, 512, 64, "Self-Attn 512x512"),
-        (4, 16, 1024, 1024, 64, "Self-Attn 1024x1024"),
-        (2, 12, 2048, 2048, 64, "Self-Attn 2048x2048"),
+        # (4, 16, 1024, 1024, 64, "Self-Attn 1024x1024"),  # Too slow on CPU
+        # (2, 12, 2048, 2048, 64, "Self-Attn 2048x2048"),  # Too slow on CPU
         (8, 12, 128, 512, 64, "Cross-Attn 128x512"),
     ]
 

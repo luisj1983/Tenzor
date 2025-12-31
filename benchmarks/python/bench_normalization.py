@@ -21,10 +21,10 @@ LAYERNORM_CONFIGS = [
     (8, 512, 768, "BERT-base"),
     (16, 128, 768, "BERT-base short"),
     (4, 1024, 768, "GPT-2 Small"),
-    (4, 2048, 768, "GPT-2 long"),
+    # (4, 2048, 768, "GPT-2 long"),  # Too slow on CPU (seq=2048)
     (2, 512, 1024, "Large model"),
-    (4, 512, 4096, "Llama 7B"),
-    (2, 2048, 4096, "Llama 7B long"),
+    # (4, 512, 4096, "Llama 7B"),  # Too slow on CPU (dim=4096)
+    # (2, 2048, 4096, "Llama 7B long"),  # Too slow on CPU (seq=2048, dim=4096)
 ]
 
 # BatchNorm2d configurations (batch, channels, height, width)

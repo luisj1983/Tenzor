@@ -22,7 +22,7 @@ LSTM_CONFIGS = [
     (32, 128, 512, 512, 1, "Medium 1L"),
     (32, 128, 512, 512, 2, "Medium 2L"),
     (16, 256, 768, 768, 2, "Large 2L"),
-    (8, 512, 1024, 1024, 3, "XLarge 3L"),
+    # (8, 512, 1024, 1024, 3, "XLarge 3L"),  # Too slow on CPU (seq=512, hidden=1024, 3 layers)
 ]
 
 # GRU configurations (same format)
@@ -37,7 +37,7 @@ GRU_CONFIGS = [
 BIDIRECTIONAL_CONFIGS = [
     (32, 128, 256, 256, 1, "BiLSTM Small"),
     (16, 256, 512, 512, 2, "BiLSTM Medium"),
-    (8, 512, 768, 768, 2, "BiLSTM Large"),
+    # (8, 512, 768, 768, 2, "BiLSTM Large"),  # Too slow on CPU (bidirectional, seq=512)
 ]
 
 

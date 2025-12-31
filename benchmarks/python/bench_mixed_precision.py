@@ -21,7 +21,7 @@ MATMUL_CONFIGS = [
     (1024, 1024, 1024, "1K x 1K"),
     (2048, 2048, 2048, "2K x 2K"),
     (4096, 4096, 4096, "4K x 4K"),
-    (8192, 8192, 8192, "8K x 8K"),
+    # (8192, 8192, 8192, "8K x 8K"),  # Too slow on CPU
 ]
 
 # Linear layer configurations (batch, in_features, out_features)

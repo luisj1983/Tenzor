@@ -35,7 +35,7 @@ CNN_CONFIGS = [
 TRANSFORMER_CONFIGS = [
     (8, 512, 768, 12, 6, "BERT-base 6L"),
     (4, 512, 768, 12, 12, "BERT-base 12L"),
-    (2, 1024, 768, 12, 6, "Long seq 6L"),
+    # (2, 1024, 768, 12, 6, "Long seq 6L"),  # Too slow on CPU
 ]
 
 

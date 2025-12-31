@@ -20,7 +20,7 @@ from benchmark_config import BenchmarkConfig, DEFAULT_CONFIG
 EMBEDDING_CONFIGS = [
     (30522, 768, 32, 128, "BERT vocab"),
     (50257, 768, 16, 512, "GPT-2 vocab"),
-    (32000, 4096, 4, 2048, "Llama vocab"),
+    # (32000, 4096, 4, 2048, "Llama vocab"),  # Too slow on CPU (seq=2048, dim=4096)
     (100000, 256, 64, 64, "Large vocab small embed"),
     (10000, 1024, 32, 256, "Small vocab large embed"),
 ]
@@ -29,8 +29,8 @@ EMBEDDING_CONFIGS = [
 POSITION_CONFIGS = [
     (512, 768, 32, "BERT max_pos"),
     (1024, 768, 16, "GPT-2 max_pos"),
-    (2048, 768, 8, "Long context"),
-    (4096, 4096, 4, "Llama style"),
+    # (2048, 768, 8, "Long context"),  # Too slow on CPU
+    # (4096, 4096, 4, "Llama style"),  # Too slow on CPU (4096 dim)
 ]
 
 
@@ -374,7 +374,7 @@ def benchmark_combined_embedding(
     configs = [
         (30522, 512, 768, 32, 128, "BERT-base"),
         (50257, 1024, 768, 16, 512, "GPT-2"),
-        (32000, 4096, 4096, 4, 2048, "Llama-7B"),
+        # (32000, 4096, 4096, 4, 2048, "Llama-7B"),  # Too slow on CPU (seq=2048, dim=4096)
     ]
 
     for vocab_size, max_pos, embed_dim, batch, seq_len, name in configs:
