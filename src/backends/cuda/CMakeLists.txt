@@ -126,8 +126,9 @@ endif()
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
     # Set common GPU architectures
     # 70 = Volta (V100), 75 = Turing (RTX 20xx), 80 = Ampere (A100, RTX 30xx),
-    # 86 = Ampere (RTX 3090), 89 = Ada Lovelace (RTX 40xx), 90 = Hopper (H100)
-    set(CMAKE_CUDA_ARCHITECTURES "70;75;80;86;89;90")
+    # 86 = Ampere (RTX 3090), 89 = Ada Lovelace (RTX 40xx), 90 = Hopper (H100),
+    # 120 ()= Blackwell (RTX 50xx)
+    set(CMAKE_CUDA_ARCHITECTURES "70;75;80;86;89;90;120")
     message(STATUS "CUDA Backend: Building for architectures: ${CMAKE_CUDA_ARCHITECTURES}")
 else()
     message(STATUS "CUDA Backend: Using user-specified architectures: ${CMAKE_CUDA_ARCHITECTURES}")

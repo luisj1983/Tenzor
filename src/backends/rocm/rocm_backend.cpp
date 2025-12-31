@@ -44,6 +44,62 @@ auto ROCmBackend::is_available() const -> bool {
     return device_count() > 0;
 }
 
+auto ROCmBackend::get_device_info(int32_t device_id) const -> DeviceInfo {
+    int count = device_count();
+    if (device_id < 0 || device_id >= count) {
+        throw std::out_of_range("Invalid ROCm device ID: " + std::to_string(device_id) +
+                                " (available: 0-" + std::to_string(count - 1) + ")");
+    }
+
+    hipDeviceProp_t props;
+    hipGetDeviceProperties(&props, device_id);
+
+    DeviceInfo info;
+    info.name = props.name;
+    info.vendor = "AMD";
+
+    // Get driver version
+    int driver_version = 0;
+    hipDriverGetVersion(&driver_version);
+    info.driver_version = std::to_string(driver_version / 100) + "." +
+                          std::to_string(driver_version % 100);
+
+    // Memory info
+    info.total_memory = props.totalGlobalMem;
+    size_t free_mem = 0, total_mem = 0;
+    int current_device;
+    hipGetDevice(&current_device);
+    hipSetDevice(device_id);
+    hipMemGetInfo(&free_mem, &total_mem);
+    hipSetDevice(current_device);
+    info.available_memory = free_mem;
+
+    // Compute info
+    info.compute_units = props.multiProcessorCount;
+    info.max_threads_per_block = props.maxThreadsPerBlock;
+    info.max_shared_memory = static_cast<int>(props.sharedMemPerBlock);
+    info.warp_size = props.warpSize;  // 64 for AMD
+
+    // GCN/RDNA version from architecture name
+    info.major_version = props.major;
+    info.minor_version = props.minor;
+
+    // Feature support - AMD GPUs generally support these
+    info.supports_fp16 = true;   // GCN 3rd gen+
+    info.supports_fp64 = true;   // All GCN/RDNA
+    info.supports_int8 = true;   // RDNA2+
+
+    // Device type
+    info.is_integrated = (props.integrated != 0);
+    info.is_discrete = !info.is_integrated;
+
+    // PCI info
+    info.pci_bus_id = props.pciBusID;
+    info.pci_device_id = props.pciDeviceID;
+
+    return info;
+}
+
 auto ROCmBackend::allocate(size_t bytes, int32_t device_id) -> void* {
     // Handle empty tensors - HIP doesn't like 0-byte allocations
     if (bytes == 0) {

@@ -2,7 +2,8 @@ cmake_minimum_required(VERSION 3.25)
 
 # Set default HIP architecture before project() if building ROCm backend
 # Auto-detect GPU architecture if not specified
-if(TENZOR_BUILD_ROCM OR NOT DEFINED TENZOR_BUILD_ROCM)
+# Only enable HIP if explicitly requested (TENZOR_BUILD_ROCM=ON)
+if(TENZOR_BUILD_ROCM)
     if(NOT CMAKE_HIP_ARCHITECTURES)
         # Try to auto-detect GPU architecture
         execute_process(
@@ -28,7 +29,7 @@ endif()
 
 # Determine languages to enable
 set(TENZOR_LANGUAGES CXX)
-if(TENZOR_BUILD_ROCM OR NOT DEFINED TENZOR_BUILD_ROCM)
+if(TENZOR_BUILD_ROCM)
     list(APPEND TENZOR_LANGUAGES HIP)
 endif()
 

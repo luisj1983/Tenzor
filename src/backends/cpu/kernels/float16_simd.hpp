@@ -94,11 +94,14 @@ inline void add_f16(const uint16_t* a, const uint16_t* b, uint16_t* out, size_t 
         __m512 vout = _mm512_add_ps(va, vb);
         cvt_f32_to_f16_avx512(vout, out + i);
     }
-    // Fall through to AVX2 for remainder
     a += i; b += i; out += i; n -= i;
-#endif
-
-#ifdef TENZOR_F16_AVX2
+    // Scalar remainder after AVX512
+    for (size_t j = 0; j < n; ++j) {
+        float fa = _cvtsh_ss(a[j]);
+        float fb = _cvtsh_ss(b[j]);
+        out[j] = _cvtss_sh(fa + fb, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+    }
+#elif defined(TENZOR_F16_AVX2)
     size_t i = 0;
     for (; i + 8 <= n; i += 8) {
         __m256 va = cvt_f16_to_f32_avx2(a + i);
@@ -138,9 +141,12 @@ inline void sub_f16(const uint16_t* a, const uint16_t* b, uint16_t* out, size_t 
         cvt_f32_to_f16_avx512(vout, out + i);
     }
     a += i; b += i; out += i; n -= i;
-#endif
-
-#ifdef TENZOR_F16_AVX2
+    for (size_t j = 0; j < n; ++j) {
+        float fa = _cvtsh_ss(a[j]);
+        float fb = _cvtsh_ss(b[j]);
+        out[j] = _cvtss_sh(fa - fb, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+    }
+#elif defined(TENZOR_F16_AVX2)
     size_t i = 0;
     for (; i + 8 <= n; i += 8) {
         __m256 va = cvt_f16_to_f32_avx2(a + i);
@@ -173,9 +179,12 @@ inline void mul_f16(const uint16_t* a, const uint16_t* b, uint16_t* out, size_t 
         cvt_f32_to_f16_avx512(vout, out + i);
     }
     a += i; b += i; out += i; n -= i;
-#endif
-
-#ifdef TENZOR_F16_AVX2
+    for (size_t j = 0; j < n; ++j) {
+        float fa = _cvtsh_ss(a[j]);
+        float fb = _cvtsh_ss(b[j]);
+        out[j] = _cvtss_sh(fa * fb, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+    }
+#elif defined(TENZOR_F16_AVX2)
     size_t i = 0;
     for (; i + 8 <= n; i += 8) {
         __m256 va = cvt_f16_to_f32_avx2(a + i);
@@ -208,9 +217,12 @@ inline void div_f16(const uint16_t* a, const uint16_t* b, uint16_t* out, size_t 
         cvt_f32_to_f16_avx512(vout, out + i);
     }
     a += i; b += i; out += i; n -= i;
-#endif
-
-#ifdef TENZOR_F16_AVX2
+    for (size_t j = 0; j < n; ++j) {
+        float fa = _cvtsh_ss(a[j]);
+        float fb = _cvtsh_ss(b[j]);
+        out[j] = _cvtss_sh(fa / fb, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+    }
+#elif defined(TENZOR_F16_AVX2)
     size_t i = 0;
     for (; i + 8 <= n; i += 8) {
         __m256 va = cvt_f16_to_f32_avx2(a + i);
@@ -245,9 +257,13 @@ inline void fma_f16(const uint16_t* a, const uint16_t* b, const uint16_t* c,
         cvt_f32_to_f16_avx512(vout, out + i);
     }
     a += i; b += i; c += i; out += i; n -= i;
-#endif
-
-#ifdef TENZOR_F16_AVX2
+    for (size_t j = 0; j < n; ++j) {
+        float fa = _cvtsh_ss(a[j]);
+        float fb = _cvtsh_ss(b[j]);
+        float fc = _cvtsh_ss(c[j]);
+        out[j] = _cvtss_sh(fa * fb + fc, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+    }
+#elif defined(TENZOR_F16_AVX2)
     size_t i = 0;
     for (; i + 8 <= n; i += 8) {
         __m256 va = cvt_f16_to_f32_avx2(a + i);
@@ -285,9 +301,11 @@ inline void sqrt_f16(const uint16_t* a, uint16_t* out, size_t n) {
         cvt_f32_to_f16_avx512(vout, out + i);
     }
     a += i; out += i; n -= i;
-#endif
-
-#ifdef TENZOR_F16_AVX2
+    for (size_t j = 0; j < n; ++j) {
+        float fa = _cvtsh_ss(a[j]);
+        out[j] = _cvtss_sh(std::sqrt(fa), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+    }
+#elif defined(TENZOR_F16_AVX2)
     size_t i = 0;
     for (; i + 8 <= n; i += 8) {
         __m256 va = cvt_f16_to_f32_avx2(a + i);
@@ -318,9 +336,11 @@ inline void relu_f16(const uint16_t* a, uint16_t* out, size_t n) {
         cvt_f32_to_f16_avx512(vout, out + i);
     }
     a += i; out += i; n -= i;
-#endif
-
-#ifdef TENZOR_F16_AVX2
+    for (size_t j = 0; j < n; ++j) {
+        float fa = _cvtsh_ss(a[j]);
+        out[j] = _cvtss_sh(std::max(0.0f, fa), _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+    }
+#elif defined(TENZOR_F16_AVX2)
     size_t i = 0;
     __m256 zero = _mm256_setzero_ps();
     for (; i + 8 <= n; i += 8) {
@@ -352,9 +372,11 @@ inline void scale_f16(const uint16_t* a, float scalar, uint16_t* out, size_t n) 
         cvt_f32_to_f16_avx512(vout, out + i);
     }
     a += i; out += i; n -= i;
-#endif
-
-#ifdef TENZOR_F16_AVX2
+    for (size_t j = 0; j < n; ++j) {
+        float fa = _cvtsh_ss(a[j]);
+        out[j] = _cvtss_sh(fa * scalar, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+    }
+#elif defined(TENZOR_F16_AVX2)
     size_t i = 0;
     __m256 vscalar = _mm256_set1_ps(scalar);
     for (; i + 8 <= n; i += 8) {
@@ -391,9 +413,11 @@ inline float sum_f16(const uint16_t* a, size_t n) {
     }
     sum += _mm512_reduce_add_ps(vsum);
     a += i; n -= i;
-#endif
-
-#ifdef TENZOR_F16_AVX2
+    // Scalar remainder after AVX512
+    for (size_t j = 0; j < n; ++j) {
+        sum += _cvtsh_ss(a[j]);
+    }
+#elif defined(TENZOR_F16_AVX2)
     size_t i = 0;
     __m256 vsum = _mm256_setzero_ps();
     for (; i + 8 <= n; i += 8) {
@@ -437,9 +461,11 @@ inline float dot_f16(const uint16_t* a, const uint16_t* b, size_t n) {
     }
     sum += _mm512_reduce_add_ps(vsum);
     a += i; b += i; n -= i;
-#endif
-
-#ifdef TENZOR_F16_AVX2
+    // Scalar remainder after AVX512
+    for (size_t j = 0; j < n; ++j) {
+        sum += _cvtsh_ss(a[j]) * _cvtsh_ss(b[j]);
+    }
+#elif defined(TENZOR_F16_AVX2)
     size_t i = 0;
     __m256 vsum = _mm256_setzero_ps();
     for (; i + 8 <= n; i += 8) {
