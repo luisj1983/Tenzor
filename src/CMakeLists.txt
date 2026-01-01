@@ -16,6 +16,8 @@ set(TENZOR_CORE_SOURCES
     backend/registry.cpp
     backend/dispatch.cpp
     backend/simd_dispatch.cpp
+    backend/dispatch_table.cpp
+    ops/op_id.cpp
     ops/creation.cpp
     ops/math.cpp
     ops/indexing.cpp

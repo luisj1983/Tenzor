@@ -1,5 +1,6 @@
 #include "tenzor/ops/indexing.hpp"
-#include "tenzor/backend/dispatch.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/ops/op_id.hpp"
 #include "tenzor/ops/creation.hpp"
 #include <iostream>
 
@@ -14,26 +15,26 @@ auto index_select(const Tensor& input, int64_t dim, const Tensor& index) -> Tens
     OpAttributes attrs;
     attrs["dim"] = std::to_string(dim);
     std::vector<Tensor> inputs = {input, index};
-    return Dispatcher::dispatch("index_select", inputs, attrs)[0];
+    return dispatch(OpId::IndexSelect, inputs, attrs)[0];
 }
 
 auto gather(const Tensor& input, int64_t dim, const Tensor& index) -> Tensor {
     OpAttributes attrs;
     attrs["dim"] = std::to_string(dim);
     std::vector<Tensor> inputs = {input, index};
-    return Dispatcher::dispatch("gather", inputs, attrs)[0];
+    return dispatch(OpId::Gather, inputs, attrs)[0];
 }
 
 auto scatter(const Tensor& input, int64_t dim, const Tensor& index, const Tensor& src) -> Tensor {
     OpAttributes attrs;
     attrs["dim"] = std::to_string(dim);
     std::vector<Tensor> inputs = {input, index, src};
-    return Dispatcher::dispatch("scatter", inputs, attrs)[0];
+    return dispatch(OpId::Scatter, inputs, attrs)[0];
 }
 
 auto masked_select(const Tensor& input, const Tensor& mask) -> Tensor {
     std::vector<Tensor> inputs = {input, mask};
-    return Dispatcher::dispatch("masked_select", inputs)[0];
+    return dispatch(OpId::MaskedSelect, inputs)[0];
 }
 
 auto masked_fill(const Tensor& input, const Tensor& mask, float value) -> Tensor {
@@ -42,22 +43,22 @@ auto masked_fill(const Tensor& input, const Tensor& mask, float value) -> Tensor
     snprintf(value_buf, sizeof(value_buf), "%.9e", value);
     attrs["value"] = std::string(value_buf);
     std::vector<Tensor> inputs = {input, mask};
-    return Dispatcher::dispatch("masked_fill", inputs, attrs)[0];
+    return dispatch(OpId::MaskedFill, inputs, attrs)[0];
 }
 
 auto where(const Tensor& condition, const Tensor& x, const Tensor& y) -> Tensor {
     std::vector<Tensor> inputs = {condition, x, y};
-    return Dispatcher::dispatch("where", inputs)[0];
+    return dispatch(OpId::Where, inputs)[0];
 }
 
 auto take(const Tensor& input, const Tensor& index) -> Tensor {
     std::vector<Tensor> inputs = {input, index};
-    return Dispatcher::dispatch("take", inputs)[0];
+    return dispatch(OpId::Take, inputs)[0];
 }
 
 auto put(const Tensor& input, const Tensor& index, const Tensor& source) -> Tensor {
     std::vector<Tensor> inputs = {input, index, source};
-    return Dispatcher::dispatch("put", inputs)[0];
+    return dispatch(OpId::Put, inputs)[0];
 }
 
 auto nonzero(const Tensor& input) -> Tensor {

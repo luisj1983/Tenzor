@@ -83,7 +83,7 @@ void benchmark_lstm_forward() {
         bench.set_flops(total_flops);
 
         auto result = bench.run([&]() {
-            auto [output, states] = lstm.forward(input_var);
+            auto output = lstm.forward(input_var);
             volatile void* ptr = output.tensor().data_ptr();
             (void)ptr;
         });
@@ -134,7 +134,7 @@ void benchmark_gru_forward() {
         bench.set_flops(total_flops);
 
         auto result = bench.run([&]() {
-            auto [output, states] = gru.forward(input_var);
+            auto output = gru.forward(input_var);
             volatile void* ptr = output.tensor().data_ptr();
             (void)ptr;
         });
@@ -176,7 +176,7 @@ void benchmark_lstm_backward() {
         // Forward only
         Benchmark bench_fwd(cfg.name + " (fwd)", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
         auto result_fwd = bench_fwd.run([&]() {
-            auto [output, states] = lstm.forward(input_var);
+            auto output = lstm.forward(input_var);
             volatile void* ptr = output.tensor().data_ptr();
             (void)ptr;
         });
@@ -185,7 +185,7 @@ void benchmark_lstm_backward() {
         // Forward + Backward
         Benchmark bench_bwd(cfg.name + " (fwd+bwd)", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS / 2);
         auto result_bwd = bench_bwd.run([&]() {
-            auto [output, states] = lstm.forward(input_var);
+            auto output = lstm.forward(input_var);
             auto grad = ones_like(output.tensor());
             output.backward(grad);
 
@@ -235,7 +235,7 @@ void benchmark_sequence_length_scaling() {
         Benchmark bench("seq=" + std::to_string(seq_len), 3, 20);
 
         auto result = bench.run([&]() {
-            auto [output, states] = lstm.forward(input_var);
+            auto output = lstm.forward(input_var);
             volatile void* ptr = output.tensor().data_ptr();
             (void)ptr;
         });
@@ -298,7 +298,7 @@ void benchmark_hidden_size_scaling() {
         bench.set_flops(total_flops);
 
         auto result = bench.run([&]() {
-            auto [output, states] = lstm.forward(input_var);
+            auto output = lstm.forward(input_var);
             volatile void* ptr = output.tensor().data_ptr();
             (void)ptr;
         });
@@ -360,7 +360,7 @@ void benchmark_lstm_vs_gru() {
         // LSTM
         Benchmark bench_lstm("LSTM " + cfg.name, 3, 20);
         auto result_lstm = bench_lstm.run([&]() {
-            auto [output, states] = lstm.forward(input_var);
+            auto output = lstm.forward(input_var);
             volatile void* ptr = output.tensor().data_ptr();
             (void)ptr;
         });
@@ -368,7 +368,7 @@ void benchmark_lstm_vs_gru() {
         // GRU
         Benchmark bench_gru("GRU " + cfg.name, 3, 20);
         auto result_gru = bench_gru.run([&]() {
-            auto [output, states] = gru.forward(input_var);
+            auto output = gru.forward(input_var);
             volatile void* ptr = output.tensor().data_ptr();
             (void)ptr;
         });
@@ -421,7 +421,7 @@ void benchmark_layer_scaling() {
         Benchmark bench("layers=" + std::to_string(num_layers), 3, 20);
 
         auto result = bench.run([&]() {
-            auto [output, states] = lstm.forward(input_var);
+            auto output = lstm.forward(input_var);
             volatile void* ptr = output.tensor().data_ptr();
             (void)ptr;
         });

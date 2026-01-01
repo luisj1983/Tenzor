@@ -1,5 +1,6 @@
 #include "tenzor/ops/fused_ops.hpp"
-#include "tenzor/backend/dispatch.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/ops/op_id.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include <stdexcept>
@@ -56,7 +57,7 @@ auto fused_linear_relu(
     OpAttributes attrs;
     attrs["has_bias"] = bias != nullptr ? "true" : "false";
 
-    return Dispatcher::dispatch("fused_linear_relu", inputs, attrs)[0];
+    return dispatch(OpId::FusedLinearReLU, inputs, attrs)[0];
 }
 
 auto fused_conv2d_relu(
@@ -112,7 +113,7 @@ auto fused_conv2d_relu(
     attrs["stride"] = std::to_string(stride);
     attrs["padding"] = std::to_string(padding);
 
-    return Dispatcher::dispatch("fused_conv2d_relu", inputs, attrs)[0];
+    return dispatch(OpId::FusedConv2dReLU, inputs, attrs)[0];
 }
 
 auto fused_batchnorm_relu(
@@ -165,7 +166,7 @@ auto fused_batchnorm_relu(
     snprintf(eps_buf, sizeof(eps_buf), "%.9e", eps);
     attrs["eps"] = std::string(eps_buf);
 
-    return Dispatcher::dispatch("fused_batchnorm_relu", inputs, attrs)[0];
+    return dispatch(OpId::FusedBatchNormReLU, inputs, attrs)[0];
 }
 
 auto fused_softmax_cross_entropy(
@@ -210,20 +211,20 @@ auto fused_softmax_cross_entropy(
     OpAttributes attrs;
     attrs["reduction"] = reduction;
 
-    return Dispatcher::dispatch("fused_softmax_cross_entropy", inputs, attrs)[0];
+    return dispatch(OpId::FusedSoftmaxCrossEntropy, inputs, attrs)[0];
 }
 
 auto fused_add_relu(const Tensor& a, const Tensor& b) -> Tensor {
     // Simple fusion: add + relu
     // In-place computation on GPU can save memory bandwidth
     std::vector<Tensor> inputs = {a, b};
-    return Dispatcher::dispatch("fused_add_relu", inputs)[0];
+    return dispatch(OpId::FusedAddReLU, inputs)[0];
 }
 
 auto fused_gelu(const Tensor& input) -> Tensor {
     // GELU approximation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
     std::vector<Tensor> inputs = {input};
-    return Dispatcher::dispatch("fused_gelu", inputs)[0];
+    return dispatch(OpId::FusedGelu, inputs)[0];
 }
 
 auto fused_layer_norm(
@@ -283,7 +284,7 @@ auto fused_layer_norm(
     }
     attrs["normalized_shape"] = shape_str;
 
-    return Dispatcher::dispatch("fused_layer_norm", inputs, attrs)[0];
+    return dispatch(OpId::FusedLayerNorm, inputs, attrs)[0];
 }
 
 } // namespace ops

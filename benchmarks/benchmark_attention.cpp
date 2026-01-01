@@ -179,10 +179,10 @@ void benchmark_scaled_dot_product() {
             // Manual scaled dot-product attention
             auto key_t = key.transpose(-2, -1);
             auto scores = matmul(query, key_t);
-            scores = mul(scores, scale);
+            scores = scores * scale;
 
             auto scores_var = Variable(scores, false);
-            auto attn_weights = softmax(scores_var, -1);
+            auto attn_weights = tenzor::softmax(scores_var, static_cast<int64_t>(-1));
 
             auto output = matmul(attn_weights.tensor(), value);
             volatile void* ptr = output.data_ptr();
@@ -391,7 +391,7 @@ void benchmark_transformer_layer() {
 
     for (const auto& cfg : configs) {
         auto encoder_layer = TransformerEncoderLayer(
-            cfg.d_model, cfg.nhead, cfg.dim_ff, 0.1, "relu", true, true);
+            cfg.d_model, cfg.nhead, cfg.dim_ff, 0.1, "relu", true);
 
         auto input = randn({cfg.batch, cfg.seq_len, cfg.d_model});
         auto input_var = Variable(input, false);
@@ -408,7 +408,7 @@ void benchmark_transformer_layer() {
         bench.set_flops(total_flops);
 
         auto result = bench.run([&]() {
-            auto output = encoder_layer.forward(input_var);
+            auto output = encoder_layer(input_var);
             volatile void* ptr = output.tensor().data_ptr();
             (void)ptr;
         });

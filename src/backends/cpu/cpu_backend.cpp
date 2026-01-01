@@ -1,4 +1,5 @@
 #include "tenzor/backend/backend.hpp"
+#include "tenzor/backend/dispatch_table.hpp"
 #include <cstring>
 #include <stdexcept>
 #include <thread>
@@ -1419,10 +1420,20 @@ public:
     }
 };
 
+// Forward declaration of kernel registration function
+void register_cpu_kernels(BackendDispatchTable& table);
+
 // Export factory function
 extern "C" {
     auto create_backend() -> std::unique_ptr<Backend> {
         return std::make_unique<CPUBackend>();
+    }
+
+    // Export kernel registration function for dispatch table initialization
+    void register_kernels(BackendDispatchTable* table) {
+        if (table) {
+            tenzor::register_cpu_kernels(*table);
+        }
     }
 }
 

@@ -4,7 +4,8 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/backend/loader.hpp"
 #include "tenzor/ops/indexing.hpp"
-#include "tenzor/backend/dispatch.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/ops/op_id.hpp"
 #include <numeric>
 #include <algorithm>
 #include <cstring>
@@ -680,7 +681,7 @@ auto Tensor::contiguous() const -> Tensor {
     // Dispatch to backend for contiguous operation
     // This properly handles both CPU and CUDA tensors
     std::vector<Tensor> inputs = {*this};
-    return Dispatcher::dispatch("contiguous", inputs)[0];
+    return dispatch(OpId::Contiguous, inputs)[0];
 }
 
 // Arithmetic operators
@@ -889,7 +890,7 @@ auto Tensor::reshape(std::vector<int64_t> new_shape) const -> Tensor {
 
     // Dispatch to backend for reshape operation
     std::vector<Tensor> inputs = {*this};
-    return Dispatcher::dispatch("reshape", inputs, attrs)[0];
+    return dispatch(OpId::Reshape, inputs, attrs)[0];
 }
 
 auto Tensor::view(std::vector<int64_t> new_shape) const -> Tensor {

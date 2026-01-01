@@ -49,7 +49,7 @@ public:
         register_module("fc2", fc2_);
     }
 
-    auto forward(const Variable& x) -> Variable override {
+    auto forward_impl(const Variable& x) -> Variable override {
         auto h = fc1_->forward(x);
         h = relu_->forward(h);
         return fc2_->forward(h);
@@ -79,7 +79,7 @@ public:
         register_module("fc", fc_);
     }
 
-    auto forward(const Variable& x) -> Variable override {
+    auto forward_impl(const Variable& x) -> Variable override {
         // Conv1 block
         auto h = conv1_->forward(x);
         h = relu1_->forward(h);

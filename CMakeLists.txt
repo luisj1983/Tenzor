@@ -42,7 +42,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Build options
 option(TENZOR_BUILD_CUDA "Build CUDA backend" ON)
-option(TENZOR_BUILD_ROCM "Build ROCm backend" OFF) #do not enable, causes system crashes
+option(TENZOR_BUILD_ROCM "Build ROCm backend" ON)
 option(TENZOR_BUILD_ONEAPI "Build OneAPI backend" ON)
 option(TENZOR_BUILD_VULKAN "Build Vulkan backend" ON)
 option(TENZOR_BUILD_METAL "Build Metal backend (macOS/iOS only)" OFF)

@@ -231,6 +231,7 @@ endif()
 if(GLSLC)
     add_library(tenzor_backend_vulkan SHARED
         vulkan_backend.cpp
+        vulkan_kernel_registry.cpp
         vulkan_backend.hpp
         vulkan_utils.hpp
         ${CMAKE_SOURCE_DIR}/src/backend/vulkan_caching_allocator.cpp
@@ -239,6 +240,7 @@ if(GLSLC)
 else()
     add_library(tenzor_backend_vulkan SHARED
         vulkan_backend.cpp
+        vulkan_kernel_registry.cpp
         vulkan_backend.hpp
         vulkan_utils.hpp
         ${CMAKE_SOURCE_DIR}/src/backend/vulkan_caching_allocator.cpp

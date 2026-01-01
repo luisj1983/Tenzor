@@ -1,5 +1,6 @@
 #include "tenzor/ops/math.hpp"
-#include "tenzor/backend/dispatch.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/ops/op_id.hpp"
 #include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/creation.hpp"
@@ -21,7 +22,7 @@ auto add(const Tensor& a, const Tensor& b) -> Tensor {
     Tensor a_contiguous = a.is_contiguous() ? a : a.contiguous();
     Tensor b_contiguous = b.is_contiguous() ? b : b.contiguous();
     std::vector<Tensor> inputs = {a_contiguous, b_contiguous};
-    return Dispatcher::dispatch("add", inputs)[0];
+    return dispatch<OpId::Add>(inputs)[0];
 }
 
 auto sub(const Tensor& a, const Tensor& b) -> Tensor {
@@ -29,7 +30,7 @@ auto sub(const Tensor& a, const Tensor& b) -> Tensor {
     Tensor a_contiguous = a.is_contiguous() ? a : a.contiguous();
     Tensor b_contiguous = b.is_contiguous() ? b : b.contiguous();
     std::vector<Tensor> inputs = {a_contiguous, b_contiguous};
-    return Dispatcher::dispatch("sub", inputs)[0];
+    return dispatch<OpId::Sub>(inputs)[0];
 }
 
 auto mul(const Tensor& a, const Tensor& b) -> Tensor {
@@ -37,7 +38,7 @@ auto mul(const Tensor& a, const Tensor& b) -> Tensor {
     Tensor a_contiguous = a.is_contiguous() ? a : a.contiguous();
     Tensor b_contiguous = b.is_contiguous() ? b : b.contiguous();
     std::vector<Tensor> inputs = {a_contiguous, b_contiguous};
-    return Dispatcher::dispatch("mul", inputs)[0];
+    return dispatch<OpId::Mul>(inputs)[0];
 }
 
 auto div(const Tensor& a, const Tensor& b) -> Tensor {
@@ -45,12 +46,12 @@ auto div(const Tensor& a, const Tensor& b) -> Tensor {
     Tensor a_contiguous = a.is_contiguous() ? a : a.contiguous();
     Tensor b_contiguous = b.is_contiguous() ? b : b.contiguous();
     std::vector<Tensor> inputs = {a_contiguous, b_contiguous};
-    return Dispatcher::dispatch("div", inputs)[0];
+    return dispatch<OpId::Div>(inputs)[0];
 }
 
 auto matmul(const Tensor& a, const Tensor& b) -> Tensor {
     std::vector<Tensor> inputs = {a, b};
-    return Dispatcher::dispatch("matmul", inputs)[0];
+    return dispatch<OpId::MatMul>(inputs)[0];
 }
 
 auto bmm(const Tensor& a, const Tensor& b) -> Tensor {
@@ -194,7 +195,7 @@ auto bmm(const Tensor& a, const Tensor& b) -> Tensor {
 
 auto dot(const Tensor& a, const Tensor& b) -> Tensor {
     std::vector<Tensor> inputs = {a, b};
-    return Dispatcher::dispatch("dot", inputs)[0];
+    return dispatch<OpId::Dot>(inputs)[0];
 }
 
 auto pow(const Tensor& input, float exponent) -> Tensor {
@@ -204,77 +205,77 @@ auto pow(const Tensor& input, float exponent) -> Tensor {
     snprintf(exp_buf, sizeof(exp_buf), "%.9e", exponent);
     attrs["exponent"] = std::string(exp_buf);
     std::vector<Tensor> inputs = {input};
-    return Dispatcher::dispatch("pow", inputs, attrs)[0];
+    return dispatch(OpId::Pow, inputs, attrs)[0];
 }
 
 auto exp(const Tensor& input) -> Tensor {
     std::vector<Tensor> inputs = {input};
-    return Dispatcher::dispatch("exp", inputs)[0];
+    return dispatch<OpId::Exp>(inputs)[0];
 }
 
 auto log(const Tensor& input) -> Tensor {
     std::vector<Tensor> inputs = {input};
-    return Dispatcher::dispatch("log", inputs)[0];
+    return dispatch<OpId::Log>(inputs)[0];
 }
 
 auto sqrt(const Tensor& input) -> Tensor {
     std::vector<Tensor> inputs = {input};
-    return Dispatcher::dispatch("sqrt", inputs)[0];
+    return dispatch<OpId::Sqrt>(inputs)[0];
 }
 
 auto sin(const Tensor& input) -> Tensor {
     std::vector<Tensor> inputs = {input};
-    return Dispatcher::dispatch("sin", inputs)[0];
+    return dispatch<OpId::Sin>(inputs)[0];
 }
 
 auto cos(const Tensor& input) -> Tensor {
     std::vector<Tensor> inputs = {input};
-    return Dispatcher::dispatch("cos", inputs)[0];
+    return dispatch<OpId::Cos>(inputs)[0];
 }
 
 auto tan(const Tensor& input) -> Tensor {
     std::vector<Tensor> inputs = {input};
-    return Dispatcher::dispatch("tan", inputs)[0];
+    return dispatch<OpId::Tan>(inputs)[0];
 }
 
 auto tanh(const Tensor& input) -> Tensor {
     std::vector<Tensor> inputs = {input};
-    return Dispatcher::dispatch("tanh", inputs)[0];
+    return dispatch<OpId::Tanh>(inputs)[0];
 }
 
 auto abs(const Tensor& input) -> Tensor {
     std::vector<Tensor> inputs = {input};
-    return Dispatcher::dispatch("abs", inputs)[0];
+    return dispatch<OpId::Abs>(inputs)[0];
 }
 
 auto neg(const Tensor& input) -> Tensor {
     std::vector<Tensor> inputs = {input};
-    return Dispatcher::dispatch("neg", inputs)[0];
+    return dispatch<OpId::Neg>(inputs)[0];
 }
 
 auto reciprocal(const Tensor& input) -> Tensor {
     std::vector<Tensor> inputs = {input};
-    return Dispatcher::dispatch("reciprocal", inputs)[0];
+    return dispatch<OpId::Reciprocal>(inputs)[0];
 }
 
 auto sign(const Tensor& input) -> Tensor {
     std::vector<Tensor> inputs = {input};
-    return Dispatcher::dispatch("sign", inputs)[0];
+    return dispatch<OpId::Sign>(inputs)[0];
 }
 
 auto floor(const Tensor& input) -> Tensor {
     std::vector<Tensor> inputs = {input};
-    return Dispatcher::dispatch("floor", inputs)[0];
+    return dispatch<OpId::Floor>(inputs)[0];
 }
 
 auto ceil(const Tensor& input) -> Tensor {
     std::vector<Tensor> inputs = {input};
-    return Dispatcher::dispatch("ceil", inputs)[0];
+    return dispatch<OpId::Ceil>(inputs)[0];
 }
 
 auto round(const Tensor& input) -> Tensor {
     std::vector<Tensor> inputs = {input};
-    return Dispatcher::dispatch("round", inputs)[0];
+    return dispatch<OpId::Round>(inputs)[0];
 }
 
 auto clamp(const Tensor& input, float min, float max) -> Tensor {
@@ -286,7 +287,7 @@ auto clamp(const Tensor& input, float min, float max) -> Tensor {
     attrs["min"] = std::string(min_buf);
     attrs["max"] = std::string(max_buf);
     std::vector<Tensor> inputs = {input};
-    return Dispatcher::dispatch("clamp", inputs, attrs)[0];
+    return dispatch(OpId::Clamp, inputs, attrs)[0];
 }
 
 auto clamp_min(const Tensor& input, float min) -> Tensor {
@@ -295,7 +296,7 @@ auto clamp_min(const Tensor& input, float min) -> Tensor {
     snprintf(min_buf, sizeof(min_buf), "%.9e", min);
     attrs["min"] = std::string(min_buf);
     std::vector<Tensor> inputs = {input};
-    return Dispatcher::dispatch("clamp_min", inputs, attrs)[0];
+    return dispatch(OpId::ClampMin, inputs, attrs)[0];
 }
 
 auto clamp_max(const Tensor& input, float max) -> Tensor {
@@ -304,32 +305,32 @@ auto clamp_max(const Tensor& input, float max) -> Tensor {
     snprintf(max_buf, sizeof(max_buf), "%.9e", max);
     attrs["max"] = std::string(max_buf);
     std::vector<Tensor> inputs = {input};
-    return Dispatcher::dispatch("clamp_max", inputs, attrs)[0];
+    return dispatch(OpId::ClampMax, inputs, attrs)[0];
 }
 
 auto sinh(const Tensor& input) -> Tensor {
     std::vector<Tensor> inputs = {input};
-    return Dispatcher::dispatch("sinh", inputs)[0];
+    return dispatch<OpId::Sinh>(inputs)[0];
 }
 
 auto cosh(const Tensor& input) -> Tensor {
     std::vector<Tensor> inputs = {input};
-    return Dispatcher::dispatch("cosh", inputs)[0];
+    return dispatch<OpId::Cosh>(inputs)[0];
 }
 
 auto atan(const Tensor& input) -> Tensor {
     std::vector<Tensor> inputs = {input};
-    return Dispatcher::dispatch("atan", inputs)[0];
+    return dispatch<OpId::Atan>(inputs)[0];
 }
 
 auto asin(const Tensor& input) -> Tensor {
     std::vector<Tensor> inputs = {input};
-    return Dispatcher::dispatch("asin", inputs)[0];
+    return dispatch<OpId::Asin>(inputs)[0];
 }
 
 auto acos(const Tensor& input) -> Tensor {
     std::vector<Tensor> inputs = {input};
-    return Dispatcher::dispatch("acos", inputs)[0];
+    return dispatch<OpId::Acos>(inputs)[0];
 }
 
 // Comparison operations
@@ -338,7 +339,7 @@ auto eq(const Tensor& a, const Tensor& b) -> Tensor {
     Tensor a_contiguous = a.is_contiguous() ? a : a.contiguous();
     Tensor b_contiguous = b.is_contiguous() ? b : b.contiguous();
     std::vector<Tensor> inputs = {a_contiguous, b_contiguous};
-    return Dispatcher::dispatch("eq", inputs)[0];
+    return dispatch<OpId::Eq>(inputs)[0];
 }
 
 auto ne(const Tensor& a, const Tensor& b) -> Tensor {
@@ -346,7 +347,7 @@ auto ne(const Tensor& a, const Tensor& b) -> Tensor {
     Tensor a_contiguous = a.is_contiguous() ? a : a.contiguous();
     Tensor b_contiguous = b.is_contiguous() ? b : b.contiguous();
     std::vector<Tensor> inputs = {a_contiguous, b_contiguous};
-    return Dispatcher::dispatch("ne", inputs)[0];
+    return dispatch<OpId::Ne>(inputs)[0];
 }
 
 auto lt(const Tensor& a, const Tensor& b) -> Tensor {
@@ -354,7 +355,7 @@ auto lt(const Tensor& a, const Tensor& b) -> Tensor {
     Tensor a_contiguous = a.is_contiguous() ? a : a.contiguous();
     Tensor b_contiguous = b.is_contiguous() ? b : b.contiguous();
     std::vector<Tensor> inputs = {a_contiguous, b_contiguous};
-    return Dispatcher::dispatch("lt", inputs)[0];
+    return dispatch<OpId::Lt>(inputs)[0];
 }
 
 auto le(const Tensor& a, const Tensor& b) -> Tensor {
@@ -362,7 +363,7 @@ auto le(const Tensor& a, const Tensor& b) -> Tensor {
     Tensor a_contiguous = a.is_contiguous() ? a : a.contiguous();
     Tensor b_contiguous = b.is_contiguous() ? b : b.contiguous();
     std::vector<Tensor> inputs = {a_contiguous, b_contiguous};
-    return Dispatcher::dispatch("le", inputs)[0];
+    return dispatch<OpId::Le>(inputs)[0];
 }
 
 auto gt(const Tensor& a, const Tensor& b) -> Tensor {
@@ -370,7 +371,7 @@ auto gt(const Tensor& a, const Tensor& b) -> Tensor {
     Tensor a_contiguous = a.is_contiguous() ? a : a.contiguous();
     Tensor b_contiguous = b.is_contiguous() ? b : b.contiguous();
     std::vector<Tensor> inputs = {a_contiguous, b_contiguous};
-    return Dispatcher::dispatch("gt", inputs)[0];
+    return dispatch<OpId::Gt>(inputs)[0];
 }
 
 auto ge(const Tensor& a, const Tensor& b) -> Tensor {
@@ -378,7 +379,7 @@ auto ge(const Tensor& a, const Tensor& b) -> Tensor {
     Tensor a_contiguous = a.is_contiguous() ? a : a.contiguous();
     Tensor b_contiguous = b.is_contiguous() ? b : b.contiguous();
     std::vector<Tensor> inputs = {a_contiguous, b_contiguous};
-    return Dispatcher::dispatch("ge", inputs)[0];
+    return dispatch<OpId::Ge>(inputs)[0];
 }
 
 // In-place operations
@@ -392,7 +393,7 @@ auto add_(Tensor& self, const Tensor& other) -> Tensor& {
     std::vector<Tensor> inputs = {self, other_contiguous};
 
     // Dispatch to backend in-place operation
-    auto result = Dispatcher::dispatch("add_inplace", inputs);
+    auto result = dispatch<OpId::AddInplace>(inputs);
 
     // Result should be same tensor modified in-place
     // Copy result data back to self if backend created new tensor
@@ -413,7 +414,7 @@ auto mul_(Tensor& self, const Tensor& other) -> Tensor& {
     std::vector<Tensor> inputs = {self, other_contiguous};
 
     // Dispatch to backend in-place operation
-    auto result = Dispatcher::dispatch("mul_inplace", inputs);
+    auto result = dispatch<OpId::MulInplace>(inputs);
 
     // Result should be same tensor modified in-place
     if (result[0].data<float>() != self.data<float>()) {
@@ -433,7 +434,7 @@ auto sub_(Tensor& self, const Tensor& other) -> Tensor& {
     std::vector<Tensor> inputs = {self, other_contiguous};
 
     // Dispatch to backend in-place operation
-    auto result = Dispatcher::dispatch("sub_inplace", inputs);
+    auto result = dispatch<OpId::SubInplace>(inputs);
 
     // Result should be same tensor modified in-place
     if (result[0].data<float>() != self.data<float>()) {
@@ -453,7 +454,7 @@ auto div_(Tensor& self, const Tensor& other) -> Tensor& {
     std::vector<Tensor> inputs = {self, other_contiguous};
 
     // Dispatch to backend in-place operation
-    auto result = Dispatcher::dispatch("div_inplace", inputs);
+    auto result = dispatch<OpId::DivInplace>(inputs);
 
     // Result should be same tensor modified in-place
     if (result[0].data<float>() != self.data<float>()) {

@@ -57,7 +57,7 @@ public:
         register_module("bn2", bn2_);
     }
 
-    auto forward(const Variable& x) -> Variable override {
+    auto forward_impl(const Variable& x) -> Variable override {
         auto out = relu(bn1_->forward(conv1_->forward(x)));
         out = bn2_->forward(conv2_->forward(out));
         // Residual connection (simplified - assumes same dimensions)
@@ -94,7 +94,7 @@ public:
         register_module("fc", fc_);
     }
 
-    auto forward(const Variable& x) -> Variable override {
+    auto forward_impl(const Variable& x) -> Variable override {
         auto out = relu(bn1_->forward(conv1_->forward(x)));
         out = pool_->forward(out);
 
@@ -102,10 +102,10 @@ public:
             out = block->forward(out);
         }
 
-        // Global average pooling
+        // Global average pooling (mean over H and W dimensions)
         auto t = out.tensor();
-        auto pooled = mean(t, {2, 3});  // Average over H, W
-        out = Variable(pooled, out.requires_grad());
+        auto pooled = mean(mean(t, 3, true), 2, true);  // Average over H, W
+        out = Variable(pooled.squeeze(3).squeeze(2), out.requires_grad());
 
         // Flatten
         auto batch_size = out.tensor().shape()[0];
@@ -142,7 +142,7 @@ public:
         // Transformer layers
         for (int64_t i = 0; i < num_layers; ++i) {
             auto layer = std::make_shared<TransformerEncoderLayer>(
-                hidden_size, num_heads, intermediate_size, 0.1, "gelu", true, true);
+                hidden_size, num_heads, intermediate_size, 0.1, "gelu", true);
             layers_.push_back(layer);
             register_module("layer" + std::to_string(i), layer);
         }
@@ -152,13 +152,13 @@ public:
         register_module("pooler", pooler_);
     }
 
-    auto forward(const Variable& input_ids) -> Variable override {
+    auto forward_impl(const Variable& input_ids) -> Variable override {
         // Simple embedding lookup simulation
         auto x = embedding_->forward(input_ids);
 
         // Pass through transformer layers
         for (auto& layer : layers_) {
-            x = layer->forward(x);
+            x = (*layer)(x);
         }
 
         // Pool first token
@@ -194,7 +194,7 @@ public:
         // Transformer layers (decoder)
         for (int64_t i = 0; i < num_layers; ++i) {
             auto layer = std::make_shared<TransformerDecoderLayer>(
-                hidden_size, num_heads, hidden_size * 4, 0.1, "gelu", true, true);
+                hidden_size, num_heads, hidden_size * 4, 0.1, "gelu", true);
             layers_.push_back(layer);
             register_module("layer" + std::to_string(i), layer);
         }
@@ -204,7 +204,7 @@ public:
         register_module("lm_head", lm_head_);
     }
 
-    auto forward(const Variable& x) -> Variable override {
+    auto forward_impl(const Variable& x) -> Variable override {
         // Embedding
         auto hidden = token_embedding_->forward(x);
 
@@ -524,7 +524,7 @@ void benchmark_model_size_scaling() {
         std::vector<std::shared_ptr<TransformerEncoderLayer>> layers;
         for (int64_t i = 0; i < cfg.layers; ++i) {
             layers.push_back(std::make_shared<TransformerEncoderLayer>(
-                cfg.hidden, cfg.heads, cfg.hidden * 4, 0.0, "gelu", true, true));
+                cfg.hidden, cfg.heads, cfg.hidden * 4, 0.0, "gelu", true));
         }
 
         auto input = randn({batch, seq_len, cfg.hidden});
@@ -535,7 +535,7 @@ void benchmark_model_size_scaling() {
         auto result = bench.run([&]() {
             auto x = input_var;
             for (auto& layer : layers) {
-                x = layer->forward(x);
+                x = (*layer)(x);
             }
             volatile void* ptr = x.tensor().data_ptr();
             (void)ptr;

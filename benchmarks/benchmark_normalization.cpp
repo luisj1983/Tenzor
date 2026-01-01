@@ -14,6 +14,7 @@
 #include "tenzor/tenzor.hpp"
 #include "tenzor/nn/layers/normalization.hpp"
 #include "tenzor/nn/layers/batchnorm.hpp"
+#include "tenzor/nn/layers/hrm.hpp"
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/utils/benchmark.hpp"
 #include "tenzor/ops/fused_ops.hpp"

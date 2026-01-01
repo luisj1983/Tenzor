@@ -15,6 +15,7 @@
 
 set(CPU_BACKEND_SOURCES
     cpu_backend.cpp
+    cpu_kernel_registry.cpp
     simd.cpp
     kernels/math.cpp
     kernels/math_simd.cpp

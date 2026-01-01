@@ -1,6 +1,7 @@
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/creation.hpp"
-#include "tenzor/backend/dispatch.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/ops/op_id.hpp"
 #include <sstream>
 #include <cstring>
 #ifdef _OPENMP
@@ -101,7 +102,7 @@ auto cat(std::span<const Tensor> tensors, int64_t dim) -> Tensor {
 
         // Convert span to vector for dispatch
         std::vector<Tensor> tensor_vec(tensors.begin(), tensors.end());
-        return Dispatcher::dispatch("cat", std::span<const Tensor>(tensor_vec), attrs)[0];
+        return dispatch(OpId::Cat, std::span<const Tensor>(tensor_vec), attrs)[0];
     }
 
     // Optimized CPU concatenation using memcpy + OpenMP
@@ -312,7 +313,7 @@ auto repeat(const Tensor& input, std::vector<int64_t> repeats) -> Tensor {
         OpAttributes attrs;
         attrs["repeats"] = shape_to_string(repeats);
         std::vector<Tensor> inputs = {input};
-        return Dispatcher::dispatch("repeat", inputs, attrs)[0];
+        return dispatch(OpId::Repeat, inputs, attrs)[0];
     }
 
     // CPU implementation: repeat elements along each dimension
@@ -400,7 +401,7 @@ auto tile(const Tensor& input, std::vector<int64_t> reps) -> Tensor {
         OpAttributes attrs;
         attrs["reps"] = shape_to_string(reps);
         std::vector<Tensor> inputs = {input};
-        return Dispatcher::dispatch("tile", inputs, attrs)[0];
+        return dispatch(OpId::Tile, inputs, attrs)[0];
     }
 
     // CPU implementation: tile entire tensor along each dimension
@@ -477,7 +478,7 @@ auto expand(const Tensor& input, std::vector<int64_t> shape) -> Tensor {
         attrs["shape"] = shape_to_string(shape);
 
         std::vector<Tensor> inputs = {input};
-        return Dispatcher::dispatch("expand", inputs, attrs)[0];
+        return dispatch(OpId::Expand, inputs, attrs)[0];
     }
 
     // CPU path: Manual implementation

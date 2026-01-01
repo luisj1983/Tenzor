@@ -1,5 +1,6 @@
 #include "tenzor/ops/reduction.hpp"
-#include "tenzor/backend/dispatch.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/ops/op_id.hpp"
 
 namespace tenzor {
 
@@ -8,7 +9,7 @@ auto sum(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> Tenso
     if (dim.has_value()) attrs["dim"] = std::to_string(*dim);
     attrs["keepdim"] = keepdim ? "1" : "0";
     std::vector<Tensor> inputs = {input};
-    return Dispatcher::dispatch("sum", inputs, attrs)[0];
+    return dispatch(OpId::Sum, inputs, attrs)[0];
 }
 
 auto mean(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> Tensor {
@@ -16,7 +17,7 @@ auto mean(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> Tens
     if (dim.has_value()) attrs["dim"] = std::to_string(*dim);
     attrs["keepdim"] = keepdim ? "1" : "0";
     std::vector<Tensor> inputs = {input};
-    return Dispatcher::dispatch("mean", inputs, attrs)[0];
+    return dispatch(OpId::Mean, inputs, attrs)[0];
 }
 
 auto max(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> Tensor {
@@ -24,7 +25,7 @@ auto max(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> Tenso
     if (dim.has_value()) attrs["dim"] = std::to_string(*dim);
     attrs["keepdim"] = keepdim ? "1" : "0";
     std::vector<Tensor> inputs = {input};
-    return Dispatcher::dispatch("max", inputs, attrs)[0];
+    return dispatch(OpId::Max, inputs, attrs)[0];
 }
 
 auto min(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> Tensor {
@@ -32,7 +33,7 @@ auto min(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> Tenso
     if (dim.has_value()) attrs["dim"] = std::to_string(*dim);
     attrs["keepdim"] = keepdim ? "1" : "0";
     std::vector<Tensor> inputs = {input};
-    return Dispatcher::dispatch("min", inputs, attrs)[0];
+    return dispatch(OpId::Min, inputs, attrs)[0];
 }
 
 auto argmax(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> Tensor {
@@ -40,7 +41,7 @@ auto argmax(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> Te
     if (dim.has_value()) attrs["dim"] = std::to_string(*dim);
     attrs["keepdim"] = keepdim ? "1" : "0";
     std::vector<Tensor> inputs = {input};
-    return Dispatcher::dispatch("argmax", inputs, attrs)[0];
+    return dispatch(OpId::ArgMax, inputs, attrs)[0];
 }
 
 auto argmin(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> Tensor {
@@ -48,7 +49,7 @@ auto argmin(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> Te
     if (dim.has_value()) attrs["dim"] = std::to_string(*dim);
     attrs["keepdim"] = keepdim ? "1" : "0";
     std::vector<Tensor> inputs = {input};
-    return Dispatcher::dispatch("argmin", inputs, attrs)[0];
+    return dispatch(OpId::ArgMin, inputs, attrs)[0];
 }
 
 auto argsort(const Tensor& input, int64_t dim, bool descending) -> Tensor {
@@ -56,7 +57,7 @@ auto argsort(const Tensor& input, int64_t dim, bool descending) -> Tensor {
     attrs["dim"] = std::to_string(dim);
     attrs["descending"] = descending ? "1" : "0";
     std::vector<Tensor> inputs = {input};
-    return Dispatcher::dispatch("argsort", inputs, attrs)[0];
+    return dispatch(OpId::ArgSort, inputs, attrs)[0];
 }
 
 auto prod(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> Tensor {
@@ -64,7 +65,7 @@ auto prod(const Tensor& input, std::optional<int64_t> dim, bool keepdim) -> Tens
     if (dim.has_value()) attrs["dim"] = std::to_string(*dim);
     attrs["keepdim"] = keepdim ? "1" : "0";
     std::vector<Tensor> inputs = {input};
-    return Dispatcher::dispatch("prod", inputs, attrs)[0];
+    return dispatch(OpId::Prod, inputs, attrs)[0];
 }
 
 auto std(const Tensor& input, std::optional<int64_t> dim, bool keepdim, bool unbiased) -> Tensor {
@@ -73,7 +74,7 @@ auto std(const Tensor& input, std::optional<int64_t> dim, bool keepdim, bool unb
     attrs["keepdim"] = keepdim ? "1" : "0";
     attrs["unbiased"] = unbiased ? "1" : "0";
     std::vector<Tensor> inputs = {input};
-    return Dispatcher::dispatch("std", inputs, attrs)[0];
+    return dispatch(OpId::Std, inputs, attrs)[0];
 }
 
 auto var(const Tensor& input, std::optional<int64_t> dim, bool keepdim, bool unbiased) -> Tensor {
@@ -82,7 +83,7 @@ auto var(const Tensor& input, std::optional<int64_t> dim, bool keepdim, bool unb
     attrs["keepdim"] = keepdim ? "1" : "0";
     attrs["unbiased"] = unbiased ? "1" : "0";
     std::vector<Tensor> inputs = {input};
-    return Dispatcher::dispatch("var", inputs, attrs)[0];
+    return dispatch(OpId::Var, inputs, attrs)[0];
 }
 
 auto norm(const Tensor& input, float p, std::optional<int64_t> dim, bool keepdim) -> Tensor {
@@ -93,7 +94,7 @@ auto norm(const Tensor& input, float p, std::optional<int64_t> dim, bool keepdim
     if (dim.has_value()) attrs["dim"] = std::to_string(*dim);
     attrs["keepdim"] = keepdim ? "1" : "0";
     std::vector<Tensor> inputs = {input};
-    return Dispatcher::dispatch("norm", inputs, attrs)[0];
+    return dispatch(OpId::Norm, inputs, attrs)[0];
 }
 
 } // namespace tenzor

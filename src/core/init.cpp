@@ -1,8 +1,10 @@
 #include "tenzor/tenzor.hpp"
 #include "tenzor/backend/registry.hpp"
 #include "tenzor/backend/loader.hpp"
+#include "tenzor/backend/dispatch_table.hpp"
 #include <iostream>
 #include <filesystem>
+#include <dlfcn.h>
 
 namespace tenzor {
 
@@ -53,6 +55,36 @@ auto initialize() -> void {
 
     // Now cpu_backend_ptr points to the registered backend
     auto* cpu_backend = cpu_backend_ptr;
+
+    // =========================================================================
+    // NEW O(1) DISPATCH TABLE REGISTRATION
+    // =========================================================================
+    // Register CPU backend with the dispatch table registry
+    DispatchTableRegistry::register_backend(Device::Type::CPU, cpu_backend);
+
+    // Populate dispatch table with direct kernel function pointers
+    auto& cpu_table = DispatchTableRegistry::get_table(Device::Type::CPU);
+
+    // Load the register_kernels function from the backend shared library
+    void* handle = dlopen(cpu_backend_path.c_str(), RTLD_NOW | RTLD_NOLOAD);
+    if (handle) {
+        using RegisterFn = void(*)(BackendDispatchTable*);
+        auto register_fn = reinterpret_cast<RegisterFn>(dlsym(handle, "register_kernels"));
+        if (register_fn) {
+            register_fn(&cpu_table);
+            std::cout << "CPU dispatch table initialized with O(1) lookup" << std::endl;
+        } else {
+            std::cerr << "Warning: Could not find register_kernels in CPU backend" << std::endl;
+        }
+        dlclose(handle);
+    } else {
+        std::cerr << "Warning: Could not reopen CPU backend for kernel registration" << std::endl;
+    }
+
+    // =========================================================================
+    // LEGACY DISPATCH REGISTRATION (for backwards compatibility during migration)
+    // TODO: Remove this section once all code uses OpId-based dispatch
+    // =========================================================================
 
     // Register all CPU operations with the OperationRegistry
     auto& registry = operation_registry();

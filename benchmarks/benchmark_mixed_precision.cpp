@@ -45,7 +45,7 @@ public:
         register_module("fc3", fc3_);
     }
 
-    auto forward(const Variable& x) -> Variable override {
+    auto forward_impl(const Variable& x) -> Variable override {
         auto h = relu(fc1_->forward(x));
         h = relu(fc2_->forward(h));
         return fc3_->forward(h);
@@ -447,17 +447,17 @@ void benchmark_int8_inference() {
             auto input = randn({cfg.batch, cfg.in_features}, DType::Float32);
 
             // Quantize input
-            float scale = 127.0f / input.abs().max().item<float>();
+            float scale = 127.0f / max(abs(input)).item<float>();
 
             Benchmark bench("  Quantize+Dequant", WARMUP_ITERATIONS, BENCHMARK_ITERATIONS);
             auto result = bench.run([&]() {
                 // Simulate quantization overhead
-                auto scaled = mul(input, scale);
+                auto scaled = input * scale;
                 auto rounded = round(scaled);
                 auto clamped = clamp(rounded, -127.0f, 127.0f);
 
                 // Dequantize
-                auto dequant = div(clamped, scale);
+                auto dequant = clamped / scale;
                 volatile void* ptr = dequant.data_ptr();
                 (void)ptr;
             });

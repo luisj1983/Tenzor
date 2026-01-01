@@ -1,5 +1,6 @@
 #include "tenzor/nn/activations/activations.hpp"
-#include "tenzor/backend/dispatch.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/ops/op_id.hpp"
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/autograd/function.hpp"
 #include "tenzor/ops/creation.hpp"
@@ -21,7 +22,7 @@ public:
         // Use the backend's native relu_backward kernel for efficiency
         // This avoids CPU transfers that happen when using comparison + dtype conversion
         std::vector<Tensor> backward_inputs = {grad_output, input};
-        auto grad_input = Dispatcher::dispatch("relu_backward", backward_inputs)[0];
+        auto grad_input = dispatch(OpId::ReLUBackward, backward_inputs)[0];
 
         return {grad_input};
     }
@@ -97,7 +98,7 @@ public:
 
         // Create constant tensors
         std::vector<Tensor> inner_vec = {inner * sqrt_2_over_pi};
-        auto tanh_inner = Dispatcher::dispatch("tanh", inner_vec)[0];
+        auto tanh_inner = dispatch(OpId::Tanh, inner_vec)[0];
 
         auto one_tensor = ones(shape_vec, input.dtype(), input.device());
         auto half_tensor = ones(shape_vec, input.dtype(), input.device()) * 0.5;
@@ -135,7 +136,7 @@ public:
 
         // Compute sigmoid(x)
         std::vector<Tensor> sig_vec = {input};
-        auto sigmoid_x = Dispatcher::dispatch("sigmoid", sig_vec)[0];
+        auto sigmoid_x = dispatch(OpId::Sigmoid, sig_vec)[0];
 
         auto one_tensor = ones(shape_vec, input.dtype(), input.device());
         auto one_minus_sigmoid = one_tensor - sigmoid_x;
@@ -228,15 +229,15 @@ public:
 
         // Compute softplus(x) = ln(1 + exp(x))
         std::vector<Tensor> sp_vec = {input};
-        auto softplus_x = Dispatcher::dispatch("softplus", sp_vec)[0];
+        auto softplus_x = dispatch(OpId::Softplus, sp_vec)[0];
 
         // Compute tanh(softplus(x))
         std::vector<Tensor> tanh_vec = {softplus_x};
-        auto tanh_sp = Dispatcher::dispatch("tanh", tanh_vec)[0];
+        auto tanh_sp = dispatch(OpId::Tanh, tanh_vec)[0];
 
         // Compute sigmoid(x)
         std::vector<Tensor> sig_vec = {input};
-        auto sigmoid_x = Dispatcher::dispatch("sigmoid", sig_vec)[0];
+        auto sigmoid_x = dispatch(OpId::Sigmoid, sig_vec)[0];
 
         auto one_tensor = ones(shape_vec, input.dtype(), input.device());
 
@@ -286,13 +287,13 @@ auto Softmax::forward_impl(const Variable& input) -> Variable {
 auto relu(const Variable& input) -> Variable {
     if (!input.requires_grad() || !is_grad_enabled()) {
         std::vector<Tensor> inputs = {input.tensor()};
-        auto result = Dispatcher::dispatch("relu", inputs)[0];
+        auto result = dispatch(OpId::ReLU, inputs)[0];
         return Variable(result, false);
     }
 
     // Compute forward
     std::vector<Tensor> inputs_vec = {input.tensor()};
-    auto result_tensor = Dispatcher::dispatch("relu", inputs_vec)[0];
+    auto result_tensor = dispatch(OpId::ReLU, inputs_vec)[0];
 
     // Set up autograd
     auto grad_fn = std::make_shared<ReLUBackward>();
@@ -318,13 +319,13 @@ auto relu(const Variable& input) -> Variable {
 auto sigmoid(const Variable& input) -> Variable {
     if (!input.requires_grad() || !is_grad_enabled()) {
         std::vector<Tensor> inputs = {input.tensor()};
-        auto result = Dispatcher::dispatch("sigmoid", inputs)[0];
+        auto result = dispatch(OpId::Sigmoid, inputs)[0];
         return Variable(result, false);
     }
 
     // Compute forward
     std::vector<Tensor> inputs_vec = {input.tensor()};
-    auto result_tensor = Dispatcher::dispatch("sigmoid", inputs_vec)[0];
+    auto result_tensor = dispatch(OpId::Sigmoid, inputs_vec)[0];
 
     // Set up autograd
     auto grad_fn = std::make_shared<SigmoidBackward>();
@@ -349,13 +350,13 @@ auto sigmoid(const Variable& input) -> Variable {
 auto tanh(const Variable& input) -> Variable {
     if (!input.requires_grad() || !is_grad_enabled()) {
         std::vector<Tensor> inputs = {input.tensor()};
-        auto result = Dispatcher::dispatch("tanh", inputs)[0];
+        auto result = dispatch(OpId::Tanh, inputs)[0];
         return Variable(result, false);
     }
 
     // Compute forward
     std::vector<Tensor> inputs_vec = {input.tensor()};
-    auto result_tensor = Dispatcher::dispatch("tanh", inputs_vec)[0];
+    auto result_tensor = dispatch(OpId::Tanh, inputs_vec)[0];
 
     // Set up autograd
     auto grad_fn = std::make_shared<TanhBackward>();
@@ -381,20 +382,20 @@ auto leaky_relu(const Variable& input, double negative_slope) -> Variable {
     OpAttributes attrs;
     attrs["alpha"] = std::to_string(static_cast<float>(negative_slope));
     std::vector<Tensor> inputs = {input.tensor()};
-    auto result = Dispatcher::dispatch("leaky_relu", inputs, attrs)[0];
+    auto result = dispatch(OpId::LeakyReLU, inputs, attrs)[0];
     return Variable(result, input.requires_grad());
 }
 
 auto gelu(const Variable& input) -> Variable {
     if (!input.requires_grad() || !is_grad_enabled()) {
         std::vector<Tensor> inputs = {input.tensor()};
-        auto result = Dispatcher::dispatch("gelu", inputs)[0];
+        auto result = dispatch(OpId::Gelu, inputs)[0];
         return Variable(result, false);
     }
 
     // Compute forward
     std::vector<Tensor> inputs_vec = {input.tensor()};
-    auto result_tensor = Dispatcher::dispatch("gelu", inputs_vec)[0];
+    auto result_tensor = dispatch(OpId::Gelu, inputs_vec)[0];
 
     // Set up autograd
     auto grad_fn = std::make_shared<GeLUBackward>();
@@ -448,7 +449,7 @@ auto elu(const Variable& input, double alpha) -> Variable {
         OpAttributes attrs;
         attrs["alpha"] = std::to_string(static_cast<float>(alpha));
         std::vector<Tensor> inputs = {input.tensor()};
-        auto result = Dispatcher::dispatch("elu", inputs, attrs)[0];
+        auto result = dispatch(OpId::Elu, inputs, attrs)[0];
         return Variable(result, false);
     }
 
@@ -456,7 +457,7 @@ auto elu(const Variable& input, double alpha) -> Variable {
     OpAttributes attrs;
     attrs["alpha"] = std::to_string(static_cast<float>(alpha));
     std::vector<Tensor> inputs_vec = {input.tensor()};
-    auto result_tensor = Dispatcher::dispatch("elu", inputs_vec, attrs)[0];
+    auto result_tensor = dispatch(OpId::Elu, inputs_vec, attrs)[0];
 
     // Set up autograd
     auto grad_fn = std::make_shared<ELUBackward>(alpha);
@@ -485,13 +486,13 @@ auto SELU::forward_impl(const Variable& input) -> Variable {
 auto selu(const Variable& input) -> Variable {
     if (!input.requires_grad() || !is_grad_enabled()) {
         std::vector<Tensor> inputs = {input.tensor()};
-        auto result = Dispatcher::dispatch("selu", inputs)[0];
+        auto result = dispatch(OpId::Selu, inputs)[0];
         return Variable(result, false);
     }
 
     // Compute forward
     std::vector<Tensor> inputs_vec = {input.tensor()};
-    auto result_tensor = Dispatcher::dispatch("selu", inputs_vec)[0];
+    auto result_tensor = dispatch(OpId::Selu, inputs_vec)[0];
 
     // Set up autograd
     auto grad_fn = std::make_shared<SELUBackward>();
@@ -520,13 +521,13 @@ auto Swish::forward_impl(const Variable& input) -> Variable {
 auto swish(const Variable& input) -> Variable {
     if (!input.requires_grad() || !is_grad_enabled()) {
         std::vector<Tensor> inputs = {input.tensor()};
-        auto result = Dispatcher::dispatch("swish", inputs)[0];
+        auto result = dispatch(OpId::Swish, inputs)[0];
         return Variable(result, false);
     }
 
     // Compute forward
     std::vector<Tensor> inputs_vec = {input.tensor()};
-    auto result_tensor = Dispatcher::dispatch("swish", inputs_vec)[0];
+    auto result_tensor = dispatch(OpId::Swish, inputs_vec)[0];
 
     // Set up autograd
     auto grad_fn = std::make_shared<SwishBackward>();
@@ -555,13 +556,13 @@ auto Mish::forward_impl(const Variable& input) -> Variable {
 auto mish(const Variable& input) -> Variable {
     if (!input.requires_grad() || !is_grad_enabled()) {
         std::vector<Tensor> inputs = {input.tensor()};
-        auto result = Dispatcher::dispatch("mish", inputs)[0];
+        auto result = dispatch(OpId::Mish, inputs)[0];
         return Variable(result, false);
     }
 
     // Compute forward
     std::vector<Tensor> inputs_vec = {input.tensor()};
-    auto result_tensor = Dispatcher::dispatch("mish", inputs_vec)[0];
+    auto result_tensor = dispatch(OpId::Mish, inputs_vec)[0];
 
     // Set up autograd
     auto grad_fn = std::make_shared<MishBackward>();
@@ -590,7 +591,7 @@ auto relu_(Tensor& input) -> Tensor& {
     }
 
     std::vector<Tensor> inputs = {input};
-    auto result = Dispatcher::dispatch("relu_inplace", inputs);
+    auto result = dispatch(OpId::ReLUInplace, inputs);
 
     // Result should be same tensor modified in-place
     if (result[0].data<float>() != input.data<float>()) {
@@ -606,7 +607,7 @@ auto sigmoid_(Tensor& input) -> Tensor& {
     }
 
     std::vector<Tensor> inputs = {input};
-    auto result = Dispatcher::dispatch("sigmoid_inplace", inputs);
+    auto result = dispatch(OpId::SigmoidInplace, inputs);
 
     // Result should be same tensor modified in-place
     if (result[0].data<float>() != input.data<float>()) {
@@ -622,7 +623,7 @@ auto tanh_(Tensor& input) -> Tensor& {
     }
 
     std::vector<Tensor> inputs = {input};
-    auto result = Dispatcher::dispatch("tanh_inplace", inputs);
+    auto result = dispatch(OpId::TanhInplace, inputs);
 
     // Result should be same tensor modified in-place
     if (result[0].data<float>() != input.data<float>()) {
@@ -640,7 +641,7 @@ auto leaky_relu_(Tensor& input, double negative_slope) -> Tensor& {
     std::vector<Tensor> inputs = {input};
     OpAttributes attrs;
     attrs["negative_slope"] = negative_slope;
-    auto result = Dispatcher::dispatch("leaky_relu_inplace", inputs, attrs);
+    auto result = dispatch(OpId::LeakyReLUInplace, inputs, attrs);
 
     // Result should be same tensor modified in-place
     if (result[0].data<float>() != input.data<float>()) {
@@ -656,7 +657,7 @@ auto gelu_(Tensor& input) -> Tensor& {
     }
 
     std::vector<Tensor> inputs = {input};
-    auto result = Dispatcher::dispatch("gelu_inplace", inputs);
+    auto result = dispatch(OpId::GeluInplace, inputs);
 
     // Result should be same tensor modified in-place
     if (result[0].data<float>() != input.data<float>()) {

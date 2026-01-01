@@ -4,7 +4,8 @@
  */
 
 #include "tenzor/ops/vision.hpp"
-#include "tenzor/backend/dispatch.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/ops/op_id.hpp"
 #include <stdexcept>
 #include <algorithm>
 
@@ -41,7 +42,7 @@ auto unfold(const Tensor& input,
 
     // Dispatch to appropriate backend
     std::vector<Tensor> inputs = {input};
-    return Dispatcher::dispatch("unfold", inputs, attrs)[0];
+    return dispatch(OpId::Unfold, inputs, attrs)[0];
 }
 
 auto fold(const Tensor& input,
@@ -99,7 +100,7 @@ auto fold(const Tensor& input,
 
     // Dispatch to appropriate backend
     std::vector<Tensor> inputs = {input};
-    return Dispatcher::dispatch("fold", inputs, attrs)[0];
+    return dispatch(OpId::Fold, inputs, attrs)[0];
 }
 
 auto interpolate(const Tensor& input,
@@ -146,7 +147,7 @@ auto interpolate(const Tensor& input,
 
     // Dispatch to appropriate backend
     std::vector<Tensor> inputs = {input};
-    return Dispatcher::dispatch("interpolate", inputs, attrs)[0];
+    return dispatch(OpId::Interpolate, inputs, attrs)[0];
 }
 
 } // namespace tenzor::ops

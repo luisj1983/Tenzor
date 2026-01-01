@@ -123,8 +123,34 @@ add_custom_command(
     VERBATIM
 )
 
-# Create ROCm backend shared library using the manually compiled object
-add_library(tenzor_backend_rocm SHARED ${ROCM_BACKEND_OBJ})
+# Manually compile rocm_kernel_registry.cpp (also pure C++, no HIP flags)
+set(ROCM_KERNEL_REGISTRY_OBJ "${CMAKE_CURRENT_BINARY_DIR}/rocm_kernel_registry.cpp.o")
+add_custom_command(
+    OUTPUT ${ROCM_KERNEL_REGISTRY_OBJ}
+    COMMAND ${CMAKE_CXX_COMPILER}
+        -c ${CMAKE_CURRENT_SOURCE_DIR}/rocm_kernel_registry.cpp
+        -o ${ROCM_KERNEL_REGISTRY_OBJ}
+        -std=c++20 -fPIC
+        -O3 -DNDEBUG
+        -Wall -Wextra -pedantic
+        -march=native
+        -Wno-unused-parameter -Wno-unused-variable
+        -fopenmp
+        -I${CMAKE_SOURCE_DIR}/include
+        -isystem /opt/rocm/include
+        -DTENZOR_HAS_MIOPEN
+        -DTENZOR_HAS_ROCBLAS
+        -DTENZOR_ROCM_BACKEND
+        -DUSE_PROF_API=1
+        -D__HIP_PLATFORM_AMD__=1
+        -Dtenzor_backend_rocm_EXPORTS
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/rocm_kernel_registry.cpp
+    COMMENT "Compiling rocm_kernel_registry.cpp (pure C++, no HIP flags)"
+    VERBATIM
+)
+
+# Create ROCm backend shared library using the manually compiled objects
+add_library(tenzor_backend_rocm SHARED ${ROCM_BACKEND_OBJ} ${ROCM_KERNEL_REGISTRY_OBJ})
 
 # Set target properties
 set_target_properties(tenzor_backend_rocm PROPERTIES

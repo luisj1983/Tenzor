@@ -3,8 +3,8 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/autograd/function.hpp"
-#include "tenzor/backend/dispatch.hpp"
-#include "tenzor/backend/registry.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/ops/op_id.hpp"
 #include <cmath>
 #include <sstream>
 #include <iomanip>
@@ -153,7 +153,7 @@ auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
         // Training mode: compute batch statistics using backend dispatch
         OpAttributes mean_var_attrs;
         std::vector<Tensor> mean_var_inputs = {input_work};
-        std::vector<Tensor> mean_var_results = Dispatcher::dispatch("batchnorm2d_mean_var", mean_var_inputs, mean_var_attrs);
+        std::vector<Tensor> mean_var_results = dispatch(OpId::BatchNorm2dMeanVar, mean_var_inputs, mean_var_attrs);
         batch_mean = mean_var_results[0];
         batch_var = mean_var_results[1];
 
@@ -174,7 +174,7 @@ auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
             momentum_ss << std::scientific << std::setprecision(9) << static_cast<float>(momentum_);
             update_attrs["momentum"] = momentum_ss.str();
             std::vector<Tensor> update_inputs = {rm_var_ptr->tensor(), rv_var_ptr->tensor(), batch_mean, unbiased_var};
-            std::vector<Tensor> updated_stats = Dispatcher::dispatch("batchnorm2d_update_running_stats", update_inputs, update_attrs);
+            std::vector<Tensor> updated_stats = dispatch(OpId::BatchNorm2dUpdateRunningStats, update_inputs, update_attrs);
 
             rm_var_ptr->tensor() = updated_stats[0];
             rv_var_ptr->tensor() = updated_stats[1];
@@ -204,12 +204,12 @@ auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
         auto& bias_ptr = parameters_["bias"];
 
         std::vector<Tensor> forward_inputs = {input_work, batch_mean, batch_var, weight_ptr->tensor(), bias_ptr->tensor()};
-        std::vector<Tensor> forward_results = Dispatcher::dispatch("batchnorm2d_forward_affine", forward_inputs, forward_attrs);
+        std::vector<Tensor> forward_results = dispatch(OpId::BatchNorm2dForwardAffine, forward_inputs, forward_attrs);
         output = forward_results[0];
     } else {
         // Use non-affine forward kernel: output = (x - mean) / sqrt(var + eps)
         std::vector<Tensor> forward_inputs = {input_work, batch_mean, batch_var};
-        std::vector<Tensor> forward_results = Dispatcher::dispatch("batchnorm2d_forward", forward_inputs, forward_attrs);
+        std::vector<Tensor> forward_results = dispatch(OpId::BatchNorm2dForward, forward_inputs, forward_attrs);
         output = forward_results[0];
     }
 

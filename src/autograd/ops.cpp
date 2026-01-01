@@ -3,7 +3,8 @@
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/transform.hpp"
-#include "tenzor/backend/dispatch.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/ops/op_id.hpp"
 
 namespace tenzor {
 
@@ -173,7 +174,7 @@ auto softmax(const Variable& input, int64_t dim) -> Variable {
         OpAttributes attrs;
         attrs["dim"] = std::to_string(dim);
         std::vector<Tensor> inputs = {input.tensor()};
-        auto result = Dispatcher::dispatch("softmax", inputs, attrs)[0];
+        auto result = dispatch(OpId::Softmax, inputs, attrs)[0];
         return Variable(result, false);
     }
 
@@ -183,7 +184,7 @@ auto softmax(const Variable& input, int64_t dim) -> Variable {
     OpAttributes attrs;
     attrs["dim"] = std::to_string(dim);
     std::vector<Tensor> input_tensors = {input.tensor()};
-    auto result_tensor = Dispatcher::dispatch("softmax", input_tensors, attrs)[0];
+    auto result_tensor = dispatch(OpId::Softmax, input_tensors, attrs)[0];
 
     grad_fn->save_for_backward({result_tensor});
 
@@ -213,7 +214,7 @@ auto log_softmax(const Variable& input, int64_t dim) -> Variable {
         OpAttributes attrs;
         attrs["dim"] = std::to_string(dim);
         std::vector<Tensor> inputs = {input.tensor()};
-        auto result = Dispatcher::dispatch("log_softmax", inputs, attrs)[0];
+        auto result = dispatch(OpId::LogSoftmax, inputs, attrs)[0];
         return Variable(result, false);
     }
 
@@ -223,7 +224,7 @@ auto log_softmax(const Variable& input, int64_t dim) -> Variable {
     OpAttributes attrs;
     attrs["dim"] = std::to_string(dim);
     std::vector<Tensor> input_tensors = {input.tensor()};
-    auto result_tensor = Dispatcher::dispatch("log_softmax", input_tensors, attrs)[0];
+    auto result_tensor = dispatch(OpId::LogSoftmax, input_tensors, attrs)[0];
 
     grad_fn->save_for_backward({result_tensor});
 

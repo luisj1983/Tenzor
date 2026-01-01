@@ -15,6 +15,7 @@ set(BENCHMARK_TARGETS
     benchmark_models
     benchmark_embeddings
     benchmark_rnn
+    benchmark_dispatch
 )
 
 # benchmark_ops - Matrix and tensor operations
@@ -71,6 +72,11 @@ target_include_directories(benchmark_embeddings PRIVATE ${CMAKE_SOURCE_DIR}/incl
 add_executable(benchmark_rnn benchmark_rnn.cpp)
 target_link_libraries(benchmark_rnn PRIVATE tenzor_core)
 target_include_directories(benchmark_rnn PRIVATE ${CMAKE_SOURCE_DIR}/include)
+
+# benchmark_dispatch - Dispatch overhead measurement
+add_executable(benchmark_dispatch benchmark_dispatch.cpp)
+target_link_libraries(benchmark_dispatch PRIVATE tenzor_core)
+target_include_directories(benchmark_dispatch PRIVATE ${CMAKE_SOURCE_DIR}/include)
 
 # Set C++ standard for all benchmarks
 foreach(target ${BENCHMARK_TARGETS})
