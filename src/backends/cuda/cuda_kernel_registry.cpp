@@ -9,6 +9,7 @@
 #include "tenzor/backend/dispatch_table.hpp"
 #include "tenzor/backend/kernel_registry.hpp"
 #include "tenzor/ops/op_id.hpp"
+#include "tenzor/ops/creation.hpp"
 #include <cuda_runtime.h>
 #include <cstdlib>
 #include <charconv>
@@ -466,6 +467,14 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         float value = parse_attr<float>(attrs, "value", 0.0f);
         return std::vector<Tensor>{cuda::fill_kernel(inputs[0], value, get_cuda_stream(attrs))};
     });
+    table.register_kernel(OpId::Reshape, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        auto shape = parse_int_list(attrs, "shape");
+        return std::vector<Tensor>{cuda::reshape_kernel(inputs[0], shape, get_cuda_stream(attrs))};
+    });
+    table.register_kernel(OpId::Expand, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        auto shape = parse_int_list(attrs, "shape");
+        return std::vector<Tensor>{cuda::expand_kernel(inputs[0], shape, static_cast<void*>(get_cuda_stream(attrs)))};
+    });
 
     // =========================================================================
     // Indexing Operations
@@ -491,6 +500,31 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     });
     table.register_kernel(OpId::Where, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         return std::vector<Tensor>{cuda::where_kernel(inputs[0], inputs[1], inputs[2], get_cuda_stream(attrs))};
+    });
+
+    // =========================================================================
+    // Normalization Operations
+    // =========================================================================
+    table.register_kernel(OpId::BatchNorm2dMeanVar, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        Tensor mean = tenzor::zeros({inputs[0].shape()[1]}, inputs[0].dtype(), inputs[0].device());
+        Tensor variance = tenzor::zeros({inputs[0].shape()[1]}, inputs[0].dtype(), inputs[0].device());
+        cuda::batchnorm2d_mean_var(inputs[0], mean, variance, get_cuda_stream(attrs));
+        return std::vector<Tensor>{mean, variance};
+    });
+    table.register_kernel(OpId::BatchNorm2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        float epsilon = parse_attr<float>(attrs, "epsilon", 1e-5f);
+        return std::vector<Tensor>{cuda::batchnorm2d_forward(inputs[0], inputs[1], inputs[2], epsilon, get_cuda_stream(attrs))};
+    });
+    table.register_kernel(OpId::BatchNorm2dForwardAffine, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        float epsilon = parse_attr<float>(attrs, "epsilon", 1e-5f);
+        return std::vector<Tensor>{cuda::batchnorm2d_forward_affine(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], epsilon, get_cuda_stream(attrs))};
+    });
+    table.register_kernel(OpId::BatchNorm2dUpdateRunningStats, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        float momentum = parse_attr<float>(attrs, "momentum", 0.1f);
+        Tensor running_mean = inputs[0];
+        Tensor running_var = inputs[1];
+        cuda::batchnorm2d_update_running_stats(running_mean, running_var, inputs[2], inputs[3], momentum, get_cuda_stream(attrs));
+        return std::vector<Tensor>{running_mean, running_var};
     });
 }
 

@@ -135,14 +135,37 @@ elseif(CMAKE_CXX_COMPILER_ID MATCHES "MSVC")
     )
 endif()
 
-# Optional: Link against optimized BLAS library
-find_package(BLAS QUIET)
-if(BLAS_FOUND)
-    target_link_libraries(tenzor_backend_cpu PRIVATE ${BLAS_LIBRARIES})
-    target_compile_definitions(tenzor_backend_cpu PRIVATE TENZOR_HAS_BLAS)
-    message(STATUS "CPU Backend: BLAS support enabled")
+# Optional: Intel MKL for high-performance GEMM
+# MKL provides highly optimized SGEMM/DGEMM that can be 5-10x faster
+# IMPORTANT: MKL is found FIRST to ensure we use GNU threading (not Intel OpenMP)
+# to avoid conflicts with GCC's libgomp. If we let find_package(BLAS) find MKL first,
+# it uses intel_thread which links libiomp5, causing dual OpenMP runtime issues.
+list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
+include(${CMAKE_SOURCE_DIR}/cmake/FindMKL.cmake OPTIONAL RESULT_VARIABLE MKL_MODULE_FOUND)
+if(MKL_MODULE_FOUND AND MKL_FOUND)
+    target_link_libraries(tenzor_backend_cpu PRIVATE ${MKL_LIBRARIES})
+    target_include_directories(tenzor_backend_cpu PRIVATE ${MKL_INCLUDE_DIRS})
+    target_compile_definitions(tenzor_backend_cpu PRIVATE TENZOR_USE_MKL TENZOR_HAS_BLAS)
+    message(STATUS "CPU Backend: Intel MKL enabled for optimized GEMM")
 else()
-    message(STATUS "CPU Backend: BLAS not found, using built-in matrix operations")
+    # Fallback: Link against generic BLAS library (OpenBLAS, etc.)
+    find_package(BLAS QUIET)
+    if(BLAS_FOUND)
+        target_link_libraries(tenzor_backend_cpu PRIVATE ${BLAS_LIBRARIES})
+        target_compile_definitions(tenzor_backend_cpu PRIVATE TENZOR_HAS_BLAS)
+        message(STATUS "CPU Backend: BLAS support enabled")
+    else()
+        message(STATUS "CPU Backend: BLAS not found, using built-in matrix operations")
+    endif()
+endif()
+
+# Optional: Intel oneDNN for optimized DNN primitives (Conv, BatchNorm, etc.)
+include(${CMAKE_SOURCE_DIR}/cmake/FindOneDNN.cmake OPTIONAL RESULT_VARIABLE ONEDNN_MODULE_FOUND)
+if(ONEDNN_MODULE_FOUND AND ONEDNN_FOUND)
+    target_link_libraries(tenzor_backend_cpu PRIVATE ${ONEDNN_LIBRARIES})
+    target_include_directories(tenzor_backend_cpu PRIVATE ${ONEDNN_INCLUDE_DIRS})
+    target_compile_definitions(tenzor_backend_cpu PRIVATE TENZOR_USE_ONEDNN)
+    message(STATUS "CPU Backend: Intel oneDNN enabled for optimized DNN primitives")
 endif()
 
 # Installation

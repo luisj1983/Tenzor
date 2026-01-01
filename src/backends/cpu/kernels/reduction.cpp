@@ -11,11 +11,30 @@
 namespace tenzor {
 namespace cpu {
 
+// Sentinel value for full reduction across all dimensions
+static constexpr int64_t REDUCE_ALL = INT64_MIN;
+
+// Helper to normalize negative dimension index
+static auto normalize_dim(int64_t dim, int64_t ndim) -> int64_t {
+    if (dim == REDUCE_ALL) {
+        return REDUCE_ALL;
+    }
+    if (dim < 0) {
+        dim += ndim;
+    }
+    return dim;
+}
+
 // Helper to compute output shape for reduction
 static auto compute_reduction_shape(const std::vector<int64_t>& input_shape,
                                     int64_t dim,
                                     bool keepdim) -> std::vector<int64_t> {
-    if (dim < 0) {
+    const int64_t ndim = static_cast<int64_t>(input_shape.size());
+
+    // Normalize negative dimension
+    dim = normalize_dim(dim, ndim);
+
+    if (dim == REDUCE_ALL) {
         // Full reduction - return scalar or [1,1,...] if keepdim
         if (keepdim) {
             return std::vector<int64_t>(input_shape.size(), 1);
@@ -147,6 +166,10 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
     const auto& device = input.device();
     const auto& input_shape = input.shape();
     const auto& input_strides = input.strides();
+    const int64_t ndim = static_cast<int64_t>(input_shape.size());
+
+    // Normalize negative dimension
+    dim = normalize_dim(dim, ndim);
 
     // Compute output shape
     auto output_shape = compute_reduction_shape(
@@ -162,7 +185,7 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
             auto* input_data = input.data<Float16>();
             auto* output_data = output.data<Float16>();
 
-            if (dim < 0) {
+            if (dim == REDUCE_ALL) {
                 // Full reduction - compute in Float32 for precision
                 const int64_t n = input.numel();
                 float sum = 0.0f;
@@ -193,11 +216,11 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
                 output_data[0] = Float16(sum);
             } else {
                 // Dimensional reduction - compute in Float32
-                const int64_t ndim = input_shape.size();
+                const int64_t shape_ndim = static_cast<int64_t>(input_shape.size());
                 const int64_t dim_size = input_shape[dim];
 
                 int64_t output_size = 1;
-                for (int64_t i = 0; i < ndim; i++) {
+                for (int64_t i = 0; i < shape_ndim; i++) {
                     if (i != dim) {
                         output_size *= input_shape[i];
                     }
@@ -207,10 +230,10 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
 
                 #pragma omp parallel for if(output_size > 1000)
                 for (int64_t out_idx = 0; out_idx < output_size; out_idx++) {
-                    std::vector<int64_t> indices(ndim, 0);
+                    std::vector<int64_t> indices(shape_ndim, 0);
                     int64_t tmp = out_idx;
 
-                    for (int64_t d = 0; d < ndim; d++) {
+                    for (int64_t d = 0; d < shape_ndim; d++) {
                         if (d == dim) continue;
                         int64_t size = input_shape[d];
                         indices[d] = tmp % size;
@@ -222,7 +245,7 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
                     for (int64_t i = 0; i < dim_size; i++) {
                         indices[dim] = i;
                         int64_t in_idx = 0;
-                        for (int64_t d = 0; d < ndim; d++) {
+                        for (int64_t d = 0; d < shape_ndim; d++) {
                             in_idx += indices[d] * input_strides[d];
                         }
                         float val = static_cast<float>(input_data[in_idx]);
@@ -240,7 +263,7 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
             auto* input_data = input.data<float>();
             auto* output_data = output.data<float>();
 
-            if (dim < 0) {
+            if (dim == REDUCE_ALL) {
                 // Full reduction
                 output_data[0] = sum_impl(input_data, input.numel());
             } else {
@@ -255,7 +278,7 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
             auto* input_data = input.data<double>();
             auto* output_data = output.data<double>();
 
-            if (dim < 0) {
+            if (dim == REDUCE_ALL) {
                 output_data[0] = sum_impl(input_data, input.numel());
             } else {
                 sum_along_dim(input_data, output_data,
@@ -269,7 +292,7 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
             auto* input_data = input.data<int32_t>();
             auto* output_data = output.data<int32_t>();
 
-            if (dim < 0) {
+            if (dim == REDUCE_ALL) {
                 output_data[0] = sum_impl(input_data, input.numel());
             } else {
                 sum_along_dim(input_data, output_data,
@@ -283,7 +306,7 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
             auto* input_data = input.data<int64_t>();
             auto* output_data = output.data<int64_t>();
 
-            if (dim < 0) {
+            if (dim == REDUCE_ALL) {
                 output_data[0] = sum_impl(input_data, input.numel());
             } else {
                 sum_along_dim(input_data, output_data,
@@ -302,18 +325,22 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
 
 auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
     const auto dtype = input.dtype();
+    const int64_t ndim = input.ndim();
 
     // Mean only supports floating point types
     if (dtype != DType::Float16 && dtype != DType::Float32 && dtype != DType::Float64) {
         throw std::runtime_error("mean: only Float16, Float32, and Float64 are supported");
     }
 
+    // Normalize negative dimension
+    dim = normalize_dim(dim, ndim);
+
     // Compute sum first
     auto sum_result = sum_kernel(input, dim, keepdim);
 
     // Compute the count for averaging
     int64_t count;
-    if (dim < 0) {
+    if (dim == REDUCE_ALL) {
         count = input.numel();
     } else {
         count = input.shape()[dim];
@@ -439,6 +466,10 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
     const auto& device = input.device();
     const auto& input_shape = input.shape();
     const auto& input_strides = input.strides();
+    const int64_t ndim = static_cast<int64_t>(input_shape.size());
+
+    // Normalize negative dimension
+    dim = normalize_dim(dim, ndim);
 
     auto output_shape = compute_reduction_shape(
         std::vector<int64_t>(input_shape.begin(), input_shape.end()),
@@ -452,7 +483,7 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
             auto* input_data = input.data<float>();
             auto* output_data = output.data<float>();
 
-            if (dim < 0) {
+            if (dim == REDUCE_ALL) {
                 output_data[0] = max_impl(input_data, input.numel());
             } else {
                 max_along_dim(input_data, output_data,
@@ -466,7 +497,7 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
             auto* input_data = input.data<double>();
             auto* output_data = output.data<double>();
 
-            if (dim < 0) {
+            if (dim == REDUCE_ALL) {
                 output_data[0] = max_impl(input_data, input.numel());
             } else {
                 max_along_dim(input_data, output_data,
@@ -480,7 +511,7 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
             auto* input_data = input.data<int32_t>();
             auto* output_data = output.data<int32_t>();
 
-            if (dim < 0) {
+            if (dim == REDUCE_ALL) {
                 output_data[0] = max_impl(input_data, input.numel());
             } else {
                 max_along_dim(input_data, output_data,
@@ -494,7 +525,7 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
             auto* input_data = input.data<int64_t>();
             auto* output_data = output.data<int64_t>();
 
-            if (dim < 0) {
+            if (dim == REDUCE_ALL) {
                 output_data[0] = max_impl(input_data, input.numel());
             } else {
                 max_along_dim(input_data, output_data,
@@ -598,6 +629,10 @@ auto min_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
     const auto& device = input.device();
     const auto& input_shape = input.shape();
     const auto& input_strides = input.strides();
+    const int64_t ndim = static_cast<int64_t>(input_shape.size());
+
+    // Normalize negative dimension
+    dim = normalize_dim(dim, ndim);
 
     auto output_shape = compute_reduction_shape(
         std::vector<int64_t>(input_shape.begin(), input_shape.end()),
@@ -611,7 +646,7 @@ auto min_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
             auto* input_data = input.data<float>();
             auto* output_data = output.data<float>();
 
-            if (dim < 0) {
+            if (dim == REDUCE_ALL) {
                 output_data[0] = min_impl(input_data, input.numel());
             } else {
                 min_along_dim(input_data, output_data,
@@ -625,7 +660,7 @@ auto min_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
             auto* input_data = input.data<double>();
             auto* output_data = output.data<double>();
 
-            if (dim < 0) {
+            if (dim == REDUCE_ALL) {
                 output_data[0] = min_impl(input_data, input.numel());
             } else {
                 min_along_dim(input_data, output_data,
@@ -639,7 +674,7 @@ auto min_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
             auto* input_data = input.data<int32_t>();
             auto* output_data = output.data<int32_t>();
 
-            if (dim < 0) {
+            if (dim == REDUCE_ALL) {
                 output_data[0] = min_impl(input_data, input.numel());
             } else {
                 min_along_dim(input_data, output_data,
@@ -653,7 +688,7 @@ auto min_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
             auto* input_data = input.data<int64_t>();
             auto* output_data = output.data<int64_t>();
 
-            if (dim < 0) {
+            if (dim == REDUCE_ALL) {
                 output_data[0] = min_impl(input_data, input.numel());
             } else {
                 min_along_dim(input_data, output_data,
@@ -750,6 +785,11 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
     // Argmax always returns Int64 indices
     auto input_shape_span = input.shape();
     std::vector<int64_t> input_shape_vec(input_shape_span.begin(), input_shape_span.end());
+    const int64_t ndim = static_cast<int64_t>(input_shape_vec.size());
+
+    // Normalize negative dimension
+    dim = normalize_dim(dim, ndim);
+
     auto output_shape = compute_reduction_shape(input_shape_vec, dim, keepdim);
     auto output = Tensor(output_shape, DType::Int64, input.device());
 
@@ -763,7 +803,7 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
     switch (input.dtype()) {
         case DType::Float32: {
             auto* input_data = input.data<float>();
-            if (dim < 0) {
+            if (dim == REDUCE_ALL) {
                 output_data[0] = argmax_impl(input_data, input.numel());
             } else {
                 argmax_along_dim(input_data, output_data,
@@ -775,7 +815,7 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
         }
         case DType::Float64: {
             auto* input_data = input.data<double>();
-            if (dim < 0) {
+            if (dim == REDUCE_ALL) {
                 output_data[0] = argmax_impl(input_data, input.numel());
             } else {
                 argmax_along_dim(input_data, output_data,
@@ -787,7 +827,7 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
         }
         case DType::Int32: {
             auto* input_data = input.data<int32_t>();
-            if (dim < 0) {
+            if (dim == REDUCE_ALL) {
                 output_data[0] = argmax_impl(input_data, input.numel());
             } else {
                 argmax_along_dim(input_data, output_data,
@@ -799,7 +839,7 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
         }
         case DType::Int64: {
             auto* input_data = input.data<int64_t>();
-            if (dim < 0) {
+            if (dim == REDUCE_ALL) {
                 output_data[0] = argmax_impl(input_data, input.numel());
             } else {
                 argmax_along_dim(input_data, output_data,
@@ -897,6 +937,11 @@ auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
     // Argmin always returns Int64 indices
     auto input_shape_span = input.shape();
     std::vector<int64_t> input_shape_vec(input_shape_span.begin(), input_shape_span.end());
+    const int64_t ndim = static_cast<int64_t>(input_shape_vec.size());
+
+    // Normalize negative dimension
+    dim = normalize_dim(dim, ndim);
+
     auto output_shape = compute_reduction_shape(input_shape_vec, dim, keepdim);
     auto output = Tensor(output_shape, DType::Int64, input.device());
 
@@ -910,7 +955,7 @@ auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
     switch (input.dtype()) {
         case DType::Float32: {
             auto* input_data = input.data<float>();
-            if (dim < 0) {
+            if (dim == REDUCE_ALL) {
                 output_data[0] = argmin_impl(input_data, input.numel());
             } else {
                 argmin_along_dim(input_data, output_data,
@@ -922,7 +967,7 @@ auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
         }
         case DType::Float64: {
             auto* input_data = input.data<double>();
-            if (dim < 0) {
+            if (dim == REDUCE_ALL) {
                 output_data[0] = argmin_impl(input_data, input.numel());
             } else {
                 argmin_along_dim(input_data, output_data,
@@ -934,7 +979,7 @@ auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
         }
         case DType::Int32: {
             auto* input_data = input.data<int32_t>();
-            if (dim < 0) {
+            if (dim == REDUCE_ALL) {
                 output_data[0] = argmin_impl(input_data, input.numel());
             } else {
                 argmin_along_dim(input_data, output_data,
@@ -946,7 +991,7 @@ auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
         }
         case DType::Int64: {
             auto* input_data = input.data<int64_t>();
-            if (dim < 0) {
+            if (dim == REDUCE_ALL) {
                 output_data[0] = argmin_impl(input_data, input.numel());
             } else {
                 argmin_along_dim(input_data, output_data,
@@ -1154,6 +1199,11 @@ void prod_along_dim(const T* input_data,
 auto prod_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
     auto shape_span = input.shape();
     std::vector<int64_t> input_shape(shape_span.begin(), shape_span.end());
+    const int64_t ndim = static_cast<int64_t>(input_shape.size());
+
+    // Normalize negative dimension
+    dim = normalize_dim(dim, ndim);
+
     auto output_shape = compute_reduction_shape(input_shape, dim, keepdim);
 
     Tensor output(output_shape, input.dtype(), input.device());
@@ -1162,7 +1212,7 @@ auto prod_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
         case DType::Float32: {
             auto* input_data = input.data<float>();
             auto* output_data = output.data<float>();
-            if (dim < 0) {
+            if (dim == REDUCE_ALL) {
                 output_data[0] = prod_impl(input_data, input.numel());
             } else {
                 auto strides_span = input.strides();
@@ -1174,7 +1224,7 @@ auto prod_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
         case DType::Float64: {
             auto* input_data = input.data<double>();
             auto* output_data = output.data<double>();
-            if (dim < 0) {
+            if (dim == REDUCE_ALL) {
                 output_data[0] = prod_impl(input_data, input.numel());
             } else {
                 auto strides_span = input.strides();
@@ -1186,7 +1236,7 @@ auto prod_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
         case DType::Int32: {
             auto* input_data = input.data<int32_t>();
             auto* output_data = output.data<int32_t>();
-            if (dim < 0) {
+            if (dim == REDUCE_ALL) {
                 output_data[0] = prod_impl(input_data, input.numel());
             } else {
                 auto strides_span = input.strides();
@@ -1206,12 +1256,17 @@ auto prod_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
 auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correction) -> Tensor {
     auto shape_span = input.shape();
     std::vector<int64_t> input_shape(shape_span.begin(), shape_span.end());
+    const int64_t ndim = static_cast<int64_t>(input_shape.size());
+
+    // Normalize negative dimension
+    dim = normalize_dim(dim, ndim);
+
     auto output_shape = compute_reduction_shape(input_shape, dim, keepdim);
 
     Tensor output(output_shape, input.dtype(), input.device());
 
-    if (dim != -1) {
-        throw std::runtime_error("var: only full reduction (dim=-1) is currently supported for CPU");
+    if (dim != REDUCE_ALL) {
+        throw std::runtime_error("var: only full reduction is currently supported for CPU");
     }
 
     const int64_t n = input.numel();
@@ -1308,9 +1363,13 @@ auto std_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
 auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim) -> Tensor {
     auto shape_span = input.shape();
     std::vector<int64_t> input_shape(shape_span.begin(), shape_span.end());
+    const int64_t ndim = static_cast<int64_t>(input_shape.size());
 
-    if (dim != -1) {
-        throw std::runtime_error("norm: only full reduction (dim=-1) is currently supported for CPU");
+    // Normalize negative dimension
+    dim = normalize_dim(dim, ndim);
+
+    if (dim != REDUCE_ALL) {
+        throw std::runtime_error("norm: only full reduction is currently supported for CPU");
     }
 
     auto output_shape = compute_reduction_shape(input_shape, dim, keepdim);

@@ -14,6 +14,7 @@
 #include <string>
 #include <stdexcept>
 #include <charconv>
+#include <climits>
 #include "../core/tensor.hpp"
 #include "../ops/op_id.hpp"
 #include "dispatch_table.hpp"
@@ -220,7 +221,8 @@ inline std::vector<int64_t> parse_int_list(const OpAttributes& attrs, const std:
     (table).register_kernel(::tenzor::OpId::op_id, \
         [](std::span<const ::tenzor::Tensor> inputs, const ::tenzor::OpAttributes& attrs) \
             -> std::vector<::tenzor::Tensor> { \
-            int64_t dim = ::tenzor::parse_attr<int64_t>(attrs, "dim", -1); \
+            /* Use LLONG_MIN as sentinel for "reduce all dimensions" (no dim specified) */ \
+            int64_t dim = ::tenzor::parse_attr<int64_t>(attrs, "dim", LLONG_MIN); \
             bool keepdim = ::tenzor::parse_attr<bool>(attrs, "keepdim", false); \
             return {(kernel_fn)(inputs[0], dim, keepdim)}; \
         })

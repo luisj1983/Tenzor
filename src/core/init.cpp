@@ -658,7 +658,31 @@ auto initialize() -> void {
 
                 auto* cuda_backend = cuda_backend_ptr;
 
-                // Register all CUDA operations
+                // =========================================================================
+                // O(1) DISPATCH TABLE REGISTRATION FOR CUDA
+                // =========================================================================
+                DispatchTableRegistry::register_backend(Device::Type::CUDA, cuda_backend);
+                auto& cuda_table = DispatchTableRegistry::get_table(Device::Type::CUDA);
+
+                // Load the register_kernels function from the CUDA backend shared library
+                void* cuda_handle = dlopen(cuda_backend_path.c_str(), RTLD_NOW | RTLD_NOLOAD);
+                if (cuda_handle) {
+                    using RegisterFn = void(*)(BackendDispatchTable*);
+                    auto register_fn = reinterpret_cast<RegisterFn>(dlsym(cuda_handle, "register_kernels"));
+                    if (register_fn) {
+                        register_fn(&cuda_table);
+                        std::cout << "CUDA dispatch table initialized with O(1) lookup" << std::endl;
+                    } else {
+                        std::cerr << "Warning: Could not find register_kernels in CUDA backend" << std::endl;
+                    }
+                    dlclose(cuda_handle);
+                } else {
+                    std::cerr << "Warning: Could not reopen CUDA backend for kernel registration" << std::endl;
+                }
+
+                // =========================================================================
+                // LEGACY DISPATCH REGISTRATION (for backwards compatibility)
+                // =========================================================================
                 std::cout << "Registering CUDA kernels with operation registry" << std::endl;
 
                 registry.register_kernel("add", Device::Type::CUDA,
@@ -2083,7 +2107,31 @@ auto initialize() -> void {
 
                 auto* vulkan_backend = vulkan_backend_ptr;
 
-                // Register essential Vulkan operations
+                // =========================================================================
+                // O(1) DISPATCH TABLE REGISTRATION FOR VULKAN
+                // =========================================================================
+                DispatchTableRegistry::register_backend(Device::Type::Vulkan, vulkan_backend);
+                auto& vulkan_table = DispatchTableRegistry::get_table(Device::Type::Vulkan);
+
+                // Load the register_kernels function from the Vulkan backend shared library
+                void* vulkan_handle = dlopen(vulkan_backend_path.c_str(), RTLD_NOW | RTLD_NOLOAD);
+                if (vulkan_handle) {
+                    using RegisterFn = void(*)(BackendDispatchTable*);
+                    auto register_fn = reinterpret_cast<RegisterFn>(dlsym(vulkan_handle, "register_kernels"));
+                    if (register_fn) {
+                        register_fn(&vulkan_table);
+                        std::cout << "Vulkan dispatch table initialized with O(1) lookup" << std::endl;
+                    } else {
+                        std::cerr << "Warning: Could not find register_kernels in Vulkan backend" << std::endl;
+                    }
+                    dlclose(vulkan_handle);
+                } else {
+                    std::cerr << "Warning: Could not reopen Vulkan backend for kernel registration" << std::endl;
+                }
+
+                // =========================================================================
+                // LEGACY DISPATCH REGISTRATION (for backwards compatibility)
+                // =========================================================================
                 std::cout << "Registering Vulkan kernels with operation registry" << std::endl;
 
                 // Binary math operations

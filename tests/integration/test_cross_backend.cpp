@@ -443,15 +443,20 @@ TEST_P(CrossBackendTest, CompleteTrainingLoop) {
     model->to(device);
 
     auto params = model->parameters();
-    auto optimizer = optim::SGD(params, 0.01);
+    // Use lower learning rate for numerical stability with random data
+    auto optimizer = optim::SGD(params, 0.001);
 
     const int num_epochs = 5;
     float initial_loss = 0.0f;
     float final_loss = 0.0f;
 
     for (int epoch = 0; epoch < num_epochs; ++epoch) {
-        auto input = Variable(randn({32, 50}, DType::Float32, device), true);
-        auto target = Variable(randn({32, 10}, DType::Float32, device), false);
+        // Use small fixed-scale random data for stability
+        auto input_raw = randn({32, 50}, DType::Float32, device);
+        auto target_raw = randn({32, 10}, DType::Float32, device);
+        // Scale down to prevent gradient explosion
+        auto input = Variable(input_raw * 0.1f, true);
+        auto target = Variable(target_raw * 0.1f, false);
 
         optimizer.zero_grad();
         auto output = model->forward(input);

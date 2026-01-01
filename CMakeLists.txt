@@ -1,9 +1,25 @@
 cmake_minimum_required(VERSION 3.25)
 
-# Set default HIP architecture before project() if building ROCm backend
-# Auto-detect GPU architecture if not specified
-# Only enable HIP if explicitly requested (TENZOR_BUILD_ROCM=ON)
-if(TENZOR_BUILD_ROCM)
+# Pre-project configuration for ROCm/HIP
+# Must happen before project() because HIP language must be enabled at project() time
+# Check if ROCm is available on the system first
+set(_ROCM_AVAILABLE FALSE)
+if(EXISTS "/opt/rocm/bin/hipcc")
+    set(_ROCM_AVAILABLE TRUE)
+endif()
+
+# Set TENZOR_BUILD_ROCM before project() - use cache to preserve user preference
+# Default to ON only if ROCm is available on the system
+if(NOT DEFINED TENZOR_BUILD_ROCM)
+    if(_ROCM_AVAILABLE)
+        set(TENZOR_BUILD_ROCM ON CACHE BOOL "Build ROCm backend" FORCE)
+    else()
+        set(TENZOR_BUILD_ROCM OFF CACHE BOOL "Build ROCm backend" FORCE)
+    endif()
+endif()
+
+# Set up HIP architectures if building ROCm backend
+if(TENZOR_BUILD_ROCM AND _ROCM_AVAILABLE)
     if(NOT CMAKE_HIP_ARCHITECTURES)
         # Try to auto-detect GPU architecture
         execute_process(
@@ -13,14 +29,14 @@ if(TENZOR_BUILD_ROCM)
             ERROR_QUIET
         )
 
-        # Extract first non-gfx agent (skip CPU)
+        # Extract first gfx architecture (skip CPU)
         string(REGEX MATCH "gfx[0-9a-z]+" DETECTED_ARCH "${ROCM_AGENTS}")
 
         if(DETECTED_ARCH)
             set(CMAKE_HIP_ARCHITECTURES "${DETECTED_ARCH}" CACHE STRING "HIP GPU architectures" FORCE)
             message(STATUS "Auto-detected GPU architecture: ${DETECTED_ARCH}")
         else()
-            # Fallback to common architecture
+            # Fallback to common architectures
             set(CMAKE_HIP_ARCHITECTURES "gfx900;gfx90c;gfx906;gfx908" CACHE STRING "HIP GPU architectures" FORCE)
             message(STATUS "Could not detect GPU, using common architectures: gfx900;gfx90c;gfx906;gfx908")
         endif()
@@ -29,7 +45,7 @@ endif()
 
 # Determine languages to enable
 set(TENZOR_LANGUAGES CXX)
-if(TENZOR_BUILD_ROCM)
+if(TENZOR_BUILD_ROCM AND _ROCM_AVAILABLE)
     list(APPEND TENZOR_LANGUAGES HIP)
 endif()
 
@@ -42,7 +58,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 # Build options
 option(TENZOR_BUILD_CUDA "Build CUDA backend" ON)
-option(TENZOR_BUILD_ROCM "Build ROCm backend" ON)
+# Note: TENZOR_BUILD_ROCM is set before project() to enable HIP language
 option(TENZOR_BUILD_ONEAPI "Build OneAPI backend" ON)
 option(TENZOR_BUILD_VULKAN "Build Vulkan backend" ON)
 option(TENZOR_BUILD_METAL "Build Metal backend (macOS/iOS only)" OFF)

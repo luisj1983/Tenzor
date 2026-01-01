@@ -22,63 +22,12 @@
 #include <limits>
 #include <thread>
 #include <vector>
+#include "test_backend_utils.hpp"
 
 using namespace tenzor;
-
-// ============================================================================
-// Backend Configuration for Multi-Backend Testing
-// ============================================================================
-
-struct BackendConfig {
-    std::string name;
-    Device::Type type;
-    int device_id;
-    bool is_available;
-
-    std::string ToString() const {
-        return name + "_" + std::to_string(device_id);
-    }
-};
-
-// Required for gtest_discover_tests to show human-readable test names
-void PrintTo(const BackendConfig& param, std::ostream* os) {
-    *os << param.ToString();
-}
-
-// Helper to check if backend is available
-bool is_backend_available(Device::Type type) {
-    try {
-        auto device = Device(type, 0);
-        auto test_tensor = ones({2, 2}, DType::Float32, device);
-        return true;
-    } catch (...) {
-        return false;
-    }
-}
-
-// Get all available backends for testing
-std::vector<BackendConfig> get_available_backends() {
-    static bool initialized = false;
-    if (!initialized) {
-        tenzor::initialize();
-        initialized = true;
-    }
-
-    std::vector<BackendConfig> configs;
-    configs.push_back({"CPU", Device::Type::CPU, 0, true});
-
-    if (is_backend_available(Device::Type::CUDA)) {
-        configs.push_back({"CUDA", Device::Type::CUDA, 0, true});
-    }
-    if (is_backend_available(Device::Type::OneAPI)) {
-        configs.push_back({"OneAPI", Device::Type::OneAPI, 0, true});
-    }
-    if (is_backend_available(Device::Type::ROCm)) {
-        configs.push_back({"ROCm", Device::Type::ROCm, 0, true});
-    }
-
-    return configs;
-}
+using tenzor::test::BackendConfig;
+using tenzor::test::is_backend_available;
+using tenzor::test::get_available_backends;
 
 // ============================================================================
 // Test Fixture

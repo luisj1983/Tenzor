@@ -184,6 +184,21 @@ __global__ void swish_forward_kernel(const T* input, T* output, int64_t n) {
     }
 }
 
+// Swish backward: grad_out * (sigmoid(x) + x * sigmoid(x) * (1 - sigmoid(x)))
+//                = grad_out * sigmoid(x) * (1 + x * (1 - sigmoid(x)))
+template<typename T>
+__global__ void swish_backward_cuda_kernel(const T* grad_output, const T* input,
+                                            T* grad_input, int64_t n) {
+    CUDA_GRID_STRIDE_LOOP(idx, n) {
+        T x = input[idx];
+        T sigmoid_x = sigmoid_stable(x);
+        // d/dx swish(x) = sigmoid(x) + x * sigmoid(x) * (1 - sigmoid(x))
+        //               = sigmoid(x) * (1 + x * (1 - sigmoid(x)))
+        T grad = sigmoid_x * (T(1) + x * (T(1) - sigmoid_x));
+        grad_input[idx] = grad_output[idx] * grad;
+    }
+}
+
 // Host functions
 extern "C" {
     void sigmoid_forward_float(const float* input, float* output, int64_t n) {
@@ -1247,6 +1262,43 @@ auto swish_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         throw std::runtime_error(std::string("CUDA error in swish_kernel: ") + cudaGetErrorString(err));
+    }
+
+    return result;
+}
+
+// Swish backward wrapper
+auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+
+    if (n == 0) {
+        cudaStreamSynchronize(stream);
+        return result;
+    }
+
+    if (input.dtype() == DType::Float32) {
+        int num_blocks = get_num_blocks(n);
+        swish_backward_cuda_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            grad_output.data<float>(), input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        int num_blocks = get_num_blocks(n);
+        swish_backward_cuda_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            grad_output.data<double>(), input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        int num_blocks = get_num_blocks(n);
+        swish_backward_cuda_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<const __half*>(grad_output.data_ptr()),
+            reinterpret_cast<const __half*>(input.data_ptr()),
+            reinterpret_cast<__half*>(result.data_ptr()), n);
+    } else {
+        throw std::runtime_error("Swish backward only supports Float32, Float64, and Float16 dtypes");
+    }
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        throw std::runtime_error(std::string("CUDA error in swish_backward_kernel: ") + cudaGetErrorString(err));
     }
 
     return result;

@@ -430,46 +430,49 @@ inline void gemm_optimized(
     const size_t MR = MR_AVX512;
     const size_t NR = NR_AVX512;
 
-    // Allocate packing buffers
-    alignas(64) float A_packed[MC * KC];
-    alignas(64) float B_packed[KC * NC];
+    // Use thread-local packing buffers (same structure as AVX2 for correct behavior)
+    #pragma omp parallel if(M * N > OMP_THRESHOLD_GEMM)
+    {
+        alignas(64) float A_packed[MC * KC];
+        alignas(64) float B_packed[KC * NC];
 
-    #pragma omp parallel for collapse(2) if(M * N > OMP_THRESHOLD_GEMM) schedule(dynamic)
-    for (int64_t jc = 0; jc < N; jc += NC) {
-        for (int64_t ic = 0; ic < M; ic += MC) {
-            int64_t nc = std::min(static_cast<int64_t>(NC), N - jc);
-            int64_t mc = std::min(static_cast<int64_t>(MC), M - ic);
+        #pragma omp for collapse(2) schedule(dynamic)
+        for (int64_t jc = 0; jc < N; jc += NC) {
+            for (int64_t ic = 0; ic < M; ic += MC) {
+                int64_t nc = std::min(static_cast<int64_t>(NC), N - jc);
+                int64_t mc = std::min(static_cast<int64_t>(MC), M - ic);
 
-            for (int64_t pc = 0; pc < K; pc += KC) {
-                int64_t kc = std::min(static_cast<int64_t>(KC), K - pc);
+                for (int64_t pc = 0; pc < K; pc += KC) {
+                    int64_t kc = std::min(static_cast<int64_t>(KC), K - pc);
 
-                // Pack A block
-                pack_a_avx512(A + ic * K + pc, A_packed, mc, kc, K);
+                    // Pack A block
+                    pack_a_avx512(A + ic * K + pc, A_packed, mc, kc, K);
 
-                // Pack B block
-                pack_b_avx512(B + pc * N + jc, B_packed, kc, nc, N);
+                    // Pack B block
+                    pack_b_avx512(B + pc * N + jc, B_packed, kc, nc, N);
 
-                // Compute micro-tiles
-                for (int64_t ir = 0; ir < mc; ir += MR) {
-                    for (int64_t jr = 0; jr < nc; jr += NR) {
-                        int64_t mr = std::min(static_cast<int64_t>(MR), mc - ir);
-                        int64_t nr = std::min(static_cast<int64_t>(NR), nc - jr);
+                    // Compute micro-tiles
+                    for (int64_t ir = 0; ir < mc; ir += MR) {
+                        for (int64_t jr = 0; jr < nc; jr += NR) {
+                            int64_t mr = std::min(static_cast<int64_t>(MR), mc - ir);
+                            int64_t nr = std::min(static_cast<int64_t>(NR), nc - jr);
 
-                        if (mr == MR && nr == NR) {
-                            microkernel_6x32_avx512(
-                                A_packed + (ir / MR) * kc * MR,
-                                B_packed + (jr / NR) * kc * NR,
-                                C + (ic + ir) * N + jc + jr,
-                                kc, N
-                            );
-                        } else {
-                            // Edge case: use scalar
-                            microkernel_scalar(
-                                A + (ic + ir) * K + pc,
-                                B + pc * N + jc + jr,
-                                C + (ic + ir) * N + jc + jr,
-                                mr, nr, kc, N
-                            );
+                            if (mr == MR && nr == NR) {
+                                microkernel_6x32_avx512(
+                                    A_packed + (ir / MR) * kc * MR,
+                                    B_packed + (jr / NR) * kc * NR,
+                                    C + (ic + ir) * N + jc + jr,
+                                    kc, N
+                                );
+                            } else {
+                                // Edge case: use scalar
+                                microkernel_scalar(
+                                    A + (ic + ir) * K + pc,
+                                    B + pc * N + jc + jr,
+                                    C + (ic + ir) * N + jc + jr,
+                                    mr, nr, kc, N
+                                );
+                            }
                         }
                     }
                 }

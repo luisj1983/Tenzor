@@ -11,6 +11,7 @@
 #include "tenzor/ops/op_id.hpp"
 #include <cstdlib>
 #include <charconv>
+#include <climits>
 
 namespace tenzor {
 
@@ -235,15 +236,16 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     TENZOR_REGISTER_REDUCTION_KERNEL(table, ArgMin, cpu::argmin_kernel);
     TENZOR_REGISTER_REDUCTION_KERNEL(table, Prod, cpu::prod_kernel);
 
+    // Use LLONG_MIN as sentinel for "reduce all dimensions" (no dim specified)
     table.register_kernel(OpId::Var, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
+        int64_t dim = parse_attr<int64_t>(attrs, "dim", LLONG_MIN);
         bool keepdim = parse_attr<bool>(attrs, "keepdim", false);
         int64_t correction = parse_attr<int64_t>(attrs, "correction", 1);
         return std::vector<Tensor>{cpu::var_kernel(inputs[0], dim, keepdim, correction)};
     });
 
     table.register_kernel(OpId::Std, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
+        int64_t dim = parse_attr<int64_t>(attrs, "dim", LLONG_MIN);
         bool keepdim = parse_attr<bool>(attrs, "keepdim", false);
         int64_t correction = parse_attr<int64_t>(attrs, "correction", 1);
         return std::vector<Tensor>{cpu::std_kernel(inputs[0], dim, keepdim, correction)};
@@ -251,7 +253,7 @@ void register_cpu_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::Norm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         float p = parse_attr<float>(attrs, "p", 2.0f);
-        int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
+        int64_t dim = parse_attr<int64_t>(attrs, "dim", LLONG_MIN);
         bool keepdim = parse_attr<bool>(attrs, "keepdim", false);
         return std::vector<Tensor>{cpu::norm_kernel(inputs[0], p, dim, keepdim)};
     });
@@ -495,6 +497,16 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::BatchNorm2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         float epsilon = parse_attr<float>(attrs, "epsilon", 1e-5f);
         return cpu::batchnorm2d_backward_kernel(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], epsilon);
+    });
+
+    table.register_kernel(OpId::BatchNorm2dUpdateRunningStats, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        float momentum = parse_attr<float>(attrs, "momentum", 0.1f);
+        // inputs: running_mean, running_var, batch_mean, batch_var
+        // Note: This modifies running_mean and running_var in-place
+        Tensor running_mean = inputs[0];  // Copy to allow modification
+        Tensor running_var = inputs[1];
+        cpu::batchnorm2d_update_running_stats_kernel(running_mean, running_var, inputs[2], inputs[3], momentum);
+        return std::vector<Tensor>{running_mean, running_var};
     });
 
     table.register_kernel(OpId::LayerNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {

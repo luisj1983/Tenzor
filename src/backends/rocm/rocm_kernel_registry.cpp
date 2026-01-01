@@ -10,6 +10,7 @@
 #include "tenzor/backend/kernel_registry.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include <hip/hip_runtime.h>
+#include <iostream>
 #include <cstdlib>
 #include <charconv>
 #include <limits>
@@ -124,22 +125,22 @@ namespace rocm {
     auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, int64_t dim, hipStream_t stream) -> Tensor;
 
     // Tensor creation
-    auto zeros_kernel(std::span<const int64_t> shape, DType dtype, Device device, hipStream_t stream) -> Tensor;
-    auto ones_kernel(std::span<const int64_t> shape, DType dtype, Device device, hipStream_t stream) -> Tensor;
-    auto full_kernel(std::span<const int64_t> shape, float value, DType dtype, Device device, hipStream_t stream) -> Tensor;
+    auto zeros_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, hipStream_t stream) -> Tensor;
+    auto ones_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, hipStream_t stream) -> Tensor;
+    auto full_kernel(const std::vector<int64_t>& shape, float value, DType dtype, Device device, hipStream_t stream) -> Tensor;
     auto fill_kernel(const Tensor& input, float value, hipStream_t stream) -> Tensor;
-    auto rand_kernel(std::span<const int64_t> shape, DType dtype, Device device, hipStream_t stream) -> Tensor;
-    auto randn_kernel(std::span<const int64_t> shape, DType dtype, Device device, hipStream_t stream) -> Tensor;
+    auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, hipStream_t stream) -> Tensor;
+    auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, hipStream_t stream) -> Tensor;
 
     // Transform operations
     auto contiguous_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
     auto clone_kernel(const Tensor& input, hipStream_t stream) -> Tensor;
-    auto reshape_kernel(const Tensor& input, std::span<const int64_t> shape, hipStream_t stream) -> Tensor;
+    auto reshape_kernel(const Tensor& input, const std::vector<int64_t>& shape, hipStream_t stream) -> Tensor;
     auto transpose_kernel(const Tensor& input, int64_t dim0, int64_t dim1, hipStream_t stream) -> Tensor;
-    auto permute_kernel(const Tensor& input, std::span<const int64_t> dims, hipStream_t stream) -> Tensor;
+    auto permute_kernel(const Tensor& input, const std::vector<int64_t>& dims, hipStream_t stream) -> Tensor;
     auto squeeze_kernel(const Tensor& input, int64_t dim, hipStream_t stream) -> Tensor;
     auto unsqueeze_kernel(const Tensor& input, int64_t dim, hipStream_t stream) -> Tensor;
-    auto expand_kernel(const Tensor& input, std::span<const int64_t> shape, void* stream) -> Tensor;
+    auto expand_kernel(const Tensor& input, const std::vector<int64_t>& shape, void* stream) -> Tensor;
 
     // BatchNorm operations
     void batchnorm2d_mean_var(const Tensor& input, Tensor& mean, Tensor& variance, hipStream_t stream);

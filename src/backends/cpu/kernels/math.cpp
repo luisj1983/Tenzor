@@ -26,6 +26,11 @@
 #include <omp.h>
 #endif
 
+// Intel MKL for optimized BLAS (5-10x faster GEMM)
+#ifdef TENZOR_USE_MKL
+#include <mkl.h>
+#endif
+
 // Adaptive OpenMP thresholds based on operation complexity
 constexpr size_t OMP_THRESHOLD_SIMPLE = 8192;    // add, mul, relu
 constexpr size_t OMP_THRESHOLD_MEDIUM = 4096;    // sigmoid, tanh
@@ -234,19 +239,62 @@ static void matmul_microkernel_float64(
 }
 
 // High-performance matrix multiplication (Float32)
-// Uses optimized GEMM with 6x16/6x32 micro-kernels, packing, and OpenMP
+// Uses MKL SGEMM when available (5-10x faster), falls back to optimized GEMM
 static void matmul_blocked_float32(
     const float* A, const float* B, float* C,
     int64_t M, int64_t N, int64_t K) {
 
-    // Use the high-performance GEMM implementation
+#ifdef TENZOR_USE_MKL
+    // Use MKL for larger matrices (threshold: ~16x16x16 = 4096 ops)
+    // MKL has overhead for small matrices, so only use for larger ones
+    if (M * N * K > 4096) {
+        // MKL SGEMM: C = alpha * A * B + beta * C
+        // Row-major: A is M×K, B is K×N, C is M×N
+        cblas_sgemm(
+            CblasRowMajor,    // Row-major layout
+            CblasNoTrans,     // Don't transpose A
+            CblasNoTrans,     // Don't transpose B
+            static_cast<MKL_INT>(M),
+            static_cast<MKL_INT>(N),
+            static_cast<MKL_INT>(K),
+            1.0f,             // alpha
+            A, static_cast<MKL_INT>(K),  // A, lda
+            B, static_cast<MKL_INT>(N),  // B, ldb
+            0.0f,             // beta
+            C, static_cast<MKL_INT>(N)   // C, ldc
+        );
+        return;
+    }
+#endif
+    // Fall back to custom optimized GEMM for small matrices
     gemm::gemm_optimized(A, B, C, M, N, K, 1.0f, 0.0f);
 }
 
 // Cache-blocked matrix multiplication (Float64)
+// Uses MKL DGEMM when available, falls back to blocked SIMD implementation
 static void matmul_blocked_float64(
     const double* A, const double* B, double* C,
     int64_t M, int64_t N, int64_t K) {
+
+#ifdef TENZOR_USE_MKL
+    // Use MKL for larger matrices
+    if (M * N * K > 4096) {
+        cblas_dgemm(
+            CblasRowMajor,
+            CblasNoTrans,
+            CblasNoTrans,
+            static_cast<MKL_INT>(M),
+            static_cast<MKL_INT>(N),
+            static_cast<MKL_INT>(K),
+            1.0,              // alpha
+            A, static_cast<MKL_INT>(K),
+            B, static_cast<MKL_INT>(N),
+            0.0,              // beta
+            C, static_cast<MKL_INT>(N)
+        );
+        return;
+    }
+#endif
 
     // Zero-initialize output
     std::fill_n(C, M * N, 0.0);
@@ -2043,6 +2091,148 @@ auto clamp_kernel(const Tensor& input, float min_val, float max_val) -> Tensor {
 
     } else {
         throw std::runtime_error("clamp operation only supports Float16, Float32 and Float64 dtypes");
+    }
+
+    return result;
+}
+
+// Clamp min kernel - clamps tensor values to min_val (x >= min_val)
+auto clamp_min_kernel(const Tensor& input, float min_val) -> Tensor {
+    auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    Tensor result(shape_vec, input.dtype(), input.device());
+    size_t n = static_cast<size_t>(input.numel());
+
+    if (input.dtype() == DType::Float32) {
+        const float* in_data = input.data<float>();
+        float* out_data = result.data<float>();
+
+#ifdef TENZOR_HAS_AVX2
+        const size_t simd_width = 8;
+        const size_t simd_end = (n / simd_width) * simd_width;
+        const __m256 min_vec = _mm256_set1_ps(min_val);
+
+        #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+        for (size_t i = 0; i < simd_end; i += simd_width) {
+            __m256 v = _mm256_loadu_ps(&in_data[i]);
+            __m256 clamped = _mm256_max_ps(v, min_vec);
+            _mm256_storeu_ps(&out_data[i], clamped);
+        }
+        for (size_t i = simd_end; i < n; ++i) {
+            out_data[i] = std::max(in_data[i], min_val);
+        }
+#else
+        #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+        for (size_t i = 0; i < n; ++i) {
+            out_data[i] = std::max(in_data[i], min_val);
+        }
+#endif
+
+    } else if (input.dtype() == DType::Float64) {
+        const double* in_data = input.data<double>();
+        double* out_data = result.data<double>();
+        double min_val_d = static_cast<double>(min_val);
+
+#ifdef TENZOR_HAS_AVX2
+        size_t simd_end = (n / 4) * 4;
+        __m256d min_vec = _mm256_set1_pd(min_val_d);
+
+        for (size_t i = 0; i < simd_end; i += 4) {
+            __m256d v = _mm256_loadu_pd(&in_data[i]);
+            __m256d clamped = _mm256_max_pd(v, min_vec);
+            _mm256_storeu_pd(&out_data[i], clamped);
+        }
+        for (size_t i = simd_end; i < n; ++i) {
+            out_data[i] = std::max(in_data[i], min_val_d);
+        }
+#else
+        for (size_t i = 0; i < n; ++i) {
+            out_data[i] = std::max(in_data[i], min_val_d);
+        }
+#endif
+
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* in_data = input.data<Float16>();
+        Float16* out_data = result.data<Float16>();
+
+        for (size_t i = 0; i < n; ++i) {
+            float val = static_cast<float>(in_data[i]);
+            val = std::max(val, min_val);
+            out_data[i] = Float16(val);
+        }
+
+    } else {
+        throw std::runtime_error("clamp_min operation only supports Float16, Float32 and Float64 dtypes");
+    }
+
+    return result;
+}
+
+// Clamp max kernel - clamps tensor values to max_val (x <= max_val)
+auto clamp_max_kernel(const Tensor& input, float max_val) -> Tensor {
+    auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
+    Tensor result(shape_vec, input.dtype(), input.device());
+    size_t n = static_cast<size_t>(input.numel());
+
+    if (input.dtype() == DType::Float32) {
+        const float* in_data = input.data<float>();
+        float* out_data = result.data<float>();
+
+#ifdef TENZOR_HAS_AVX2
+        const size_t simd_width = 8;
+        const size_t simd_end = (n / simd_width) * simd_width;
+        const __m256 max_vec = _mm256_set1_ps(max_val);
+
+        #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+        for (size_t i = 0; i < simd_end; i += simd_width) {
+            __m256 v = _mm256_loadu_ps(&in_data[i]);
+            __m256 clamped = _mm256_min_ps(v, max_vec);
+            _mm256_storeu_ps(&out_data[i], clamped);
+        }
+        for (size_t i = simd_end; i < n; ++i) {
+            out_data[i] = std::min(in_data[i], max_val);
+        }
+#else
+        #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
+        for (size_t i = 0; i < n; ++i) {
+            out_data[i] = std::min(in_data[i], max_val);
+        }
+#endif
+
+    } else if (input.dtype() == DType::Float64) {
+        const double* in_data = input.data<double>();
+        double* out_data = result.data<double>();
+        double max_val_d = static_cast<double>(max_val);
+
+#ifdef TENZOR_HAS_AVX2
+        size_t simd_end = (n / 4) * 4;
+        __m256d max_vec = _mm256_set1_pd(max_val_d);
+
+        for (size_t i = 0; i < simd_end; i += 4) {
+            __m256d v = _mm256_loadu_pd(&in_data[i]);
+            __m256d clamped = _mm256_min_pd(v, max_vec);
+            _mm256_storeu_pd(&out_data[i], clamped);
+        }
+        for (size_t i = simd_end; i < n; ++i) {
+            out_data[i] = std::min(in_data[i], max_val_d);
+        }
+#else
+        for (size_t i = 0; i < n; ++i) {
+            out_data[i] = std::min(in_data[i], max_val_d);
+        }
+#endif
+
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* in_data = input.data<Float16>();
+        Float16* out_data = result.data<Float16>();
+
+        for (size_t i = 0; i < n; ++i) {
+            float val = static_cast<float>(in_data[i]);
+            val = std::min(val, max_val);
+            out_data[i] = Float16(val);
+        }
+
+    } else {
+        throw std::runtime_error("clamp_max operation only supports Float16, Float32 and Float64 dtypes");
     }
 
     return result;

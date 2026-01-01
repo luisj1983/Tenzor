@@ -489,10 +489,7 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     // ========================================================================
     // Pooling Operations
     // ========================================================================
-    table.register_kernel(OpId::MaxPool2d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return get_vulkan_backend()->dispatch("max_pool2d", inputs, attrs);
-    });
-
+    // Note: MaxPool2dForward is the canonical OpId for max pooling
     table.register_kernel(OpId::MaxPool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         return get_vulkan_backend()->dispatch("max_pool2d_forward", inputs, attrs);
     });
@@ -501,10 +498,7 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return get_vulkan_backend()->dispatch("max_pool2d_backward", inputs, attrs);
     });
 
-    table.register_kernel(OpId::AvgPool2d, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return get_vulkan_backend()->dispatch("avg_pool2d", inputs, attrs);
-    });
-
+    // Note: AvgPool2dForward is the canonical OpId for avg pooling
     table.register_kernel(OpId::AvgPool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         return get_vulkan_backend()->dispatch("avg_pool2d_forward", inputs, attrs);
     });
@@ -582,9 +576,7 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return get_vulkan_backend()->dispatch("fold", inputs, attrs);
     });
 
-    table.register_kernel(OpId::GatherRelativePositionBias, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return get_vulkan_backend()->dispatch("gather_relative_position_bias", inputs, attrs);
-    });
+    // Note: GatherRelativePositionBias not in OpId enum - registered via string dispatch only
 
     std::cout << "Vulkan dispatch table initialized with O(1) lookup" << std::endl;
 }

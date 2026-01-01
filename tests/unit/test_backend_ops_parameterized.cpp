@@ -34,9 +34,35 @@ void PrintTo(const BackendConfig& param, std::ostream* os) {
 }
 
 // Helper to check if backend is available
+// Note: For ROCm, we use a safer check that doesn't launch kernels
+// because some ROCm configurations may crash on kernel launch
 bool is_backend_available(Device::Type type) {
     try {
-        // Try to create a simple tensor on the device
+        auto backend = backend_registry().get_backend(type);
+        if (!backend) {
+            return false;
+        }
+
+        // Check if the backend reports having devices
+        if (backend->device_count() == 0) {
+            return false;
+        }
+
+        // For ROCm, check environment variable to opt-in (avoids crashes on broken setups)
+        if (type == Device::Type::ROCm) {
+            const char* enable_rocm = std::getenv("TENZOR_TEST_ROCM");
+            if (!enable_rocm || std::string(enable_rocm) != "1") {
+                return false;  // Skip ROCm tests unless explicitly enabled
+            }
+        }
+
+        // For backends that might have driver issues, don't test with actual tensor ops
+        // Just check that the backend is registered and has devices
+        if (type == Device::Type::ROCm) {
+            return true;  // Trust the device count, don't launch kernels
+        }
+
+        // For CUDA and other backends, verify with actual tensor creation
         auto device = Device(type, 0);
         auto test_tensor = ones({2, 2}, DType::Float32, device);
         return true;

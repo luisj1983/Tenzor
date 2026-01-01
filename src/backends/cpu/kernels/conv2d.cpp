@@ -11,6 +11,11 @@
 #include <omp.h>
 #endif
 
+// Intel oneDNN for optimized convolutions (3-8x faster)
+#ifdef TENZOR_USE_ONEDNN
+#include <dnnl.hpp>
+#endif
+
 // SIMD intrinsics for F16C support
 #if defined(__x86_64__) || defined(_M_X64)
     #include <immintrin.h>
@@ -309,6 +314,129 @@ void gemm_transA_cpu<Float16>(
 // Conv2d Forward CPU Implementation
 // ============================================================================
 
+#ifdef TENZOR_USE_ONEDNN
+// oneDNN-accelerated Conv2d Forward (Float32 only)
+// Provides 3-8x speedup over im2col+GEMM for standard convolutions
+static bool conv2d_forward_onednn(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias,
+    Tensor& output,
+    int64_t stride,
+    int64_t padding,
+    int64_t dilation,
+    int64_t groups
+) {
+    // oneDNN requires float32 and standard convolution parameters
+    if (input.dtype() != DType::Float32) {
+        return false;  // Fall back to im2col+GEMM
+    }
+
+    // For now, only support standard convolutions (dilation=1, groups=1)
+    // oneDNN supports these but requires more complex setup
+    if (dilation != 1 || groups != 1) {
+        return false;
+    }
+
+    try {
+        auto input_shape = input.shape();
+        auto weight_shape = weight.shape();
+        auto output_shape = output.shape();
+
+        int64_t batch = input_shape[0];
+        int64_t in_channels = input_shape[1];
+        int64_t height = input_shape[2];
+        int64_t width = input_shape[3];
+
+        int64_t out_channels = weight_shape[0];
+        int64_t kernel_h = weight_shape[2];
+        int64_t kernel_w = weight_shape[3];
+
+        int64_t out_h = output_shape[2];
+        int64_t out_w = output_shape[3];
+
+        // Create oneDNN engine and stream
+        dnnl::engine engine(dnnl::engine::kind::cpu, 0);
+        dnnl::stream stream(engine);
+
+        // Create memory descriptors
+        dnnl::memory::dims src_dims = {batch, in_channels, height, width};
+        dnnl::memory::dims weights_dims = {out_channels, in_channels, kernel_h, kernel_w};
+        dnnl::memory::dims dst_dims = {batch, out_channels, out_h, out_w};
+        dnnl::memory::dims strides_dims = {stride, stride};
+        dnnl::memory::dims padding_dims = {padding, padding};
+
+        auto src_md = dnnl::memory::desc(src_dims, dnnl::memory::data_type::f32,
+                                          dnnl::memory::format_tag::nchw);
+        auto weights_md = dnnl::memory::desc(weights_dims, dnnl::memory::data_type::f32,
+                                              dnnl::memory::format_tag::oihw);
+        auto dst_md = dnnl::memory::desc(dst_dims, dnnl::memory::data_type::f32,
+                                          dnnl::memory::format_tag::nchw);
+
+        // Create convolution primitive descriptor
+        dnnl::convolution_forward::primitive_desc conv_pd;
+
+        if (bias != nullptr) {
+            dnnl::memory::dims bias_dims = {out_channels};
+            auto bias_md = dnnl::memory::desc(bias_dims, dnnl::memory::data_type::f32,
+                                               dnnl::memory::format_tag::a);
+
+            conv_pd = dnnl::convolution_forward::primitive_desc(
+                engine,
+                dnnl::prop_kind::forward_inference,
+                dnnl::algorithm::convolution_direct,
+                src_md, weights_md, bias_md, dst_md,
+                strides_dims, padding_dims, padding_dims
+            );
+        } else {
+            conv_pd = dnnl::convolution_forward::primitive_desc(
+                engine,
+                dnnl::prop_kind::forward_inference,
+                dnnl::algorithm::convolution_direct,
+                src_md, weights_md, dst_md,
+                strides_dims, padding_dims, padding_dims
+            );
+        }
+
+        // Create memory objects
+        auto src_mem = dnnl::memory(src_md, engine, const_cast<float*>(input.data<float>()));
+        auto weights_mem = dnnl::memory(weights_md, engine, const_cast<float*>(weight.data<float>()));
+        auto dst_mem = dnnl::memory(dst_md, engine, output.data<float>());
+
+        // Create convolution primitive
+        auto conv_prim = dnnl::convolution_forward(conv_pd);
+
+        // Execute
+        if (bias != nullptr) {
+            dnnl::memory::dims bias_dims = {out_channels};
+            auto bias_md = dnnl::memory::desc(bias_dims, dnnl::memory::data_type::f32,
+                                               dnnl::memory::format_tag::a);
+            auto bias_mem = dnnl::memory(bias_md, engine, const_cast<float*>(bias->data<float>()));
+
+            conv_prim.execute(stream, {
+                {DNNL_ARG_SRC, src_mem},
+                {DNNL_ARG_WEIGHTS, weights_mem},
+                {DNNL_ARG_BIAS, bias_mem},
+                {DNNL_ARG_DST, dst_mem}
+            });
+        } else {
+            conv_prim.execute(stream, {
+                {DNNL_ARG_SRC, src_mem},
+                {DNNL_ARG_WEIGHTS, weights_mem},
+                {DNNL_ARG_DST, dst_mem}
+            });
+        }
+
+        stream.wait();
+        return true;
+
+    } catch (const dnnl::error& e) {
+        // oneDNN error, fall back to im2col+GEMM
+        return false;
+    }
+}
+#endif
+
 // Template helper for dtype-generic conv2d forward
 template<typename T>
 void conv2d_forward_impl(
@@ -463,6 +591,14 @@ auto conv2d_forward_kernel(
     // Create output tensor with correct dtype
     std::vector<int64_t> output_shape = {batch, out_channels, out_h, out_w};
     Tensor output(output_shape, input.dtype(), input.device());
+
+#ifdef TENZOR_USE_ONEDNN
+    // Try oneDNN-accelerated convolution first (3-8x faster for Float32)
+    if (conv2d_forward_onednn(input, weight, bias, output, stride, padding, dilation, groups)) {
+        return output;
+    }
+    // Fall through to im2col+GEMM if oneDNN not applicable
+#endif
 
     // Dispatch based on dtype
     if (input.dtype() == DType::Float32) {
