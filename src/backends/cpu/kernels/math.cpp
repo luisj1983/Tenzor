@@ -32,10 +32,14 @@
 #endif
 
 // Adaptive OpenMP thresholds based on operation complexity
-constexpr size_t OMP_THRESHOLD_SIMPLE = 8192;    // add, mul, relu
-constexpr size_t OMP_THRESHOLD_MEDIUM = 4096;    // sigmoid, tanh
-constexpr size_t OMP_THRESHOLD_COMPLEX = 2048;   // softmax, layernorm
-constexpr size_t OMP_THRESHOLD_MATMUL = 1024;    // matrix operations
+// NOTE: Thresholds tuned to avoid OpenMP overhead for medium-sized tensors.
+// For simple ops, the per-element work is tiny, so we need large tensors
+// to amortize thread creation/join overhead (~50-100μs per parallel region).
+// With AVX-512 processing 16 floats/cycle, we need ~100K+ elements to benefit.
+constexpr size_t OMP_THRESHOLD_SIMPLE = 131072;  // 128K elements for add, mul, relu
+constexpr size_t OMP_THRESHOLD_MEDIUM = 65536;   // 64K for sigmoid, tanh
+constexpr size_t OMP_THRESHOLD_COMPLEX = 16384;  // 16K for softmax, layernorm
+constexpr size_t OMP_THRESHOLD_MATMUL = 1024;    // matrix operations (high compute/element)
 
 namespace tenzor {
 namespace cpu {
@@ -1715,7 +1719,7 @@ auto matmul_kernel(const Tensor& a, const Tensor& b) -> Tensor {
     return result;
 }
 
-// Square root kernel
+// Square root kernel (OpenMP + SIMD optimized with chunking)
 auto sqrt_kernel(const Tensor& input) -> Tensor {
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
     Tensor result(shape_vec, input.dtype(), input.device());
@@ -1725,84 +1729,151 @@ auto sqrt_kernel(const Tensor& input) -> Tensor {
         const float* in_data = input.data<float>();
         float* out_data = result.data<float>();
 
+        // For small arrays, use single-threaded SIMD
+        if (n < OMP_THRESHOLD_SIMPLE) {
 #ifdef TENZOR_HAS_AVX512
-        // Process 16 floats at a time with AVX-512 + OpenMP
-        const size_t simd_width = 16;
-        const size_t simd_end = (n / simd_width) * simd_width;
-        #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
-        for (size_t i = 0; i < simd_end; i += simd_width) {
-            __m512 v = _mm512_loadu_ps(&in_data[i]);
-            __m512 sqrt_v = _mm512_sqrt_ps(v);
-            _mm512_storeu_ps(&out_data[i], sqrt_v);
-        }
-        // Handle remainder
-        for (size_t i = simd_end; i < n; ++i) {
-            out_data[i] = std::sqrt(in_data[i]);
-        }
+            const size_t simd_width = 16;
+            size_t i = 0;
+            for (; i + simd_width <= n; i += simd_width) {
+                __m512 v = _mm512_loadu_ps(&in_data[i]);
+                _mm512_storeu_ps(&out_data[i], _mm512_sqrt_ps(v));
+            }
+            for (; i < n; ++i) out_data[i] = std::sqrt(in_data[i]);
 #elif defined(TENZOR_HAS_AVX2)
-        // Process 8 floats at a time with AVX2 + OpenMP
-        const size_t simd_width = 8;
-        const size_t simd_end = (n / simd_width) * simd_width;
-        #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
-        for (size_t i = 0; i < simd_end; i += simd_width) {
-            __m256 v = _mm256_loadu_ps(&in_data[i]);
-            __m256 sqrt_v = _mm256_sqrt_ps(v);
-            _mm256_storeu_ps(&out_data[i], sqrt_v);
-        }
-        // Handle remainder
-        for (size_t i = simd_end; i < n; ++i) {
-            out_data[i] = std::sqrt(in_data[i]);
-        }
+            const size_t simd_width = 8;
+            size_t i = 0;
+            for (; i + simd_width <= n; i += simd_width) {
+                __m256 v = _mm256_loadu_ps(&in_data[i]);
+                _mm256_storeu_ps(&out_data[i], _mm256_sqrt_ps(v));
+            }
+            for (; i < n; ++i) out_data[i] = std::sqrt(in_data[i]);
 #else
-        // Scalar fallback with OpenMP
-        #pragma omp parallel for if(n > OMP_THRESHOLD_SIMPLE)
-        for (size_t i = 0; i < n; ++i) {
-            out_data[i] = std::sqrt(in_data[i]);
-        }
+            for (size_t i = 0; i < n; ++i) out_data[i] = std::sqrt(in_data[i]);
 #endif
+        } else {
+            // For large arrays, use OpenMP with thread-local SIMD chunks
+            #pragma omp parallel
+            {
+                int tid = omp_get_thread_num();
+                int nthreads = omp_get_num_threads();
+                size_t chunk_size = (n + nthreads - 1) / nthreads;
+                size_t start = tid * chunk_size;
+                size_t end = std::min(start + chunk_size, n);
+
+#ifdef TENZOR_HAS_AVX512
+                const size_t simd_width = 16;
+                size_t i = start;
+                for (; i + simd_width <= end; i += simd_width) {
+                    __m512 v = _mm512_loadu_ps(&in_data[i]);
+                    _mm512_storeu_ps(&out_data[i], _mm512_sqrt_ps(v));
+                }
+                for (; i < end; ++i) out_data[i] = std::sqrt(in_data[i]);
+#elif defined(TENZOR_HAS_AVX2)
+                const size_t simd_width = 8;
+                size_t i = start;
+                for (; i + simd_width <= end; i += simd_width) {
+                    __m256 v = _mm256_loadu_ps(&in_data[i]);
+                    _mm256_storeu_ps(&out_data[i], _mm256_sqrt_ps(v));
+                }
+                for (; i < end; ++i) out_data[i] = std::sqrt(in_data[i]);
+#else
+                for (size_t i = start; i < end; ++i) out_data[i] = std::sqrt(in_data[i]);
+#endif
+            }
+        }
 
     } else if (input.dtype() == DType::Float64) {
         const double* in_data = input.data<double>();
         double* out_data = result.data<double>();
 
+        if (n < OMP_THRESHOLD_SIMPLE) {
 #ifdef TENZOR_HAS_AVX512
-        // Process 8 doubles at a time with AVX-512
-        size_t simd_end = (n / 8) * 8;
-        for (size_t i = 0; i < simd_end; i += 8) {
-            __m512d v = _mm512_loadu_pd(&in_data[i]);
-            __m512d sqrt_v = _mm512_sqrt_pd(v);
-            _mm512_storeu_pd(&out_data[i], sqrt_v);
-        }
-        // Handle remainder
-        for (size_t i = simd_end; i < n; ++i) {
-            out_data[i] = std::sqrt(in_data[i]);
-        }
+            size_t i = 0;
+            for (; i + 8 <= n; i += 8) {
+                __m512d v = _mm512_loadu_pd(&in_data[i]);
+                _mm512_storeu_pd(&out_data[i], _mm512_sqrt_pd(v));
+            }
+            for (; i < n; ++i) out_data[i] = std::sqrt(in_data[i]);
 #elif defined(TENZOR_HAS_AVX2)
-        // Process 4 doubles at a time with AVX2
-        size_t simd_end = (n / 4) * 4;
-        for (size_t i = 0; i < simd_end; i += 4) {
-            __m256d v = _mm256_loadu_pd(&in_data[i]);
-            __m256d sqrt_v = _mm256_sqrt_pd(v);
-            _mm256_storeu_pd(&out_data[i], sqrt_v);
-        }
-        // Handle remainder
-        for (size_t i = simd_end; i < n; ++i) {
-            out_data[i] = std::sqrt(in_data[i]);
-        }
+            size_t i = 0;
+            for (; i + 4 <= n; i += 4) {
+                __m256d v = _mm256_loadu_pd(&in_data[i]);
+                _mm256_storeu_pd(&out_data[i], _mm256_sqrt_pd(v));
+            }
+            for (; i < n; ++i) out_data[i] = std::sqrt(in_data[i]);
 #else
-        // Scalar fallback
-        for (size_t i = 0; i < n; ++i) {
-            out_data[i] = std::sqrt(in_data[i]);
-        }
+            for (size_t i = 0; i < n; ++i) out_data[i] = std::sqrt(in_data[i]);
 #endif
+        } else {
+            #pragma omp parallel
+            {
+                int tid = omp_get_thread_num();
+                int nthreads = omp_get_num_threads();
+                size_t chunk_size = (n + nthreads - 1) / nthreads;
+                size_t start = tid * chunk_size;
+                size_t end = std::min(start + chunk_size, n);
+
+#ifdef TENZOR_HAS_AVX512
+                size_t i = start;
+                for (; i + 8 <= end; i += 8) {
+                    __m512d v = _mm512_loadu_pd(&in_data[i]);
+                    _mm512_storeu_pd(&out_data[i], _mm512_sqrt_pd(v));
+                }
+                for (; i < end; ++i) out_data[i] = std::sqrt(in_data[i]);
+#elif defined(TENZOR_HAS_AVX2)
+                size_t i = start;
+                for (; i + 4 <= end; i += 4) {
+                    __m256d v = _mm256_loadu_pd(&in_data[i]);
+                    _mm256_storeu_pd(&out_data[i], _mm256_sqrt_pd(v));
+                }
+                for (; i < end; ++i) out_data[i] = std::sqrt(in_data[i]);
+#else
+                for (size_t i = start; i < end; ++i) out_data[i] = std::sqrt(in_data[i]);
+#endif
+            }
+        }
 
     } else if (input.dtype() == DType::Float16) {
         const Float16* in_data = input.data<Float16>();
         Float16* out_data = result.data<Float16>();
 
-        for (size_t i = 0; i < n; ++i) {
-            float val = static_cast<float>(in_data[i]);
-            out_data[i] = Float16(std::sqrt(val));
+        if (n < OMP_THRESHOLD_SIMPLE) {
+#ifdef __F16C__
+            size_t i = 0;
+            for (; i + 8 <= n; i += 8) {
+                __m128i packed = _mm_loadu_si128(reinterpret_cast<const __m128i*>(in_data + i));
+                __m256 fp32 = _mm256_cvtph_ps(packed);
+                __m256 result_v = _mm256_sqrt_ps(fp32);
+                __m128i out_packed = _mm256_cvtps_ph(result_v, _MM_FROUND_TO_NEAREST_INT);
+                _mm_storeu_si128(reinterpret_cast<__m128i*>(out_data + i), out_packed);
+            }
+            for (; i < n; ++i) out_data[i] = Float16(std::sqrt(static_cast<float>(in_data[i])));
+#else
+            for (size_t i = 0; i < n; ++i) out_data[i] = Float16(std::sqrt(static_cast<float>(in_data[i])));
+#endif
+        } else {
+            #pragma omp parallel
+            {
+                int tid = omp_get_thread_num();
+                int nthreads = omp_get_num_threads();
+                size_t chunk_size = (n + nthreads - 1) / nthreads;
+                size_t start = tid * chunk_size;
+                size_t end = std::min(start + chunk_size, n);
+
+#ifdef __F16C__
+                size_t i = start;
+                for (; i + 8 <= end; i += 8) {
+                    __m128i packed = _mm_loadu_si128(reinterpret_cast<const __m128i*>(in_data + i));
+                    __m256 fp32 = _mm256_cvtph_ps(packed);
+                    __m256 result_v = _mm256_sqrt_ps(fp32);
+                    __m128i out_packed = _mm256_cvtps_ph(result_v, _MM_FROUND_TO_NEAREST_INT);
+                    _mm_storeu_si128(reinterpret_cast<__m128i*>(out_data + i), out_packed);
+                }
+                for (; i < end; ++i) out_data[i] = Float16(std::sqrt(static_cast<float>(in_data[i])));
+#else
+                for (size_t i = start; i < end; ++i) out_data[i] = Float16(std::sqrt(static_cast<float>(in_data[i])));
+#endif
+            }
         }
 
     } else {
@@ -2238,7 +2309,7 @@ auto clamp_max_kernel(const Tensor& input, float max_val) -> Tensor {
     return result;
 }
 
-// Log kernel - natural logarithm
+// Log kernel - natural logarithm (OpenMP + SIMD optimized)
 auto log_kernel(const Tensor& input) -> Tensor {
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     Tensor result(shape_vec, input.dtype(), input.device());
@@ -2248,21 +2319,47 @@ auto log_kernel(const Tensor& input) -> Tensor {
         const float* in_data = input.data<float>();
         float* out_data = result.data<float>();
 
-        // Use fast polynomial approximation with SIMD
+        // For small arrays, use single-threaded SIMD
+        if (n < OMP_THRESHOLD_MEDIUM) {
 #ifdef TENZOR_HAS_AVX512
-        fast_math::log_batch_avx512(in_data, out_data, n);
+            fast_math::log_batch_avx512(in_data, out_data, n);
 #elif defined(TENZOR_HAS_AVX2)
-        fast_math::log_batch_avx2(in_data, out_data, n);
+            fast_math::log_batch_avx2(in_data, out_data, n);
 #else
-        for (size_t i = 0; i < n; ++i) {
-            out_data[i] = std::log(in_data[i]);
-        }
+            for (size_t i = 0; i < n; ++i) {
+                out_data[i] = std::log(in_data[i]);
+            }
 #endif
+        } else {
+            // For large arrays, use OpenMP with thread-local SIMD
+            #pragma omp parallel
+            {
+                int tid = omp_get_thread_num();
+                int nthreads = omp_get_num_threads();
+
+                size_t chunk_size = (n + nthreads - 1) / nthreads;
+                size_t start = tid * chunk_size;
+                size_t end = std::min(start + chunk_size, n);
+
+                if (start < end) {
+#ifdef TENZOR_HAS_AVX512
+                    fast_math::log_batch_avx512(in_data + start, out_data + start, end - start);
+#elif defined(TENZOR_HAS_AVX2)
+                    fast_math::log_batch_avx2(in_data + start, out_data + start, end - start);
+#else
+                    for (size_t i = start; i < end; ++i) {
+                        out_data[i] = std::log(in_data[i]);
+                    }
+#endif
+                }
+            }
+        }
 
     } else if (input.dtype() == DType::Float64) {
         const double* in_data = input.data<double>();
         double* out_data = result.data<double>();
 
+        #pragma omp parallel for if(n > OMP_THRESHOLD_MEDIUM)
         for (size_t i = 0; i < n; ++i) {
             out_data[i] = std::log(in_data[i]);
         }
@@ -2271,26 +2368,53 @@ auto log_kernel(const Tensor& input) -> Tensor {
         const Float16* in_data = input.data<Float16>();
         Float16* out_data = result.data<Float16>();
 
-        // Use F16C + fast SIMD log
+        if (n < OMP_THRESHOLD_MEDIUM) {
 #ifdef __F16C__
-        size_t i = 0;
-        for (; i + 8 <= n; i += 8) {
-            __m128i packed = _mm_loadu_si128(reinterpret_cast<const __m128i*>(in_data + i));
-            __m256 fp32 = _mm256_cvtph_ps(packed);
-            __m256 result_v = fast_math::log_avx2(fp32);
-            __m128i out_packed = _mm256_cvtps_ph(result_v, _MM_FROUND_TO_NEAREST_INT);
-            _mm_storeu_si128(reinterpret_cast<__m128i*>(out_data + i), out_packed);
-        }
-        for (; i < n; ++i) {
-            float val = static_cast<float>(in_data[i]);
-            out_data[i] = Float16(std::log(val));
-        }
+            size_t i = 0;
+            for (; i + 8 <= n; i += 8) {
+                __m128i packed = _mm_loadu_si128(reinterpret_cast<const __m128i*>(in_data + i));
+                __m256 fp32 = _mm256_cvtph_ps(packed);
+                __m256 result_v = fast_math::log_avx2(fp32);
+                __m128i out_packed = _mm256_cvtps_ph(result_v, _MM_FROUND_TO_NEAREST_INT);
+                _mm_storeu_si128(reinterpret_cast<__m128i*>(out_data + i), out_packed);
+            }
+            for (; i < n; ++i) {
+                out_data[i] = Float16(std::log(static_cast<float>(in_data[i])));
+            }
 #else
-        for (size_t i = 0; i < n; ++i) {
-            float val = static_cast<float>(in_data[i]);
-            out_data[i] = Float16(std::log(val));
-        }
+            for (size_t i = 0; i < n; ++i) {
+                out_data[i] = Float16(std::log(static_cast<float>(in_data[i])));
+            }
 #endif
+        } else {
+            #pragma omp parallel
+            {
+                int tid = omp_get_thread_num();
+                int nthreads = omp_get_num_threads();
+
+                size_t chunk_size = (n + nthreads - 1) / nthreads;
+                size_t start = tid * chunk_size;
+                size_t end = std::min(start + chunk_size, n);
+
+#ifdef __F16C__
+                size_t i = start;
+                for (; i + 8 <= end; i += 8) {
+                    __m128i packed = _mm_loadu_si128(reinterpret_cast<const __m128i*>(in_data + i));
+                    __m256 fp32 = _mm256_cvtph_ps(packed);
+                    __m256 result_v = fast_math::log_avx2(fp32);
+                    __m128i out_packed = _mm256_cvtps_ph(result_v, _MM_FROUND_TO_NEAREST_INT);
+                    _mm_storeu_si128(reinterpret_cast<__m128i*>(out_data + i), out_packed);
+                }
+                for (; i < end; ++i) {
+                    out_data[i] = Float16(std::log(static_cast<float>(in_data[i])));
+                }
+#else
+                for (size_t i = start; i < end; ++i) {
+                    out_data[i] = Float16(std::log(static_cast<float>(in_data[i])));
+                }
+#endif
+            }
+        }
 
     } else {
         throw std::runtime_error("log operation only supports Float32, Float64, and Float16 dtypes");
@@ -2299,7 +2423,7 @@ auto log_kernel(const Tensor& input) -> Tensor {
     return result;
 }
 
-// Exp kernel - exponential
+// Exp kernel - exponential (OpenMP + SIMD optimized)
 auto exp_kernel(const Tensor& input) -> Tensor {
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     Tensor result(shape_vec, input.dtype(), input.device());
@@ -2309,21 +2433,47 @@ auto exp_kernel(const Tensor& input) -> Tensor {
         const float* in_data = input.data<float>();
         float* out_data = result.data<float>();
 
-        // Use fast polynomial approximation with SIMD
+        // For small arrays, use single-threaded SIMD
+        if (n < OMP_THRESHOLD_MEDIUM) {
 #ifdef TENZOR_HAS_AVX512
-        fast_math::exp_batch_avx512(in_data, out_data, n);
+            fast_math::exp_batch_avx512(in_data, out_data, n);
 #elif defined(TENZOR_HAS_AVX2)
-        fast_math::exp_batch_avx2(in_data, out_data, n);
+            fast_math::exp_batch_avx2(in_data, out_data, n);
 #else
-        for (size_t i = 0; i < n; ++i) {
-            out_data[i] = std::exp(in_data[i]);
-        }
+            for (size_t i = 0; i < n; ++i) {
+                out_data[i] = std::exp(in_data[i]);
+            }
 #endif
+        } else {
+            // For large arrays, use OpenMP with thread-local SIMD
+            #pragma omp parallel
+            {
+                int tid = omp_get_thread_num();
+                int nthreads = omp_get_num_threads();
+
+                size_t chunk_size = (n + nthreads - 1) / nthreads;
+                size_t start = tid * chunk_size;
+                size_t end = std::min(start + chunk_size, n);
+
+                if (start < end) {
+#ifdef TENZOR_HAS_AVX512
+                    fast_math::exp_batch_avx512(in_data + start, out_data + start, end - start);
+#elif defined(TENZOR_HAS_AVX2)
+                    fast_math::exp_batch_avx2(in_data + start, out_data + start, end - start);
+#else
+                    for (size_t i = start; i < end; ++i) {
+                        out_data[i] = std::exp(in_data[i]);
+                    }
+#endif
+                }
+            }
+        }
 
     } else if (input.dtype() == DType::Float64) {
         const double* in_data = input.data<double>();
         double* out_data = result.data<double>();
 
+        #pragma omp parallel for if(n > OMP_THRESHOLD_MEDIUM)
         for (size_t i = 0; i < n; ++i) {
             out_data[i] = std::exp(in_data[i]);
         }
@@ -2332,26 +2482,58 @@ auto exp_kernel(const Tensor& input) -> Tensor {
         const Float16* in_data = input.data<Float16>();
         Float16* out_data = result.data<Float16>();
 
-        // Use F16C + fast SIMD exp
+        // Use F16C + fast SIMD exp with OpenMP for large arrays
+        if (n < OMP_THRESHOLD_MEDIUM) {
 #ifdef __F16C__
-        size_t i = 0;
-        for (; i + 8 <= n; i += 8) {
-            __m128i packed = _mm_loadu_si128(reinterpret_cast<const __m128i*>(in_data + i));
-            __m256 fp32 = _mm256_cvtph_ps(packed);
-            __m256 result_v = fast_math::exp_avx2(fp32);
-            __m128i out_packed = _mm256_cvtps_ph(result_v, _MM_FROUND_TO_NEAREST_INT);
-            _mm_storeu_si128(reinterpret_cast<__m128i*>(out_data + i), out_packed);
-        }
-        for (; i < n; ++i) {
-            float val = static_cast<float>(in_data[i]);
-            out_data[i] = Float16(std::exp(val));
-        }
+            size_t i = 0;
+            for (; i + 8 <= n; i += 8) {
+                __m128i packed = _mm_loadu_si128(reinterpret_cast<const __m128i*>(in_data + i));
+                __m256 fp32 = _mm256_cvtph_ps(packed);
+                __m256 result_v = fast_math::exp_avx2(fp32);
+                __m128i out_packed = _mm256_cvtps_ph(result_v, _MM_FROUND_TO_NEAREST_INT);
+                _mm_storeu_si128(reinterpret_cast<__m128i*>(out_data + i), out_packed);
+            }
+            for (; i < n; ++i) {
+                float val = static_cast<float>(in_data[i]);
+                out_data[i] = Float16(std::exp(val));
+            }
 #else
-        for (size_t i = 0; i < n; ++i) {
-            float val = static_cast<float>(in_data[i]);
-            out_data[i] = Float16(std::exp(val));
-        }
+            for (size_t i = 0; i < n; ++i) {
+                float val = static_cast<float>(in_data[i]);
+                out_data[i] = Float16(std::exp(val));
+            }
 #endif
+        } else {
+            #pragma omp parallel
+            {
+                int tid = omp_get_thread_num();
+                int nthreads = omp_get_num_threads();
+
+                size_t chunk_size = (n + nthreads - 1) / nthreads;
+                size_t start = tid * chunk_size;
+                size_t end = std::min(start + chunk_size, n);
+
+#ifdef __F16C__
+                size_t i = start;
+                for (; i + 8 <= end; i += 8) {
+                    __m128i packed = _mm_loadu_si128(reinterpret_cast<const __m128i*>(in_data + i));
+                    __m256 fp32 = _mm256_cvtph_ps(packed);
+                    __m256 result_v = fast_math::exp_avx2(fp32);
+                    __m128i out_packed = _mm256_cvtps_ph(result_v, _MM_FROUND_TO_NEAREST_INT);
+                    _mm_storeu_si128(reinterpret_cast<__m128i*>(out_data + i), out_packed);
+                }
+                for (; i < end; ++i) {
+                    float val = static_cast<float>(in_data[i]);
+                    out_data[i] = Float16(std::exp(val));
+                }
+#else
+                for (size_t i = start; i < end; ++i) {
+                    float val = static_cast<float>(in_data[i]);
+                    out_data[i] = Float16(std::exp(val));
+                }
+#endif
+            }
+        }
 
     } else {
         throw std::runtime_error("exp operation only supports Float32, Float64, and Float16 dtypes");

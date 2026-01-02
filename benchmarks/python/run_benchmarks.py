@@ -12,8 +12,25 @@ Usage:
     python run_benchmarks.py --no-pytorch       # Skip PyTorch comparison
 """
 
-import sys
 import os
+
+# Fix UCX library conflict between PyTorch and Tenzor
+# Must be set BEFORE importing either library
+os.environ['UCX_TLS'] = 'tcp,cuda_copy,cuda_ipc'  # Disable problematic transports
+os.environ['UCX_MEMTYPE_CACHE'] = 'n'  # Disable memory type cache
+os.environ['UCX_RNDV_SCHEME'] = 'get_zcopy'  # Use zero-copy get
+os.environ['UCX_ERROR_SIGNALS'] = ''  # Disable UCX signal handling
+os.environ['UCX_LOG_LEVEL'] = 'error'  # Suppress UCX warnings
+
+# CRITICAL: Import PyTorch FIRST before Tenzor to avoid UCX signal handler conflicts
+# PyTorch's UCX initialization must happen before Tenzor loads its backends
+try:
+    import torch
+    _pytorch_available = True
+except ImportError:
+    _pytorch_available = False
+
+import sys
 import argparse
 from datetime import datetime
 from typing import List

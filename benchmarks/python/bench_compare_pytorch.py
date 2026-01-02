@@ -3,15 +3,20 @@
 Simple benchmark comparing Tenzor with PyTorch on CPU operations.
 """
 
-import sys
 import os
+
+# Fix UCX library conflict between PyTorch and Tenzor
+# Must be set BEFORE importing either library
+os.environ['UCX_TLS'] = 'tcp,cuda_copy,cuda_ipc'  # Disable problematic transports
+os.environ['UCX_MEMTYPE_CACHE'] = 'n'  # Disable memory type cache
+os.environ['UCX_RNDV_SCHEME'] = 'get_zcopy'  # Use zero-copy get
+os.environ['UCX_ERROR_SIGNALS'] = ''  # Disable UCX signal handling
+os.environ['UCX_NET_DEVICES'] = ''  # Disable network devices
+
+import sys
 import time
 import statistics
 import ctypes
-
-# Disable UCX to avoid conflicts
-os.environ['UCX_TLS'] = 'tcp'
-os.environ['UCX_NET_DEVICES'] = ''
 
 # Add bin directory to library path before any imports
 bin_dir = os.path.join(os.path.dirname(__file__), '..', '..', 'bin')
