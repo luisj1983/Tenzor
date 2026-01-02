@@ -1061,5 +1061,68 @@ auto conv_transpose2d_forward_kernel(
     return output;
 }
 
+// ============================================================================
+// Depthwise Conv2d Forward CPU Implementation
+// ============================================================================
+
+auto depthwise_conv2d_kernel(const Tensor& input, const Tensor& weight,
+                              const Tensor* bias, int64_t stride,
+                              int64_t padding, int64_t dilation) -> Tensor {
+    // Depthwise convolution: groups = in_channels = out_channels
+    // input: [N, C, H, W]
+    // weight: [C, 1, kH, kW]
+
+    auto in_shape = input.shape();
+    auto w_shape = weight.shape();
+
+    int64_t N = in_shape[0];
+    int64_t C = in_shape[1];
+    int64_t H = in_shape[2];
+    int64_t W = in_shape[3];
+    int64_t kH = w_shape[2];
+    int64_t kW = w_shape[3];
+
+    int64_t H_out = (H + 2 * padding - dilation * (kH - 1) - 1) / stride + 1;
+    int64_t W_out = (W + 2 * padding - dilation * (kW - 1) - 1) / stride + 1;
+
+    auto output = Tensor::empty_uninitialized({N, C, H_out, W_out}, input.dtype(), input.device());
+
+    const float* in_data = input.data<float>();
+    const float* w_data = weight.data<float>();
+    const float* b_data = bias ? bias->data<float>() : nullptr;
+    float* out_data = output.data<float>();
+
+    #pragma omp parallel for collapse(4)
+    for (int64_t n = 0; n < N; ++n) {
+        for (int64_t c = 0; c < C; ++c) {
+            for (int64_t oh = 0; oh < H_out; ++oh) {
+                for (int64_t ow = 0; ow < W_out; ++ow) {
+                    float sum = 0.0f;
+
+                    for (int64_t kh = 0; kh < kH; ++kh) {
+                        for (int64_t kw = 0; kw < kW; ++kw) {
+                            int64_t h = oh * stride - padding + kh * dilation;
+                            int64_t w = ow * stride - padding + kw * dilation;
+
+                            if (h >= 0 && h < H && w >= 0 && w < W) {
+                                sum += in_data[((n * C + c) * H + h) * W + w] *
+                                       w_data[(c * 1 + 0) * kH * kW + kh * kW + kw];
+                            }
+                        }
+                    }
+
+                    if (b_data) {
+                        sum += b_data[c];
+                    }
+
+                    out_data[((n * C + c) * H_out + oh) * W_out + ow] = sum;
+                }
+            }
+        }
+    }
+
+    return output;
+}
+
 } // namespace cpu
 } // namespace tenzor

@@ -15,6 +15,7 @@
 
 set(CPU_BACKEND_SOURCES
     cpu_backend.cpp
+    cpu_caching_allocator.cpp
     cpu_kernel_registry.cpp
     simd.cpp
     kernels/math.cpp
@@ -29,6 +30,9 @@ set(CPU_BACKEND_SOURCES
     kernels/conv2d.cpp
     kernels/fused_ops.cpp
     kernels/simd_dispatch.cpp
+    kernels/pooling.cpp
+    kernels/nn_kernels.cpp
+    kernels/rnn_kernels.cpp
 )
 
 # Create CPU backend shared library

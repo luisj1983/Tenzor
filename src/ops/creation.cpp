@@ -71,12 +71,8 @@ auto zeros(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
         return backend->dispatch("zeros", {}, attrs)[0];
     }
 
-    // CPU path: create and fill directly
-    auto tensor = empty(std::move(shape), dtype, device);
-    if (tensor.impl() && tensor.impl()->storage) {
-        std::memset(tensor.impl()->storage->data(), 0, tensor.numel() * dtype_size(dtype));
-    }
-    return tensor;
+    // CPU path: use zero-initialized constructor directly
+    return Tensor(std::move(shape), dtype, device);
 }
 
 auto ones(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
@@ -101,8 +97,8 @@ auto ones(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
         return backend->dispatch("ones", {}, attrs)[0];
     }
 
-    // CPU path: create and fill directly
-    auto tensor = empty(std::move(shape), dtype, device);
+    // CPU path: use uninitialized allocation (avoid wasteful zeroing before fill)
+    auto tensor = Tensor::empty_uninitialized(std::move(shape), dtype, device);
     if (!tensor.impl() || !tensor.impl()->storage) return tensor;
 
     size_t numel = tensor.numel();
@@ -177,8 +173,8 @@ auto full(std::vector<int64_t> shape, float value, DType dtype, Device device) -
         return backend->dispatch("full", {}, attrs)[0];
     }
 
-    // CPU path: create and fill directly
-    auto tensor = empty(std::move(shape), dtype, device);
+    // CPU path: use uninitialized allocation (avoid wasteful zeroing before fill)
+    auto tensor = Tensor::empty_uninitialized(std::move(shape), dtype, device);
     if (!tensor.impl() || !tensor.impl()->storage) return tensor;
 
     size_t numel = tensor.numel();
@@ -252,8 +248,8 @@ auto full(std::vector<int64_t> shape, double value, DType dtype, Device device) 
         return backend->dispatch("full", {}, attrs)[0];
     }
 
-    // CPU path: create and fill directly
-    auto tensor = empty(std::move(shape), dtype, device);
+    // CPU path: use uninitialized allocation (avoid wasteful zeroing before fill)
+    auto tensor = Tensor::empty_uninitialized(std::move(shape), dtype, device);
     if (!tensor.impl() || !tensor.impl()->storage) return tensor;
 
     size_t numel = tensor.numel();
@@ -308,7 +304,8 @@ auto full(std::vector<int64_t> shape, double value, DType dtype, Device device) 
 }
 
 auto empty(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
-    return Tensor(std::move(shape), dtype, device);
+    // empty() returns truly uninitialized memory - no zeroing
+    return Tensor::empty_uninitialized(std::move(shape), dtype, device);
 }
 
 auto rand(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
@@ -327,8 +324,8 @@ auto rand(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
         return backend->dispatch("rand", {}, attrs)[0];
     }
 
-    // CPU path: create and fill directly
-    auto tensor = empty(std::move(shape), dtype, device);
+    // CPU path: use uninitialized allocation (avoid wasteful zeroing before fill)
+    auto tensor = Tensor::empty_uninitialized(std::move(shape), dtype, device);
     if (!tensor.impl() || !tensor.impl()->storage) return tensor;
 
     size_t numel = tensor.numel();
@@ -385,8 +382,8 @@ auto randn(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
         return backend->dispatch("randn", {}, attrs)[0];
     }
 
-    // CPU path: create and fill directly
-    auto tensor = empty(std::move(shape), dtype, device);
+    // CPU path: use uninitialized allocation (avoid wasteful zeroing before fill)
+    auto tensor = Tensor::empty_uninitialized(std::move(shape), dtype, device);
     if (!tensor.impl() || !tensor.impl()->storage) return tensor;
 
     size_t numel = tensor.numel();
@@ -445,7 +442,8 @@ auto arange(float start, float end, float step, DType dtype, Device device) -> T
     int64_t numel = static_cast<int64_t>(std::ceil((end - start) / step));
     if (numel < 0) numel = 0;
 
-    auto tensor = empty({numel}, dtype, device);
+    // Use uninitialized allocation (avoid wasteful zeroing before fill)
+    auto tensor = Tensor::empty_uninitialized({numel}, dtype, device);
     if (!tensor.impl() || !tensor.impl()->storage || numel == 0) return tensor;
 
     void* data = tensor.impl()->storage->data();
@@ -507,7 +505,8 @@ auto linspace(float start, float end, int64_t steps, DType dtype, Device device)
         return cpu_tensor.to(device);
     }
 
-    auto tensor = empty({steps}, dtype, device);
+    // Use uninitialized allocation (avoid wasteful zeroing before fill)
+    auto tensor = Tensor::empty_uninitialized({steps}, dtype, device);
     if (!tensor.impl() || !tensor.impl()->storage) return tensor;
 
     void* data = tensor.impl()->storage->data();

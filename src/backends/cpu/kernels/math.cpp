@@ -3239,7 +3239,7 @@ auto dot_kernel(const Tensor& a, const Tensor& b) -> Tensor {
 // Trigonometric functions (SIMD + OpenMP optimized)
 auto sin_kernel(const Tensor& input) -> Tensor {
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
-    auto output = Tensor(shape_vec, input.dtype(), input.device());
+    auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
     int64_t n = input.numel();
 
     switch (input.dtype()) {
@@ -3275,7 +3275,7 @@ auto sin_kernel(const Tensor& input) -> Tensor {
 
 auto cos_kernel(const Tensor& input) -> Tensor {
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
-    auto output = Tensor(shape_vec, input.dtype(), input.device());
+    auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
     int64_t n = input.numel();
 
     switch (input.dtype()) {
@@ -3311,7 +3311,7 @@ auto cos_kernel(const Tensor& input) -> Tensor {
 
 auto tan_kernel(const Tensor& input) -> Tensor {
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
-    auto output = Tensor(shape_vec, input.dtype(), input.device());
+    auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
     int64_t n = input.numel();
 
     switch (input.dtype()) {
@@ -3341,7 +3341,7 @@ auto tan_kernel(const Tensor& input) -> Tensor {
 
 auto asin_kernel(const Tensor& input) -> Tensor {
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
-    auto output = Tensor(shape_vec, input.dtype(), input.device());
+    auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
     int64_t n = input.numel();
 
     switch (input.dtype()) {
@@ -3371,7 +3371,7 @@ auto asin_kernel(const Tensor& input) -> Tensor {
 
 auto acos_kernel(const Tensor& input) -> Tensor {
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
-    auto output = Tensor(shape_vec, input.dtype(), input.device());
+    auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
     int64_t n = input.numel();
 
     switch (input.dtype()) {
@@ -3401,7 +3401,7 @@ auto acos_kernel(const Tensor& input) -> Tensor {
 
 auto atan_kernel(const Tensor& input) -> Tensor {
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
-    auto output = Tensor(shape_vec, input.dtype(), input.device());
+    auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
     int64_t n = input.numel();
 
     switch (input.dtype()) {
@@ -3432,7 +3432,7 @@ auto atan_kernel(const Tensor& input) -> Tensor {
 // Hyperbolic functions
 auto sinh_kernel(const Tensor& input) -> Tensor {
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
-    auto output = Tensor(shape_vec, input.dtype(), input.device());
+    auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
     int64_t n = input.numel();
 
     switch (input.dtype()) {
@@ -3462,7 +3462,7 @@ auto sinh_kernel(const Tensor& input) -> Tensor {
 
 auto cosh_kernel(const Tensor& input) -> Tensor {
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
-    auto output = Tensor(shape_vec, input.dtype(), input.device());
+    auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
     int64_t n = input.numel();
 
     switch (input.dtype()) {
@@ -3493,7 +3493,7 @@ auto cosh_kernel(const Tensor& input) -> Tensor {
 // Rounding functions
 auto round_kernel(const Tensor& input) -> Tensor {
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
-    auto output = Tensor(shape_vec, input.dtype(), input.device());
+    auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
     int64_t n = input.numel();
 
     switch (input.dtype()) {
@@ -3523,7 +3523,7 @@ auto round_kernel(const Tensor& input) -> Tensor {
 
 auto floor_kernel(const Tensor& input) -> Tensor {
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
-    auto output = Tensor(shape_vec, input.dtype(), input.device());
+    auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
     int64_t n = input.numel();
 
     switch (input.dtype()) {
@@ -3553,7 +3553,7 @@ auto floor_kernel(const Tensor& input) -> Tensor {
 
 auto ceil_kernel(const Tensor& input) -> Tensor {
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
-    auto output = Tensor(shape_vec, input.dtype(), input.device());
+    auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
     int64_t n = input.numel();
 
     switch (input.dtype()) {
@@ -3584,7 +3584,7 @@ auto ceil_kernel(const Tensor& input) -> Tensor {
 // Reciprocal
 auto reciprocal_kernel(const Tensor& input) -> Tensor {
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
-    auto output = Tensor(shape_vec, input.dtype(), input.device());
+    auto output = Tensor::empty_uninitialized(shape_vec, input.dtype(), input.device());
     int64_t n = input.numel();
 
     switch (input.dtype()) {

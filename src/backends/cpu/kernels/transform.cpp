@@ -213,5 +213,144 @@ auto contiguous_kernel(const Tensor& input) -> Tensor {
     return result;
 }
 
+auto cat_kernel(const std::vector<Tensor>& tensors, int64_t dim) -> Tensor {
+    if (tensors.empty()) {
+        throw std::runtime_error("cat requires at least one tensor");
+    }
+
+    // Calculate output shape
+    auto out_shape = std::vector<int64_t>(tensors[0].shape().begin(), tensors[0].shape().end());
+    int64_t cat_dim_size = 0;
+    for (const auto& t : tensors) {
+        cat_dim_size += t.shape()[dim];
+    }
+    out_shape[dim] = cat_dim_size;
+
+    auto output = Tensor::empty_uninitialized(out_shape, tensors[0].dtype(), tensors[0].device());
+
+    // Copy data from each tensor
+    int64_t offset = 0;
+    size_t elem_size = dtype_size(tensors[0].dtype());
+
+    for (const auto& t : tensors) {
+        auto t_cont = t.is_contiguous() ? t : contiguous_kernel(t);
+        auto t_shape = t_cont.shape();
+        int64_t t_dim_size = t_shape[dim];
+
+        // Calculate sizes before and after the cat dimension
+        int64_t outer_size = 1;
+        for (int64_t d = 0; d < dim; ++d) {
+            outer_size *= t_shape[d];
+        }
+        int64_t inner_size = 1;
+        for (size_t d = dim + 1; d < t_shape.size(); ++d) {
+            inner_size *= t_shape[d];
+        }
+
+        const uint8_t* src = static_cast<const uint8_t*>(t_cont.impl_->storage->data());
+        uint8_t* dst = static_cast<uint8_t*>(output.impl_->storage->data());
+
+        for (int64_t o = 0; o < outer_size; ++o) {
+            int64_t src_idx = o * t_dim_size * inner_size;
+            int64_t dst_idx = o * cat_dim_size * inner_size + offset * inner_size;
+
+            std::memcpy(dst + dst_idx * elem_size,
+                        src + src_idx * elem_size,
+                        t_dim_size * inner_size * elem_size);
+        }
+
+        offset += t_dim_size;
+    }
+
+    return output;
+}
+
+auto flatten_kernel(const Tensor& input, int64_t start_dim, int64_t end_dim) -> Tensor {
+    auto shape = input.shape();
+    int64_t ndim = shape.size();
+
+    // Handle negative dims
+    if (start_dim < 0) start_dim += ndim;
+    if (end_dim < 0) end_dim += ndim;
+
+    // Calculate flattened dimension size
+    int64_t flat_size = 1;
+    for (int64_t d = start_dim; d <= end_dim; ++d) {
+        flat_size *= shape[d];
+    }
+
+    // Build new shape
+    std::vector<int64_t> new_shape;
+    for (int64_t d = 0; d < start_dim; ++d) {
+        new_shape.push_back(shape[d]);
+    }
+    new_shape.push_back(flat_size);
+    for (int64_t d = end_dim + 1; d < ndim; ++d) {
+        new_shape.push_back(shape[d]);
+    }
+
+    return reshape_kernel(input, new_shape);
+}
+
+auto slice_kernel(const Tensor& input, int64_t dim, int64_t start, int64_t end, int64_t step) -> Tensor {
+    auto shape = input.shape();
+    auto strides = input.strides();
+    int64_t ndim = shape.size();
+
+    // Handle negative indices
+    if (start < 0) start += shape[dim];
+    if (end < 0) end += shape[dim];
+
+    // Clamp to valid range
+    start = std::max(int64_t(0), std::min(start, shape[dim]));
+    end = std::max(int64_t(0), std::min(end, shape[dim]));
+
+    // Calculate output size along the sliced dimension
+    int64_t slice_size = (end - start + step - 1) / step;
+    if (slice_size < 0) slice_size = 0;
+
+    // Create new shape
+    std::vector<int64_t> new_shape(shape.begin(), shape.end());
+    new_shape[dim] = slice_size;
+
+    // If step is 1, we can create a view
+    if (step == 1) {
+        Tensor result;
+        result.impl_ = std::make_shared<TensorImpl>(*input.impl_);
+        result.impl_->shape = new_shape;
+        result.impl_->offset += start * strides[dim];
+        return result;
+    }
+
+    // Otherwise, need to copy with stride
+    auto output = Tensor::empty_uninitialized(new_shape, input.dtype(), input.device());
+
+    size_t elem_size = dtype_size(input.dtype());
+    int64_t outer_size = 1;
+    for (int64_t d = 0; d < dim; ++d) {
+        outer_size *= shape[d];
+    }
+    int64_t inner_size = 1;
+    for (int64_t d = dim + 1; d < ndim; ++d) {
+        inner_size *= shape[d];
+    }
+
+    const uint8_t* src = static_cast<const uint8_t*>(input.impl_->storage->data());
+    uint8_t* dst = static_cast<uint8_t*>(output.impl_->storage->data());
+
+    int64_t dst_idx = 0;
+    for (int64_t o = 0; o < outer_size; ++o) {
+        for (int64_t s = start; s < end; s += step) {
+            int64_t src_idx = (o * shape[dim] + s) * inner_size;
+            std::memcpy(dst + dst_idx * elem_size,
+                        src + src_idx * elem_size,
+                        inner_size * elem_size);
+            dst_idx += inner_size;
+        }
+    }
+
+    return output;
+}
+
 } // namespace cpu
 } // namespace tenzor

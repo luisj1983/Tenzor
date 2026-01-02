@@ -32,6 +32,9 @@ namespace cpu {
     auto squeeze_kernel(const tenzor::Tensor& input, int64_t dim) -> tenzor::Tensor;
     auto unsqueeze_kernel(const tenzor::Tensor& input, int64_t dim) -> tenzor::Tensor;
     auto contiguous_kernel(const tenzor::Tensor& input) -> tenzor::Tensor;
+    auto cat_kernel(const std::vector<tenzor::Tensor>& tensors, int64_t dim) -> tenzor::Tensor;
+    auto flatten_kernel(const tenzor::Tensor& input, int64_t start_dim, int64_t end_dim) -> tenzor::Tensor;
+    auto slice_kernel(const tenzor::Tensor& input, int64_t dim, int64_t start, int64_t end, int64_t step) -> tenzor::Tensor;
 }
 namespace cuda {
     class CUDAKernelAccess;  // Forward declaration for friend access
@@ -85,6 +88,8 @@ public:
     /**
      * @brief Construct tensor with specified shape, dtype, and device.
      *
+     * Memory is zero-initialized by default.
+     *
      * @param shape Dimensions of the tensor (e.g., {3, 4} for 3x4 matrix)
      * @param dtype Data type of tensor elements
      * @param device Device where tensor will be allocated
@@ -94,6 +99,30 @@ public:
      * @endcode
      */
     Tensor(std::vector<int64_t> shape, DType dtype, Device device);
+
+    /**
+     * @brief Create an uninitialized tensor.
+     *
+     * Memory is NOT zero-initialized. Use when you will immediately
+     * overwrite all values (e.g., output of arithmetic operations).
+     * This is more efficient as it avoids wasteful memset.
+     *
+     * @param shape Dimensions of the tensor
+     * @param dtype Data type of tensor elements
+     * @param device Device where tensor will be allocated
+     * @return Uninitialized tensor
+     *
+     * @warning Reading from uninitialized memory is undefined behavior.
+     *          Only use when all elements will be written before reading.
+     *
+     * @code
+     * auto output = Tensor::empty_uninitialized({1000, 1000}, DType::Float32, Device::cpu());
+     * // Fill output with computed values...
+     * @endcode
+     */
+    static auto empty_uninitialized(std::vector<int64_t> shape,
+                                     DType dtype = DType::Float32,
+                                     Device device = Device::cpu()) -> Tensor;
 
     /**
      * @brief Copy constructor (shallow copy with shared storage).
@@ -768,6 +797,9 @@ private:
     friend auto cpu::squeeze_kernel(const Tensor& input, int64_t dim) -> Tensor;
     friend auto cpu::unsqueeze_kernel(const Tensor& input, int64_t dim) -> Tensor;
     friend auto cpu::contiguous_kernel(const Tensor& input) -> Tensor;
+    friend auto cpu::cat_kernel(const std::vector<Tensor>& tensors, int64_t dim) -> Tensor;
+    friend auto cpu::flatten_kernel(const Tensor& input, int64_t start_dim, int64_t end_dim) -> Tensor;
+    friend auto cpu::slice_kernel(const Tensor& input, int64_t dim, int64_t start, int64_t end, int64_t step) -> Tensor;
     friend auto cuda::clone_kernel(const Tensor& input) -> Tensor;
     friend auto cuda::reshape_kernel(const Tensor& input, const std::vector<int64_t>& new_shape) -> Tensor;
     friend auto cuda::transpose_kernel(const Tensor& input, int64_t dim0, int64_t dim1) -> Tensor;
@@ -801,8 +833,10 @@ public:
      * @param shape Tensor dimensions
      * @param dtype Element data type
      * @param device Device location
+     * @param zero_init If true, zero-initialize memory (default: true)
      */
-    TensorImpl(std::vector<int64_t> shape, DType dtype, Device device);
+    TensorImpl(std::vector<int64_t> shape, DType dtype, Device device,
+               bool zero_init = true);
 
     /**
      * @brief Get total number of elements.

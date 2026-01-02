@@ -1,5 +1,6 @@
 #include "tenzor/backend/backend.hpp"
 #include "tenzor/backend/dispatch_table.hpp"
+#include "tenzor/backend/cpu_caching_allocator.hpp"
 #include <cstring>
 #include <stdexcept>
 #include <thread>
@@ -216,22 +217,13 @@ public:
     }
 
     auto allocate(size_t bytes, int32_t device_id) -> void* override {
-        #ifdef _WIN32
-            return _aligned_malloc(bytes, 64);
-        #else
-            void* ptr = nullptr;
-            posix_memalign(&ptr, 64, bytes);
-            return ptr;
-        #endif
+        // Use caching allocator for efficient memory reuse
+        return cpu::CPUCachingAllocator::instance().allocate(bytes);
     }
 
     auto deallocate(void* ptr) -> void override {
-        if (!ptr) return;
-        #ifdef _WIN32
-            _aligned_free(ptr);
-        #else
-            free(ptr);
-        #endif
+        // Return to cache for reuse instead of freeing immediately
+        cpu::CPUCachingAllocator::instance().deallocate(ptr);
     }
 
     auto copy(void* dst, const void* src, size_t bytes, CopyKind kind) -> void override {

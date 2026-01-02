@@ -130,7 +130,7 @@ if(TENZOR_BUILD_PYTHON)
             python/numpy_interop.cpp
         )
 
-        target_link_libraries(tenzor_python PRIVATE tenzor_core)
+        target_link_libraries(tenzor_python PRIVATE tenzor_core tenzor_backend_cpu)
 
         set_target_properties(tenzor_python PROPERTIES
             OUTPUT_NAME "tenzor_core"

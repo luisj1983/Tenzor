@@ -14,7 +14,8 @@
 namespace tenzor {
 
 // TensorImpl implementation
-TensorImpl::TensorImpl(std::vector<int64_t> shape_, DType dtype_, Device device_)
+TensorImpl::TensorImpl(std::vector<int64_t> shape_, DType dtype_, Device device_,
+                       bool zero_init)
     : shape(std::move(shape_)), dtype(dtype_), device(device_) {
 
     // Compute strides
@@ -23,24 +24,24 @@ TensorImpl::TensorImpl(std::vector<int64_t> shape_, DType dtype_, Device device_
     // Allocate storage
     size_t size_bytes = numel() * dtype_size(dtype);
 
-    if (device.type == Device::Type::CPU) {
-        storage = std::make_shared<CPUStorage>(size_bytes);
-    } else {
-        // Allocate device storage using backend
-        auto* backend = backend_registry().get_backend(device.type);
-        if (!backend) {
-            throw std::runtime_error("Backend not available for device: " + device.to_string());
-        }
+    // UNIFIED PATH: All devices go through backend allocator
+    auto* backend = backend_registry().get_backend(device.type);
+    if (!backend) {
+        throw std::runtime_error("Backend not available for device: " + device.to_string());
+    }
 
-        // Allocate device memory
-        void* device_ptr = backend->allocate(size_bytes, device.index);
-        if (!device_ptr && size_bytes > 0) {
-            // Only throw error if allocation failed for non-empty tensor
-            throw std::runtime_error("Failed to allocate device memory");
-        }
+    // Allocate memory via backend (which may use caching allocator)
+    void* ptr = backend->allocate(size_bytes, device.index);
+    if (!ptr && size_bytes > 0) {
+        throw std::runtime_error("Failed to allocate memory for tensor");
+    }
 
-        // Create device storage (device_ptr can be nullptr for empty tensors)
-        storage = std::make_shared<DeviceStorage>(device_ptr, size_bytes, device, backend);
+    // Use DeviceStorage for ALL devices (including CPU)
+    storage = std::make_shared<DeviceStorage>(ptr, size_bytes, device, backend);
+
+    // Zero-initialize if requested (CPU only - device kernels handle their own init)
+    if (zero_init && device.type == Device::Type::CPU && size_bytes > 0) {
+        std::memset(ptr, 0, size_bytes);
     }
 }
 
@@ -59,7 +60,14 @@ auto TensorImpl::is_contiguous() const -> bool {
 
 // Tensor implementation
 Tensor::Tensor(std::vector<int64_t> shape, DType dtype, Device device)
-    : impl_(std::make_shared<TensorImpl>(std::move(shape), dtype, device)) {}
+    : impl_(std::make_shared<TensorImpl>(std::move(shape), dtype, device, true)) {}
+
+auto Tensor::empty_uninitialized(std::vector<int64_t> shape, DType dtype, Device device)
+    -> Tensor {
+    Tensor t;
+    t.impl_ = std::make_shared<TensorImpl>(std::move(shape), dtype, device, false);
+    return t;
+}
 
 auto Tensor::shape() const noexcept -> std::span<const int64_t> {
     if (!impl_) return {};

@@ -48,6 +48,7 @@
 #include <tenzor/nn/layers/hrm.hpp>
 #include <tenzor/models/resnet.hpp>
 #include <tenzor/onnx/importer.hpp>
+#include <tenzor/backend/cpu_caching_allocator.hpp>
 #include "numpy_interop.hpp"
 
 namespace py = pybind11;
@@ -4748,4 +4749,47 @@ void bind_compression(py::module& m) {
              py::arg("in_features"), py::arg("out_features"),
              py::arg("weight_qparams"), py::arg("bias_scale") = 1.0f,
              "INT8 quantized linear layer");
+
+    // =============================================================================
+    // Memory Management
+    // =============================================================================
+
+    m.def("empty_cache", []() {
+        // Release CPU cache
+        tenzor::cpu::CPUCachingAllocator::instance().release_cached_memory();
+        // Note: Could also release GPU caches here if desired
+    }, "Release all cached memory back to the system");
+
+    m.def("memory_stats", [](const std::string& device) -> py::dict {
+        py::dict d;
+        if (device == "cpu" || device.empty()) {
+            auto stats = tenzor::cpu::CPUCachingAllocator::instance().get_stats();
+            d["allocated_bytes"] = stats.allocated_bytes;
+            d["cached_bytes"] = stats.cached_bytes;
+            d["peak_allocated_bytes"] = stats.peak_allocated_bytes;
+            d["total_allocations"] = stats.total_allocations;
+            d["cache_hits"] = stats.cache_hits;
+            d["cache_hit_rate"] = stats.total_allocations > 0
+                ? static_cast<double>(stats.cache_hits) / static_cast<double>(stats.total_allocations) : 0.0;
+            d["num_splits"] = stats.num_splits;
+            d["num_backend_allocs"] = stats.num_backend_allocs;
+            d["num_backend_frees"] = stats.num_backend_frees;
+        }
+        return d;
+    }, py::arg("device") = "cpu",
+    "Get memory allocation statistics for the specified device");
+
+    m.def("reset_memory_stats", [](const std::string& device) {
+        if (device == "cpu" || device.empty()) {
+            tenzor::cpu::CPUCachingAllocator::instance().reset_stats();
+        }
+    }, py::arg("device") = "cpu",
+    "Reset memory statistics counters for the specified device");
+
+    m.def("set_max_cached_bytes", [](size_t bytes, const std::string& device) {
+        if (device == "cpu" || device.empty()) {
+            tenzor::cpu::CPUCachingAllocator::instance().set_max_cached_bytes(bytes);
+        }
+    }, py::arg("bytes"), py::arg("device") = "cpu",
+    "Set maximum cached memory for the specified device");
 }

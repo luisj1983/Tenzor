@@ -791,7 +791,7 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
     dim = normalize_dim(dim, ndim);
 
     auto output_shape = compute_reduction_shape(input_shape_vec, dim, keepdim);
-    auto output = Tensor(output_shape, DType::Int64, input.device());
+    auto output = Tensor::empty_uninitialized(output_shape, DType::Int64, input.device());
 
     auto input_shape = input.shape();
     auto input_strides = input.strides();
@@ -943,7 +943,7 @@ auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
     dim = normalize_dim(dim, ndim);
 
     auto output_shape = compute_reduction_shape(input_shape_vec, dim, keepdim);
-    auto output = Tensor(output_shape, DType::Int64, input.device());
+    auto output = Tensor::empty_uninitialized(output_shape, DType::Int64, input.device());
 
     auto input_shape = input.shape();
     auto input_strides = input.strides();

@@ -69,69 +69,6 @@ public:
     virtual auto ref_count() const -> int64_t = 0;
 };
 
-/**
- * @brief CPU memory storage with aligned allocation.
- *
- * Manages host (CPU) memory with cache-line alignment for optimal
- * performance. Uses aligned_alloc for memory allocation and handles
- * proper cleanup on destruction.
- *
- * Memory is allocated with 64-byte alignment to avoid false sharing
- * and enable efficient SIMD operations.
- *
- * @code
- * auto storage = std::make_unique<CPUStorage>(1024);  // 1KB allocation
- * float* ptr = static_cast<float*>(storage->data());
- * @endcode
- *
- * @note This class is move-only (non-copyable).
- */
-class CPUStorage : public Storage {
-public:
-    /**
-     * @brief Allocate aligned CPU memory.
-     *
-     * @param size_bytes Number of bytes to allocate
-     * @throws std::bad_alloc if allocation fails
-     */
-    explicit CPUStorage(size_t size_bytes);
-
-    /**
-     * @brief Destructor frees allocated memory.
-     */
-    ~CPUStorage() override;
-
-    CPUStorage(const CPUStorage&) = delete;
-    CPUStorage& operator=(const CPUStorage&) = delete;
-
-    /**
-     * @brief Move constructor transfers ownership.
-     *
-     * @param other Source storage (left in valid but unspecified state)
-     */
-    CPUStorage(CPUStorage&&) noexcept;
-
-    /**
-     * @brief Move assignment transfers ownership.
-     *
-     * @param other Source storage (left in valid but unspecified state)
-     * @return Reference to this
-     */
-    CPUStorage& operator=(CPUStorage&&) noexcept;
-
-    auto data() -> void* override { return data_; }
-    auto data() const -> const void* override { return data_; }
-    auto size_bytes() const -> size_t override { return size_; }
-    auto device() const -> Device override { return Device::cpu(); }
-    auto ref_count() const -> int64_t override { return ref_count_.load(); }
-
-private:
-    void* data_{nullptr};                         ///< Pointer to allocated memory
-    size_t size_{0};                              ///< Size in bytes
-    mutable std::atomic<int64_t> ref_count_{1};   ///< Reference counter (atomic)
-    static constexpr size_t alignment_ = 64;      ///< Cache line alignment (64 bytes)
-};
-
 // Forward declaration for backend
 class Backend;
 
