@@ -2030,9 +2030,10 @@ auto var_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
     const auto& device = input.device();
     const auto& input_shape = input.shape();
 
-    // For now, only support full reduction (dim=-1)
-    if (dim != -1) {
-        throw std::runtime_error("var: only dim=-1 (full reduction) is currently supported for CUDA");
+    // For now, only support full reduction (dim=INT64_MIN or dim=-1)
+    // INT64_MIN is the sentinel for "reduce all dimensions"
+    if (dim != INT64_MIN && dim != -1) {
+        throw std::runtime_error("var: only full reduction is currently supported for CUDA");
     }
 
     // Compute output shape
@@ -2087,9 +2088,10 @@ auto std_kernel(const Tensor& input, int64_t dim, bool keepdim, int64_t correcti
     const auto& device = input.device();
     const auto& input_shape = input.shape();
 
-    // For now, only support full reduction (dim=-1)
-    if (dim != -1) {
-        throw std::runtime_error("std: only dim=-1 (full reduction) is currently supported for CUDA");
+    // For now, only support full reduction (dim=INT64_MIN or dim=-1)
+    // INT64_MIN is the sentinel for "reduce all dimensions"
+    if (dim != INT64_MIN && dim != -1) {
+        throw std::runtime_error("std: only full reduction is currently supported for CUDA");
     }
 
     // Compute output shape
@@ -2269,8 +2271,9 @@ __global__ void lp_norm_kernel(const T* input, T* output, int64_t n, float p) {
 
 // Norm kernel implementation
 auto norm_kernel(const Tensor& input, float p, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
-    if (dim != -1) {
-        throw std::runtime_error("norm: only full reduction (dim=-1) is currently supported for CUDA");
+    // INT64_MIN is the sentinel for "reduce all dimensions"
+    if (dim != INT64_MIN && dim != -1) {
+        throw std::runtime_error("norm: only full reduction is currently supported for CUDA");
     }
 
     auto shape = input.shape();

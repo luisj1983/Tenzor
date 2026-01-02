@@ -39,6 +39,21 @@ void VulkanCachingAllocator::initialize(VkDevice device, VkPhysicalDevice physic
     device_alloc.device = device;
     device_alloc.physical_device = physical_device;
     vkGetPhysicalDeviceMemoryProperties(physical_device, &device_alloc.memory_properties);
+
+    // Find the largest device-local memory heap
+    size_t max_device_local_memory = 0;
+    for (uint32_t i = 0; i < device_alloc.memory_properties.memoryHeapCount; i++) {
+        const auto& heap = device_alloc.memory_properties.memoryHeaps[i];
+        if (heap.flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) {
+            if (heap.size > max_device_local_memory) {
+                max_device_local_memory = heap.size;
+            }
+        }
+    }
+
+    // Store device memory size for proactive cache management
+    device_alloc.device_memory_size = max_device_local_memory;
+
     device_alloc.initialized = true;
 }
 
@@ -68,6 +83,27 @@ void* VulkanCachingAllocator::allocate(size_t size, int device,
 
     auto& device_alloc = device_allocators_[device];
     device_alloc.stats.num_allocations++;
+
+    // Proactively clear cache if memory pressure is high
+    // This prevents OOM by releasing cached memory before attempting new allocation
+    if (device_alloc.device_memory_size > 0 && !device_alloc.free_blocks.empty()) {
+        // Target: keep reserved memory under 75% of device VRAM
+        size_t memory_limit = (device_alloc.device_memory_size * 3) / 4;
+        size_t projected_usage = device_alloc.stats.reserved_bytes + size;
+
+        if (projected_usage > memory_limit) {
+            // Release cached blocks until we're under the limit or cache is empty
+            while (!device_alloc.free_blocks.empty() &&
+                   device_alloc.stats.reserved_bytes + size > memory_limit) {
+                // Release largest block first for maximum impact
+                auto it = device_alloc.free_blocks.rbegin();
+                VulkanBlock* block_to_release = *it;
+                auto forward_it = std::next(it).base();
+                device_alloc.free_blocks.erase(forward_it);
+                release_block(block_to_release);
+            }
+        }
+    }
 
     // Try to find a suitable block in cache
     VulkanBlock* block = try_allocate_from_cache(size, device, usage, properties);
@@ -137,7 +173,8 @@ void VulkanCachingAllocator::free(void* ptr, int device) {
     }
 }
 
-void VulkanCachingAllocator::empty_cache(int device) {
+void VulkanCachingAllocator::empty_cache(int device)
+{
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (device == -1) {
@@ -175,6 +212,7 @@ void VulkanCachingAllocator::empty_cache(int device) {
         }
     }
 }
+
 
 VkBuffer VulkanCachingAllocator::get_buffer(void* ptr, int device) const {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -365,19 +403,39 @@ VulkanBlock* VulkanCachingAllocator::allocate_new_block(size_t size, int device,
                                                    properties);
 
     VkDeviceMemory memory;
+    bool using_relaxed_props = false;
+    VkMemoryPropertyFlags relaxed_props = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+
     result = vkAllocateMemory(device_alloc.device, &alloc_info, nullptr, &memory);
 
     // If allocation fails with HOST_VISIBLE requested, retry with DEVICE_LOCAL only
     // This handles discrete GPUs where BAR (host-visible VRAM) is limited
     if (result != VK_SUCCESS && (properties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) {
         // Retry with just DEVICE_LOCAL
-        VkMemoryPropertyFlags relaxed_props = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
         alloc_info.memoryTypeIndex = find_memory_type(device_alloc.physical_device,
                                                        mem_requirements.memoryTypeBits,
                                                        relaxed_props);
         result = vkAllocateMemory(device_alloc.device, &alloc_info, nullptr, &memory);
         if (result == VK_SUCCESS) {
-            // Successfully allocated with device-local only, clear HOST_VISIBLE from properties
+            // Successfully allocated with device-local only
+            using_relaxed_props = true;
+            properties = relaxed_props;
+        } else {
+            // Track that we're now trying with relaxed props
+            using_relaxed_props = true;
+        }
+    }
+
+    // If allocation still fails (OOM), try emptying the cache and retrying
+    if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY || result == VK_ERROR_OUT_OF_HOST_MEMORY) {
+        // Empty the cache to free up memory (mutex already held)
+        empty_cache(device);
+
+        // Retry allocation
+        result = vkAllocateMemory(device_alloc.device, &alloc_info, nullptr, &memory);
+
+        // If OOM retry succeeded with relaxed props, update properties
+        if (result == VK_SUCCESS && using_relaxed_props) {
             properties = relaxed_props;
         }
     }

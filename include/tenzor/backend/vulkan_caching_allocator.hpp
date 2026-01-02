@@ -287,6 +287,7 @@ private:
      */
     void release_block(VulkanBlock* block);
 
+
     /**
      * @brief Find suitable memory type index
      */
@@ -299,6 +300,7 @@ private:
         VkDevice device = VK_NULL_HANDLE;
         VkPhysicalDevice physical_device = VK_NULL_HANDLE;
         VkPhysicalDeviceMemoryProperties memory_properties{};
+        size_t device_memory_size = 0;  // Total device-local VRAM
         bool initialized = false;
 
         // Free blocks ordered by size (for best-fit)

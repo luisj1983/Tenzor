@@ -475,6 +475,31 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         auto shape = parse_int_list(attrs, "shape");
         return std::vector<Tensor>{cuda::expand_kernel(inputs[0], shape, static_cast<void*>(get_cuda_stream(attrs)))};
     });
+    table.register_kernel(OpId::Transpose, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t dim0 = parse_attr<int64_t>(attrs, "dim0", 0);
+        int64_t dim1 = parse_attr<int64_t>(attrs, "dim1", 1);
+        return std::vector<Tensor>{cuda::transpose_kernel(inputs[0], dim0, dim1, get_cuda_stream(attrs))};
+    });
+    table.register_kernel(OpId::Permute, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        auto dims = parse_int_list(attrs, "dims");
+        return std::vector<Tensor>{cuda::permute_kernel(inputs[0], dims, get_cuda_stream(attrs))};
+    });
+    table.register_kernel(OpId::Squeeze, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
+        return std::vector<Tensor>{cuda::squeeze_kernel(inputs[0], dim, get_cuda_stream(attrs))};
+    });
+    table.register_kernel(OpId::Unsqueeze, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t dim = parse_attr<int64_t>(attrs, "dim", 0);
+        return std::vector<Tensor>{cuda::unsqueeze_kernel(inputs[0], dim, get_cuda_stream(attrs))};
+    });
+    table.register_kernel(OpId::Cat, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t dim = parse_attr<int64_t>(attrs, "dim", 0);
+        return std::vector<Tensor>{cuda::cat_kernel(inputs, dim, get_cuda_stream(attrs))};
+    });
+    table.register_kernel(OpId::Repeat, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        auto repeats = parse_int_list(attrs, "repeats");
+        return std::vector<Tensor>{cuda::repeat_kernel(inputs[0], repeats, get_cuda_stream(attrs))};
+    });
 
     // =========================================================================
     // Indexing Operations
