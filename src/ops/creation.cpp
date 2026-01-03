@@ -424,6 +424,82 @@ auto randn(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
     return tensor;
 }
 
+auto randint(int64_t low, int64_t high, std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
+    if (low >= high) {
+        throw std::invalid_argument("randint: low must be less than high");
+    }
+
+    // Use backend directly for non-CPU devices
+    if (device.type != Device::Type::CPU) {
+        auto backend = backend_registry().get_backend(device.type);
+        if (!backend) {
+            throw std::runtime_error("Backend not available for device type");
+        }
+
+        OpAttributes attrs;
+        attrs["shape"] = shape_to_string(shape);
+        attrs["dtype"] = dtype_to_string(dtype);
+        attrs["device_id"] = std::to_string(device.index);
+        attrs["low"] = std::to_string(low);
+        attrs["high"] = std::to_string(high);
+
+        return backend->dispatch("randint", {}, attrs)[0];
+    }
+
+    // CPU path: use uninitialized allocation
+    auto tensor = Tensor::empty_uninitialized(std::move(shape), dtype, device);
+    if (!tensor.impl() || !tensor.impl()->storage) return tensor;
+
+    size_t numel = tensor.numel();
+    void* data = tensor.impl()->storage->data();
+
+    // Use global random number generator
+    auto& gen = get_rng();
+    std::uniform_int_distribution<int64_t> dist(low, high - 1);
+
+    // Fill with random integers based on dtype
+    switch (dtype) {
+        case DType::Int64: {
+            int64_t* ptr = static_cast<int64_t*>(data);
+            for (size_t i = 0; i < numel; ++i) {
+                ptr[i] = dist(gen);
+            }
+            break;
+        }
+        case DType::Int32: {
+            int32_t* ptr = static_cast<int32_t*>(data);
+            for (size_t i = 0; i < numel; ++i) {
+                ptr[i] = static_cast<int32_t>(dist(gen));
+            }
+            break;
+        }
+        case DType::Int16: {
+            int16_t* ptr = static_cast<int16_t*>(data);
+            for (size_t i = 0; i < numel; ++i) {
+                ptr[i] = static_cast<int16_t>(dist(gen));
+            }
+            break;
+        }
+        case DType::Int8: {
+            int8_t* ptr = static_cast<int8_t*>(data);
+            for (size_t i = 0; i < numel; ++i) {
+                ptr[i] = static_cast<int8_t>(dist(gen));
+            }
+            break;
+        }
+        case DType::UInt8: {
+            uint8_t* ptr = static_cast<uint8_t*>(data);
+            for (size_t i = 0; i < numel; ++i) {
+                ptr[i] = static_cast<uint8_t>(dist(gen));
+            }
+            break;
+        }
+        default:
+            throw std::runtime_error("Unsupported dtype for randint() - only integer types are supported");
+    }
+    return tensor;
+}
+
 auto arange(float start, float end, float step, DType dtype, Device device) -> Tensor {
     if (step == 0.0f) {
         throw std::invalid_argument("step cannot be zero");

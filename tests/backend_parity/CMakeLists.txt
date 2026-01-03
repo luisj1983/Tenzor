@@ -18,7 +18,7 @@ function(add_parity_test TEST_NAME SOURCE_FILE)
     add_executable(${TEST_NAME} ${SOURCE_FILE})
 
     target_link_libraries(${TEST_NAME}
-        tenzor
+        tenzor_core
         GTest::gtest
         GTest::gtest_main
         ${CMAKE_THREAD_LIBS_INIT}

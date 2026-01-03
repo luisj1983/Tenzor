@@ -405,6 +405,24 @@ auto LayerNorm::forward_impl(const Variable& input) -> Variable {
             }
 
             grad_fn->set_next_functions(std::move(next_funcs));
+
+            // Track input variables for gradient accumulation
+            std::vector<Variable> input_vars;
+            if (input.requires_grad()) {
+                input_vars.push_back(input);
+            }
+            if (elementwise_affine_) {
+                auto weight_it = parameters_.find("weight");
+                auto bias_it = parameters_.find("bias");
+                if (weight_it != parameters_.end() && weight_it->second->requires_grad()) {
+                    input_vars.push_back(*weight_it->second);
+                }
+                if (bias_it != parameters_.end() && bias_it->second->requires_grad()) {
+                    input_vars.push_back(*bias_it->second);
+                }
+            }
+            grad_fn->set_input_variables(input_vars);
+
             return result;
         }
 
@@ -520,8 +538,8 @@ auto LayerNorm::forward_impl(const Variable& input) -> Variable {
                     input_vars.push_back(*bias_it->second);
                 }
             }
+            grad_fn->set_input_variables(input_vars);
 
-            // Removed set_inputs call - method doesn't exist
             return result;
         }
 
@@ -637,6 +655,23 @@ auto LayerNorm::forward_impl(const Variable& input) -> Variable {
                 }
             }
             grad_fn->set_next_functions(next_funcs);
+
+            // Track input variables for gradient accumulation
+            std::vector<Variable> input_vars;
+            if (input.requires_grad()) {
+                input_vars.push_back(input);
+            }
+            if (elementwise_affine_) {
+                auto weight_it = parameters_.find("weight");
+                auto bias_it = parameters_.find("bias");
+                if (weight_it != parameters_.end() && weight_it->second->requires_grad()) {
+                    input_vars.push_back(*weight_it->second);
+                }
+                if (bias_it != parameters_.end() && bias_it->second->requires_grad()) {
+                    input_vars.push_back(*bias_it->second);
+                }
+            }
+            grad_fn->set_input_variables(input_vars);
 
             return result;
         }
@@ -992,6 +1027,402 @@ auto GroupNorm::forward_impl(const Variable& input) -> Variable {
 
 auto GroupNorm::reset_parameters() -> void {
     // Weight initialized to 1, bias to 0 (already done in constructor)
+}
+
+// ============================================================================
+// RMSNorm Implementation
+// ============================================================================
+
+// RMSNorm autograd function
+class RMSNormBackward : public Function {
+public:
+    RMSNormBackward(double eps, int64_t normalized_size, std::vector<Tensor> tensors_to_save)
+        : eps_(eps), normalized_size_(normalized_size) {
+        saved_tensors_ = std::move(tensors_to_save);
+    }
+
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+        throw std::runtime_error("RMSNormBackward::forward should not be called");
+    }
+
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
+        auto& grad_output_orig = grad_outputs[0];
+        auto saved = saved_tensors();
+        auto& input_orig = saved[0];
+        auto& rrms_orig = saved[1];  // reciprocal root mean square (1 / sqrt(mean(x^2) + eps))
+        auto& weight_orig = saved[2];
+
+        // Save original device before transferring to CPU
+        Device original_device = input_orig.device();
+        DType original_dtype = grad_output_orig.dtype();
+
+        // Move to CPU and convert to Float32 for computation
+        auto grad_output = (grad_output_orig.device() == Device::cpu())
+                          ? grad_output_orig.contiguous().to(DType::Float32)
+                          : grad_output_orig.contiguous().to(Device::cpu()).to(DType::Float32);
+        auto input = (input_orig.device() == Device::cpu())
+                    ? input_orig.contiguous().to(DType::Float32)
+                    : input_orig.contiguous().to(Device::cpu()).to(DType::Float32);
+        auto rrms = (rrms_orig.device() == Device::cpu())
+                   ? rrms_orig.contiguous().to(DType::Float32)
+                   : rrms_orig.contiguous().to(Device::cpu()).to(DType::Float32);
+        auto weight = (weight_orig.device() == Device::cpu())
+                     ? weight_orig.contiguous().to(DType::Float32)
+                     : weight_orig.contiguous().to(Device::cpu()).to(DType::Float32);
+
+        auto shape = input.shape();
+        int64_t batch_size = 1;
+        for (size_t i = 0; i < shape.size() - 1; i++) {
+            batch_size *= shape[i];
+        }
+
+        int64_t N = normalized_size_;
+
+        auto* input_data = input.data<float>();
+        auto* rrms_data = rrms.data<float>();
+        auto* grad_out_data = grad_output.data<float>();
+        auto* weight_data = weight.data<float>();
+
+        // Allocate gradient tensors
+        auto grad_input = zeros_like(input);
+        auto grad_weight = zeros({N}, grad_output.dtype(), grad_output.device());
+
+        auto* grad_in_data = grad_input.data<float>();
+        auto* grad_weight_data = grad_weight.data<float>();
+
+        // Compute gradients for each batch element
+        // RMSNorm: y = x * rrms * weight
+        // where rrms = 1 / sqrt(mean(x^2) + eps)
+        //
+        // d/dx[y] = weight * rrms - x * weight * rrms^3 * mean(x) / N
+        // d/dweight[y] = x * rrms
+        for (int64_t b = 0; b < batch_size; b++) {
+            float inv_rms = rrms_data[b];
+            float inv_rms_cubed = inv_rms * inv_rms * inv_rms;
+
+            // Compute sum for gradient correction term
+            float sum_grad_x = 0.0f;
+            for (int64_t i = 0; i < N; i++) {
+                int64_t idx = b * N + i;
+                sum_grad_x += grad_out_data[idx] * weight_data[i] * input_data[idx];
+            }
+            float correction = sum_grad_x * inv_rms_cubed / N;
+
+            // Compute input and weight gradients
+            for (int64_t i = 0; i < N; i++) {
+                int64_t idx = b * N + i;
+                float x = input_data[idx];
+                float normalized = x * inv_rms;
+
+                // Weight gradient
+                grad_weight_data[i] += grad_out_data[idx] * normalized;
+
+                // Input gradient: d/dx = weight * rrms - x * correction
+                grad_in_data[idx] = grad_out_data[idx] * weight_data[i] * inv_rms - x * correction;
+            }
+        }
+
+        // Transfer gradients back to original device and dtype if needed
+        Tensor grad_input_final = (original_device == Device::cpu())
+                                 ? grad_input.contiguous().to(original_dtype)
+                                 : grad_input.contiguous().to(original_device).to(original_dtype);
+        Tensor grad_weight_final = (original_device == Device::cpu())
+                                  ? grad_weight.contiguous().to(original_dtype)
+                                  : grad_weight.contiguous().to(original_device).to(original_dtype);
+
+        return {grad_input_final, grad_weight_final};
+    }
+
+private:
+    double eps_;
+    int64_t normalized_size_;
+};
+
+RMSNorm::RMSNorm(int64_t normalized_shape, double eps)
+    : normalized_shape_(normalized_shape), eps_(eps) {
+
+    weight_ = Variable(ones({normalized_shape_}), true);
+    register_parameter("weight", weight_);
+
+    reset_parameters();
+}
+
+auto RMSNorm::forward_impl(const Variable& input) -> Variable {
+    auto shape = input.shape();
+
+    // Verify that input's last dimension matches normalized_shape
+    if (shape.empty() || shape.back() != normalized_shape_) {
+        throw std::runtime_error("Input's last dimension (" +
+                               std::to_string(shape.empty() ? 0 : shape.back()) +
+                               ") doesn't match normalized_shape (" +
+                               std::to_string(normalized_shape_) + ")");
+    }
+
+    // Calculate batch size (all dimensions except the last)
+    int64_t batch_size = 1;
+    for (size_t i = 0; i < shape.size() - 1; i++) {
+        batch_size *= shape[i];
+    }
+
+    int64_t N = normalized_shape_;
+
+    // Save original device and move input to CPU for pointer-based computation
+    Device original_device = input.tensor().device();
+    Tensor input_cpu = (original_device == Device::cpu()) ? input.tensor() : input.tensor().to(Device::cpu());
+
+    // Get weight from parameters_ to respect offload hooks
+    Tensor weight_cpu = parameters_["weight"]->tensor();
+    if (weight_cpu.device() != Device::cpu()) {
+        weight_cpu = weight_cpu.to(Device::cpu());
+    }
+    if (weight_cpu.dtype() != input_cpu.dtype()) {
+        weight_cpu = weight_cpu.to(input_cpu.dtype());
+    }
+
+    DType input_dtype = input_cpu.dtype();
+
+    if (input_dtype == DType::Float32) {
+        auto* input_data = input_cpu.data<float>();
+
+        // Compute root mean square for each batch element
+        auto rrms = zeros({batch_size}, DType::Float32, Device::cpu());
+        auto* rrms_data = rrms.data<float>();
+
+        for (int64_t b = 0; b < batch_size; b++) {
+            double sum_sq = 0.0;
+            for (int64_t i = 0; i < N; i++) {
+                float val = input_data[b * N + i];
+                sum_sq += val * val;
+            }
+            double rms = std::sqrt(sum_sq / N + eps_);
+            rrms_data[b] = static_cast<float>(1.0 / rms);
+        }
+
+        // Normalize: x * rrms * weight
+        auto output_cpu = zeros_like(input_cpu);
+        auto* output_data = output_cpu.data<float>();
+        auto* weight_data = weight_cpu.data<float>();
+
+        for (int64_t b = 0; b < batch_size; b++) {
+            float inv_rms = rrms_data[b];
+            for (int64_t i = 0; i < N; i++) {
+                int64_t idx = b * N + i;
+                output_data[idx] = input_data[idx] * inv_rms * weight_data[i];
+            }
+        }
+
+        // Move output back to original device if needed
+        Tensor output = (original_device == Device::cpu()) ? output_cpu : output_cpu.to(original_device);
+
+        // Set up autograd if needed
+        if (input.requires_grad() || parameters_["weight"]->requires_grad()) {
+            auto result = Variable(output, true);
+
+            std::vector<Tensor> tensors_to_save = {
+                input.tensor(),
+                rrms,
+                parameters_["weight"]->tensor()
+            };
+
+            auto grad_fn = std::make_shared<RMSNormBackward>(
+                eps_, N, std::move(tensors_to_save)
+            );
+
+            result.set_grad_fn(grad_fn);
+
+            std::vector<std::shared_ptr<Function>> next_funcs;
+            if (auto input_grad_fn = input.grad_fn()) {
+                next_funcs.push_back(input_grad_fn);
+            }
+            auto weight_it = parameters_.find("weight");
+            if (weight_it != parameters_.end() && weight_it->second->requires_grad()) {
+                if (auto weight_grad_fn = weight_it->second->grad_fn()) {
+                    next_funcs.push_back(weight_grad_fn);
+                }
+            }
+            grad_fn->set_next_functions(next_funcs);
+
+            // Track input variables for gradient accumulation
+            std::vector<Variable> input_vars;
+            if (input.requires_grad()) {
+                input_vars.push_back(input);
+            }
+            if (weight_it != parameters_.end() && weight_it->second->requires_grad()) {
+                input_vars.push_back(*weight_it->second);
+            }
+            grad_fn->set_input_variables(input_vars);
+
+            return result;
+        }
+
+        return Variable(output, false);
+
+    } else if (input_dtype == DType::Float64) {
+        auto* input_data = input_cpu.data<double>();
+
+        // Compute root mean square for each batch element
+        auto rrms = zeros({batch_size}, DType::Float64, Device::cpu());
+        auto* rrms_data = rrms.data<double>();
+
+        for (int64_t b = 0; b < batch_size; b++) {
+            double sum_sq = 0.0;
+            for (int64_t i = 0; i < N; i++) {
+                double val = input_data[b * N + i];
+                sum_sq += val * val;
+            }
+            double rms = std::sqrt(sum_sq / N + eps_);
+            rrms_data[b] = 1.0 / rms;
+        }
+
+        // Normalize: x * rrms * weight
+        auto output_cpu = zeros_like(input_cpu);
+        auto* output_data = output_cpu.data<double>();
+        auto* weight_data = weight_cpu.data<double>();
+
+        for (int64_t b = 0; b < batch_size; b++) {
+            double inv_rms = rrms_data[b];
+            for (int64_t i = 0; i < N; i++) {
+                int64_t idx = b * N + i;
+                output_data[idx] = input_data[idx] * inv_rms * weight_data[i];
+            }
+        }
+
+        // Move output back to original device if needed
+        Tensor output = (original_device == Device::cpu()) ? output_cpu : output_cpu.to(original_device);
+
+        // Set up autograd if needed
+        if (input.requires_grad() || parameters_["weight"]->requires_grad()) {
+            auto result = Variable(output, true);
+
+            // Convert rrms to Float32 for backward compatibility
+            auto rrms_f32 = zeros({batch_size}, DType::Float32, Device::cpu());
+            auto* rrms_f32_data = rrms_f32.data<float>();
+            for (int64_t b = 0; b < batch_size; b++) {
+                rrms_f32_data[b] = static_cast<float>(rrms_data[b]);
+            }
+
+            std::vector<Tensor> tensors_to_save = {
+                input.tensor(),
+                rrms_f32,
+                parameters_["weight"]->tensor()
+            };
+
+            auto grad_fn = std::make_shared<RMSNormBackward>(
+                eps_, N, std::move(tensors_to_save)
+            );
+
+            result.set_grad_fn(grad_fn);
+
+            std::vector<std::shared_ptr<Function>> next_funcs;
+            if (auto input_grad_fn = input.grad_fn()) {
+                next_funcs.push_back(input_grad_fn);
+            }
+            auto weight_it = parameters_.find("weight");
+            if (weight_it != parameters_.end() && weight_it->second->requires_grad()) {
+                if (auto weight_grad_fn = weight_it->second->grad_fn()) {
+                    next_funcs.push_back(weight_grad_fn);
+                }
+            }
+            grad_fn->set_next_functions(next_funcs);
+
+            // Track input variables for gradient accumulation
+            std::vector<Variable> input_vars;
+            if (input.requires_grad()) {
+                input_vars.push_back(input);
+            }
+            if (weight_it != parameters_.end() && weight_it->second->requires_grad()) {
+                input_vars.push_back(*weight_it->second);
+            }
+            grad_fn->set_input_variables(input_vars);
+
+            return result;
+        }
+
+        return Variable(output, false);
+
+    } else if (input_dtype == DType::Float16) {
+        auto* input_data = input_cpu.data<Float16>();
+
+        // Compute root mean square for each batch element (use float accumulation)
+        auto rrms = zeros({batch_size}, DType::Float32, Device::cpu());
+        auto* rrms_data = rrms.data<float>();
+
+        for (int64_t b = 0; b < batch_size; b++) {
+            double sum_sq = 0.0;
+            for (int64_t i = 0; i < N; i++) {
+                float val = static_cast<float>(input_data[b * N + i]);
+                sum_sq += val * val;
+            }
+            double rms = std::sqrt(sum_sq / N + eps_);
+            rrms_data[b] = static_cast<float>(1.0 / rms);
+        }
+
+        // Normalize: x * rrms * weight
+        auto output_cpu = zeros_like(input_cpu);
+        auto* output_data = output_cpu.data<Float16>();
+        auto* weight_data = weight_cpu.data<Float16>();
+
+        for (int64_t b = 0; b < batch_size; b++) {
+            float inv_rms = rrms_data[b];
+            for (int64_t i = 0; i < N; i++) {
+                int64_t idx = b * N + i;
+                output_data[idx] = Float16(static_cast<float>(input_data[idx]) * inv_rms * static_cast<float>(weight_data[i]));
+            }
+        }
+
+        // Move output back to original device if needed
+        Tensor output = (original_device == Device::cpu()) ? output_cpu : output_cpu.to(original_device);
+
+        // Set up autograd if needed
+        if (input.requires_grad() || parameters_["weight"]->requires_grad()) {
+            auto result = Variable(output, true);
+
+            std::vector<Tensor> tensors_to_save = {
+                input.tensor(),
+                rrms,
+                parameters_["weight"]->tensor()
+            };
+
+            auto grad_fn = std::make_shared<RMSNormBackward>(
+                eps_, N, std::move(tensors_to_save)
+            );
+
+            result.set_grad_fn(grad_fn);
+
+            std::vector<std::shared_ptr<Function>> next_funcs;
+            if (auto input_grad_fn = input.grad_fn()) {
+                next_funcs.push_back(input_grad_fn);
+            }
+            auto weight_it = parameters_.find("weight");
+            if (weight_it != parameters_.end() && weight_it->second->requires_grad()) {
+                if (auto weight_grad_fn = weight_it->second->grad_fn()) {
+                    next_funcs.push_back(weight_grad_fn);
+                }
+            }
+            grad_fn->set_next_functions(next_funcs);
+
+            // Track input variables for gradient accumulation
+            std::vector<Variable> input_vars;
+            if (input.requires_grad()) {
+                input_vars.push_back(input);
+            }
+            if (weight_it != parameters_.end() && weight_it->second->requires_grad()) {
+                input_vars.push_back(*weight_it->second);
+            }
+            grad_fn->set_input_variables(input_vars);
+
+            return result;
+        }
+
+        return Variable(output, false);
+
+    } else {
+        throw std::runtime_error("RMSNorm only supports Float16, Float32, and Float64 dtypes");
+    }
+}
+
+auto RMSNorm::reset_parameters() -> void {
+    // Weight initialized to 1 (already done in constructor)
 }
 
 } // namespace tenzor::nn

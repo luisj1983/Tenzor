@@ -1043,9 +1043,28 @@ PYBIND11_MODULE(tenzor_core, m) {
          py::arg("dtype") = tenzor::DType::Float32,
          py::arg("device") = tenzor::Device::cpu());
 
+    m.def("randint", &tenzor::randint, "Create tensor with random integers",
+         py::arg("low"),
+         py::arg("high"),
+         py::arg("shape"),
+         py::arg("dtype") = tenzor::DType::Int64,
+         py::arg("device") = tenzor::Device::cpu());
+
+    m.def("arange", &tenzor::arange, "Create 1D tensor with evenly spaced values",
+         py::arg("start"),
+         py::arg("end"),
+         py::arg("step") = 1.0f,
+         py::arg("dtype") = tenzor::DType::Float32,
+         py::arg("device") = tenzor::Device::cpu());
+
     m.def("matmul", [](const tenzor::Tensor& a, const tenzor::Tensor& b) {
          return tenzor::matmul(a, b);
          }, "Matrix multiplication",
+         py::arg("a"), py::arg("b"));
+
+    m.def("bmm", [](const tenzor::Tensor& a, const tenzor::Tensor& b) {
+         return tenzor::bmm(a, b);
+         }, "Batched matrix multiplication",
          py::arg("a"), py::arg("b"));
 
     // Math operations - using lambda wrappers for overloaded functions
@@ -1708,6 +1727,17 @@ PYBIND11_MODULE(tenzor_core, m) {
              py::arg("num_channels"),
              py::arg("eps") = 1e-5,
              py::arg("affine") = true);
+
+    py::class_<tenzor::nn::RMSNorm, tenzor::nn::Module,
+               std::shared_ptr<tenzor::nn::RMSNorm>>(nn, "RMSNorm")
+        .def(py::init<int64_t, double>(),
+             py::arg("normalized_shape"),
+             py::arg("eps") = 1e-6)
+        .def("__repr__", [](const tenzor::nn::RMSNorm& self) {
+            auto params = const_cast<tenzor::nn::RMSNorm&>(self).own_parameters();
+            int64_t size = params.empty() ? 0 : params[0]->tensor().numel();
+            return "RMSNorm(" + std::to_string(size) + ")";
+        });
 
     // Regularization layers
     py::class_<tenzor::nn::Dropout, tenzor::nn::Module,
@@ -4231,12 +4261,7 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def_readwrite("use_truncated_normal", &tenzor::nn::HRMConfig::use_truncated_normal)
         .def_readwrite("init_std", &tenzor::nn::HRMConfig::init_std);
 
-    // RMSNorm layer
-    py::class_<tenzor::nn::RMSNorm, tenzor::nn::Module,
-               std::shared_ptr<tenzor::nn::RMSNorm>>(hrm, "RMSNorm",
-        "RMS Layer Normalization")
-        .def(py::init<int64_t, double>(),
-             py::arg("normalized_shape"), py::arg("eps") = 1e-6);
+    // RMSNorm is registered in nn module, no need to register again here
 
     // GatedLinearUnit
     py::class_<tenzor::nn::GatedLinearUnit, tenzor::nn::Module,

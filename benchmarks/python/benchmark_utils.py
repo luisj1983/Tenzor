@@ -15,6 +15,115 @@ import platform
 import subprocess
 
 
+# =============================================================================
+# CUDA Synchronization Helpers
+# =============================================================================
+
+def get_tenzor_sync_fn(device: str) -> Optional[Callable]:
+    """Get the appropriate synchronization function for Tenzor CUDA operations.
+
+    Returns None for CPU, or a sync function for CUDA.
+    For CUDA, falls back to PyTorch's sync if Tenzor doesn't expose one,
+    since they typically share the same CUDA context.
+    """
+    if device != "cuda":
+        return None
+
+    try:
+        import tenzor as tz
+        # Try different possible sync methods Tenzor might have
+        if hasattr(tz, 'cuda') and hasattr(tz.cuda, 'synchronize'):
+            return tz.cuda.synchronize
+        elif hasattr(tz, 'synchronize'):
+            return tz.synchronize
+        elif hasattr(tz, 'sync'):
+            return tz.sync
+    except ImportError:
+        pass
+
+    # Fallback: use PyTorch's sync if available (they share CUDA context)
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return torch.cuda.synchronize
+    except ImportError:
+        pass
+
+    # Last resort: warn that timing may be inaccurate
+    print("  [WARNING] No CUDA sync function found for Tenzor. GPU timings may be inaccurate.")
+    return None
+
+
+def get_pytorch_sync_fn(device: str) -> Optional[Callable]:
+    """Get the appropriate synchronization function for PyTorch CUDA operations."""
+    if device != "cuda":
+        return None
+
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return torch.cuda.synchronize
+    except ImportError:
+        pass
+    return None
+
+
+def check_tenzor_cuda_available() -> bool:
+    """Check if Tenzor has CUDA support available."""
+    try:
+        import tenzor as tz
+        # Try different possible ways Tenzor might expose CUDA availability
+        if hasattr(tz, 'cuda') and hasattr(tz.cuda, 'is_available'):
+            return tz.cuda.is_available()
+        elif hasattr(tz, 'is_cuda_available'):
+            return tz.is_cuda_available()
+        elif hasattr(tz, 'cuda_available'):
+            return tz.cuda_available()
+        else:
+            # Try to create a CUDA tensor as a test
+            try:
+                test = tz.randn([2, 2]).cuda()
+                del test
+                return True
+            except Exception:
+                return False
+    except ImportError:
+        return False
+
+
+def check_pytorch_cuda_available() -> bool:
+    """Check if PyTorch has CUDA support available."""
+    try:
+        import torch
+        return torch.cuda.is_available()
+    except ImportError:
+        return False
+
+
+def clear_gpu_memory():
+    """Clear GPU memory caches for both frameworks."""
+    gc.collect()
+
+    # Clear PyTorch cache
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+    except ImportError:
+        pass
+
+    # Clear Tenzor cache if available
+    try:
+        import tenzor as tz
+        if hasattr(tz, 'cuda') and hasattr(tz.cuda, 'empty_cache'):
+            tz.cuda.empty_cache()
+        if hasattr(tz, 'cuda') and hasattr(tz.cuda, 'synchronize'):
+            tz.cuda.synchronize()
+    except ImportError:
+        pass
+
+
 @dataclass
 class BenchmarkResult:
     """Results from a single benchmark."""

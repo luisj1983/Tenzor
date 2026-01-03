@@ -97,6 +97,9 @@ target_link_libraries(tenzor_integration_tests PRIVATE
 # Comprehensive integration tests subdirectory
 add_subdirectory(integration)
 
+# Backend parity tests subdirectory
+add_subdirectory(backend_parity)
+
 # Dropout tests
 add_executable(test_dropout
     nn/layers/test_dropout.cpp
@@ -738,6 +741,18 @@ target_link_libraries(test_comparison_ops_multidtype PRIVATE
     tenzor_core
     GTest::gtest_main
 )
+
+# Creation operations tests
+add_executable(test_creation_ops
+    test_creation_ops.cpp
+)
+
+target_link_libraries(test_creation_ops PRIVATE
+    tenzor_core
+    GTest::gtest_main
+)
+
+tenzor_discover_tests(test_creation_ops DISCOVERY_TIMEOUT 30)
 
 # Creation operations multi-dtype tests
 add_executable(test_creation_ops_multidtype

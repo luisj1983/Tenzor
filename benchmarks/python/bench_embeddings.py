@@ -11,7 +11,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'python')
 
 from typing import List, Tuple, Dict, Any
 from benchmark_utils import (
-    run_benchmark, compute_statistics, BenchmarkResult, print_result
+    run_benchmark, compute_statistics, BenchmarkResult, print_result,
+    get_tenzor_sync_fn, get_pytorch_sync_fn, check_tenzor_cuda_available,
+    check_pytorch_cuda_available, clear_gpu_memory
 )
 from benchmark_config import BenchmarkConfig, DEFAULT_CONFIG
 

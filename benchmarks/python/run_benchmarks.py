@@ -212,7 +212,9 @@ def generate_summary(results: List[BenchmarkResult]):
     for r in results:
         if r.category not in categories:
             categories[r.category] = {"tenzor": [], "pytorch": []}
-        categories[r.category][r.framework].append(r)
+        # Normalize framework names - treat pytorch variants as pytorch
+        framework_key = "tenzor" if r.framework == "tenzor" else "pytorch"
+        categories[r.category][framework_key].append(r)
 
     # Calculate average speedups
     for category, data in categories.items():
@@ -239,7 +241,7 @@ def generate_summary(results: List[BenchmarkResult]):
 
     # Overall statistics
     tz_total = [r for r in results if r.framework == "tenzor"]
-    pt_total = [r for r in results if r.framework == "pytorch"]
+    pt_total = [r for r in results if r.framework != "tenzor"]  # All non-tenzor are pytorch variants
 
     if tz_total:
         print(f"\n  OVERALL")

@@ -2492,6 +2492,10 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
         insertComputeBarrier(cmdBuffer);
 
         endSingleTimeCommands(cmdBuffer, device_id);
+
+        // Synchronize to ensure GPU has completed before using the result
+        synchronize(device_id);
+
         return output;
     } else {
         // Broadcasting path: use math_broadcast shader
@@ -2625,6 +2629,10 @@ auto VulkanBackend::dispatchBinaryOp(const std::string& op_name,
         insertComputeBarrier(cmdBuffer);
 
         endSingleTimeCommands(cmdBuffer, device_id);
+
+        // Synchronize to ensure GPU has completed before using the result
+        synchronize(device_id);
+
         return output;
     }
 }
@@ -2762,6 +2770,9 @@ auto VulkanBackend::dispatchUnaryOp(const std::string& op_name,
 
     insertComputeBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
+
+    // Synchronize to ensure GPU has completed before using the result
+    synchronize(device_id);
 
     return output;
 }
@@ -5239,8 +5250,19 @@ auto VulkanBackend::dispatchVariance(const Tensor& input, int64_t dim, bool unbi
     std::vector<int64_t> out_shape;
     auto input_shape = input.shape();
 
-    if (dim < 0) {
-        out_shape = {1};
+    // Check if this is a full reduction (dim < 0 means reduce all elements)
+    bool full_reduction = (dim < 0);
+
+    // For dispatchReduction, use INT64_MIN to signal full reduction
+    int64_t reduction_dim = full_reduction ? INT64_MIN : dim;
+
+    if (full_reduction) {
+        // Full reduction: output is scalar (empty shape) or [1,1,...] if keepdim
+        if (keepdim) {
+            out_shape.assign(input_shape.size(), 1);
+        } else {
+            out_shape = {};  // Scalar
+        }
     } else {
         out_shape = std::vector<int64_t>(input_shape.begin(), input_shape.end());
         if (keepdim) {
@@ -5252,7 +5274,7 @@ auto VulkanBackend::dispatchVariance(const Tensor& input, int64_t dim, bool unbi
 
     // Compute variance using the formula: Var(X) = E[(X - mean)^2]
     // 1. Compute mean (with keepdim=true for broadcasting)
-    Tensor mean = dispatchReduction("mean", input, dim, true);
+    Tensor mean = dispatchReduction("mean", input, reduction_dim, true);
 
     // 2. Compute (X - mean)
     Tensor diff = dispatchBinaryOp("sub", input, mean);
@@ -5261,23 +5283,36 @@ auto VulkanBackend::dispatchVariance(const Tensor& input, int64_t dim, bool unbi
     Tensor squared_diff = dispatchBinaryOp("mul", diff, diff);
 
     // 4. Compute sum of squared differences
-    Tensor sum_squared = dispatchReduction("sum", squared_diff, dim, keepdim);
+    Tensor sum_squared = dispatchReduction("sum", squared_diff, reduction_dim, keepdim);
 
     // 5. Divide by N or N-1
-    uint32_t reduce_size = (dim >= 0) ? static_cast<uint32_t>(input_shape[dim]) : static_cast<uint32_t>(input.numel());
+    uint32_t reduce_size = full_reduction ? static_cast<uint32_t>(input.numel()) : static_cast<uint32_t>(input_shape[dim]);
     float divisor = unbiased ? static_cast<float>(reduce_size - 1) : static_cast<float>(reduce_size);
 
-    // Create a scalar tensor with the divisor on CPU, then copy to device
-    std::vector<int64_t> scalar_shape = {1};
-    Tensor divisor_tensor_cpu(scalar_shape, input.dtype(), Device::cpu());
+    // Create a scalar tensor with the divisor matching the output shape
+    // This ensures broadcasting preserves the correct output shape
+    auto sum_shape = sum_squared.shape();
+    std::vector<int64_t> divisor_shape(sum_shape.begin(), sum_shape.end());
+    if (divisor_shape.empty()) {
+        divisor_shape = {1};  // Can't create empty tensor on CPU, use [1] for scalar
+    }
+    Tensor divisor_tensor_cpu(divisor_shape, input.dtype(), Device::cpu());
     float* divisor_data = static_cast<float*>(divisor_tensor_cpu.data_ptr());
-    *divisor_data = divisor;
+    for (int64_t i = 0; i < divisor_tensor_cpu.numel(); i++) {
+        divisor_data[i] = divisor;
+    }
 
     // Copy to device
     Tensor divisor_tensor = divisor_tensor_cpu.to(input.device());
 
-    // Divide variance by divisor
-    return dispatchBinaryOp("div", sum_squared, divisor_tensor);
+    // Divide variance by divisor and reshape to match expected output
+    Tensor result = dispatchBinaryOp("div", sum_squared, divisor_tensor);
+
+    // If the output should be a scalar but broadcast made it [1], reshape to scalar
+    if (full_reduction && !keepdim && result.shape().size() > 0) {
+        return result.reshape({});
+    }
+    return result;
 }
 
 auto VulkanBackend::dispatchStd(const Tensor& input, int64_t dim, bool unbiased, bool keepdim) -> Tensor {
@@ -5331,8 +5366,16 @@ auto VulkanBackend::dispatchProd(const Tensor& input, int64_t dim, bool keepdim)
     std::vector<int64_t> out_shape;
     auto input_shape = input.shape();
 
-    if (dim < 0) {
-        out_shape = {1};
+    // Check if this is a full reduction (dim < 0 means reduce all elements)
+    bool full_reduction = (dim < 0);
+
+    if (full_reduction) {
+        // Full reduction: output is scalar (empty shape) or [1,1,...] if keepdim
+        if (keepdim) {
+            out_shape.assign(input_shape.size(), 1);
+        } else {
+            out_shape = {};  // Scalar - but we need at least 1 element for the output
+        }
     } else {
         out_shape = std::vector<int64_t>(input_shape.begin(), input_shape.end());
         if (keepdim) {
@@ -5342,7 +5385,9 @@ auto VulkanBackend::dispatchProd(const Tensor& input, int64_t dim, bool keepdim)
         }
     }
 
-    Tensor output(out_shape, input.dtype(), input.device());
+    // For full reduction to scalar, we still need buffer space, so use [1] internally
+    std::vector<int64_t> buffer_shape = out_shape.empty() ? std::vector<int64_t>{1} : out_shape;
+    Tensor output(buffer_shape, input.dtype(), input.device());
 
     // Get VkBuffer handles from tensor data pointers
     VkBuffer buffer_in = getVulkanBuffer(input.data_ptr());
@@ -5402,6 +5447,13 @@ auto VulkanBackend::dispatchProd(const Tensor& input, int64_t dim, bool keepdim)
 
     endSingleTimeCommands(cmdBuffer, device_id);
 
+    // Synchronize to ensure GPU has completed before reading results
+    synchronize(device_id);
+
+    // If output should be scalar but we used [1] internally, reshape to scalar
+    if (full_reduction && !keepdim) {
+        return output.reshape({});
+    }
     return output;
 }
 

@@ -129,6 +129,15 @@ auto reciprocal(const Tensor& input) -> Tensor;
 /** @brief Element-wise sign function (-1, 0, 1) */
 auto sign(const Tensor& input) -> Tensor;
 
+/** @brief Element-wise sigmoid function: 1 / (1 + exp(-x)) */
+auto sigmoid(const Tensor& input) -> Tensor;
+
+/** @brief Element-wise minimum of two tensors */
+auto minimum(const Tensor& a, const Tensor& b) -> Tensor;
+
+/** @brief Element-wise maximum of two tensors */
+auto maximum(const Tensor& a, const Tensor& b) -> Tensor;
+
 /// @}
 /// @name Rounding Functions
 /// @{

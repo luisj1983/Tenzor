@@ -10,7 +10,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'python')
 
 from typing import List, Dict
 from benchmark_utils import (
-    run_benchmark, compute_statistics, BenchmarkResult, print_result
+    run_benchmark, compute_statistics, BenchmarkResult, print_result,
+    get_tenzor_sync_fn, get_pytorch_sync_fn, check_tenzor_cuda_available,
+    check_pytorch_cuda_available, clear_gpu_memory
 )
 from benchmark_config import BenchmarkConfig, DEFAULT_CONFIG
 
@@ -21,6 +23,7 @@ def benchmark_linear_layers(device: str, config: BenchmarkConfig) -> List[Benchm
     tz.initialize()
 
     results = []
+    sync_fn = get_tenzor_sync_fn(device)
     layer_configs = [
         {"in_features": 784, "out_features": 256, "batch": 32},
         {"in_features": 256, "out_features": 128, "batch": 32},
@@ -47,10 +50,11 @@ def benchmark_linear_layers(device: str, config: BenchmarkConfig) -> List[Benchm
         # Tenzor modules expect Variable input
         x_var = tz.Variable(x, requires_grad=False)
 
-        def forward_fn():
-            return layer(x_var)
+        # Use default args to capture current loop values (fixes closure bug)
+        def forward_fn(l=layer, xv=x_var):
+            return l(xv)
 
-        times = run_benchmark(forward_fn, config.warmup_iterations, config.benchmark_iterations)
+        times = run_benchmark(forward_fn, config.warmup_iterations, config.benchmark_iterations, sync_fn)
         flops = 2 * batch * in_f * out_f
 
         result = compute_statistics(
@@ -72,15 +76,16 @@ def benchmark_linear_layers(device: str, config: BenchmarkConfig) -> List[Benchm
                 import torch
                 import torch.nn as nn
 
+                pt_sync_fn = get_pytorch_sync_fn(device)
                 torch_device = torch.device(device)
                 x_pt = torch.randn(batch, in_f, device=torch_device)
                 layer_pt = nn.Linear(in_f, out_f).to(torch_device)
-                sync_fn = torch.cuda.synchronize if device == "cuda" else None
 
-                def forward_pt():
-                    return layer_pt(x_pt)
+                # Use default args to capture current loop values (fixes closure bug)
+                def forward_pt(l=layer_pt, x=x_pt):
+                    return l(x)
 
-                times_pt = run_benchmark(forward_pt, config.warmup_iterations, config.benchmark_iterations, sync_fn)
+                times_pt = run_benchmark(forward_pt, config.warmup_iterations, config.benchmark_iterations, pt_sync_fn)
 
                 result_pt = compute_statistics(
                     times=times_pt,
@@ -107,6 +112,7 @@ def benchmark_activation_functions(device: str, config: BenchmarkConfig) -> List
 
     results = []
     sizes = [(32, 1024), (64, 4096), (128, 16384)]
+    sync_fn = get_tenzor_sync_fn(device)
 
     activations_tz = {
         "ReLU": tz.nn.ReLU(),
@@ -127,10 +133,11 @@ def benchmark_activation_functions(device: str, config: BenchmarkConfig) -> List
             # Tenzor modules expect Variable input
             x_var = tz.Variable(x, requires_grad=False)
 
-            def act_fn():
-                return activation(x_var)
+            # Use default args to capture current loop values (fixes closure bug)
+            def act_fn(act=activation, xv=x_var):
+                return act(xv)
 
-            times = run_benchmark(act_fn, config.warmup_iterations, config.benchmark_iterations)
+            times = run_benchmark(act_fn, config.warmup_iterations, config.benchmark_iterations, sync_fn)
 
             result = compute_statistics(
                 times=times,
@@ -151,6 +158,9 @@ def benchmark_activation_functions(device: str, config: BenchmarkConfig) -> List
             import torch
             import torch.nn as nn
 
+            pt_sync_fn = get_pytorch_sync_fn(device)
+            torch_device = torch.device(device)
+
             activations_pt = {
                 "ReLU": nn.ReLU(),
                 "GELU": nn.GELU(),
@@ -159,16 +169,15 @@ def benchmark_activation_functions(device: str, config: BenchmarkConfig) -> List
             }
 
             for name, activation in activations_pt.items():
+                activation = activation.to(torch_device)
                 for batch, features in sizes:
-                    torch_device = torch.device(device)
                     x_pt = torch.randn(batch, features, device=torch_device)
-                    activation = activation.to(torch_device)
-                    sync_fn = torch.cuda.synchronize if device == "cuda" else None
 
-                    def act_pt():
-                        return activation(x_pt)
+                    # Use default args to capture current loop values (fixes closure bug)
+                    def act_pt(act=activation, x=x_pt):
+                        return act(x)
 
-                    times_pt = run_benchmark(act_pt, config.warmup_iterations, config.benchmark_iterations, sync_fn)
+                    times_pt = run_benchmark(act_pt, config.warmup_iterations, config.benchmark_iterations, pt_sync_fn)
 
                     result_pt = compute_statistics(
                         times=times_pt,
@@ -193,6 +202,7 @@ def benchmark_normalization_layers(device: str, config: BenchmarkConfig) -> List
     tz.initialize()
 
     results = []
+    sync_fn = get_tenzor_sync_fn(device)
 
     # BatchNorm2d configs
     bn_configs = [
@@ -218,10 +228,11 @@ def benchmark_normalization_layers(device: str, config: BenchmarkConfig) -> List
         # Tenzor modules expect Variable input
         x_var = tz.Variable(x, requires_grad=False)
 
-        def bn_fn():
-            return bn(x_var)
+        # Use default args to capture current loop values (fixes closure bug)
+        def bn_fn(layer=bn, xv=x_var):
+            return layer(xv)
 
-        times = run_benchmark(bn_fn, config.warmup_iterations, config.benchmark_iterations)
+        times = run_benchmark(bn_fn, config.warmup_iterations, config.benchmark_iterations, sync_fn)
 
         result = compute_statistics(
             times=times,
@@ -241,15 +252,16 @@ def benchmark_normalization_layers(device: str, config: BenchmarkConfig) -> List
                 import torch
                 import torch.nn as nn
 
+                pt_sync_fn = get_pytorch_sync_fn(device)
                 torch_device = torch.device(device)
                 x_pt = torch.randn(batch, ch, h, w, device=torch_device)
                 bn_pt = nn.BatchNorm2d(ch).to(torch_device)
-                sync_fn = torch.cuda.synchronize if device == "cuda" else None
 
-                def bn_pt_fn():
-                    return bn_pt(x_pt)
+                # Use default args to capture current loop values (fixes closure bug)
+                def bn_pt_fn(layer=bn_pt, x=x_pt):
+                    return layer(x)
 
-                times_pt = run_benchmark(bn_pt_fn, config.warmup_iterations, config.benchmark_iterations, sync_fn)
+                times_pt = run_benchmark(bn_pt_fn, config.warmup_iterations, config.benchmark_iterations, pt_sync_fn)
 
                 result_pt = compute_statistics(
                     times=times_pt,
@@ -289,10 +301,11 @@ def benchmark_normalization_layers(device: str, config: BenchmarkConfig) -> List
         # Tenzor modules expect Variable input
         x_var = tz.Variable(x, requires_grad=False)
 
-        def ln_fn():
-            return ln(x_var)
+        # Use default args to capture current loop values (fixes closure bug)
+        def ln_fn(layer=ln, xv=x_var):
+            return layer(xv)
 
-        times = run_benchmark(ln_fn, config.warmup_iterations, config.benchmark_iterations)
+        times = run_benchmark(ln_fn, config.warmup_iterations, config.benchmark_iterations, sync_fn)
 
         result = compute_statistics(
             times=times,
@@ -315,6 +328,7 @@ def benchmark_pooling_layers(device: str, config: BenchmarkConfig) -> List[Bench
     tz.initialize()
 
     results = []
+    sync_fn = get_tenzor_sync_fn(device)
 
     pool_configs = [
         {"channels": 64, "h": 112, "w": 112, "kernel": 3, "stride": 2, "batch": 32},
@@ -338,10 +352,11 @@ def benchmark_pooling_layers(device: str, config: BenchmarkConfig) -> List[Bench
         # Tenzor modules expect Variable input
         x_var = tz.Variable(x, requires_grad=False)
 
-        def pool_fn():
-            return pool(x_var)
+        # Use default args to capture current loop values (fixes closure bug)
+        def pool_fn(p=pool, xv=x_var):
+            return p(xv)
 
-        times = run_benchmark(pool_fn, config.warmup_iterations, config.benchmark_iterations)
+        times = run_benchmark(pool_fn, config.warmup_iterations, config.benchmark_iterations, sync_fn)
 
         result = compute_statistics(
             times=times,
@@ -372,14 +387,23 @@ def run_nn_layer_benchmarks(config: BenchmarkConfig = None) -> List[BenchmarkRes
         print(f"  Device: {device.upper()}")
         print(f"{'='*70}")
 
+        # Check CUDA availability for both frameworks
         if device == "cuda":
-            try:
-                import torch
-                if not torch.cuda.is_available():
-                    print("CUDA not available, skipping...")
-                    continue
-            except ImportError:
-                pass
+            tenzor_cuda = check_tenzor_cuda_available()
+            pytorch_cuda = check_pytorch_cuda_available()
+
+            if not tenzor_cuda and not pytorch_cuda:
+                print("CUDA not available for either framework, skipping...")
+                continue
+
+            if not tenzor_cuda:
+                print("  [WARNING] Tenzor CUDA not available")
+            if not pytorch_cuda and config.compare_with_pytorch:
+                print("  [WARNING] PyTorch CUDA not available")
+
+        # Clear GPU memory before starting
+        if device == "cuda":
+            clear_gpu_memory()
 
         all_results.extend(benchmark_linear_layers(device, config))
         all_results.extend(benchmark_activation_functions(device, config))

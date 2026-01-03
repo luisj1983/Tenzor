@@ -15,6 +15,7 @@
 #include <functional>
 #include <cmath>
 #include <iostream>
+#include <ranges>
 #include <iomanip>
 
 namespace tenzor {
@@ -77,7 +78,7 @@ inline std::string backend_name(const Device& device) {
 inline bool tensors_close(const Tensor& a, const Tensor& b,
                          float rtol = 1e-5f, float atol = 1e-8f,
                          bool equal_nan = false) {
-    if (a.shape() != b.shape()) {
+    if (!std::ranges::equal(a.shape(), b.shape())) {
         return false;
     }
 
@@ -93,8 +94,8 @@ inline bool tensors_close(const Tensor& a, const Tensor& b,
     a.device().synchronize();
     b.device().synchronize();
 
-    const float* a_data = a_cpu.data_ptr<float>();
-    const float* b_data = b_cpu.data_ptr<float>();
+    const float* a_data = a_cpu.data<float>();
+    const float* b_data = b_cpu.data<float>();
 
     for (int64_t i = 0; i < a_cpu.numel(); ++i) {
         float va = a_data[i];
@@ -138,8 +139,8 @@ inline float max_abs_diff(const Tensor& a, const Tensor& b) {
     a.device().synchronize();
     b.device().synchronize();
 
-    const float* a_data = a_cpu.data_ptr<float>();
-    const float* b_data = b_cpu.data_ptr<float>();
+    const float* a_data = a_cpu.data<float>();
+    const float* b_data = b_cpu.data<float>();
 
     float max_diff = 0.0f;
     for (int64_t i = 0; i < a_cpu.numel(); ++i) {
@@ -182,21 +183,25 @@ inline Tensor generate_uniform_tensor(const std::vector<int64_t>& shape,
 }
 
 /**
- * @brief Test operation parity across all available backends.
+ * @brief Test operation parity across specified backends.
  *
  * @param operation Function that takes input tensors and returns result
  * @param inputs Input tensors (on CPU)
+ * @param backends List of backends to test (if empty, uses all available)
  * @param rtol Relative tolerance
  * @param atol Absolute tolerance
  * @param test_name Test name for error reporting
  */
 template<typename Op>
-void test_operation_parity(Op operation,
+void test_operation_parity_backends(Op operation,
                           const std::vector<Tensor>& inputs,
+                          std::vector<Device> backends,
                           float rtol = 1e-5f,
                           float atol = 1e-8f,
                           const std::string& test_name = "Operation") {
-    auto backends = get_available_backends();
+    if (backends.empty()) {
+        backends = get_available_backends();
+    }
 
     if (backends.size() < 2) {
         GTEST_SKIP() << "Need at least 2 backends for parity testing";
@@ -257,6 +262,24 @@ void test_operation_parity(Op operation,
 }
 
 /**
+ * @brief Test operation parity across all available backends.
+ *
+ * @param operation Function that takes input tensors and returns result
+ * @param inputs Input tensors (on CPU)
+ * @param rtol Relative tolerance
+ * @param atol Absolute tolerance
+ * @param test_name Test name for error reporting
+ */
+template<typename Op>
+void test_operation_parity(Op operation,
+                          const std::vector<Tensor>& inputs,
+                          float rtol = 1e-5f,
+                          float atol = 1e-8f,
+                          const std::string& test_name = "Operation") {
+    test_operation_parity_backends(operation, inputs, {}, rtol, atol, test_name);
+}
+
+/**
  * @brief Macro for expecting tensors to be close with detailed error message.
  */
 #define EXPECT_TENSORS_CLOSE(a, b, rtol, atol) \
@@ -282,9 +305,9 @@ inline Tensor numerical_gradient(std::function<Tensor(const Tensor&)> func,
                                 const Tensor& input,
                                 float eps = 1e-4f) {
     auto grad = zeros_like(input);
-    auto grad_data = grad.data_ptr<float>();
+    auto grad_data = grad.data<float>();
     auto input_cpu = input.to(Device::cpu());
-    auto input_data = input_cpu.data_ptr<float>();
+    auto input_data = input_cpu.data<float>();
 
     for (int64_t i = 0; i < input.numel(); ++i) {
         float original = input_data[i];
@@ -292,12 +315,12 @@ inline Tensor numerical_gradient(std::function<Tensor(const Tensor&)> func,
         // f(x + eps)
         input_data[i] = original + eps;
         auto input_plus = input_cpu.clone();
-        float f_plus = func(input_plus).sum().item<float>();
+        float f_plus = sum(func(input_plus)).item<float>();
 
         // f(x - eps)
         input_data[i] = original - eps;
         auto input_minus = input_cpu.clone();
-        float f_minus = func(input_minus).sum().item<float>();
+        float f_minus = sum(func(input_minus)).item<float>();
 
         // Restore original
         input_data[i] = original;

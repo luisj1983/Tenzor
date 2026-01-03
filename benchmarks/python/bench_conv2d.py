@@ -10,7 +10,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'python')
 
 from typing import List, Dict, Tuple
 from benchmark_utils import (
-    run_benchmark, compute_statistics, BenchmarkResult, print_result
+    run_benchmark, compute_statistics, BenchmarkResult, print_result,
+    get_tenzor_sync_fn, get_pytorch_sync_fn, check_tenzor_cuda_available,
+    check_pytorch_cuda_available, clear_gpu_memory
 )
 from benchmark_config import BenchmarkConfig, DEFAULT_CONFIG
 
@@ -49,6 +51,7 @@ def benchmark_tenzor_conv2d(
     tz.initialize()
 
     results = []
+    sync_fn = get_tenzor_sync_fn(device)
 
     for conv_cfg in conv_configs:
         for H, W in image_sizes:
@@ -63,17 +66,16 @@ def benchmark_tenzor_conv2d(
                 x = tz.randn([batch_size, in_ch, H, W]).cuda()
                 conv = tz.nn.Conv2d(in_ch, out_ch, kernel, stride=stride, padding=padding)
                 conv.cuda()
-                sync_fn = None
             else:
                 x = tz.randn([batch_size, in_ch, H, W])
                 conv = tz.nn.Conv2d(in_ch, out_ch, kernel, stride=stride, padding=padding)
-                sync_fn = None
 
             # Tenzor modules expect Variable input
             x_var = tz.Variable(x, requires_grad=False)
 
-            def conv_fn():
-                return conv(x_var)
+            # Use default args to capture current loop values (fixes closure bug)
+            def conv_fn(layer=conv, xv=x_var):
+                return layer(xv)
 
             times = run_benchmark(
                 conv_fn,
@@ -127,6 +129,7 @@ def benchmark_pytorch_conv2d(
         return []
 
     results = []
+    sync_fn = get_pytorch_sync_fn(device)
 
     for conv_cfg in conv_configs:
         for H, W in image_sizes:
@@ -140,10 +143,9 @@ def benchmark_pytorch_conv2d(
             x = torch.randn(batch_size, in_ch, H, W, device=torch_device)
             conv = nn.Conv2d(in_ch, out_ch, kernel, stride=stride, padding=padding).to(torch_device)
 
-            sync_fn = torch.cuda.synchronize if device == "cuda" else None
-
-            def conv_fn():
-                return conv(x)
+            # Use default args to capture current loop values (fixes closure bug)
+            def conv_fn(layer=conv, inp=x):
+                return layer(inp)
 
             times = run_benchmark(
                 conv_fn,
@@ -238,36 +240,52 @@ def run_conv2d_benchmarks(config: BenchmarkConfig = None) -> List[BenchmarkResul
         print(f"  Device: {device.upper()}")
         print(f"{'='*70}")
 
+        # Check CUDA availability for both frameworks
         if device == "cuda":
-            try:
-                import torch
-                if not torch.cuda.is_available():
-                    print("CUDA not available, skipping...")
-                    continue
-            except ImportError:
-                pass
+            tenzor_cuda = check_tenzor_cuda_available()
+            pytorch_cuda = check_pytorch_cuda_available()
+
+            if not tenzor_cuda and not pytorch_cuda:
+                print("CUDA not available for either framework, skipping...")
+                continue
+
+            if not tenzor_cuda:
+                print("  [WARNING] Tenzor CUDA not available")
+            if not pytorch_cuda and config.compare_with_pytorch:
+                print("  [WARNING] PyTorch CUDA not available")
+
+        # Clear GPU memory before starting
+        if device == "cuda":
+            clear_gpu_memory()
 
         # Standard conv2d benchmarks
         print("\n--- Tenzor Conv2d ---")
-        tz_results = benchmark_tenzor_conv2d(
-            config.conv2d_configs[:3],  # First 3 configs
-            config.image_sizes[:2],      # Smaller sizes
-            batch_size=32,
-            device=device,
-            config=config,
-        )
-        all_results.extend(tz_results)
-
-        if config.compare_with_pytorch:
-            print("\n--- PyTorch Conv2d ---")
-            pt_results = benchmark_pytorch_conv2d(
-                config.conv2d_configs[:3],
-                config.image_sizes[:2],
+        if device != "cuda" or check_tenzor_cuda_available():
+            tz_results = benchmark_tenzor_conv2d(
+                config.conv2d_configs[:3],  # First 3 configs
+                config.image_sizes[:2],      # Smaller sizes
                 batch_size=32,
                 device=device,
                 config=config,
             )
-            all_results.extend(pt_results)
+            all_results.extend(tz_results)
+        else:
+            tz_results = []
+            print("  [SKIP] Tenzor CUDA not available")
+
+        if config.compare_with_pytorch:
+            print("\n--- PyTorch Conv2d ---")
+            if device != "cuda" or check_pytorch_cuda_available():
+                pt_results = benchmark_pytorch_conv2d(
+                    config.conv2d_configs[:3],
+                    config.image_sizes[:2],
+                    batch_size=32,
+                    device=device,
+                    config=config,
+                )
+                all_results.extend(pt_results)
+            else:
+                print("  [SKIP] PyTorch CUDA not available")
 
         # ResNet layer benchmarks
         resnet_results = benchmark_resnet_layers(device, config)

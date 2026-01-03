@@ -167,5 +167,70 @@ private:
     auto reset_parameters() -> void;
 };
 
+/**
+ * @brief Root Mean Square Layer Normalization.
+ *
+ * Simplified variant of LayerNorm that only uses root mean square for
+ * normalization, without centering (mean subtraction). This is more
+ * computationally efficient and works well for transformer models.
+ *
+ * Normalization formula:
+ * - y = x / sqrt(mean(x^2) + eps) * weight
+ *
+ * Unlike LayerNorm, RMSNorm:
+ * - Does not subtract the mean
+ * - Has no bias term (only scale)
+ * - Is more efficient to compute
+ *
+ * Shape:
+ * - Input: (*, normalized_shape) where * is any number of dimensions
+ * - Output: Same as input
+ * - Weight: normalized_shape
+ *
+ * @code
+ * // Normalize over last dimension (hidden size)
+ * RMSNorm rms(768);
+ *
+ * Variable x(Tensor({batch, seq_len, 768}, DType::Float32, Device::cpu()), true);
+ * Variable normalized = rms.forward(x);  // Normalize over 768
+ * @endcode
+ *
+ * @see LayerNorm for standard layer normalization
+ */
+class RMSNorm : public Module {
+public:
+    /**
+     * @brief Construct RMS normalization.
+     *
+     * @param normalized_shape Size of the last dimension to normalize
+     * @param eps Small constant for numerical stability (default: 1e-6)
+     *
+     * @code
+     * RMSNorm rms1(768);    // For BERT-style transformers
+     * RMSNorm rms2(4096);   // For large language models
+     * @endcode
+     */
+    RMSNorm(int64_t normalized_shape, double eps = 1e-6);
+
+    /**
+     * @brief Forward pass through RMS normalization.
+     *
+     * @param input Input variable with last dimension matching normalized_shape
+     * @return Normalized output (same shape as input)
+     */
+    auto forward_impl(const Variable& input) -> Variable override;
+
+private:
+    int64_t normalized_shape_;  ///< Size of dimension to normalize
+    double eps_;                ///< Numerical stability constant
+
+    Variable weight_;  ///< Scale parameter
+
+    /**
+     * @brief Initialize weight to ones.
+     */
+    auto reset_parameters() -> void;
+};
+
 } // namespace nn
 } // namespace tenzor

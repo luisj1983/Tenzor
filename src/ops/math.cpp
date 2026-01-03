@@ -50,6 +50,12 @@ auto div(const Tensor& a, const Tensor& b) -> Tensor {
 }
 
 auto matmul(const Tensor& a, const Tensor& b) -> Tensor {
+    // Handle batched matrix multiplication (3D+ tensors)
+    if (a.shape().size() >= 3 && b.shape().size() >= 3) {
+        // Both are batched - use bmm
+        return bmm(a, b);
+    }
+    // Standard 2D matmul
     std::vector<Tensor> inputs = {a, b};
     return dispatch<OpId::MatMul>(inputs)[0];
 }
@@ -261,6 +267,41 @@ auto reciprocal(const Tensor& input) -> Tensor {
 auto sign(const Tensor& input) -> Tensor {
     std::vector<Tensor> inputs = {input};
     return dispatch<OpId::Sign>(inputs)[0];
+}
+
+auto sigmoid(const Tensor& input) -> Tensor {
+    std::vector<Tensor> inputs = {input};
+    return dispatch<OpId::Sigmoid>(inputs)[0];
+}
+
+auto minimum(const Tensor& a, const Tensor& b) -> Tensor {
+    // minimum(a, b) = (a + b - abs(a - b)) / 2
+    Tensor a_contiguous = a.is_contiguous() ? a : a.contiguous();
+    Tensor b_contiguous = b.is_contiguous() ? b : b.contiguous();
+    auto sum_ab = add(a_contiguous, b_contiguous);
+    auto diff_ab = sub(a_contiguous, b_contiguous);
+    auto abs_diff = abs(diff_ab);
+    auto numerator = sub(sum_ab, abs_diff);
+    // Divide by 2 using scalar multiplication
+    auto shape_span = numerator.shape();
+    std::vector<int64_t> shape_vec(shape_span.begin(), shape_span.end());
+    auto half = full(shape_vec, 0.5f, numerator.dtype(), numerator.device());
+    return mul(numerator, half);
+}
+
+auto maximum(const Tensor& a, const Tensor& b) -> Tensor {
+    // maximum(a, b) = (a + b + abs(a - b)) / 2
+    Tensor a_contiguous = a.is_contiguous() ? a : a.contiguous();
+    Tensor b_contiguous = b.is_contiguous() ? b : b.contiguous();
+    auto sum_ab = add(a_contiguous, b_contiguous);
+    auto diff_ab = sub(a_contiguous, b_contiguous);
+    auto abs_diff = abs(diff_ab);
+    auto numerator = add(sum_ab, abs_diff);
+    // Divide by 2 using scalar multiplication
+    auto shape_span = numerator.shape();
+    std::vector<int64_t> shape_vec(shape_span.begin(), shape_span.end());
+    auto half = full(shape_vec, 0.5f, numerator.dtype(), numerator.device());
+    return mul(numerator, half);
 }
 
 auto floor(const Tensor& input) -> Tensor {

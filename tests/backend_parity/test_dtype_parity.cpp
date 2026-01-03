@@ -240,12 +240,12 @@ TEST(DTypeParity, MixedType_Reduction) {
 
     // Test Float32 sum
     test_operation_parity([](const std::vector<Tensor>& inputs) {
-        return inputs[0].sum();
+        return sum(inputs[0]);
     }, {a_f32}, 1e-4f, 1e-6f, "Sum Float32");
 
     // Test Float64 sum
     test_operation_parity([](const std::vector<Tensor>& inputs) {
-        return inputs[0].sum();
+        return sum(inputs[0]);
     }, {a_f64}, 1e-8f, 1e-10f, "Sum Float64");
 }
 
@@ -282,12 +282,13 @@ TEST(DTypeParity, EdgeCase_LargeInt) {
     if (backends.size() < 2) GTEST_SKIP();
 
     // Use large integers that are within Int32 range
-    auto a = full({32, 32}, 1000000, DType::Int32, Device::cpu());
-    auto b = full({32, 32}, 1000, DType::Int32, Device::cpu());
+    auto a = full({32, 32}, 1000000.0f, DType::Int32, Device::cpu());
+    auto b = full({32, 32}, 1000.0f, DType::Int32, Device::cpu());
 
+    std::vector<Tensor> inputs = {a, b};
     test_operation_parity([](const std::vector<Tensor>& inputs) {
         return inputs[0] + inputs[1];
-    }, {a, b}, 0.0f, 0.0f, "Large Int Values");
+    }, inputs, 0.0f, 0.0f, "Large Int Values");
 }
 
 // ============================================================================

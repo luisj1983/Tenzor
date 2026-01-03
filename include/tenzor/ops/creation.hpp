@@ -136,6 +136,26 @@ auto randn(std::vector<int64_t> shape,
 auto randperm(int64_t n, Device device = Device::cpu()) -> Tensor;
 
 /**
+ * @brief Create tensor with random integers.
+ *
+ * Returns a tensor filled with random integers from uniform distribution [low, high).
+ *
+ * @param low Lower bound (inclusive)
+ * @param high Upper bound (exclusive)
+ * @param shape Tensor dimensions
+ * @param dtype Element data type (default: Int64)
+ * @param device Target device (default: CPU)
+ * @return Tensor with random integers
+ *
+ * @code
+ * auto t = randint(0, 10, {3, 4});  // 3x4 tensor with ints in [0, 10)
+ * @endcode
+ */
+auto randint(int64_t low, int64_t high, std::vector<int64_t> shape,
+            DType dtype = DType::Int64,
+            Device device = Device::cpu()) -> Tensor;
+
+/**
  * @brief Create 1D tensor with evenly spaced values.
  *
  * Creates sequence [start, start+step, start+2*step, ..., end).
@@ -313,5 +333,6 @@ using tenzor::randn;
 using tenzor::rand_like;
 using tenzor::randn_like;
 using tenzor::randperm;
+using tenzor::randint;
 } // namespace ops
 } // namespace tenzor

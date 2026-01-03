@@ -11,7 +11,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'python')
 
 from typing import List, Tuple, Dict, Any
 from benchmark_utils import (
-    run_benchmark, compute_statistics, BenchmarkResult, print_result
+    run_benchmark, compute_statistics, BenchmarkResult, print_result,
+    get_tenzor_sync_fn, get_pytorch_sync_fn, check_tenzor_cuda_available,
+    check_pytorch_cuda_available, clear_gpu_memory
 )
 from benchmark_config import BenchmarkConfig, DEFAULT_CONFIG
 
@@ -72,6 +74,7 @@ def benchmark_tenzor_attention(
     tz.initialize()
 
     results = []
+    sync_fn = get_tenzor_sync_fn(device)
 
     for batch, seq_len, embed_dim, num_heads, name in configs:
         try:
@@ -86,11 +89,10 @@ def benchmark_tenzor_attention(
 
             x_var = tz.Variable(x, False)
 
-            def attn_fn():
-                output, _ = mha.forward(x_var, x_var, x_var, need_weights=False)
+            # Use default args to capture current loop values (fixes closure bug)
+            def attn_fn(layer=mha, xv=x_var):
+                output, _ = layer.forward(xv, xv, xv, need_weights=False)
                 return output
-
-            sync_fn = None  # Tenzor handles sync
 
             times = run_benchmark(
                 attn_fn,
@@ -137,6 +139,7 @@ def benchmark_pytorch_attention(
 
     results = []
     torch_device = torch.device(device)
+    sync_fn = get_pytorch_sync_fn(device)
 
     for batch, seq_len, embed_dim, num_heads, name in configs:
         try:
@@ -147,11 +150,10 @@ def benchmark_pytorch_attention(
             # Create input
             x = torch.randn(batch, seq_len, embed_dim, device=torch_device)
 
-            sync_fn = torch.cuda.synchronize if device == "cuda" else None
-
             with torch.no_grad():
-                def attn_fn():
-                    output, _ = mha(x, x, x, need_weights=False)
+                # Use default args to capture current loop values (fixes closure bug)
+                def attn_fn(layer=mha, inp=x):
+                    output, _ = layer(inp, inp, inp, need_weights=False)
                     return output
 
                 times = run_benchmark(
@@ -193,6 +195,7 @@ def benchmark_scaled_dot_product_tenzor(
     tz.initialize()
 
     results = []
+    sync_fn = get_tenzor_sync_fn(device)
 
     configs = [
         (8, 12, 512, 512, 64, "Self-Attn 512x512"),
@@ -214,20 +217,22 @@ def benchmark_scaled_dot_product_tenzor(
 
             scale = 1.0 / (head_dim ** 0.5)
 
-            def sdp_fn():
+            # Use default args to capture current loop values (fixes closure bug)
+            def sdp_fn(q_=q, k_=k, v_=v, s=scale):
                 # Manual scaled dot-product attention
-                k_t = k.transpose(-2, -1)
-                scores = tz.matmul(q, k_t)
-                scores = tz.mul(scores, scale)
+                k_t = k_.transpose(-2, -1)
+                scores = tz.matmul(q_, k_t)
+                scores = tz.mul(scores, s)
                 scores_var = tz.Variable(scores, False)
                 attn_weights = tz.nn.softmax(scores_var, -1)
-                output = tz.matmul(attn_weights.tensor(), v)
+                output = tz.matmul(attn_weights.tensor(), v_)
                 return output
 
             times = run_benchmark(
                 sdp_fn,
                 warmup_iterations=config.warmup_iterations,
                 benchmark_iterations=config.benchmark_iterations,
+                sync_fn=sync_fn,
             )
 
             flops = calculate_attention_flops(batch, heads, seq_q, seq_kv, head_dim)
@@ -262,6 +267,7 @@ def benchmark_scaled_dot_product_pytorch(
 
     results = []
     torch_device = torch.device(device)
+    sync_fn = get_pytorch_sync_fn(device)
 
     configs = [
         (8, 12, 512, 512, 64, "Self-Attn 512x512"),
@@ -279,21 +285,21 @@ def benchmark_scaled_dot_product_pytorch(
             k = torch.randn(batch, heads, seq_kv, head_dim, device=torch_device)
             v = torch.randn(batch, heads, seq_kv, head_dim, device=torch_device)
 
-            sync_fn = torch.cuda.synchronize if device == "cuda" else None
-
             with torch.no_grad():
                 if has_sdpa:
                     # Use PyTorch 2.0 optimized SDPA (includes Flash Attention)
-                    def sdp_fn():
-                        return F.scaled_dot_product_attention(q, k, v)
+                    # Use default args to capture current loop values (fixes closure bug)
+                    def sdp_fn(q_=q, k_=k, v_=v):
+                        return F.scaled_dot_product_attention(q_, k_, v_)
                     framework_name = "pytorch_sdpa"
                 else:
                     # Manual implementation
                     scale = 1.0 / (head_dim ** 0.5)
-                    def sdp_fn():
-                        scores = torch.matmul(q, k.transpose(-2, -1)) * scale
+                    # Use default args to capture current loop values (fixes closure bug)
+                    def sdp_fn(q_=q, k_=k, v_=v, s=scale):
+                        scores = torch.matmul(q_, k_.transpose(-2, -1)) * s
                         attn_weights = F.softmax(scores, dim=-1)
-                        return torch.matmul(attn_weights, v)
+                        return torch.matmul(attn_weights, v_)
                     framework_name = "pytorch_manual"
 
                 times = run_benchmark(
@@ -336,58 +342,85 @@ def run_attention_benchmarks(config: BenchmarkConfig = None) -> List[BenchmarkRe
         print(f"  Device: {device.upper()}")
         print(f"{'='*70}")
 
-        # Skip CUDA if not available
+        # Check CUDA availability for both frameworks
         if device == "cuda":
-            try:
-                import torch
-                if not torch.cuda.is_available():
-                    print("CUDA not available, skipping...")
-                    continue
-            except ImportError:
-                pass
+            tenzor_cuda = check_tenzor_cuda_available()
+            pytorch_cuda = check_pytorch_cuda_available()
+
+            if not tenzor_cuda and not pytorch_cuda:
+                print("CUDA not available for either framework, skipping...")
+                continue
+
+            if not tenzor_cuda:
+                print("  [WARNING] Tenzor CUDA not available")
+            if not pytorch_cuda and config.compare_with_pytorch:
+                print("  [WARNING] PyTorch CUDA not available")
+
+        # Clear GPU memory before starting
+        if device == "cuda":
+            clear_gpu_memory()
 
         # Multi-head attention benchmarks
         print("\n--- Tenzor Multi-Head Attention ---")
-        tenzor_mha = benchmark_tenzor_attention(ATTENTION_CONFIGS, device, config)
-        all_results.extend(tenzor_mha)
+        if device != "cuda" or check_tenzor_cuda_available():
+            tenzor_mha = benchmark_tenzor_attention(ATTENTION_CONFIGS, device, config)
+            all_results.extend(tenzor_mha)
+        else:
+            tenzor_mha = []
+            print("  [SKIP] Tenzor CUDA not available")
 
         if config.compare_with_pytorch:
             print("\n--- PyTorch Multi-Head Attention ---")
-            pytorch_mha = benchmark_pytorch_attention(ATTENTION_CONFIGS, device, config)
-            all_results.extend(pytorch_mha)
+            if device != "cuda" or check_pytorch_cuda_available():
+                pytorch_mha = benchmark_pytorch_attention(ATTENTION_CONFIGS, device, config)
+                all_results.extend(pytorch_mha)
+            else:
+                pytorch_mha = []
+                print("  [SKIP] PyTorch CUDA not available")
 
-            # Print comparison
-            print("\n" + "=" * 70)
-            print("  COMPARISON: Tenzor vs PyTorch (Multi-Head Attention)")
-            print("=" * 70)
-            print(f"{'Configuration':<35} {'Tenzor (ms)':<15} {'PyTorch (ms)':<15} {'Speedup':<10}")
-            print("-" * 75)
+            # Print comparison (only if both have results)
+            if tenzor_mha and pytorch_mha:
+                print("\n" + "=" * 70)
+                print("  COMPARISON: Tenzor vs PyTorch (Multi-Head Attention)")
+                print("=" * 70)
+                print(f"{'Configuration':<35} {'Tenzor (ms)':<15} {'PyTorch (ms)':<15} {'Speedup':<10}")
+                print("-" * 75)
 
-            for tz_r, pt_r in zip(tenzor_mha, pytorch_mha):
-                speedup = tz_r.speedup_vs(pt_r)
-                status = "FASTER" if speedup > 1 else "SLOWER"
-                print(f"{tz_r.name:<35} {tz_r.mean_ms:<15.3f} {pt_r.mean_ms:<15.3f} {speedup:.2f}x {status}")
+                for tz_r, pt_r in zip(tenzor_mha, pytorch_mha):
+                    speedup = tz_r.speedup_vs(pt_r)
+                    status = "FASTER" if speedup > 1 else "SLOWER"
+                    print(f"{tz_r.name:<35} {tz_r.mean_ms:<15.3f} {pt_r.mean_ms:<15.3f} {speedup:.2f}x {status}")
 
         # Scaled dot-product attention benchmarks
         print("\n--- Tenzor Scaled Dot-Product Attention ---")
-        tenzor_sdp = benchmark_scaled_dot_product_tenzor(device, config)
-        all_results.extend(tenzor_sdp)
+        if device != "cuda" or check_tenzor_cuda_available():
+            tenzor_sdp = benchmark_scaled_dot_product_tenzor(device, config)
+            all_results.extend(tenzor_sdp)
+        else:
+            tenzor_sdp = []
+            print("  [SKIP] Tenzor CUDA not available")
 
         if config.compare_with_pytorch:
             print("\n--- PyTorch Scaled Dot-Product Attention ---")
-            pytorch_sdp = benchmark_scaled_dot_product_pytorch(device, config)
-            all_results.extend(pytorch_sdp)
+            if device != "cuda" or check_pytorch_cuda_available():
+                pytorch_sdp = benchmark_scaled_dot_product_pytorch(device, config)
+                all_results.extend(pytorch_sdp)
+            else:
+                pytorch_sdp = []
+                print("  [SKIP] PyTorch CUDA not available")
 
-            print("\n" + "=" * 70)
-            print("  COMPARISON: Tenzor vs PyTorch (Scaled Dot-Product)")
-            print("=" * 70)
-            print(f"{'Configuration':<35} {'Tenzor (ms)':<15} {'PyTorch (ms)':<15} {'Speedup':<10}")
-            print("-" * 75)
+            # Print comparison (only if both have results)
+            if tenzor_sdp and pytorch_sdp:
+                print("\n" + "=" * 70)
+                print("  COMPARISON: Tenzor vs PyTorch (Scaled Dot-Product)")
+                print("=" * 70)
+                print(f"{'Configuration':<35} {'Tenzor (ms)':<15} {'PyTorch (ms)':<15} {'Speedup':<10}")
+                print("-" * 75)
 
-            for tz_r, pt_r in zip(tenzor_sdp, pytorch_sdp):
-                speedup = tz_r.speedup_vs(pt_r)
-                status = "FASTER" if speedup > 1 else "SLOWER"
-                print(f"{tz_r.name:<35} {tz_r.mean_ms:<15.3f} {pt_r.mean_ms:<15.3f} {speedup:.2f}x {status}")
+                for tz_r, pt_r in zip(tenzor_sdp, pytorch_sdp):
+                    speedup = tz_r.speedup_vs(pt_r)
+                    status = "FASTER" if speedup > 1 else "SLOWER"
+                    print(f"{tz_r.name:<35} {tz_r.mean_ms:<15.3f} {pt_r.mean_ms:<15.3f} {speedup:.2f}x {status}")
 
     return all_results
 

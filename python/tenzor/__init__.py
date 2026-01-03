@@ -67,6 +67,7 @@ __all__ = [
     "ones",
     "randn",
     "rand",
+    "randint",
     "eye",
     "arange",
     "linspace",
@@ -75,6 +76,7 @@ __all__ = [
 
     # Operations
     "matmul",
+    "bmm",
     "add",
     "sub",
     "mul",

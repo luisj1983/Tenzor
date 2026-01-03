@@ -11,7 +11,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'python')
 
 from typing import List, Tuple, Dict, Any
 from benchmark_utils import (
-    run_benchmark, compute_statistics, BenchmarkResult, print_result
+    run_benchmark, compute_statistics, BenchmarkResult, print_result,
+    get_tenzor_sync_fn, get_pytorch_sync_fn, check_tenzor_cuda_available,
+    check_pytorch_cuda_available, clear_gpu_memory
 )
 from benchmark_config import BenchmarkConfig, DEFAULT_CONFIG
 
@@ -78,6 +80,7 @@ def benchmark_tenzor_lstm(
 
     results = []
     bi_str = "Bi" if bidirectional else ""
+    sync_fn = get_tenzor_sync_fn(device)
 
     for batch, seq_len, input_size, hidden_size, num_layers, name in configs:
         try:
@@ -96,14 +99,16 @@ def benchmark_tenzor_lstm(
 
             x_var = tz.Variable(x, False)
 
-            def lstm_fn():
-                output, (h_n, c_n) = lstm.forward(x_var)
+            # Use default args to capture current loop values (fixes closure bug)
+            def lstm_fn(layer=lstm, xv=x_var):
+                output, (h_n, c_n) = layer.forward(xv)
                 return output
 
             times = run_benchmark(
                 lstm_fn,
                 warmup_iterations=config.warmup_iterations,
                 benchmark_iterations=config.benchmark_iterations,
+                sync_fn=sync_fn,
             )
 
             flops = calculate_lstm_flops(batch, seq_len, input_size, hidden_size, num_layers)
@@ -150,6 +155,7 @@ def benchmark_pytorch_lstm(
     results = []
     torch_device = torch.device(device)
     bi_str = "Bi" if bidirectional else ""
+    sync_fn = get_pytorch_sync_fn(device)
 
     for batch, seq_len, input_size, hidden_size, num_layers, name in configs:
         try:
@@ -163,11 +169,11 @@ def benchmark_pytorch_lstm(
             lstm.eval()
 
             x = torch.randn(batch, seq_len, input_size, device=torch_device)
-            sync_fn = torch.cuda.synchronize if device == "cuda" else None
 
             with torch.no_grad():
-                def lstm_fn():
-                    output, (h_n, c_n) = lstm(x)
+                # Use default args to capture current loop values (fixes closure bug)
+                def lstm_fn(layer=lstm, inp=x):
+                    output, (h_n, c_n) = layer(inp)
                     return output
 
                 times = run_benchmark(
@@ -214,6 +220,7 @@ def benchmark_tenzor_gru(
     tz.initialize()
 
     results = []
+    sync_fn = get_tenzor_sync_fn(device)
 
     for batch, seq_len, input_size, hidden_size, num_layers, name in configs:
         try:
@@ -231,14 +238,16 @@ def benchmark_tenzor_gru(
 
             x_var = tz.Variable(x, False)
 
-            def gru_fn():
-                output, h_n = gru.forward(x_var)
+            # Use default args to capture current loop values (fixes closure bug)
+            def gru_fn(layer=gru, xv=x_var):
+                output, h_n = layer.forward(xv)
                 return output
 
             times = run_benchmark(
                 gru_fn,
                 warmup_iterations=config.warmup_iterations,
                 benchmark_iterations=config.benchmark_iterations,
+                sync_fn=sync_fn,
             )
 
             # GRU has 3 gates vs LSTM's 4, so roughly 75% of LSTM FLOPs
@@ -281,6 +290,7 @@ def benchmark_pytorch_gru(
 
     results = []
     torch_device = torch.device(device)
+    sync_fn = get_pytorch_sync_fn(device)
 
     for batch, seq_len, input_size, hidden_size, num_layers, name in configs:
         try:
@@ -293,11 +303,11 @@ def benchmark_pytorch_gru(
             gru.eval()
 
             x = torch.randn(batch, seq_len, input_size, device=torch_device)
-            sync_fn = torch.cuda.synchronize if device == "cuda" else None
 
             with torch.no_grad():
-                def gru_fn():
-                    output, h_n = gru(x)
+                # Use default args to capture current loop values (fixes closure bug)
+                def gru_fn(layer=gru, inp=x):
+                    output, h_n = layer(inp)
                     return output
 
                 times = run_benchmark(
@@ -342,6 +352,7 @@ def benchmark_tenzor_lstm_backward(
     tz.initialize()
 
     results = []
+    sync_fn = get_tenzor_sync_fn(device)
 
     for batch, seq_len, input_size, hidden_size, num_layers, name in configs:
         try:
@@ -359,8 +370,9 @@ def benchmark_tenzor_lstm_backward(
 
             x_var = tz.Variable(x, True)
 
-            def lstm_backward_fn():
-                output, _ = lstm.forward(x_var)
+            # Use default args to capture current loop values (fixes closure bug)
+            def lstm_backward_fn(layer=lstm, xv=x_var):
+                output, _ = layer.forward(xv)
                 loss = tz.sum(output)
                 loss.backward()
                 return output
@@ -369,6 +381,7 @@ def benchmark_tenzor_lstm_backward(
                 lstm_backward_fn,
                 warmup_iterations=config.warmup_iterations,
                 benchmark_iterations=config.benchmark_iterations,
+                sync_fn=sync_fn,
             )
 
             flops = calculate_lstm_flops(batch, seq_len, input_size, hidden_size, num_layers) * 3
@@ -405,6 +418,7 @@ def benchmark_pytorch_lstm_backward(
 
     results = []
     torch_device = torch.device(device)
+    sync_fn = get_pytorch_sync_fn(device)
 
     for batch, seq_len, input_size, hidden_size, num_layers, name in configs:
         try:
@@ -417,11 +431,11 @@ def benchmark_pytorch_lstm_backward(
             lstm.train()
 
             x = torch.randn(batch, seq_len, input_size, device=torch_device, requires_grad=True)
-            sync_fn = torch.cuda.synchronize if device == "cuda" else None
 
-            def lstm_backward_fn():
-                lstm.zero_grad()
-                output, _ = lstm(x)
+            # Use default args to capture current loop values (fixes closure bug)
+            def lstm_backward_fn(layer=lstm, inp=x):
+                layer.zero_grad()
+                output, _ = layer(inp)
                 loss = output.sum()
                 loss.backward()
                 return output
@@ -481,14 +495,23 @@ def run_rnn_benchmarks(config: BenchmarkConfig = None) -> List[BenchmarkResult]:
         print(f"  Device: {device.upper()}")
         print(f"{'='*70}")
 
+        # Check CUDA availability for both frameworks
         if device == "cuda":
-            try:
-                import torch
-                if not torch.cuda.is_available():
-                    print("CUDA not available, skipping...")
-                    continue
-            except ImportError:
-                pass
+            tenzor_cuda = check_tenzor_cuda_available()
+            pytorch_cuda = check_pytorch_cuda_available()
+
+            if not tenzor_cuda and not pytorch_cuda:
+                print("CUDA not available for either framework, skipping...")
+                continue
+
+            if not tenzor_cuda:
+                print("  [WARNING] Tenzor CUDA not available")
+            if not pytorch_cuda and config.compare_with_pytorch:
+                print("  [WARNING] PyTorch CUDA not available")
+
+        # Clear GPU memory before starting
+        if device == "cuda":
+            clear_gpu_memory()
 
         # LSTM Forward
         print("\n--- Tenzor LSTM (Forward) ---")

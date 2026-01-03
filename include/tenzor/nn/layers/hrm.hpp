@@ -149,31 +149,7 @@ struct HRMConfig {
     double truncated_b = 2.0;       ///< Upper bound for truncated normal (in std units)
 };
 
-/**
- * @brief RMS Layer Normalization (used in modern transformers)
- *
- * RMSNorm(x) = x / RMS(x) * gamma
- * where RMS(x) = sqrt(mean(x^2) + eps)
- *
- * More efficient than LayerNorm as it doesn't require mean subtraction.
- */
-class RMSNorm : public Module {
-public:
-    /**
-     * @brief Construct RMS normalization layer
-     *
-     * @param normalized_shape Dimensions to normalize over
-     * @param eps Epsilon for numerical stability
-     */
-    explicit RMSNorm(int64_t normalized_shape, double eps = 1e-6);
-
-    auto forward_impl(const Variable& input) -> Variable override;
-
-private:
-    int64_t normalized_shape_;
-    double eps_;
-    std::shared_ptr<Variable> weight_;  ///< Learnable scale parameter (gamma)
-};
+// RMSNorm is now defined in normalization.hpp and included above
 
 /**
  * @brief Gated Linear Unit (GLU) activation

@@ -29,7 +29,9 @@ def generate_markdown_report(results: List[BenchmarkResult], sys_info: Dict, out
         key = (r.category, r.device)
         if key not in grouped:
             grouped[key] = {"tenzor": [], "pytorch": []}
-        grouped[key][r.framework].append(r)
+        # Normalize framework names - treat pytorch variants as pytorch
+        framework_key = "tenzor" if r.framework == "tenzor" else "pytorch"
+        grouped[key][framework_key].append(r)
 
     lines = [
         "# Tenzor Benchmark Report",
@@ -140,11 +142,12 @@ def generate_markdown_report(results: List[BenchmarkResult], sys_info: Dict, out
         sorted_by_speedup = sorted(total_speedups, key=lambda x: x[1], reverse=True)
 
         lines.extend([
-            "### Top 5 Fastest (vs PyTorch)",
+            "### Top 5 Best Performers (vs PyTorch)",
             "",
         ])
         for name, speedup, device in sorted_by_speedup[:5]:
-            lines.append(f"1. **{name}** ({device}): {speedup:.2f}x faster")
+            status = "faster" if speedup >= 1 else "slower"
+            lines.append(f"1. **{name}** ({device}): {speedup:.2f}x {status}")
 
         lines.extend([
             "",
@@ -267,7 +270,7 @@ def generate_html_report(results: List[BenchmarkResult], sys_info: Dict, output_
     speedups = []
     for cat_results in categories.values():
         tz_results = [r for r in cat_results if r.framework == "tenzor"]
-        pt_results = [r for r in cat_results if r.framework == "pytorch"]
+        pt_results = [r for r in cat_results if r.framework != "tenzor"]  # All non-tenzor are pytorch variants
         for tz_r in tz_results:
             for pt_r in pt_results:
                 if tz_r.name == pt_r.name and tz_r.device == pt_r.device:
@@ -309,7 +312,7 @@ def generate_html_report(results: List[BenchmarkResult], sys_info: Dict, output_
     # Results tables by category
     for category, cat_results in categories.items():
         tz_results = [r for r in cat_results if r.framework == "tenzor"]
-        pt_results = [r for r in cat_results if r.framework == "pytorch"]
+        pt_results = [r for r in cat_results if r.framework != "tenzor"]  # All non-tenzor are pytorch variants
 
         html += f"""
         <div class="card">

@@ -165,38 +165,7 @@ Variable stablemax_cross_entropy(const Variable& input, const Variable& target,
     return Variable(mean_loss, input.requires_grad());
 }
 
-// ============================================================================
-// RMSNorm Implementation
-// ============================================================================
-
-RMSNorm::RMSNorm(int64_t normalized_shape, double eps)
-    : normalized_shape_(normalized_shape), eps_(eps) {
-
-    // Initialize weight (gamma) to ones
-    Tensor weight_data = ones({normalized_shape}, DType::Float32, Device::cpu());
-    weight_ = std::make_shared<Variable>(weight_data, true);
-    register_parameter("weight", *weight_);
-}
-
-auto RMSNorm::forward_impl(const Variable& input) -> Variable {
-    // RMSNorm: x / sqrt(mean(x^2) + eps) * gamma
-    auto x = input;
-
-    // Compute RMS: sqrt(mean(x^2))
-    auto x_sq = x * x;
-
-    // Mean over last dimension
-    auto mean_sq = tenzor::mean(x_sq.tensor(), {-1}, true);
-    auto rms = tenzor::sqrt(mean_sq + eps_);
-
-    // Normalize
-    auto x_norm = x.tensor() / rms;
-
-    // Scale by learned weight
-    auto result = x_norm * weight_->tensor();
-
-    return Variable(result, input.requires_grad());
-}
+// RMSNorm is now implemented in normalization.cpp
 
 // ============================================================================
 // GatedLinearUnit Implementation
