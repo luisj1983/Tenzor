@@ -8,6 +8,14 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'python'))
 
+# IMPORTANT: Import PyTorch BEFORE Tenzor to avoid MKL library conflicts
+# When both libraries use MKL, the first one to load wins and sets up the runtime
+try:
+    import torch
+    import torch.nn
+except ImportError:
+    pass
+
 from typing import List, Dict
 from benchmark_utils import (
     run_benchmark, compute_statistics, BenchmarkResult, print_result,

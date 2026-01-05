@@ -3,6 +3,8 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/autograd/function.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/ops/op_id.hpp"
 #include <cmath>
 #include <stdexcept>
 #include <iostream>
@@ -429,59 +431,44 @@ auto LayerNorm::forward_impl(const Variable& input) -> Variable {
         return Variable(output, false);
 
     } else if (input_dtype == DType::Float32) {
-        auto* input_data = input_cpu.data<float>();
-
-        // Compute mean for each batch element
-        for (int64_t b = 0; b < batch_size; b++) {
-            double sum = 0.0;
-            for (int64_t i = 0; i < N; i++) {
-                sum += input_data[b * N + i];
-            }
-            mean_data[b] = static_cast<float>(sum / N);
+        // Use optimized kernel dispatch (oneDNN/SIMD) for Float32
+        // The kernel expects: input, normalized_shape, weight, bias, eps
+        OpAttributes attrs;
+        attrs["eps"] = std::to_string(eps_);
+        // Convert normalized_shape to comma-separated string
+        std::string shape_str;
+        for (size_t i = 0; i < normalized_shape_.size(); ++i) {
+            if (i > 0) shape_str += ",";
+            shape_str += std::to_string(normalized_shape_[i]);
         }
+        attrs["normalized_shape"] = shape_str;
 
-        // Compute variance for each batch element
-        for (int64_t b = 0; b < batch_size; b++) {
-            double sum_sq = 0.0;
-            float mu = mean_data[b];
-            for (int64_t i = 0; i < N; i++) {
-                float diff = input_data[b * N + i] - mu;
-                sum_sq += diff * diff;
-            }
-            var_data[b] = static_cast<float>(sum_sq / N);
-        }
-
-        // Compute reciprocal std (1 / sqrt(var + eps))
-        auto rstd = zeros({batch_size}, DType::Float32, Device::cpu());
-        auto* rstd_data = rstd.data<float>();
-        for (int64_t b = 0; b < batch_size; b++) {
-            rstd_data[b] = 1.0f / std::sqrt(var_data[b] + static_cast<float>(eps_));
-        }
-
-        // Normalize: (x - mean) * rstd on CPU
-        auto output_cpu = zeros_like(input_cpu);
-        auto* output_data = output_cpu.data<float>();
-        auto* weight_data = weight_cpu.data<float>();
-        auto* bias_data = bias_cpu.data<float>();
-
-        for (int64_t b = 0; b < batch_size; b++) {
-            float mu = mean_data[b];
-            float inv_std = rstd_data[b];
-
-            for (int64_t i = 0; i < N; i++) {
-                int64_t idx = b * N + i;
-                float normalized = (input_data[idx] - mu) * inv_std;
-
-                if (elementwise_affine_) {
-                    output_data[idx] = normalized * weight_data[i] + bias_data[i];
-                } else {
-                    output_data[idx] = normalized;
-                }
-            }
-        }
+        std::vector<Tensor> inputs = {input_cpu, weight_cpu, bias_cpu};
+        Tensor output_cpu = dispatch_single<OpId::LayerNorm>(inputs, attrs);
 
         // Move output back to original device if needed
         Tensor output = (original_device == Device::cpu()) ? output_cpu : output_cpu.to(original_device);
+
+        // For autograd, we still need to compute mean and rstd for the backward pass
+        // Use single-pass Welford algorithm for numerical stability
+        auto rstd = zeros({batch_size}, DType::Float32, Device::cpu());
+        auto* rstd_data = rstd.data<float>();
+        const auto* input_data = input_cpu.data<float>();
+
+        #pragma omp parallel for
+        for (int64_t b = 0; b < batch_size; b++) {
+            // Single-pass mean and variance using Welford's algorithm
+            double mean = 0.0, M2 = 0.0;
+            for (int64_t i = 0; i < N; i++) {
+                double x = input_data[b * N + i];
+                double delta = x - mean;
+                mean += delta / (i + 1);
+                M2 += delta * (x - mean);
+            }
+            double var = M2 / N;
+            mean_data[b] = static_cast<float>(mean);
+            rstd_data[b] = 1.0f / std::sqrt(static_cast<float>(var) + static_cast<float>(eps_));
+        }
 
         // Set up autograd if needed
         if (input.requires_grad() || (elementwise_affine_ && parameters_["weight"]->requires_grad())) {
@@ -863,10 +850,12 @@ auto GroupNorm::forward_impl(const Variable& input) -> Variable {
     // Get weight/bias from parameters_ to respect offload hooks
     Tensor weight_tensor = affine_ ? parameters_["weight"]->tensor() : weight_.tensor();
     Tensor bias_tensor = affine_ ? parameters_["bias"]->tensor() : bias_.tensor();
+    bool weight_requires_grad = affine_ ? parameters_["weight"]->requires_grad() : weight_.requires_grad();
+    bool bias_requires_grad = affine_ ? parameters_["bias"]->requires_grad() : bias_.requires_grad();
     Variable weight_cpu = (weight_tensor.device().type == Device::Type::CPU) ?
-                          Variable(weight_tensor, parameters_["weight"]->requires_grad()) : Variable(weight_tensor.cpu(), parameters_["weight"]->requires_grad());
+                          Variable(weight_tensor, weight_requires_grad) : Variable(weight_tensor.cpu(), weight_requires_grad);
     Variable bias_cpu = (bias_tensor.device().type == Device::Type::CPU) ?
-                        Variable(bias_tensor, parameters_["bias"]->requires_grad()) : Variable(bias_tensor.cpu(), parameters_["bias"]->requires_grad());
+                        Variable(bias_tensor, bias_requires_grad) : Variable(bias_tensor.cpu(), bias_requires_grad);
 
     // Compute mean and variance for each group
     // Shape: [N, num_groups]

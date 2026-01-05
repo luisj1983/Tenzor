@@ -42,6 +42,19 @@ class Backend;
 using KernelFn = std::vector<Tensor>(*)(std::span<const Tensor>, const OpAttributes&);
 
 /**
+ * @brief Single-output kernel function pointer type for optimized dispatch.
+ *
+ * For operations that produce exactly one output tensor, this avoids
+ * the overhead of vector allocation. Most ops (add, mul, matmul, linear, etc.)
+ * are single-output and benefit from this optimization.
+ *
+ * @param inputs Input tensors for the operation
+ * @param attrs Operation-specific attributes
+ * @return Single output tensor (no heap allocation for container)
+ */
+using SingleOutputKernelFn = Tensor(*)(std::span<const Tensor>, const OpAttributes&);
+
+/**
  * @brief Number of device types in the dispatch system.
  *
  * Must match Device::Type enum count.
@@ -69,6 +82,9 @@ struct alignas(64) BackendDispatchTable {
     /// Function pointer array indexed by OpId (nullptr = not supported)
     std::array<KernelFn, OP_COUNT> kernels{};
 
+    /// Single-output kernel array for optimized dispatch (no vector allocation)
+    std::array<SingleOutputKernelFn, OP_COUNT> single_output_kernels{};
+
     /// Device type this table serves
     Device::Type device_type{Device::Type::CPU};
 
@@ -86,13 +102,37 @@ struct alignas(64) BackendDispatchTable {
     }
 
     /**
+     * @brief Register a single-output kernel for optimized dispatch.
+     *
+     * Use this for operations that always produce exactly one output tensor.
+     * This avoids vector allocation overhead on every dispatch call.
+     *
+     * @param op Operation identifier
+     * @param fn Single-output kernel function pointer
+     */
+    void register_single_output_kernel(OpId op, SingleOutputKernelFn fn) noexcept {
+        single_output_kernels[static_cast<size_t>(op)] = fn;
+    }
+
+    /**
      * @brief Check if a kernel is registered for an operation.
      *
      * @param op Operation identifier
      * @return true if kernel exists
      */
     [[nodiscard]] bool has_kernel(OpId op) const noexcept {
-        return kernels[static_cast<size_t>(op)] != nullptr;
+        return kernels[static_cast<size_t>(op)] != nullptr ||
+               single_output_kernels[static_cast<size_t>(op)] != nullptr;
+    }
+
+    /**
+     * @brief Check if a single-output kernel is registered.
+     *
+     * @param op Operation identifier
+     * @return true if single-output kernel exists
+     */
+    [[nodiscard]] bool has_single_output_kernel(OpId op) const noexcept {
+        return single_output_kernels[static_cast<size_t>(op)] != nullptr;
     }
 
     /**
@@ -103,6 +143,16 @@ struct alignas(64) BackendDispatchTable {
      */
     [[nodiscard]] KernelFn get_kernel(OpId op) const noexcept {
         return kernels[static_cast<size_t>(op)];
+    }
+
+    /**
+     * @brief Get single-output kernel function pointer.
+     *
+     * @param op Operation identifier
+     * @return Single-output kernel function pointer (nullptr if not registered)
+     */
+    [[nodiscard]] SingleOutputKernelFn get_single_output_kernel(OpId op) const noexcept {
+        return single_output_kernels[static_cast<size_t>(op)];
     }
 
     /**
@@ -126,6 +176,35 @@ struct alignas(64) BackendDispatchTable {
             throw_unsupported(op);
         }
         return fn(inputs, attrs);
+    }
+
+    /**
+     * @brief Optimized dispatch for single-output operations.
+     *
+     * Returns Tensor directly without vector allocation overhead.
+     * Use dispatch_single<OpId>() from fast_dispatch.hpp for convenience.
+     *
+     * @param op Operation identifier
+     * @param inputs Input tensors
+     * @param attrs Operation attributes
+     * @return Single output tensor
+     * @throws std::runtime_error if operation not supported
+     */
+    [[nodiscard]] Tensor dispatch_single(
+        OpId op,
+        std::span<const Tensor> inputs,
+        const OpAttributes& attrs = {}) const
+    {
+        auto fn = single_output_kernels[static_cast<size_t>(op)];
+        if (fn) [[likely]] {
+            return fn(inputs, attrs);
+        }
+        // Fall back to multi-output dispatch if no single-output kernel
+        auto multi_fn = kernels[static_cast<size_t>(op)];
+        if (!multi_fn) [[unlikely]] {
+            throw_unsupported(op);
+        }
+        return multi_fn(inputs, attrs)[0];
     }
 
 private:

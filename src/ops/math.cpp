@@ -12,6 +12,11 @@
 #include <omp.h>
 #endif
 
+// Intel MKL for optimized BLAS operations
+#ifdef TENZOR_USE_MKL
+#include <mkl.h>
+#endif
+
 namespace tenzor {
 
 // Math operation implementations - dispatched to backend kernels
@@ -123,18 +128,15 @@ auto bmm(const Tensor& a, const Tensor& b) -> Tensor {
         const float* b_data = b_cont.data<float>();
         float* c_data = output.data<float>();
 
-        // Parallelize across batches
+        // Fallback: Parallelize across batches with naive GEMM
         #pragma omp parallel for if(batch_size > 1)
         for (int64_t batch = 0; batch < batch_size; ++batch) {
             const float* a_batch = a_data + batch * a_batch_stride;
             const float* b_batch = b_data + batch * b_batch_stride;
             float* c_batch = c_data + batch * c_batch_stride;
 
-            // Simple but fast GEMM for each batch
-            // Zero output first
             std::memset(c_batch, 0, c_batch_stride * sizeof(float));
 
-            // C = A * B (M x N = M x K * K x N)
             for (int64_t i = 0; i < M; ++i) {
                 for (int64_t k = 0; k < K; ++k) {
                     float a_ik = a_batch[i * K + k];

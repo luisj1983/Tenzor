@@ -4,6 +4,14 @@ Benchmark Utilities
 Common utilities for running benchmarks and collecting statistics.
 """
 
+# IMPORTANT: Import PyTorch BEFORE Tenzor to avoid MKL library conflicts
+# When both libraries use MKL, the first one to load wins and sets up the runtime
+try:
+    import torch
+    import torch.nn
+except ImportError:
+    pass
+
 import time
 import gc
 import json

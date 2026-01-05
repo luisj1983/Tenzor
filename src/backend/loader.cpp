@@ -151,7 +151,10 @@ auto BackendLoader::load_library(const std::filesystem::path& path) -> LibHandle
     #else
         // Clear any existing error
         dlerror();
-        return dlopen(path.c_str(), RTLD_LAZY | RTLD_GLOBAL);
+        // Use RTLD_LOCAL to prevent symbol pollution to other libraries (e.g., PyTorch)
+        // that also use MKL. RTLD_GLOBAL would make Tenzor's MKL symbols visible globally,
+        // causing conflicts when another library tries to use its own MKL.
+        return dlopen(path.c_str(), RTLD_LAZY | RTLD_LOCAL);
     #endif
 }
 

@@ -258,6 +258,27 @@ public:
 };
 
 /**
+ * @brief Fused linear layer gradient function.
+ *
+ * Implements fused forward and backward for y = x @ W.T + b
+ * More efficient than separate matmul + add operations.
+ *
+ * Forward: y = x @ W.T + b (via linear_kernel)
+ * Backward:
+ *   dL/dx = dL/dy @ W
+ *   dL/dW = dL/dy.T @ x
+ *   dL/db = sum(dL/dy, dim=0)
+ *
+ * @note All three inputs (x, W, b) are saved for backward pass.
+ *       Uses optimized MKL kernels internally.
+ */
+class LinearBackward : public Function {
+public:
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override;
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override;
+};
+
+/**
  * @brief ReLU activation gradient function.
  *
  * Implements forward and backward for ReLU (Rectified Linear Unit) activation.

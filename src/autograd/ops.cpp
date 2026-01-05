@@ -3,10 +3,20 @@
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/transform.hpp"
+#include "tenzor/ops/creation.hpp"
 #include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/ops/op_id.hpp"
+#include <array>
 
 namespace tenzor {
+
+// Optimized forward linear computation via backend dispatch
+// Uses dispatch_single to avoid output vector allocation
+static Tensor linear_forward_dispatch(const Tensor& x, const Tensor& w, const Tensor& b) {
+    // Tensor copies are cheap (shared_ptr storage), but we minimize them
+    std::vector<Tensor> inputs = {x, w, b};
+    return dispatch_single<OpId::Linear>(inputs);
+}
 
 auto sum(const Variable& input, std::optional<int64_t> dim, bool keepdim) -> Variable {
     if (!input.requires_grad() || !is_grad_enabled()) {
@@ -643,6 +653,42 @@ auto matmul(const Variable& a, const Variable& b) -> Variable {
     // Compute result
     auto result_tensor = tenzor::matmul(a_tensor, b_tensor);
 
+    Variable output(result_tensor, true);
+    output.set_grad_fn(grad_fn);
+
+    return output;
+}
+
+auto linear(const Variable& x, const Variable& w, const Variable& b) -> Variable {
+    // Fast path: no gradients needed
+    if ((!x.requires_grad() && !w.requires_grad() && !b.requires_grad()) || !is_grad_enabled()) {
+        // Dispatch to backend (CPU uses MKL, CUDA uses cuBLAS, etc.)
+        auto result = linear_forward_dispatch(x.tensor(), w.tensor(), b.tensor());
+        return Variable(result, false);
+    }
+
+    // Create backward function
+    auto grad_fn = std::make_shared<LinearBackward>();
+
+    // Save all input tensors for backward pass
+    grad_fn->save_for_backward({x.tensor(), w.tensor(), b.tensor()});
+
+    // Set up backward graph - maintain index correspondence
+    std::vector<std::shared_ptr<Function>> next_funcs;
+    next_funcs.push_back(x.grad_fn());  // nullptr if x is leaf
+    next_funcs.push_back(w.grad_fn());  // nullptr if w is leaf
+    next_funcs.push_back(b.grad_fn());  // nullptr if b is leaf
+    grad_fn->set_next_functions(next_funcs);
+
+    // Track input variables for gradient accumulation
+    // MUST include all three to maintain 1:1 index correspondence with gradients
+    std::vector<Variable> input_vars = {x, w, b};
+    grad_fn->set_input_variables(input_vars);
+
+    // Dispatch forward to backend (CPU uses MKL, CUDA uses cuBLAS, etc.)
+    auto result_tensor = linear_forward_dispatch(x.tensor(), w.tensor(), b.tensor());
+
+    // Create output with grad_fn
     Variable output(result_tensor, true);
     output.set_grad_fn(grad_fn);
 

@@ -509,10 +509,18 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{running_mean, running_var};
     });
 
+    // Register both multi-output and single-output versions for LayerNorm
     table.register_kernel(OpId::LayerNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         auto normalized_shape = parse_int_list(attrs, "normalized_shape");
         float eps = parse_attr<float>(attrs, "eps", 1e-5f);
         return std::vector<Tensor>{cpu::layer_norm_kernel(inputs[0], normalized_shape, inputs[1], inputs[2], eps)};
+    });
+
+    // Single-output version for optimized dispatch (no vector allocation)
+    table.register_single_output_kernel(OpId::LayerNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        auto normalized_shape = parse_int_list(attrs, "normalized_shape");
+        float eps = parse_attr<float>(attrs, "eps", 1e-5f);
+        return cpu::layer_norm_kernel(inputs[0], normalized_shape, inputs[1], inputs[2], eps);
     });
 
     table.register_kernel(OpId::GroupNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -669,9 +677,10 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     // =========================================================================
     // Linear/FC Operations
     // =========================================================================
-    table.register_kernel(OpId::Linear, [](std::span<const Tensor> inputs, const OpAttributes&) {
+    // Use single-output registration for optimized dispatch (no vector allocation)
+    table.register_single_output_kernel(OpId::Linear, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
         const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
-        return std::vector<Tensor>{cpu::linear_kernel(inputs[0], inputs[1], bias)};
+        return cpu::linear_kernel(inputs[0], inputs[1], bias);
     });
 
     table.register_kernel(OpId::LinearBackward, [](std::span<const Tensor> inputs, const OpAttributes&) {

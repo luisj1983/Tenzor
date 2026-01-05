@@ -27,85 +27,148 @@ Linear::Linear(int64_t in_features, int64_t out_features, bool bias)
     }
 }
 
+// Helper function to compute linear using matmul (works on all backends)
+static auto linear_via_matmul(const Variable& input, const Variable& weight,
+                               const Variable* bias) -> Variable {
+    // Transpose weight: [out_features, in_features] -> [in_features, out_features]
+    auto weight_t = autograd::permute(weight, {1, 0});
+
+    // Matrix multiplication: input @ weight.T
+    auto output = autograd::matmul(input, weight_t);
+
+    // Add bias if present
+    if (bias) {
+        output = output + *bias;
+    }
+
+    return output;
+}
+
 auto Linear::forward_impl(const Variable& input) -> Variable {
     // input: [*, in_features] where * can be any number of dimensions
     // weight: [out_features, in_features]
     // output: [*, out_features]
 
-    // Save original input shape (convert span to vector)
-    std::vector<int64_t> original_shape(input.shape().begin(), input.shape().end());
+    auto input_shape = input.shape();
+    const bool is_2d = (input_shape.size() == 2);
 
-    // Calculate total batch size (product of all dimensions except last)
+    // Get weight and bias from parameters
+    auto& weight_ptr = parameters_["weight"];
+    auto& weight = *weight_ptr;
+
+    // Check if we're on CPU - use fused linear kernel for better performance
+    const bool is_cpu = (weight.tensor().device().type == Device::Type::CPU);
+
+    // Fast path: 2D input - skip reshape operations entirely
+    // This eliminates 2 ReshapeBackward allocations per forward pass
+    if (is_2d) {
+        // Handle device mismatch
+        Variable input_device = input;
+        if (input.tensor().device() != weight.tensor().device()) {
+            auto input_transferred = input.tensor().to(weight.tensor().device());
+            input_device = Variable(input_transferred, input.requires_grad());
+            input_device.set_grad_fn(input.grad_fn());
+        }
+
+        // Handle dtype mismatch
+        Variable weight_matched = weight;
+        if (input_device.dtype() != weight.dtype()) {
+            auto weight_converted = weight.tensor().to(input_device.dtype());
+            weight_matched = Variable(weight_converted, weight.requires_grad());
+            weight_matched.set_grad_fn(weight.grad_fn());
+        }
+
+        // Get bias
+        Variable bias_matched;
+        Variable* bias_ptr = nullptr;
+        auto bias_it = parameters_.find("bias");
+        if (bias_it != parameters_.end()) {
+            auto& bias = *bias_it->second;
+            bias_matched = bias;
+            if (input_device.dtype() != bias.dtype()) {
+                auto bias_converted = bias.tensor().to(input_device.dtype());
+                bias_matched = Variable(bias_converted, bias.requires_grad());
+                bias_matched.set_grad_fn(bias.grad_fn());
+            }
+            bias_ptr = &bias_matched;
+        }
+
+        // CPU: use fused linear kernel with MKL for optimal performance
+        // GPU: use matmul + add which works on all backends
+        if (is_cpu) {
+            // Create zero bias if needed for fused kernel
+            if (!bias_ptr) {
+                auto zero_bias = zeros({out_features_}, input_device.dtype(), input_device.tensor().device());
+                bias_matched = Variable(zero_bias, false);
+            }
+            return autograd::linear(input_device, weight_matched, bias_matched);
+        } else {
+            return linear_via_matmul(input_device, weight_matched, bias_ptr);
+        }
+    }
+
+    // General path: N-D input requires reshape
+    std::vector<int64_t> original_shape(input_shape.begin(), input_shape.end());
+
+    // Calculate total batch size
     int64_t batch_total = 1;
     for (size_t i = 0; i < original_shape.size() - 1; ++i) {
         batch_total *= original_shape[i];
     }
 
-    // Flatten input to 2D: (batch_total, in_features) using autograd reshape
+    // Flatten input to 2D
     std::vector<int64_t> flat_shape = {batch_total, in_features_};
-    try {
-        auto input_2d = autograd::reshape(input, flat_shape);
+    auto input_2d = autograd::reshape(input, flat_shape);
 
-        // Get weight from parameters (ensures correct device)
-        auto& weight_ptr = parameters_["weight"];
-        auto& weight = *weight_ptr;
-
-        // Handle device mismatch: transfer input to weight's device if needed
-        Variable input_2d_device = input_2d;
-        if (input_2d.tensor().device() != weight.tensor().device()) {
-            // Transfer input to weight's device
-            auto input_transferred = input_2d.tensor().to(weight.tensor().device());
-            input_2d_device = Variable(input_transferred, input_2d.requires_grad());
-            input_2d_device.set_grad_fn(input_2d.grad_fn());
-        }
-
-        // Handle dtype mismatch: convert weight to input's dtype if needed
-        Variable weight_dtype_matched = weight;
-        if (input_2d_device.dtype() != weight.dtype()) {
-            auto weight_converted = weight.tensor().to(input_2d_device.dtype());
-            weight_dtype_matched = Variable(weight_converted, weight.requires_grad());
-            weight_dtype_matched.set_grad_fn(weight.grad_fn());
-        }
-
-        // Compute output = input_2d @ weight.T
-        // input_2d: (batch_total, in_features)
-        // weight: (out_features, in_features)
-        // weight.T: (in_features, out_features)
-        // output: (batch_total, out_features)
-
-        // Transpose weight
-        auto weight_t = autograd::permute(weight_dtype_matched, {1, 0});  // (in_features, out_features)
-
-        // Matrix multiplication (use device-matched input)
-        auto output_2d = autograd::matmul(input_2d_device, weight_t);  // (batch_total, out_features)
-
-        // Reshape output back to original dimensions: [*, out_features]
-        std::vector<int64_t> output_shape = original_shape;
-        output_shape.back() = out_features_;
-        auto output = autograd::reshape(output_2d, output_shape);
-
-        // Add bias if present (Variable operators already use autograd)
-        auto bias_it = parameters_.find("bias");
-        if (bias_it != parameters_.end()) {
-            auto& bias_ptr = bias_it->second;
-            auto& bias = *bias_ptr;
-
-            // Convert bias to match input dtype if needed
-            Variable bias_dtype_matched = bias;
-            if (input_2d_device.dtype() != bias.dtype()) {
-                auto bias_converted = bias.tensor().to(input_2d_device.dtype());
-                bias_dtype_matched = Variable(bias_converted, bias.requires_grad());
-                bias_dtype_matched.set_grad_fn(bias.grad_fn());
-            }
-
-            // Native broadcasting: bias [out_features] + output [*, out_features]
-            output = output + bias_dtype_matched;
-        }
-
-        return output;
-    } catch (const std::exception& e) {
-        throw;
+    // Handle device mismatch
+    Variable input_2d_device = input_2d;
+    if (input_2d.tensor().device() != weight.tensor().device()) {
+        auto input_transferred = input_2d.tensor().to(weight.tensor().device());
+        input_2d_device = Variable(input_transferred, input_2d.requires_grad());
+        input_2d_device.set_grad_fn(input_2d.grad_fn());
     }
+
+    // Handle dtype mismatch
+    Variable weight_matched = weight;
+    if (input_2d_device.dtype() != weight.dtype()) {
+        auto weight_converted = weight.tensor().to(input_2d_device.dtype());
+        weight_matched = Variable(weight_converted, weight.requires_grad());
+        weight_matched.set_grad_fn(weight.grad_fn());
+    }
+
+    // Get bias
+    Variable bias_matched;
+    Variable* bias_ptr = nullptr;
+    auto bias_it = parameters_.find("bias");
+    if (bias_it != parameters_.end()) {
+        auto& bias = *bias_it->second;
+        bias_matched = bias;
+        if (input_2d_device.dtype() != bias.dtype()) {
+            auto bias_converted = bias.tensor().to(input_2d_device.dtype());
+            bias_matched = Variable(bias_converted, bias.requires_grad());
+            bias_matched.set_grad_fn(bias.grad_fn());
+        }
+        bias_ptr = &bias_matched;
+    }
+
+    // Compute linear operation
+    Variable output_2d;
+    if (is_cpu) {
+        // CPU: use fused linear kernel with MKL
+        if (!bias_ptr) {
+            auto zero_bias = zeros({out_features_}, input_2d_device.dtype(), input_2d_device.tensor().device());
+            bias_matched = Variable(zero_bias, false);
+        }
+        output_2d = autograd::linear(input_2d_device, weight_matched, bias_matched);
+    } else {
+        // GPU: use matmul + add
+        output_2d = linear_via_matmul(input_2d_device, weight_matched, bias_ptr);
+    }
+
+    // Reshape output back
+    std::vector<int64_t> output_shape = original_shape;
+    output_shape.back() = out_features_;
+    return autograd::reshape(output_2d, output_shape);
 }
 
 auto Linear::reset_parameters() -> void {

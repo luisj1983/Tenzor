@@ -200,6 +200,9 @@ PYBIND11_MODULE(tenzor_core, m) {
     m.def("initialize", &tenzor::initialize,
           "Initialize the Tenzor library (registers backends and operations)");
 
+    m.def("mkl_cleanup", &tenzor::mkl_cleanup,
+          "Free MKL internal buffers (call before using PyTorch/NumPy with MKL)");
+
     // Device availability checks
     m.def("cuda_is_available", []() {
         auto& loader = tenzor::backend_registry();

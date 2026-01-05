@@ -409,6 +409,31 @@ auto bmm(const Variable& a, const Variable& b) -> Variable;
  */
 auto matmul(const Variable& a, const Variable& b) -> Variable;
 
+/**
+ * @brief Fused linear layer with gradient tracking.
+ *
+ * Computes y = x @ W.T + b with automatic differentiation.
+ * More efficient than separate matmul + add operations as it:
+ * - Avoids intermediate tensor allocation
+ * - Uses a single optimized backward function
+ * - Leverages MKL BLAS kernels directly
+ *
+ * @param x Input variable (batch_size, in_features)
+ * @param w Weight variable (out_features, in_features)
+ * @param b Bias variable (out_features)
+ * @return Variable containing linear(x, w, b) with gradient function
+ *
+ * @code
+ * Variable x(Tensor({32, 784}, DType::Float32, Device::cpu()), true);
+ * Variable w(Tensor({256, 784}, DType::Float32, Device::cpu()), true);
+ * Variable b(Tensor({256}, DType::Float32, Device::cpu()), true);
+ * Variable y = linear(x, w, b);  // Shape: {32, 256}
+ * @endcode
+ *
+ * @see LinearBackward for gradient implementation
+ */
+auto linear(const Variable& x, const Variable& w, const Variable& b) -> Variable;
+
 } // namespace tenzor
 
 namespace tenzor {

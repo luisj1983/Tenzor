@@ -157,6 +157,20 @@ namespace tenzor {
     void initialize();
 
     /**
+     * @brief Free MKL internal buffers to prevent conflicts with other MKL users
+     *
+     * Call this after a batch of Tenzor operations before using another library
+     * that uses MKL (e.g., PyTorch, NumPy). This is only necessary when using
+     * Tenzor alongside other MKL-based libraries in the same process.
+     *
+     * @code{.cpp}
+     * // After Tenzor operations, before PyTorch
+     * tenzor::mkl_cleanup();
+     * @endcode
+     */
+    void mkl_cleanup();
+
+    /**
      * @brief Finalize and cleanup Tenzor library
      *
      * Should be called before program termination.

@@ -29,6 +29,7 @@
 // Intel MKL for optimized BLAS (5-10x faster GEMM)
 #ifdef TENZOR_USE_MKL
 #include <mkl.h>
+#include <mkl_service.h>
 #endif
 
 // Adaptive OpenMP thresholds based on operation complexity
@@ -42,6 +43,18 @@ constexpr size_t OMP_THRESHOLD_COMPLEX = 16384;  // 16K for softmax, layernorm
 constexpr size_t OMP_THRESHOLD_MATMUL = 1024;    // matrix operations (high compute/element)
 
 namespace tenzor {
+
+// Free MKL internal buffers to prevent conflicts with other MKL users (e.g., PyTorch)
+// Call this after a batch of Tenzor operations before using another library that uses MKL
+void mkl_cleanup() {
+#ifdef TENZOR_USE_MKL
+    // Free all thread-local memory allocations
+    mkl_thread_free_buffers();
+    // Free all MKL internal memory
+    mkl_free_buffers();
+#endif
+}
+
 namespace cpu {
 
 // Optimized cache block sizes for L1/L2/L3 hierarchy
@@ -249,23 +262,20 @@ static void matmul_blocked_float32(
     int64_t M, int64_t N, int64_t K) {
 
 #ifdef TENZOR_USE_MKL
-    // Use MKL for larger matrices (threshold: ~16x16x16 = 4096 ops)
-    // MKL has overhead for small matrices, so only use for larger ones
+    // Use MKL SGEMM for larger matrices (5-10x speedup)
     if (M * N * K > 4096) {
-        // MKL SGEMM: C = alpha * A * B + beta * C
-        // Row-major: A is M×K, B is K×N, C is M×N
         cblas_sgemm(
-            CblasRowMajor,    // Row-major layout
-            CblasNoTrans,     // Don't transpose A
-            CblasNoTrans,     // Don't transpose B
+            CblasRowMajor,
+            CblasNoTrans,
+            CblasNoTrans,
             static_cast<MKL_INT>(M),
             static_cast<MKL_INT>(N),
             static_cast<MKL_INT>(K),
-            1.0f,             // alpha
-            A, static_cast<MKL_INT>(K),  // A, lda
-            B, static_cast<MKL_INT>(N),  // B, ldb
-            0.0f,             // beta
-            C, static_cast<MKL_INT>(N)   // C, ldc
+            1.0f,
+            A, static_cast<MKL_INT>(K),
+            B, static_cast<MKL_INT>(N),
+            0.0f,
+            C, static_cast<MKL_INT>(N)
         );
         return;
     }
@@ -281,7 +291,7 @@ static void matmul_blocked_float64(
     int64_t M, int64_t N, int64_t K) {
 
 #ifdef TENZOR_USE_MKL
-    // Use MKL for larger matrices
+    // Use MKL DGEMM for larger matrices
     if (M * N * K > 4096) {
         cblas_dgemm(
             CblasRowMajor,
@@ -290,10 +300,10 @@ static void matmul_blocked_float64(
             static_cast<MKL_INT>(M),
             static_cast<MKL_INT>(N),
             static_cast<MKL_INT>(K),
-            1.0,              // alpha
+            1.0,
             A, static_cast<MKL_INT>(K),
             B, static_cast<MKL_INT>(N),
-            0.0,              // beta
+            0.0,
             C, static_cast<MKL_INT>(N)
         );
         return;

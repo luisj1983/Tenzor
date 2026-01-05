@@ -8,6 +8,7 @@
 #include "tenzor/ops/math.hpp"
 #include <random>
 #include <cmath>
+#include <iostream>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -16,6 +17,11 @@
 // Intel oneDNN for optimized layer operations
 #ifdef TENZOR_USE_ONEDNN
 #include <dnnl.hpp>
+#endif
+
+// Intel MKL for optimized BLAS operations
+#ifdef TENZOR_USE_MKL
+#include <mkl.h>
 #endif
 
 // SIMD intrinsics
@@ -116,13 +122,115 @@ static bool linear_onednn(
 }
 #endif
 
+#ifdef TENZOR_USE_MKL
+// MKL-accelerated Linear using SGEMM
+// Computes: output = input @ weight^T + bias
+// Input layout:  [batch_size, in_features], stride = in_features
+// Weight layout: [out_features, in_features], stride = in_features
+// Output layout: [batch_size, out_features], stride = out_features
+static bool linear_mkl_float32(
+    const float* input, const float* weight, const float* bias,
+    float* output,
+    int64_t batch_size, int64_t in_features, int64_t out_features
+) {
+    // Only use MKL for larger matrices where the overhead is worth it
+    const int64_t ops = batch_size * in_features * out_features;
+    if (ops < 4096) {
+        return false;  // Let SIMD fallback handle small matrices
+    }
+
+    // C = alpha * A @ B^T + beta * C
+    // A = input[batch, in_features], lda = in_features
+    // B = weight[out_features, in_features], ldb = in_features (NOT out_features!)
+    // C = output[batch, out_features], ldc = out_features
+    cblas_sgemm(
+        CblasRowMajor,
+        CblasNoTrans,     // A is not transposed
+        CblasTrans,       // B is transposed (weight^T)
+        static_cast<MKL_INT>(batch_size),     // M = rows of output
+        static_cast<MKL_INT>(out_features),   // N = cols of output
+        static_cast<MKL_INT>(in_features),    // K = reduction dimension
+        1.0f,                                  // alpha
+        input,                                 // A
+        static_cast<MKL_INT>(in_features),    // lda = stride of input rows
+        weight,                                // B
+        static_cast<MKL_INT>(in_features),    // ldb = stride of weight rows (NOT out_features!)
+        0.0f,                                  // beta
+        output,                                // C
+        static_cast<MKL_INT>(out_features)    // ldc = stride of output rows
+    );
+
+    // Add bias if present
+    // NOTE: Using simple serial loop instead of OpenMP to avoid thread overhead
+    // for small batch sizes. OpenMP parallelization added ~5ms overhead for
+    // batch_size * out_features < 100k elements, far exceeding the ~3µs computation.
+    if (bias) {
+        for (int64_t b = 0; b < batch_size; ++b) {
+            for (int64_t o = 0; o < out_features; ++o) {
+                output[b * out_features + o] += bias[o];
+            }
+        }
+    }
+
+    return true;
+}
+
+// MKL-accelerated Linear for Float64
+static bool linear_mkl_float64(
+    const double* input, const double* weight, const double* bias,
+    double* output,
+    int64_t batch_size, int64_t in_features, int64_t out_features
+) {
+    const int64_t ops = batch_size * in_features * out_features;
+    if (ops < 4096) {
+        return false;
+    }
+
+    cblas_dgemm(
+        CblasRowMajor,
+        CblasNoTrans,
+        CblasTrans,
+        static_cast<MKL_INT>(batch_size),
+        static_cast<MKL_INT>(out_features),
+        static_cast<MKL_INT>(in_features),
+        1.0,
+        input,
+        static_cast<MKL_INT>(in_features),
+        weight,
+        static_cast<MKL_INT>(in_features),
+        0.0,
+        output,
+        static_cast<MKL_INT>(out_features)
+    );
+
+    // Add bias if present (serial loop to avoid OpenMP overhead)
+    if (bias) {
+        for (int64_t b = 0; b < batch_size; ++b) {
+            for (int64_t o = 0; o < out_features; ++o) {
+                output[b * out_features + o] += bias[o];
+            }
+        }
+    }
+
+    return true;
+}
+#endif
+
 auto linear_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias) -> Tensor {
     // input: [*, in_features] or [batch, in_features]
     // weight: [out_features, in_features]
     // output: [*, out_features]
 
-    auto in_shape = input.shape();
-    auto w_shape = weight.shape();
+    // Ensure tensors are contiguous for optimal MKL/BLAS performance
+    // Non-contiguous tensors would produce incorrect results with raw pointer access
+    bool input_was_contiguous = input.is_contiguous();
+    bool weight_was_contiguous = weight.is_contiguous();
+
+    Tensor input_c = input_was_contiguous ? input : input.contiguous();
+    Tensor weight_c = weight_was_contiguous ? weight : weight.contiguous();
+
+    auto in_shape = input_c.shape();
+    auto w_shape = weight_c.shape();
     int64_t out_features = w_shape[0];
     int64_t in_features = w_shape[1];
 
@@ -136,40 +244,144 @@ auto linear_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias
     std::vector<int64_t> out_shape(in_shape.begin(), in_shape.end() - 1);
     out_shape.push_back(out_features);
 
-    auto output = Tensor::empty_uninitialized(out_shape, input.dtype(), input.device());
+    auto output = Tensor::empty_uninitialized(out_shape, input_c.dtype(), input_c.device());
 
-    const float* in_data = input.data<float>();
-    const float* w_data = weight.data<float>();
-    float* out_data = output.data<float>();
-    const float* b_data = bias ? bias->data<float>() : nullptr;
+    // Dispatch based on dtype with optimized backends
+    if (input_c.dtype() == DType::Float32) {
+        const float* in_data = input_c.data<float>();
+        const float* w_data = weight_c.data<float>();
+        float* out_data = output.data<float>();
+        const float* b_data = bias ? bias->data<float>() : nullptr;
 
-#ifdef TENZOR_USE_ONEDNN
-    // Try oneDNN first for maximum performance
-    if (input.dtype() == DType::Float32 &&
-        linear_onednn(in_data, w_data, b_data, out_data, batch_size, in_features, out_features)) {
-        return output;
-    }
+#ifdef TENZOR_USE_MKL
+        // Try MKL SGEMM first for maximum performance
+        if (linear_mkl_float32(in_data, w_data, b_data, out_data, batch_size, in_features, out_features)) {
+            return output;
+        }
 #endif
 
-    // Fallback: Y = X @ W^T with OpenMP parallelization
-    #pragma omp parallel for collapse(2)
-    for (int64_t b = 0; b < batch_size; ++b) {
-        for (int64_t o = 0; o < out_features; ++o) {
-            float sum = 0.0f;
-            #pragma omp simd reduction(+:sum)
-            for (int64_t i = 0; i < in_features; ++i) {
-                sum += in_data[b * in_features + i] * w_data[o * in_features + i];
-            }
-            out_data[b * out_features + o] = sum + (b_data ? b_data[o] : 0.0f);
+#ifdef TENZOR_USE_ONEDNN
+        // Try oneDNN as fallback
+        if (linear_onednn(in_data, w_data, b_data, out_data, batch_size, in_features, out_features)) {
+            return output;
         }
+#endif
+
+        // Scalar fallback: Y = X @ W^T with OpenMP parallelization
+        #pragma omp parallel for collapse(2)
+        for (int64_t b = 0; b < batch_size; ++b) {
+            for (int64_t o = 0; o < out_features; ++o) {
+                float sum = 0.0f;
+                #pragma omp simd reduction(+:sum)
+                for (int64_t i = 0; i < in_features; ++i) {
+                    sum += in_data[b * in_features + i] * w_data[o * in_features + i];
+                }
+                out_data[b * out_features + o] = sum + (b_data ? b_data[o] : 0.0f);
+            }
+        }
+    } else if (input_c.dtype() == DType::Float64) {
+        const double* in_data = input_c.data<double>();
+        const double* w_data = weight_c.data<double>();
+        double* out_data = output.data<double>();
+        const double* b_data = bias ? bias->data<double>() : nullptr;
+
+#ifdef TENZOR_USE_MKL
+        // Try MKL DGEMM first
+        if (linear_mkl_float64(in_data, w_data, b_data, out_data, batch_size, in_features, out_features)) {
+            return output;
+        }
+#endif
+
+        // Scalar fallback for Float64
+        #pragma omp parallel for collapse(2)
+        for (int64_t b = 0; b < batch_size; ++b) {
+            for (int64_t o = 0; o < out_features; ++o) {
+                double sum = 0.0;
+                #pragma omp simd reduction(+:sum)
+                for (int64_t i = 0; i < in_features; ++i) {
+                    sum += in_data[b * in_features + i] * w_data[o * in_features + i];
+                }
+                out_data[b * out_features + o] = sum + (b_data ? b_data[o] : 0.0);
+            }
+        }
+    } else if (input_c.dtype() == DType::Float16) {
+        // Float16: Convert to Float32, compute, convert back
+        // This provides correct results at the cost of some overhead
+        auto input_f32 = input_c.to(DType::Float32);
+        auto weight_f32 = weight_c.to(DType::Float32);
+        auto output_f32 = Tensor::empty_uninitialized(out_shape, DType::Float32, input_c.device());
+        Tensor bias_f32;
+        if (bias) {
+            bias_f32 = bias->to(DType::Float32);
+        }
+
+        const float* in_data = input_f32.data<float>();
+        const float* w_data = weight_f32.data<float>();
+        float* out_data = output_f32.data<float>();
+        const float* b_data = bias ? bias_f32.data<float>() : nullptr;
+
+        #pragma omp parallel for collapse(2)
+        for (int64_t b = 0; b < batch_size; ++b) {
+            for (int64_t o = 0; o < out_features; ++o) {
+                float sum = 0.0f;
+                #pragma omp simd reduction(+:sum)
+                for (int64_t i = 0; i < in_features; ++i) {
+                    sum += in_data[b * in_features + i] * w_data[o * in_features + i];
+                }
+                out_data[b * out_features + o] = sum + (b_data ? b_data[o] : 0.0f);
+            }
+        }
+
+        // Convert result back to Float16
+        return output_f32.to(DType::Float16);
+    } else {
+        // For other dtypes, throw an error rather than crash
+        throw std::runtime_error("linear_kernel: Unsupported dtype " +
+                                 std::to_string(static_cast<int>(input_c.dtype())));
     }
 
     return output;
 }
 
+// Template for linear backward implementation
+template<typename T>
+static void linear_backward_impl(
+    const T* grad_out_data, const T* in_data, const T* w_data,
+    T* grad_in_data, T* grad_w_data, T* grad_b_data,
+    int64_t batch_size, int64_t in_features, int64_t out_features
+) {
+    // grad_input = grad_output @ weight
+    #pragma omp parallel for
+    for (int64_t b = 0; b < batch_size; ++b) {
+        for (int64_t i = 0; i < in_features; ++i) {
+            T sum = T(0);
+            for (int64_t o = 0; o < out_features; ++o) {
+                sum += grad_out_data[b * out_features + o] * w_data[o * in_features + i];
+            }
+            grad_in_data[b * in_features + i] = sum;
+        }
+    }
+
+    // grad_weight = grad_output^T @ input
+    for (int64_t b = 0; b < batch_size; ++b) {
+        for (int64_t o = 0; o < out_features; ++o) {
+            for (int64_t i = 0; i < in_features; ++i) {
+                grad_w_data[o * in_features + i] +=
+                    grad_out_data[b * out_features + o] * in_data[b * in_features + i];
+            }
+        }
+    }
+
+    // grad_bias = sum(grad_output, dim=0)
+    for (int64_t b = 0; b < batch_size; ++b) {
+        for (int64_t o = 0; o < out_features; ++o) {
+            grad_b_data[o] += grad_out_data[b * out_features + o];
+        }
+    }
+}
+
 auto linear_backward_kernel(const Tensor& grad_output, const Tensor& input,
                              const Tensor& weight) -> std::vector<Tensor> {
-    auto grad_shape = grad_output.shape();
     auto in_shape = input.shape();
     auto w_shape = weight.shape();
 
@@ -181,51 +393,132 @@ auto linear_backward_kernel(const Tensor& grad_output, const Tensor& input,
         batch_size *= in_shape[i];
     }
 
-    // grad_input = grad_output @ weight
+    // Allocate output tensors with correct dtypes
     auto grad_input = Tensor::empty_uninitialized(
         std::vector<int64_t>(in_shape.begin(), in_shape.end()),
         input.dtype(), input.device());
-
-    const float* grad_out_data = grad_output.data<float>();
-    const float* w_data = weight.data<float>();
-    float* grad_in_data = grad_input.data<float>();
-
-    #pragma omp parallel for
-    for (int64_t b = 0; b < batch_size; ++b) {
-        for (int64_t i = 0; i < in_features; ++i) {
-            float sum = 0.0f;
-            for (int64_t o = 0; o < out_features; ++o) {
-                sum += grad_out_data[b * out_features + o] * w_data[o * in_features + i];
-            }
-            grad_in_data[b * in_features + i] = sum;
-        }
-    }
-
-    // grad_weight = grad_output^T @ input
     auto grad_weight = zeros(
         std::vector<int64_t>(w_shape.begin(), w_shape.end()),
         weight.dtype(), weight.device());
-
-    const float* in_data = input.data<float>();
-    float* grad_w_data = grad_weight.data<float>();
-
-    for (int64_t b = 0; b < batch_size; ++b) {
-        for (int64_t o = 0; o < out_features; ++o) {
-            for (int64_t i = 0; i < in_features; ++i) {
-                grad_w_data[o * in_features + i] +=
-                    grad_out_data[b * out_features + o] * in_data[b * in_features + i];
-            }
-        }
-    }
-
-    // grad_bias = sum(grad_output, dim=0)
     auto grad_bias = zeros({out_features}, grad_output.dtype(), grad_output.device());
-    float* grad_b_data = grad_bias.data<float>();
 
-    for (int64_t b = 0; b < batch_size; ++b) {
-        for (int64_t o = 0; o < out_features; ++o) {
-            grad_b_data[o] += grad_out_data[b * out_features + o];
+    const int64_t ops = batch_size * in_features * out_features;
+    // Use MKL for large enough matrices
+    const bool use_mkl = ops > 4096;
+
+    // Dispatch based on dtype
+    if (grad_output.dtype() == DType::Float32) {
+        const float* grad_out_data = grad_output.data<float>();
+        const float* w_data = weight.data<float>();
+        const float* in_data = input.data<float>();
+        float* grad_in_data = grad_input.data<float>();
+        float* grad_w_data = grad_weight.data<float>();
+        float* grad_b_data = grad_bias.data<float>();
+
+#ifdef TENZOR_USE_MKL
+        if (use_mkl) {
+            // grad_input = grad_output @ weight
+            cblas_sgemm(
+                CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                static_cast<MKL_INT>(batch_size),
+                static_cast<MKL_INT>(in_features),
+                static_cast<MKL_INT>(out_features),
+                1.0f, grad_out_data, static_cast<MKL_INT>(out_features),
+                w_data, static_cast<MKL_INT>(in_features),
+                0.0f, grad_in_data, static_cast<MKL_INT>(in_features)
+            );
+
+            // grad_weight = grad_output^T @ input
+            cblas_sgemm(
+                CblasRowMajor, CblasTrans, CblasNoTrans,
+                static_cast<MKL_INT>(out_features),
+                static_cast<MKL_INT>(in_features),
+                static_cast<MKL_INT>(batch_size),
+                1.0f, grad_out_data, static_cast<MKL_INT>(out_features),
+                in_data, static_cast<MKL_INT>(in_features),
+                0.0f, grad_w_data, static_cast<MKL_INT>(in_features)
+            );
+
+            // grad_bias = sum(grad_output, dim=0)
+            // Only use OpenMP for large out_features to avoid thread overhead
+            #pragma omp parallel for if(out_features > 1000)
+            for (int64_t o = 0; o < out_features; ++o) {
+                float sum = 0.0f;
+                #pragma omp simd reduction(+:sum)
+                for (int64_t b = 0; b < batch_size; ++b) {
+                    sum += grad_out_data[b * out_features + o];
+                }
+                grad_b_data[o] = sum;
+            }
+
+            return {grad_input, grad_weight, grad_bias};
         }
+#endif
+        linear_backward_impl<float>(grad_out_data, in_data, w_data,
+                                     grad_in_data, grad_w_data, grad_b_data,
+                                     batch_size, in_features, out_features);
+
+    } else if (grad_output.dtype() == DType::Float64) {
+        const double* grad_out_data = grad_output.data<double>();
+        const double* w_data = weight.data<double>();
+        const double* in_data = input.data<double>();
+        double* grad_in_data = grad_input.data<double>();
+        double* grad_w_data = grad_weight.data<double>();
+        double* grad_b_data = grad_bias.data<double>();
+
+#ifdef TENZOR_USE_MKL
+        if (use_mkl) {
+            cblas_dgemm(
+                CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                static_cast<MKL_INT>(batch_size),
+                static_cast<MKL_INT>(in_features),
+                static_cast<MKL_INT>(out_features),
+                1.0, grad_out_data, static_cast<MKL_INT>(out_features),
+                w_data, static_cast<MKL_INT>(in_features),
+                0.0, grad_in_data, static_cast<MKL_INT>(in_features)
+            );
+
+            cblas_dgemm(
+                CblasRowMajor, CblasTrans, CblasNoTrans,
+                static_cast<MKL_INT>(out_features),
+                static_cast<MKL_INT>(in_features),
+                static_cast<MKL_INT>(batch_size),
+                1.0, grad_out_data, static_cast<MKL_INT>(out_features),
+                in_data, static_cast<MKL_INT>(in_features),
+                0.0, grad_w_data, static_cast<MKL_INT>(in_features)
+            );
+
+            // Only use OpenMP for large out_features to avoid thread overhead
+            #pragma omp parallel for if(out_features > 1000)
+            for (int64_t o = 0; o < out_features; ++o) {
+                double sum = 0.0;
+                #pragma omp simd reduction(+:sum)
+                for (int64_t b = 0; b < batch_size; ++b) {
+                    sum += grad_out_data[b * out_features + o];
+                }
+                grad_b_data[o] = sum;
+            }
+
+            return {grad_input, grad_weight, grad_bias};
+        }
+#endif
+        linear_backward_impl<double>(grad_out_data, in_data, w_data,
+                                      grad_in_data, grad_w_data, grad_b_data,
+                                      batch_size, in_features, out_features);
+
+    } else {
+        // Float16 and other dtypes: use Float32 scalar fallback
+        // (MKL doesn't support Float16 directly)
+        const float* grad_out_data = grad_output.data<float>();
+        const float* w_data = weight.data<float>();
+        const float* in_data = input.data<float>();
+        float* grad_in_data = grad_input.data<float>();
+        float* grad_w_data = grad_weight.data<float>();
+        float* grad_b_data = grad_bias.data<float>();
+
+        linear_backward_impl<float>(grad_out_data, in_data, w_data,
+                                     grad_in_data, grad_w_data, grad_b_data,
+                                     batch_size, in_features, out_features);
     }
 
     return {grad_input, grad_weight, grad_bias};
@@ -286,7 +579,7 @@ auto dropout_backward_kernel(const Tensor& grad_output, const Tensor& mask, floa
     const float* mask_data = mask.data<float>();
     float* grad_in_data = grad_input.data<float>();
 
-    #pragma omp parallel for
+    #pragma omp parallel for if(n > 10000)
     for (int64_t i = 0; i < n; ++i) {
         grad_in_data[i] = grad_data[i] * mask_data[i];
     }
@@ -314,7 +607,7 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices) -> Tensor {
     const int64_t* idx_data = indices.data<int64_t>();
     float* out_data = output.data<float>();
 
-    #pragma omp parallel for
+    #pragma omp parallel for if(num_indices * embedding_dim > 10000)
     for (int64_t i = 0; i < num_indices; ++i) {
         int64_t idx = idx_data[i];
         for (int64_t j = 0; j < embedding_dim; ++j) {
@@ -396,7 +689,15 @@ static bool layer_norm_onednn(
         });
         stream.wait();
         return true;
+    } catch (const std::exception& e) {
+#ifndef NDEBUG
+        std::cerr << "[TENZOR] oneDNN LayerNorm failed: " << e.what() << std::endl;
+#endif
+        return false;
     } catch (...) {
+#ifndef NDEBUG
+        std::cerr << "[TENZOR] oneDNN LayerNorm failed with unknown exception" << std::endl;
+#endif
         return false;
     }
 }
@@ -408,7 +709,11 @@ static void layer_norm_simd(
     const float* weight, const float* bias,
     int64_t batch_size, int64_t norm_size, float eps
 ) {
-    #pragma omp parallel for
+    // Prefetch distance (cache lines ahead)
+    constexpr int64_t PREFETCH_DISTANCE = 64;
+
+    // Only parallelize for large total work to avoid thread overhead
+    #pragma omp parallel for if(batch_size * norm_size > 10000)
     for (int64_t b = 0; b < batch_size; ++b) {
         const float* in_ptr = input + b * norm_size;
         float* out_ptr = output + b * norm_size;
@@ -423,6 +728,10 @@ static void layer_norm_simd(
         __m512 vsum_sq = _mm512_setzero_ps();
         int64_t i = 0;
         for (; i + simd_size <= norm_size; i += simd_size) {
+            // Prefetch ahead for next iterations
+            if (i + PREFETCH_DISTANCE < norm_size) {
+                _mm_prefetch(reinterpret_cast<const char*>(in_ptr + i + PREFETCH_DISTANCE), _MM_HINT_T0);
+            }
             __m512 v = _mm512_loadu_ps(in_ptr + i);
             vsum = _mm512_add_ps(vsum, v);
             vsum_sq = _mm512_fmadd_ps(v, v, vsum_sq);
@@ -439,6 +748,10 @@ static void layer_norm_simd(
         __m256 vsum_sq = _mm256_setzero_ps();
         int64_t i = 0;
         for (; i + simd_size <= norm_size; i += simd_size) {
+            // Prefetch ahead for next iterations
+            if (i + PREFETCH_DISTANCE < norm_size) {
+                _mm_prefetch(reinterpret_cast<const char*>(in_ptr + i + PREFETCH_DISTANCE), _MM_HINT_T0);
+            }
             __m256 v = _mm256_loadu_ps(in_ptr + i);
             vsum = _mm256_add_ps(vsum, v);
             vsum_sq = _mm256_fmadd_ps(v, v, vsum_sq);
@@ -479,6 +792,12 @@ static void layer_norm_simd(
         __m512 vinv_std = _mm512_set1_ps(inv_std);
         i = 0;
         for (; i + 16 <= norm_size; i += 16) {
+            // Prefetch input, weight, bias for next iteration
+            if (i + PREFETCH_DISTANCE < norm_size) {
+                _mm_prefetch(reinterpret_cast<const char*>(in_ptr + i + PREFETCH_DISTANCE), _MM_HINT_T0);
+                _mm_prefetch(reinterpret_cast<const char*>(weight + i + PREFETCH_DISTANCE), _MM_HINT_T0);
+                _mm_prefetch(reinterpret_cast<const char*>(bias + i + PREFETCH_DISTANCE), _MM_HINT_T0);
+            }
             __m512 v = _mm512_loadu_ps(in_ptr + i);
             __m512 w = _mm512_loadu_ps(weight + i);
             __m512 b = _mm512_loadu_ps(bias + i);
@@ -495,6 +814,12 @@ static void layer_norm_simd(
         __m256 vinv_std = _mm256_set1_ps(inv_std);
         i = 0;
         for (; i + 8 <= norm_size; i += 8) {
+            // Prefetch input, weight, bias for next iteration
+            if (i + PREFETCH_DISTANCE < norm_size) {
+                _mm_prefetch(reinterpret_cast<const char*>(in_ptr + i + PREFETCH_DISTANCE), _MM_HINT_T0);
+                _mm_prefetch(reinterpret_cast<const char*>(weight + i + PREFETCH_DISTANCE), _MM_HINT_T0);
+                _mm_prefetch(reinterpret_cast<const char*>(bias + i + PREFETCH_DISTANCE), _MM_HINT_T0);
+            }
             __m256 v = _mm256_loadu_ps(in_ptr + i);
             __m256 w = _mm256_loadu_ps(weight + i);
             __m256 b = _mm256_loadu_ps(bias + i);
@@ -517,25 +842,28 @@ static void layer_norm_simd(
 
 auto layer_norm_kernel(const Tensor& input, const std::vector<int64_t>& normalized_shape,
                         const Tensor& weight, const Tensor& bias, float eps) -> Tensor {
-    auto in_shape = input.shape();
+    // Ensure input is contiguous for optimal memory access patterns
+    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
+
+    auto in_shape = input_cont.shape();
     int64_t norm_size = 1;
     for (auto s : normalized_shape) {
         norm_size *= s;
     }
-    int64_t batch_size = input.numel() / norm_size;
+    int64_t batch_size = input_cont.numel() / norm_size;
 
     auto output = Tensor::empty_uninitialized(
         std::vector<int64_t>(in_shape.begin(), in_shape.end()),
-        input.dtype(), input.device());
+        input_cont.dtype(), input_cont.device());
 
-    const float* in_data = input.data<float>();
+    const float* in_data = input_cont.data<float>();
     const float* w_data = weight.data<float>();
     const float* b_data = bias.data<float>();
     float* out_data = output.data<float>();
 
 #ifdef TENZOR_USE_ONEDNN
     // Try oneDNN first for maximum performance
-    if (input.dtype() == DType::Float32 &&
+    if (input_cont.dtype() == DType::Float32 &&
         layer_norm_onednn(in_data, out_data, w_data, b_data, batch_size, norm_size, eps)) {
         return output;
     }
@@ -568,7 +896,8 @@ auto group_norm_kernel(const Tensor& input, int64_t num_groups,
     const float* b_data = bias.data<float>();
     float* out_data = output.data<float>();
 
-    #pragma omp parallel for collapse(2)
+    // Only parallelize for large total work to avoid thread overhead
+    #pragma omp parallel for collapse(2) if(N * num_groups > 16)
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t g = 0; g < num_groups; ++g) {
             int64_t c_start = g * channels_per_group;
@@ -628,7 +957,8 @@ auto instance_norm_kernel(const Tensor& input, const Tensor& weight,
     const float* b_data = bias.impl() ? bias.data<float>() : nullptr;
     float* out_data = output.data<float>();
 
-    #pragma omp parallel for collapse(2)
+    // Only parallelize for large total work to avoid thread overhead
+    #pragma omp parallel for collapse(2) if(N * C > 16)
     for (int64_t n = 0; n < N; ++n) {
         for (int64_t c = 0; c < C; ++c) {
             // Compute mean

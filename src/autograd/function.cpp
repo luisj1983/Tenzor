@@ -392,6 +392,63 @@ auto MatMulBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<T
     return {grad_a, grad_b};
 }
 
+// LinearBackward implementation
+auto LinearBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
+    // This is typically not called - autograd::linear() handles forward directly
+    // But implement for completeness
+    // inputs[0] = x (batch_size, in_features)
+    // inputs[1] = W (out_features, in_features)
+    // inputs[2] = b (out_features)
+    saved_tensors_ = {inputs[0].tensor(), inputs[1].tensor(), inputs[2].tensor()};
+
+    // Compute: y = x @ W.T + b
+    auto x = inputs[0].tensor();
+    auto w = inputs[1].tensor();
+    auto b = inputs[2].tensor();
+
+    // Transpose weight: (out_features, in_features) -> (in_features, out_features)
+    auto w_t = transpose(w, 0, 1);
+
+    // Matrix multiplication: (batch, in) @ (in, out) -> (batch, out)
+    auto matmul_result = matmul(x, w_t);
+
+    // Add bias (broadcasts automatically)
+    auto result = add(matmul_result, b);
+
+    return {Variable(result, true)};
+}
+
+auto LinearBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
+    // For y = x @ W.T + b:
+    // dL/dx = dL/dy @ W          -> (batch, out) @ (out, in) = (batch, in)
+    // dL/dW = dL/dy.T @ x        -> (out, batch) @ (batch, in) = (out, in)
+    // dL/db = sum(dL/dy, dim=0)  -> reduce batch dimension
+
+    const auto& x = saved_tensors_[0];       // (batch, in)
+    const auto& w = saved_tensors_[1];       // (out, in)
+    const auto& grad_out = grad_outputs[0];  // (batch, out)
+
+    // Use optimized LinearBackward kernel for Float32/Float64
+    // Fall back to tensor ops for Float16 and other types
+    if (grad_out.dtype() == DType::Float32 || grad_out.dtype() == DType::Float64) {
+        std::vector<Tensor> inputs = {grad_out, x, w};
+        return dispatch<OpId::LinearBackward>(inputs);
+    }
+
+    // Fallback for Float16 and other types using tensor operations
+    // grad_input = grad_out @ W
+    auto grad_x = matmul(grad_out, w);
+
+    // grad_weight = grad_out.T @ x
+    auto grad_out_t = transpose(grad_out, 0, 1);  // (out, batch)
+    auto grad_w = matmul(grad_out_t, x);          // (out, in)
+
+    // grad_bias = sum(grad_out, dim=0)
+    auto grad_b = tenzor::sum(grad_out, 0, false);  // (out,)
+
+    return {grad_x, grad_w, grad_b};
+}
+
 // SumBackward implementation
 auto SumBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable> {
     saved_tensors_ = {inputs[0].tensor()};
