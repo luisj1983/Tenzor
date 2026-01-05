@@ -5,6 +5,11 @@
 #include <iostream>
 #include <filesystem>
 #include <dlfcn.h>
+#include <thread>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 namespace tenzor {
 
@@ -15,6 +20,15 @@ auto initialize() -> void {
     if (g_initialized) {
         return;
     }
+
+    // Configure OpenMP to use all available hardware threads by default
+    // Users can override with OMP_NUM_THREADS environment variable
+#ifdef _OPENMP
+    if (std::getenv("OMP_NUM_THREADS") == nullptr) {
+        int num_threads = std::max(1u, std::thread::hardware_concurrency());
+        omp_set_num_threads(num_threads);
+    }
+#endif
 
     std::cout << "Initializing Tenzor library v1.0.0" << std::endl;
 

@@ -50,6 +50,25 @@
 #include <tenzor/onnx/importer.hpp>
 #include <tenzor/backend/cpu_caching_allocator.hpp>
 #include "numpy_interop.hpp"
+#include <thread>
+#include <cstdlib>
+
+// ============================================================================
+// Early OpenMP Configuration
+// ============================================================================
+// This constructor runs when the shared library is loaded, BEFORE main() or
+// any module initialization. It sets OMP_NUM_THREADS environment variable
+// to use all available hardware threads if not already set.
+// This is necessary because once the OpenMP runtime is initialized (e.g., by
+// MKL via NumPy/PyTorch), omp_set_num_threads() may not affect all runtimes.
+__attribute__((constructor(101)))  // Priority 101 = very early
+static void configure_openmp_threads() {
+    if (std::getenv("OMP_NUM_THREADS") == nullptr) {
+        unsigned int num_threads = std::max(1u, std::thread::hardware_concurrency());
+        std::string env_value = std::to_string(num_threads);
+        setenv("OMP_NUM_THREADS", env_value.c_str(), 0);  // 0 = don't overwrite
+    }
+}
 
 namespace py = pybind11;
 

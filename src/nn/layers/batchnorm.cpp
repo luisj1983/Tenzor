@@ -9,6 +9,33 @@
 #include <sstream>
 #include <iomanip>
 
+// SIMD headers for optimized BatchNorm
+#if defined(__x86_64__) || defined(_M_X64)
+#include <immintrin.h>
+#endif
+
+// OpenMP for parallel execution
+#ifdef _OPENMP
+#include <omp.h>
+#include <thread>
+#endif
+
+// Get optimal thread count for compute-bound operations
+static inline int get_optimal_threads() {
+#ifdef _OPENMP
+    static int optimal = []() {
+        // Use all hardware threads for compute-bound work
+        int hw_threads = static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
+        // Ensure OpenMP uses this count
+        omp_set_num_threads(hw_threads);
+        return hw_threads;
+    }();
+    return optimal;
+#else
+    return 1;
+#endif
+}
+
 namespace tenzor::nn {
 
 // BatchNorm2d autograd function
@@ -134,6 +161,99 @@ auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
                                " channels, got " + std::to_string(C));
     }
 
+    // ============================================================================
+    // FAST INFERENCE PATH: CPU Float32 eval mode with running stats
+    // ============================================================================
+    const bool needs_grad = is_grad_enabled() &&
+        (input.requires_grad() || (affine_ && parameters_["weight"]->requires_grad()));
+
+    if (!needs_grad && !training_ && track_running_stats_ &&
+        input.tensor().device().type == Device::Type::CPU && input.tensor().dtype() == DType::Float32) {
+
+        const Tensor& input_tensor = input.tensor();
+        const auto* input_data = input_tensor.data<float>();
+
+        // Get running stats and affine parameters directly
+        const Tensor& running_mean = buffers_["running_mean"]->tensor();
+        const Tensor& running_var = buffers_["running_var"]->tensor();
+        const auto* mean_data = running_mean.data<float>();
+        const auto* var_data = running_var.data<float>();
+
+        const float* gamma_data = nullptr;
+        const float* beta_data = nullptr;
+        if (affine_) {
+            gamma_data = parameters_["weight"]->tensor().data<float>();
+            beta_data = parameters_["bias"]->tensor().data<float>();
+        }
+
+        // Allocate output
+        auto output = Tensor::empty_uninitialized(
+            {N, C, H, W}, DType::Float32, Device::cpu());
+        auto* output_data = output.data<float>();
+
+        const float eps = static_cast<float>(eps_);
+
+        // Precompute scale and shift for each channel: scale = gamma / sqrt(var + eps), shift = beta - mean * scale
+        std::vector<float> scale(C), shift(C);
+        for (int64_t c = 0; c < C; c++) {
+            float inv_std = 1.0f / std::sqrt(var_data[c] + eps);
+            if (affine_) {
+                scale[c] = gamma_data[c] * inv_std;
+                shift[c] = beta_data[c] - mean_data[c] * scale[c];
+            } else {
+                scale[c] = inv_std;
+                shift[c] = -mean_data[c] * inv_std;
+            }
+        }
+
+        // Apply normalization: output = input * scale + shift
+        const int nthreads = get_optimal_threads();
+        #pragma omp parallel for collapse(2) num_threads(nthreads)
+        for (int64_t n = 0; n < N; n++) {
+            for (int64_t c = 0; c < C; c++) {
+                const float s = scale[c];
+                const float b = shift[c];
+                const int64_t channel_offset = (n * C + c) * spatial_size;
+
+                #if defined(__AVX512F__)
+                __m512 v_scale = _mm512_set1_ps(s);
+                __m512 v_shift = _mm512_set1_ps(b);
+                int64_t i = 0;
+                for (; i + 16 <= spatial_size; i += 16) {
+                    __m512 v_in = _mm512_loadu_ps(input_data + channel_offset + i);
+                    __m512 v_out = _mm512_fmadd_ps(v_in, v_scale, v_shift);
+                    _mm512_storeu_ps(output_data + channel_offset + i, v_out);
+                }
+                for (; i < spatial_size; i++) {
+                    output_data[channel_offset + i] = input_data[channel_offset + i] * s + b;
+                }
+                #elif defined(__AVX2__)
+                __m256 v_scale = _mm256_set1_ps(s);
+                __m256 v_shift = _mm256_set1_ps(b);
+                int64_t i = 0;
+                for (; i + 8 <= spatial_size; i += 8) {
+                    __m256 v_in = _mm256_loadu_ps(input_data + channel_offset + i);
+                    __m256 v_out = _mm256_fmadd_ps(v_in, v_scale, v_shift);
+                    _mm256_storeu_ps(output_data + channel_offset + i, v_out);
+                }
+                for (; i < spatial_size; i++) {
+                    output_data[channel_offset + i] = input_data[channel_offset + i] * s + b;
+                }
+                #else
+                for (int64_t i = 0; i < spatial_size; i++) {
+                    output_data[channel_offset + i] = input_data[channel_offset + i] * s + b;
+                }
+                #endif
+            }
+        }
+
+        return Variable(output, false);
+    }
+
+    // ============================================================================
+    // STANDARD PATH: Full dispatch with autograd support
+    // ============================================================================
+
     // Validate to prevent division by zero
     int64_t batch_size = N * spatial_size;
     if (training_ && batch_size == 0) {
@@ -213,12 +333,12 @@ auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
         output = forward_results[0];
     }
 
-    // Set up autograd if needed
+    // Set up autograd if needed - check is_grad_enabled() first for fast inference path
     bool requires_grad = input.requires_grad();
     if (affine_ && parameters_.find("weight") != parameters_.end()) {
         requires_grad = requires_grad || parameters_["weight"]->requires_grad();
     }
-    if (requires_grad) {
+    if (is_grad_enabled() && requires_grad) {
         // Create result variable from output
         auto result = Variable(output, true);
 

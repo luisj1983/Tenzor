@@ -115,8 +115,12 @@ auto bmm(const Tensor& a, const Tensor& b) -> Tensor {
     Tensor a_cont = a.is_contiguous() ? a : a.contiguous();
     Tensor b_cont = b.is_contiguous() ? b : b.contiguous();
 
-    // Create output tensor
+    // Create output tensor - use uninitialized for MKL (beta=0 overwrites anyway)
+#ifdef TENZOR_USE_MKL
+    Tensor output = Tensor::empty_uninitialized({batch_size, M, N}, a.dtype(), Device::cpu());
+#else
     Tensor output = zeros({batch_size, M, N}, a.dtype(), Device::cpu());
+#endif
 
     // Batch strides
     int64_t a_batch_stride = M * K;
@@ -128,6 +132,23 @@ auto bmm(const Tensor& a, const Tensor& b) -> Tensor {
         const float* b_data = b_cont.data<float>();
         float* c_data = output.data<float>();
 
+#ifdef TENZOR_USE_MKL
+        // Use MKL batched SGEMM for optimal performance
+        // For batch_size=1, batched_strided has minimal overhead vs regular SGEMM
+        cblas_sgemm_batch_strided(
+            CblasRowMajor,
+            CblasNoTrans, CblasNoTrans,
+            static_cast<MKL_INT>(M),
+            static_cast<MKL_INT>(N),
+            static_cast<MKL_INT>(K),
+            1.0f,  // alpha
+            a_data, static_cast<MKL_INT>(K), a_batch_stride,
+            b_data, static_cast<MKL_INT>(N), b_batch_stride,
+            0.0f,  // beta
+            c_data, static_cast<MKL_INT>(N), c_batch_stride,
+            static_cast<MKL_INT>(batch_size)
+        );
+#else
         // Fallback: Parallelize across batches with naive GEMM
         #pragma omp parallel for if(batch_size > 1)
         for (int64_t batch = 0; batch < batch_size; ++batch) {
@@ -146,11 +167,28 @@ auto bmm(const Tensor& a, const Tensor& b) -> Tensor {
                 }
             }
         }
+#endif
     } else if (a.dtype() == DType::Float64) {
         const double* a_data = a_cont.data<double>();
         const double* b_data = b_cont.data<double>();
         double* c_data = output.data<double>();
 
+#ifdef TENZOR_USE_MKL
+        // Use MKL batched DGEMM for optimal performance
+        cblas_dgemm_batch_strided(
+            CblasRowMajor,
+            CblasNoTrans, CblasNoTrans,
+            static_cast<MKL_INT>(M),
+            static_cast<MKL_INT>(N),
+            static_cast<MKL_INT>(K),
+            1.0,  // alpha
+            a_data, static_cast<MKL_INT>(K), a_batch_stride,
+            b_data, static_cast<MKL_INT>(N), b_batch_stride,
+            0.0,  // beta
+            c_data, static_cast<MKL_INT>(N), c_batch_stride,
+            static_cast<MKL_INT>(batch_size)
+        );
+#else
         #pragma omp parallel for if(batch_size > 1)
         for (int64_t batch = 0; batch < batch_size; ++batch) {
             const double* a_batch = a_data + batch * a_batch_stride;
@@ -168,6 +206,7 @@ auto bmm(const Tensor& a, const Tensor& b) -> Tensor {
                 }
             }
         }
+#endif
     } else if (a.dtype() == DType::Float16) {
         const Float16* a_data = a_cont.data<Float16>();
         const Float16* b_data = b_cont.data<Float16>();

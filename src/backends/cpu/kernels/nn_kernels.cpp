@@ -9,6 +9,7 @@
 #include <random>
 #include <cmath>
 #include <iostream>
+#include <tuple>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -703,6 +704,144 @@ static bool layer_norm_onednn(
 }
 #endif
 
+// SIMD-optimized LayerNorm with statistics output for backward pass
+// This version outputs mean and rstd for use in autograd
+static void layer_norm_simd_with_stats(
+    const float* input, float* output,
+    const float* weight, const float* bias,
+    float* mean_out, float* rstd_out,
+    int64_t batch_size, int64_t norm_size, float eps
+) {
+    // Prefetch distance (cache lines ahead)
+    constexpr int64_t PREFETCH_DISTANCE = 64;
+
+    // Only parallelize for large total work to avoid thread overhead
+    #pragma omp parallel for if(batch_size * norm_size > 10000)
+    for (int64_t b = 0; b < batch_size; ++b) {
+        const float* in_ptr = input + b * norm_size;
+        float* out_ptr = output + b * norm_size;
+
+        // Single-pass mean and variance computation with SIMD
+        float sum = 0.0f;
+        float sum_sq = 0.0f;
+
+#ifdef HAS_AVX512
+        int64_t simd_size = 16;
+        __m512 vsum = _mm512_setzero_ps();
+        __m512 vsum_sq = _mm512_setzero_ps();
+        int64_t i = 0;
+        for (; i + simd_size <= norm_size; i += simd_size) {
+            if (i + PREFETCH_DISTANCE < norm_size) {
+                _mm_prefetch(reinterpret_cast<const char*>(in_ptr + i + PREFETCH_DISTANCE), _MM_HINT_T0);
+            }
+            __m512 v = _mm512_loadu_ps(in_ptr + i);
+            vsum = _mm512_add_ps(vsum, v);
+            vsum_sq = _mm512_fmadd_ps(v, v, vsum_sq);
+        }
+        sum = _mm512_reduce_add_ps(vsum);
+        sum_sq = _mm512_reduce_add_ps(vsum_sq);
+        for (; i < norm_size; ++i) {
+            sum += in_ptr[i];
+            sum_sq += in_ptr[i] * in_ptr[i];
+        }
+#elif defined(HAS_AVX2)
+        int64_t simd_size = 8;
+        __m256 vsum = _mm256_setzero_ps();
+        __m256 vsum_sq = _mm256_setzero_ps();
+        int64_t i = 0;
+        for (; i + simd_size <= norm_size; i += simd_size) {
+            if (i + PREFETCH_DISTANCE < norm_size) {
+                _mm_prefetch(reinterpret_cast<const char*>(in_ptr + i + PREFETCH_DISTANCE), _MM_HINT_T0);
+            }
+            __m256 v = _mm256_loadu_ps(in_ptr + i);
+            vsum = _mm256_add_ps(vsum, v);
+            vsum_sq = _mm256_fmadd_ps(v, v, vsum_sq);
+        }
+        __m128 lo = _mm256_castps256_ps128(vsum);
+        __m128 hi = _mm256_extractf128_ps(vsum, 1);
+        lo = _mm_add_ps(lo, hi);
+        lo = _mm_hadd_ps(lo, lo);
+        lo = _mm_hadd_ps(lo, lo);
+        sum = _mm_cvtss_f32(lo);
+
+        lo = _mm256_castps256_ps128(vsum_sq);
+        hi = _mm256_extractf128_ps(vsum_sq, 1);
+        lo = _mm_add_ps(lo, hi);
+        lo = _mm_hadd_ps(lo, lo);
+        lo = _mm_hadd_ps(lo, lo);
+        sum_sq = _mm_cvtss_f32(lo);
+
+        for (; i < norm_size; ++i) {
+            sum += in_ptr[i];
+            sum_sq += in_ptr[i] * in_ptr[i];
+        }
+#else
+        for (int64_t i = 0; i < norm_size; ++i) {
+            sum += in_ptr[i];
+            sum_sq += in_ptr[i] * in_ptr[i];
+        }
+#endif
+
+        float mean = sum / norm_size;
+        float var = (sum_sq / norm_size) - (mean * mean);
+        float inv_std = 1.0f / std::sqrt(var + eps);
+
+        // Save statistics for backward pass
+        mean_out[b] = mean;
+        rstd_out[b] = inv_std;
+
+        // Normalize with SIMD
+#ifdef HAS_AVX512
+        __m512 vmean = _mm512_set1_ps(mean);
+        __m512 vinv_std = _mm512_set1_ps(inv_std);
+        i = 0;
+        for (; i + 16 <= norm_size; i += 16) {
+            if (i + PREFETCH_DISTANCE < norm_size) {
+                _mm_prefetch(reinterpret_cast<const char*>(in_ptr + i + PREFETCH_DISTANCE), _MM_HINT_T0);
+                _mm_prefetch(reinterpret_cast<const char*>(weight + i + PREFETCH_DISTANCE), _MM_HINT_T0);
+                _mm_prefetch(reinterpret_cast<const char*>(bias + i + PREFETCH_DISTANCE), _MM_HINT_T0);
+            }
+            __m512 v = _mm512_loadu_ps(in_ptr + i);
+            __m512 w = _mm512_loadu_ps(weight + i);
+            __m512 b = _mm512_loadu_ps(bias + i);
+            __m512 normalized = _mm512_mul_ps(_mm512_sub_ps(v, vmean), vinv_std);
+            __m512 result = _mm512_fmadd_ps(normalized, w, b);
+            _mm512_storeu_ps(out_ptr + i, result);
+        }
+        for (; i < norm_size; ++i) {
+            float normalized = (in_ptr[i] - mean) * inv_std;
+            out_ptr[i] = normalized * weight[i] + bias[i];
+        }
+#elif defined(HAS_AVX2)
+        __m256 vmean = _mm256_set1_ps(mean);
+        __m256 vinv_std = _mm256_set1_ps(inv_std);
+        i = 0;
+        for (; i + 8 <= norm_size; i += 8) {
+            if (i + PREFETCH_DISTANCE < norm_size) {
+                _mm_prefetch(reinterpret_cast<const char*>(in_ptr + i + PREFETCH_DISTANCE), _MM_HINT_T0);
+                _mm_prefetch(reinterpret_cast<const char*>(weight + i + PREFETCH_DISTANCE), _MM_HINT_T0);
+                _mm_prefetch(reinterpret_cast<const char*>(bias + i + PREFETCH_DISTANCE), _MM_HINT_T0);
+            }
+            __m256 v = _mm256_loadu_ps(in_ptr + i);
+            __m256 w = _mm256_loadu_ps(weight + i);
+            __m256 b = _mm256_loadu_ps(bias + i);
+            __m256 normalized = _mm256_mul_ps(_mm256_sub_ps(v, vmean), vinv_std);
+            __m256 result = _mm256_fmadd_ps(normalized, w, b);
+            _mm256_storeu_ps(out_ptr + i, result);
+        }
+        for (; i < norm_size; ++i) {
+            float normalized = (in_ptr[i] - mean) * inv_std;
+            out_ptr[i] = normalized * weight[i] + bias[i];
+        }
+#else
+        for (int64_t i = 0; i < norm_size; ++i) {
+            float normalized = (in_ptr[i] - mean) * inv_std;
+            out_ptr[i] = normalized * weight[i] + bias[i];
+        }
+#endif
+    }
+}
+
 // SIMD-optimized LayerNorm for when oneDNN is not available or fails
 static void layer_norm_simd(
     const float* input, float* output,
@@ -873,6 +1012,45 @@ auto layer_norm_kernel(const Tensor& input, const std::vector<int64_t>& normaliz
     layer_norm_simd(in_data, out_data, w_data, b_data, batch_size, norm_size, eps);
 
     return output;
+}
+
+// LayerNorm kernel that also returns mean and rstd for backward pass
+// This avoids the double computation issue where forward computes stats,
+// then backward re-computes them again
+auto layer_norm_kernel_with_stats(const Tensor& input, const std::vector<int64_t>& normalized_shape,
+                                   const Tensor& weight, const Tensor& bias, float eps)
+    -> std::tuple<Tensor, Tensor, Tensor> {
+    // Ensure input is contiguous for optimal memory access patterns
+    Tensor input_cont = input.is_contiguous() ? input : input.contiguous();
+
+    auto in_shape = input_cont.shape();
+    int64_t norm_size = 1;
+    for (auto s : normalized_shape) {
+        norm_size *= s;
+    }
+    int64_t batch_size = input_cont.numel() / norm_size;
+
+    // Create output tensor
+    auto output = Tensor::empty_uninitialized(
+        std::vector<int64_t>(in_shape.begin(), in_shape.end()),
+        input_cont.dtype(), input_cont.device());
+
+    // Create mean and rstd tensors (one per batch element)
+    auto mean = Tensor::empty_uninitialized({batch_size}, DType::Float32, input_cont.device());
+    auto rstd = Tensor::empty_uninitialized({batch_size}, DType::Float32, input_cont.device());
+
+    const float* in_data = input_cont.data<float>();
+    const float* w_data = weight.data<float>();
+    const float* b_data = bias.data<float>();
+    float* out_data = output.data<float>();
+    float* mean_data = mean.data<float>();
+    float* rstd_data = rstd.data<float>();
+
+    // Use SIMD-optimized implementation that saves statistics
+    layer_norm_simd_with_stats(in_data, out_data, w_data, b_data, mean_data, rstd_data,
+                                batch_size, norm_size, eps);
+
+    return {output, mean, rstd};
 }
 
 auto group_norm_kernel(const Tensor& input, int64_t num_groups,

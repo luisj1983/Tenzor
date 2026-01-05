@@ -58,11 +58,17 @@ def benchmark_linear_layers(device: str, config: BenchmarkConfig) -> List[Benchm
         # Tenzor modules expect Variable input
         x_var = tz.Variable(x, requires_grad=False)
 
+        # Disable gradient computation for inference (like PyTorch's torch.no_grad())
+        tz.set_grad_enabled(False)
+
         # Use default args to capture current loop values (fixes closure bug)
         def forward_fn(l=layer, xv=x_var):
             return l(xv)
 
         times = run_benchmark(forward_fn, config.warmup_iterations, config.benchmark_iterations, sync_fn)
+
+        # Re-enable gradients
+        tz.set_grad_enabled(True)
         flops = 2 * batch * in_f * out_f
 
         result = compute_statistics(
@@ -88,12 +94,15 @@ def benchmark_linear_layers(device: str, config: BenchmarkConfig) -> List[Benchm
                 torch_device = torch.device(device)
                 x_pt = torch.randn(batch, in_f, device=torch_device)
                 layer_pt = nn.Linear(in_f, out_f).to(torch_device)
+                layer_pt.eval()
 
-                # Use default args to capture current loop values (fixes closure bug)
-                def forward_pt(l=layer_pt, x=x_pt):
-                    return l(x)
+                # Use torch.no_grad() for inference benchmarking
+                with torch.no_grad():
+                    # Use default args to capture current loop values (fixes closure bug)
+                    def forward_pt(l=layer_pt, x=x_pt):
+                        return l(x)
 
-                times_pt = run_benchmark(forward_pt, config.warmup_iterations, config.benchmark_iterations, pt_sync_fn)
+                    times_pt = run_benchmark(forward_pt, config.warmup_iterations, config.benchmark_iterations, pt_sync_fn)
 
                 result_pt = compute_statistics(
                     times=times_pt,
@@ -228,19 +237,27 @@ def benchmark_normalization_layers(device: str, config: BenchmarkConfig) -> List
         if device == "cuda":
             x = tz.randn([batch, ch, h, w]).cuda()
             bn = tz.nn.BatchNorm2d(ch)
+            bn.eval()  # Set eval mode before CUDA transfer
             bn.cuda()
         else:
             x = tz.randn([batch, ch, h, w])
             bn = tz.nn.BatchNorm2d(ch)
+            bn.eval()
 
         # Tenzor modules expect Variable input
         x_var = tz.Variable(x, requires_grad=False)
+
+        # Disable gradient computation for inference
+        tz.set_grad_enabled(False)
 
         # Use default args to capture current loop values (fixes closure bug)
         def bn_fn(layer=bn, xv=x_var):
             return layer(xv)
 
         times = run_benchmark(bn_fn, config.warmup_iterations, config.benchmark_iterations, sync_fn)
+
+        # Re-enable gradients
+        tz.set_grad_enabled(True)
 
         result = compute_statistics(
             times=times,

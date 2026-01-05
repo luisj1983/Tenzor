@@ -6,6 +6,27 @@
 #include <thread>
 #include <fstream>
 #include <string>
+#include <cstdlib>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
+// ============================================================================
+// Early OpenMP Configuration (Static Constructor)
+// ============================================================================
+// This runs when the CPU backend shared library is loaded, setting
+// OMP_NUM_THREADS before any OpenMP runtime initialization.
+// Note: This may not help if PyTorch/MKL is loaded first, but it ensures
+// our library uses all threads when loaded independently.
+__attribute__((constructor(101)))
+static void configure_openmp_early() {
+    if (std::getenv("OMP_NUM_THREADS") == nullptr) {
+        unsigned int num_threads = std::max(1u, std::thread::hardware_concurrency());
+        std::string env_value = std::to_string(num_threads);
+        setenv("OMP_NUM_THREADS", env_value.c_str(), 0);
+    }
+}
 
 #ifdef _WIN32
 #include <windows.h>
@@ -1418,6 +1439,14 @@ void register_cpu_kernels(BackendDispatchTable& table);
 // Export factory function
 extern "C" {
     auto create_backend() -> std::unique_ptr<Backend> {
+        // Configure OpenMP to use all available hardware threads by default
+        // Users can override with OMP_NUM_THREADS environment variable
+#ifdef _OPENMP
+        if (std::getenv("OMP_NUM_THREADS") == nullptr) {
+            int num_threads = static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
+            omp_set_num_threads(num_threads);
+        }
+#endif
         return std::make_unique<CPUBackend>();
     }
 

@@ -61,6 +61,9 @@ def benchmark_tenzor_layernorm(
 
             x_var = tz.Variable(x, False)
 
+            # Disable gradient computation for inference (like PyTorch's torch.no_grad())
+            tz.set_grad_enabled(False)
+
             def ln_fn():
                 return ln.forward(x_var)
 
@@ -86,7 +89,11 @@ def benchmark_tenzor_layernorm(
             results.append(result)
             print_result(result)
 
+            # Re-enable gradients after benchmark
+            tz.set_grad_enabled(True)
+
         except Exception as e:
+            tz.set_grad_enabled(True)  # Ensure re-enabled on error
             print(f"  [SKIP] {name}: {e}")
 
     return results

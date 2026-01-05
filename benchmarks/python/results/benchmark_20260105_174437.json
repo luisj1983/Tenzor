@@ -1,0 +1,194 @@
+{
+  "system_info": {
+    "timestamp": "2026-01-05T17:44:37.519394",
+    "platform": "Linux-6.18.2-arch2-1-x86_64-with-glibc2.42",
+    "python_version": "3.13.11",
+    "processor": "",
+    "cpu_count": 24,
+    "gpu_name": "NVIDIA GeForce RTX 5070 Laptop GPU",
+    "gpu_memory": "8151 MiB",
+    "gpu_driver": "590.48.01"
+  },
+  "results": [
+    {
+      "name": "MatMul 512x512 @ 512x512",
+      "category": "matmul",
+      "device": "cpu",
+      "framework": "tenzor",
+      "mean_ms": 0.46354010119102895,
+      "std_ms": 0.01158518564610612,
+      "min_ms": 0.45304500963538885,
+      "max_ms": 0.4895930178463459,
+      "median_ms": 0.4582155088428408,
+      "p95_ms": 0.4895930178463459,
+      "p99_ms": 0.4895930178463459,
+      "gflops": 579.0986698028428,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "M": 512,
+        "K": 512,
+        "N": 512
+      }
+    },
+    {
+      "name": "MatMul 1024x1024 @ 1024x1024",
+      "category": "matmul",
+      "device": "cpu",
+      "framework": "tenzor",
+      "mean_ms": 3.3415879064705223,
+      "std_ms": 0.024173102861139658,
+      "min_ms": 3.3103280002251267,
+      "max_ms": 3.391008998733014,
+      "median_ms": 3.3405095455236733,
+      "p95_ms": 3.391008998733014,
+      "p99_ms": 3.391008998733014,
+      "gflops": 642.6536449457742,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "M": 1024,
+        "K": 1024,
+        "N": 1024
+      }
+    },
+    {
+      "name": "MatMul 512x512 @ 512x512",
+      "category": "matmul",
+      "device": "cpu",
+      "framework": "pytorch",
+      "mean_ms": 0.41645130841061473,
+      "std_ms": 0.007670659661775225,
+      "min_ms": 0.40990504203364253,
+      "max_ms": 0.4308640491217375,
+      "median_ms": 0.41373749263584614,
+      "p95_ms": 0.4308640491217375,
+      "p99_ms": 0.4308640491217375,
+      "gflops": 644.5782509952561,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "M": 512,
+        "K": 512,
+        "N": 512
+      }
+    },
+    {
+      "name": "MatMul 1024x1024 @ 1024x1024",
+      "category": "matmul",
+      "device": "cpu",
+      "framework": "pytorch",
+      "mean_ms": 3.166122391121462,
+      "std_ms": 0.04458812948550677,
+      "min_ms": 3.1278079841285944,
+      "max_ms": 3.2720869639888406,
+      "median_ms": 3.1476699805352837,
+      "p95_ms": 3.2720869639888406,
+      "p99_ms": 3.2720869639888406,
+      "gflops": 678.269309494175,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "M": 1024,
+        "K": 1024,
+        "N": 1024
+      }
+    },
+    {
+      "name": "BatchedMatMul B=1 256x256 @ 256x256",
+      "category": "batched_matmul",
+      "device": "cpu",
+      "framework": "tenzor",
+      "mean_ms": 0.5127169017214328,
+      "std_ms": 0.0019400862709298126,
+      "min_ms": 0.5098010296933353,
+      "max_ms": 0.5150609649717808,
+      "median_ms": 0.5133679951541126,
+      "p95_ms": 0.5150609649717808,
+      "p99_ms": 0.5150609649717808,
+      "gflops": 65.44436488702034,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "batch": 1,
+        "M": 256,
+        "K": 256,
+        "N": 256
+      }
+    },
+    {
+      "name": "BatchedMatMul B=32 256x256 @ 256x256",
+      "category": "batched_matmul",
+      "device": "cpu",
+      "framework": "tenzor",
+      "mean_ms": 4.26518699969165,
+      "std_ms": 1.4456182584433506,
+      "min_ms": 3.404004033654928,
+      "max_ms": 7.8224000171758235,
+      "median_ms": 3.4593619930092245,
+      "p95_ms": 7.8224000171758235,
+      "p99_ms": 7.8224000171758235,
+      "gflops": 251.74554458635123,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "batch": 32,
+        "M": 256,
+        "K": 256,
+        "N": 256
+      }
+    },
+    {
+      "name": "BatchedMatMul B=1 256x256 @ 256x256",
+      "category": "batched_matmul",
+      "device": "cpu",
+      "framework": "pytorch",
+      "mean_ms": 0.08168061031028628,
+      "std_ms": 0.029201078375794196,
+      "min_ms": 0.06170501001179218,
+      "max_ms": 0.1339699956588447,
+      "median_ms": 0.06395447417162359,
+      "p95_ms": 0.1339699956588447,
+      "p99_ms": 0.1339699956588447,
+      "gflops": 410.8004564673826,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "batch": 1,
+        "M": 256,
+        "K": 256,
+        "N": 256
+      }
+    },
+    {
+      "name": "BatchedMatMul B=32 256x256 @ 256x256",
+      "category": "batched_matmul",
+      "device": "cpu",
+      "framework": "pytorch",
+      "mean_ms": 1.7945553874596953,
+      "std_ms": 0.01593544320506478,
+      "min_ms": 1.7665369668975472,
+      "max_ms": 1.819656987208873,
+      "median_ms": 1.7920745012816042,
+      "p95_ms": 1.819656987208873,
+      "p99_ms": 1.819656987208873,
+      "gflops": 598.3330642805895,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "batch": 32,
+        "M": 256,
+        "K": 256,
+        "N": 256
+      }
+    }
+  ]
+}
