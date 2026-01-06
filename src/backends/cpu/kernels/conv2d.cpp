@@ -111,7 +111,16 @@ void im2col_cpu(
 ) {
     int64_t total_elements = batch * out_h * out_w * channels * kernel_h * kernel_w;
 
-    #pragma omp parallel for if(total_elements > 10000)
+    // Limit threads to avoid OpenMP overhead for memory-bound operations
+#ifdef _OPENMP
+    int max_threads = omp_get_max_threads();
+    int effective_threads = std::min({max_threads, static_cast<int>(batch), 8});
+    int final_threads = std::max(1, effective_threads);
+#else
+    int final_threads = 1;
+#endif
+
+    #pragma omp parallel for num_threads(final_threads) if(total_elements > 10000)
     for (int64_t idx = 0; idx < total_elements; ++idx) {
         // Decode flat index to (b, oh, ow, c, kh, kw)
         int64_t temp = idx;
@@ -381,6 +390,11 @@ struct Conv2dCachedPrimitive {
     dnnl::memory::desc bias_md;         // Bias memory descriptor (if applicable)
     bool need_src_reorder;
     bool need_dst_reorder;
+
+    // Cached scratch buffers to avoid allocation on every call
+    dnnl::memory src_reorder_mem;       // Scratch for source reorder (if needed)
+    dnnl::memory dst_reorder_mem;       // Scratch for destination reorder (if needed)
+    bool scratch_initialized{false};    // Whether scratch buffers are allocated
 };
 
 // Thread-local cache with LRU eviction (max 32 entries per thread)
@@ -434,23 +448,39 @@ static bool conv2d_forward_onednn(
         return false;
     }
 
-    try {
-        auto input_shape = input.shape();
-        auto weight_shape = weight.shape();
-        auto output_shape = output.shape();
+    auto input_shape = input.shape();
+    auto weight_shape = weight.shape();
+    auto output_shape = output.shape();
 
-        int64_t batch = input_shape[0];
-        int64_t in_channels = input_shape[1];
+    int64_t out_h = output_shape[2];
+    int64_t out_w = output_shape[3];
+    int64_t out_channels = weight_shape[0];
+    int64_t in_channels = input_shape[1];
+    int64_t kernel_h = weight_shape[2];
+    int64_t kernel_w = weight_shape[3];
+    int64_t batch = input_shape[0];
+
+    // =========================================================================
+    // Skip oneDNN only for tiny convolutions where primitive overhead dominates
+    // =========================================================================
+    // With cached primitives and scratch buffers, oneDNN is typically faster than
+    // our im2col+GEMM fallback for almost all practical convolution sizes.
+    // Only skip for extremely small outputs where even memory allocation overhead
+    // exceeds compute time.
+
+    int64_t total_output_elements = batch * out_channels * out_h * out_w;
+
+    // Skip only for tiny outputs (< 4K elements, e.g., batch=1, channels=64, 8x8)
+    constexpr int64_t MIN_OUTPUT_ELEMENTS = 4096;
+
+    if (total_output_elements < MIN_OUTPUT_ELEMENTS) {
+        return false;  // Use im2col+GEMM fallback only for tiny convolutions
+    }
+
+    try {
         int64_t height = input_shape[2];
         int64_t width = input_shape[3];
-
-        int64_t out_channels = weight_shape[0];
         int64_t in_channels_per_group = weight_shape[1];
-        int64_t kernel_h = weight_shape[2];
-        int64_t kernel_w = weight_shape[3];
-
-        int64_t out_h = output_shape[2];
-        int64_t out_w = output_shape[3];
 
         auto& engine = g_onednn_engine;
         auto& stream = g_onednn_stream;
@@ -556,21 +586,31 @@ static bool conv2d_forward_onednn(
         }
 
         // Execute convolution using cached primitive
-        // Create source memory (input changes each call)
+        // Create source/dest memory wrappers (no allocation, just wraps existing data)
         auto src_mem_user = dnnl::memory(cached->src_md_user, engine, const_cast<float*>(input.data<float>()));
         auto dst_mem_user = dnnl::memory(cached->dst_md_user, engine, output.data<float>());
 
-        // Reorder source if needed
+        // Initialize scratch buffers on first use (cached for subsequent calls)
+        if (!cached->scratch_initialized) {
+            if (cached->need_src_reorder) {
+                cached->src_reorder_mem = dnnl::memory(cached->conv_pd.src_desc(), engine);
+            }
+            if (cached->need_dst_reorder) {
+                cached->dst_reorder_mem = dnnl::memory(cached->conv_pd.dst_desc(), engine);
+            }
+            cached->scratch_initialized = true;
+        }
+
+        // Use cached scratch buffers for reorders (no allocation per call)
         dnnl::memory src_mem = src_mem_user;
         if (cached->need_src_reorder) {
-            src_mem = dnnl::memory(cached->conv_pd.src_desc(), engine);
+            src_mem = cached->src_reorder_mem;
             dnnl::reorder(src_mem_user, src_mem).execute(stream, src_mem_user, src_mem);
         }
 
-        // Create destination memory with optimal layout if needed
         dnnl::memory dst_mem = dst_mem_user;
         if (cached->need_dst_reorder) {
-            dst_mem = dnnl::memory(cached->conv_pd.dst_desc(), engine);
+            dst_mem = cached->dst_reorder_mem;
         }
 
         // Execute convolution with cached primitive and weights

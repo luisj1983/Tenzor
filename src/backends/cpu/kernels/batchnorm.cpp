@@ -8,6 +8,11 @@
 #include <omp.h>
 #endif
 
+// SIMD headers for optimized BatchNorm
+#ifdef __AVX2__
+#include <immintrin.h>
+#endif
+
 // Intel oneDNN for optimized batch normalization (2-3x faster)
 #ifdef TENZOR_USE_ONEDNN
 #include <dnnl.hpp>
@@ -75,6 +80,89 @@ inline Float16 safe_sqrt<Float16>(const Float16& x) {
 // BatchNorm2d Mean/Variance Computation
 // ============================================================================
 
+#ifdef __AVX2__
+// SIMD-optimized mean/variance computation for Float32
+// Uses AVX2 for 8-wide parallel reduction
+static void batchnorm_mean_var_simd_f32(
+    const float* __restrict input,
+    float* __restrict mean,
+    float* __restrict variance,
+    int64_t N, int64_t C, int64_t H, int64_t W)
+{
+    int64_t spatial_size = H * W;
+    int64_t total_elements = N * spatial_size;
+    float inv_total = 1.0f / static_cast<float>(total_elements);
+
+    // Use fewer threads to avoid OpenMP overhead
+#ifdef _OPENMP
+    int nthreads = omp_get_max_threads();
+    int effective_threads = std::min({nthreads, static_cast<int>(C), 4});
+    int final_threads = std::max(1, effective_threads);
+#else
+    int final_threads = 1;
+#endif
+
+    #pragma omp parallel for num_threads(final_threads) if(C > 1)
+    for (int64_t c = 0; c < C; c++) {
+        // First pass: compute sum using AVX2
+        __m256 vsum = _mm256_setzero_ps();
+
+        for (int64_t n = 0; n < N; n++) {
+            const float* ch_ptr = input + (n * C + c) * spatial_size;
+            int64_t i = 0;
+
+            // Process 8 floats at a time
+            for (; i + 8 <= spatial_size; i += 8) {
+                __m256 v = _mm256_loadu_ps(ch_ptr + i);
+                vsum = _mm256_add_ps(vsum, v);
+            }
+            // Handle remainder
+            for (; i < spatial_size; i++) {
+                vsum = _mm256_add_ps(vsum, _mm256_set1_ps(ch_ptr[i]));
+            }
+        }
+
+        // Horizontal sum of vsum
+        __m128 hi = _mm256_extractf128_ps(vsum, 1);
+        __m128 lo = _mm256_castps256_ps128(vsum);
+        __m128 sum128 = _mm_add_ps(hi, lo);
+        sum128 = _mm_hadd_ps(sum128, sum128);
+        sum128 = _mm_hadd_ps(sum128, sum128);
+        float channel_mean = _mm_cvtss_f32(sum128) * inv_total;
+        mean[c] = channel_mean;
+
+        // Second pass: compute variance
+        __m256 vmean = _mm256_set1_ps(channel_mean);
+        __m256 vvar = _mm256_setzero_ps();
+
+        for (int64_t n = 0; n < N; n++) {
+            const float* ch_ptr = input + (n * C + c) * spatial_size;
+            int64_t i = 0;
+
+            // Process 8 floats at a time
+            for (; i + 8 <= spatial_size; i += 8) {
+                __m256 v = _mm256_loadu_ps(ch_ptr + i);
+                __m256 diff = _mm256_sub_ps(v, vmean);
+                vvar = _mm256_fmadd_ps(diff, diff, vvar);
+            }
+            // Handle remainder
+            for (; i < spatial_size; i++) {
+                float diff = ch_ptr[i] - channel_mean;
+                vvar = _mm256_add_ps(vvar, _mm256_set1_ps(diff * diff));
+            }
+        }
+
+        // Horizontal sum of vvar
+        hi = _mm256_extractf128_ps(vvar, 1);
+        lo = _mm256_castps256_ps128(vvar);
+        __m128 var128 = _mm_add_ps(hi, lo);
+        var128 = _mm_hadd_ps(var128, var128);
+        var128 = _mm_hadd_ps(var128, var128);
+        variance[c] = _mm_cvtss_f32(var128) * inv_total;
+    }
+}
+#endif
+
 // Compute per-channel mean and variance
 // Input: [N, C, H, W] - NCHW format
 // Output: mean[C], variance[C]
@@ -94,43 +182,36 @@ void batchnorm_mean_var_impl(const T* input,
         throw std::runtime_error("BatchNorm2d: Cannot compute mean/variance for empty tensor (total_elements = 0)");
     }
 
-    // Compute mean and variance for each channel
-    #pragma omp parallel for if(C > 1)
-    for (int64_t c = 0; c < C; c++) {
-        // Compute mean using Kahan summation for numerical stability
-        T sum = T(0.0f);
-        T compensation = T(0.0f);
+    // Use fewer threads to avoid OpenMP overhead
+#ifdef _OPENMP
+    int nthreads = omp_get_max_threads();
+    int effective_threads = std::min({nthreads, static_cast<int>(C), 4});
+    int final_threads = std::max(1, effective_threads);
+#else
+    int final_threads = 1;
+#endif
 
+    // Compute mean and variance for each channel
+    #pragma omp parallel for num_threads(final_threads) if(C > 1)
+    for (int64_t c = 0; c < C; c++) {
+        // Compute mean - simple sum (Kahan adds too much overhead)
+        T sum = T(0.0f);
         for (int64_t n = 0; n < N; n++) {
-            for (int64_t h = 0; h < H; h++) {
-                for (int64_t w = 0; w < W; w++) {
-                    int64_t idx = ((n * C + c) * H + h) * W + w;
-                    T value = input[idx];
-                    T y = value - compensation;
-                    T t = sum + y;
-                    compensation = (t - sum) - y;
-                    sum = t;
-                }
+            const T* ch_ptr = input + (n * C + c) * spatial_size;
+            for (int64_t hw = 0; hw < spatial_size; hw++) {
+                sum += ch_ptr[hw];
             }
         }
-        mean[c] = sum / T(static_cast<float>(total_elements));
+        T channel_mean = sum / T(static_cast<float>(total_elements));
+        mean[c] = channel_mean;
 
-        // Compute variance using Kahan summation
+        // Compute variance
         T sum_sq_diff = T(0.0f);
-        T var_compensation = T(0.0f);
-        T channel_mean = mean[c];
-
         for (int64_t n = 0; n < N; n++) {
-            for (int64_t h = 0; h < H; h++) {
-                for (int64_t w = 0; w < W; w++) {
-                    int64_t idx = ((n * C + c) * H + h) * W + w;
-                    T diff = input[idx] - channel_mean;
-                    T sq_diff = diff * diff;
-                    T y = sq_diff - var_compensation;
-                    T t = sum_sq_diff + y;
-                    var_compensation = (t - sum_sq_diff) - y;
-                    sum_sq_diff = t;
-                }
+            const T* ch_ptr = input + (n * C + c) * spatial_size;
+            for (int64_t hw = 0; hw < spatial_size; hw++) {
+                T diff = ch_ptr[hw] - channel_mean;
+                sum_sq_diff += diff * diff;
             }
         }
         variance[c] = sum_sq_diff / T(static_cast<float>(total_elements));
@@ -153,12 +234,22 @@ auto batchnorm2d_mean_var_kernel(const Tensor& input) -> std::vector<Tensor> {
     Tensor variance({C}, input.dtype(), input.device());
 
     if (input.dtype() == DType::Float32) {
+#ifdef __AVX2__
+        // Use SIMD-optimized version for Float32
+        batchnorm_mean_var_simd_f32(
+            input.data<float>(),
+            mean.data<float>(),
+            variance.data<float>(),
+            N, C, H, W
+        );
+#else
         batchnorm_mean_var_impl<float>(
             input.data<float>(),
             mean.data<float>(),
             variance.data<float>(),
             N, C, H, W
         );
+#endif
     } else if (input.dtype() == DType::Float64) {
         batchnorm_mean_var_impl<double>(
             input.data<double>(),
@@ -198,7 +289,16 @@ void batchnorm_forward_impl(const T* input,
     int64_t spatial_size = H * W;
     int64_t total_size = N * C * spatial_size;
 
-    #pragma omp parallel for if(total_size > 10000)
+    // Use fewer threads for memory-bound operations
+#ifdef _OPENMP
+    int nthreads = omp_get_max_threads();
+    int effective_threads = std::min({nthreads, static_cast<int>(total_size / 65536), 4});
+    int final_threads = std::max(1, effective_threads);
+#else
+    int final_threads = 1;
+#endif
+
+    #pragma omp parallel for num_threads(final_threads) if(total_size > 10000)
     for (int64_t idx = 0; idx < total_size; idx++) {
         // Decode NCHW index
         int64_t w = idx % W;
@@ -328,6 +428,7 @@ static thread_local BatchNormPrimitiveCache g_batchnorm_cache;
 
 // oneDNN-accelerated BatchNorm2d Forward with Affine Transform (Float32 only)
 // Provides 2-3x speedup over scalar implementation with primitive caching
+// NOTE: Only used for very large tensors (>10M elements) due to high overhead
 static bool batchnorm2d_forward_affine_onednn(
     const Tensor& input,
     Tensor& output,
@@ -416,7 +517,67 @@ static bool batchnorm2d_forward_affine_onednn(
 }
 #endif
 
+// SIMD-optimized BatchNorm forward for Float32
+// Uses AVX2 FMA for maximum throughput
+#ifdef __AVX2__
+static void batchnorm_forward_affine_simd_f32(
+    const float* __restrict input,
+    float* __restrict output,
+    const float* mean,
+    const float* variance,
+    const float* gamma,
+    const float* beta,
+    float epsilon,
+    int64_t N, int64_t C, int64_t H, int64_t W)
+{
+    int64_t spatial_size = H * W;
+    int64_t total_size = N * C * spatial_size;
+
+    // Precompute per-channel scale and bias
+    std::vector<float> scale(C), bias_vec(C);
+    for (int64_t c = 0; c < C; c++) {
+        float invstd = 1.0f / std::sqrt(variance[c] + epsilon);
+        scale[c] = gamma[c] * invstd;
+        bias_vec[c] = beta[c] - mean[c] * scale[c];
+    }
+
+    // Use fewer threads for memory-bound operations
+#ifdef _OPENMP
+    int nthreads = omp_get_max_threads();
+    int effective_threads = std::min({nthreads, static_cast<int>(total_size / 65536), 4});
+    int final_threads = std::max(1, effective_threads);
+#else
+    int final_threads = 1;
+#endif
+
+    // Process by batch and channel
+    #pragma omp parallel for collapse(2) num_threads(final_threads) if(total_size > 10000)
+    for (int64_t n = 0; n < N; n++) {
+        for (int64_t c = 0; c < C; c++) {
+            __m256 vscale = _mm256_set1_ps(scale[c]);
+            __m256 vbias = _mm256_set1_ps(bias_vec[c]);
+
+            const float* in_ptr = input + (n * C + c) * spatial_size;
+            float* out_ptr = output + (n * C + c) * spatial_size;
+
+            int64_t hw = 0;
+            // Process 8 floats at a time with AVX2 FMA
+            for (; hw + 8 <= spatial_size; hw += 8) {
+                __m256 vin = _mm256_loadu_ps(in_ptr + hw);
+                __m256 vout = _mm256_fmadd_ps(vscale, vin, vbias);
+                _mm256_storeu_ps(out_ptr + hw, vout);
+            }
+            // Handle remainder
+            for (; hw < spatial_size; hw++) {
+                out_ptr[hw] = scale[c] * in_ptr[hw] + bias_vec[c];
+            }
+        }
+    }
+}
+#endif
+
 // Combined normalization + affine: y = gamma * normalized + beta
+// Optimized for cache efficiency and minimal redundant computation
 template<typename T>
 void batchnorm_forward_affine_impl(const T* input,
                                    T* output,
@@ -432,17 +593,38 @@ void batchnorm_forward_affine_impl(const T* input,
     int64_t spatial_size = H * W;
     int64_t total_size = N * C * spatial_size;
 
-    #pragma omp parallel for if(total_size > 10000)
-    for (int64_t idx = 0; idx < total_size; idx++) {
-        // Decode NCHW index
-        int64_t c = (idx / (H * W)) % C;
+    // Precompute per-channel scale and bias: y = scale * x + bias
+    // where scale = gamma / sqrt(var + eps), bias = beta - mean * scale
+    std::vector<T> scale(C), bias(C);
+    for (int64_t c = 0; c < C; c++) {
+        T invstd = T(1.0f) / safe_sqrt(variance[c] + epsilon);
+        scale[c] = gamma[c] * invstd;
+        bias[c] = beta[c] - mean[c] * scale[c];
+    }
 
-        T channel_mean = mean[c];
-        T channel_var = variance[c];
-        T invstd = T(1.0f) / safe_sqrt(channel_var + epsilon);
+    // Use fewer threads for memory-bound operations
+#ifdef _OPENMP
+    int nthreads = omp_get_max_threads();
+    int effective_threads = std::min({nthreads, static_cast<int>(total_size / 65536), 4});
+    int final_threads = std::max(1, effective_threads);
+#else
+    int final_threads = 1;
+#endif
 
-        T normalized = (input[idx] - channel_mean) * invstd;
-        output[idx] = gamma[c] * normalized + beta[c];
+    // Process by batch and channel for better cache locality
+    // Each (n, c) slice is contiguous in memory
+    #pragma omp parallel for collapse(2) num_threads(final_threads) if(total_size > 10000)
+    for (int64_t n = 0; n < N; n++) {
+        for (int64_t c = 0; c < C; c++) {
+            T sc = scale[c];
+            T bi = bias[c];
+            int64_t base_idx = (n * C + c) * spatial_size;
+
+            // Simple fused multiply-add over spatial dimensions
+            for (int64_t hw = 0; hw < spatial_size; hw++) {
+                output[base_idx + hw] = sc * input[base_idx + hw] + bi;
+            }
+        }
     }
 }
 
@@ -462,14 +644,31 @@ auto batchnorm2d_forward_affine_kernel(const Tensor& input,
     int64_t W = shape[3];
 
 #ifdef TENZOR_USE_ONEDNN
-    // Try oneDNN-accelerated batch normalization first (2-3x faster for Float32)
-    if (batchnorm2d_forward_affine_onednn(input, output, mean, variance, gamma, beta, epsilon)) {
+    // Only use oneDNN for very large tensors where it's actually beneficial
+    // oneDNN has ~6ms overhead per call, so only use when compute > overhead
+    int64_t total_elements = N * C * H * W;
+    bool use_onednn = total_elements > 10000000;  // > 10M elements
+
+    if (use_onednn && batchnorm2d_forward_affine_onednn(input, output, mean, variance, gamma, beta, epsilon)) {
         return output;
     }
-    // Fall through to scalar implementation if oneDNN not applicable
+    // Fall through to scalar implementation for smaller tensors
 #endif
 
     if (input.dtype() == DType::Float32) {
+#ifdef __AVX2__
+        // Use SIMD-optimized version for Float32
+        batchnorm_forward_affine_simd_f32(
+            input.data<float>(),
+            output.data<float>(),
+            mean.data<float>(),
+            variance.data<float>(),
+            gamma.data<float>(),
+            beta.data<float>(),
+            epsilon,
+            N, C, H, W
+        );
+#else
         batchnorm_forward_affine_impl<float>(
             input.data<float>(),
             output.data<float>(),
@@ -480,6 +679,7 @@ auto batchnorm2d_forward_affine_kernel(const Tensor& input,
             epsilon,
             N, C, H, W
         );
+#endif
     } else if (input.dtype() == DType::Float64) {
         batchnorm_forward_affine_impl<double>(
             input.data<double>(),
@@ -521,7 +721,8 @@ void batchnorm_update_running_stats_impl(T* running_mean,
                                          const T* batch_var,
                                          T momentum,
                                          int64_t C) {
-    #pragma omp parallel for if(C > 100)
+    // Running stats update is very lightweight - no parallelization needed
+    // Parallelizing would add more overhead than benefit
     for (int64_t c = 0; c < C; c++) {
         running_mean[c] = (T(1.0f) - momentum) * running_mean[c] + momentum * batch_mean[c];
         running_var[c] = (T(1.0f) - momentum) * running_var[c] + momentum * batch_var[c];
@@ -594,8 +795,17 @@ void batchnorm_backward_impl(const T* grad_output,
         throw std::runtime_error("BatchNorm2d backward: Cannot compute gradients for empty tensor (total_elements = 0)");
     }
 
+    // Use fewer threads to avoid OpenMP overhead
+#ifdef _OPENMP
+    int nthreads = omp_get_max_threads();
+    int effective_threads = std::min({nthreads, static_cast<int>(C), 4});
+    int final_threads = std::max(1, effective_threads);
+#else
+    int final_threads = 1;
+#endif
+
     // Compute grad_gamma and grad_beta for each channel
-    #pragma omp parallel for if(C > 1)
+    #pragma omp parallel for num_threads(final_threads) if(C > 1)
     for (int64_t c = 0; c < C; c++) {
         T channel_mean = mean[c];
         T channel_var = variance[c];
@@ -625,7 +835,7 @@ void batchnorm_backward_impl(const T* grad_output,
 
     // Compute grad_input
     // Efficient formulation: grad_input = gamma * invstd * (grad_output - mean(grad_output) - normalized * mean(grad_output * normalized))
-    #pragma omp parallel for if(C > 1)
+    #pragma omp parallel for num_threads(final_threads) if(C > 1)
     for (int64_t c = 0; c < C; c++) {
         T channel_mean = mean[c];
         T channel_var = variance[c];

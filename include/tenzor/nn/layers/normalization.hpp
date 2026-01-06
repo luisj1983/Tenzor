@@ -230,6 +230,9 @@ private:
 
     Variable weight_;  ///< Scale parameter
 
+    // Cached pointer to parameters_ entry (avoids ~2-3ms hash map lookup overhead)
+    std::shared_ptr<Variable> cached_weight_;
+
     /**
      * @brief Initialize weight to ones.
      */
