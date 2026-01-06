@@ -32,6 +32,11 @@
 #include <mkl_service.h>
 #endif
 
+// Intel oneDNN for optimized matrix operations (alternative to MKL)
+#ifdef TENZOR_USE_ONEDNN
+#include <dnnl.hpp>
+#endif
+
 // Adaptive OpenMP thresholds based on operation complexity
 // NOTE: Thresholds tuned to avoid OpenMP overhead for medium-sized tensors.
 // For simple ops, the per-element work is tiny, so we need large tensors
@@ -255,15 +260,77 @@ static void matmul_microkernel_float64(
 #endif
 }
 
+// ============================================================================
+// oneDNN MatMul helper (provides optimized GEMM with better memory handling)
+// ============================================================================
+#ifdef TENZOR_USE_ONEDNN
+static thread_local dnnl::engine g_matmul_engine(dnnl::engine::kind::cpu, 0);
+static thread_local dnnl::stream g_matmul_stream(g_matmul_engine);
+
+// oneDNN matmul for Float32 - can be faster than MKL for certain shapes
+static bool onednn_matmul_f32(
+    const float* A, const float* B, float* C,
+    int64_t M, int64_t N, int64_t K) {
+
+    // Only use oneDNN for matrices large enough to amortize primitive creation overhead
+    if (M * N < 1024 || K < 32) {
+        return false;  // Fall back to MKL/custom GEMM
+    }
+
+    try {
+        auto& engine = g_matmul_engine;
+        auto& stream = g_matmul_stream;
+
+        // Create memory descriptors for row-major matrices
+        dnnl::memory::dims a_dims = {M, K};
+        dnnl::memory::dims b_dims = {K, N};
+        dnnl::memory::dims c_dims = {M, N};
+
+        auto a_md = dnnl::memory::desc(a_dims, dnnl::memory::data_type::f32, dnnl::memory::format_tag::ab);
+        auto b_md = dnnl::memory::desc(b_dims, dnnl::memory::data_type::f32, dnnl::memory::format_tag::ab);
+        auto c_md = dnnl::memory::desc(c_dims, dnnl::memory::data_type::f32, dnnl::memory::format_tag::ab);
+
+        // Create matmul primitive descriptor
+        auto matmul_pd = dnnl::matmul::primitive_desc(engine, a_md, b_md, c_md);
+
+        // Create memory objects
+        auto a_mem = dnnl::memory(a_md, engine, const_cast<float*>(A));
+        auto b_mem = dnnl::memory(b_md, engine, const_cast<float*>(B));
+        auto c_mem = dnnl::memory(c_md, engine, C);
+
+        // Create and execute matmul primitive
+        auto matmul_prim = dnnl::matmul(matmul_pd);
+        matmul_prim.execute(stream, {
+            {DNNL_ARG_SRC, a_mem},
+            {DNNL_ARG_WEIGHTS, b_mem},
+            {DNNL_ARG_DST, c_mem}
+        });
+        stream.wait();
+
+        return true;
+    } catch (const dnnl::error&) {
+        return false;  // Fall back to MKL/custom GEMM
+    }
+}
+#endif
+
 // High-performance matrix multiplication (Float32)
-// Uses MKL SGEMM when available (5-10x faster), falls back to optimized GEMM
+// Uses oneDNN or MKL SGEMM when available (5-10x faster), falls back to optimized GEMM
 static void matmul_blocked_float32(
     const float* A, const float* B, float* C,
     int64_t M, int64_t N, int64_t K) {
 
+#ifdef TENZOR_USE_ONEDNN
+    // Try oneDNN first (can be faster for certain shapes due to better memory handling)
+    if (onednn_matmul_f32(A, B, C, M, N, K)) {
+        return;
+    }
+#endif
+
 #ifdef TENZOR_USE_MKL
-    // Use MKL SGEMM for larger matrices (5-10x speedup)
-    if (M * N * K > 4096) {
+    // Use MKL SGEMM for any non-trivial matrix size
+    // Lowered threshold from 4096 to 512 - MKL is faster even for small matrices
+    if (M * N * K > 512) {
         cblas_sgemm(
             CblasRowMajor,
             CblasNoTrans,
@@ -280,7 +347,7 @@ static void matmul_blocked_float32(
         return;
     }
 #endif
-    // Fall back to custom optimized GEMM for small matrices
+    // Fall back to custom optimized GEMM for very small matrices
     gemm::gemm_optimized(A, B, C, M, N, K, 1.0f, 0.0f);
 }
 
@@ -291,8 +358,9 @@ static void matmul_blocked_float64(
     int64_t M, int64_t N, int64_t K) {
 
 #ifdef TENZOR_USE_MKL
-    // Use MKL DGEMM for larger matrices
-    if (M * N * K > 4096) {
+    // Use MKL DGEMM for any non-trivial matrix size
+    // Lowered threshold - MKL is faster even for small matrices
+    if (M * N * K > 512) {
         cblas_dgemm(
             CblasRowMajor,
             CblasNoTrans,

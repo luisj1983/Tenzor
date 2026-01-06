@@ -56,8 +56,16 @@ def benchmark_tenzor_matmul_precision(
     if device == "cuda":
         dtypes.append("bfloat16")
 
+    # Skip float16 for large CPU matrices (software emulation is extremely slow)
+    skip_cpu_fp16_threshold = 1024  # Skip float16 on CPU for matrices > 1K
+
     for m, k, n, name in configs:
         for dtype in dtypes:
+            # Skip float16 on CPU for large matrices (software emulation is too slow)
+            if device == "cpu" and dtype == "float16" and m > skip_cpu_fp16_threshold:
+                print(f"  [SKIP] {name} {dtype}: CPU float16 too slow for large matrices")
+                continue
+
             try:
                 if device == "cuda":
                     a = tz.randn([m, k], dtype=dtype).cuda()
@@ -120,8 +128,16 @@ def benchmark_pytorch_matmul_precision(
     if device == "cuda" and torch.cuda.is_bf16_supported():
         dtypes.append("bfloat16")
 
+    # Skip float16 for large CPU matrices (software emulation is extremely slow)
+    skip_cpu_fp16_threshold = 1024  # Skip float16 on CPU for matrices > 1K
+
     for m, k, n, name in configs:
         for dtype_name in dtypes:
+            # Skip float16 on CPU for large matrices (software emulation is too slow)
+            if device == "cpu" and dtype_name == "float16" and m > skip_cpu_fp16_threshold:
+                print(f"  [SKIP] {name} {dtype_name}: CPU float16 too slow for large matrices")
+                continue
+
             try:
                 torch_dtype = dtype_map[dtype_name]
                 a = torch.randn(m, k, device=torch_device, dtype=torch_dtype)
@@ -172,8 +188,16 @@ def benchmark_tenzor_linear_precision(
     results = []
     dtypes = ["float32", "float16"]
 
+    # Skip float16 for large CPU layers (software emulation is extremely slow)
+    skip_cpu_fp16_threshold = 1024  # Skip float16 on CPU for layers > 1K features
+
     for batch, in_feat, out_feat, name in configs:
         for dtype in dtypes:
+            # Skip float16 on CPU for large layers
+            if device == "cpu" and dtype == "float16" and max(in_feat, out_feat) > skip_cpu_fp16_threshold:
+                print(f"  [SKIP] {name} {dtype}: CPU float16 too slow for large layers")
+                continue
+
             try:
                 linear = tz.nn.Linear(in_feat, out_feat, dtype=dtype)
 
@@ -232,8 +256,16 @@ def benchmark_pytorch_linear_precision(
         "float16": torch.float16,
     }
 
+    # Skip float16 for large CPU layers (software emulation is extremely slow)
+    skip_cpu_fp16_threshold = 1024  # Skip float16 on CPU for layers > 1K features
+
     for batch, in_feat, out_feat, name in configs:
         for dtype_name in ["float32", "float16"]:
+            # Skip float16 on CPU for large layers
+            if device == "cpu" and dtype_name == "float16" and max(in_feat, out_feat) > skip_cpu_fp16_threshold:
+                print(f"  [SKIP] {name} {dtype_name}: CPU float16 too slow for large layers")
+                continue
+
             try:
                 torch_dtype = dtype_map[dtype_name]
                 linear = nn.Linear(in_feat, out_feat).to(torch_device).to(torch_dtype)

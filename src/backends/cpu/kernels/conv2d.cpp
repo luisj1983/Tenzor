@@ -642,6 +642,65 @@ void conv2d_forward_impl(
     // Process each group separately
     int64_t out_channels_per_group = out_channels / groups;
 
+    // =========================================================================
+    // Fast path for 1x1 convolutions (skip im2col, direct GEMM)
+    // 1x1 conv is essentially a per-pixel fully-connected layer
+    // =========================================================================
+    if (kernel_h == 1 && kernel_w == 1 && stride == 1 && padding == 0 && dilation == 1) {
+        // For 1x1 convs: treat as GEMM without im2col
+        // Input viewed as (batch, in_channels, H*W) -> transpose to (batch, H*W, in_channels)
+        // Weight viewed as (out_channels, in_channels)
+        // Output = Input_transposed @ Weight.T -> (batch, H*W, out_channels) -> transpose to NCHW
+
+        const T* input_data = input.data<T>();
+        const T* weight_data = weight.data<T>();
+        T* output_data = output.data<T>();
+
+        int64_t spatial = height * width;
+
+        for (int64_t g = 0; g < groups; ++g) {
+            int64_t in_start = g * in_channels_per_group;
+            int64_t out_start = g * out_channels_per_group;
+
+            // Process each batch
+            #pragma omp parallel for if(batch * spatial > 10000)
+            for (int64_t b = 0; b < batch; ++b) {
+                // For each spatial position
+                for (int64_t s = 0; s < spatial; ++s) {
+                    // Compute dot product: out[c] = sum_k(in[k] * weight[c,k])
+                    for (int64_t oc = 0; oc < out_channels_per_group; ++oc) {
+                        T sum{};  // Value-initialize to zero
+                        for (int64_t ic = 0; ic < in_channels_per_group; ++ic) {
+                            int64_t in_idx = b * (in_channels * spatial) + (in_start + ic) * spatial + s;
+                            int64_t w_idx = (out_start + oc) * in_channels_per_group + ic;
+                            sum += input_data[in_idx] * weight_data[w_idx];
+                        }
+                        int64_t out_idx = b * (out_channels * spatial) + (out_start + oc) * spatial + s;
+                        output_data[out_idx] = sum;
+                    }
+                }
+            }
+        }
+
+        // Add bias if present
+        if (bias) {
+            const T* bias_data = bias->data<T>();
+            #pragma omp parallel for collapse(3) if(batch * out_channels * spatial > 10000)
+            for (int64_t b = 0; b < batch; ++b) {
+                for (int64_t c = 0; c < out_channels; ++c) {
+                    for (int64_t s = 0; s < spatial; ++s) {
+                        output_data[b * (out_channels * spatial) + c * spatial + s] += bias_data[c];
+                    }
+                }
+            }
+        }
+
+        return;
+    }
+
+    // =========================================================================
+    // General path: im2col + GEMM for larger kernels
+    // =========================================================================
     for (int64_t g = 0; g < groups; ++g) {
         // Calculate channel offsets
         int64_t in_start = g * in_channels_per_group;
