@@ -20,6 +20,8 @@
 #include <thread>
 #endif
 
+#include <iostream>
+
 // Get optimal thread count for compute-bound operations
 static inline int get_optimal_threads() {
 #ifdef _OPENMP
@@ -193,8 +195,17 @@ auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
 
         const float eps = static_cast<float>(eps_);
 
-        // Precompute scale and shift for each channel: scale = gamma / sqrt(var + eps), shift = beta - mean * scale
-        std::vector<float> scale(C), shift(C);
+        // Use thread-local storage to avoid allocation per forward call
+        // This gives significant speedup for repeated inference
+        thread_local std::vector<float> tls_scale, tls_shift;
+        if (static_cast<int64_t>(tls_scale.size()) < C) {
+            tls_scale.resize(C);
+            tls_shift.resize(C);
+        }
+        float* scale = tls_scale.data();
+        float* shift = tls_shift.data();
+
+        // Precompute scale and shift for each channel
         for (int64_t c = 0; c < C; c++) {
             float inv_std = 1.0f / std::sqrt(var_data[c] + eps);
             if (affine_) {
@@ -206,42 +217,28 @@ auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
             }
         }
 
-        // Apply normalization: output = input * scale + shift
-        const int nthreads = get_optimal_threads();
-        #pragma omp parallel for collapse(2) num_threads(nthreads)
+        // Apply normalization with SIMD
         for (int64_t n = 0; n < N; n++) {
             for (int64_t c = 0; c < C; c++) {
                 const float s = scale[c];
                 const float b = shift[c];
-                const int64_t channel_offset = (n * C + c) * spatial_size;
+                const int64_t idx = (n * C + c) * spatial_size;
 
                 #if defined(__AVX512F__)
                 __m512 v_scale = _mm512_set1_ps(s);
                 __m512 v_shift = _mm512_set1_ps(b);
                 int64_t i = 0;
                 for (; i + 16 <= spatial_size; i += 16) {
-                    __m512 v_in = _mm512_loadu_ps(input_data + channel_offset + i);
+                    __m512 v_in = _mm512_loadu_ps(input_data + idx + i);
                     __m512 v_out = _mm512_fmadd_ps(v_in, v_scale, v_shift);
-                    _mm512_storeu_ps(output_data + channel_offset + i, v_out);
+                    _mm512_storeu_ps(output_data + idx + i, v_out);
                 }
                 for (; i < spatial_size; i++) {
-                    output_data[channel_offset + i] = input_data[channel_offset + i] * s + b;
-                }
-                #elif defined(__AVX2__)
-                __m256 v_scale = _mm256_set1_ps(s);
-                __m256 v_shift = _mm256_set1_ps(b);
-                int64_t i = 0;
-                for (; i + 8 <= spatial_size; i += 8) {
-                    __m256 v_in = _mm256_loadu_ps(input_data + channel_offset + i);
-                    __m256 v_out = _mm256_fmadd_ps(v_in, v_scale, v_shift);
-                    _mm256_storeu_ps(output_data + channel_offset + i, v_out);
-                }
-                for (; i < spatial_size; i++) {
-                    output_data[channel_offset + i] = input_data[channel_offset + i] * s + b;
+                    output_data[idx + i] = input_data[idx + i] * s + b;
                 }
                 #else
                 for (int64_t i = 0; i < spatial_size; i++) {
-                    output_data[channel_offset + i] = input_data[channel_offset + i] * s + b;
+                    output_data[idx + i] = input_data[idx + i] * s + b;
                 }
                 #endif
             }

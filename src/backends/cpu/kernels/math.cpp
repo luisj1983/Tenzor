@@ -1729,6 +1729,188 @@ auto matmul_kernel(const Tensor& a, const Tensor& b) -> Tensor {
     return result;
 }
 
+// Batched matrix multiplication kernel (uses MKL batch SGEMM/DGEMM)
+auto bmm_kernel(const Tensor& a, const Tensor& b) -> Tensor {
+    // Validate inputs are 3D
+    if (a.shape().size() != 3 || b.shape().size() != 3) {
+        throw std::runtime_error(
+            "bmm_kernel requires 3D tensors, got shapes: [" +
+            std::to_string(a.shape().size()) + "D] and [" +
+            std::to_string(b.shape().size()) + "D]");
+    }
+
+    int64_t batch_size = a.shape()[0];
+    int64_t M = a.shape()[1];  // rows of A
+    int64_t K = a.shape()[2];  // cols of A = rows of B
+    int64_t N = b.shape()[2];  // cols of B
+
+    if (b.shape()[0] != batch_size || b.shape()[1] != K) {
+        throw std::runtime_error(
+            "bmm_kernel dimension mismatch: expected b.shape=[" +
+            std::to_string(batch_size) + ", " + std::to_string(K) + ", *], got [" +
+            std::to_string(b.shape()[0]) + ", " + std::to_string(b.shape()[1]) + ", " +
+            std::to_string(b.shape()[2]) + "]");
+    }
+
+    // Make inputs contiguous
+    Tensor a_cont = a.is_contiguous() ? a : a.contiguous();
+    Tensor b_cont = b.is_contiguous() ? b : b.contiguous();
+
+    // Create output tensor
+    Tensor output = Tensor::empty_uninitialized({batch_size, M, N}, a.dtype(), Device::cpu());
+
+    // Batch strides
+    int64_t a_batch_stride = M * K;
+    int64_t b_batch_stride = K * N;
+    int64_t c_batch_stride = M * N;
+
+    if (a.dtype() == DType::Float32) {
+        const float* a_data = a_cont.data<float>();
+        const float* b_data = b_cont.data<float>();
+        float* c_data = output.data<float>();
+
+#ifdef TENZOR_USE_MKL
+        // Use batch_strided for efficient batched GEMM
+        cblas_sgemm_batch_strided(
+            CblasRowMajor,
+            CblasNoTrans, CblasNoTrans,
+            static_cast<MKL_INT>(M),
+            static_cast<MKL_INT>(N),
+            static_cast<MKL_INT>(K),
+            1.0f,
+            a_data, static_cast<MKL_INT>(K), a_batch_stride,
+            b_data, static_cast<MKL_INT>(N), b_batch_stride,
+            0.0f,
+            c_data, static_cast<MKL_INT>(N), c_batch_stride,
+            static_cast<MKL_INT>(batch_size)
+        );
+#else
+        // Fallback: Parallelize across batches with naive GEMM
+        #pragma omp parallel for if(batch_size > 1)
+        for (int64_t batch = 0; batch < batch_size; ++batch) {
+            const float* a_batch = a_data + batch * a_batch_stride;
+            const float* b_batch = b_data + batch * b_batch_stride;
+            float* c_batch = c_data + batch * c_batch_stride;
+
+            for (int64_t i = 0; i < M; ++i) {
+                for (int64_t j = 0; j < N; ++j) {
+                    float sum = 0.0f;
+                    for (int64_t k = 0; k < K; ++k) {
+                        sum += a_batch[i * K + k] * b_batch[k * N + j];
+                    }
+                    c_batch[i * N + j] = sum;
+                }
+            }
+        }
+#endif
+    } else if (a.dtype() == DType::Float64) {
+        const double* a_data = a_cont.data<double>();
+        const double* b_data = b_cont.data<double>();
+        double* c_data = output.data<double>();
+
+#ifdef TENZOR_USE_MKL
+        cblas_dgemm_batch_strided(
+            CblasRowMajor,
+            CblasNoTrans, CblasNoTrans,
+            static_cast<MKL_INT>(M),
+            static_cast<MKL_INT>(N),
+            static_cast<MKL_INT>(K),
+            1.0,
+            a_data, static_cast<MKL_INT>(K), a_batch_stride,
+            b_data, static_cast<MKL_INT>(N), b_batch_stride,
+            0.0,
+            c_data, static_cast<MKL_INT>(N), c_batch_stride,
+            static_cast<MKL_INT>(batch_size)
+        );
+#else
+        #pragma omp parallel for if(batch_size > 1)
+        for (int64_t batch = 0; batch < batch_size; ++batch) {
+            const double* a_batch = a_data + batch * a_batch_stride;
+            const double* b_batch = b_data + batch * b_batch_stride;
+            double* c_batch = c_data + batch * c_batch_stride;
+
+            for (int64_t i = 0; i < M; ++i) {
+                for (int64_t j = 0; j < N; ++j) {
+                    double sum = 0.0;
+                    for (int64_t k = 0; k < K; ++k) {
+                        sum += a_batch[i * K + k] * b_batch[k * N + j];
+                    }
+                    c_batch[i * N + j] = sum;
+                }
+            }
+        }
+#endif
+    } else if (a.dtype() == DType::Float16) {
+        // Float16: Convert to Float32, compute, convert back
+        // (MKL doesn't support Float16 BLAS, and CPU Float16 is slow anyway)
+        const Float16* a_data = a_cont.data<Float16>();
+        const Float16* b_data = b_cont.data<Float16>();
+        Float16* c_data = output.data<Float16>();
+
+        // Allocate temporary Float32 buffers
+        size_t a_size = static_cast<size_t>(batch_size * M * K);
+        size_t b_size = static_cast<size_t>(batch_size * K * N);
+        size_t c_size = static_cast<size_t>(batch_size * M * N);
+
+        std::vector<float> a_f32(a_size);
+        std::vector<float> b_f32(b_size);
+        std::vector<float> c_f32(c_size);
+
+        // Convert Float16 to Float32
+        for (size_t i = 0; i < a_size; ++i) {
+            a_f32[i] = static_cast<float>(a_data[i]);
+        }
+        for (size_t i = 0; i < b_size; ++i) {
+            b_f32[i] = static_cast<float>(b_data[i]);
+        }
+
+#ifdef TENZOR_USE_MKL
+        cblas_sgemm_batch_strided(
+            CblasRowMajor,
+            CblasNoTrans, CblasNoTrans,
+            static_cast<MKL_INT>(M),
+            static_cast<MKL_INT>(N),
+            static_cast<MKL_INT>(K),
+            1.0f,
+            a_f32.data(), static_cast<MKL_INT>(K), a_batch_stride,
+            b_f32.data(), static_cast<MKL_INT>(N), b_batch_stride,
+            0.0f,
+            c_f32.data(), static_cast<MKL_INT>(N), c_batch_stride,
+            static_cast<MKL_INT>(batch_size)
+        );
+#else
+        #pragma omp parallel for if(batch_size > 1)
+        for (int64_t batch = 0; batch < batch_size; ++batch) {
+            const float* a_batch = a_f32.data() + batch * a_batch_stride;
+            const float* b_batch = b_f32.data() + batch * b_batch_stride;
+            float* c_batch = c_f32.data() + batch * c_batch_stride;
+
+            for (int64_t i = 0; i < M; ++i) {
+                for (int64_t j = 0; j < N; ++j) {
+                    float sum = 0.0f;
+                    for (int64_t k = 0; k < K; ++k) {
+                        sum += a_batch[i * K + k] * b_batch[k * N + j];
+                    }
+                    c_batch[i * N + j] = sum;
+                }
+            }
+        }
+#endif
+
+        // Convert Float32 back to Float16
+        for (size_t i = 0; i < c_size; ++i) {
+            c_data[i] = Float16(c_f32[i]);
+        }
+    } else {
+        throw std::runtime_error(
+            "bmm_kernel unsupported dtype: " +
+            std::string(dtype_name(a.dtype()))
+        );
+    }
+
+    return output;
+}
+
 // Square root kernel (OpenMP + SIMD optimized with chunking)
 auto sqrt_kernel(const Tensor& input) -> Tensor {
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());

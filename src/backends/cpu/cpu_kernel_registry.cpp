@@ -217,6 +217,7 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     TENZOR_REGISTER_BINARY_KERNEL(table, Mul, cpu::mul_kernel);
     TENZOR_REGISTER_BINARY_KERNEL(table, Div, cpu::div_kernel);
     TENZOR_REGISTER_BINARY_KERNEL(table, MatMul, cpu::matmul_kernel);
+    TENZOR_REGISTER_BINARY_KERNEL(table, Bmm, cpu::bmm_kernel);
     TENZOR_REGISTER_BINARY_KERNEL(table, Dot, cpu::dot_kernel);
 
     // Inplace operations

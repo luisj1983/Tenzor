@@ -310,6 +310,11 @@ def benchmark_normalization_layers(device: str, config: BenchmarkConfig) -> List
 
     print("\n--- LayerNorm Benchmarks ---")
 
+    # IMPORTANT: Disable gradient tracking for inference benchmarking
+    # This allows the fast SIMD path to be used
+    prev_grad_state = tz.is_grad_enabled()
+    tz.set_grad_enabled(False)
+
     for cfg in ln_configs:
         norm_shape = cfg["normalized_shape"]
         batch = cfg["batch"]
@@ -343,6 +348,9 @@ def benchmark_normalization_layers(device: str, config: BenchmarkConfig) -> List
         )
         results.append(result)
         print_result(result)
+
+    # Restore gradient state
+    tz.set_grad_enabled(prev_grad_state)
 
     return results
 

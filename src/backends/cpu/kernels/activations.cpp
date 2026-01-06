@@ -511,39 +511,59 @@ auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Ten
 // GELU Activation
 // ============================================================================
 
-// Forward: 0.5 * x * (1 + erf(x / sqrt(2)))
-// GELU (Gaussian Error Linear Unit)
+// Forward: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+// GELU (Gaussian Error Linear Unit) - using fast tanh approximation
 auto gelu_kernel(const Tensor& input) -> Tensor {
-    auto output = zeros_like(input);
-    constexpr float sqrt_2 = 1.41421356237f;
+    Tensor output = zeros_like(input);
 
     if (input.dtype() == DType::Float32) {
         const float* in_data = input.data<float>();
         float* out_data = output.data<float>();
         size_t n = input.numel();
 
+        // Use SIMD-optimized batch functions from simd_fast_math.hpp
+#ifdef TENZOR_HAS_AVX512
+        fast_math::gelu_batch_avx512(in_data, out_data, n);
+#elif defined(TENZOR_HAS_AVX2)
+        fast_math::gelu_batch_avx2(in_data, out_data, n);
+#else
+        // Scalar fallback using tanh approximation (faster than erf)
+        constexpr float sqrt_2_over_pi = 0.7978845608f;
+        constexpr float coeff = 0.044715f;
         for (size_t i = 0; i < n; ++i) {
             float x = in_data[i];
-            out_data[i] = 0.5f * x * (1.0f + std::erf(x / sqrt_2));
+            float x3 = x * x * x;
+            float inner = sqrt_2_over_pi * (x + coeff * x3);
+            out_data[i] = 0.5f * x * (1.0f + std::tanh(inner));
         }
+#endif
     } else if (input.dtype() == DType::Float64) {
         const double* in_data = input.data<double>();
         double* out_data = output.data<double>();
         size_t n = input.numel();
-        constexpr double sqrt_2_d = 1.41421356237;
 
+        // Double precision uses tanh approximation (faster than erf)
+        constexpr double sqrt_2_over_pi = 0.7978845608028654;
+        constexpr double coeff = 0.044715;
         for (size_t i = 0; i < n; ++i) {
             double x = in_data[i];
-            out_data[i] = 0.5 * x * (1.0 + std::erf(x / sqrt_2_d));
+            double x3 = x * x * x;
+            double inner = sqrt_2_over_pi * (x + coeff * x3);
+            out_data[i] = 0.5 * x * (1.0 + std::tanh(inner));
         }
     } else if (input.dtype() == DType::Float16) {
         const Float16* in_data = input.data<Float16>();
         Float16* out_data = output.data<Float16>();
         size_t n = input.numel();
 
+        // Convert to float, use SIMD, convert back
+        constexpr float sqrt_2_over_pi = 0.7978845608f;
+        constexpr float coeff = 0.044715f;
         for (size_t i = 0; i < n; ++i) {
             float x = static_cast<float>(in_data[i]);
-            out_data[i] = Float16(0.5f * x * (1.0f + std::erf(x / sqrt_2)));
+            float x3 = x * x * x;
+            float inner = sqrt_2_over_pi * (x + coeff * x3);
+            out_data[i] = Float16(0.5f * x * (1.0f + std::tanh(inner)));
         }
     } else {
         throw std::runtime_error("GELU only supports Float32/Float64/Float16");
