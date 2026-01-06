@@ -18,6 +18,8 @@
 // Intel oneDNN for optimized layer operations
 #ifdef TENZOR_USE_ONEDNN
 #include <dnnl.hpp>
+#include <list>
+#include <unordered_map>
 #endif
 
 // Intel MKL for optimized BLAS operations
@@ -44,6 +46,62 @@ static thread_local std::mt19937 tl_rng(std::random_device{}());
 // Thread-local oneDNN engine and stream for reuse
 static thread_local dnnl::engine g_nn_engine(dnnl::engine::kind::cpu, 0);
 static thread_local dnnl::stream g_nn_stream(g_nn_engine);
+
+// --------------------------------------------------------------------------
+// LayerNorm Primitive Caching (eliminates ~1-5ms primitive creation overhead)
+// --------------------------------------------------------------------------
+struct LayerNormCacheKey {
+    int64_t batch_size;
+    int64_t norm_size;
+
+    bool operator==(const LayerNormCacheKey& other) const {
+        return batch_size == other.batch_size && norm_size == other.norm_size;
+    }
+};
+
+struct LayerNormCacheKeyHash {
+    size_t operator()(const LayerNormCacheKey& k) const {
+        size_t h = std::hash<int64_t>{}(k.batch_size);
+        h ^= std::hash<int64_t>{}(k.norm_size) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        return h;
+    }
+};
+
+struct LayerNormCachedPrimitive {
+    dnnl::layer_normalization_forward prim;
+    dnnl::memory::desc src_md, dst_md, stat_md;
+};
+
+static constexpr size_t LAYERNORM_CACHE_SIZE = 32;
+
+class LayerNormPrimitiveCache {
+public:
+    std::shared_ptr<LayerNormCachedPrimitive> get(const LayerNormCacheKey& key) {
+        auto it = cache_.find(key);
+        if (it != cache_.end()) {
+            lru_list_.remove(key);
+            lru_list_.push_front(key);
+            return it->second;
+        }
+        return nullptr;
+    }
+
+    void put(const LayerNormCacheKey& key, std::shared_ptr<LayerNormCachedPrimitive> value) {
+        if (cache_.size() >= LAYERNORM_CACHE_SIZE) {
+            auto evict_key = lru_list_.back();
+            lru_list_.pop_back();
+            cache_.erase(evict_key);
+        }
+        cache_[key] = value;
+        lru_list_.push_front(key);
+    }
+
+private:
+    std::unordered_map<LayerNormCacheKey, std::shared_ptr<LayerNormCachedPrimitive>, LayerNormCacheKeyHash> cache_;
+    std::list<LayerNormCacheKey> lru_list_;
+};
+
+static thread_local LayerNormPrimitiveCache g_layernorm_cache;
 #endif
 
 #ifdef TENZOR_USE_ONEDNN
@@ -644,7 +702,7 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
 }
 
 #ifdef TENZOR_USE_ONEDNN
-// oneDNN-accelerated LayerNorm - provides 10-50x speedup
+// oneDNN-accelerated LayerNorm with primitive caching - provides 10-50x speedup
 static bool layer_norm_onednn(
     const float* input, float* output,
     const float* weight, const float* bias,
@@ -654,35 +712,48 @@ static bool layer_norm_onednn(
         auto& engine = g_nn_engine;
         auto& stream = g_nn_stream;
 
-        // Create memory descriptors for 2D layout [batch, norm_size]
-        dnnl::memory::dims src_dims = {batch_size, norm_size};
-        auto src_md = dnnl::memory::desc(src_dims, dnnl::memory::data_type::f32,
-                                          dnnl::memory::format_tag::nc);
-        auto dst_md = dnnl::memory::desc(src_dims, dnnl::memory::data_type::f32,
-                                          dnnl::memory::format_tag::nc);
+        // Create cache key
+        LayerNormCacheKey cache_key{batch_size, norm_size};
 
-        // Weight and bias are 1D [norm_size]
-        dnnl::memory::dims stat_dims = {norm_size};
-        auto stat_md = dnnl::memory::desc(stat_dims, dnnl::memory::data_type::f32,
-                                           dnnl::memory::format_tag::a);
+        // Try to get cached primitive
+        auto cached = g_layernorm_cache.get(cache_key);
 
-        // Create layer normalization primitive descriptor
-        auto lnorm_pd = dnnl::layer_normalization_forward::primitive_desc(
-            engine,
-            dnnl::prop_kind::forward_inference,
-            src_md, dst_md, eps,
-            dnnl::normalization_flags::use_scale | dnnl::normalization_flags::use_shift
-        );
+        if (!cached) {
+            // Cache miss - create new primitive and cache it
+            cached = std::make_shared<LayerNormCachedPrimitive>();
 
-        // Create memory objects
-        auto src_mem = dnnl::memory(src_md, engine, const_cast<float*>(input));
-        auto dst_mem = dnnl::memory(dst_md, engine, output);
-        auto scale_mem = dnnl::memory(stat_md, engine, const_cast<float*>(weight));
-        auto shift_mem = dnnl::memory(stat_md, engine, const_cast<float*>(bias));
+            // Create memory descriptors for 2D layout [batch, norm_size]
+            dnnl::memory::dims src_dims = {batch_size, norm_size};
+            cached->src_md = dnnl::memory::desc(src_dims, dnnl::memory::data_type::f32,
+                                                  dnnl::memory::format_tag::nc);
+            cached->dst_md = dnnl::memory::desc(src_dims, dnnl::memory::data_type::f32,
+                                                  dnnl::memory::format_tag::nc);
 
-        // Create and execute primitive
-        auto lnorm_prim = dnnl::layer_normalization_forward(lnorm_pd);
-        lnorm_prim.execute(stream, {
+            // Weight and bias are 1D [norm_size]
+            dnnl::memory::dims stat_dims = {norm_size};
+            cached->stat_md = dnnl::memory::desc(stat_dims, dnnl::memory::data_type::f32,
+                                                   dnnl::memory::format_tag::a);
+
+            // Create layer normalization primitive descriptor and primitive
+            auto lnorm_pd = dnnl::layer_normalization_forward::primitive_desc(
+                engine,
+                dnnl::prop_kind::forward_inference,
+                cached->src_md, cached->dst_md, eps,
+                dnnl::normalization_flags::use_scale | dnnl::normalization_flags::use_shift
+            );
+            cached->prim = dnnl::layer_normalization_forward(lnorm_pd);
+
+            g_layernorm_cache.put(cache_key, cached);
+        }
+
+        // Create memory objects with user data (fast - just wraps pointers)
+        auto src_mem = dnnl::memory(cached->src_md, engine, const_cast<float*>(input));
+        auto dst_mem = dnnl::memory(cached->dst_md, engine, output);
+        auto scale_mem = dnnl::memory(cached->stat_md, engine, const_cast<float*>(weight));
+        auto shift_mem = dnnl::memory(cached->stat_md, engine, const_cast<float*>(bias));
+
+        // Execute cached primitive
+        cached->prim.execute(stream, {
             {DNNL_ARG_SRC, src_mem},
             {DNNL_ARG_DST, dst_mem},
             {DNNL_ARG_SCALE, scale_mem},

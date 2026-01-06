@@ -35,6 +35,8 @@
 // Intel oneDNN for optimized matrix operations (alternative to MKL)
 #ifdef TENZOR_USE_ONEDNN
 #include <dnnl.hpp>
+#include <list>
+#include <unordered_map>
 #endif
 
 // Adaptive OpenMP thresholds based on operation complexity
@@ -267,13 +269,73 @@ static void matmul_microkernel_float64(
 static thread_local dnnl::engine g_matmul_engine(dnnl::engine::kind::cpu, 0);
 static thread_local dnnl::stream g_matmul_stream(g_matmul_engine);
 
-// oneDNN matmul for Float32 - can be faster than MKL for certain shapes
+// --------------------------------------------------------------------------
+// MatMul Primitive Caching (eliminates ~1-5ms primitive creation overhead)
+// --------------------------------------------------------------------------
+struct MatMulCacheKey {
+    int64_t M, N, K;
+
+    bool operator==(const MatMulCacheKey& other) const {
+        return M == other.M && N == other.N && K == other.K;
+    }
+};
+
+struct MatMulCacheKeyHash {
+    size_t operator()(const MatMulCacheKey& k) const {
+        size_t h = std::hash<int64_t>{}(k.M);
+        h ^= std::hash<int64_t>{}(k.N) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= std::hash<int64_t>{}(k.K) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        return h;
+    }
+};
+
+struct MatMulCachedPrimitive {
+    dnnl::matmul prim;
+    dnnl::memory::desc a_md, b_md, c_md;
+};
+
+static constexpr size_t MATMUL_CACHE_SIZE = 48;
+
+class MatMulPrimitiveCache {
+public:
+    std::shared_ptr<MatMulCachedPrimitive> get(const MatMulCacheKey& key) {
+        auto it = cache_.find(key);
+        if (it != cache_.end()) {
+            // Move to front of LRU list
+            lru_list_.remove(key);
+            lru_list_.push_front(key);
+            return it->second;
+        }
+        return nullptr;
+    }
+
+    void put(const MatMulCacheKey& key, std::shared_ptr<MatMulCachedPrimitive> value) {
+        // Evict if cache is full
+        if (cache_.size() >= MATMUL_CACHE_SIZE) {
+            auto evict_key = lru_list_.back();
+            lru_list_.pop_back();
+            cache_.erase(evict_key);
+        }
+        cache_[key] = value;
+        lru_list_.push_front(key);
+    }
+
+private:
+    std::unordered_map<MatMulCacheKey, std::shared_ptr<MatMulCachedPrimitive>, MatMulCacheKeyHash> cache_;
+    std::list<MatMulCacheKey> lru_list_;
+};
+
+static thread_local MatMulPrimitiveCache g_matmul_cache;
+
+// oneDNN matmul for Float32 with primitive caching
 static bool onednn_matmul_f32(
     const float* A, const float* B, float* C,
     int64_t M, int64_t N, int64_t K) {
 
-    // Only use oneDNN for matrices large enough to amortize primitive creation overhead
-    if (M * N < 1024 || K < 32) {
+    // oneDNN matmul has higher overhead than MKL SGEMM even with caching
+    // Only use for very large matrices where oneDNN's memory handling helps
+    // MKL is 5-10x faster for most common matrix sizes
+    if (M < 4096 || N < 4096 || K < 2048) {
         return false;  // Fall back to MKL/custom GEMM
     }
 
@@ -281,26 +343,40 @@ static bool onednn_matmul_f32(
         auto& engine = g_matmul_engine;
         auto& stream = g_matmul_stream;
 
-        // Create memory descriptors for row-major matrices
-        dnnl::memory::dims a_dims = {M, K};
-        dnnl::memory::dims b_dims = {K, N};
-        dnnl::memory::dims c_dims = {M, N};
+        // Create cache key
+        MatMulCacheKey cache_key{M, N, K};
 
-        auto a_md = dnnl::memory::desc(a_dims, dnnl::memory::data_type::f32, dnnl::memory::format_tag::ab);
-        auto b_md = dnnl::memory::desc(b_dims, dnnl::memory::data_type::f32, dnnl::memory::format_tag::ab);
-        auto c_md = dnnl::memory::desc(c_dims, dnnl::memory::data_type::f32, dnnl::memory::format_tag::ab);
+        // Try to get cached primitive
+        auto cached = g_matmul_cache.get(cache_key);
 
-        // Create matmul primitive descriptor
-        auto matmul_pd = dnnl::matmul::primitive_desc(engine, a_md, b_md, c_md);
+        if (!cached) {
+            // Cache miss - create new primitive and cache it
+            cached = std::make_shared<MatMulCachedPrimitive>();
 
-        // Create memory objects
-        auto a_mem = dnnl::memory(a_md, engine, const_cast<float*>(A));
-        auto b_mem = dnnl::memory(b_md, engine, const_cast<float*>(B));
-        auto c_mem = dnnl::memory(c_md, engine, C);
+            // Create memory descriptors for row-major matrices
+            dnnl::memory::dims a_dims = {M, K};
+            dnnl::memory::dims b_dims = {K, N};
+            dnnl::memory::dims c_dims = {M, N};
 
-        // Create and execute matmul primitive
-        auto matmul_prim = dnnl::matmul(matmul_pd);
-        matmul_prim.execute(stream, {
+            cached->a_md = dnnl::memory::desc(a_dims, dnnl::memory::data_type::f32, dnnl::memory::format_tag::ab);
+            cached->b_md = dnnl::memory::desc(b_dims, dnnl::memory::data_type::f32, dnnl::memory::format_tag::ab);
+            cached->c_md = dnnl::memory::desc(c_dims, dnnl::memory::data_type::f32, dnnl::memory::format_tag::ab);
+
+            // Create matmul primitive descriptor and primitive
+            auto matmul_pd = dnnl::matmul::primitive_desc(engine, cached->a_md, cached->b_md, cached->c_md);
+            cached->prim = dnnl::matmul(matmul_pd);
+
+            // Store in cache
+            g_matmul_cache.put(cache_key, cached);
+        }
+
+        // Create memory objects with user data (this is fast - just wraps pointers)
+        auto a_mem = dnnl::memory(cached->a_md, engine, const_cast<float*>(A));
+        auto b_mem = dnnl::memory(cached->b_md, engine, const_cast<float*>(B));
+        auto c_mem = dnnl::memory(cached->c_md, engine, C);
+
+        // Execute cached primitive
+        cached->prim.execute(stream, {
             {DNNL_ARG_SRC, a_mem},
             {DNNL_ARG_WEIGHTS, b_mem},
             {DNNL_ARG_DST, c_mem}

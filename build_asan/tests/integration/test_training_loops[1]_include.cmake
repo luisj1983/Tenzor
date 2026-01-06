@@ -1,0 +1,5 @@
+if(EXISTS "/home/lee/Projects/Tenzor/build_asan/tests/integration/test_training_loops[1]_tests.cmake")
+  include("/home/lee/Projects/Tenzor/build_asan/tests/integration/test_training_loops[1]_tests.cmake")
+else()
+  add_test(test_training_loops_NOT_BUILT test_training_loops_NOT_BUILT)
+endif()

@@ -13,13 +13,15 @@
 // Intel oneDNN for optimized pooling operations
 #ifdef TENZOR_USE_ONEDNN
 #include <dnnl.hpp>
+#include <list>
+#include <unordered_map>
 #endif
 
 namespace tenzor {
 namespace cpu {
 
 // ============================================================================
-// oneDNN Pooling Helpers
+// oneDNN Pooling Helpers with Primitive Caching
 // ============================================================================
 #ifdef TENZOR_USE_ONEDNN
 static thread_local dnnl::engine g_pooling_engine(dnnl::engine::kind::cpu, 0);
@@ -28,7 +30,80 @@ static thread_local dnnl::stream g_pooling_stream(g_pooling_engine);
 // Threshold for using oneDNN (elements in output)
 constexpr size_t ONEDNN_POOLING_THRESHOLD = 4096;
 
-// oneDNN max pooling forward
+// --------------------------------------------------------------------------
+// Pooling Primitive Caching (eliminates ~1-5ms primitive creation overhead)
+// --------------------------------------------------------------------------
+struct PoolingCacheKey {
+    dnnl::algorithm algo;
+    int64_t N, C, H, W;
+    int64_t H_out, W_out;
+    int64_t kernel_size, stride, padding;
+
+    bool operator==(const PoolingCacheKey& other) const {
+        return algo == other.algo && N == other.N && C == other.C &&
+               H == other.H && W == other.W &&
+               H_out == other.H_out && W_out == other.W_out &&
+               kernel_size == other.kernel_size &&
+               stride == other.stride && padding == other.padding;
+    }
+};
+
+struct PoolingCacheKeyHash {
+    size_t operator()(const PoolingCacheKey& k) const {
+        size_t h = std::hash<int>{}(static_cast<int>(k.algo));
+        auto hash_combine = [&h](int64_t v) {
+            h ^= std::hash<int64_t>{}(v) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        };
+        hash_combine(k.N);
+        hash_combine(k.C);
+        hash_combine(k.H);
+        hash_combine(k.W);
+        hash_combine(k.H_out);
+        hash_combine(k.W_out);
+        hash_combine(k.kernel_size);
+        hash_combine(k.stride);
+        hash_combine(k.padding);
+        return h;
+    }
+};
+
+struct PoolingCachedPrimitive {
+    dnnl::pooling_forward prim;
+    dnnl::memory::desc src_md, dst_md;
+};
+
+static constexpr size_t POOLING_CACHE_SIZE = 32;
+
+class PoolingPrimitiveCache {
+public:
+    std::shared_ptr<PoolingCachedPrimitive> get(const PoolingCacheKey& key) {
+        auto it = cache_.find(key);
+        if (it != cache_.end()) {
+            lru_list_.remove(key);
+            lru_list_.push_front(key);
+            return it->second;
+        }
+        return nullptr;
+    }
+
+    void put(const PoolingCacheKey& key, std::shared_ptr<PoolingCachedPrimitive> value) {
+        if (cache_.size() >= POOLING_CACHE_SIZE) {
+            auto evict_key = lru_list_.back();
+            lru_list_.pop_back();
+            cache_.erase(evict_key);
+        }
+        cache_[key] = value;
+        lru_list_.push_front(key);
+    }
+
+private:
+    std::unordered_map<PoolingCacheKey, std::shared_ptr<PoolingCachedPrimitive>, PoolingCacheKeyHash> cache_;
+    std::list<PoolingCacheKey> lru_list_;
+};
+
+static thread_local PoolingPrimitiveCache g_pooling_cache;
+
+// oneDNN max pooling forward with caching
 static bool onednn_maxpool2d_forward(
     const float* input, float* output, int64_t* indices,
     int64_t N, int64_t C, int64_t H, int64_t W,
@@ -49,35 +124,46 @@ static bool onednn_maxpool2d_forward(
         auto& engine = g_pooling_engine;
         auto& stream = g_pooling_stream;
 
-        // Memory descriptors for NCHW format
-        dnnl::memory::dims src_dims = {N, C, H, W};
-        dnnl::memory::dims dst_dims = {N, C, H_out, W_out};
-        dnnl::memory::dims kernel_dims = {kernel_size, kernel_size};
-        dnnl::memory::dims stride_dims = {stride, stride};
-        dnnl::memory::dims dilation_dims = {0, 0};  // No dilation for pooling
-        dnnl::memory::dims padding_l = {padding, padding};
-        dnnl::memory::dims padding_r = {padding, padding};
+        // Create cache key
+        PoolingCacheKey cache_key{dnnl::algorithm::pooling_max,
+                                   N, C, H, W, H_out, W_out,
+                                   kernel_size, stride, padding};
 
-        auto src_md = dnnl::memory::desc(src_dims, dnnl::memory::data_type::f32, dnnl::memory::format_tag::nchw);
-        auto dst_md = dnnl::memory::desc(dst_dims, dnnl::memory::data_type::f32, dnnl::memory::format_tag::nchw);
+        auto cached = g_pooling_cache.get(cache_key);
 
-        // Create pooling primitive descriptor
-        // Args: engine, prop_kind, algorithm, src_md, dst_md, strides, kernel, dilation, padding_l, padding_r
-        auto pool_pd = dnnl::pooling_forward::primitive_desc(
-            engine,
-            dnnl::prop_kind::forward_inference,
-            dnnl::algorithm::pooling_max,
-            src_md, dst_md,
-            stride_dims, kernel_dims,
-            dilation_dims, padding_l, padding_r);
+        if (!cached) {
+            // Cache miss - create new primitive and cache it
+            cached = std::make_shared<PoolingCachedPrimitive>();
 
-        // Create memory objects
-        auto src_mem = dnnl::memory(src_md, engine, const_cast<float*>(input));
-        auto dst_mem = dnnl::memory(dst_md, engine, output);
+            dnnl::memory::dims src_dims = {N, C, H, W};
+            dnnl::memory::dims dst_dims = {N, C, H_out, W_out};
+            dnnl::memory::dims kernel_dims = {kernel_size, kernel_size};
+            dnnl::memory::dims stride_dims = {stride, stride};
+            dnnl::memory::dims dilation_dims = {0, 0};
+            dnnl::memory::dims padding_l = {padding, padding};
+            dnnl::memory::dims padding_r = {padding, padding};
 
-        // Create and execute pooling primitive
-        auto pool_prim = dnnl::pooling_forward(pool_pd);
-        pool_prim.execute(stream, {
+            cached->src_md = dnnl::memory::desc(src_dims, dnnl::memory::data_type::f32, dnnl::memory::format_tag::nchw);
+            cached->dst_md = dnnl::memory::desc(dst_dims, dnnl::memory::data_type::f32, dnnl::memory::format_tag::nchw);
+
+            auto pool_pd = dnnl::pooling_forward::primitive_desc(
+                engine,
+                dnnl::prop_kind::forward_inference,
+                dnnl::algorithm::pooling_max,
+                cached->src_md, cached->dst_md,
+                stride_dims, kernel_dims,
+                dilation_dims, padding_l, padding_r);
+            cached->prim = dnnl::pooling_forward(pool_pd);
+
+            g_pooling_cache.put(cache_key, cached);
+        }
+
+        // Create memory objects with user data (fast - just wraps pointers)
+        auto src_mem = dnnl::memory(cached->src_md, engine, const_cast<float*>(input));
+        auto dst_mem = dnnl::memory(cached->dst_md, engine, output);
+
+        // Execute cached primitive
+        cached->prim.execute(stream, {
             {DNNL_ARG_SRC, src_mem},
             {DNNL_ARG_DST, dst_mem}
         });
@@ -89,7 +175,7 @@ static bool onednn_maxpool2d_forward(
     }
 }
 
-// oneDNN average pooling forward
+// oneDNN average pooling forward with caching
 static bool onednn_avgpool2d_forward(
     const float* input, float* output,
     int64_t N, int64_t C, int64_t H, int64_t W,
@@ -105,32 +191,43 @@ static bool onednn_avgpool2d_forward(
         auto& engine = g_pooling_engine;
         auto& stream = g_pooling_stream;
 
-        dnnl::memory::dims src_dims = {N, C, H, W};
-        dnnl::memory::dims dst_dims = {N, C, H_out, W_out};
-        dnnl::memory::dims kernel_dims = {kernel_size, kernel_size};
-        dnnl::memory::dims stride_dims = {stride, stride};
-        dnnl::memory::dims dilation_dims = {0, 0};  // No dilation for pooling
-        dnnl::memory::dims padding_l = {padding, padding};
-        dnnl::memory::dims padding_r = {padding, padding};
+        // Create cache key
+        PoolingCacheKey cache_key{dnnl::algorithm::pooling_avg_exclude_padding,
+                                   N, C, H, W, H_out, W_out,
+                                   kernel_size, stride, padding};
 
-        auto src_md = dnnl::memory::desc(src_dims, dnnl::memory::data_type::f32, dnnl::memory::format_tag::nchw);
-        auto dst_md = dnnl::memory::desc(dst_dims, dnnl::memory::data_type::f32, dnnl::memory::format_tag::nchw);
+        auto cached = g_pooling_cache.get(cache_key);
 
-        // Use exclude_padding for accurate averaging at edges
-        // Args: engine, prop_kind, algorithm, src_md, dst_md, strides, kernel, dilation, padding_l, padding_r
-        auto pool_pd = dnnl::pooling_forward::primitive_desc(
-            engine,
-            dnnl::prop_kind::forward_inference,
-            dnnl::algorithm::pooling_avg_exclude_padding,
-            src_md, dst_md,
-            stride_dims, kernel_dims,
-            dilation_dims, padding_l, padding_r);
+        if (!cached) {
+            cached = std::make_shared<PoolingCachedPrimitive>();
 
-        auto src_mem = dnnl::memory(src_md, engine, const_cast<float*>(input));
-        auto dst_mem = dnnl::memory(dst_md, engine, output);
+            dnnl::memory::dims src_dims = {N, C, H, W};
+            dnnl::memory::dims dst_dims = {N, C, H_out, W_out};
+            dnnl::memory::dims kernel_dims = {kernel_size, kernel_size};
+            dnnl::memory::dims stride_dims = {stride, stride};
+            dnnl::memory::dims dilation_dims = {0, 0};
+            dnnl::memory::dims padding_l = {padding, padding};
+            dnnl::memory::dims padding_r = {padding, padding};
 
-        auto pool_prim = dnnl::pooling_forward(pool_pd);
-        pool_prim.execute(stream, {
+            cached->src_md = dnnl::memory::desc(src_dims, dnnl::memory::data_type::f32, dnnl::memory::format_tag::nchw);
+            cached->dst_md = dnnl::memory::desc(dst_dims, dnnl::memory::data_type::f32, dnnl::memory::format_tag::nchw);
+
+            auto pool_pd = dnnl::pooling_forward::primitive_desc(
+                engine,
+                dnnl::prop_kind::forward_inference,
+                dnnl::algorithm::pooling_avg_exclude_padding,
+                cached->src_md, cached->dst_md,
+                stride_dims, kernel_dims,
+                dilation_dims, padding_l, padding_r);
+            cached->prim = dnnl::pooling_forward(pool_pd);
+
+            g_pooling_cache.put(cache_key, cached);
+        }
+
+        auto src_mem = dnnl::memory(cached->src_md, engine, const_cast<float*>(input));
+        auto dst_mem = dnnl::memory(cached->dst_md, engine, output);
+
+        cached->prim.execute(stream, {
             {DNNL_ARG_SRC, src_mem},
             {DNNL_ARG_DST, dst_mem}
         });

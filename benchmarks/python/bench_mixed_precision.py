@@ -7,7 +7,7 @@ Critical for modern GPU training with Tensor Cores.
 
 import sys
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'python'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'build', 'python'))
 
 from typing import List, Tuple, Dict, Any
 from benchmark_utils import (

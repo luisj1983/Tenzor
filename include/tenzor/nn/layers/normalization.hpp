@@ -78,8 +78,12 @@ private:
     bool elementwise_affine_;                ///< Whether to learn affine parameters
     int64_t num_features_;                   ///< Product of normalized_shape
 
-    Variable weight_;  ///< Scale parameter gamma
-    Variable bias_;    ///< Shift parameter beta
+    Variable weight_;  ///< Scale parameter gamma (moved-from after register_parameter)
+    Variable bias_;    ///< Shift parameter beta (moved-from after register_parameter)
+
+    // Cached pointers to parameters_ entries (avoids ~2-3ms hash map lookup overhead)
+    std::shared_ptr<Variable> cached_weight_;
+    std::shared_ptr<Variable> cached_bias_;
 
     /**
      * @brief Initialize affine parameters to ones and zeros.

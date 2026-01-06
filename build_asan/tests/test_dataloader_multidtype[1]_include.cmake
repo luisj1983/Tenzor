@@ -1,0 +1,5 @@
+if(EXISTS "/home/lee/Projects/Tenzor/build_asan/tests/test_dataloader_multidtype[1]_tests.cmake")
+  include("/home/lee/Projects/Tenzor/build_asan/tests/test_dataloader_multidtype[1]_tests.cmake")
+else()
+  add_test(test_dataloader_multidtype_NOT_BUILT test_dataloader_multidtype_NOT_BUILT)
+endif()

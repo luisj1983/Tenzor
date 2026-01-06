@@ -14,6 +14,7 @@
 #ifdef TENZOR_USE_ONEDNN
 #include <dnnl.hpp>
 #include <unordered_map>
+#include <list>
 #include <mutex>
 #endif
 
@@ -46,7 +47,130 @@ namespace cpu {
 static thread_local dnnl::engine g_activation_engine(dnnl::engine::kind::cpu, 0);
 static thread_local dnnl::stream g_activation_stream(g_activation_engine);
 
-// Helper: Execute oneDNN eltwise forward operation
+// --------------------------------------------------------------------------
+// Eltwise Primitive Caching (eliminates ~1-5ms primitive creation overhead)
+// --------------------------------------------------------------------------
+struct EltwiseCacheKey {
+    dnnl::algorithm algo;
+    size_t n;
+    float alpha, beta;
+    bool is_backward;
+
+    bool operator==(const EltwiseCacheKey& other) const {
+        return algo == other.algo && n == other.n &&
+               alpha == other.alpha && beta == other.beta &&
+               is_backward == other.is_backward;
+    }
+};
+
+struct EltwiseCacheKeyHash {
+    size_t operator()(const EltwiseCacheKey& k) const {
+        size_t h = std::hash<int>{}(static_cast<int>(k.algo));
+        h ^= std::hash<size_t>{}(k.n) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= std::hash<float>{}(k.alpha) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= std::hash<float>{}(k.beta) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= std::hash<bool>{}(k.is_backward) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        return h;
+    }
+};
+
+struct EltwiseCachedPrimitive {
+    dnnl::eltwise_forward fwd_prim;
+    dnnl::eltwise_backward bwd_prim;
+    dnnl::memory::desc data_md;
+    bool is_backward;
+};
+
+static constexpr size_t ELTWISE_CACHE_SIZE = 64;
+
+class EltwisePrimitiveCache {
+public:
+    std::shared_ptr<EltwiseCachedPrimitive> get(const EltwiseCacheKey& key) {
+        auto it = cache_.find(key);
+        if (it != cache_.end()) {
+            lru_list_.remove(key);
+            lru_list_.push_front(key);
+            return it->second;
+        }
+        return nullptr;
+    }
+
+    void put(const EltwiseCacheKey& key, std::shared_ptr<EltwiseCachedPrimitive> value) {
+        if (cache_.size() >= ELTWISE_CACHE_SIZE) {
+            auto evict_key = lru_list_.back();
+            lru_list_.pop_back();
+            cache_.erase(evict_key);
+        }
+        cache_[key] = value;
+        lru_list_.push_front(key);
+    }
+
+private:
+    std::unordered_map<EltwiseCacheKey, std::shared_ptr<EltwiseCachedPrimitive>, EltwiseCacheKeyHash> cache_;
+    std::list<EltwiseCacheKey> lru_list_;
+};
+
+static thread_local EltwisePrimitiveCache g_eltwise_cache;
+
+// --------------------------------------------------------------------------
+// Softmax Primitive Caching
+// --------------------------------------------------------------------------
+struct SoftmaxCacheKey {
+    std::vector<int64_t> dims;
+    int64_t axis;
+
+    bool operator==(const SoftmaxCacheKey& other) const {
+        return dims == other.dims && axis == other.axis;
+    }
+};
+
+struct SoftmaxCacheKeyHash {
+    size_t operator()(const SoftmaxCacheKey& k) const {
+        size_t h = std::hash<int64_t>{}(k.axis);
+        for (auto d : k.dims) {
+            h ^= std::hash<int64_t>{}(d) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        }
+        return h;
+    }
+};
+
+struct SoftmaxCachedPrimitive {
+    dnnl::softmax_forward prim;
+    dnnl::memory::desc data_md;
+};
+
+static constexpr size_t SOFTMAX_CACHE_SIZE = 32;
+
+class SoftmaxPrimitiveCache {
+public:
+    std::shared_ptr<SoftmaxCachedPrimitive> get(const SoftmaxCacheKey& key) {
+        auto it = cache_.find(key);
+        if (it != cache_.end()) {
+            lru_list_.remove(key);
+            lru_list_.push_front(key);
+            return it->second;
+        }
+        return nullptr;
+    }
+
+    void put(const SoftmaxCacheKey& key, std::shared_ptr<SoftmaxCachedPrimitive> value) {
+        if (cache_.size() >= SOFTMAX_CACHE_SIZE) {
+            auto evict_key = lru_list_.back();
+            lru_list_.pop_back();
+            cache_.erase(evict_key);
+        }
+        cache_[key] = value;
+        lru_list_.push_front(key);
+    }
+
+private:
+    std::unordered_map<SoftmaxCacheKey, std::shared_ptr<SoftmaxCachedPrimitive>, SoftmaxCacheKeyHash> cache_;
+    std::list<SoftmaxCacheKey> lru_list_;
+};
+
+static thread_local SoftmaxPrimitiveCache g_softmax_cache;
+
+// Helper: Execute oneDNN eltwise forward operation with caching
 // Returns true if successful, false if should fall back to SIMD
 static bool onednn_eltwise_forward(
     const float* input, float* output, size_t n,
@@ -60,21 +184,34 @@ static bool onednn_eltwise_forward(
         auto& engine = g_activation_engine;
         auto& stream = g_activation_stream;
 
-        // Create memory descriptor for 1D tensor
-        dnnl::memory::dims dims = {static_cast<dnnl::memory::dim>(n)};
-        auto md = dnnl::memory::desc(dims, dnnl::memory::data_type::f32, dnnl::memory::format_tag::a);
+        // Create cache key
+        EltwiseCacheKey cache_key{alg, n, alpha, beta, false};
 
-        // Create eltwise primitive descriptor
-        auto eltwise_pd = dnnl::eltwise_forward::primitive_desc(
-            engine, dnnl::prop_kind::forward_inference, alg, md, md, alpha, beta);
+        // Try to get cached primitive
+        auto cached = g_eltwise_cache.get(cache_key);
 
-        // Create memory objects
-        auto src_mem = dnnl::memory(md, engine, const_cast<float*>(input));
-        auto dst_mem = dnnl::memory(md, engine, output);
+        if (!cached) {
+            // Cache miss - create new primitive and cache it
+            cached = std::make_shared<EltwiseCachedPrimitive>();
+            cached->is_backward = false;
 
-        // Create and execute primitive
-        auto eltwise_prim = dnnl::eltwise_forward(eltwise_pd);
-        eltwise_prim.execute(stream, {
+            dnnl::memory::dims dims = {static_cast<dnnl::memory::dim>(n)};
+            cached->data_md = dnnl::memory::desc(dims, dnnl::memory::data_type::f32, dnnl::memory::format_tag::a);
+
+            auto eltwise_pd = dnnl::eltwise_forward::primitive_desc(
+                engine, dnnl::prop_kind::forward_inference, alg,
+                cached->data_md, cached->data_md, alpha, beta);
+            cached->fwd_prim = dnnl::eltwise_forward(eltwise_pd);
+
+            g_eltwise_cache.put(cache_key, cached);
+        }
+
+        // Create memory objects with user data (fast - just wraps pointers)
+        auto src_mem = dnnl::memory(cached->data_md, engine, const_cast<float*>(input));
+        auto dst_mem = dnnl::memory(cached->data_md, engine, output);
+
+        // Execute cached primitive
+        cached->fwd_prim.execute(stream, {
             {DNNL_ARG_SRC, src_mem},
             {DNNL_ARG_DST, dst_mem}
         });
@@ -86,7 +223,7 @@ static bool onednn_eltwise_forward(
     }
 }
 
-// Helper: Execute oneDNN eltwise backward operation
+// Helper: Execute oneDNN eltwise backward operation with caching
 static bool onednn_eltwise_backward(
     const float* diff_dst, const float* src, float* diff_src, size_t n,
     dnnl::algorithm alg, float alpha = 0.0f, float beta = 0.0f) {
@@ -99,23 +236,37 @@ static bool onednn_eltwise_backward(
         auto& engine = g_activation_engine;
         auto& stream = g_activation_stream;
 
-        dnnl::memory::dims dims = {static_cast<dnnl::memory::dim>(n)};
-        auto md = dnnl::memory::desc(dims, dnnl::memory::data_type::f32, dnnl::memory::format_tag::a);
+        // Create cache key (is_backward = true)
+        EltwiseCacheKey cache_key{alg, n, alpha, beta, true};
 
-        // Forward hint for backward
-        auto fwd_pd = dnnl::eltwise_forward::primitive_desc(
-            engine, dnnl::prop_kind::forward_training, alg, md, md, alpha, beta);
+        auto cached = g_eltwise_cache.get(cache_key);
 
-        // Backward descriptor
-        auto bwd_pd = dnnl::eltwise_backward::primitive_desc(
-            engine, alg, md, md, fwd_pd.dst_desc(), alpha, beta, fwd_pd);
+        if (!cached) {
+            cached = std::make_shared<EltwiseCachedPrimitive>();
+            cached->is_backward = true;
 
-        auto src_mem = dnnl::memory(md, engine, const_cast<float*>(src));
-        auto diff_dst_mem = dnnl::memory(md, engine, const_cast<float*>(diff_dst));
-        auto diff_src_mem = dnnl::memory(md, engine, diff_src);
+            dnnl::memory::dims dims = {static_cast<dnnl::memory::dim>(n)};
+            cached->data_md = dnnl::memory::desc(dims, dnnl::memory::data_type::f32, dnnl::memory::format_tag::a);
 
-        auto eltwise_bwd = dnnl::eltwise_backward(bwd_pd);
-        eltwise_bwd.execute(stream, {
+            // Forward hint for backward
+            auto fwd_pd = dnnl::eltwise_forward::primitive_desc(
+                engine, dnnl::prop_kind::forward_training, alg,
+                cached->data_md, cached->data_md, alpha, beta);
+
+            // Backward descriptor
+            auto bwd_pd = dnnl::eltwise_backward::primitive_desc(
+                engine, alg, cached->data_md, cached->data_md,
+                fwd_pd.dst_desc(), alpha, beta, fwd_pd);
+            cached->bwd_prim = dnnl::eltwise_backward(bwd_pd);
+
+            g_eltwise_cache.put(cache_key, cached);
+        }
+
+        auto src_mem = dnnl::memory(cached->data_md, engine, const_cast<float*>(src));
+        auto diff_dst_mem = dnnl::memory(cached->data_md, engine, const_cast<float*>(diff_dst));
+        auto diff_src_mem = dnnl::memory(cached->data_md, engine, diff_src);
+
+        cached->bwd_prim.execute(stream, {
             {DNNL_ARG_SRC, src_mem},
             {DNNL_ARG_DIFF_DST, diff_dst_mem},
             {DNNL_ARG_DIFF_SRC, diff_src_mem}
@@ -128,7 +279,7 @@ static bool onednn_eltwise_backward(
     }
 }
 
-// Helper: Execute oneDNN softmax forward
+// Helper: Execute oneDNN softmax forward with caching
 static bool onednn_softmax_forward(
     const float* input, float* output,
     const std::vector<int64_t>& shape, int64_t axis) {
@@ -143,30 +294,41 @@ static bool onednn_softmax_forward(
         auto& engine = g_activation_engine;
         auto& stream = g_activation_stream;
 
-        // Convert shape to dnnl dims
-        dnnl::memory::dims dims(shape.begin(), shape.end());
+        // Create cache key
+        SoftmaxCacheKey cache_key{shape, axis};
 
-        // Use plain format
-        dnnl::memory::format_tag tag;
-        switch (shape.size()) {
-            case 1: tag = dnnl::memory::format_tag::a; break;
-            case 2: tag = dnnl::memory::format_tag::ab; break;
-            case 3: tag = dnnl::memory::format_tag::abc; break;
-            case 4: tag = dnnl::memory::format_tag::abcd; break;
-            default: return false;  // Unsupported
+        auto cached = g_softmax_cache.get(cache_key);
+
+        if (!cached) {
+            cached = std::make_shared<SoftmaxCachedPrimitive>();
+
+            // Convert shape to dnnl dims
+            dnnl::memory::dims dims(shape.begin(), shape.end());
+
+            // Use plain format
+            dnnl::memory::format_tag tag;
+            switch (shape.size()) {
+                case 1: tag = dnnl::memory::format_tag::a; break;
+                case 2: tag = dnnl::memory::format_tag::ab; break;
+                case 3: tag = dnnl::memory::format_tag::abc; break;
+                case 4: tag = dnnl::memory::format_tag::abcd; break;
+                default: return false;  // Unsupported
+            }
+
+            cached->data_md = dnnl::memory::desc(dims, dnnl::memory::data_type::f32, tag);
+
+            auto softmax_pd = dnnl::softmax_forward::primitive_desc(
+                engine, dnnl::prop_kind::forward_inference, dnnl::algorithm::softmax_accurate,
+                cached->data_md, cached->data_md, static_cast<int>(axis));
+            cached->prim = dnnl::softmax_forward(softmax_pd);
+
+            g_softmax_cache.put(cache_key, cached);
         }
 
-        auto md = dnnl::memory::desc(dims, dnnl::memory::data_type::f32, tag);
+        auto src_mem = dnnl::memory(cached->data_md, engine, const_cast<float*>(input));
+        auto dst_mem = dnnl::memory(cached->data_md, engine, output);
 
-        auto softmax_pd = dnnl::softmax_forward::primitive_desc(
-            engine, dnnl::prop_kind::forward_inference, dnnl::algorithm::softmax_accurate,
-            md, md, static_cast<int>(axis));
-
-        auto src_mem = dnnl::memory(md, engine, const_cast<float*>(input));
-        auto dst_mem = dnnl::memory(md, engine, output);
-
-        auto softmax_prim = dnnl::softmax_forward(softmax_pd);
-        softmax_prim.execute(stream, {
+        cached->prim.execute(stream, {
             {DNNL_ARG_SRC, src_mem},
             {DNNL_ARG_DST, dst_mem}
         });

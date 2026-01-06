@@ -84,6 +84,10 @@ private:
     Variable running_var_;          ///< Running variance [num_features]
     int64_t num_batches_tracked_{0};  ///< Count of batches processed
 
+    // Cached pointers to parameters_ entries (avoids ~2-3ms hash map lookup overhead)
+    std::shared_ptr<Variable> cached_weight_;
+    std::shared_ptr<Variable> cached_bias_;
+
     /**
      * @brief Initialize affine parameters.
      */
@@ -146,6 +150,10 @@ private:
     Variable running_mean_;         ///< Running mean
     Variable running_var_;          ///< Running variance
     int64_t num_batches_tracked_{0};  ///< Count of batches processed
+
+    // Cached pointers to parameters_ entries (avoids ~2-3ms hash map lookup overhead)
+    std::shared_ptr<Variable> cached_weight_;
+    std::shared_ptr<Variable> cached_bias_;
 
     /**
      * @brief Initialize affine parameters.

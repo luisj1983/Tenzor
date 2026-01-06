@@ -1,0 +1,5 @@
+if(EXISTS "/home/lee/Projects/Tenzor/build_asan/tests/test_tensor_multidtype[1]_tests.cmake")
+  include("/home/lee/Projects/Tenzor/build_asan/tests/test_tensor_multidtype[1]_tests.cmake")
+else()
+  add_test(test_tensor_multidtype_NOT_BUILT test_tensor_multidtype_NOT_BUILT)
+endif()

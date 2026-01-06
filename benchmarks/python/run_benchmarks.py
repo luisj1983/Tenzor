@@ -35,8 +35,8 @@ import argparse
 from datetime import datetime
 from typing import List
 
-# Add paths
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'python'))
+# Add paths - use build/python for the compiled module
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'build', 'python'))
 sys.path.insert(0, os.path.dirname(__file__))
 
 from benchmark_config import BenchmarkConfig, DEFAULT_CONFIG, QUICK_CONFIG, FULL_CONFIG

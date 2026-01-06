@@ -1,0 +1,5 @@
+if(EXISTS "/home/lee/Projects/Tenzor/build_asan/tests/test_ops_additional_multidtype[1]_tests.cmake")
+  include("/home/lee/Projects/Tenzor/build_asan/tests/test_ops_additional_multidtype[1]_tests.cmake")
+else()
+  add_test(test_ops_additional_multidtype_NOT_BUILT test_ops_additional_multidtype_NOT_BUILT)
+endif()

@@ -1,0 +1,5 @@
+if(EXISTS "/home/lee/Projects/Tenzor/build_asan/tests/test_transfer_engine[1]_tests.cmake")
+  include("/home/lee/Projects/Tenzor/build_asan/tests/test_transfer_engine[1]_tests.cmake")
+else()
+  add_test(test_transfer_engine_NOT_BUILT test_transfer_engine_NOT_BUILT)
+endif()

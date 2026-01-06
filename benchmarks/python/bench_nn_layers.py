@@ -6,7 +6,7 @@ Compare various neural network layer performance between Tenzor and PyTorch.
 
 import sys
 import os
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'python'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'build', 'python'))
 
 # IMPORTANT: Import PyTorch BEFORE Tenzor to avoid MKL library conflicts
 # When both libraries use MKL, the first one to load wins and sets up the runtime

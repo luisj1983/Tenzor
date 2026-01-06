@@ -11,6 +11,8 @@
 // Intel oneDNN for optimized batch normalization (2-3x faster)
 #ifdef TENZOR_USE_ONEDNN
 #include <dnnl.hpp>
+#include <list>
+#include <unordered_map>
 #endif
 
 namespace tenzor {
@@ -263,8 +265,69 @@ auto batchnorm2d_forward_kernel(const Tensor& input,
 // ============================================================================
 
 #ifdef TENZOR_USE_ONEDNN
+// Thread-local oneDNN engine and stream for reuse
+static thread_local dnnl::engine g_bn_engine(dnnl::engine::kind::cpu, 0);
+static thread_local dnnl::stream g_bn_stream(g_bn_engine);
+
+// --------------------------------------------------------------------------
+// BatchNorm Primitive Caching (eliminates ~1-5ms primitive creation overhead)
+// --------------------------------------------------------------------------
+struct BatchNormCacheKey {
+    int64_t N, C, H, W;
+
+    bool operator==(const BatchNormCacheKey& other) const {
+        return N == other.N && C == other.C && H == other.H && W == other.W;
+    }
+};
+
+struct BatchNormCacheKeyHash {
+    size_t operator()(const BatchNormCacheKey& k) const {
+        size_t h = std::hash<int64_t>{}(k.N);
+        h ^= std::hash<int64_t>{}(k.C) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= std::hash<int64_t>{}(k.H) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= std::hash<int64_t>{}(k.W) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        return h;
+    }
+};
+
+struct BatchNormCachedPrimitive {
+    dnnl::batch_normalization_forward prim;
+    dnnl::memory::desc src_md, sc_md;
+};
+
+static constexpr size_t BATCHNORM_CACHE_SIZE = 32;
+
+class BatchNormPrimitiveCache {
+public:
+    std::shared_ptr<BatchNormCachedPrimitive> get(const BatchNormCacheKey& key) {
+        auto it = cache_.find(key);
+        if (it != cache_.end()) {
+            lru_list_.remove(key);
+            lru_list_.push_front(key);
+            return it->second;
+        }
+        return nullptr;
+    }
+
+    void put(const BatchNormCacheKey& key, std::shared_ptr<BatchNormCachedPrimitive> value) {
+        if (cache_.size() >= BATCHNORM_CACHE_SIZE) {
+            auto evict_key = lru_list_.back();
+            lru_list_.pop_back();
+            cache_.erase(evict_key);
+        }
+        cache_[key] = value;
+        lru_list_.push_front(key);
+    }
+
+private:
+    std::unordered_map<BatchNormCacheKey, std::shared_ptr<BatchNormCachedPrimitive>, BatchNormCacheKeyHash> cache_;
+    std::list<BatchNormCacheKey> lru_list_;
+};
+
+static thread_local BatchNormPrimitiveCache g_batchnorm_cache;
+
 // oneDNN-accelerated BatchNorm2d Forward with Affine Transform (Float32 only)
-// Provides 2-3x speedup over scalar implementation
+// Provides 2-3x speedup over scalar implementation with primitive caching
 static bool batchnorm2d_forward_affine_onednn(
     const Tensor& input,
     Tensor& output,
@@ -279,54 +342,62 @@ static bool batchnorm2d_forward_affine_onednn(
         return false;
     }
 
+    auto shape = input.shape();
+    int64_t N = shape[0];
+    int64_t C = shape[1];
+    int64_t H = shape[2];
+    int64_t W = shape[3];
+
     try {
-        auto shape = input.shape();
-        int64_t N = shape[0];
-        int64_t C = shape[1];
-        int64_t H = shape[2];
-        int64_t W = shape[3];
+        auto& engine = g_bn_engine;
+        auto& stream = g_bn_stream;
 
-        // Create oneDNN engine and stream
-        dnnl::engine engine(dnnl::engine::kind::cpu, 0);
-        dnnl::stream stream(engine);
+        // Create cache key
+        BatchNormCacheKey cache_key{N, C, H, W};
 
-        // Memory descriptors
-        dnnl::memory::dims src_dims = {N, C, H, W};
-        auto src_md = dnnl::memory::desc(src_dims, dnnl::memory::data_type::f32,
-                                          dnnl::memory::format_tag::nchw);
+        // Try to get cached primitive
+        auto cached = g_batchnorm_cache.get(cache_key);
 
-        // Create batch normalization primitive descriptor for inference
-        // Use global stats (pre-computed mean/variance)
-        // oneDNN requires both src and dst memory descriptors
-        auto bn_pd = dnnl::batch_normalization_forward::primitive_desc(
-            engine,
-            dnnl::prop_kind::forward_inference,
-            src_md,  // src_desc
-            src_md,  // dst_desc (same as src for in-place capable op)
-            epsilon,
-            dnnl::normalization_flags::use_global_stats |
-            dnnl::normalization_flags::use_scale |
-            dnnl::normalization_flags::use_shift
-        );
+        if (!cached) {
+            // Cache miss - create new primitive and cache it
+            cached = std::make_shared<BatchNormCachedPrimitive>();
 
-        // Create memory objects
-        auto src_mem = dnnl::memory(src_md, engine, const_cast<float*>(input.data<float>()));
-        auto dst_mem = dnnl::memory(src_md, engine, output.data<float>());
+            // Memory descriptors
+            dnnl::memory::dims src_dims = {N, C, H, W};
+            cached->src_md = dnnl::memory::desc(src_dims, dnnl::memory::data_type::f32,
+                                                  dnnl::memory::format_tag::nchw);
 
-        // oneDNN expects scale and shift in specific format
-        dnnl::memory::dims sc_dims = {C};
-        auto sc_md = dnnl::memory::desc(sc_dims, dnnl::memory::data_type::f32,
-                                         dnnl::memory::format_tag::a);
+            // Scale/shift memory descriptor
+            dnnl::memory::dims sc_dims = {C};
+            cached->sc_md = dnnl::memory::desc(sc_dims, dnnl::memory::data_type::f32,
+                                                 dnnl::memory::format_tag::a);
 
-        auto scale_mem = dnnl::memory(sc_md, engine, const_cast<float*>(gamma.data<float>()));
-        auto shift_mem = dnnl::memory(sc_md, engine, const_cast<float*>(beta.data<float>()));
-        auto mean_mem = dnnl::memory(sc_md, engine, const_cast<float*>(mean.data<float>()));
-        auto var_mem = dnnl::memory(sc_md, engine, const_cast<float*>(variance.data<float>()));
+            // Create batch normalization primitive descriptor for inference
+            auto bn_pd = dnnl::batch_normalization_forward::primitive_desc(
+                engine,
+                dnnl::prop_kind::forward_inference,
+                cached->src_md,
+                cached->src_md,
+                epsilon,
+                dnnl::normalization_flags::use_global_stats |
+                dnnl::normalization_flags::use_scale |
+                dnnl::normalization_flags::use_shift
+            );
+            cached->prim = dnnl::batch_normalization_forward(bn_pd);
 
-        // Create and execute batch normalization primitive
-        auto bn_prim = dnnl::batch_normalization_forward(bn_pd);
+            g_batchnorm_cache.put(cache_key, cached);
+        }
 
-        bn_prim.execute(stream, {
+        // Create memory objects with user data (fast - just wraps pointers)
+        auto src_mem = dnnl::memory(cached->src_md, engine, const_cast<float*>(input.data<float>()));
+        auto dst_mem = dnnl::memory(cached->src_md, engine, output.data<float>());
+        auto scale_mem = dnnl::memory(cached->sc_md, engine, const_cast<float*>(gamma.data<float>()));
+        auto shift_mem = dnnl::memory(cached->sc_md, engine, const_cast<float*>(beta.data<float>()));
+        auto mean_mem = dnnl::memory(cached->sc_md, engine, const_cast<float*>(mean.data<float>()));
+        auto var_mem = dnnl::memory(cached->sc_md, engine, const_cast<float*>(variance.data<float>()));
+
+        // Execute cached primitive
+        cached->prim.execute(stream, {
             {DNNL_ARG_SRC, src_mem},
             {DNNL_ARG_DST, dst_mem},
             {DNNL_ARG_SCALE, scale_mem},
