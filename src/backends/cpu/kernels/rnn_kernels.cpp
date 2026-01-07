@@ -1,10 +1,16 @@
 /**
  * @file rnn_kernels.cpp
  * @brief CPU RNN kernel implementations (LSTM, GRU)
+ *
+ * Includes both cell-level and full-sequence implementations:
+ * - Cell-level: lstm_cell_forward_kernel, gru_cell_forward_kernel
+ * - Full-sequence: lstm_forward_kernel, gru_forward_kernel (fused, SIMD-optimized)
  */
 
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "fused_lstm.hpp"  // SIMD-optimized fused kernels
+// TEMPORARILY disabled to debug crash: #include "rnn_onednn.hpp"
 #include <cmath>
 
 namespace tenzor {
@@ -196,6 +202,137 @@ auto gru_cell_backward_kernel(const Tensor& grad_hy, const Tensor& input, const 
     auto grad_bias_hh = zeros({3 * hidden_size}, input.dtype(), input.device());
 
     return {grad_input, grad_hx, grad_weight_ih, grad_weight_hh, grad_bias_ih, grad_bias_hh};
+}
+
+// =============================================================================
+// Full-Sequence Kernels (SIMD-Optimized via fused_lstm.hpp)
+// =============================================================================
+
+/**
+ * @brief Fused LSTM forward pass for entire sequence
+ *
+ * Uses SIMD-accelerated gate computations and batched input transformation.
+ *
+ * @param input Input sequence (seq_len, batch, input_size)
+ * @param W_ih Input-to-hidden weights (4*hidden, input_size)
+ * @param W_hh Hidden-to-hidden weights (4*hidden, hidden)
+ * @param bias Combined bias (4*hidden) or empty tensor
+ * @param h0 Initial hidden state (batch, hidden)
+ * @param c0 Initial cell state (batch, hidden)
+ * @return vector of [output, h_n, c_n]
+ */
+auto lstm_forward_kernel(
+    const Tensor& input,
+    const Tensor& W_ih,
+    const Tensor& W_hh,
+    const Tensor& bias,
+    const Tensor& h0,
+    const Tensor& c0
+) -> std::vector<Tensor> {
+    // Get dimensions
+    auto input_shape = input.shape();
+    int64_t seq_len = input_shape[0];
+    int64_t batch = input_shape[1];
+    int64_t input_size = input_shape[2];
+    int64_t hidden = h0.shape()[1];
+
+    // Make tensors contiguous
+    Tensor input_contig = input.contiguous();
+    Tensor W_ih_contig = W_ih.contiguous();
+    Tensor W_hh_contig = W_hh.contiguous();
+    Tensor h0_contig = h0.contiguous();
+    Tensor c0_contig = c0.contiguous();
+
+    // Get bias pointer (may be null)
+    const float* bias_ptr = nullptr;
+    Tensor bias_contig;
+    if (bias.numel() > 0) {
+        bias_contig = bias.contiguous();
+        bias_ptr = bias_contig.data<float>();
+    }
+
+    // Allocate output tensors
+    Tensor output = empty({seq_len, batch, hidden}, DType::Float32, input.device());
+    Tensor h_n = empty({batch, hidden}, DType::Float32, input.device());
+    Tensor c_n = empty({batch, hidden}, DType::Float32, input.device());
+
+    // oneDNN LSTM disabled - using SIMD path only
+
+    // Fallback to SIMD-optimized implementation
+    lstm::lstm_forward(
+        input_contig.data<float>(),
+        W_ih_contig.data<float>(),
+        W_hh_contig.data<float>(),
+        bias_ptr,
+        h0_contig.data<float>(),
+        c0_contig.data<float>(),
+        output.data<float>(),
+        h_n.data<float>(),
+        c_n.data<float>(),
+        seq_len, batch, input_size, hidden
+    );
+
+    return {output, h_n, c_n};
+}
+
+/**
+ * @brief Fused GRU forward pass for entire sequence
+ *
+ * Uses SIMD-accelerated gate computations and batched input transformation.
+ *
+ * @param input Input sequence (seq_len, batch, input_size)
+ * @param W_ih Input-to-hidden weights (3*hidden, input_size)
+ * @param W_hh Hidden-to-hidden weights (3*hidden, hidden)
+ * @param bias Combined bias (3*hidden) or empty tensor
+ * @param h0 Initial hidden state (batch, hidden)
+ * @return vector of [output, h_n]
+ */
+auto gru_forward_kernel(
+    const Tensor& input,
+    const Tensor& W_ih,
+    const Tensor& W_hh,
+    const Tensor& bias,
+    const Tensor& h0
+) -> std::vector<Tensor> {
+    // Get dimensions
+    auto input_shape = input.shape();
+    int64_t seq_len = input_shape[0];
+    int64_t batch = input_shape[1];
+    int64_t input_size = input_shape[2];
+    int64_t hidden = h0.shape()[1];
+
+    // Make tensors contiguous
+    Tensor input_contig = input.contiguous();
+    Tensor W_ih_contig = W_ih.contiguous();
+    Tensor W_hh_contig = W_hh.contiguous();
+    Tensor h0_contig = h0.contiguous();
+
+    // Get bias pointer (may be null)
+    const float* bias_ptr = nullptr;
+    Tensor bias_contig;
+    if (bias.numel() > 0) {
+        bias_contig = bias.contiguous();
+        bias_ptr = bias_contig.data<float>();
+    }
+
+    // Allocate output tensors
+    Tensor output = empty({seq_len, batch, hidden}, DType::Float32, input.device());
+    Tensor h_n = empty({batch, hidden}, DType::Float32, input.device());
+
+    // oneDNN GRU disabled - using SIMD path only
+    // SIMD-optimized implementation
+    lstm::gru_forward(
+        input_contig.data<float>(),
+        W_ih_contig.data<float>(),
+        W_hh_contig.data<float>(),
+        bias_ptr,
+        h0_contig.data<float>(),
+        output.data<float>(),
+        h_n.data<float>(),
+        seq_len, batch, input_size, hidden
+    );
+
+    return {output, h_n};
 }
 
 } // namespace cpu

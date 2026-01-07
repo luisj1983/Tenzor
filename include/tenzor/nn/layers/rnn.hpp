@@ -219,11 +219,32 @@ public:
         -> std::pair<Variable, Variable>;
 
     /**
+     * @brief Forward pass with pre-computed input gates (for batched optimization).
+     *
+     * This method is used by LSTM to avoid redundant input->hidden computations
+     * when processing multiple timesteps. Instead of calling weight_ih->forward()
+     * for each timestep, LSTM pre-computes all input gates at once and passes them here.
+     *
+     * @param gates_ih Pre-computed input gates of shape (batch, 4*hidden_size)
+     * @param hx Hidden state of shape (batch, hidden_size)
+     * @param cx Cell state of shape (batch, hidden_size)
+     * @return Tuple of (h_next, c_next) both of shape (batch, hidden_size)
+     */
+    auto forward_with_precomputed_ih(const Tensor& gates_ih, const Variable& hx, const Variable& cx)
+        -> std::pair<Variable, Variable>;
+
+    /**
      * @brief Override base Module forward (single parameter).
      */
     auto forward_impl(const Variable& input) -> Variable override {
         return forward(input, Variable{}, Variable{}).first;
     }
+
+    /** @brief Get input-to-hidden weight matrix for batched optimization */
+    std::shared_ptr<Linear> weight_ih() const { return weight_ih_; }
+
+    /** @brief Get hidden size */
+    int64_t hidden_size() const { return hidden_size_; }
 
 private:
     int64_t input_size_;
@@ -360,21 +381,38 @@ public:
     auto forward(const Variable& input, const Variable& hx) -> Variable;
 
     /**
+     * @brief Forward pass with pre-computed input gates (for batched optimization).
+     *
+     * This method is used by GRU to avoid redundant input->hidden computations
+     * when processing multiple timesteps. Instead of calling weight_ih->forward()
+     * for each timestep, GRU pre-computes all input gates at once and passes them here.
+     *
+     * @param gates_ih Pre-computed input gates of shape (batch, 3*hidden_size)
+     * @param hx Hidden state of shape (batch, hidden_size)
+     * @return New hidden state of shape (batch, hidden_size)
+     */
+    auto forward_with_precomputed_ih(const Tensor& gates_ih, const Variable& hx) -> Variable;
+
+    /**
      * @brief Override base Module forward (single parameter).
      */
     auto forward_impl(const Variable& input) -> Variable override {
         return forward(input, Variable{});
     }
 
+    /** @brief Get input-to-hidden weight matrix for batched optimization */
+    std::shared_ptr<Linear> weight_ih() const { return weight_ih_; }
+
+    /** @brief Get hidden size */
+    int64_t hidden_size() const { return hidden_size_; }
+
 private:
     int64_t input_size_;
     int64_t hidden_size_;
-    std::shared_ptr<Linear> reset_gate_input_;    ///< W_ir, b_ir
-    std::shared_ptr<Linear> reset_gate_hidden_;   ///< W_hr, b_hr
-    std::shared_ptr<Linear> update_gate_input_;   ///< W_iz, b_iz
-    std::shared_ptr<Linear> update_gate_hidden_;  ///< W_hz, b_hz
-    std::shared_ptr<Linear> new_gate_input_;      ///< W_in, b_in
-    std::shared_ptr<Linear> new_gate_hidden_;     ///< W_hn, b_hn
+    // Combined weight matrices for all 3 gates (reset, update, new)
+    // More efficient: 2 linear layers instead of 6
+    std::shared_ptr<Linear> weight_ih_;    ///< (3*hidden, input) for all gates
+    std::shared_ptr<Linear> weight_hh_;    ///< (3*hidden, hidden) for all gates
 };
 
 /**

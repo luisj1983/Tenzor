@@ -1,0 +1,247 @@
+{
+  "tests": 47,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "ROCmKernelsTest",
+      "tests": 47,
+      "testsuite": [
+        {
+          "name": "Add_Float32_Basic",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 66
+        },
+        {
+          "name": "Add_Float32_LargeArray",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 81
+        },
+        {
+          "name": "Add_Float64_Precision",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 116
+        },
+        {
+          "name": "Sub_Float32_Basic",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 150
+        },
+        {
+          "name": "Mul_Float32_Basic",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 168
+        },
+        {
+          "name": "Div_Float32_Basic",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 191
+        },
+        {
+          "name": "Neg_Float32_Basic",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 214
+        },
+        {
+          "name": "Abs_Float32_Basic",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 234
+        },
+        {
+          "name": "Sqrt_Float32_Basic",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 254
+        },
+        {
+          "name": "Exp_Float32_Basic",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 274
+        },
+        {
+          "name": "Log_Float32_Basic",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 295
+        },
+        {
+          "name": "Pow_Float32_Basic",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 316
+        },
+        {
+          "name": "Clamp_Float32_Basic",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 337
+        },
+        {
+          "name": "Sum_Float32_FullReduction",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 363
+        },
+        {
+          "name": "Sum_Float32_LargeReduction",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 382
+        },
+        {
+          "name": "Sum_Float32_DimReduction",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 394
+        },
+        {
+          "name": "Mean_Float32_Basic",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 419
+        },
+        {
+          "name": "Max_Float32_Basic",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 434
+        },
+        {
+          "name": "Min_Float32_Basic",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 452
+        },
+        {
+          "name": "ReLU_Forward_Float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 474
+        },
+        {
+          "name": "ReLU_Backward_Float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 495
+        },
+        {
+          "name": "Sigmoid_Forward_Float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 524
+        },
+        {
+          "name": "Tanh_Forward_Float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 546
+        },
+        {
+          "name": "LeakyReLU_Forward_Float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 568
+        },
+        {
+          "name": "Softmax_Forward_2D",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 591
+        },
+        {
+          "name": "LogSoftmax_Forward_2D",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 620
+        },
+        {
+          "name": "MatMul_Float32_2x3_3x2",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 653
+        },
+        {
+          "name": "MatMul_Float32_LargeMatrix",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 681
+        },
+        {
+          "name": "MatMul_Float64_Precision",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 703
+        },
+        {
+          "name": "Transpose_Float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 737
+        },
+        {
+          "name": "Reshape_Float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 763
+        },
+        {
+          "name": "BatchNorm2d_Forward",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 792
+        },
+        {
+          "name": "LayerNorm_Forward",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 824
+        },
+        {
+          "name": "MaxPool2d_Forward",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 879
+        },
+        {
+          "name": "AvgPool2d_Forward",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 909
+        },
+        {
+          "name": "Conv2d_Forward_Basic",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 943
+        },
+        {
+          "name": "Conv2d_Forward_NoPadding",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 969
+        },
+        {
+          "name": "Conv2d_Forward_Stride2",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 995
+        },
+        {
+          "name": "EmptyTensor_Operations",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 1025
+        },
+        {
+          "name": "SingleElement_AllOps",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 1034
+        },
+        {
+          "name": "NumericalStability_Softmax",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 1064
+        },
+        {
+          "name": "MixedDTypes_Error",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 1098
+        },
+        {
+          "name": "Performance_LargeAdd",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 1110
+        },
+        {
+          "name": "Performance_LargeMatMul",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 1146
+        },
+        {
+          "name": "NeuralNetwork_ForwardPass",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 1185
+        },
+        {
+          "name": "CNN_ForwardPass",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 1225
+        },
+        {
+          "name": "MultiStream_Execution",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/backends\/test_rocm_kernels.cpp",
+          "line": 1261
+        }
+      ]
+    }
+  ]
+}

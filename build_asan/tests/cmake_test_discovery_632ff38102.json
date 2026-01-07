@@ -1,0 +1,120 @@
+{
+  "tests": 18,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "AllBackends\/BackendOpsTest",
+      "tests": 18,
+      "testsuite": [
+        {
+          "name": "AddFloat32_Basic\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_backend_ops_parameterized.cpp",
+          "line": 170
+        },
+        {
+          "name": "AddFloat32_DifferentValues\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_backend_ops_parameterized.cpp",
+          "line": 183
+        },
+        {
+          "name": "AddFloat64_Basic\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_backend_ops_parameterized.cpp",
+          "line": 217
+        },
+        {
+          "name": "SubFloat32_Basic\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_backend_ops_parameterized.cpp",
+          "line": 231
+        },
+        {
+          "name": "SubFloat32_ResultNegative\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_backend_ops_parameterized.cpp",
+          "line": 240
+        },
+        {
+          "name": "MulFloat32_Basic\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_backend_ops_parameterized.cpp",
+          "line": 253
+        },
+        {
+          "name": "MulFloat32_WithZero\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_backend_ops_parameterized.cpp",
+          "line": 262
+        },
+        {
+          "name": "DivFloat32_Basic\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_backend_ops_parameterized.cpp",
+          "line": 275
+        },
+        {
+          "name": "DivFloat32_Fractional\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_backend_ops_parameterized.cpp",
+          "line": 284
+        },
+        {
+          "name": "MatMulFloat32_2x3_3x2\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_backend_ops_parameterized.cpp",
+          "line": 297
+        },
+        {
+          "name": "MatMulFloat32_LargeMatrix\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_backend_ops_parameterized.cpp",
+          "line": 326
+        },
+        {
+          "name": "SumFloat32_FullReduction\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_backend_ops_parameterized.cpp",
+          "line": 352
+        },
+        {
+          "name": "MeanFloat32_Basic\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_backend_ops_parameterized.cpp",
+          "line": 363
+        },
+        {
+          "name": "ReLU_Forward_Float32\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_backend_ops_parameterized.cpp",
+          "line": 378
+        },
+        {
+          "name": "Sigmoid_Forward_Float32\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_backend_ops_parameterized.cpp",
+          "line": 398
+        },
+        {
+          "name": "Softmax_Forward_2D\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_backend_ops_parameterized.cpp",
+          "line": 419
+        },
+        {
+          "name": "Transpose_Float32\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_backend_ops_parameterized.cpp",
+          "line": 451
+        },
+        {
+          "name": "Reshape_Float32\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_backend_ops_parameterized.cpp",
+          "line": 476
+        }
+      ]
+    }
+  ]
+}

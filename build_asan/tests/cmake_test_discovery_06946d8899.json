@@ -1,0 +1,112 @@
+{
+  "tests": 20,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "GradientCheckpointTest",
+      "tests": 20,
+      "testsuite": [
+        {
+          "name": "StatsTracking",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gradient_checkpoint.cpp",
+          "line": 34
+        },
+        {
+          "name": "ResetStats",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gradient_checkpoint.cpp",
+          "line": 41
+        },
+        {
+          "name": "CheckpointContextEnabled",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gradient_checkpoint.cpp",
+          "line": 58
+        },
+        {
+          "name": "CheckpointContextDisabled",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gradient_checkpoint.cpp",
+          "line": 63
+        },
+        {
+          "name": "CheckpointContextStats",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gradient_checkpoint.cpp",
+          "line": 68
+        },
+        {
+          "name": "GlobalEnableDisable",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gradient_checkpoint.cpp",
+          "line": 87
+        },
+        {
+          "name": "MemoryTrackerStart",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gradient_checkpoint.cpp",
+          "line": 99
+        },
+        {
+          "name": "MemoryTrackerPeak",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gradient_checkpoint.cpp",
+          "line": 109
+        },
+        {
+          "name": "MemoryTrackerReset",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gradient_checkpoint.cpp",
+          "line": 119
+        },
+        {
+          "name": "SimpleForwardPass",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gradient_checkpoint.cpp",
+          "line": 133
+        },
+        {
+          "name": "CheckpointGradientCorrectness",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gradient_checkpoint.cpp",
+          "line": 162
+        },
+        {
+          "name": "MultiVariableCheckpoint",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gradient_checkpoint.cpp",
+          "line": 188
+        },
+        {
+          "name": "NestedCheckpoints",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gradient_checkpoint.cpp",
+          "line": 225
+        },
+        {
+          "name": "CheckpointWithReLU",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gradient_checkpoint.cpp",
+          "line": 271
+        },
+        {
+          "name": "CheckpointWithSigmoid",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gradient_checkpoint.cpp",
+          "line": 290
+        },
+        {
+          "name": "CheckpointSegmentConstruction",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gradient_checkpoint.cpp",
+          "line": 319
+        },
+        {
+          "name": "CheckpointSegmentExecution",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gradient_checkpoint.cpp",
+          "line": 326
+        },
+        {
+          "name": "CheckpointSegmentNesting",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gradient_checkpoint.cpp",
+          "line": 353
+        },
+        {
+          "name": "MemorySavingsEstimation",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gradient_checkpoint.cpp",
+          "line": 365
+        },
+        {
+          "name": "CheckpointStatsAccumulation",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gradient_checkpoint.cpp",
+          "line": 395
+        }
+      ]
+    }
+  ]
+}

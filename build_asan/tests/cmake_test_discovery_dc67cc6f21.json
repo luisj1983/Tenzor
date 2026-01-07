@@ -1,0 +1,1458 @@
+{
+  "tests": 240,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "AllBackendsAllDTypes\/GRUCellMultiDTypeTest",
+      "tests": 40,
+      "testsuite": [
+        {
+          "name": "BasicForward\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 118
+        },
+        {
+          "name": "BasicForward\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 118
+        },
+        {
+          "name": "BasicForward\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 118
+        },
+        {
+          "name": "BasicForward\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 118
+        },
+        {
+          "name": "BasicForward\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 118
+        },
+        {
+          "name": "BasicForward\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 118
+        },
+        {
+          "name": "BasicForward\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 118
+        },
+        {
+          "name": "BasicForward\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 118
+        },
+        {
+          "name": "NoInitialHidden\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 135
+        },
+        {
+          "name": "NoInitialHidden\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 135
+        },
+        {
+          "name": "NoInitialHidden\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 135
+        },
+        {
+          "name": "NoInitialHidden\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 135
+        },
+        {
+          "name": "NoInitialHidden\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 135
+        },
+        {
+          "name": "NoInitialHidden\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 135
+        },
+        {
+          "name": "NoInitialHidden\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 135
+        },
+        {
+          "name": "NoInitialHidden\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 135
+        },
+        {
+          "name": "NoBias\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 151
+        },
+        {
+          "name": "NoBias\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 151
+        },
+        {
+          "name": "NoBias\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 151
+        },
+        {
+          "name": "NoBias\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 151
+        },
+        {
+          "name": "NoBias\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 151
+        },
+        {
+          "name": "NoBias\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 151
+        },
+        {
+          "name": "NoBias\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 151
+        },
+        {
+          "name": "NoBias\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 151
+        },
+        {
+          "name": "HiddenStateEvolution\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 166
+        },
+        {
+          "name": "HiddenStateEvolution\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 166
+        },
+        {
+          "name": "HiddenStateEvolution\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 166
+        },
+        {
+          "name": "HiddenStateEvolution\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 166
+        },
+        {
+          "name": "HiddenStateEvolution\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 166
+        },
+        {
+          "name": "HiddenStateEvolution\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 166
+        },
+        {
+          "name": "HiddenStateEvolution\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 166
+        },
+        {
+          "name": "HiddenStateEvolution\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 166
+        },
+        {
+          "name": "ParameterCount\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 184
+        },
+        {
+          "name": "ParameterCount\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 184
+        },
+        {
+          "name": "ParameterCount\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 184
+        },
+        {
+          "name": "ParameterCount\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 184
+        },
+        {
+          "name": "ParameterCount\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 184
+        },
+        {
+          "name": "ParameterCount\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 184
+        },
+        {
+          "name": "ParameterCount\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 184
+        },
+        {
+          "name": "ParameterCount\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 184
+        }
+      ]
+    },
+    {
+      "name": "AllBackendsAllDTypes\/GRUMultiDTypeTest",
+      "tests": 200,
+      "testsuite": [
+        {
+          "name": "BasicForward\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 266
+        },
+        {
+          "name": "BasicForward\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 266
+        },
+        {
+          "name": "BasicForward\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 266
+        },
+        {
+          "name": "BasicForward\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 266
+        },
+        {
+          "name": "BasicForward\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 266
+        },
+        {
+          "name": "BasicForward\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 266
+        },
+        {
+          "name": "BasicForward\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 266
+        },
+        {
+          "name": "BasicForward\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 266
+        },
+        {
+          "name": "MultiLayer\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 290
+        },
+        {
+          "name": "MultiLayer\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 290
+        },
+        {
+          "name": "MultiLayer\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 290
+        },
+        {
+          "name": "MultiLayer\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 290
+        },
+        {
+          "name": "MultiLayer\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 290
+        },
+        {
+          "name": "MultiLayer\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 290
+        },
+        {
+          "name": "MultiLayer\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 290
+        },
+        {
+          "name": "MultiLayer\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 290
+        },
+        {
+          "name": "BatchFirst\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 308
+        },
+        {
+          "name": "BatchFirst\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 308
+        },
+        {
+          "name": "BatchFirst\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 308
+        },
+        {
+          "name": "BatchFirst\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 308
+        },
+        {
+          "name": "BatchFirst\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 308
+        },
+        {
+          "name": "BatchFirst\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 308
+        },
+        {
+          "name": "BatchFirst\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 308
+        },
+        {
+          "name": "BatchFirst\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 308
+        },
+        {
+          "name": "Bidirectional\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 324
+        },
+        {
+          "name": "Bidirectional\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 324
+        },
+        {
+          "name": "Bidirectional\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 324
+        },
+        {
+          "name": "Bidirectional\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 324
+        },
+        {
+          "name": "Bidirectional\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 324
+        },
+        {
+          "name": "Bidirectional\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 324
+        },
+        {
+          "name": "Bidirectional\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 324
+        },
+        {
+          "name": "Bidirectional\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 324
+        },
+        {
+          "name": "BidirectionalMultiLayer\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 342
+        },
+        {
+          "name": "BidirectionalMultiLayer\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 342
+        },
+        {
+          "name": "BidirectionalMultiLayer\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 342
+        },
+        {
+          "name": "BidirectionalMultiLayer\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 342
+        },
+        {
+          "name": "BidirectionalMultiLayer\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 342
+        },
+        {
+          "name": "BidirectionalMultiLayer\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 342
+        },
+        {
+          "name": "BidirectionalMultiLayer\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 342
+        },
+        {
+          "name": "BidirectionalMultiLayer\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 342
+        },
+        {
+          "name": "WithDropout\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 357
+        },
+        {
+          "name": "WithDropout\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 357
+        },
+        {
+          "name": "WithDropout\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 357
+        },
+        {
+          "name": "WithDropout\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 357
+        },
+        {
+          "name": "WithDropout\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 357
+        },
+        {
+          "name": "WithDropout\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 357
+        },
+        {
+          "name": "WithDropout\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 357
+        },
+        {
+          "name": "WithDropout\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 357
+        },
+        {
+          "name": "InitialHiddenState\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 373
+        },
+        {
+          "name": "InitialHiddenState\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 373
+        },
+        {
+          "name": "InitialHiddenState\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 373
+        },
+        {
+          "name": "InitialHiddenState\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 373
+        },
+        {
+          "name": "InitialHiddenState\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 373
+        },
+        {
+          "name": "InitialHiddenState\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 373
+        },
+        {
+          "name": "InitialHiddenState\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 373
+        },
+        {
+          "name": "InitialHiddenState\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 373
+        },
+        {
+          "name": "SequenceLengthVariation\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 389
+        },
+        {
+          "name": "SequenceLengthVariation\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 389
+        },
+        {
+          "name": "SequenceLengthVariation\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 389
+        },
+        {
+          "name": "SequenceLengthVariation\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 389
+        },
+        {
+          "name": "SequenceLengthVariation\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 389
+        },
+        {
+          "name": "SequenceLengthVariation\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 389
+        },
+        {
+          "name": "SequenceLengthVariation\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 389
+        },
+        {
+          "name": "SequenceLengthVariation\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 389
+        },
+        {
+          "name": "BatchSizeVariation\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 410
+        },
+        {
+          "name": "BatchSizeVariation\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 410
+        },
+        {
+          "name": "BatchSizeVariation\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 410
+        },
+        {
+          "name": "BatchSizeVariation\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 410
+        },
+        {
+          "name": "BatchSizeVariation\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 410
+        },
+        {
+          "name": "BatchSizeVariation\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 410
+        },
+        {
+          "name": "BatchSizeVariation\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 410
+        },
+        {
+          "name": "BatchSizeVariation\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 410
+        },
+        {
+          "name": "SingleTimestep\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 431
+        },
+        {
+          "name": "SingleTimestep\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 431
+        },
+        {
+          "name": "SingleTimestep\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 431
+        },
+        {
+          "name": "SingleTimestep\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 431
+        },
+        {
+          "name": "SingleTimestep\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 431
+        },
+        {
+          "name": "SingleTimestep\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 431
+        },
+        {
+          "name": "SingleTimestep\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 431
+        },
+        {
+          "name": "SingleTimestep\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 431
+        },
+        {
+          "name": "OutputConsistency\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 445
+        },
+        {
+          "name": "OutputConsistency\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 445
+        },
+        {
+          "name": "OutputConsistency\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 445
+        },
+        {
+          "name": "OutputConsistency\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 445
+        },
+        {
+          "name": "OutputConsistency\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 445
+        },
+        {
+          "name": "OutputConsistency\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 445
+        },
+        {
+          "name": "OutputConsistency\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 445
+        },
+        {
+          "name": "OutputConsistency\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 445
+        },
+        {
+          "name": "GradientFlow\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 464
+        },
+        {
+          "name": "GradientFlow\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 464
+        },
+        {
+          "name": "GradientFlow\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 464
+        },
+        {
+          "name": "GradientFlow\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 464
+        },
+        {
+          "name": "GradientFlow\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 464
+        },
+        {
+          "name": "GradientFlow\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 464
+        },
+        {
+          "name": "GradientFlow\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 464
+        },
+        {
+          "name": "GradientFlow\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 464
+        },
+        {
+          "name": "TrainingMode\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 486
+        },
+        {
+          "name": "TrainingMode\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 486
+        },
+        {
+          "name": "TrainingMode\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 486
+        },
+        {
+          "name": "TrainingMode\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 486
+        },
+        {
+          "name": "TrainingMode\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 486
+        },
+        {
+          "name": "TrainingMode\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 486
+        },
+        {
+          "name": "TrainingMode\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 486
+        },
+        {
+          "name": "TrainingMode\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 486
+        },
+        {
+          "name": "ParameterCount\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 501
+        },
+        {
+          "name": "ParameterCount\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 501
+        },
+        {
+          "name": "ParameterCount\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 501
+        },
+        {
+          "name": "ParameterCount\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 501
+        },
+        {
+          "name": "ParameterCount\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 501
+        },
+        {
+          "name": "ParameterCount\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 501
+        },
+        {
+          "name": "ParameterCount\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 501
+        },
+        {
+          "name": "ParameterCount\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 501
+        },
+        {
+          "name": "LargeHidden\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 516
+        },
+        {
+          "name": "LargeHidden\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 516
+        },
+        {
+          "name": "LargeHidden\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 516
+        },
+        {
+          "name": "LargeHidden\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 516
+        },
+        {
+          "name": "LargeHidden\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 516
+        },
+        {
+          "name": "LargeHidden\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 516
+        },
+        {
+          "name": "LargeHidden\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 516
+        },
+        {
+          "name": "LargeHidden\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 516
+        },
+        {
+          "name": "VeryDeepNetwork\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 530
+        },
+        {
+          "name": "VeryDeepNetwork\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 530
+        },
+        {
+          "name": "VeryDeepNetwork\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 530
+        },
+        {
+          "name": "VeryDeepNetwork\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 530
+        },
+        {
+          "name": "VeryDeepNetwork\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 530
+        },
+        {
+          "name": "VeryDeepNetwork\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 530
+        },
+        {
+          "name": "VeryDeepNetwork\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 530
+        },
+        {
+          "name": "VeryDeepNetwork\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 530
+        },
+        {
+          "name": "LongSequence\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 544
+        },
+        {
+          "name": "LongSequence\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 544
+        },
+        {
+          "name": "LongSequence\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 544
+        },
+        {
+          "name": "LongSequence\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 544
+        },
+        {
+          "name": "LongSequence\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 544
+        },
+        {
+          "name": "LongSequence\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 544
+        },
+        {
+          "name": "LongSequence\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 544
+        },
+        {
+          "name": "LongSequence\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 544
+        },
+        {
+          "name": "InvalidNumLayers\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 558
+        },
+        {
+          "name": "InvalidNumLayers\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 558
+        },
+        {
+          "name": "InvalidNumLayers\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 558
+        },
+        {
+          "name": "InvalidNumLayers\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 558
+        },
+        {
+          "name": "InvalidNumLayers\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 558
+        },
+        {
+          "name": "InvalidNumLayers\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 558
+        },
+        {
+          "name": "InvalidNumLayers\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 558
+        },
+        {
+          "name": "InvalidNumLayers\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 558
+        },
+        {
+          "name": "InvalidDropout\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 567
+        },
+        {
+          "name": "InvalidDropout\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 567
+        },
+        {
+          "name": "InvalidDropout\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 567
+        },
+        {
+          "name": "InvalidDropout\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 567
+        },
+        {
+          "name": "InvalidDropout\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 567
+        },
+        {
+          "name": "InvalidDropout\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 567
+        },
+        {
+          "name": "InvalidDropout\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 567
+        },
+        {
+          "name": "InvalidDropout\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 567
+        },
+        {
+          "name": "GateOutputRanges\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 576
+        },
+        {
+          "name": "GateOutputRanges\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 576
+        },
+        {
+          "name": "GateOutputRanges\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 576
+        },
+        {
+          "name": "GateOutputRanges\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 576
+        },
+        {
+          "name": "GateOutputRanges\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 576
+        },
+        {
+          "name": "GateOutputRanges\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 576
+        },
+        {
+          "name": "GateOutputRanges\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 576
+        },
+        {
+          "name": "GateOutputRanges\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 576
+        },
+        {
+          "name": "BatchFirstBidirectional\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 617
+        },
+        {
+          "name": "BatchFirstBidirectional\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 617
+        },
+        {
+          "name": "BatchFirstBidirectional\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 617
+        },
+        {
+          "name": "BatchFirstBidirectional\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 617
+        },
+        {
+          "name": "BatchFirstBidirectional\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 617
+        },
+        {
+          "name": "BatchFirstBidirectional\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 617
+        },
+        {
+          "name": "BatchFirstBidirectional\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 617
+        },
+        {
+          "name": "BatchFirstBidirectional\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 617
+        },
+        {
+          "name": "ComparisonWithLSTM\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 633
+        },
+        {
+          "name": "ComparisonWithLSTM\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 633
+        },
+        {
+          "name": "ComparisonWithLSTM\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 633
+        },
+        {
+          "name": "ComparisonWithLSTM\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 633
+        },
+        {
+          "name": "ComparisonWithLSTM\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 633
+        },
+        {
+          "name": "ComparisonWithLSTM\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 633
+        },
+        {
+          "name": "ComparisonWithLSTM\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 633
+        },
+        {
+          "name": "ComparisonWithLSTM\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 633
+        },
+        {
+          "name": "MemoryEfficiency\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 661
+        },
+        {
+          "name": "MemoryEfficiency\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 661
+        },
+        {
+          "name": "MemoryEfficiency\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 661
+        },
+        {
+          "name": "MemoryEfficiency\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 661
+        },
+        {
+          "name": "MemoryEfficiency\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 661
+        },
+        {
+          "name": "MemoryEfficiency\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 661
+        },
+        {
+          "name": "MemoryEfficiency\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 661
+        },
+        {
+          "name": "MemoryEfficiency\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 661
+        },
+        {
+          "name": "NumericalPrecision\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 689
+        },
+        {
+          "name": "NumericalPrecision\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 689
+        },
+        {
+          "name": "NumericalPrecision\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 689
+        },
+        {
+          "name": "NumericalPrecision\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 689
+        },
+        {
+          "name": "NumericalPrecision\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 689
+        },
+        {
+          "name": "NumericalPrecision\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 689
+        },
+        {
+          "name": "NumericalPrecision\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 689
+        },
+        {
+          "name": "NumericalPrecision\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 689
+        },
+        {
+          "name": "CrossDTypeConsistency\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 727
+        },
+        {
+          "name": "CrossDTypeConsistency\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 727
+        },
+        {
+          "name": "CrossDTypeConsistency\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 727
+        },
+        {
+          "name": "CrossDTypeConsistency\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 727
+        },
+        {
+          "name": "CrossDTypeConsistency\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 727
+        },
+        {
+          "name": "CrossDTypeConsistency\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 727
+        },
+        {
+          "name": "CrossDTypeConsistency\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 727
+        },
+        {
+          "name": "CrossDTypeConsistency\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 727
+        }
+      ]
+    }
+  ]
+}

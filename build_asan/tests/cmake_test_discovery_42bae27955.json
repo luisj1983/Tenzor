@@ -1,0 +1,372 @@
+{
+  "tests": 60,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "AllBackendsAllDTypes\/EmbeddingMultiDTypeTest",
+      "tests": 60,
+      "testsuite": [
+        {
+          "name": "BasicLookup\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 103
+        },
+        {
+          "name": "BasicLookup\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 103
+        },
+        {
+          "name": "BasicLookup\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 103
+        },
+        {
+          "name": "BasicLookup\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 103
+        },
+        {
+          "name": "BasicLookup\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 103
+        },
+        {
+          "name": "BasicLookup\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 103
+        },
+        {
+          "name": "BasicLookup\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 103
+        },
+        {
+          "name": "BasicLookup\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 103
+        },
+        {
+          "name": "BasicLookup\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 103
+        },
+        {
+          "name": "BasicLookup\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 103
+        },
+        {
+          "name": "MultiDimensionalInput\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 157
+        },
+        {
+          "name": "MultiDimensionalInput\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 157
+        },
+        {
+          "name": "MultiDimensionalInput\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 157
+        },
+        {
+          "name": "MultiDimensionalInput\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 157
+        },
+        {
+          "name": "MultiDimensionalInput\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 157
+        },
+        {
+          "name": "MultiDimensionalInput\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 157
+        },
+        {
+          "name": "MultiDimensionalInput\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 157
+        },
+        {
+          "name": "MultiDimensionalInput\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 157
+        },
+        {
+          "name": "MultiDimensionalInput\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 157
+        },
+        {
+          "name": "MultiDimensionalInput\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 157
+        },
+        {
+          "name": "PaddingIdx\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 196
+        },
+        {
+          "name": "PaddingIdx\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 196
+        },
+        {
+          "name": "PaddingIdx\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 196
+        },
+        {
+          "name": "PaddingIdx\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 196
+        },
+        {
+          "name": "PaddingIdx\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 196
+        },
+        {
+          "name": "PaddingIdx\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 196
+        },
+        {
+          "name": "PaddingIdx\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 196
+        },
+        {
+          "name": "PaddingIdx\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 196
+        },
+        {
+          "name": "PaddingIdx\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 196
+        },
+        {
+          "name": "PaddingIdx\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 196
+        },
+        {
+          "name": "DTypeConversionAccuracy\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 247
+        },
+        {
+          "name": "DTypeConversionAccuracy\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 247
+        },
+        {
+          "name": "DTypeConversionAccuracy\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 247
+        },
+        {
+          "name": "DTypeConversionAccuracy\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 247
+        },
+        {
+          "name": "DTypeConversionAccuracy\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 247
+        },
+        {
+          "name": "DTypeConversionAccuracy\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 247
+        },
+        {
+          "name": "DTypeConversionAccuracy\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 247
+        },
+        {
+          "name": "DTypeConversionAccuracy\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 247
+        },
+        {
+          "name": "DTypeConversionAccuracy\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 247
+        },
+        {
+          "name": "DTypeConversionAccuracy\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 247
+        },
+        {
+          "name": "EmbeddingBagWithDTypeConversion\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 281
+        },
+        {
+          "name": "EmbeddingBagWithDTypeConversion\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 281
+        },
+        {
+          "name": "EmbeddingBagWithDTypeConversion\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 281
+        },
+        {
+          "name": "EmbeddingBagWithDTypeConversion\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 281
+        },
+        {
+          "name": "EmbeddingBagWithDTypeConversion\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 281
+        },
+        {
+          "name": "EmbeddingBagWithDTypeConversion\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 281
+        },
+        {
+          "name": "EmbeddingBagWithDTypeConversion\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 281
+        },
+        {
+          "name": "EmbeddingBagWithDTypeConversion\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 281
+        },
+        {
+          "name": "EmbeddingBagWithDTypeConversion\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 281
+        },
+        {
+          "name": "EmbeddingBagWithDTypeConversion\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 281
+        },
+        {
+          "name": "Float64PrecisionBenefit\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 313
+        },
+        {
+          "name": "Float64PrecisionBenefit\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 313
+        },
+        {
+          "name": "Float64PrecisionBenefit\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 313
+        },
+        {
+          "name": "Float64PrecisionBenefit\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 313
+        },
+        {
+          "name": "Float64PrecisionBenefit\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 313
+        },
+        {
+          "name": "Float64PrecisionBenefit\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 313
+        },
+        {
+          "name": "Float64PrecisionBenefit\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 313
+        },
+        {
+          "name": "Float64PrecisionBenefit\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 313
+        },
+        {
+          "name": "Float64PrecisionBenefit\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 313
+        },
+        {
+          "name": "Float64PrecisionBenefit\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding_multidtype.cpp",
+          "line": 313
+        }
+      ]
+    }
+  ]
+}

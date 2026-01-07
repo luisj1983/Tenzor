@@ -1,0 +1,72 @@
+{
+  "tests": 12,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "ZeROGlooTest",
+      "tests": 12,
+      "testsuite": [
+        {
+          "name": "TwoRankGradientAllReduce",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_distributed.cpp",
+          "line": 126
+        },
+        {
+          "name": "FourRankParameterPartitioning",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_distributed.cpp",
+          "line": 154
+        },
+        {
+          "name": "GradientSynchronizationCorrectness",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_distributed.cpp",
+          "line": 172
+        },
+        {
+          "name": "DistributedTrainingConvergence",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_distributed.cpp",
+          "line": 200
+        },
+        {
+          "name": "MemoryReductionVerification",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_distributed.cpp",
+          "line": 240
+        },
+        {
+          "name": "StateDictSaveLoadAcrossRanks",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_distributed.cpp",
+          "line": 263
+        },
+        {
+          "name": "CheckpointCompatibilityAcrossRanks",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_distributed.cpp",
+          "line": 295
+        },
+        {
+          "name": "UnevenParameterDistribution",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_distributed.cpp",
+          "line": 571
+        },
+        {
+          "name": "FewerParametersThanRanks",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_distributed.cpp",
+          "line": 589
+        },
+        {
+          "name": "EmptyGradientsOnSomeRanks",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_distributed.cpp",
+          "line": 607
+        },
+        {
+          "name": "BarrierSynchronization",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_distributed.cpp",
+          "line": 628
+        },
+        {
+          "name": "ConcurrentOptimizationSteps",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1_distributed.cpp",
+          "line": 649
+        }
+      ]
+    }
+  ]
+}

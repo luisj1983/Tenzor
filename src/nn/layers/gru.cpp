@@ -5,6 +5,8 @@
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/autograd/function.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/ops/op_id.hpp"
 #include <stdexcept>
 #include <sstream>
 
@@ -17,30 +19,19 @@ namespace tenzor::nn {
 GRUCell::GRUCell(int64_t input_size, int64_t hidden_size, bool bias)
     : input_size_(input_size), hidden_size_(hidden_size) {
 
-    // GRU has 3 gates:
-    // 1. Reset gate: r_t = σ(W_ir @ x_t + b_ir + W_hr @ h_{t-1} + b_hr)
-    // 2. Update gate: z_t = σ(W_iz @ x_t + b_iz + W_hz @ h_{t-1} + b_hz)
-    // 3. New gate: n_t = tanh(W_in @ x_t + b_in + r_t ⊙ (W_hn @ h_{t-1} + b_hn))
+    // GRU has 3 gates (reset, update, new)
+    // PyTorch-style GRU with combined weight matrices for efficiency:
+    // weight_ih: (3 * hidden_size, input_size) - maps input to all 3 gates
+    // weight_hh: (3 * hidden_size, hidden_size) - maps hidden to all 3 gates
+    // Gate order: [reset | update | new]
 
-    // Reset gate layers
-    reset_gate_input_ = std::make_shared<Linear>(input_size, hidden_size, bias);
-    reset_gate_hidden_ = std::make_shared<Linear>(hidden_size, hidden_size, bias);
+    // Input-to-hidden transformation for all 3 gates (6 -> 2 linear layers)
+    weight_ih_ = std::make_shared<Linear>(input_size, 3 * hidden_size, bias);
+    register_module("weight_ih", weight_ih_);
 
-    // Update gate layers
-    update_gate_input_ = std::make_shared<Linear>(input_size, hidden_size, bias);
-    update_gate_hidden_ = std::make_shared<Linear>(hidden_size, hidden_size, bias);
-
-    // New gate layers
-    new_gate_input_ = std::make_shared<Linear>(input_size, hidden_size, bias);
-    new_gate_hidden_ = std::make_shared<Linear>(hidden_size, hidden_size, bias);
-
-    // Register as submodules
-    register_module("reset_gate_input", reset_gate_input_);
-    register_module("reset_gate_hidden", reset_gate_hidden_);
-    register_module("update_gate_input", update_gate_input_);
-    register_module("update_gate_hidden", update_gate_hidden_);
-    register_module("new_gate_input", new_gate_input_);
-    register_module("new_gate_hidden", new_gate_hidden_);
+    // Hidden-to-hidden transformation for all 3 gates
+    weight_hh_ = std::make_shared<Linear>(hidden_size, 3 * hidden_size, bias);
+    register_module("weight_hh", weight_hh_);
 }
 
 auto GRUCell::forward(const Variable& input, const Variable& hx) -> Variable {
@@ -60,12 +51,8 @@ auto GRUCell::forward(const Variable& input, const Variable& hx) -> Variable {
 
     // Ensure module parameters are on the same device as input
     auto input_device = input.device();
-    reset_gate_input_->to(input_device);
-    reset_gate_hidden_->to(input_device);
-    update_gate_input_->to(input_device);
-    update_gate_hidden_->to(input_device);
-    new_gate_input_->to(input_device);
-    new_gate_hidden_->to(input_device);
+    weight_ih_->to(input_device);
+    weight_hh_->to(input_device);
 
     // Initialize hidden state if not provided
     Variable h = hx;
@@ -80,39 +67,94 @@ auto GRUCell::forward(const Variable& input, const Variable& hx) -> Variable {
         throw std::runtime_error("GRUCell: invalid hidden state shape");
     }
 
-    // Compute reset gate: r_t = σ(W_ir @ x_t + W_hr @ h_{t-1})
-    auto r_i = reset_gate_input_->forward(input);
-    auto r_h = reset_gate_hidden_->forward(h);
-    auto r_combined = Variable(r_i.tensor() + r_h.tensor(), true);
-    auto r_t = nn::sigmoid(r_combined);
+    // Compute combined gates efficiently (2 linear calls instead of 6)
+    // gates_ih: (batch, 3 * hidden_size) = [r_i | z_i | n_i]
+    // gates_hh: (batch, 3 * hidden_size) = [r_h | z_h | n_h]
+    auto gates_ih = weight_ih_->forward(input);    // (batch, 3*hidden_size)
+    auto gates_hh = weight_hh_->forward(h);        // (batch, 3*hidden_size)
 
-    // Compute update gate: z_t = σ(W_iz @ x_t + W_hz @ h_{t-1})
-    auto z_i = update_gate_input_->forward(input);
-    auto z_h = update_gate_hidden_->forward(h);
-    auto z_combined = Variable(z_i.tensor() + z_h.tensor(), true);
-    auto z_t = nn::sigmoid(z_combined);
+    auto gates_ih_t = gates_ih.tensor().contiguous();
+    auto gates_hh_t = gates_hh.tensor().contiguous();
 
-    // Compute new gate: n_t = tanh(W_in @ x_t + r_t ⊙ (W_hn @ h_{t-1}))
-    auto n_i = new_gate_input_->forward(input);
-    auto n_h = new_gate_hidden_->forward(h);
-    // Apply reset gate to hidden transformation
-    auto n_h_reset = Variable(r_t.tensor() * n_h.tensor(), true);
-    auto n_combined = Variable(n_i.tensor() + n_h_reset.tensor(), true);
-    auto n_t = nn::tanh(n_combined);
+    // Split gates into 3 chunks
+    auto ih_chunks = chunk(gates_ih_t, 3, 1);  // [r_i, z_i, n_i]
+    auto hh_chunks = chunk(gates_hh_t, 3, 1);  // [r_h, z_h, n_h]
+
+    auto r_i = ih_chunks[0];
+    auto z_i = ih_chunks[1];
+    auto n_i = ih_chunks[2];
+    auto r_h = hh_chunks[0];
+    auto z_h = hh_chunks[1];
+    auto n_h = hh_chunks[2];
+
+    // Compute reset gate: r_t = σ(r_i + r_h)
+    auto r_t = nn::sigmoid(Variable(r_i + r_h, true));
+
+    // Compute update gate: z_t = σ(z_i + z_h)
+    auto z_t = nn::sigmoid(Variable(z_i + z_h, true));
+
+    // Compute new gate: n_t = tanh(n_i + r_t ⊙ n_h)
+    auto n_h_reset = r_t.tensor() * n_h;
+    auto n_t = nn::tanh(Variable(n_i + n_h_reset, true));
 
     // Compute new hidden state: h_t = (1 - z_t) ⊙ n_t + z_t ⊙ h_{t-1}
-    // h_t = z_t * h_{t-1} + (1 - z_t) * n_t
-    auto z_h_prev = Variable(z_t.tensor() * h.tensor(), true);
+    auto z_tensor = z_t.tensor();
+    auto n_tensor = n_t.tensor();
+    auto h_tensor = h.tensor();
 
-    // Compute (1 - z_t)
-    auto ones_tensor = ones_like(z_t.tensor());
-    auto one_minus_z = Variable(ones_tensor - z_t.tensor(), true);
+    // h_new = z_t * h + (1 - z_t) * n_t = z_t * h + n_t - z_t * n_t
+    //       = n_t + z_t * (h - n_t)
+    auto h_minus_n = h_tensor - n_tensor;
+    auto h_new_tensor = n_tensor + z_tensor * h_minus_n;
 
-    auto one_minus_z_n = Variable(one_minus_z.tensor() * n_t.tensor(), true);
+    return Variable(h_new_tensor, true);
+}
 
-    auto h_new = Variable(z_h_prev.tensor() + one_minus_z_n.tensor(), true);
+auto GRUCell::forward_with_precomputed_ih(const Tensor& gates_ih, const Variable& hx) -> Variable {
+    int64_t batch_size = gates_ih.shape()[0];
 
-    return h_new;
+    // Initialize hidden state if not provided
+    Variable h = hx;
+    if (!h.is_initialized() || h.tensor().numel() == 0) {
+        h = Variable(zeros({batch_size, hidden_size_},
+                          gates_ih.dtype(), gates_ih.device()), false);
+    }
+
+    // Compute hidden-to-hidden gates
+    auto gates_hh = weight_hh_->forward(h);
+    auto gates_hh_t = gates_hh.tensor().contiguous();
+
+    // Split gates into 3 chunks
+    auto ih_chunks = chunk(gates_ih.contiguous(), 3, 1);  // [r_i, z_i, n_i]
+    auto hh_chunks = chunk(gates_hh_t, 3, 1);             // [r_h, z_h, n_h]
+
+    auto r_i = ih_chunks[0];
+    auto z_i = ih_chunks[1];
+    auto n_i = ih_chunks[2];
+    auto r_h = hh_chunks[0];
+    auto z_h = hh_chunks[1];
+    auto n_h = hh_chunks[2];
+
+    // Compute reset gate: r_t = σ(r_i + r_h)
+    auto r_t = nn::sigmoid(Variable(r_i + r_h, true));
+
+    // Compute update gate: z_t = σ(z_i + z_h)
+    auto z_t = nn::sigmoid(Variable(z_i + z_h, true));
+
+    // Compute new gate: n_t = tanh(n_i + r_t ⊙ n_h)
+    auto n_h_reset = r_t.tensor() * n_h;
+    auto n_t = nn::tanh(Variable(n_i + n_h_reset, true));
+
+    // Compute new hidden state: h_t = (1 - z_t) ⊙ n_t + z_t ⊙ h_{t-1}
+    auto z_tensor = z_t.tensor();
+    auto n_tensor = n_t.tensor();
+    auto h_tensor = h.tensor();
+
+    // h_new = n_t + z_t * (h - n_t)
+    auto h_minus_n = h_tensor - n_tensor;
+    auto h_new_tensor = n_tensor + z_tensor * h_minus_n;
+
+    return Variable(h_new_tensor, true);
 }
 
 // ============================================================================
@@ -204,6 +246,66 @@ auto GRU::forward(const Variable& input, const Variable& hx)
         throw std::runtime_error("GRU: invalid hidden state shape");
     }
 
+    // =========================================================================
+    // FAST PATH: Use fused CPU backend kernel for inference
+    // Conditions: CPU, Float32, not training, single layer, not bidirectional
+    // =========================================================================
+    bool can_use_fused = input.device().type == Device::Type::CPU &&
+                         input.dtype() == DType::Float32 &&
+                         !is_training() &&
+                         num_layers_ == 1 &&
+                         !bidirectional_;
+
+    if (can_use_fused) {
+        // Get weight matrices from the cell
+        auto& cell = forward_cells_[0];
+        auto W_ih_linear = cell->weight_ih();
+
+        // Get weight tensors (3*hidden, input_size) and (3*hidden, hidden_size)
+        auto W_ih_params = W_ih_linear->parameters();
+        Tensor W_ih_tensor = W_ih_params[0]->tensor().contiguous();
+
+        // Get W_hh from cell's registered modules
+        auto cell_params = cell->parameters();
+        Tensor W_hh_tensor = cell_params[2]->tensor().contiguous();
+
+        // Get bias (3*hidden) or empty tensor
+        Tensor bias_tensor;
+        if (W_ih_params.size() > 1) {
+            bias_tensor = W_ih_params[1]->tensor().contiguous();
+        } else {
+            bias_tensor = empty({0}, DType::Float32, input.device());
+        }
+
+        // Make input contiguous (seq, batch, input_size)
+        Tensor input_tensor = x.tensor().contiguous();
+
+        // Get initial state (batch, hidden)
+        Tensor h0_tensor = h.tensor().slice(0, 0, 1).reshape({batch_size, hidden_size_}).contiguous();
+
+        // Call fused kernel via dispatch
+        // inputs: [input, W_ih, W_hh, bias, h0]
+        std::vector<Tensor> inputs = {input_tensor, W_ih_tensor, W_hh_tensor,
+                                       bias_tensor, h0_tensor};
+        auto outputs = dispatch<OpId::GRUForward>(inputs);
+        // outputs: [output, h_n]
+
+        // Reshape output
+        Variable output(outputs[0], false);
+        if (batch_first_) {
+            output = Variable(output.tensor().transpose(0, 1), false);
+        }
+
+        // Reshape final state to (1, batch, hidden)
+        Variable h_final(outputs[1].reshape({1, batch_size, hidden_size_}), false);
+
+        return {output, h_final};
+    }
+
+    // =========================================================================
+    // STANDARD PATH: Use autograd operations (required for training/gradients)
+    // =========================================================================
+
     // Split states by layer
     std::vector<Variable> h_layers;
     for (int64_t i = 0; i < num_layers_ * num_directions; ++i) {
@@ -220,16 +322,28 @@ auto GRU::forward(const Variable& input, const Variable& hx)
         auto& forward_cell = forward_cells_[layer];
         Variable forward_h = h_layers[layer * num_directions];
 
+        int64_t layer_feat_size = (layer == 0) ? input_size_ : (hidden_size_ * num_directions);
+
+        // OPTIMIZATION: Pre-compute all input-to-hidden gates at once
+        // Instead of calling weight_ih->forward() seq_len times, we do it ONCE
+        // Reshape from (seq, batch, feat) to (seq*batch, feat)
+        auto x_tensor = layer_input.tensor().contiguous();
+        auto x_flat = x_tensor.reshape({seq_len * batch_size, layer_feat_size});
+
+        // Compute all input gates at once: (seq*batch, 3*hidden)
+        auto all_gates_ih = forward_cell->weight_ih()->forward(Variable(x_flat, false));
+
+        // Reshape to (seq, batch, 3*hidden)
+        auto gates_ih_tensor = all_gates_ih.tensor().reshape({seq_len, batch_size, 3 * hidden_size_});
+
         std::vector<Variable> forward_outputs;
 
-        // Forward pass
+        // Forward pass with pre-computed input gates
         for (int64_t t = 0; t < seq_len; ++t) {
-            auto x_tensor = layer_input.tensor();
-            int64_t layer_feat_size = (layer == 0) ? input_size_ : (hidden_size_ * num_directions);
-            auto x_t = x_tensor.slice(0, t, t + 1).reshape({batch_size, layer_feat_size});
-            Variable x_t_var(x_t, layer_input.requires_grad());
+            // Extract pre-computed input gates for this timestep
+            auto gates_ih_t = gates_ih_tensor.slice(0, t, t + 1).reshape({batch_size, 3 * hidden_size_});
 
-            forward_h = forward_cell->forward(x_t_var, forward_h);
+            forward_h = forward_cell->forward_with_precomputed_ih(gates_ih_t, forward_h);
             forward_outputs.push_back(forward_h);
         }
 
@@ -241,16 +355,17 @@ auto GRU::forward(const Variable& input, const Variable& hx)
             auto& backward_cell = backward_cells_[layer];
             Variable backward_h = h_layers[layer * num_directions + 1];
 
+            // Pre-compute all backward input gates
+            auto all_gates_ih_bwd = backward_cell->weight_ih()->forward(Variable(x_flat, false));
+            auto gates_ih_bwd_tensor = all_gates_ih_bwd.tensor().reshape({seq_len, batch_size, 3 * hidden_size_});
+
             std::vector<Variable> backward_outputs;
 
-            // Backward pass
+            // Backward pass with pre-computed input gates
             for (int64_t t = seq_len - 1; t >= 0; --t) {
-                auto x_tensor = layer_input.tensor();
-                int64_t layer_feat_size = (layer == 0) ? input_size_ : (hidden_size_ * 2);
-                auto x_t = x_tensor.slice(0, t, t + 1).reshape({batch_size, layer_feat_size});
-                Variable x_t_var(x_t, layer_input.requires_grad());
+                auto gates_ih_t = gates_ih_bwd_tensor.slice(0, t, t + 1).reshape({batch_size, 3 * hidden_size_});
 
-                backward_h = backward_cell->forward(x_t_var, backward_h);
+                backward_h = backward_cell->forward_with_precomputed_ih(gates_ih_t, backward_h);
                 backward_outputs.push_back(backward_h);
             }
 

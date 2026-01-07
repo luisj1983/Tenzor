@@ -1,0 +1,264 @@
+{
+  "tests": 42,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "AllDTypes\/NormalizationMultiDTypeTest",
+      "tests": 42,
+      "testsuite": [
+        {
+          "name": "LayerNormConstructorWithAffine\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 69
+        },
+        {
+          "name": "LayerNormConstructorWithAffine\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 69
+        },
+        {
+          "name": "LayerNormConstructorWithAffine\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 69
+        },
+        {
+          "name": "LayerNormForwardNormalization1D\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 76
+        },
+        {
+          "name": "LayerNormForwardNormalization1D\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 76
+        },
+        {
+          "name": "LayerNormForwardNormalization1D\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 76
+        },
+        {
+          "name": "LayerNormForwardNormalization2D\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 126
+        },
+        {
+          "name": "LayerNormForwardNormalization2D\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 126
+        },
+        {
+          "name": "LayerNormForwardNormalization2D\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 126
+        },
+        {
+          "name": "LayerNormBackwardGradientFlow\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 177
+        },
+        {
+          "name": "LayerNormBackwardGradientFlow\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 177
+        },
+        {
+          "name": "LayerNormBackwardGradientFlow\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 177
+        },
+        {
+          "name": "LayerNormMultipleBatches\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 200
+        },
+        {
+          "name": "LayerNormMultipleBatches\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 200
+        },
+        {
+          "name": "LayerNormMultipleBatches\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 200
+        },
+        {
+          "name": "GroupNormConstructorWithAffine\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 233
+        },
+        {
+          "name": "GroupNormConstructorWithAffine\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 233
+        },
+        {
+          "name": "GroupNormConstructorWithAffine\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 233
+        },
+        {
+          "name": "GroupNormForwardNormalization\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 240
+        },
+        {
+          "name": "GroupNormForwardNormalization\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 240
+        },
+        {
+          "name": "GroupNormForwardNormalization\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 240
+        },
+        {
+          "name": "GroupNormSingleGroup\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 284
+        },
+        {
+          "name": "GroupNormSingleGroup\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 284
+        },
+        {
+          "name": "GroupNormSingleGroup\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 284
+        },
+        {
+          "name": "GroupNormGroupsEqualChannels\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 311
+        },
+        {
+          "name": "GroupNormGroupsEqualChannels\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 311
+        },
+        {
+          "name": "GroupNormGroupsEqualChannels\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 311
+        },
+        {
+          "name": "GroupNormBackwardGradientFlow\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 341
+        },
+        {
+          "name": "GroupNormBackwardGradientFlow\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 341
+        },
+        {
+          "name": "GroupNormBackwardGradientFlow\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 341
+        },
+        {
+          "name": "GroupNormMultipleBatches\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 359
+        },
+        {
+          "name": "GroupNormMultipleBatches\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 359
+        },
+        {
+          "name": "GroupNormMultipleBatches\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 359
+        },
+        {
+          "name": "LayerNormLargeInput\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 379
+        },
+        {
+          "name": "LayerNormLargeInput\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 379
+        },
+        {
+          "name": "LayerNormLargeInput\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 379
+        },
+        {
+          "name": "GroupNormLargeInput\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 396
+        },
+        {
+          "name": "GroupNormLargeInput\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 396
+        },
+        {
+          "name": "GroupNormLargeInput\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 396
+        },
+        {
+          "name": "EpsilonEffect\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 413
+        },
+        {
+          "name": "EpsilonEffect\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 413
+        },
+        {
+          "name": "EpsilonEffect\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization_multidtype.cpp",
+          "line": 413
+        }
+      ]
+    }
+  ]
+}

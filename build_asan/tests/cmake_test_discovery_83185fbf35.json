@@ -1,0 +1,306 @@
+{
+  "tests": 48,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "MaskRCNNMultiDTypeTest\/0",
+      "tests": 24,
+      "testsuite": [
+        {
+          "name": "RPNForwardShape",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 79
+        },
+        {
+          "name": "RPNMultiScaleProposals",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 91
+        },
+        {
+          "name": "RPNGradientFlow",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 108
+        },
+        {
+          "name": "ROIAlignSpatialAlignment",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 136
+        },
+        {
+          "name": "ROIAlignOutputDimensions",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 149
+        },
+        {
+          "name": "MaskHeadOutputShape",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 169
+        },
+        {
+          "name": "MaskHeadMultiInstance",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 184
+        },
+        {
+          "name": "MaskHeadGradientFlow",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 208
+        },
+        {
+          "name": "DetectionHeadOutputs",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 239
+        },
+        {
+          "name": "DetectionHeadClassification",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 257
+        },
+        {
+          "name": "DetectionHeadScoreRange",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 274
+        },
+        {
+          "name": "ForwardPassSmallImage",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 295
+        },
+        {
+          "name": "ForwardPassMediumImage",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 306
+        },
+        {
+          "name": "ForwardPassLargeImage",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 317
+        },
+        {
+          "name": "ForwardPassBatchProcessing",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 328
+        },
+        {
+          "name": "ForwardPassRectangularImage",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 340
+        },
+        {
+          "name": "MultiInstanceDetection",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 356
+        },
+        {
+          "name": "MultiInstanceTraining",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 369
+        },
+        {
+          "name": "MultiInstanceDifferentClasses",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 394
+        },
+        {
+          "name": "ResNet50BackboneForward",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 423
+        },
+        {
+          "name": "ResNet101BackboneForward",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 433
+        },
+        {
+          "name": "CustomNumClasses",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 443
+        },
+        {
+          "name": "EndToEndInference",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 466
+        },
+        {
+          "name": "EndToEndTraining",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 480
+        }
+      ]
+    },
+    {
+      "name": "MaskRCNNMultiDTypeTest\/1",
+      "tests": 24,
+      "testsuite": [
+        {
+          "name": "RPNForwardShape",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 79
+        },
+        {
+          "name": "RPNMultiScaleProposals",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 91
+        },
+        {
+          "name": "RPNGradientFlow",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 108
+        },
+        {
+          "name": "ROIAlignSpatialAlignment",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 136
+        },
+        {
+          "name": "ROIAlignOutputDimensions",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 149
+        },
+        {
+          "name": "MaskHeadOutputShape",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 169
+        },
+        {
+          "name": "MaskHeadMultiInstance",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 184
+        },
+        {
+          "name": "MaskHeadGradientFlow",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 208
+        },
+        {
+          "name": "DetectionHeadOutputs",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 239
+        },
+        {
+          "name": "DetectionHeadClassification",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 257
+        },
+        {
+          "name": "DetectionHeadScoreRange",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 274
+        },
+        {
+          "name": "ForwardPassSmallImage",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 295
+        },
+        {
+          "name": "ForwardPassMediumImage",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 306
+        },
+        {
+          "name": "ForwardPassLargeImage",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 317
+        },
+        {
+          "name": "ForwardPassBatchProcessing",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 328
+        },
+        {
+          "name": "ForwardPassRectangularImage",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 340
+        },
+        {
+          "name": "MultiInstanceDetection",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 356
+        },
+        {
+          "name": "MultiInstanceTraining",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 369
+        },
+        {
+          "name": "MultiInstanceDifferentClasses",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 394
+        },
+        {
+          "name": "ResNet50BackboneForward",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 423
+        },
+        {
+          "name": "ResNet101BackboneForward",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 433
+        },
+        {
+          "name": "CustomNumClasses",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 443
+        },
+        {
+          "name": "EndToEndInference",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 466
+        },
+        {
+          "name": "EndToEndTraining",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_mask_rcnn_multidtype.cpp",
+          "line": 480
+        }
+      ]
+    }
+  ]
+}

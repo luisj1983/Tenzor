@@ -1,0 +1,180 @@
+{
+  "tests": 28,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "AllBackends\/AcceleratorTrainingTest",
+      "tests": 28,
+      "testsuite": [
+        {
+          "name": "SimpleCNN_MNIST\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
+          "line": 196
+        },
+        {
+          "name": "SimpleCNN_MNIST\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
+          "line": 196
+        },
+        {
+          "name": "SimpleCNN_MNIST\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
+          "line": 196
+        },
+        {
+          "name": "SimpleCNN_MNIST\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
+          "line": 196
+        },
+        {
+          "name": "MLP_Training\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
+          "line": 247
+        },
+        {
+          "name": "MLP_Training\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
+          "line": 247
+        },
+        {
+          "name": "MLP_Training\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
+          "line": 247
+        },
+        {
+          "name": "MLP_Training\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
+          "line": 247
+        },
+        {
+          "name": "CompleteTrainingLoop\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
+          "line": 303
+        },
+        {
+          "name": "CompleteTrainingLoop\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
+          "line": 303
+        },
+        {
+          "name": "CompleteTrainingLoop\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
+          "line": 303
+        },
+        {
+          "name": "CompleteTrainingLoop\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
+          "line": 303
+        },
+        {
+          "name": "GradientFlowVerification\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
+          "line": 380
+        },
+        {
+          "name": "GradientFlowVerification\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
+          "line": 380
+        },
+        {
+          "name": "GradientFlowVerification\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
+          "line": 380
+        },
+        {
+          "name": "GradientFlowVerification\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
+          "line": 380
+        },
+        {
+          "name": "BatchSizeScaling\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
+          "line": 442
+        },
+        {
+          "name": "BatchSizeScaling\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
+          "line": 442
+        },
+        {
+          "name": "BatchSizeScaling\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
+          "line": 442
+        },
+        {
+          "name": "BatchSizeScaling\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
+          "line": 442
+        },
+        {
+          "name": "MultiEpochTrainingWithValidation\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
+          "line": 472
+        },
+        {
+          "name": "MultiEpochTrainingWithValidation\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
+          "line": 472
+        },
+        {
+          "name": "MultiEpochTrainingWithValidation\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
+          "line": 472
+        },
+        {
+          "name": "MultiEpochTrainingWithValidation\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
+          "line": 472
+        },
+        {
+          "name": "BackendResultConsistency\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
+          "line": 529
+        },
+        {
+          "name": "BackendResultConsistency\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
+          "line": 529
+        },
+        {
+          "name": "BackendResultConsistency\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
+          "line": 529
+        },
+        {
+          "name": "BackendResultConsistency\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
+          "line": 529
+        }
+      ]
+    }
+  ]
+}

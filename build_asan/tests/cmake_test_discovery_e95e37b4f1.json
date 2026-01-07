@@ -1,0 +1,192 @@
+{
+  "tests": 30,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "AllDTypes\/PoolingMultiDTypeTest",
+      "tests": 30,
+      "testsuite": [
+        {
+          "name": "MaxPool2dForwardBasic\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_pooling_multidtype.cpp",
+          "line": 66
+        },
+        {
+          "name": "MaxPool2dForwardBasic\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_pooling_multidtype.cpp",
+          "line": 66
+        },
+        {
+          "name": "MaxPool2dForwardBasic\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_pooling_multidtype.cpp",
+          "line": 66
+        },
+        {
+          "name": "MaxPool2dMaxValueSelection\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_pooling_multidtype.cpp",
+          "line": 86
+        },
+        {
+          "name": "MaxPool2dMaxValueSelection\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_pooling_multidtype.cpp",
+          "line": 86
+        },
+        {
+          "name": "MaxPool2dMaxValueSelection\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_pooling_multidtype.cpp",
+          "line": 86
+        },
+        {
+          "name": "MaxPool2dGradientFlow\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_pooling_multidtype.cpp",
+          "line": 115
+        },
+        {
+          "name": "MaxPool2dGradientFlow\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_pooling_multidtype.cpp",
+          "line": 115
+        },
+        {
+          "name": "MaxPool2dGradientFlow\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_pooling_multidtype.cpp",
+          "line": 115
+        },
+        {
+          "name": "AvgPool2dForwardBasic\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_pooling_multidtype.cpp",
+          "line": 143
+        },
+        {
+          "name": "AvgPool2dForwardBasic\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_pooling_multidtype.cpp",
+          "line": 143
+        },
+        {
+          "name": "AvgPool2dForwardBasic\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_pooling_multidtype.cpp",
+          "line": 143
+        },
+        {
+          "name": "AvgPool2dAverageComputation\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_pooling_multidtype.cpp",
+          "line": 162
+        },
+        {
+          "name": "AvgPool2dAverageComputation\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_pooling_multidtype.cpp",
+          "line": 162
+        },
+        {
+          "name": "AvgPool2dAverageComputation\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_pooling_multidtype.cpp",
+          "line": 162
+        },
+        {
+          "name": "AvgPool2dGradientFlow\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_pooling_multidtype.cpp",
+          "line": 189
+        },
+        {
+          "name": "AvgPool2dGradientFlow\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_pooling_multidtype.cpp",
+          "line": 189
+        },
+        {
+          "name": "AvgPool2dGradientFlow\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_pooling_multidtype.cpp",
+          "line": 189
+        },
+        {
+          "name": "AdaptiveAvgPool2dForwardBasic\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_pooling_multidtype.cpp",
+          "line": 217
+        },
+        {
+          "name": "AdaptiveAvgPool2dForwardBasic\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_pooling_multidtype.cpp",
+          "line": 217
+        },
+        {
+          "name": "AdaptiveAvgPool2dForwardBasic\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_pooling_multidtype.cpp",
+          "line": 217
+        },
+        {
+          "name": "AdaptiveAvgPool2dGlobalPooling\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_pooling_multidtype.cpp",
+          "line": 236
+        },
+        {
+          "name": "AdaptiveAvgPool2dGlobalPooling\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_pooling_multidtype.cpp",
+          "line": 236
+        },
+        {
+          "name": "AdaptiveAvgPool2dGlobalPooling\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_pooling_multidtype.cpp",
+          "line": 236
+        },
+        {
+          "name": "AdaptiveAvgPool2dGradientFlow\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_pooling_multidtype.cpp",
+          "line": 253
+        },
+        {
+          "name": "AdaptiveAvgPool2dGradientFlow\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_pooling_multidtype.cpp",
+          "line": 253
+        },
+        {
+          "name": "AdaptiveAvgPool2dGradientFlow\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_pooling_multidtype.cpp",
+          "line": 253
+        },
+        {
+          "name": "SequentialPoolingPreservesType\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_pooling_multidtype.cpp",
+          "line": 281
+        },
+        {
+          "name": "SequentialPoolingPreservesType\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_pooling_multidtype.cpp",
+          "line": 281
+        },
+        {
+          "name": "SequentialPoolingPreservesType\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_pooling_multidtype.cpp",
+          "line": 281
+        }
+      ]
+    }
+  ]
+}

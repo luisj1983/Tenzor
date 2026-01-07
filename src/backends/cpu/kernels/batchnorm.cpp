@@ -289,27 +289,31 @@ void batchnorm_forward_impl(const T* input,
     int64_t spatial_size = H * W;
     int64_t total_size = N * C * spatial_size;
 
-    // Use fewer threads for memory-bound operations
+    // Use nested loops to avoid expensive modulo operations for index decoding
+    // Also increase parallelization threshold - OpenMP overhead exceeds benefit for small tensors
 #ifdef _OPENMP
     int nthreads = omp_get_max_threads();
-    int effective_threads = std::min({nthreads, static_cast<int>(total_size / 65536), 4});
+    // Only parallelize for large tensors where threading benefit exceeds overhead
+    int effective_threads = std::min({nthreads, static_cast<int>(total_size / 200000), 4});
     int final_threads = std::max(1, effective_threads);
+    bool should_parallelize = total_size > 200000;
 #else
     int final_threads = 1;
+    bool should_parallelize = false;
 #endif
 
-    #pragma omp parallel for num_threads(final_threads) if(total_size > 10000)
-    for (int64_t idx = 0; idx < total_size; idx++) {
-        // Decode NCHW index
-        int64_t w = idx % W;
-        int64_t h = (idx / W) % H;
-        int64_t c = (idx / (W * H)) % C;
+    #pragma omp parallel for collapse(2) num_threads(final_threads) if(should_parallelize)
+    for (int64_t n = 0; n < N; n++) {
+        for (int64_t c = 0; c < C; c++) {
+            T channel_mean = mean[c];
+            T channel_var = variance[c];
+            T invstd = T(1.0f) / safe_sqrt(channel_var + epsilon);
 
-        T channel_mean = mean[c];
-        T channel_var = variance[c];
-        T invstd = T(1.0f) / safe_sqrt(channel_var + epsilon);
-
-        output[idx] = (input[idx] - channel_mean) * invstd;
+            int64_t base_idx = (n * C + c) * spatial_size;
+            for (int64_t hw = 0; hw < spatial_size; hw++) {
+                output[base_idx + hw] = (input[base_idx + hw] - channel_mean) * invstd;
+            }
+        }
     }
 }
 

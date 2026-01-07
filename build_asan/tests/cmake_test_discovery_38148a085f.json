@@ -1,0 +1,1752 @@
+{
+  "tests": 288,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "AllBackendsAllDTypes\/ComparisonOpsMultiDTypeTest",
+      "tests": 192,
+      "testsuite": [
+        {
+          "name": "EqualOperator_SameValues\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 155
+        },
+        {
+          "name": "EqualOperator_SameValues\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 155
+        },
+        {
+          "name": "EqualOperator_SameValues\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 155
+        },
+        {
+          "name": "EqualOperator_SameValues\/cpu_int64",
+          "value_param": "cpu_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 155
+        },
+        {
+          "name": "EqualOperator_SameValues\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 155
+        },
+        {
+          "name": "EqualOperator_SameValues\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 155
+        },
+        {
+          "name": "EqualOperator_SameValues\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 155
+        },
+        {
+          "name": "EqualOperator_SameValues\/cuda_int64",
+          "value_param": "cuda_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 155
+        },
+        {
+          "name": "EqualOperator_SameValues\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 155
+        },
+        {
+          "name": "EqualOperator_SameValues\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 155
+        },
+        {
+          "name": "EqualOperator_SameValues\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 155
+        },
+        {
+          "name": "EqualOperator_SameValues\/vulkan_int64",
+          "value_param": "vulkan_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 155
+        },
+        {
+          "name": "EqualOperator_SameValues\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 155
+        },
+        {
+          "name": "EqualOperator_SameValues\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 155
+        },
+        {
+          "name": "EqualOperator_SameValues\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 155
+        },
+        {
+          "name": "EqualOperator_SameValues\/oneapi_int64",
+          "value_param": "oneapi_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 155
+        },
+        {
+          "name": "EqualOperator_DifferentValues\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 163
+        },
+        {
+          "name": "EqualOperator_DifferentValues\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 163
+        },
+        {
+          "name": "EqualOperator_DifferentValues\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 163
+        },
+        {
+          "name": "EqualOperator_DifferentValues\/cpu_int64",
+          "value_param": "cpu_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 163
+        },
+        {
+          "name": "EqualOperator_DifferentValues\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 163
+        },
+        {
+          "name": "EqualOperator_DifferentValues\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 163
+        },
+        {
+          "name": "EqualOperator_DifferentValues\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 163
+        },
+        {
+          "name": "EqualOperator_DifferentValues\/cuda_int64",
+          "value_param": "cuda_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 163
+        },
+        {
+          "name": "EqualOperator_DifferentValues\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 163
+        },
+        {
+          "name": "EqualOperator_DifferentValues\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 163
+        },
+        {
+          "name": "EqualOperator_DifferentValues\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 163
+        },
+        {
+          "name": "EqualOperator_DifferentValues\/vulkan_int64",
+          "value_param": "vulkan_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 163
+        },
+        {
+          "name": "EqualOperator_DifferentValues\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 163
+        },
+        {
+          "name": "EqualOperator_DifferentValues\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 163
+        },
+        {
+          "name": "EqualOperator_DifferentValues\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 163
+        },
+        {
+          "name": "EqualOperator_DifferentValues\/oneapi_int64",
+          "value_param": "oneapi_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 163
+        },
+        {
+          "name": "NotEqualOperator\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 171
+        },
+        {
+          "name": "NotEqualOperator\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 171
+        },
+        {
+          "name": "NotEqualOperator\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 171
+        },
+        {
+          "name": "NotEqualOperator\/cpu_int64",
+          "value_param": "cpu_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 171
+        },
+        {
+          "name": "NotEqualOperator\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 171
+        },
+        {
+          "name": "NotEqualOperator\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 171
+        },
+        {
+          "name": "NotEqualOperator\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 171
+        },
+        {
+          "name": "NotEqualOperator\/cuda_int64",
+          "value_param": "cuda_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 171
+        },
+        {
+          "name": "NotEqualOperator\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 171
+        },
+        {
+          "name": "NotEqualOperator\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 171
+        },
+        {
+          "name": "NotEqualOperator\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 171
+        },
+        {
+          "name": "NotEqualOperator\/vulkan_int64",
+          "value_param": "vulkan_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 171
+        },
+        {
+          "name": "NotEqualOperator\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 171
+        },
+        {
+          "name": "NotEqualOperator\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 171
+        },
+        {
+          "name": "NotEqualOperator\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 171
+        },
+        {
+          "name": "NotEqualOperator\/oneapi_int64",
+          "value_param": "oneapi_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 171
+        },
+        {
+          "name": "NotEqualOperator_SameValues\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 179
+        },
+        {
+          "name": "NotEqualOperator_SameValues\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 179
+        },
+        {
+          "name": "NotEqualOperator_SameValues\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 179
+        },
+        {
+          "name": "NotEqualOperator_SameValues\/cpu_int64",
+          "value_param": "cpu_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 179
+        },
+        {
+          "name": "NotEqualOperator_SameValues\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 179
+        },
+        {
+          "name": "NotEqualOperator_SameValues\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 179
+        },
+        {
+          "name": "NotEqualOperator_SameValues\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 179
+        },
+        {
+          "name": "NotEqualOperator_SameValues\/cuda_int64",
+          "value_param": "cuda_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 179
+        },
+        {
+          "name": "NotEqualOperator_SameValues\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 179
+        },
+        {
+          "name": "NotEqualOperator_SameValues\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 179
+        },
+        {
+          "name": "NotEqualOperator_SameValues\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 179
+        },
+        {
+          "name": "NotEqualOperator_SameValues\/vulkan_int64",
+          "value_param": "vulkan_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 179
+        },
+        {
+          "name": "NotEqualOperator_SameValues\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 179
+        },
+        {
+          "name": "NotEqualOperator_SameValues\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 179
+        },
+        {
+          "name": "NotEqualOperator_SameValues\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 179
+        },
+        {
+          "name": "NotEqualOperator_SameValues\/oneapi_int64",
+          "value_param": "oneapi_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 179
+        },
+        {
+          "name": "LessThanOperator\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 187
+        },
+        {
+          "name": "LessThanOperator\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 187
+        },
+        {
+          "name": "LessThanOperator\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 187
+        },
+        {
+          "name": "LessThanOperator\/cpu_int64",
+          "value_param": "cpu_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 187
+        },
+        {
+          "name": "LessThanOperator\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 187
+        },
+        {
+          "name": "LessThanOperator\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 187
+        },
+        {
+          "name": "LessThanOperator\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 187
+        },
+        {
+          "name": "LessThanOperator\/cuda_int64",
+          "value_param": "cuda_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 187
+        },
+        {
+          "name": "LessThanOperator\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 187
+        },
+        {
+          "name": "LessThanOperator\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 187
+        },
+        {
+          "name": "LessThanOperator\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 187
+        },
+        {
+          "name": "LessThanOperator\/vulkan_int64",
+          "value_param": "vulkan_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 187
+        },
+        {
+          "name": "LessThanOperator\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 187
+        },
+        {
+          "name": "LessThanOperator\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 187
+        },
+        {
+          "name": "LessThanOperator\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 187
+        },
+        {
+          "name": "LessThanOperator\/oneapi_int64",
+          "value_param": "oneapi_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 187
+        },
+        {
+          "name": "LessThanOperator_False\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 195
+        },
+        {
+          "name": "LessThanOperator_False\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 195
+        },
+        {
+          "name": "LessThanOperator_False\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 195
+        },
+        {
+          "name": "LessThanOperator_False\/cpu_int64",
+          "value_param": "cpu_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 195
+        },
+        {
+          "name": "LessThanOperator_False\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 195
+        },
+        {
+          "name": "LessThanOperator_False\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 195
+        },
+        {
+          "name": "LessThanOperator_False\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 195
+        },
+        {
+          "name": "LessThanOperator_False\/cuda_int64",
+          "value_param": "cuda_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 195
+        },
+        {
+          "name": "LessThanOperator_False\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 195
+        },
+        {
+          "name": "LessThanOperator_False\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 195
+        },
+        {
+          "name": "LessThanOperator_False\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 195
+        },
+        {
+          "name": "LessThanOperator_False\/vulkan_int64",
+          "value_param": "vulkan_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 195
+        },
+        {
+          "name": "LessThanOperator_False\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 195
+        },
+        {
+          "name": "LessThanOperator_False\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 195
+        },
+        {
+          "name": "LessThanOperator_False\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 195
+        },
+        {
+          "name": "LessThanOperator_False\/oneapi_int64",
+          "value_param": "oneapi_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 195
+        },
+        {
+          "name": "LessEqualOperator_Equal\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 203
+        },
+        {
+          "name": "LessEqualOperator_Equal\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 203
+        },
+        {
+          "name": "LessEqualOperator_Equal\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 203
+        },
+        {
+          "name": "LessEqualOperator_Equal\/cpu_int64",
+          "value_param": "cpu_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 203
+        },
+        {
+          "name": "LessEqualOperator_Equal\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 203
+        },
+        {
+          "name": "LessEqualOperator_Equal\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 203
+        },
+        {
+          "name": "LessEqualOperator_Equal\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 203
+        },
+        {
+          "name": "LessEqualOperator_Equal\/cuda_int64",
+          "value_param": "cuda_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 203
+        },
+        {
+          "name": "LessEqualOperator_Equal\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 203
+        },
+        {
+          "name": "LessEqualOperator_Equal\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 203
+        },
+        {
+          "name": "LessEqualOperator_Equal\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 203
+        },
+        {
+          "name": "LessEqualOperator_Equal\/vulkan_int64",
+          "value_param": "vulkan_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 203
+        },
+        {
+          "name": "LessEqualOperator_Equal\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 203
+        },
+        {
+          "name": "LessEqualOperator_Equal\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 203
+        },
+        {
+          "name": "LessEqualOperator_Equal\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 203
+        },
+        {
+          "name": "LessEqualOperator_Equal\/oneapi_int64",
+          "value_param": "oneapi_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 203
+        },
+        {
+          "name": "LessEqualOperator_Less\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 211
+        },
+        {
+          "name": "LessEqualOperator_Less\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 211
+        },
+        {
+          "name": "LessEqualOperator_Less\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 211
+        },
+        {
+          "name": "LessEqualOperator_Less\/cpu_int64",
+          "value_param": "cpu_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 211
+        },
+        {
+          "name": "LessEqualOperator_Less\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 211
+        },
+        {
+          "name": "LessEqualOperator_Less\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 211
+        },
+        {
+          "name": "LessEqualOperator_Less\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 211
+        },
+        {
+          "name": "LessEqualOperator_Less\/cuda_int64",
+          "value_param": "cuda_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 211
+        },
+        {
+          "name": "LessEqualOperator_Less\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 211
+        },
+        {
+          "name": "LessEqualOperator_Less\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 211
+        },
+        {
+          "name": "LessEqualOperator_Less\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 211
+        },
+        {
+          "name": "LessEqualOperator_Less\/vulkan_int64",
+          "value_param": "vulkan_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 211
+        },
+        {
+          "name": "LessEqualOperator_Less\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 211
+        },
+        {
+          "name": "LessEqualOperator_Less\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 211
+        },
+        {
+          "name": "LessEqualOperator_Less\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 211
+        },
+        {
+          "name": "LessEqualOperator_Less\/oneapi_int64",
+          "value_param": "oneapi_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 211
+        },
+        {
+          "name": "GreaterThanOperator\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 219
+        },
+        {
+          "name": "GreaterThanOperator\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 219
+        },
+        {
+          "name": "GreaterThanOperator\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 219
+        },
+        {
+          "name": "GreaterThanOperator\/cpu_int64",
+          "value_param": "cpu_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 219
+        },
+        {
+          "name": "GreaterThanOperator\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 219
+        },
+        {
+          "name": "GreaterThanOperator\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 219
+        },
+        {
+          "name": "GreaterThanOperator\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 219
+        },
+        {
+          "name": "GreaterThanOperator\/cuda_int64",
+          "value_param": "cuda_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 219
+        },
+        {
+          "name": "GreaterThanOperator\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 219
+        },
+        {
+          "name": "GreaterThanOperator\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 219
+        },
+        {
+          "name": "GreaterThanOperator\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 219
+        },
+        {
+          "name": "GreaterThanOperator\/vulkan_int64",
+          "value_param": "vulkan_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 219
+        },
+        {
+          "name": "GreaterThanOperator\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 219
+        },
+        {
+          "name": "GreaterThanOperator\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 219
+        },
+        {
+          "name": "GreaterThanOperator\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 219
+        },
+        {
+          "name": "GreaterThanOperator\/oneapi_int64",
+          "value_param": "oneapi_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 219
+        },
+        {
+          "name": "GreaterThanOperator_False\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 227
+        },
+        {
+          "name": "GreaterThanOperator_False\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 227
+        },
+        {
+          "name": "GreaterThanOperator_False\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 227
+        },
+        {
+          "name": "GreaterThanOperator_False\/cpu_int64",
+          "value_param": "cpu_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 227
+        },
+        {
+          "name": "GreaterThanOperator_False\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 227
+        },
+        {
+          "name": "GreaterThanOperator_False\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 227
+        },
+        {
+          "name": "GreaterThanOperator_False\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 227
+        },
+        {
+          "name": "GreaterThanOperator_False\/cuda_int64",
+          "value_param": "cuda_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 227
+        },
+        {
+          "name": "GreaterThanOperator_False\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 227
+        },
+        {
+          "name": "GreaterThanOperator_False\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 227
+        },
+        {
+          "name": "GreaterThanOperator_False\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 227
+        },
+        {
+          "name": "GreaterThanOperator_False\/vulkan_int64",
+          "value_param": "vulkan_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 227
+        },
+        {
+          "name": "GreaterThanOperator_False\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 227
+        },
+        {
+          "name": "GreaterThanOperator_False\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 227
+        },
+        {
+          "name": "GreaterThanOperator_False\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 227
+        },
+        {
+          "name": "GreaterThanOperator_False\/oneapi_int64",
+          "value_param": "oneapi_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 227
+        },
+        {
+          "name": "GreaterEqualOperator_Equal\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 235
+        },
+        {
+          "name": "GreaterEqualOperator_Equal\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 235
+        },
+        {
+          "name": "GreaterEqualOperator_Equal\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 235
+        },
+        {
+          "name": "GreaterEqualOperator_Equal\/cpu_int64",
+          "value_param": "cpu_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 235
+        },
+        {
+          "name": "GreaterEqualOperator_Equal\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 235
+        },
+        {
+          "name": "GreaterEqualOperator_Equal\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 235
+        },
+        {
+          "name": "GreaterEqualOperator_Equal\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 235
+        },
+        {
+          "name": "GreaterEqualOperator_Equal\/cuda_int64",
+          "value_param": "cuda_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 235
+        },
+        {
+          "name": "GreaterEqualOperator_Equal\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 235
+        },
+        {
+          "name": "GreaterEqualOperator_Equal\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 235
+        },
+        {
+          "name": "GreaterEqualOperator_Equal\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 235
+        },
+        {
+          "name": "GreaterEqualOperator_Equal\/vulkan_int64",
+          "value_param": "vulkan_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 235
+        },
+        {
+          "name": "GreaterEqualOperator_Equal\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 235
+        },
+        {
+          "name": "GreaterEqualOperator_Equal\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 235
+        },
+        {
+          "name": "GreaterEqualOperator_Equal\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 235
+        },
+        {
+          "name": "GreaterEqualOperator_Equal\/oneapi_int64",
+          "value_param": "oneapi_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 235
+        },
+        {
+          "name": "GreaterEqualOperator_Greater\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 243
+        },
+        {
+          "name": "GreaterEqualOperator_Greater\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 243
+        },
+        {
+          "name": "GreaterEqualOperator_Greater\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 243
+        },
+        {
+          "name": "GreaterEqualOperator_Greater\/cpu_int64",
+          "value_param": "cpu_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 243
+        },
+        {
+          "name": "GreaterEqualOperator_Greater\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 243
+        },
+        {
+          "name": "GreaterEqualOperator_Greater\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 243
+        },
+        {
+          "name": "GreaterEqualOperator_Greater\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 243
+        },
+        {
+          "name": "GreaterEqualOperator_Greater\/cuda_int64",
+          "value_param": "cuda_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 243
+        },
+        {
+          "name": "GreaterEqualOperator_Greater\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 243
+        },
+        {
+          "name": "GreaterEqualOperator_Greater\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 243
+        },
+        {
+          "name": "GreaterEqualOperator_Greater\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 243
+        },
+        {
+          "name": "GreaterEqualOperator_Greater\/vulkan_int64",
+          "value_param": "vulkan_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 243
+        },
+        {
+          "name": "GreaterEqualOperator_Greater\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 243
+        },
+        {
+          "name": "GreaterEqualOperator_Greater\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 243
+        },
+        {
+          "name": "GreaterEqualOperator_Greater\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 243
+        },
+        {
+          "name": "GreaterEqualOperator_Greater\/oneapi_int64",
+          "value_param": "oneapi_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 243
+        }
+      ]
+    },
+    {
+      "name": "FloatEdgeCases\/ComparisonOpsFloatEdgeCases",
+      "tests": 48,
+      "testsuite": [
+        {
+          "name": "NaN_NotEqualToItself\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 257
+        },
+        {
+          "name": "NaN_NotEqualToItself\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 257
+        },
+        {
+          "name": "NaN_NotEqualToItself\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 257
+        },
+        {
+          "name": "NaN_NotEqualToItself\/cpu_int64",
+          "value_param": "cpu_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 257
+        },
+        {
+          "name": "NaN_NotEqualToItself\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 257
+        },
+        {
+          "name": "NaN_NotEqualToItself\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 257
+        },
+        {
+          "name": "NaN_NotEqualToItself\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 257
+        },
+        {
+          "name": "NaN_NotEqualToItself\/cuda_int64",
+          "value_param": "cuda_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 257
+        },
+        {
+          "name": "NaN_NotEqualToItself\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 257
+        },
+        {
+          "name": "NaN_NotEqualToItself\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 257
+        },
+        {
+          "name": "NaN_NotEqualToItself\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 257
+        },
+        {
+          "name": "NaN_NotEqualToItself\/vulkan_int64",
+          "value_param": "vulkan_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 257
+        },
+        {
+          "name": "NaN_NotEqualToItself\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 257
+        },
+        {
+          "name": "NaN_NotEqualToItself\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 257
+        },
+        {
+          "name": "NaN_NotEqualToItself\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 257
+        },
+        {
+          "name": "NaN_NotEqualToItself\/oneapi_int64",
+          "value_param": "oneapi_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 257
+        },
+        {
+          "name": "NaN_ComparisonAlwaysFalse\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 287
+        },
+        {
+          "name": "NaN_ComparisonAlwaysFalse\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 287
+        },
+        {
+          "name": "NaN_ComparisonAlwaysFalse\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 287
+        },
+        {
+          "name": "NaN_ComparisonAlwaysFalse\/cpu_int64",
+          "value_param": "cpu_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 287
+        },
+        {
+          "name": "NaN_ComparisonAlwaysFalse\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 287
+        },
+        {
+          "name": "NaN_ComparisonAlwaysFalse\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 287
+        },
+        {
+          "name": "NaN_ComparisonAlwaysFalse\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 287
+        },
+        {
+          "name": "NaN_ComparisonAlwaysFalse\/cuda_int64",
+          "value_param": "cuda_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 287
+        },
+        {
+          "name": "NaN_ComparisonAlwaysFalse\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 287
+        },
+        {
+          "name": "NaN_ComparisonAlwaysFalse\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 287
+        },
+        {
+          "name": "NaN_ComparisonAlwaysFalse\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 287
+        },
+        {
+          "name": "NaN_ComparisonAlwaysFalse\/vulkan_int64",
+          "value_param": "vulkan_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 287
+        },
+        {
+          "name": "NaN_ComparisonAlwaysFalse\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 287
+        },
+        {
+          "name": "NaN_ComparisonAlwaysFalse\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 287
+        },
+        {
+          "name": "NaN_ComparisonAlwaysFalse\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 287
+        },
+        {
+          "name": "NaN_ComparisonAlwaysFalse\/oneapi_int64",
+          "value_param": "oneapi_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 287
+        },
+        {
+          "name": "Infinity_Comparisons\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 325
+        },
+        {
+          "name": "Infinity_Comparisons\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 325
+        },
+        {
+          "name": "Infinity_Comparisons\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 325
+        },
+        {
+          "name": "Infinity_Comparisons\/cpu_int64",
+          "value_param": "cpu_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 325
+        },
+        {
+          "name": "Infinity_Comparisons\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 325
+        },
+        {
+          "name": "Infinity_Comparisons\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 325
+        },
+        {
+          "name": "Infinity_Comparisons\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 325
+        },
+        {
+          "name": "Infinity_Comparisons\/cuda_int64",
+          "value_param": "cuda_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 325
+        },
+        {
+          "name": "Infinity_Comparisons\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 325
+        },
+        {
+          "name": "Infinity_Comparisons\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 325
+        },
+        {
+          "name": "Infinity_Comparisons\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 325
+        },
+        {
+          "name": "Infinity_Comparisons\/vulkan_int64",
+          "value_param": "vulkan_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 325
+        },
+        {
+          "name": "Infinity_Comparisons\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 325
+        },
+        {
+          "name": "Infinity_Comparisons\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 325
+        },
+        {
+          "name": "Infinity_Comparisons\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 325
+        },
+        {
+          "name": "Infinity_Comparisons\/oneapi_int64",
+          "value_param": "oneapi_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 325
+        }
+      ]
+    },
+    {
+      "name": "IntEdgeCases\/ComparisonOpsIntEdgeCases",
+      "tests": 48,
+      "testsuite": [
+        {
+          "name": "MaxValue_Comparisons\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 376
+        },
+        {
+          "name": "MaxValue_Comparisons\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 376
+        },
+        {
+          "name": "MaxValue_Comparisons\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 376
+        },
+        {
+          "name": "MaxValue_Comparisons\/cpu_int64",
+          "value_param": "cpu_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 376
+        },
+        {
+          "name": "MaxValue_Comparisons\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 376
+        },
+        {
+          "name": "MaxValue_Comparisons\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 376
+        },
+        {
+          "name": "MaxValue_Comparisons\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 376
+        },
+        {
+          "name": "MaxValue_Comparisons\/cuda_int64",
+          "value_param": "cuda_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 376
+        },
+        {
+          "name": "MaxValue_Comparisons\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 376
+        },
+        {
+          "name": "MaxValue_Comparisons\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 376
+        },
+        {
+          "name": "MaxValue_Comparisons\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 376
+        },
+        {
+          "name": "MaxValue_Comparisons\/vulkan_int64",
+          "value_param": "vulkan_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 376
+        },
+        {
+          "name": "MaxValue_Comparisons\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 376
+        },
+        {
+          "name": "MaxValue_Comparisons\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 376
+        },
+        {
+          "name": "MaxValue_Comparisons\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 376
+        },
+        {
+          "name": "MaxValue_Comparisons\/oneapi_int64",
+          "value_param": "oneapi_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 376
+        },
+        {
+          "name": "MinValue_Comparisons\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 411
+        },
+        {
+          "name": "MinValue_Comparisons\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 411
+        },
+        {
+          "name": "MinValue_Comparisons\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 411
+        },
+        {
+          "name": "MinValue_Comparisons\/cpu_int64",
+          "value_param": "cpu_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 411
+        },
+        {
+          "name": "MinValue_Comparisons\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 411
+        },
+        {
+          "name": "MinValue_Comparisons\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 411
+        },
+        {
+          "name": "MinValue_Comparisons\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 411
+        },
+        {
+          "name": "MinValue_Comparisons\/cuda_int64",
+          "value_param": "cuda_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 411
+        },
+        {
+          "name": "MinValue_Comparisons\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 411
+        },
+        {
+          "name": "MinValue_Comparisons\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 411
+        },
+        {
+          "name": "MinValue_Comparisons\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 411
+        },
+        {
+          "name": "MinValue_Comparisons\/vulkan_int64",
+          "value_param": "vulkan_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 411
+        },
+        {
+          "name": "MinValue_Comparisons\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 411
+        },
+        {
+          "name": "MinValue_Comparisons\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 411
+        },
+        {
+          "name": "MinValue_Comparisons\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 411
+        },
+        {
+          "name": "MinValue_Comparisons\/oneapi_int64",
+          "value_param": "oneapi_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 411
+        },
+        {
+          "name": "Zero_Comparisons\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 446
+        },
+        {
+          "name": "Zero_Comparisons\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 446
+        },
+        {
+          "name": "Zero_Comparisons\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 446
+        },
+        {
+          "name": "Zero_Comparisons\/cpu_int64",
+          "value_param": "cpu_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 446
+        },
+        {
+          "name": "Zero_Comparisons\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 446
+        },
+        {
+          "name": "Zero_Comparisons\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 446
+        },
+        {
+          "name": "Zero_Comparisons\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 446
+        },
+        {
+          "name": "Zero_Comparisons\/cuda_int64",
+          "value_param": "cuda_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 446
+        },
+        {
+          "name": "Zero_Comparisons\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 446
+        },
+        {
+          "name": "Zero_Comparisons\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 446
+        },
+        {
+          "name": "Zero_Comparisons\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 446
+        },
+        {
+          "name": "Zero_Comparisons\/vulkan_int64",
+          "value_param": "vulkan_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 446
+        },
+        {
+          "name": "Zero_Comparisons\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 446
+        },
+        {
+          "name": "Zero_Comparisons\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 446
+        },
+        {
+          "name": "Zero_Comparisons\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 446
+        },
+        {
+          "name": "Zero_Comparisons\/oneapi_int64",
+          "value_param": "oneapi_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 446
+        }
+      ]
+    }
+  ]
+}

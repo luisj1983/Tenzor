@@ -1,0 +1,2172 @@
+{
+  "tests": 360,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "AllBackendsMultiDType\/ShapeOpsMultiDTypeTest",
+      "tests": 360,
+      "testsuite": [
+        {
+          "name": "SqueezeAll\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 145
+        },
+        {
+          "name": "SqueezeAll\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 145
+        },
+        {
+          "name": "SqueezeAll\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 145
+        },
+        {
+          "name": "SqueezeAll\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 145
+        },
+        {
+          "name": "SqueezeAll\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 145
+        },
+        {
+          "name": "SqueezeAll\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 145
+        },
+        {
+          "name": "SqueezeAll\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 145
+        },
+        {
+          "name": "SqueezeAll\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 145
+        },
+        {
+          "name": "SqueezeAll\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 145
+        },
+        {
+          "name": "SqueezeAll\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 145
+        },
+        {
+          "name": "SqueezeAll\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 145
+        },
+        {
+          "name": "SqueezeAll\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 145
+        },
+        {
+          "name": "SqueezeAll\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 145
+        },
+        {
+          "name": "SqueezeAll\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 145
+        },
+        {
+          "name": "SqueezeAll\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 145
+        },
+        {
+          "name": "SqueezeSpecificDim\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 156
+        },
+        {
+          "name": "SqueezeSpecificDim\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 156
+        },
+        {
+          "name": "SqueezeSpecificDim\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 156
+        },
+        {
+          "name": "SqueezeSpecificDim\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 156
+        },
+        {
+          "name": "SqueezeSpecificDim\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 156
+        },
+        {
+          "name": "SqueezeSpecificDim\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 156
+        },
+        {
+          "name": "SqueezeSpecificDim\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 156
+        },
+        {
+          "name": "SqueezeSpecificDim\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 156
+        },
+        {
+          "name": "SqueezeSpecificDim\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 156
+        },
+        {
+          "name": "SqueezeSpecificDim\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 156
+        },
+        {
+          "name": "SqueezeSpecificDim\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 156
+        },
+        {
+          "name": "SqueezeSpecificDim\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 156
+        },
+        {
+          "name": "SqueezeSpecificDim\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 156
+        },
+        {
+          "name": "SqueezeSpecificDim\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 156
+        },
+        {
+          "name": "SqueezeSpecificDim\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 156
+        },
+        {
+          "name": "SqueezeNonSingletonDim\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 167
+        },
+        {
+          "name": "SqueezeNonSingletonDim\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 167
+        },
+        {
+          "name": "SqueezeNonSingletonDim\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 167
+        },
+        {
+          "name": "SqueezeNonSingletonDim\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 167
+        },
+        {
+          "name": "SqueezeNonSingletonDim\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 167
+        },
+        {
+          "name": "SqueezeNonSingletonDim\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 167
+        },
+        {
+          "name": "SqueezeNonSingletonDim\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 167
+        },
+        {
+          "name": "SqueezeNonSingletonDim\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 167
+        },
+        {
+          "name": "SqueezeNonSingletonDim\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 167
+        },
+        {
+          "name": "SqueezeNonSingletonDim\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 167
+        },
+        {
+          "name": "SqueezeNonSingletonDim\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 167
+        },
+        {
+          "name": "SqueezeNonSingletonDim\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 167
+        },
+        {
+          "name": "SqueezeNonSingletonDim\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 167
+        },
+        {
+          "name": "SqueezeNonSingletonDim\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 167
+        },
+        {
+          "name": "SqueezeNonSingletonDim\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 167
+        },
+        {
+          "name": "SqueezeNoSingletonDims\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 178
+        },
+        {
+          "name": "SqueezeNoSingletonDims\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 178
+        },
+        {
+          "name": "SqueezeNoSingletonDims\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 178
+        },
+        {
+          "name": "SqueezeNoSingletonDims\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 178
+        },
+        {
+          "name": "SqueezeNoSingletonDims\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 178
+        },
+        {
+          "name": "SqueezeNoSingletonDims\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 178
+        },
+        {
+          "name": "SqueezeNoSingletonDims\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 178
+        },
+        {
+          "name": "SqueezeNoSingletonDims\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 178
+        },
+        {
+          "name": "SqueezeNoSingletonDims\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 178
+        },
+        {
+          "name": "SqueezeNoSingletonDims\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 178
+        },
+        {
+          "name": "SqueezeNoSingletonDims\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 178
+        },
+        {
+          "name": "SqueezeNoSingletonDims\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 178
+        },
+        {
+          "name": "SqueezeNoSingletonDims\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 178
+        },
+        {
+          "name": "SqueezeNoSingletonDims\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 178
+        },
+        {
+          "name": "SqueezeNoSingletonDims\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 178
+        },
+        {
+          "name": "SqueezePreservesData\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 190
+        },
+        {
+          "name": "SqueezePreservesData\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 190
+        },
+        {
+          "name": "SqueezePreservesData\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 190
+        },
+        {
+          "name": "SqueezePreservesData\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 190
+        },
+        {
+          "name": "SqueezePreservesData\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 190
+        },
+        {
+          "name": "SqueezePreservesData\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 190
+        },
+        {
+          "name": "SqueezePreservesData\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 190
+        },
+        {
+          "name": "SqueezePreservesData\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 190
+        },
+        {
+          "name": "SqueezePreservesData\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 190
+        },
+        {
+          "name": "SqueezePreservesData\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 190
+        },
+        {
+          "name": "SqueezePreservesData\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 190
+        },
+        {
+          "name": "SqueezePreservesData\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 190
+        },
+        {
+          "name": "SqueezePreservesData\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 190
+        },
+        {
+          "name": "SqueezePreservesData\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 190
+        },
+        {
+          "name": "SqueezePreservesData\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 190
+        },
+        {
+          "name": "UnsqueezeBeginning\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 203
+        },
+        {
+          "name": "UnsqueezeBeginning\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 203
+        },
+        {
+          "name": "UnsqueezeBeginning\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 203
+        },
+        {
+          "name": "UnsqueezeBeginning\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 203
+        },
+        {
+          "name": "UnsqueezeBeginning\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 203
+        },
+        {
+          "name": "UnsqueezeBeginning\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 203
+        },
+        {
+          "name": "UnsqueezeBeginning\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 203
+        },
+        {
+          "name": "UnsqueezeBeginning\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 203
+        },
+        {
+          "name": "UnsqueezeBeginning\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 203
+        },
+        {
+          "name": "UnsqueezeBeginning\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 203
+        },
+        {
+          "name": "UnsqueezeBeginning\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 203
+        },
+        {
+          "name": "UnsqueezeBeginning\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 203
+        },
+        {
+          "name": "UnsqueezeBeginning\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 203
+        },
+        {
+          "name": "UnsqueezeBeginning\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 203
+        },
+        {
+          "name": "UnsqueezeBeginning\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 203
+        },
+        {
+          "name": "UnsqueezeMiddle\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 216
+        },
+        {
+          "name": "UnsqueezeMiddle\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 216
+        },
+        {
+          "name": "UnsqueezeMiddle\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 216
+        },
+        {
+          "name": "UnsqueezeMiddle\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 216
+        },
+        {
+          "name": "UnsqueezeMiddle\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 216
+        },
+        {
+          "name": "UnsqueezeMiddle\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 216
+        },
+        {
+          "name": "UnsqueezeMiddle\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 216
+        },
+        {
+          "name": "UnsqueezeMiddle\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 216
+        },
+        {
+          "name": "UnsqueezeMiddle\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 216
+        },
+        {
+          "name": "UnsqueezeMiddle\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 216
+        },
+        {
+          "name": "UnsqueezeMiddle\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 216
+        },
+        {
+          "name": "UnsqueezeMiddle\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 216
+        },
+        {
+          "name": "UnsqueezeMiddle\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 216
+        },
+        {
+          "name": "UnsqueezeMiddle\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 216
+        },
+        {
+          "name": "UnsqueezeMiddle\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 216
+        },
+        {
+          "name": "UnsqueezeEnd\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 228
+        },
+        {
+          "name": "UnsqueezeEnd\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 228
+        },
+        {
+          "name": "UnsqueezeEnd\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 228
+        },
+        {
+          "name": "UnsqueezeEnd\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 228
+        },
+        {
+          "name": "UnsqueezeEnd\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 228
+        },
+        {
+          "name": "UnsqueezeEnd\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 228
+        },
+        {
+          "name": "UnsqueezeEnd\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 228
+        },
+        {
+          "name": "UnsqueezeEnd\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 228
+        },
+        {
+          "name": "UnsqueezeEnd\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 228
+        },
+        {
+          "name": "UnsqueezeEnd\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 228
+        },
+        {
+          "name": "UnsqueezeEnd\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 228
+        },
+        {
+          "name": "UnsqueezeEnd\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 228
+        },
+        {
+          "name": "UnsqueezeEnd\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 228
+        },
+        {
+          "name": "UnsqueezeEnd\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 228
+        },
+        {
+          "name": "UnsqueezeEnd\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 228
+        },
+        {
+          "name": "UnsqueezeNegativeDim\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 239
+        },
+        {
+          "name": "UnsqueezeNegativeDim\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 239
+        },
+        {
+          "name": "UnsqueezeNegativeDim\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 239
+        },
+        {
+          "name": "UnsqueezeNegativeDim\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 239
+        },
+        {
+          "name": "UnsqueezeNegativeDim\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 239
+        },
+        {
+          "name": "UnsqueezeNegativeDim\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 239
+        },
+        {
+          "name": "UnsqueezeNegativeDim\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 239
+        },
+        {
+          "name": "UnsqueezeNegativeDim\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 239
+        },
+        {
+          "name": "UnsqueezeNegativeDim\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 239
+        },
+        {
+          "name": "UnsqueezeNegativeDim\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 239
+        },
+        {
+          "name": "UnsqueezeNegativeDim\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 239
+        },
+        {
+          "name": "UnsqueezeNegativeDim\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 239
+        },
+        {
+          "name": "UnsqueezeNegativeDim\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 239
+        },
+        {
+          "name": "UnsqueezeNegativeDim\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 239
+        },
+        {
+          "name": "UnsqueezeNegativeDim\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 239
+        },
+        {
+          "name": "UnsqueezePreservesData\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 251
+        },
+        {
+          "name": "UnsqueezePreservesData\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 251
+        },
+        {
+          "name": "UnsqueezePreservesData\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 251
+        },
+        {
+          "name": "UnsqueezePreservesData\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 251
+        },
+        {
+          "name": "UnsqueezePreservesData\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 251
+        },
+        {
+          "name": "UnsqueezePreservesData\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 251
+        },
+        {
+          "name": "UnsqueezePreservesData\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 251
+        },
+        {
+          "name": "UnsqueezePreservesData\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 251
+        },
+        {
+          "name": "UnsqueezePreservesData\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 251
+        },
+        {
+          "name": "UnsqueezePreservesData\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 251
+        },
+        {
+          "name": "UnsqueezePreservesData\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 251
+        },
+        {
+          "name": "UnsqueezePreservesData\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 251
+        },
+        {
+          "name": "UnsqueezePreservesData\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 251
+        },
+        {
+          "name": "UnsqueezePreservesData\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 251
+        },
+        {
+          "name": "UnsqueezePreservesData\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 251
+        },
+        {
+          "name": "ReshapeBasic\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 264
+        },
+        {
+          "name": "ReshapeBasic\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 264
+        },
+        {
+          "name": "ReshapeBasic\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 264
+        },
+        {
+          "name": "ReshapeBasic\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 264
+        },
+        {
+          "name": "ReshapeBasic\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 264
+        },
+        {
+          "name": "ReshapeBasic\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 264
+        },
+        {
+          "name": "ReshapeBasic\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 264
+        },
+        {
+          "name": "ReshapeBasic\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 264
+        },
+        {
+          "name": "ReshapeBasic\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 264
+        },
+        {
+          "name": "ReshapeBasic\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 264
+        },
+        {
+          "name": "ReshapeBasic\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 264
+        },
+        {
+          "name": "ReshapeBasic\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 264
+        },
+        {
+          "name": "ReshapeBasic\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 264
+        },
+        {
+          "name": "ReshapeBasic\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 264
+        },
+        {
+          "name": "ReshapeBasic\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 264
+        },
+        {
+          "name": "ReshapeToVector\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 275
+        },
+        {
+          "name": "ReshapeToVector\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 275
+        },
+        {
+          "name": "ReshapeToVector\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 275
+        },
+        {
+          "name": "ReshapeToVector\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 275
+        },
+        {
+          "name": "ReshapeToVector\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 275
+        },
+        {
+          "name": "ReshapeToVector\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 275
+        },
+        {
+          "name": "ReshapeToVector\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 275
+        },
+        {
+          "name": "ReshapeToVector\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 275
+        },
+        {
+          "name": "ReshapeToVector\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 275
+        },
+        {
+          "name": "ReshapeToVector\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 275
+        },
+        {
+          "name": "ReshapeToVector\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 275
+        },
+        {
+          "name": "ReshapeToVector\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 275
+        },
+        {
+          "name": "ReshapeToVector\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 275
+        },
+        {
+          "name": "ReshapeToVector\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 275
+        },
+        {
+          "name": "ReshapeToVector\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 275
+        },
+        {
+          "name": "ReshapeInferDimension\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 284
+        },
+        {
+          "name": "ReshapeInferDimension\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 284
+        },
+        {
+          "name": "ReshapeInferDimension\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 284
+        },
+        {
+          "name": "ReshapeInferDimension\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 284
+        },
+        {
+          "name": "ReshapeInferDimension\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 284
+        },
+        {
+          "name": "ReshapeInferDimension\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 284
+        },
+        {
+          "name": "ReshapeInferDimension\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 284
+        },
+        {
+          "name": "ReshapeInferDimension\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 284
+        },
+        {
+          "name": "ReshapeInferDimension\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 284
+        },
+        {
+          "name": "ReshapeInferDimension\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 284
+        },
+        {
+          "name": "ReshapeInferDimension\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 284
+        },
+        {
+          "name": "ReshapeInferDimension\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 284
+        },
+        {
+          "name": "ReshapeInferDimension\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 284
+        },
+        {
+          "name": "ReshapeInferDimension\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 284
+        },
+        {
+          "name": "ReshapeInferDimension\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 284
+        },
+        {
+          "name": "ReshapePreservesData\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 294
+        },
+        {
+          "name": "ReshapePreservesData\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 294
+        },
+        {
+          "name": "ReshapePreservesData\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 294
+        },
+        {
+          "name": "ReshapePreservesData\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 294
+        },
+        {
+          "name": "ReshapePreservesData\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 294
+        },
+        {
+          "name": "ReshapePreservesData\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 294
+        },
+        {
+          "name": "ReshapePreservesData\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 294
+        },
+        {
+          "name": "ReshapePreservesData\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 294
+        },
+        {
+          "name": "ReshapePreservesData\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 294
+        },
+        {
+          "name": "ReshapePreservesData\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 294
+        },
+        {
+          "name": "ReshapePreservesData\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 294
+        },
+        {
+          "name": "ReshapePreservesData\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 294
+        },
+        {
+          "name": "ReshapePreservesData\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 294
+        },
+        {
+          "name": "ReshapePreservesData\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 294
+        },
+        {
+          "name": "ReshapePreservesData\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 294
+        },
+        {
+          "name": "Transpose2D\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 308
+        },
+        {
+          "name": "Transpose2D\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 308
+        },
+        {
+          "name": "Transpose2D\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 308
+        },
+        {
+          "name": "Transpose2D\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 308
+        },
+        {
+          "name": "Transpose2D\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 308
+        },
+        {
+          "name": "Transpose2D\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 308
+        },
+        {
+          "name": "Transpose2D\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 308
+        },
+        {
+          "name": "Transpose2D\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 308
+        },
+        {
+          "name": "Transpose2D\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 308
+        },
+        {
+          "name": "Transpose2D\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 308
+        },
+        {
+          "name": "Transpose2D\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 308
+        },
+        {
+          "name": "Transpose2D\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 308
+        },
+        {
+          "name": "Transpose2D\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 308
+        },
+        {
+          "name": "Transpose2D\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 308
+        },
+        {
+          "name": "Transpose2D\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 308
+        },
+        {
+          "name": "TransposeDims\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 318
+        },
+        {
+          "name": "TransposeDims\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 318
+        },
+        {
+          "name": "TransposeDims\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 318
+        },
+        {
+          "name": "TransposeDims\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 318
+        },
+        {
+          "name": "TransposeDims\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 318
+        },
+        {
+          "name": "TransposeDims\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 318
+        },
+        {
+          "name": "TransposeDims\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 318
+        },
+        {
+          "name": "TransposeDims\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 318
+        },
+        {
+          "name": "TransposeDims\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 318
+        },
+        {
+          "name": "TransposeDims\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 318
+        },
+        {
+          "name": "TransposeDims\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 318
+        },
+        {
+          "name": "TransposeDims\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 318
+        },
+        {
+          "name": "TransposeDims\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 318
+        },
+        {
+          "name": "TransposeDims\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 318
+        },
+        {
+          "name": "TransposeDims\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 318
+        },
+        {
+          "name": "TransposeRoundTrip\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 329
+        },
+        {
+          "name": "TransposeRoundTrip\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 329
+        },
+        {
+          "name": "TransposeRoundTrip\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 329
+        },
+        {
+          "name": "TransposeRoundTrip\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 329
+        },
+        {
+          "name": "TransposeRoundTrip\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 329
+        },
+        {
+          "name": "TransposeRoundTrip\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 329
+        },
+        {
+          "name": "TransposeRoundTrip\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 329
+        },
+        {
+          "name": "TransposeRoundTrip\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 329
+        },
+        {
+          "name": "TransposeRoundTrip\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 329
+        },
+        {
+          "name": "TransposeRoundTrip\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 329
+        },
+        {
+          "name": "TransposeRoundTrip\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 329
+        },
+        {
+          "name": "TransposeRoundTrip\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 329
+        },
+        {
+          "name": "TransposeRoundTrip\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 329
+        },
+        {
+          "name": "TransposeRoundTrip\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 329
+        },
+        {
+          "name": "TransposeRoundTrip\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 329
+        },
+        {
+          "name": "PermuteBasic\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 344
+        },
+        {
+          "name": "PermuteBasic\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 344
+        },
+        {
+          "name": "PermuteBasic\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 344
+        },
+        {
+          "name": "PermuteBasic\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 344
+        },
+        {
+          "name": "PermuteBasic\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 344
+        },
+        {
+          "name": "PermuteBasic\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 344
+        },
+        {
+          "name": "PermuteBasic\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 344
+        },
+        {
+          "name": "PermuteBasic\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 344
+        },
+        {
+          "name": "PermuteBasic\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 344
+        },
+        {
+          "name": "PermuteBasic\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 344
+        },
+        {
+          "name": "PermuteBasic\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 344
+        },
+        {
+          "name": "PermuteBasic\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 344
+        },
+        {
+          "name": "PermuteBasic\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 344
+        },
+        {
+          "name": "PermuteBasic\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 344
+        },
+        {
+          "name": "PermuteBasic\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 344
+        },
+        {
+          "name": "PermuteIdentity\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 355
+        },
+        {
+          "name": "PermuteIdentity\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 355
+        },
+        {
+          "name": "PermuteIdentity\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 355
+        },
+        {
+          "name": "PermuteIdentity\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 355
+        },
+        {
+          "name": "PermuteIdentity\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 355
+        },
+        {
+          "name": "PermuteIdentity\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 355
+        },
+        {
+          "name": "PermuteIdentity\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 355
+        },
+        {
+          "name": "PermuteIdentity\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 355
+        },
+        {
+          "name": "PermuteIdentity\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 355
+        },
+        {
+          "name": "PermuteIdentity\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 355
+        },
+        {
+          "name": "PermuteIdentity\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 355
+        },
+        {
+          "name": "PermuteIdentity\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 355
+        },
+        {
+          "name": "PermuteIdentity\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 355
+        },
+        {
+          "name": "PermuteIdentity\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 355
+        },
+        {
+          "name": "PermuteIdentity\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 355
+        },
+        {
+          "name": "PermuteReverse\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 365
+        },
+        {
+          "name": "PermuteReverse\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 365
+        },
+        {
+          "name": "PermuteReverse\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 365
+        },
+        {
+          "name": "PermuteReverse\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 365
+        },
+        {
+          "name": "PermuteReverse\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 365
+        },
+        {
+          "name": "PermuteReverse\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 365
+        },
+        {
+          "name": "PermuteReverse\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 365
+        },
+        {
+          "name": "PermuteReverse\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 365
+        },
+        {
+          "name": "PermuteReverse\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 365
+        },
+        {
+          "name": "PermuteReverse\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 365
+        },
+        {
+          "name": "PermuteReverse\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 365
+        },
+        {
+          "name": "PermuteReverse\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 365
+        },
+        {
+          "name": "PermuteReverse\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 365
+        },
+        {
+          "name": "PermuteReverse\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 365
+        },
+        {
+          "name": "PermuteReverse\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 365
+        },
+        {
+          "name": "Permute4D\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 375
+        },
+        {
+          "name": "Permute4D\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 375
+        },
+        {
+          "name": "Permute4D\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 375
+        },
+        {
+          "name": "Permute4D\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 375
+        },
+        {
+          "name": "Permute4D\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 375
+        },
+        {
+          "name": "Permute4D\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 375
+        },
+        {
+          "name": "Permute4D\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 375
+        },
+        {
+          "name": "Permute4D\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 375
+        },
+        {
+          "name": "Permute4D\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 375
+        },
+        {
+          "name": "Permute4D\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 375
+        },
+        {
+          "name": "Permute4D\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 375
+        },
+        {
+          "name": "Permute4D\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 375
+        },
+        {
+          "name": "Permute4D\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 375
+        },
+        {
+          "name": "Permute4D\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 375
+        },
+        {
+          "name": "Permute4D\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 375
+        },
+        {
+          "name": "SqueezeUnsqueezeRoundTrip\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 390
+        },
+        {
+          "name": "SqueezeUnsqueezeRoundTrip\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 390
+        },
+        {
+          "name": "SqueezeUnsqueezeRoundTrip\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 390
+        },
+        {
+          "name": "SqueezeUnsqueezeRoundTrip\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 390
+        },
+        {
+          "name": "SqueezeUnsqueezeRoundTrip\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 390
+        },
+        {
+          "name": "SqueezeUnsqueezeRoundTrip\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 390
+        },
+        {
+          "name": "SqueezeUnsqueezeRoundTrip\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 390
+        },
+        {
+          "name": "SqueezeUnsqueezeRoundTrip\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 390
+        },
+        {
+          "name": "SqueezeUnsqueezeRoundTrip\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 390
+        },
+        {
+          "name": "SqueezeUnsqueezeRoundTrip\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 390
+        },
+        {
+          "name": "SqueezeUnsqueezeRoundTrip\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 390
+        },
+        {
+          "name": "SqueezeUnsqueezeRoundTrip\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 390
+        },
+        {
+          "name": "SqueezeUnsqueezeRoundTrip\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 390
+        },
+        {
+          "name": "SqueezeUnsqueezeRoundTrip\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 390
+        },
+        {
+          "name": "SqueezeUnsqueezeRoundTrip\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 390
+        },
+        {
+          "name": "ReshapeTransposeReshape\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 402
+        },
+        {
+          "name": "ReshapeTransposeReshape\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 402
+        },
+        {
+          "name": "ReshapeTransposeReshape\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 402
+        },
+        {
+          "name": "ReshapeTransposeReshape\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 402
+        },
+        {
+          "name": "ReshapeTransposeReshape\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 402
+        },
+        {
+          "name": "ReshapeTransposeReshape\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 402
+        },
+        {
+          "name": "ReshapeTransposeReshape\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 402
+        },
+        {
+          "name": "ReshapeTransposeReshape\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 402
+        },
+        {
+          "name": "ReshapeTransposeReshape\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 402
+        },
+        {
+          "name": "ReshapeTransposeReshape\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 402
+        },
+        {
+          "name": "ReshapeTransposeReshape\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 402
+        },
+        {
+          "name": "ReshapeTransposeReshape\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 402
+        },
+        {
+          "name": "ReshapeTransposeReshape\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 402
+        },
+        {
+          "name": "ReshapeTransposeReshape\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 402
+        },
+        {
+          "name": "ReshapeTransposeReshape\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 402
+        },
+        {
+          "name": "BatchDimensionHandling\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 414
+        },
+        {
+          "name": "BatchDimensionHandling\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 414
+        },
+        {
+          "name": "BatchDimensionHandling\/cpu_int32",
+          "value_param": "cpu_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 414
+        },
+        {
+          "name": "BatchDimensionHandling\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 414
+        },
+        {
+          "name": "BatchDimensionHandling\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 414
+        },
+        {
+          "name": "BatchDimensionHandling\/cuda_int32",
+          "value_param": "cuda_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 414
+        },
+        {
+          "name": "BatchDimensionHandling\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 414
+        },
+        {
+          "name": "BatchDimensionHandling\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 414
+        },
+        {
+          "name": "BatchDimensionHandling\/vulkan_int32",
+          "value_param": "vulkan_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 414
+        },
+        {
+          "name": "BatchDimensionHandling\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 414
+        },
+        {
+          "name": "BatchDimensionHandling\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 414
+        },
+        {
+          "name": "BatchDimensionHandling\/oneapi_int32",
+          "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 414
+        },
+        {
+          "name": "BatchDimensionHandling\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 414
+        },
+        {
+          "name": "BatchDimensionHandling\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 414
+        },
+        {
+          "name": "BatchDimensionHandling\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/ops\/test_shape_ops_multidtype.cpp",
+          "line": 414
+        }
+      ]
+    }
+  ]
+}

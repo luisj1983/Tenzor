@@ -1,0 +1,2460 @@
+{
+  "tests": 408,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "SwinMultiDType\/SwinMultiDTypeTest",
+      "tests": 408,
+      "testsuite": [
+        {
+          "name": "SwinTinyForwardShape\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 155
+        },
+        {
+          "name": "SwinTinyForwardShape\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 155
+        },
+        {
+          "name": "SwinTinyForwardShape\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 155
+        },
+        {
+          "name": "SwinTinyForwardShape\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 155
+        },
+        {
+          "name": "SwinTinyForwardShape\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 155
+        },
+        {
+          "name": "SwinTinyForwardShape\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 155
+        },
+        {
+          "name": "SwinTinyForwardShape\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 155
+        },
+        {
+          "name": "SwinTinyForwardShape\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 155
+        },
+        {
+          "name": "SwinTinyForwardShape\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 155
+        },
+        {
+          "name": "SwinTinyForwardShape\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 155
+        },
+        {
+          "name": "SwinTinyForwardShape\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 155
+        },
+        {
+          "name": "SwinTinyForwardShape\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 155
+        },
+        {
+          "name": "SwinTinyGradientFlow\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 170
+        },
+        {
+          "name": "SwinTinyGradientFlow\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 170
+        },
+        {
+          "name": "SwinTinyGradientFlow\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 170
+        },
+        {
+          "name": "SwinTinyGradientFlow\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 170
+        },
+        {
+          "name": "SwinTinyGradientFlow\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 170
+        },
+        {
+          "name": "SwinTinyGradientFlow\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 170
+        },
+        {
+          "name": "SwinTinyGradientFlow\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 170
+        },
+        {
+          "name": "SwinTinyGradientFlow\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 170
+        },
+        {
+          "name": "SwinTinyGradientFlow\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 170
+        },
+        {
+          "name": "SwinTinyGradientFlow\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 170
+        },
+        {
+          "name": "SwinTinyGradientFlow\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 170
+        },
+        {
+          "name": "SwinTinyGradientFlow\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 170
+        },
+        {
+          "name": "SwinTinyParameterCount\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 194
+        },
+        {
+          "name": "SwinTinyParameterCount\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 194
+        },
+        {
+          "name": "SwinTinyParameterCount\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 194
+        },
+        {
+          "name": "SwinTinyParameterCount\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 194
+        },
+        {
+          "name": "SwinTinyParameterCount\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 194
+        },
+        {
+          "name": "SwinTinyParameterCount\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 194
+        },
+        {
+          "name": "SwinTinyParameterCount\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 194
+        },
+        {
+          "name": "SwinTinyParameterCount\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 194
+        },
+        {
+          "name": "SwinTinyParameterCount\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 194
+        },
+        {
+          "name": "SwinTinyParameterCount\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 194
+        },
+        {
+          "name": "SwinTinyParameterCount\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 194
+        },
+        {
+          "name": "SwinTinyParameterCount\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 194
+        },
+        {
+          "name": "SwinTinyBatchSizeOne\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 205
+        },
+        {
+          "name": "SwinTinyBatchSizeOne\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 205
+        },
+        {
+          "name": "SwinTinyBatchSizeOne\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 205
+        },
+        {
+          "name": "SwinTinyBatchSizeOne\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 205
+        },
+        {
+          "name": "SwinTinyBatchSizeOne\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 205
+        },
+        {
+          "name": "SwinTinyBatchSizeOne\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 205
+        },
+        {
+          "name": "SwinTinyBatchSizeOne\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 205
+        },
+        {
+          "name": "SwinTinyBatchSizeOne\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 205
+        },
+        {
+          "name": "SwinTinyBatchSizeOne\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 205
+        },
+        {
+          "name": "SwinTinyBatchSizeOne\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 205
+        },
+        {
+          "name": "SwinTinyBatchSizeOne\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 205
+        },
+        {
+          "name": "SwinTinyBatchSizeOne\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 205
+        },
+        {
+          "name": "SwinTinyCustomClasses\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 220
+        },
+        {
+          "name": "SwinTinyCustomClasses\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 220
+        },
+        {
+          "name": "SwinTinyCustomClasses\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 220
+        },
+        {
+          "name": "SwinTinyCustomClasses\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 220
+        },
+        {
+          "name": "SwinTinyCustomClasses\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 220
+        },
+        {
+          "name": "SwinTinyCustomClasses\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 220
+        },
+        {
+          "name": "SwinTinyCustomClasses\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 220
+        },
+        {
+          "name": "SwinTinyCustomClasses\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 220
+        },
+        {
+          "name": "SwinTinyCustomClasses\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 220
+        },
+        {
+          "name": "SwinTinyCustomClasses\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 220
+        },
+        {
+          "name": "SwinTinyCustomClasses\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 220
+        },
+        {
+          "name": "SwinTinyCustomClasses\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 220
+        },
+        {
+          "name": "SwinSmallForwardShape\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 239
+        },
+        {
+          "name": "SwinSmallForwardShape\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 239
+        },
+        {
+          "name": "SwinSmallForwardShape\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 239
+        },
+        {
+          "name": "SwinSmallForwardShape\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 239
+        },
+        {
+          "name": "SwinSmallForwardShape\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 239
+        },
+        {
+          "name": "SwinSmallForwardShape\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 239
+        },
+        {
+          "name": "SwinSmallForwardShape\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 239
+        },
+        {
+          "name": "SwinSmallForwardShape\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 239
+        },
+        {
+          "name": "SwinSmallForwardShape\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 239
+        },
+        {
+          "name": "SwinSmallForwardShape\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 239
+        },
+        {
+          "name": "SwinSmallForwardShape\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 239
+        },
+        {
+          "name": "SwinSmallForwardShape\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 239
+        },
+        {
+          "name": "SwinSmallGradientFlow\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 254
+        },
+        {
+          "name": "SwinSmallGradientFlow\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 254
+        },
+        {
+          "name": "SwinSmallGradientFlow\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 254
+        },
+        {
+          "name": "SwinSmallGradientFlow\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 254
+        },
+        {
+          "name": "SwinSmallGradientFlow\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 254
+        },
+        {
+          "name": "SwinSmallGradientFlow\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 254
+        },
+        {
+          "name": "SwinSmallGradientFlow\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 254
+        },
+        {
+          "name": "SwinSmallGradientFlow\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 254
+        },
+        {
+          "name": "SwinSmallGradientFlow\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 254
+        },
+        {
+          "name": "SwinSmallGradientFlow\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 254
+        },
+        {
+          "name": "SwinSmallGradientFlow\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 254
+        },
+        {
+          "name": "SwinSmallGradientFlow\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 254
+        },
+        {
+          "name": "SwinSmallParameterCount\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 270
+        },
+        {
+          "name": "SwinSmallParameterCount\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 270
+        },
+        {
+          "name": "SwinSmallParameterCount\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 270
+        },
+        {
+          "name": "SwinSmallParameterCount\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 270
+        },
+        {
+          "name": "SwinSmallParameterCount\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 270
+        },
+        {
+          "name": "SwinSmallParameterCount\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 270
+        },
+        {
+          "name": "SwinSmallParameterCount\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 270
+        },
+        {
+          "name": "SwinSmallParameterCount\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 270
+        },
+        {
+          "name": "SwinSmallParameterCount\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 270
+        },
+        {
+          "name": "SwinSmallParameterCount\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 270
+        },
+        {
+          "name": "SwinSmallParameterCount\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 270
+        },
+        {
+          "name": "SwinSmallParameterCount\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 270
+        },
+        {
+          "name": "SwinBaseForwardShape\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 285
+        },
+        {
+          "name": "SwinBaseForwardShape\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 285
+        },
+        {
+          "name": "SwinBaseForwardShape\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 285
+        },
+        {
+          "name": "SwinBaseForwardShape\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 285
+        },
+        {
+          "name": "SwinBaseForwardShape\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 285
+        },
+        {
+          "name": "SwinBaseForwardShape\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 285
+        },
+        {
+          "name": "SwinBaseForwardShape\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 285
+        },
+        {
+          "name": "SwinBaseForwardShape\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 285
+        },
+        {
+          "name": "SwinBaseForwardShape\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 285
+        },
+        {
+          "name": "SwinBaseForwardShape\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 285
+        },
+        {
+          "name": "SwinBaseForwardShape\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 285
+        },
+        {
+          "name": "SwinBaseForwardShape\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 285
+        },
+        {
+          "name": "SwinBaseGradientFlow\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 300
+        },
+        {
+          "name": "SwinBaseGradientFlow\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 300
+        },
+        {
+          "name": "SwinBaseGradientFlow\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 300
+        },
+        {
+          "name": "SwinBaseGradientFlow\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 300
+        },
+        {
+          "name": "SwinBaseGradientFlow\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 300
+        },
+        {
+          "name": "SwinBaseGradientFlow\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 300
+        },
+        {
+          "name": "SwinBaseGradientFlow\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 300
+        },
+        {
+          "name": "SwinBaseGradientFlow\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 300
+        },
+        {
+          "name": "SwinBaseGradientFlow\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 300
+        },
+        {
+          "name": "SwinBaseGradientFlow\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 300
+        },
+        {
+          "name": "SwinBaseGradientFlow\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 300
+        },
+        {
+          "name": "SwinBaseGradientFlow\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 300
+        },
+        {
+          "name": "SwinBaseParameterCount\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 316
+        },
+        {
+          "name": "SwinBaseParameterCount\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 316
+        },
+        {
+          "name": "SwinBaseParameterCount\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 316
+        },
+        {
+          "name": "SwinBaseParameterCount\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 316
+        },
+        {
+          "name": "SwinBaseParameterCount\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 316
+        },
+        {
+          "name": "SwinBaseParameterCount\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 316
+        },
+        {
+          "name": "SwinBaseParameterCount\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 316
+        },
+        {
+          "name": "SwinBaseParameterCount\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 316
+        },
+        {
+          "name": "SwinBaseParameterCount\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 316
+        },
+        {
+          "name": "SwinBaseParameterCount\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 316
+        },
+        {
+          "name": "SwinBaseParameterCount\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 316
+        },
+        {
+          "name": "SwinBaseParameterCount\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 316
+        },
+        {
+          "name": "SwinLargeForwardShape\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 331
+        },
+        {
+          "name": "SwinLargeForwardShape\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 331
+        },
+        {
+          "name": "SwinLargeForwardShape\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 331
+        },
+        {
+          "name": "SwinLargeForwardShape\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 331
+        },
+        {
+          "name": "SwinLargeForwardShape\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 331
+        },
+        {
+          "name": "SwinLargeForwardShape\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 331
+        },
+        {
+          "name": "SwinLargeForwardShape\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 331
+        },
+        {
+          "name": "SwinLargeForwardShape\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 331
+        },
+        {
+          "name": "SwinLargeForwardShape\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 331
+        },
+        {
+          "name": "SwinLargeForwardShape\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 331
+        },
+        {
+          "name": "SwinLargeForwardShape\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 331
+        },
+        {
+          "name": "SwinLargeForwardShape\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 331
+        },
+        {
+          "name": "SwinLargeGradientFlow\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 346
+        },
+        {
+          "name": "SwinLargeGradientFlow\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 346
+        },
+        {
+          "name": "SwinLargeGradientFlow\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 346
+        },
+        {
+          "name": "SwinLargeGradientFlow\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 346
+        },
+        {
+          "name": "SwinLargeGradientFlow\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 346
+        },
+        {
+          "name": "SwinLargeGradientFlow\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 346
+        },
+        {
+          "name": "SwinLargeGradientFlow\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 346
+        },
+        {
+          "name": "SwinLargeGradientFlow\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 346
+        },
+        {
+          "name": "SwinLargeGradientFlow\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 346
+        },
+        {
+          "name": "SwinLargeGradientFlow\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 346
+        },
+        {
+          "name": "SwinLargeGradientFlow\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 346
+        },
+        {
+          "name": "SwinLargeGradientFlow\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 346
+        },
+        {
+          "name": "SwinLargeParameterCount\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 375
+        },
+        {
+          "name": "SwinLargeParameterCount\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 375
+        },
+        {
+          "name": "SwinLargeParameterCount\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 375
+        },
+        {
+          "name": "SwinLargeParameterCount\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 375
+        },
+        {
+          "name": "SwinLargeParameterCount\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 375
+        },
+        {
+          "name": "SwinLargeParameterCount\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 375
+        },
+        {
+          "name": "SwinLargeParameterCount\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 375
+        },
+        {
+          "name": "SwinLargeParameterCount\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 375
+        },
+        {
+          "name": "SwinLargeParameterCount\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 375
+        },
+        {
+          "name": "SwinLargeParameterCount\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 375
+        },
+        {
+          "name": "SwinLargeParameterCount\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 375
+        },
+        {
+          "name": "SwinLargeParameterCount\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 375
+        },
+        {
+          "name": "SwinTinyImageSize384\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 390
+        },
+        {
+          "name": "SwinTinyImageSize384\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 390
+        },
+        {
+          "name": "SwinTinyImageSize384\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 390
+        },
+        {
+          "name": "SwinTinyImageSize384\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 390
+        },
+        {
+          "name": "SwinTinyImageSize384\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 390
+        },
+        {
+          "name": "SwinTinyImageSize384\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 390
+        },
+        {
+          "name": "SwinTinyImageSize384\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 390
+        },
+        {
+          "name": "SwinTinyImageSize384\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 390
+        },
+        {
+          "name": "SwinTinyImageSize384\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 390
+        },
+        {
+          "name": "SwinTinyImageSize384\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 390
+        },
+        {
+          "name": "SwinTinyImageSize384\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 390
+        },
+        {
+          "name": "SwinTinyImageSize384\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 390
+        },
+        {
+          "name": "SwinTinyImageSize448\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 409
+        },
+        {
+          "name": "SwinTinyImageSize448\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 409
+        },
+        {
+          "name": "SwinTinyImageSize448\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 409
+        },
+        {
+          "name": "SwinTinyImageSize448\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 409
+        },
+        {
+          "name": "SwinTinyImageSize448\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 409
+        },
+        {
+          "name": "SwinTinyImageSize448\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 409
+        },
+        {
+          "name": "SwinTinyImageSize448\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 409
+        },
+        {
+          "name": "SwinTinyImageSize448\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 409
+        },
+        {
+          "name": "SwinTinyImageSize448\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 409
+        },
+        {
+          "name": "SwinTinyImageSize448\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 409
+        },
+        {
+          "name": "SwinTinyImageSize448\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 409
+        },
+        {
+          "name": "SwinTinyImageSize448\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 409
+        },
+        {
+          "name": "SwinSmallImageSize448\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 424
+        },
+        {
+          "name": "SwinSmallImageSize448\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 424
+        },
+        {
+          "name": "SwinSmallImageSize448\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 424
+        },
+        {
+          "name": "SwinSmallImageSize448\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 424
+        },
+        {
+          "name": "SwinSmallImageSize448\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 424
+        },
+        {
+          "name": "SwinSmallImageSize448\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 424
+        },
+        {
+          "name": "SwinSmallImageSize448\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 424
+        },
+        {
+          "name": "SwinSmallImageSize448\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 424
+        },
+        {
+          "name": "SwinSmallImageSize448\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 424
+        },
+        {
+          "name": "SwinSmallImageSize448\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 424
+        },
+        {
+          "name": "SwinSmallImageSize448\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 424
+        },
+        {
+          "name": "SwinSmallImageSize448\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 424
+        },
+        {
+          "name": "SwinBaseImageSize560\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 439
+        },
+        {
+          "name": "SwinBaseImageSize560\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 439
+        },
+        {
+          "name": "SwinBaseImageSize560\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 439
+        },
+        {
+          "name": "SwinBaseImageSize560\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 439
+        },
+        {
+          "name": "SwinBaseImageSize560\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 439
+        },
+        {
+          "name": "SwinBaseImageSize560\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 439
+        },
+        {
+          "name": "SwinBaseImageSize560\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 439
+        },
+        {
+          "name": "SwinBaseImageSize560\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 439
+        },
+        {
+          "name": "SwinBaseImageSize560\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 439
+        },
+        {
+          "name": "SwinBaseImageSize560\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 439
+        },
+        {
+          "name": "SwinBaseImageSize560\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 439
+        },
+        {
+          "name": "SwinBaseImageSize560\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 439
+        },
+        {
+          "name": "SwinTinyPatchMergingFeatures\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 461
+        },
+        {
+          "name": "SwinTinyPatchMergingFeatures\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 461
+        },
+        {
+          "name": "SwinTinyPatchMergingFeatures\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 461
+        },
+        {
+          "name": "SwinTinyPatchMergingFeatures\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 461
+        },
+        {
+          "name": "SwinTinyPatchMergingFeatures\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 461
+        },
+        {
+          "name": "SwinTinyPatchMergingFeatures\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 461
+        },
+        {
+          "name": "SwinTinyPatchMergingFeatures\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 461
+        },
+        {
+          "name": "SwinTinyPatchMergingFeatures\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 461
+        },
+        {
+          "name": "SwinTinyPatchMergingFeatures\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 461
+        },
+        {
+          "name": "SwinTinyPatchMergingFeatures\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 461
+        },
+        {
+          "name": "SwinTinyPatchMergingFeatures\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 461
+        },
+        {
+          "name": "SwinTinyPatchMergingFeatures\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 461
+        },
+        {
+          "name": "SwinSmallPatchMergingConsistency\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 480
+        },
+        {
+          "name": "SwinSmallPatchMergingConsistency\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 480
+        },
+        {
+          "name": "SwinSmallPatchMergingConsistency\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 480
+        },
+        {
+          "name": "SwinSmallPatchMergingConsistency\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 480
+        },
+        {
+          "name": "SwinSmallPatchMergingConsistency\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 480
+        },
+        {
+          "name": "SwinSmallPatchMergingConsistency\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 480
+        },
+        {
+          "name": "SwinSmallPatchMergingConsistency\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 480
+        },
+        {
+          "name": "SwinSmallPatchMergingConsistency\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 480
+        },
+        {
+          "name": "SwinSmallPatchMergingConsistency\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 480
+        },
+        {
+          "name": "SwinSmallPatchMergingConsistency\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 480
+        },
+        {
+          "name": "SwinSmallPatchMergingConsistency\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 480
+        },
+        {
+          "name": "SwinSmallPatchMergingConsistency\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 480
+        },
+        {
+          "name": "SwinTinyShiftedWindowGradients\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 506
+        },
+        {
+          "name": "SwinTinyShiftedWindowGradients\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 506
+        },
+        {
+          "name": "SwinTinyShiftedWindowGradients\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 506
+        },
+        {
+          "name": "SwinTinyShiftedWindowGradients\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 506
+        },
+        {
+          "name": "SwinTinyShiftedWindowGradients\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 506
+        },
+        {
+          "name": "SwinTinyShiftedWindowGradients\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 506
+        },
+        {
+          "name": "SwinTinyShiftedWindowGradients\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 506
+        },
+        {
+          "name": "SwinTinyShiftedWindowGradients\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 506
+        },
+        {
+          "name": "SwinTinyShiftedWindowGradients\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 506
+        },
+        {
+          "name": "SwinTinyShiftedWindowGradients\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 506
+        },
+        {
+          "name": "SwinTinyShiftedWindowGradients\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 506
+        },
+        {
+          "name": "SwinTinyShiftedWindowGradients\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 506
+        },
+        {
+          "name": "SwinBaseShiftedWindowAttention\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 542
+        },
+        {
+          "name": "SwinBaseShiftedWindowAttention\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 542
+        },
+        {
+          "name": "SwinBaseShiftedWindowAttention\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 542
+        },
+        {
+          "name": "SwinBaseShiftedWindowAttention\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 542
+        },
+        {
+          "name": "SwinBaseShiftedWindowAttention\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 542
+        },
+        {
+          "name": "SwinBaseShiftedWindowAttention\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 542
+        },
+        {
+          "name": "SwinBaseShiftedWindowAttention\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 542
+        },
+        {
+          "name": "SwinBaseShiftedWindowAttention\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 542
+        },
+        {
+          "name": "SwinBaseShiftedWindowAttention\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 542
+        },
+        {
+          "name": "SwinBaseShiftedWindowAttention\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 542
+        },
+        {
+          "name": "SwinBaseShiftedWindowAttention\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 542
+        },
+        {
+          "name": "SwinBaseShiftedWindowAttention\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 542
+        },
+        {
+          "name": "SwinTinyHierarchicalFeatures\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 571
+        },
+        {
+          "name": "SwinTinyHierarchicalFeatures\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 571
+        },
+        {
+          "name": "SwinTinyHierarchicalFeatures\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 571
+        },
+        {
+          "name": "SwinTinyHierarchicalFeatures\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 571
+        },
+        {
+          "name": "SwinTinyHierarchicalFeatures\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 571
+        },
+        {
+          "name": "SwinTinyHierarchicalFeatures\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 571
+        },
+        {
+          "name": "SwinTinyHierarchicalFeatures\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 571
+        },
+        {
+          "name": "SwinTinyHierarchicalFeatures\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 571
+        },
+        {
+          "name": "SwinTinyHierarchicalFeatures\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 571
+        },
+        {
+          "name": "SwinTinyHierarchicalFeatures\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 571
+        },
+        {
+          "name": "SwinTinyHierarchicalFeatures\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 571
+        },
+        {
+          "name": "SwinTinyHierarchicalFeatures\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 571
+        },
+        {
+          "name": "SwinSmallHierarchicalGradients\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 591
+        },
+        {
+          "name": "SwinSmallHierarchicalGradients\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 591
+        },
+        {
+          "name": "SwinSmallHierarchicalGradients\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 591
+        },
+        {
+          "name": "SwinSmallHierarchicalGradients\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 591
+        },
+        {
+          "name": "SwinSmallHierarchicalGradients\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 591
+        },
+        {
+          "name": "SwinSmallHierarchicalGradients\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 591
+        },
+        {
+          "name": "SwinSmallHierarchicalGradients\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 591
+        },
+        {
+          "name": "SwinSmallHierarchicalGradients\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 591
+        },
+        {
+          "name": "SwinSmallHierarchicalGradients\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 591
+        },
+        {
+          "name": "SwinSmallHierarchicalGradients\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 591
+        },
+        {
+          "name": "SwinSmallHierarchicalGradients\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 591
+        },
+        {
+          "name": "SwinSmallHierarchicalGradients\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 591
+        },
+        {
+          "name": "SwinBaseHierarchicalFeatureExtraction\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 618
+        },
+        {
+          "name": "SwinBaseHierarchicalFeatureExtraction\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 618
+        },
+        {
+          "name": "SwinBaseHierarchicalFeatureExtraction\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 618
+        },
+        {
+          "name": "SwinBaseHierarchicalFeatureExtraction\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 618
+        },
+        {
+          "name": "SwinBaseHierarchicalFeatureExtraction\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 618
+        },
+        {
+          "name": "SwinBaseHierarchicalFeatureExtraction\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 618
+        },
+        {
+          "name": "SwinBaseHierarchicalFeatureExtraction\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 618
+        },
+        {
+          "name": "SwinBaseHierarchicalFeatureExtraction\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 618
+        },
+        {
+          "name": "SwinBaseHierarchicalFeatureExtraction\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 618
+        },
+        {
+          "name": "SwinBaseHierarchicalFeatureExtraction\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 618
+        },
+        {
+          "name": "SwinBaseHierarchicalFeatureExtraction\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 618
+        },
+        {
+          "name": "SwinBaseHierarchicalFeatureExtraction\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 618
+        },
+        {
+          "name": "SwinLargeHierarchicalMultiScale\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 647
+        },
+        {
+          "name": "SwinLargeHierarchicalMultiScale\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 647
+        },
+        {
+          "name": "SwinLargeHierarchicalMultiScale\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 647
+        },
+        {
+          "name": "SwinLargeHierarchicalMultiScale\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 647
+        },
+        {
+          "name": "SwinLargeHierarchicalMultiScale\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 647
+        },
+        {
+          "name": "SwinLargeHierarchicalMultiScale\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 647
+        },
+        {
+          "name": "SwinLargeHierarchicalMultiScale\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 647
+        },
+        {
+          "name": "SwinLargeHierarchicalMultiScale\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 647
+        },
+        {
+          "name": "SwinLargeHierarchicalMultiScale\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 647
+        },
+        {
+          "name": "SwinLargeHierarchicalMultiScale\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 647
+        },
+        {
+          "name": "SwinLargeHierarchicalMultiScale\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 647
+        },
+        {
+          "name": "SwinLargeHierarchicalMultiScale\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 647
+        },
+        {
+          "name": "VariantParameterProgression\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 668
+        },
+        {
+          "name": "VariantParameterProgression\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 668
+        },
+        {
+          "name": "VariantParameterProgression\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 668
+        },
+        {
+          "name": "VariantParameterProgression\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 668
+        },
+        {
+          "name": "VariantParameterProgression\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 668
+        },
+        {
+          "name": "VariantParameterProgression\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 668
+        },
+        {
+          "name": "VariantParameterProgression\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 668
+        },
+        {
+          "name": "VariantParameterProgression\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 668
+        },
+        {
+          "name": "VariantParameterProgression\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 668
+        },
+        {
+          "name": "VariantParameterProgression\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 668
+        },
+        {
+          "name": "VariantParameterProgression\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 668
+        },
+        {
+          "name": "VariantParameterProgression\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 668
+        },
+        {
+          "name": "VariantOutputConsistency\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 685
+        },
+        {
+          "name": "VariantOutputConsistency\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 685
+        },
+        {
+          "name": "VariantOutputConsistency\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 685
+        },
+        {
+          "name": "VariantOutputConsistency\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 685
+        },
+        {
+          "name": "VariantOutputConsistency\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 685
+        },
+        {
+          "name": "VariantOutputConsistency\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 685
+        },
+        {
+          "name": "VariantOutputConsistency\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 685
+        },
+        {
+          "name": "VariantOutputConsistency\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 685
+        },
+        {
+          "name": "VariantOutputConsistency\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 685
+        },
+        {
+          "name": "VariantOutputConsistency\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 685
+        },
+        {
+          "name": "VariantOutputConsistency\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 685
+        },
+        {
+          "name": "VariantOutputConsistency\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 685
+        },
+        {
+          "name": "SwinTinyMinimalBatch\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 721
+        },
+        {
+          "name": "SwinTinyMinimalBatch\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 721
+        },
+        {
+          "name": "SwinTinyMinimalBatch\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 721
+        },
+        {
+          "name": "SwinTinyMinimalBatch\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 721
+        },
+        {
+          "name": "SwinTinyMinimalBatch\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 721
+        },
+        {
+          "name": "SwinTinyMinimalBatch\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 721
+        },
+        {
+          "name": "SwinTinyMinimalBatch\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 721
+        },
+        {
+          "name": "SwinTinyMinimalBatch\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 721
+        },
+        {
+          "name": "SwinTinyMinimalBatch\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 721
+        },
+        {
+          "name": "SwinTinyMinimalBatch\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 721
+        },
+        {
+          "name": "SwinTinyMinimalBatch\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 721
+        },
+        {
+          "name": "SwinTinyMinimalBatch\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 721
+        },
+        {
+          "name": "SwinSmallLargeBatch\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 735
+        },
+        {
+          "name": "SwinSmallLargeBatch\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 735
+        },
+        {
+          "name": "SwinSmallLargeBatch\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 735
+        },
+        {
+          "name": "SwinSmallLargeBatch\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 735
+        },
+        {
+          "name": "SwinSmallLargeBatch\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 735
+        },
+        {
+          "name": "SwinSmallLargeBatch\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 735
+        },
+        {
+          "name": "SwinSmallLargeBatch\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 735
+        },
+        {
+          "name": "SwinSmallLargeBatch\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 735
+        },
+        {
+          "name": "SwinSmallLargeBatch\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 735
+        },
+        {
+          "name": "SwinSmallLargeBatch\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 735
+        },
+        {
+          "name": "SwinSmallLargeBatch\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 735
+        },
+        {
+          "name": "SwinSmallLargeBatch\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 735
+        },
+        {
+          "name": "SwinBaseNumericalStability\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 749
+        },
+        {
+          "name": "SwinBaseNumericalStability\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 749
+        },
+        {
+          "name": "SwinBaseNumericalStability\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 749
+        },
+        {
+          "name": "SwinBaseNumericalStability\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 749
+        },
+        {
+          "name": "SwinBaseNumericalStability\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 749
+        },
+        {
+          "name": "SwinBaseNumericalStability\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 749
+        },
+        {
+          "name": "SwinBaseNumericalStability\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 749
+        },
+        {
+          "name": "SwinBaseNumericalStability\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 749
+        },
+        {
+          "name": "SwinBaseNumericalStability\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 749
+        },
+        {
+          "name": "SwinBaseNumericalStability\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 749
+        },
+        {
+          "name": "SwinBaseNumericalStability\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 749
+        },
+        {
+          "name": "SwinBaseNumericalStability\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 749
+        },
+        {
+          "name": "SwinLargeTrainEvalModeConsistency\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 779
+        },
+        {
+          "name": "SwinLargeTrainEvalModeConsistency\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 779
+        },
+        {
+          "name": "SwinLargeTrainEvalModeConsistency\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 779
+        },
+        {
+          "name": "SwinLargeTrainEvalModeConsistency\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 779
+        },
+        {
+          "name": "SwinLargeTrainEvalModeConsistency\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 779
+        },
+        {
+          "name": "SwinLargeTrainEvalModeConsistency\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 779
+        },
+        {
+          "name": "SwinLargeTrainEvalModeConsistency\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 779
+        },
+        {
+          "name": "SwinLargeTrainEvalModeConsistency\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 779
+        },
+        {
+          "name": "SwinLargeTrainEvalModeConsistency\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 779
+        },
+        {
+          "name": "SwinLargeTrainEvalModeConsistency\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 779
+        },
+        {
+          "name": "SwinLargeTrainEvalModeConsistency\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 779
+        },
+        {
+          "name": "SwinLargeTrainEvalModeConsistency\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 779
+        },
+        {
+          "name": "SwinTinyDTypePreservation\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 806
+        },
+        {
+          "name": "SwinTinyDTypePreservation\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 806
+        },
+        {
+          "name": "SwinTinyDTypePreservation\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 806
+        },
+        {
+          "name": "SwinTinyDTypePreservation\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 806
+        },
+        {
+          "name": "SwinTinyDTypePreservation\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 806
+        },
+        {
+          "name": "SwinTinyDTypePreservation\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 806
+        },
+        {
+          "name": "SwinTinyDTypePreservation\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 806
+        },
+        {
+          "name": "SwinTinyDTypePreservation\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 806
+        },
+        {
+          "name": "SwinTinyDTypePreservation\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 806
+        },
+        {
+          "name": "SwinTinyDTypePreservation\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 806
+        },
+        {
+          "name": "SwinTinyDTypePreservation\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 806
+        },
+        {
+          "name": "SwinTinyDTypePreservation\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 806
+        },
+        {
+          "name": "SwinSmallGradientDTypeConsistency\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 819
+        },
+        {
+          "name": "SwinSmallGradientDTypeConsistency\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 819
+        },
+        {
+          "name": "SwinSmallGradientDTypeConsistency\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 819
+        },
+        {
+          "name": "SwinSmallGradientDTypeConsistency\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 819
+        },
+        {
+          "name": "SwinSmallGradientDTypeConsistency\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 819
+        },
+        {
+          "name": "SwinSmallGradientDTypeConsistency\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 819
+        },
+        {
+          "name": "SwinSmallGradientDTypeConsistency\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 819
+        },
+        {
+          "name": "SwinSmallGradientDTypeConsistency\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 819
+        },
+        {
+          "name": "SwinSmallGradientDTypeConsistency\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 819
+        },
+        {
+          "name": "SwinSmallGradientDTypeConsistency\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 819
+        },
+        {
+          "name": "SwinSmallGradientDTypeConsistency\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 819
+        },
+        {
+          "name": "SwinSmallGradientDTypeConsistency\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 819
+        }
+      ]
+    }
+  ]
+}

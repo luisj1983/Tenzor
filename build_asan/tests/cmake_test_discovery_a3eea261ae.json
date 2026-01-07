@@ -1,0 +1,618 @@
+{
+  "tests": 100,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "AllBackends\/LSTMCellTestFixture",
+      "tests": 16,
+      "testsuite": [
+        {
+          "name": "BasicForward\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 14
+        },
+        {
+          "name": "BasicForward\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 14
+        },
+        {
+          "name": "BasicForward\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 14
+        },
+        {
+          "name": "BasicForward\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 14
+        },
+        {
+          "name": "NoInitialStates\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 34
+        },
+        {
+          "name": "NoInitialStates\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 34
+        },
+        {
+          "name": "NoInitialStates\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 34
+        },
+        {
+          "name": "NoInitialStates\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 34
+        },
+        {
+          "name": "NoBias\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 52
+        },
+        {
+          "name": "NoBias\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 52
+        },
+        {
+          "name": "NoBias\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 52
+        },
+        {
+          "name": "NoBias\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 52
+        },
+        {
+          "name": "CellStateEvolution\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 65
+        },
+        {
+          "name": "CellStateEvolution\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 65
+        },
+        {
+          "name": "CellStateEvolution\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 65
+        },
+        {
+          "name": "CellStateEvolution\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 65
+        }
+      ]
+    },
+    {
+      "name": "AllBackends\/LSTMTestFixture",
+      "tests": 84,
+      "testsuite": [
+        {
+          "name": "BasicForward\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 89
+        },
+        {
+          "name": "BasicForward\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 89
+        },
+        {
+          "name": "BasicForward\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 89
+        },
+        {
+          "name": "BasicForward\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 89
+        },
+        {
+          "name": "MultiLayer\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 115
+        },
+        {
+          "name": "MultiLayer\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 115
+        },
+        {
+          "name": "MultiLayer\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 115
+        },
+        {
+          "name": "MultiLayer\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 115
+        },
+        {
+          "name": "BatchFirst\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 133
+        },
+        {
+          "name": "BatchFirst\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 133
+        },
+        {
+          "name": "BatchFirst\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 133
+        },
+        {
+          "name": "BatchFirst\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 133
+        },
+        {
+          "name": "Bidirectional\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 147
+        },
+        {
+          "name": "Bidirectional\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 147
+        },
+        {
+          "name": "Bidirectional\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 147
+        },
+        {
+          "name": "Bidirectional\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 147
+        },
+        {
+          "name": "BidirectionalMultiLayer\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 168
+        },
+        {
+          "name": "BidirectionalMultiLayer\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 168
+        },
+        {
+          "name": "BidirectionalMultiLayer\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 168
+        },
+        {
+          "name": "BidirectionalMultiLayer\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 168
+        },
+        {
+          "name": "WithDropout\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 183
+        },
+        {
+          "name": "WithDropout\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 183
+        },
+        {
+          "name": "WithDropout\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 183
+        },
+        {
+          "name": "WithDropout\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 183
+        },
+        {
+          "name": "InitialStates\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 197
+        },
+        {
+          "name": "InitialStates\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 197
+        },
+        {
+          "name": "InitialStates\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 197
+        },
+        {
+          "name": "InitialStates\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 197
+        },
+        {
+          "name": "SequenceLengthVariation\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 214
+        },
+        {
+          "name": "SequenceLengthVariation\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 214
+        },
+        {
+          "name": "SequenceLengthVariation\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 214
+        },
+        {
+          "name": "SequenceLengthVariation\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 214
+        },
+        {
+          "name": "BatchSizeVariation\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 231
+        },
+        {
+          "name": "BatchSizeVariation\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 231
+        },
+        {
+          "name": "BatchSizeVariation\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 231
+        },
+        {
+          "name": "BatchSizeVariation\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 231
+        },
+        {
+          "name": "SingleTimestep\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 248
+        },
+        {
+          "name": "SingleTimestep\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 248
+        },
+        {
+          "name": "SingleTimestep\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 248
+        },
+        {
+          "name": "SingleTimestep\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 248
+        },
+        {
+          "name": "OutputConsistency\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 260
+        },
+        {
+          "name": "OutputConsistency\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 260
+        },
+        {
+          "name": "OutputConsistency\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 260
+        },
+        {
+          "name": "OutputConsistency\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 260
+        },
+        {
+          "name": "GradientFlow\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 276
+        },
+        {
+          "name": "GradientFlow\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 276
+        },
+        {
+          "name": "GradientFlow\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 276
+        },
+        {
+          "name": "GradientFlow\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 276
+        },
+        {
+          "name": "TrainingMode\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 297
+        },
+        {
+          "name": "TrainingMode\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 297
+        },
+        {
+          "name": "TrainingMode\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 297
+        },
+        {
+          "name": "TrainingMode\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 297
+        },
+        {
+          "name": "ParameterCount\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 312
+        },
+        {
+          "name": "ParameterCount\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 312
+        },
+        {
+          "name": "ParameterCount\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 312
+        },
+        {
+          "name": "ParameterCount\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 312
+        },
+        {
+          "name": "LargeHidden\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 328
+        },
+        {
+          "name": "LargeHidden\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 328
+        },
+        {
+          "name": "LargeHidden\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 328
+        },
+        {
+          "name": "LargeHidden\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 328
+        },
+        {
+          "name": "VeryDeepNetwork\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 340
+        },
+        {
+          "name": "VeryDeepNetwork\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 340
+        },
+        {
+          "name": "VeryDeepNetwork\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 340
+        },
+        {
+          "name": "VeryDeepNetwork\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 340
+        },
+        {
+          "name": "LongSequence\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 354
+        },
+        {
+          "name": "LongSequence\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 354
+        },
+        {
+          "name": "LongSequence\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 354
+        },
+        {
+          "name": "LongSequence\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 354
+        },
+        {
+          "name": "InvalidNumLayers\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 366
+        },
+        {
+          "name": "InvalidNumLayers\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 366
+        },
+        {
+          "name": "InvalidNumLayers\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 366
+        },
+        {
+          "name": "InvalidNumLayers\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 366
+        },
+        {
+          "name": "InvalidDropout\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 375
+        },
+        {
+          "name": "InvalidDropout\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 375
+        },
+        {
+          "name": "InvalidDropout\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 375
+        },
+        {
+          "name": "InvalidDropout\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 375
+        },
+        {
+          "name": "CellStateMemory\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 384
+        },
+        {
+          "name": "CellStateMemory\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 384
+        },
+        {
+          "name": "CellStateMemory\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 384
+        },
+        {
+          "name": "CellStateMemory\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 384
+        },
+        {
+          "name": "BatchFirstBidirectional\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 407
+        },
+        {
+          "name": "BatchFirstBidirectional\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 407
+        },
+        {
+          "name": "BatchFirstBidirectional\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 407
+        },
+        {
+          "name": "BatchFirstBidirectional\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 407
+        }
+      ]
+    }
+  ]
+}

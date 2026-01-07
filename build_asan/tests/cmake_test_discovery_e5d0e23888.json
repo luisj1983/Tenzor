@@ -1,0 +1,1116 @@
+{
+  "tests": 184,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "AllBackendsFloatDTypes\/LossMultiDTypeTest",
+      "tests": 184,
+      "testsuite": [
+        {
+          "name": "MSELossBasic\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 168
+        },
+        {
+          "name": "MSELossBasic\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 168
+        },
+        {
+          "name": "MSELossBasic\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 168
+        },
+        {
+          "name": "MSELossBasic\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 168
+        },
+        {
+          "name": "MSELossBasic\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 168
+        },
+        {
+          "name": "MSELossBasic\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 168
+        },
+        {
+          "name": "MSELossBasic\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 168
+        },
+        {
+          "name": "MSELossBasic\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 168
+        },
+        {
+          "name": "MSELossZero\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 180
+        },
+        {
+          "name": "MSELossZero\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 180
+        },
+        {
+          "name": "MSELossZero\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 180
+        },
+        {
+          "name": "MSELossZero\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 180
+        },
+        {
+          "name": "MSELossZero\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 180
+        },
+        {
+          "name": "MSELossZero\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 180
+        },
+        {
+          "name": "MSELossZero\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 180
+        },
+        {
+          "name": "MSELossZero\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 180
+        },
+        {
+          "name": "MSELossSum\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 191
+        },
+        {
+          "name": "MSELossSum\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 191
+        },
+        {
+          "name": "MSELossSum\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 191
+        },
+        {
+          "name": "MSELossSum\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 191
+        },
+        {
+          "name": "MSELossSum\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 191
+        },
+        {
+          "name": "MSELossSum\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 191
+        },
+        {
+          "name": "MSELossSum\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 191
+        },
+        {
+          "name": "MSELossSum\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 191
+        },
+        {
+          "name": "MSELossNone\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 202
+        },
+        {
+          "name": "MSELossNone\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 202
+        },
+        {
+          "name": "MSELossNone\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 202
+        },
+        {
+          "name": "MSELossNone\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 202
+        },
+        {
+          "name": "MSELossNone\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 202
+        },
+        {
+          "name": "MSELossNone\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 202
+        },
+        {
+          "name": "MSELossNone\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 202
+        },
+        {
+          "name": "MSELossNone\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 202
+        },
+        {
+          "name": "MSELossHighPrecision\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 214
+        },
+        {
+          "name": "MSELossHighPrecision\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 214
+        },
+        {
+          "name": "MSELossHighPrecision\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 214
+        },
+        {
+          "name": "MSELossHighPrecision\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 214
+        },
+        {
+          "name": "MSELossHighPrecision\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 214
+        },
+        {
+          "name": "MSELossHighPrecision\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 214
+        },
+        {
+          "name": "MSELossHighPrecision\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 214
+        },
+        {
+          "name": "MSELossHighPrecision\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 214
+        },
+        {
+          "name": "BCELossBasic\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 240
+        },
+        {
+          "name": "BCELossBasic\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 240
+        },
+        {
+          "name": "BCELossBasic\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 240
+        },
+        {
+          "name": "BCELossBasic\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 240
+        },
+        {
+          "name": "BCELossBasic\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 240
+        },
+        {
+          "name": "BCELossBasic\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 240
+        },
+        {
+          "name": "BCELossBasic\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 240
+        },
+        {
+          "name": "BCELossBasic\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 240
+        },
+        {
+          "name": "BCELossPerfectPrediction\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 261
+        },
+        {
+          "name": "BCELossPerfectPrediction\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 261
+        },
+        {
+          "name": "BCELossPerfectPrediction\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 261
+        },
+        {
+          "name": "BCELossPerfectPrediction\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 261
+        },
+        {
+          "name": "BCELossPerfectPrediction\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 261
+        },
+        {
+          "name": "BCELossPerfectPrediction\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 261
+        },
+        {
+          "name": "BCELossPerfectPrediction\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 261
+        },
+        {
+          "name": "BCELossPerfectPrediction\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 261
+        },
+        {
+          "name": "BCELossMixedTargets\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 280
+        },
+        {
+          "name": "BCELossMixedTargets\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 280
+        },
+        {
+          "name": "BCELossMixedTargets\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 280
+        },
+        {
+          "name": "BCELossMixedTargets\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 280
+        },
+        {
+          "name": "BCELossMixedTargets\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 280
+        },
+        {
+          "name": "BCELossMixedTargets\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 280
+        },
+        {
+          "name": "BCELossMixedTargets\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 280
+        },
+        {
+          "name": "BCELossMixedTargets\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 280
+        },
+        {
+          "name": "L1LossBasic\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 302
+        },
+        {
+          "name": "L1LossBasic\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 302
+        },
+        {
+          "name": "L1LossBasic\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 302
+        },
+        {
+          "name": "L1LossBasic\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 302
+        },
+        {
+          "name": "L1LossBasic\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 302
+        },
+        {
+          "name": "L1LossBasic\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 302
+        },
+        {
+          "name": "L1LossBasic\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 302
+        },
+        {
+          "name": "L1LossBasic\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 302
+        },
+        {
+          "name": "L1LossNegativeDiff\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 313
+        },
+        {
+          "name": "L1LossNegativeDiff\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 313
+        },
+        {
+          "name": "L1LossNegativeDiff\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 313
+        },
+        {
+          "name": "L1LossNegativeDiff\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 313
+        },
+        {
+          "name": "L1LossNegativeDiff\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 313
+        },
+        {
+          "name": "L1LossNegativeDiff\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 313
+        },
+        {
+          "name": "L1LossNegativeDiff\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 313
+        },
+        {
+          "name": "L1LossNegativeDiff\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 313
+        },
+        {
+          "name": "L1LossSum\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 324
+        },
+        {
+          "name": "L1LossSum\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 324
+        },
+        {
+          "name": "L1LossSum\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 324
+        },
+        {
+          "name": "L1LossSum\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 324
+        },
+        {
+          "name": "L1LossSum\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 324
+        },
+        {
+          "name": "L1LossSum\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 324
+        },
+        {
+          "name": "L1LossSum\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 324
+        },
+        {
+          "name": "L1LossSum\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 324
+        },
+        {
+          "name": "L1LossZero\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 335
+        },
+        {
+          "name": "L1LossZero\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 335
+        },
+        {
+          "name": "L1LossZero\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 335
+        },
+        {
+          "name": "L1LossZero\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 335
+        },
+        {
+          "name": "L1LossZero\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 335
+        },
+        {
+          "name": "L1LossZero\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 335
+        },
+        {
+          "name": "L1LossZero\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 335
+        },
+        {
+          "name": "L1LossZero\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 335
+        },
+        {
+          "name": "L1LossNone\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 345
+        },
+        {
+          "name": "L1LossNone\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 345
+        },
+        {
+          "name": "L1LossNone\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 345
+        },
+        {
+          "name": "L1LossNone\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 345
+        },
+        {
+          "name": "L1LossNone\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 345
+        },
+        {
+          "name": "L1LossNone\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 345
+        },
+        {
+          "name": "L1LossNone\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 345
+        },
+        {
+          "name": "L1LossNone\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 345
+        },
+        {
+          "name": "CrossEntropyBasic\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 361
+        },
+        {
+          "name": "CrossEntropyBasic\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 361
+        },
+        {
+          "name": "CrossEntropyBasic\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 361
+        },
+        {
+          "name": "CrossEntropyBasic\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 361
+        },
+        {
+          "name": "CrossEntropyBasic\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 361
+        },
+        {
+          "name": "CrossEntropyBasic\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 361
+        },
+        {
+          "name": "CrossEntropyBasic\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 361
+        },
+        {
+          "name": "CrossEntropyBasic\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 361
+        },
+        {
+          "name": "CrossEntropyUniformLogits\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 394
+        },
+        {
+          "name": "CrossEntropyUniformLogits\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 394
+        },
+        {
+          "name": "CrossEntropyUniformLogits\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 394
+        },
+        {
+          "name": "CrossEntropyUniformLogits\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 394
+        },
+        {
+          "name": "CrossEntropyUniformLogits\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 394
+        },
+        {
+          "name": "CrossEntropyUniformLogits\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 394
+        },
+        {
+          "name": "CrossEntropyUniformLogits\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 394
+        },
+        {
+          "name": "CrossEntropyUniformLogits\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 394
+        },
+        {
+          "name": "NLLLossBasic\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 433
+        },
+        {
+          "name": "NLLLossBasic\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 433
+        },
+        {
+          "name": "NLLLossBasic\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 433
+        },
+        {
+          "name": "NLLLossBasic\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 433
+        },
+        {
+          "name": "NLLLossBasic\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 433
+        },
+        {
+          "name": "NLLLossBasic\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 433
+        },
+        {
+          "name": "NLLLossBasic\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 433
+        },
+        {
+          "name": "NLLLossBasic\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 433
+        },
+        {
+          "name": "MSELossClass\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 469
+        },
+        {
+          "name": "MSELossClass\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 469
+        },
+        {
+          "name": "MSELossClass\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 469
+        },
+        {
+          "name": "MSELossClass\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 469
+        },
+        {
+          "name": "MSELossClass\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 469
+        },
+        {
+          "name": "MSELossClass\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 469
+        },
+        {
+          "name": "MSELossClass\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 469
+        },
+        {
+          "name": "MSELossClass\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 469
+        },
+        {
+          "name": "BCELossClass\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 481
+        },
+        {
+          "name": "BCELossClass\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 481
+        },
+        {
+          "name": "BCELossClass\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 481
+        },
+        {
+          "name": "BCELossClass\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 481
+        },
+        {
+          "name": "BCELossClass\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 481
+        },
+        {
+          "name": "BCELossClass\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 481
+        },
+        {
+          "name": "BCELossClass\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 481
+        },
+        {
+          "name": "BCELossClass\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 481
+        },
+        {
+          "name": "L1LossClass\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 501
+        },
+        {
+          "name": "L1LossClass\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 501
+        },
+        {
+          "name": "L1LossClass\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 501
+        },
+        {
+          "name": "L1LossClass\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 501
+        },
+        {
+          "name": "L1LossClass\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 501
+        },
+        {
+          "name": "L1LossClass\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 501
+        },
+        {
+          "name": "L1LossClass\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 501
+        },
+        {
+          "name": "L1LossClass\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 501
+        },
+        {
+          "name": "CrossEntropyLossClass\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 513
+        },
+        {
+          "name": "CrossEntropyLossClass\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 513
+        },
+        {
+          "name": "CrossEntropyLossClass\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 513
+        },
+        {
+          "name": "CrossEntropyLossClass\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 513
+        },
+        {
+          "name": "CrossEntropyLossClass\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 513
+        },
+        {
+          "name": "CrossEntropyLossClass\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 513
+        },
+        {
+          "name": "CrossEntropyLossClass\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 513
+        },
+        {
+          "name": "CrossEntropyLossClass\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 513
+        },
+        {
+          "name": "MSELossGradientRequired\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 549
+        },
+        {
+          "name": "MSELossGradientRequired\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 549
+        },
+        {
+          "name": "MSELossGradientRequired\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 549
+        },
+        {
+          "name": "MSELossGradientRequired\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 549
+        },
+        {
+          "name": "MSELossGradientRequired\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 549
+        },
+        {
+          "name": "MSELossGradientRequired\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 549
+        },
+        {
+          "name": "MSELossGradientRequired\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 549
+        },
+        {
+          "name": "MSELossGradientRequired\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 549
+        },
+        {
+          "name": "BCELossGradientRequired\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 559
+        },
+        {
+          "name": "BCELossGradientRequired\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 559
+        },
+        {
+          "name": "BCELossGradientRequired\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 559
+        },
+        {
+          "name": "BCELossGradientRequired\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 559
+        },
+        {
+          "name": "BCELossGradientRequired\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 559
+        },
+        {
+          "name": "BCELossGradientRequired\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 559
+        },
+        {
+          "name": "BCELossGradientRequired\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 559
+        },
+        {
+          "name": "BCELossGradientRequired\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 559
+        },
+        {
+          "name": "L1LossGradientRequired\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 568
+        },
+        {
+          "name": "L1LossGradientRequired\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 568
+        },
+        {
+          "name": "L1LossGradientRequired\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 568
+        },
+        {
+          "name": "L1LossGradientRequired\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 568
+        },
+        {
+          "name": "L1LossGradientRequired\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 568
+        },
+        {
+          "name": "L1LossGradientRequired\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 568
+        },
+        {
+          "name": "L1LossGradientRequired\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 568
+        },
+        {
+          "name": "L1LossGradientRequired\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 568
+        }
+      ]
+    }
+  ]
+}

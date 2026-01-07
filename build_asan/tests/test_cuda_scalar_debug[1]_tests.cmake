@@ -1,0 +1,5 @@
+add_test([=[CUDAScalarDebug.BasicSum]=]  /home/lee/Projects/Tenzor/bin/test_cuda_scalar_debug [==[--gtest_filter=CUDAScalarDebug.BasicSum]==] --gtest_also_run_disabled_tests)
+set_tests_properties([=[CUDAScalarDebug.BasicSum]=]  PROPERTIES DEF_SOURCE_LINE /home/lee/Projects/Tenzor/tests/test_cuda_scalar_debug.cpp:19 WORKING_DIRECTORY /home/lee/Projects/Tenzor/build_asan/tests SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
+add_test([=[CUDAScalarDebug.MeanReduction]=]  /home/lee/Projects/Tenzor/bin/test_cuda_scalar_debug [==[--gtest_filter=CUDAScalarDebug.MeanReduction]==] --gtest_also_run_disabled_tests)
+set_tests_properties([=[CUDAScalarDebug.MeanReduction]=]  PROPERTIES DEF_SOURCE_LINE /home/lee/Projects/Tenzor/tests/test_cuda_scalar_debug.cpp:63 WORKING_DIRECTORY /home/lee/Projects/Tenzor/build_asan/tests SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
+set(  test_cuda_scalar_debug_TESTS CUDAScalarDebug.BasicSum CUDAScalarDebug.MeanReduction)

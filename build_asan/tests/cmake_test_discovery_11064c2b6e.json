@@ -1,0 +1,402 @@
+{
+  "tests": 64,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "FasterRCNNMultiDTypeTest\/0",
+      "tests": 32,
+      "testsuite": [
+        {
+          "name": "ResNet50BackboneForward",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 62
+        },
+        {
+          "name": "ResNet101BackboneForward",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 73
+        },
+        {
+          "name": "BackboneBatchProcessing",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 84
+        },
+        {
+          "name": "RPNProposalGeneration",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 99
+        },
+        {
+          "name": "RPNMultiScaleAnchors",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 112
+        },
+        {
+          "name": "RPNObjectnessScores",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 128
+        },
+        {
+          "name": "ROIPoolingForward",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 162
+        },
+        {
+          "name": "ROIAlignPrecision",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 173
+        },
+        {
+          "name": "ROIMultipleRegions",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 186
+        },
+        {
+          "name": "DetectionHeadClassification",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 232
+        },
+        {
+          "name": "DetectionHeadBBoxRegression",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 245
+        },
+        {
+          "name": "DetectionHeadMultiClass",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 278
+        },
+        {
+          "name": "SmallImageSize",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 293
+        },
+        {
+          "name": "MediumImageSize",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 303
+        },
+        {
+          "name": "StandardImageSize",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 313
+        },
+        {
+          "name": "LargeImageSize",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 323
+        },
+        {
+          "name": "VeryLargeImageSize",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 333
+        },
+        {
+          "name": "RectangularImageSize",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 343
+        },
+        {
+          "name": "SingleObjectDetection",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 360
+        },
+        {
+          "name": "MultiObjectDetection",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 385
+        },
+        {
+          "name": "DenseObjectDetection",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 419
+        },
+        {
+          "name": "OverlappingObjectDetection",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 452
+        },
+        {
+          "name": "GradientFlowThroughModel",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 495
+        },
+        {
+          "name": "ParameterCount",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 530
+        },
+        {
+          "name": "BatchInference",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 543
+        },
+        {
+          "name": "LargeBatchInference",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 554
+        },
+        {
+          "name": "ResNet50Variant",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 569
+        },
+        {
+          "name": "ResNet101Variant",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 579
+        },
+        {
+          "name": "CustomNumClasses",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 589
+        },
+        {
+          "name": "NoObjectsInImage",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 603
+        },
+        {
+          "name": "VerySmallObjects",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 622
+        },
+        {
+          "name": "VeryLargeObjects",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 655
+        }
+      ]
+    },
+    {
+      "name": "FasterRCNNMultiDTypeTest\/1",
+      "tests": 32,
+      "testsuite": [
+        {
+          "name": "ResNet50BackboneForward",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 62
+        },
+        {
+          "name": "ResNet101BackboneForward",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 73
+        },
+        {
+          "name": "BackboneBatchProcessing",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 84
+        },
+        {
+          "name": "RPNProposalGeneration",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 99
+        },
+        {
+          "name": "RPNMultiScaleAnchors",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 112
+        },
+        {
+          "name": "RPNObjectnessScores",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 128
+        },
+        {
+          "name": "ROIPoolingForward",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 162
+        },
+        {
+          "name": "ROIAlignPrecision",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 173
+        },
+        {
+          "name": "ROIMultipleRegions",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 186
+        },
+        {
+          "name": "DetectionHeadClassification",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 232
+        },
+        {
+          "name": "DetectionHeadBBoxRegression",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 245
+        },
+        {
+          "name": "DetectionHeadMultiClass",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 278
+        },
+        {
+          "name": "SmallImageSize",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 293
+        },
+        {
+          "name": "MediumImageSize",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 303
+        },
+        {
+          "name": "StandardImageSize",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 313
+        },
+        {
+          "name": "LargeImageSize",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 323
+        },
+        {
+          "name": "VeryLargeImageSize",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 333
+        },
+        {
+          "name": "RectangularImageSize",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 343
+        },
+        {
+          "name": "SingleObjectDetection",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 360
+        },
+        {
+          "name": "MultiObjectDetection",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 385
+        },
+        {
+          "name": "DenseObjectDetection",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 419
+        },
+        {
+          "name": "OverlappingObjectDetection",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 452
+        },
+        {
+          "name": "GradientFlowThroughModel",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 495
+        },
+        {
+          "name": "ParameterCount",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 530
+        },
+        {
+          "name": "BatchInference",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 543
+        },
+        {
+          "name": "LargeBatchInference",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 554
+        },
+        {
+          "name": "ResNet50Variant",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 569
+        },
+        {
+          "name": "ResNet101Variant",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 579
+        },
+        {
+          "name": "CustomNumClasses",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 589
+        },
+        {
+          "name": "NoObjectsInImage",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 603
+        },
+        {
+          "name": "VerySmallObjects",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 622
+        },
+        {
+          "name": "VeryLargeObjects",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_faster_rcnn_multidtype.cpp",
+          "line": 655
+        }
+      ]
+    }
+  ]
+}

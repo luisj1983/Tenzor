@@ -13,6 +13,9 @@
 #include <stdexcept>
 #include <limits>
 
+// Include fused attention kernel for CPU optimization
+#include "../../backends/cpu/kernels/fused_attention.hpp"
+
 namespace tenzor {
 namespace nn {
 
@@ -128,6 +131,53 @@ auto MultiheadAttention::scaled_dot_product_attention(
 
     auto k_shape = key.shape();
     int64_t seq_len_k = k_shape[2];
+
+    // Use fused CPU kernel for inference when conditions allow:
+    // - CPU device, Float32, no mask, no dropout (or eval mode)
+    bool can_use_fused = query.device().type == Device::Type::CPU &&
+                         query.dtype() == DType::Float32 &&
+                         attn_mask.shape().size() == 0 &&  // No attention mask
+                         (dropout_p <= 0.0 || !is_training());  // No dropout needed
+
+    if (can_use_fused && !is_training()) {
+        // Fast path: Use fused SDPA kernel
+        int64_t batch_heads = batch_size * num_heads;
+
+        // Make tensors contiguous if needed (permute/transpose creates non-contiguous views)
+        Tensor q_contig = query.tensor().is_contiguous() ? query.tensor() : query.tensor().contiguous();
+        Tensor k_contig = key.tensor().is_contiguous() ? key.tensor() : key.tensor().contiguous();
+        Tensor v_contig = value.tensor().is_contiguous() ? value.tensor() : value.tensor().contiguous();
+
+        // Get raw data pointers
+        const float* Q = q_contig.template data<float>();
+        const float* K = k_contig.template data<float>();
+        const float* V = v_contig.template data<float>();
+
+        // Allocate output tensor
+        std::vector<int64_t> out_shape = {batch_size, num_heads, seq_len_q, head_dim};
+        Tensor output_tensor = empty(out_shape, DType::Float32, query.device());
+        float* output = output_tensor.data<float>();
+
+        // Call fused kernel
+        cpu::attention::scaled_dot_product_attention(
+            Q, K, V, output,
+            batch_heads,
+            seq_len_q, seq_len_k,
+            head_dim, head_dim,  // d_k = d_v = head_dim
+            false  // causal = false (can be extended later)
+        );
+
+        // Return result (no attention weights computed in fused path for efficiency)
+        Variable attended(output_tensor, false);
+
+        // Return empty attention weights in fused path (saves memory/compute)
+        Tensor empty_weights;
+        Variable attn_weights(empty_weights, false);
+
+        return {attended, attn_weights};
+    }
+
+    // Standard path: Use separate autograd operations (required for gradients)
 
     // Compute scaling factor
     double scale = 1.0 / std::sqrt(static_cast<double>(head_dim));

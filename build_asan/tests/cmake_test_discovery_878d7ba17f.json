@@ -1,0 +1,82 @@
+{
+  "tests": 14,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "Conv1dTest",
+      "tests": 14,
+      "testsuite": [
+        {
+          "name": "BasicForward",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_conv1d.cpp",
+          "line": 28
+        },
+        {
+          "name": "WithPadding",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_conv1d.cpp",
+          "line": 49
+        },
+        {
+          "name": "WithStride",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_conv1d.cpp",
+          "line": 66
+        },
+        {
+          "name": "WithDilation",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_conv1d.cpp",
+          "line": 83
+        },
+        {
+          "name": "WithGroups",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_conv1d.cpp",
+          "line": 100
+        },
+        {
+          "name": "BackwardPass",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_conv1d.cpp",
+          "line": 117
+        },
+        {
+          "name": "WithBias",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_conv1d.cpp",
+          "line": 157
+        },
+        {
+          "name": "ParameterShapes",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_conv1d.cpp",
+          "line": 176
+        },
+        {
+          "name": "WithoutBias",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_conv1d.cpp",
+          "line": 202
+        },
+        {
+          "name": "InputValidation",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_conv1d.cpp",
+          "line": 212
+        },
+        {
+          "name": "BatchProcessing",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_conv1d.cpp",
+          "line": 228
+        },
+        {
+          "name": "ParameterCount",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_conv1d.cpp",
+          "line": 244
+        },
+        {
+          "name": "WeightGradient",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_conv1d.cpp",
+          "line": 255
+        },
+        {
+          "name": "SequenceData",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_conv1d.cpp",
+          "line": 280
+        }
+      ]
+    }
+  ]
+}

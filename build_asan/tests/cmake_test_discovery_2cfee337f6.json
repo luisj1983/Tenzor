@@ -1,0 +1,822 @@
+{
+  "tests": 135,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "MultiDTypeSupport\/EfficientNetMultiDTypeTest",
+      "tests": 135,
+      "testsuite": [
+        {
+          "name": "SqueezeExcitationForwardShape\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 47
+        },
+        {
+          "name": "SqueezeExcitationForwardShape\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 47
+        },
+        {
+          "name": "SqueezeExcitationForwardShape\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 47
+        },
+        {
+          "name": "SqueezeExcitationDifferentChannels\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 59
+        },
+        {
+          "name": "SqueezeExcitationDifferentChannels\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 59
+        },
+        {
+          "name": "SqueezeExcitationDifferentChannels\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 59
+        },
+        {
+          "name": "SqueezeExcitationGradientFlow\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 73
+        },
+        {
+          "name": "SqueezeExcitationGradientFlow\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 73
+        },
+        {
+          "name": "SqueezeExcitationGradientFlow\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 73
+        },
+        {
+          "name": "SqueezeExcitationDifferentReductionRatios\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 90
+        },
+        {
+          "name": "SqueezeExcitationDifferentReductionRatios\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 90
+        },
+        {
+          "name": "SqueezeExcitationDifferentReductionRatios\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 90
+        },
+        {
+          "name": "MBConvBlockNoExpansionShape\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 108
+        },
+        {
+          "name": "MBConvBlockNoExpansionShape\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 108
+        },
+        {
+          "name": "MBConvBlockNoExpansionShape\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 108
+        },
+        {
+          "name": "MBConvBlockWithExpansionShape\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 119
+        },
+        {
+          "name": "MBConvBlockWithExpansionShape\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 119
+        },
+        {
+          "name": "MBConvBlockWithExpansionShape\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 119
+        },
+        {
+          "name": "MBConvBlockDifferentExpansionRatios\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 131
+        },
+        {
+          "name": "MBConvBlockDifferentExpansionRatios\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 131
+        },
+        {
+          "name": "MBConvBlockDifferentExpansionRatios\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 131
+        },
+        {
+          "name": "MBConvBlockDifferentKernelSizes\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 144
+        },
+        {
+          "name": "MBConvBlockDifferentKernelSizes\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 144
+        },
+        {
+          "name": "MBConvBlockDifferentKernelSizes\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 144
+        },
+        {
+          "name": "MBConvBlockDifferentStrides\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 157
+        },
+        {
+          "name": "MBConvBlockDifferentStrides\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 157
+        },
+        {
+          "name": "MBConvBlockDifferentStrides\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 157
+        },
+        {
+          "name": "MBConvBlockGradientFlow\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 171
+        },
+        {
+          "name": "MBConvBlockGradientFlow\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 171
+        },
+        {
+          "name": "MBConvBlockGradientFlow\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 171
+        },
+        {
+          "name": "MBConvBlockWithoutSE\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 190
+        },
+        {
+          "name": "MBConvBlockWithoutSE\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 190
+        },
+        {
+          "name": "MBConvBlockWithoutSE\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 190
+        },
+        {
+          "name": "EfficientNetB0ForwardShape\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 205
+        },
+        {
+          "name": "EfficientNetB0ForwardShape\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 205
+        },
+        {
+          "name": "EfficientNetB0ForwardShape\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 205
+        },
+        {
+          "name": "EfficientNetB0GradientFlow\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 215
+        },
+        {
+          "name": "EfficientNetB0GradientFlow\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 215
+        },
+        {
+          "name": "EfficientNetB0GradientFlow\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 215
+        },
+        {
+          "name": "EfficientNetB0SmallBatch\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 231
+        },
+        {
+          "name": "EfficientNetB0SmallBatch\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 231
+        },
+        {
+          "name": "EfficientNetB0SmallBatch\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 231
+        },
+        {
+          "name": "EfficientNetB0CustomClasses\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 242
+        },
+        {
+          "name": "EfficientNetB0CustomClasses\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 242
+        },
+        {
+          "name": "EfficientNetB0CustomClasses\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 242
+        },
+        {
+          "name": "EfficientNetB0DifferentBatchSizes\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 253
+        },
+        {
+          "name": "EfficientNetB0DifferentBatchSizes\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 253
+        },
+        {
+          "name": "EfficientNetB0DifferentBatchSizes\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 253
+        },
+        {
+          "name": "EfficientNetB1ForwardShape\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 270
+        },
+        {
+          "name": "EfficientNetB1ForwardShape\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 270
+        },
+        {
+          "name": "EfficientNetB1ForwardShape\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 270
+        },
+        {
+          "name": "EfficientNetB1GradientFlow\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 280
+        },
+        {
+          "name": "EfficientNetB1GradientFlow\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 280
+        },
+        {
+          "name": "EfficientNetB1GradientFlow\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 280
+        },
+        {
+          "name": "EfficientNetB1CustomResolution\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 293
+        },
+        {
+          "name": "EfficientNetB1CustomResolution\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 293
+        },
+        {
+          "name": "EfficientNetB1CustomResolution\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 293
+        },
+        {
+          "name": "EfficientNetB2ForwardShape\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 310
+        },
+        {
+          "name": "EfficientNetB2ForwardShape\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 310
+        },
+        {
+          "name": "EfficientNetB2ForwardShape\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 310
+        },
+        {
+          "name": "EfficientNetB2GradientFlow\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 320
+        },
+        {
+          "name": "EfficientNetB2GradientFlow\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 320
+        },
+        {
+          "name": "EfficientNetB2GradientFlow\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 320
+        },
+        {
+          "name": "EfficientNetB3ForwardShape\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 337
+        },
+        {
+          "name": "EfficientNetB3ForwardShape\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 337
+        },
+        {
+          "name": "EfficientNetB3ForwardShape\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 337
+        },
+        {
+          "name": "EfficientNetB3BatchSizeOne\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 347
+        },
+        {
+          "name": "EfficientNetB3BatchSizeOne\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 347
+        },
+        {
+          "name": "EfficientNetB3BatchSizeOne\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 347
+        },
+        {
+          "name": "EfficientNetB3GradientFlow\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 358
+        },
+        {
+          "name": "EfficientNetB3GradientFlow\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 358
+        },
+        {
+          "name": "EfficientNetB3GradientFlow\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 358
+        },
+        {
+          "name": "EfficientNetB4ForwardShape\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 375
+        },
+        {
+          "name": "EfficientNetB4ForwardShape\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 375
+        },
+        {
+          "name": "EfficientNetB4ForwardShape\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 375
+        },
+        {
+          "name": "EfficientNetB4CustomClasses\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 385
+        },
+        {
+          "name": "EfficientNetB4CustomClasses\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 385
+        },
+        {
+          "name": "EfficientNetB4CustomClasses\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 385
+        },
+        {
+          "name": "EfficientNetB5ForwardShape\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 399
+        },
+        {
+          "name": "EfficientNetB5ForwardShape\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 399
+        },
+        {
+          "name": "EfficientNetB5ForwardShape\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 399
+        },
+        {
+          "name": "EfficientNetB5GradientFlow\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 409
+        },
+        {
+          "name": "EfficientNetB5GradientFlow\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 409
+        },
+        {
+          "name": "EfficientNetB5GradientFlow\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 409
+        },
+        {
+          "name": "EfficientNetB6ForwardShape\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 426
+        },
+        {
+          "name": "EfficientNetB6ForwardShape\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 426
+        },
+        {
+          "name": "EfficientNetB6ForwardShape\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 426
+        },
+        {
+          "name": "EfficientNetB6CustomClasses\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 436
+        },
+        {
+          "name": "EfficientNetB6CustomClasses\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 436
+        },
+        {
+          "name": "EfficientNetB6CustomClasses\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 436
+        },
+        {
+          "name": "EfficientNetB7ForwardShape\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 450
+        },
+        {
+          "name": "EfficientNetB7ForwardShape\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 450
+        },
+        {
+          "name": "EfficientNetB7ForwardShape\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 450
+        },
+        {
+          "name": "EfficientNetB7GradientFlow\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 460
+        },
+        {
+          "name": "EfficientNetB7GradientFlow\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 460
+        },
+        {
+          "name": "EfficientNetB7GradientFlow\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 460
+        },
+        {
+          "name": "EfficientNetB7BatchProcessing\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 473
+        },
+        {
+          "name": "EfficientNetB7BatchProcessing\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 473
+        },
+        {
+          "name": "EfficientNetB7BatchProcessing\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 473
+        },
+        {
+          "name": "CompoundScalingConfig\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 487
+        },
+        {
+          "name": "CompoundScalingConfig\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 487
+        },
+        {
+          "name": "CompoundScalingConfig\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 487
+        },
+        {
+          "name": "CompoundScalingEffects\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 498
+        },
+        {
+          "name": "CompoundScalingEffects\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 498
+        },
+        {
+          "name": "CompoundScalingEffects\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 498
+        },
+        {
+          "name": "DifferentImageSizesB0\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 514
+        },
+        {
+          "name": "DifferentImageSizesB0\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 514
+        },
+        {
+          "name": "DifferentImageSizesB0\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 514
+        },
+        {
+          "name": "DifferentImageSizesB4\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 529
+        },
+        {
+          "name": "DifferentImageSizesB4\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 529
+        },
+        {
+          "name": "DifferentImageSizesB4\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 529
+        },
+        {
+          "name": "NonSquareInputImages\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 544
+        },
+        {
+          "name": "NonSquareInputImages\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 544
+        },
+        {
+          "name": "NonSquareInputImages\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 544
+        },
+        {
+          "name": "VariantResolutionProgression\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 561
+        },
+        {
+          "name": "VariantResolutionProgression\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 561
+        },
+        {
+          "name": "VariantResolutionProgression\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 561
+        },
+        {
+          "name": "VariantParameterScaling\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 580
+        },
+        {
+          "name": "VariantParameterScaling\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 580
+        },
+        {
+          "name": "VariantParameterScaling\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 580
+        },
+        {
+          "name": "MinimalBatchSize\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 612
+        },
+        {
+          "name": "MinimalBatchSize\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 612
+        },
+        {
+          "name": "MinimalBatchSize\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 612
+        },
+        {
+          "name": "LargeBatchSize\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 630
+        },
+        {
+          "name": "LargeBatchSize\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 630
+        },
+        {
+          "name": "LargeBatchSize\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 630
+        },
+        {
+          "name": "SingleClassOutput\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 641
+        },
+        {
+          "name": "SingleClassOutput\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 641
+        },
+        {
+          "name": "SingleClassOutput\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 641
+        },
+        {
+          "name": "ManyClassesOutput\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 652
+        },
+        {
+          "name": "ManyClassesOutput\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 652
+        },
+        {
+          "name": "ManyClassesOutput\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 652
+        },
+        {
+          "name": "TrainingVsEvalMode\/Float32",
+          "value_param": "1-byte object <00>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 667
+        },
+        {
+          "name": "TrainingVsEvalMode\/Float64",
+          "value_param": "1-byte object <01>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 667
+        },
+        {
+          "name": "TrainingVsEvalMode\/Float16",
+          "value_param": "1-byte object <02>",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_efficientnet_multidtype.cpp",
+          "line": 667
+        }
+      ]
+    }
+  ]
+}

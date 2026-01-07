@@ -1,0 +1,102 @@
+{
+  "tests": 18,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "GradScalerTest",
+      "tests": 18,
+      "testsuite": [
+        {
+          "name": "DefaultConstructor",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_grad_scaler.cpp",
+          "line": 29
+        },
+        {
+          "name": "CustomConstructor",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_grad_scaler.cpp",
+          "line": 38
+        },
+        {
+          "name": "ConstructorValidation",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_grad_scaler.cpp",
+          "line": 46
+        },
+        {
+          "name": "LossScaling",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_grad_scaler.cpp",
+          "line": 66
+        },
+        {
+          "name": "GradientUnscaling",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_grad_scaler.cpp",
+          "line": 81
+        },
+        {
+          "name": "NoInfNanDetection",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_grad_scaler.cpp",
+          "line": 108
+        },
+        {
+          "name": "InfDetection",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_grad_scaler.cpp",
+          "line": 130
+        },
+        {
+          "name": "NanDetection",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_grad_scaler.cpp",
+          "line": 154
+        },
+        {
+          "name": "ScaleBackoff",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_grad_scaler.cpp",
+          "line": 178
+        },
+        {
+          "name": "ScaleGrowth",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_grad_scaler.cpp",
+          "line": 207
+        },
+        {
+          "name": "SGDIntegration",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_grad_scaler.cpp",
+          "line": 234
+        },
+        {
+          "name": "AdamIntegration",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_grad_scaler.cpp",
+          "line": 266
+        },
+        {
+          "name": "Reset",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_grad_scaler.cpp",
+          "line": 294
+        },
+        {
+          "name": "StateDictSaveLoad",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_grad_scaler.cpp",
+          "line": 323
+        },
+        {
+          "name": "MultipleParameters",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_grad_scaler.cpp",
+          "line": 355
+        },
+        {
+          "name": "TrainingLoopSimulation",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_grad_scaler.cpp",
+          "line": 391
+        },
+        {
+          "name": "ScaleLimits",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_grad_scaler.cpp",
+          "line": 438
+        },
+        {
+          "name": "DoubleUnscaleProtection",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_grad_scaler.cpp",
+          "line": 462
+        }
+      ]
+    }
+  ]
+}

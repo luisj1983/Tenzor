@@ -26,13 +26,23 @@
 
 #ifdef _WIN32
     #include <malloc.h>
-    #define ALIGNED_ALLOC(alignment, size) _aligned_malloc(size, alignment)
     #define ALIGNED_FREE(ptr) _aligned_free(ptr)
+    inline void* aligned_alloc_wrapper(size_t alignment, size_t size) {
+        return _aligned_malloc(size, alignment);
+    }
 #else
     #include <cstdlib>
-    #define ALIGNED_ALLOC(alignment, size) std::aligned_alloc(alignment, size)
     #define ALIGNED_FREE(ptr) std::free(ptr)
+    // Use posix_memalign for better compatibility and error handling
+    inline void* aligned_alloc_wrapper(size_t alignment, size_t size) {
+        void* ptr = nullptr;
+        if (posix_memalign(&ptr, alignment, size) != 0) {
+            return nullptr;
+        }
+        return ptr;
+    }
 #endif
+#define ALIGNED_ALLOC(alignment, size) aligned_alloc_wrapper(alignment, size)
 
 namespace tenzor {
 namespace cpu {
@@ -156,9 +166,13 @@ public:
      */
     void* acquire(size_t size) {
         if (size == 0) return nullptr;
-        if (size > MAX_BUFFER_SIZE) {
+
+        // std::aligned_alloc requires size to be a multiple of alignment
+        size_t aligned_size = (size + BUFFER_ALIGNMENT - 1) & ~(BUFFER_ALIGNMENT - 1);
+
+        if (aligned_size > MAX_BUFFER_SIZE) {
             // Too large for pool, allocate directly
-            return ALIGNED_ALLOC(BUFFER_ALIGNMENT, size);
+            return ALIGNED_ALLOC(BUFFER_ALIGNMENT, aligned_size);
         }
 
         size_t class_idx = get_size_class(size);
@@ -172,8 +186,10 @@ public:
             return ptr;
         }
 
-        // Allocate new buffer with class size
-        size_t alloc_size = get_class_size(class_idx);
+        // Allocate new buffer - must be at least the requested size
+        // get_class_size may return less than requested for sizes between
+        // class boundaries, so we take the max to ensure sufficient allocation
+        size_t alloc_size = std::max(size, get_class_size(class_idx));
         void* ptr = ALIGNED_ALLOC(BUFFER_ALIGNMENT, alloc_size);
         if (ptr) {
             buffer_sizes_[ptr] = alloc_size;
@@ -183,6 +199,11 @@ public:
 
     /**
      * @brief Return a buffer to the pool
+     *
+     * Note: Due to AlignedBuffer's RAII design, we cannot safely transfer
+     * ownership of raw pointers into it. For now, we just free immediately.
+     * This means the pool doesn't actually cache, but is at least correct.
+     * TODO: Refactor to use raw pointer storage for caching.
      */
     void release(void* ptr) {
         if (!ptr) return;
@@ -194,29 +215,11 @@ public:
             return;
         }
 
-        size_t size = it->second;
         buffer_sizes_.erase(it);
 
-        size_t class_idx = get_size_class(size);
-        auto& bucket = buckets_[class_idx];
-
-        // Only cache up to MAX_CACHED_BUFFERS per class
-        if (bucket.size() < MAX_CACHED_BUFFERS) {
-            // Create a wrapper that owns this memory
-            AlignedBuffer buf;
-            // Transfer ownership without reallocation
-            // This is a bit hacky but avoids extra allocation
-            bucket.emplace_back(0);  // Empty buffer
-            bucket.back() = AlignedBuffer(size);
-            ALIGNED_FREE(bucket.back().as<void>());
-            // Directly set the pointer (internal use only)
-            // We need to be careful here - just free it instead
-            bucket.pop_back();
-            ALIGNED_FREE(ptr);
-        } else {
-            // Pool is full, free the buffer
-            ALIGNED_FREE(ptr);
-        }
+        // For now, just free the buffer directly
+        // The previous caching code had a double-free bug
+        ALIGNED_FREE(ptr);
     }
 
     /**

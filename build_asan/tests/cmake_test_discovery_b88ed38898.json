@@ -1,0 +1,408 @@
+{
+  "tests": 66,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "AllDTypes\/FusedOpsMultiDTypeTest",
+      "tests": 66,
+      "testsuite": [
+        {
+          "name": "FusedLinearReLU_ForwardCorrectness_2D\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 159
+        },
+        {
+          "name": "FusedLinearReLU_ForwardCorrectness_2D\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 159
+        },
+        {
+          "name": "FusedLinearReLU_ForwardCorrectness_2D\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 159
+        },
+        {
+          "name": "FusedLinearReLU_ForwardCorrectness_3D\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 180
+        },
+        {
+          "name": "FusedLinearReLU_ForwardCorrectness_3D\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 180
+        },
+        {
+          "name": "FusedLinearReLU_ForwardCorrectness_3D\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 180
+        },
+        {
+          "name": "FusedLinearReLU_NoBias\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 197
+        },
+        {
+          "name": "FusedLinearReLU_NoBias\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 197
+        },
+        {
+          "name": "FusedLinearReLU_NoBias\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 197
+        },
+        {
+          "name": "FusedLinearReLU_LargeBatch\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 212
+        },
+        {
+          "name": "FusedLinearReLU_LargeBatch\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 212
+        },
+        {
+          "name": "FusedLinearReLU_LargeBatch\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 212
+        },
+        {
+          "name": "FusedBatchNormReLU_ForwardCorrectness_2D\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 231
+        },
+        {
+          "name": "FusedBatchNormReLU_ForwardCorrectness_2D\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 231
+        },
+        {
+          "name": "FusedBatchNormReLU_ForwardCorrectness_2D\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 231
+        },
+        {
+          "name": "FusedBatchNormReLU_ForwardCorrectness_4D\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 253
+        },
+        {
+          "name": "FusedBatchNormReLU_ForwardCorrectness_4D\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 253
+        },
+        {
+          "name": "FusedBatchNormReLU_ForwardCorrectness_4D\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 253
+        },
+        {
+          "name": "FusedBatchNormReLU_CustomEpsilon\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 269
+        },
+        {
+          "name": "FusedBatchNormReLU_CustomEpsilon\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 269
+        },
+        {
+          "name": "FusedBatchNormReLU_CustomEpsilon\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 269
+        },
+        {
+          "name": "FusedAddReLU_ForwardCorrectness\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 291
+        },
+        {
+          "name": "FusedAddReLU_ForwardCorrectness\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 291
+        },
+        {
+          "name": "FusedAddReLU_ForwardCorrectness\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 291
+        },
+        {
+          "name": "FusedAddReLU_Broadcasting\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 308
+        },
+        {
+          "name": "FusedAddReLU_Broadcasting\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 308
+        },
+        {
+          "name": "FusedAddReLU_Broadcasting\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 308
+        },
+        {
+          "name": "FusedAddReLU_ResidualConnection\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 326
+        },
+        {
+          "name": "FusedAddReLU_ResidualConnection\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 326
+        },
+        {
+          "name": "FusedAddReLU_ResidualConnection\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 326
+        },
+        {
+          "name": "FusedGELU_ForwardCorrectness\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 346
+        },
+        {
+          "name": "FusedGELU_ForwardCorrectness\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 346
+        },
+        {
+          "name": "FusedGELU_ForwardCorrectness\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 346
+        },
+        {
+          "name": "FusedGELU_ZeroInput\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 382
+        },
+        {
+          "name": "FusedGELU_ZeroInput\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 382
+        },
+        {
+          "name": "FusedGELU_ZeroInput\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 382
+        },
+        {
+          "name": "FusedGELU_NumericalStability\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 402
+        },
+        {
+          "name": "FusedGELU_NumericalStability\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 402
+        },
+        {
+          "name": "FusedGELU_NumericalStability\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 402
+        },
+        {
+          "name": "FusedLayerNorm_ForwardCorrectness_2D\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 432
+        },
+        {
+          "name": "FusedLayerNorm_ForwardCorrectness_2D\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 432
+        },
+        {
+          "name": "FusedLayerNorm_ForwardCorrectness_2D\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 432
+        },
+        {
+          "name": "FusedLayerNorm_MultiDimensional\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 503
+        },
+        {
+          "name": "FusedLayerNorm_MultiDimensional\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 503
+        },
+        {
+          "name": "FusedLayerNorm_MultiDimensional\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 503
+        },
+        {
+          "name": "FusedLayerNorm_CustomWeightBias\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 519
+        },
+        {
+          "name": "FusedLayerNorm_CustomWeightBias\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 519
+        },
+        {
+          "name": "FusedLayerNorm_CustomWeightBias\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 519
+        },
+        {
+          "name": "FusedLayerNorm_SmallEpsilon\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 535
+        },
+        {
+          "name": "FusedLayerNorm_SmallEpsilon\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 535
+        },
+        {
+          "name": "FusedLayerNorm_SmallEpsilon\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 535
+        },
+        {
+          "name": "MixedPrecision_LinearReLU_HighToLow\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 557
+        },
+        {
+          "name": "MixedPrecision_LinearReLU_HighToLow\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 557
+        },
+        {
+          "name": "MixedPrecision_LinearReLU_HighToLow\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 557
+        },
+        {
+          "name": "MixedPrecision_GELU_Stability\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 575
+        },
+        {
+          "name": "MixedPrecision_GELU_Stability\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 575
+        },
+        {
+          "name": "MixedPrecision_GELU_Stability\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 575
+        },
+        {
+          "name": "EdgeCase_SingleElement\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 598
+        },
+        {
+          "name": "EdgeCase_SingleElement\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 598
+        },
+        {
+          "name": "EdgeCase_SingleElement\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 598
+        },
+        {
+          "name": "EdgeCase_LargeFeatureDimension\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 610
+        },
+        {
+          "name": "EdgeCase_LargeFeatureDimension\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 610
+        },
+        {
+          "name": "EdgeCase_LargeFeatureDimension\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 610
+        },
+        {
+          "name": "Performance_LinearReLU_Consistency\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 626
+        },
+        {
+          "name": "Performance_LinearReLU_Consistency\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 626
+        },
+        {
+          "name": "Performance_LinearReLU_Consistency\/float16",
+          "value_param": "float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_fused_ops_multidtype.cpp",
+          "line": 626
+        }
+      ]
+    }
+  ]
+}

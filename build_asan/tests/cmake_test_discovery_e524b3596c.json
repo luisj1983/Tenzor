@@ -1,0 +1,252 @@
+{
+  "tests": 48,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "ZeROStage3Test",
+      "tests": 48,
+      "testsuite": [
+        {
+          "name": "ConstructorWithValidConfig",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 179
+        },
+        {
+          "name": "ConstructorWithMultipleRanks",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 198
+        },
+        {
+          "name": "ConstructorValidatesConfig",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 213
+        },
+        {
+          "name": "ConstructorWithInvalidRank",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 227
+        },
+        {
+          "name": "ConstructorWithNullOptimizer",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 240
+        },
+        {
+          "name": "ParameterPartitioningBasic",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 252
+        },
+        {
+          "name": "ParameterPartitioningMultipleRanks",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 267
+        },
+        {
+          "name": "ParameterPartitioningUnevenSizes",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 284
+        },
+        {
+          "name": "ParameterPartitioningSharedParameters",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 304
+        },
+        {
+          "name": "ParameterPartitioningEmptyModel",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 322
+        },
+        {
+          "name": "GatherParameterSingleRank",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 338
+        },
+        {
+          "name": "GatherParameterMultipleRanks",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 359
+        },
+        {
+          "name": "GatherParameterWithPrefetch",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 379
+        },
+        {
+          "name": "FreeParameterWithRefCounting",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 401
+        },
+        {
+          "name": "FreeParameterShared",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 419
+        },
+        {
+          "name": "GatherScatterRoundtrip",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 433
+        },
+        {
+          "name": "PrefetchSingleParameter",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 464
+        },
+        {
+          "name": "PrefetchMultipleParameters",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 484
+        },
+        {
+          "name": "PrefetchPriorityOrdering",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 507
+        },
+        {
+          "name": "PrefetchMemoryBudget",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 529
+        },
+        {
+          "name": "ForwardWithGather",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 554
+        },
+        {
+          "name": "BackwardWithScatter",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 574
+        },
+        {
+          "name": "ForwardBackwardFullTraining",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 600
+        },
+        {
+          "name": "ForwardBackwardMultipleLayers",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 630
+        },
+        {
+          "name": "ForwardBackwardWithPrefetch",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 659
+        },
+        {
+          "name": "MemoryReduction",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 688
+        },
+        {
+          "name": "MemoryStatsReporting",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 707
+        },
+        {
+          "name": "MemoryPressureHandling",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 730
+        },
+        {
+          "name": "CPUOffloadEnabled",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 751
+        },
+        {
+          "name": "CPUOffloadWithPrefetch",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 765
+        },
+        {
+          "name": "CPUOffloadMemoryLocation",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 784
+        },
+        {
+          "name": "StateDictSaveLoad",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 808
+        },
+        {
+          "name": "StateDictContainsPartitionInfo",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 834
+        },
+        {
+          "name": "CheckpointCompatibility",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 856
+        },
+        {
+          "name": "EdgeCaseSingleParameter",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 890
+        },
+        {
+          "name": "EdgeCaseEmptyGradients",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 907
+        },
+        {
+          "name": "EdgeCaseSharedParameters",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 922
+        },
+        {
+          "name": "EdgeCaseWorldSizeOne",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 940
+        },
+        {
+          "name": "EdgeCaseLargeParameters",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 961
+        },
+        {
+          "name": "MultipleStepsConsistency",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 982
+        },
+        {
+          "name": "ParameterCacheHitRate",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 1001
+        },
+        {
+          "name": "CommunicationOverlap",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 1024
+        },
+        {
+          "name": "GradientAccumulation",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 1046
+        },
+        {
+          "name": "DifferentOptimizerTypes",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 1071
+        },
+        {
+          "name": "PartitionAlignment",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 1104
+        },
+        {
+          "name": "SmallParameterThreshold",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 1117
+        },
+        {
+          "name": "ConcurrentParameterAccess",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 1145
+        },
+        {
+          "name": "PerformanceDegradation",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3.cpp",
+          "line": 1162
+        }
+      ]
+    }
+  ]
+}

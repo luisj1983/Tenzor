@@ -1,0 +1,192 @@
+{
+  "tests": 36,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "ModelHubTest",
+      "tests": 36,
+      "testsuite": [
+        {
+          "name": "SetAndGetCacheDir",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_model_hub.cpp",
+          "line": 70
+        },
+        {
+          "name": "SetAndGetConfig",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_model_hub.cpp",
+          "line": 78
+        },
+        {
+          "name": "ComputeChecksum",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_model_hub.cpp",
+          "line": 102
+        },
+        {
+          "name": "VerifyChecksum_Valid",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_model_hub.cpp",
+          "line": 113
+        },
+        {
+          "name": "VerifyChecksum_Invalid",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_model_hub.cpp",
+          "line": 118
+        },
+        {
+          "name": "VerifyChecksum_Empty",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_model_hub.cpp",
+          "line": 123
+        },
+        {
+          "name": "RegisterModel",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_model_hub.cpp",
+          "line": 132
+        },
+        {
+          "name": "RegisterMultipleModels",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_model_hub.cpp",
+          "line": 152
+        },
+        {
+          "name": "GetModelInfo_NotRegistered",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_model_hub.cpp",
+          "line": 175
+        },
+        {
+          "name": "ListRegisteredModels",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_model_hub.cpp",
+          "line": 179
+        },
+        {
+          "name": "CacheSize_Empty",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_model_hub.cpp",
+          "line": 199
+        },
+        {
+          "name": "CacheSize_WithFiles",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_model_hub.cpp",
+          "line": 205
+        },
+        {
+          "name": "ClearCache",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_model_hub.cpp",
+          "line": 226
+        },
+        {
+          "name": "ListCachedModels",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_model_hub.cpp",
+          "line": 243
+        },
+        {
+          "name": "IsCached",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_model_hub.cpp",
+          "line": 257
+        },
+        {
+          "name": "GetCachedPath",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_model_hub.cpp",
+          "line": 268
+        },
+        {
+          "name": "RemoveFromCache",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_model_hub.cpp",
+          "line": 283
+        },
+        {
+          "name": "CleanCache_SizeLimit",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_model_hub.cpp",
+          "line": 302
+        },
+        {
+          "name": "DownloadWeights_FileURL",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_model_hub.cpp",
+          "line": 339
+        },
+        {
+          "name": "DownloadWeights_Caching",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_model_hub.cpp",
+          "line": 368
+        },
+        {
+          "name": "DownloadWeights_ChecksumMismatch",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_model_hub.cpp",
+          "line": 385
+        },
+        {
+          "name": "DownloadPretrained_NotRegistered",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_model_hub.cpp",
+          "line": 408
+        },
+        {
+          "name": "ProgressCallback",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_model_hub.cpp",
+          "line": 419
+        },
+        {
+          "name": "DownloadStats",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_model_hub.cpp",
+          "line": 451
+        },
+        {
+          "name": "LoadPretrainedWeights_FileNotFound",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_model_hub.cpp",
+          "line": 474
+        },
+        {
+          "name": "LoadPretrainedWeights_Strict",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_model_hub.cpp",
+          "line": 498
+        },
+        {
+          "name": "LoadPretrainedWeights_NonStrict",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_model_hub.cpp",
+          "line": 531
+        },
+        {
+          "name": "DefaultRegistry_ResNet",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_model_hub.cpp",
+          "line": 566
+        },
+        {
+          "name": "DefaultRegistry_VGG",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_model_hub.cpp",
+          "line": 580
+        },
+        {
+          "name": "DefaultRegistry_MobileNet",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_model_hub.cpp",
+          "line": 587
+        },
+        {
+          "name": "DefaultRegistry_EfficientNet",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_model_hub.cpp",
+          "line": 591
+        },
+        {
+          "name": "ConcurrentAccess",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_model_hub.cpp",
+          "line": 602
+        },
+        {
+          "name": "EmptyModelName",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_model_hub.cpp",
+          "line": 644
+        },
+        {
+          "name": "InvalidURL",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_model_hub.cpp",
+          "line": 651
+        },
+        {
+          "name": "ComputeChecksum_NonexistentFile",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_model_hub.cpp",
+          "line": 658
+        },
+        {
+          "name": "VerifyChecksum_NonexistentFile",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_model_hub.cpp",
+          "line": 665
+        }
+      ]
+    }
+  ]
+}

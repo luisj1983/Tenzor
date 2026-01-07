@@ -1,0 +1,1032 @@
+{
+  "tests": 168,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "AllBackendsAllDTypes\/MultiheadAttentionMultiDTypeTest",
+      "tests": 104,
+      "testsuite": [
+        {
+          "name": "Construction\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 108
+        },
+        {
+          "name": "Construction\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 108
+        },
+        {
+          "name": "Construction\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 108
+        },
+        {
+          "name": "Construction\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 108
+        },
+        {
+          "name": "Construction\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 108
+        },
+        {
+          "name": "Construction\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 108
+        },
+        {
+          "name": "Construction\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 108
+        },
+        {
+          "name": "Construction\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 108
+        },
+        {
+          "name": "InvalidConstruction\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 120
+        },
+        {
+          "name": "InvalidConstruction\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 120
+        },
+        {
+          "name": "InvalidConstruction\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 120
+        },
+        {
+          "name": "InvalidConstruction\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 120
+        },
+        {
+          "name": "InvalidConstruction\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 120
+        },
+        {
+          "name": "InvalidConstruction\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 120
+        },
+        {
+          "name": "InvalidConstruction\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 120
+        },
+        {
+          "name": "InvalidConstruction\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 120
+        },
+        {
+          "name": "SelfAttentionShape\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 136
+        },
+        {
+          "name": "SelfAttentionShape\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 136
+        },
+        {
+          "name": "SelfAttentionShape\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 136
+        },
+        {
+          "name": "SelfAttentionShape\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 136
+        },
+        {
+          "name": "SelfAttentionShape\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 136
+        },
+        {
+          "name": "SelfAttentionShape\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 136
+        },
+        {
+          "name": "SelfAttentionShape\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 136
+        },
+        {
+          "name": "SelfAttentionShape\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 136
+        },
+        {
+          "name": "CrossAttentionShape\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 162
+        },
+        {
+          "name": "CrossAttentionShape\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 162
+        },
+        {
+          "name": "CrossAttentionShape\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 162
+        },
+        {
+          "name": "CrossAttentionShape\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 162
+        },
+        {
+          "name": "CrossAttentionShape\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 162
+        },
+        {
+          "name": "CrossAttentionShape\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 162
+        },
+        {
+          "name": "CrossAttentionShape\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 162
+        },
+        {
+          "name": "CrossAttentionShape\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 162
+        },
+        {
+          "name": "BatchFirstFalse\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 189
+        },
+        {
+          "name": "BatchFirstFalse\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 189
+        },
+        {
+          "name": "BatchFirstFalse\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 189
+        },
+        {
+          "name": "BatchFirstFalse\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 189
+        },
+        {
+          "name": "BatchFirstFalse\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 189
+        },
+        {
+          "name": "BatchFirstFalse\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 189
+        },
+        {
+          "name": "BatchFirstFalse\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 189
+        },
+        {
+          "name": "BatchFirstFalse\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 189
+        },
+        {
+          "name": "SimpleForwardInterface\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 207
+        },
+        {
+          "name": "SimpleForwardInterface\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 207
+        },
+        {
+          "name": "SimpleForwardInterface\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 207
+        },
+        {
+          "name": "SimpleForwardInterface\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 207
+        },
+        {
+          "name": "SimpleForwardInterface\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 207
+        },
+        {
+          "name": "SimpleForwardInterface\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 207
+        },
+        {
+          "name": "SimpleForwardInterface\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 207
+        },
+        {
+          "name": "SimpleForwardInterface\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 207
+        },
+        {
+          "name": "WithoutAttentionWeights\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 219
+        },
+        {
+          "name": "WithoutAttentionWeights\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 219
+        },
+        {
+          "name": "WithoutAttentionWeights\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 219
+        },
+        {
+          "name": "WithoutAttentionWeights\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 219
+        },
+        {
+          "name": "WithoutAttentionWeights\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 219
+        },
+        {
+          "name": "WithoutAttentionWeights\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 219
+        },
+        {
+          "name": "WithoutAttentionWeights\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 219
+        },
+        {
+          "name": "WithoutAttentionWeights\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 219
+        },
+        {
+          "name": "SingleHead\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 236
+        },
+        {
+          "name": "SingleHead\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 236
+        },
+        {
+          "name": "SingleHead\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 236
+        },
+        {
+          "name": "SingleHead\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 236
+        },
+        {
+          "name": "SingleHead\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 236
+        },
+        {
+          "name": "SingleHead\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 236
+        },
+        {
+          "name": "SingleHead\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 236
+        },
+        {
+          "name": "SingleHead\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 236
+        },
+        {
+          "name": "LargeSequence\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 251
+        },
+        {
+          "name": "LargeSequence\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 251
+        },
+        {
+          "name": "LargeSequence\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 251
+        },
+        {
+          "name": "LargeSequence\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 251
+        },
+        {
+          "name": "LargeSequence\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 251
+        },
+        {
+          "name": "LargeSequence\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 251
+        },
+        {
+          "name": "LargeSequence\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 251
+        },
+        {
+          "name": "LargeSequence\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 251
+        },
+        {
+          "name": "SmallBatch\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 263
+        },
+        {
+          "name": "SmallBatch\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 263
+        },
+        {
+          "name": "SmallBatch\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 263
+        },
+        {
+          "name": "SmallBatch\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 263
+        },
+        {
+          "name": "SmallBatch\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 263
+        },
+        {
+          "name": "SmallBatch\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 263
+        },
+        {
+          "name": "SmallBatch\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 263
+        },
+        {
+          "name": "SmallBatch\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 263
+        },
+        {
+          "name": "WithDropout\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 276
+        },
+        {
+          "name": "WithDropout\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 276
+        },
+        {
+          "name": "WithDropout\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 276
+        },
+        {
+          "name": "WithDropout\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 276
+        },
+        {
+          "name": "WithDropout\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 276
+        },
+        {
+          "name": "WithDropout\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 276
+        },
+        {
+          "name": "WithDropout\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 276
+        },
+        {
+          "name": "WithDropout\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 276
+        },
+        {
+          "name": "EvalMode\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 319
+        },
+        {
+          "name": "EvalMode\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 319
+        },
+        {
+          "name": "EvalMode\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 319
+        },
+        {
+          "name": "EvalMode\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 319
+        },
+        {
+          "name": "EvalMode\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 319
+        },
+        {
+          "name": "EvalMode\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 319
+        },
+        {
+          "name": "EvalMode\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 319
+        },
+        {
+          "name": "EvalMode\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 319
+        },
+        {
+          "name": "DifferentKeyValueDims\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 360
+        },
+        {
+          "name": "DifferentKeyValueDims\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 360
+        },
+        {
+          "name": "DifferentKeyValueDims\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 360
+        },
+        {
+          "name": "DifferentKeyValueDims\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 360
+        },
+        {
+          "name": "DifferentKeyValueDims\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 360
+        },
+        {
+          "name": "DifferentKeyValueDims\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 360
+        },
+        {
+          "name": "DifferentKeyValueDims\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 360
+        },
+        {
+          "name": "DifferentKeyValueDims\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 360
+        }
+      ]
+    },
+    {
+      "name": "AllBackendsAllDTypes\/CausalMaskMultiDTypeTest",
+      "tests": 32,
+      "testsuite": [
+        {
+          "name": "Shape\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 440
+        },
+        {
+          "name": "Shape\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 440
+        },
+        {
+          "name": "Shape\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 440
+        },
+        {
+          "name": "Shape\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 440
+        },
+        {
+          "name": "Shape\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 440
+        },
+        {
+          "name": "Shape\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 440
+        },
+        {
+          "name": "Shape\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 440
+        },
+        {
+          "name": "Shape\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 440
+        },
+        {
+          "name": "Values\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 449
+        },
+        {
+          "name": "Values\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 449
+        },
+        {
+          "name": "Values\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 449
+        },
+        {
+          "name": "Values\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 449
+        },
+        {
+          "name": "Values\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 449
+        },
+        {
+          "name": "Values\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 449
+        },
+        {
+          "name": "Values\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 449
+        },
+        {
+          "name": "Values\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 449
+        },
+        {
+          "name": "SmallSize\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 485
+        },
+        {
+          "name": "SmallSize\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 485
+        },
+        {
+          "name": "SmallSize\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 485
+        },
+        {
+          "name": "SmallSize\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 485
+        },
+        {
+          "name": "SmallSize\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 485
+        },
+        {
+          "name": "SmallSize\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 485
+        },
+        {
+          "name": "SmallSize\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 485
+        },
+        {
+          "name": "SmallSize\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 485
+        },
+        {
+          "name": "MediumSize\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 503
+        },
+        {
+          "name": "MediumSize\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 503
+        },
+        {
+          "name": "MediumSize\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 503
+        },
+        {
+          "name": "MediumSize\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 503
+        },
+        {
+          "name": "MediumSize\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 503
+        },
+        {
+          "name": "MediumSize\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 503
+        },
+        {
+          "name": "MediumSize\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 503
+        },
+        {
+          "name": "MediumSize\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 503
+        }
+      ]
+    },
+    {
+      "name": "AllBackendsAllDTypes\/AttentionIntegrationMultiDTypeTest",
+      "tests": 32,
+      "testsuite": [
+        {
+          "name": "ForwardBackward\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 589
+        },
+        {
+          "name": "ForwardBackward\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 589
+        },
+        {
+          "name": "ForwardBackward\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 589
+        },
+        {
+          "name": "ForwardBackward\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 589
+        },
+        {
+          "name": "ForwardBackward\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 589
+        },
+        {
+          "name": "ForwardBackward\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 589
+        },
+        {
+          "name": "ForwardBackward\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 589
+        },
+        {
+          "name": "ForwardBackward\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 589
+        },
+        {
+          "name": "ParameterCount\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 609
+        },
+        {
+          "name": "ParameterCount\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 609
+        },
+        {
+          "name": "ParameterCount\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 609
+        },
+        {
+          "name": "ParameterCount\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 609
+        },
+        {
+          "name": "ParameterCount\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 609
+        },
+        {
+          "name": "ParameterCount\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 609
+        },
+        {
+          "name": "ParameterCount\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 609
+        },
+        {
+          "name": "ParameterCount\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 609
+        },
+        {
+          "name": "TrainEvalSwitch\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 620
+        },
+        {
+          "name": "TrainEvalSwitch\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 620
+        },
+        {
+          "name": "TrainEvalSwitch\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 620
+        },
+        {
+          "name": "TrainEvalSwitch\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 620
+        },
+        {
+          "name": "TrainEvalSwitch\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 620
+        },
+        {
+          "name": "TrainEvalSwitch\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 620
+        },
+        {
+          "name": "TrainEvalSwitch\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 620
+        },
+        {
+          "name": "TrainEvalSwitch\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 620
+        },
+        {
+          "name": "Deterministic\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 633
+        },
+        {
+          "name": "Deterministic\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 633
+        },
+        {
+          "name": "Deterministic\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 633
+        },
+        {
+          "name": "Deterministic\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 633
+        },
+        {
+          "name": "Deterministic\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 633
+        },
+        {
+          "name": "Deterministic\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 633
+        },
+        {
+          "name": "Deterministic\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 633
+        },
+        {
+          "name": "Deterministic\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 633
+        }
+      ]
+    }
+  ]
+}

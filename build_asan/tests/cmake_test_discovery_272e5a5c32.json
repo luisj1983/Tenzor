@@ -1,0 +1,102 @@
+{
+  "tests": 18,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "SerializationTest",
+      "tests": 18,
+      "testsuite": [
+        {
+          "name": "SaveLoadStateDictBasic",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/test_serialization.cpp",
+          "line": 46
+        },
+        {
+          "name": "SaveLoadDifferentDTypes",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/test_serialization.cpp",
+          "line": 72
+        },
+        {
+          "name": "FileValidation",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/test_serialization.cpp",
+          "line": 92
+        },
+        {
+          "name": "ModuleSaveLoad",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/test_serialization.cpp",
+          "line": 111
+        },
+        {
+          "name": "ModuleStateDict",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/test_serialization.cpp",
+          "line": 141
+        },
+        {
+          "name": "ModuleLoadStateDict",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/test_serialization.cpp",
+          "line": 155
+        },
+        {
+          "name": "ShapeMismatchError",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/test_serialization.cpp",
+          "line": 177
+        },
+        {
+          "name": "DTypeMismatchError",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/test_serialization.cpp",
+          "line": 188
+        },
+        {
+          "name": "PartialStateLoading",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/test_serialization.cpp",
+          "line": 199
+        },
+        {
+          "name": "EmptyStateDict",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/test_serialization.cpp",
+          "line": 226
+        },
+        {
+          "name": "LargeTensor",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/test_serialization.cpp",
+          "line": 237
+        },
+        {
+          "name": "AdamOptimizerSaveLoad",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/test_serialization.cpp",
+          "line": 256
+        },
+        {
+          "name": "OptimizerStateDict",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/test_serialization.cpp",
+          "line": 292
+        },
+        {
+          "name": "CorruptedFileError",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/test_serialization.cpp",
+          "line": 313
+        },
+        {
+          "name": "SequentialModuleSerialization",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/test_serialization.cpp",
+          "line": 325
+        },
+        {
+          "name": "RoundTripComputation",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/test_serialization.cpp",
+          "line": 363
+        },
+        {
+          "name": "NamedParametersAndBuffers",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/test_serialization.cpp",
+          "line": 390
+        },
+        {
+          "name": "FileOverwrite",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/test_serialization.cpp",
+          "line": 409
+        }
+      ]
+    }
+  ]
+}

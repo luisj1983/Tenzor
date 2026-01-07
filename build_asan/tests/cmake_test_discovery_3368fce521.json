@@ -1,0 +1,972 @@
+{
+  "tests": 160,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "AllBackends\/CachingAllocatorTest",
+      "tests": 160,
+      "testsuite": [
+        {
+          "name": "ConstructorValidBackend\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 78
+        },
+        {
+          "name": "ConstructorValidBackend\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 78
+        },
+        {
+          "name": "ConstructorValidBackend\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 78
+        },
+        {
+          "name": "ConstructorValidBackend\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 78
+        },
+        {
+          "name": "ConstructorNullBackendThrows\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 84
+        },
+        {
+          "name": "ConstructorNullBackendThrows\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 84
+        },
+        {
+          "name": "ConstructorNullBackendThrows\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 84
+        },
+        {
+          "name": "ConstructorNullBackendThrows\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 84
+        },
+        {
+          "name": "AllocateBasicSizes\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 90
+        },
+        {
+          "name": "AllocateBasicSizes\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 90
+        },
+        {
+          "name": "AllocateBasicSizes\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 90
+        },
+        {
+          "name": "AllocateBasicSizes\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 90
+        },
+        {
+          "name": "AllocateZeroSizeThrows\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 104
+        },
+        {
+          "name": "AllocateZeroSizeThrows\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 104
+        },
+        {
+          "name": "AllocateZeroSizeThrows\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 104
+        },
+        {
+          "name": "AllocateZeroSizeThrows\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 104
+        },
+        {
+          "name": "DeallocateNullIsNoOp\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 110
+        },
+        {
+          "name": "DeallocateNullIsNoOp\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 110
+        },
+        {
+          "name": "DeallocateNullIsNoOp\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 110
+        },
+        {
+          "name": "DeallocateNullIsNoOp\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 110
+        },
+        {
+          "name": "DeallocateInvalidPointerThrows\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 116
+        },
+        {
+          "name": "DeallocateInvalidPointerThrows\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 116
+        },
+        {
+          "name": "DeallocateInvalidPointerThrows\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 116
+        },
+        {
+          "name": "DeallocateInvalidPointerThrows\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 116
+        },
+        {
+          "name": "DoubleDeallocateThrows\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 125
+        },
+        {
+          "name": "DoubleDeallocateThrows\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 125
+        },
+        {
+          "name": "DoubleDeallocateThrows\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 125
+        },
+        {
+          "name": "DoubleDeallocateThrows\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 125
+        },
+        {
+          "name": "MultipleAllocations\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 134
+        },
+        {
+          "name": "MultipleAllocations\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 134
+        },
+        {
+          "name": "MultipleAllocations\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 134
+        },
+        {
+          "name": "MultipleAllocations\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 134
+        },
+        {
+          "name": "AllocateDifferentSizes\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 157
+        },
+        {
+          "name": "AllocateDifferentSizes\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 157
+        },
+        {
+          "name": "AllocateDifferentSizes\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 157
+        },
+        {
+          "name": "AllocateDifferentSizes\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 157
+        },
+        {
+          "name": "CacheReuseExactSize\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 177
+        },
+        {
+          "name": "CacheReuseExactSize\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 177
+        },
+        {
+          "name": "CacheReuseExactSize\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 177
+        },
+        {
+          "name": "CacheReuseExactSize\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 177
+        },
+        {
+          "name": "CacheHitRate\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 200
+        },
+        {
+          "name": "CacheHitRate\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 200
+        },
+        {
+          "name": "CacheHitRate\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 200
+        },
+        {
+          "name": "CacheHitRate\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 200
+        },
+        {
+          "name": "CacheMissNewSize\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 220
+        },
+        {
+          "name": "CacheMissNewSize\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 220
+        },
+        {
+          "name": "CacheMissNewSize\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 220
+        },
+        {
+          "name": "CacheMissNewSize\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 220
+        },
+        {
+          "name": "DefragmentEmptiesCache\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 238
+        },
+        {
+          "name": "DefragmentEmptiesCache\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 238
+        },
+        {
+          "name": "DefragmentEmptiesCache\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 238
+        },
+        {
+          "name": "DefragmentEmptiesCache\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 238
+        },
+        {
+          "name": "DefragmentPreservesActiveAllocations\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 261
+        },
+        {
+          "name": "DefragmentPreservesActiveAllocations\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 261
+        },
+        {
+          "name": "DefragmentPreservesActiveAllocations\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 261
+        },
+        {
+          "name": "DefragmentPreservesActiveAllocations\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 261
+        },
+        {
+          "name": "BestFitStrategy\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 294
+        },
+        {
+          "name": "BestFitStrategy\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 294
+        },
+        {
+          "name": "BestFitStrategy\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 294
+        },
+        {
+          "name": "BestFitStrategy\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 294
+        },
+        {
+          "name": "InitialStatistics\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 320
+        },
+        {
+          "name": "InitialStatistics\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 320
+        },
+        {
+          "name": "InitialStatistics\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 320
+        },
+        {
+          "name": "InitialStatistics\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 320
+        },
+        {
+          "name": "AllocationIncreasesStats\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 328
+        },
+        {
+          "name": "AllocationIncreasesStats\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 328
+        },
+        {
+          "name": "AllocationIncreasesStats\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 328
+        },
+        {
+          "name": "AllocationIncreasesStats\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 328
+        },
+        {
+          "name": "DeallocationIncreasesCachedStats\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 341
+        },
+        {
+          "name": "DeallocationIncreasesCachedStats\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 341
+        },
+        {
+          "name": "DeallocationIncreasesCachedStats\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 341
+        },
+        {
+          "name": "DeallocationIncreasesCachedStats\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 341
+        },
+        {
+          "name": "TotalAllocatedBytesTracking\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 351
+        },
+        {
+          "name": "TotalAllocatedBytesTracking\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 351
+        },
+        {
+          "name": "TotalAllocatedBytesTracking\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 351
+        },
+        {
+          "name": "TotalAllocatedBytesTracking\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 351
+        },
+        {
+          "name": "CachedBytesTracking\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 370
+        },
+        {
+          "name": "CachedBytesTracking\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 370
+        },
+        {
+          "name": "CachedBytesTracking\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 370
+        },
+        {
+          "name": "CachedBytesTracking\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 370
+        },
+        {
+          "name": "CacheHitRateZeroInitially\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 392
+        },
+        {
+          "name": "CacheHitRateZeroInitially\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 392
+        },
+        {
+          "name": "CacheHitRateZeroInitially\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 392
+        },
+        {
+          "name": "CacheHitRateZeroInitially\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 392
+        },
+        {
+          "name": "CacheHitRateCalculation\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 397
+        },
+        {
+          "name": "CacheHitRateCalculation\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 397
+        },
+        {
+          "name": "CacheHitRateCalculation\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 397
+        },
+        {
+          "name": "CacheHitRateCalculation\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 397
+        },
+        {
+          "name": "DeviceProperty\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 418
+        },
+        {
+          "name": "DeviceProperty\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 418
+        },
+        {
+          "name": "DeviceProperty\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 418
+        },
+        {
+          "name": "DeviceProperty\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 418
+        },
+        {
+          "name": "VeryLargeAllocation\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 427
+        },
+        {
+          "name": "VeryLargeAllocation\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 427
+        },
+        {
+          "name": "VeryLargeAllocation\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 427
+        },
+        {
+          "name": "VeryLargeAllocation\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 427
+        },
+        {
+          "name": "ManySmallAllocations\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 447
+        },
+        {
+          "name": "ManySmallAllocations\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 447
+        },
+        {
+          "name": "ManySmallAllocations\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 447
+        },
+        {
+          "name": "ManySmallAllocations\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 447
+        },
+        {
+          "name": "InterleavedAllocDealloc\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 487
+        },
+        {
+          "name": "InterleavedAllocDealloc\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 487
+        },
+        {
+          "name": "InterleavedAllocDealloc\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 487
+        },
+        {
+          "name": "InterleavedAllocDealloc\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 487
+        },
+        {
+          "name": "RepeatedAllocDeallocSameSize\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 509
+        },
+        {
+          "name": "RepeatedAllocDeallocSameSize\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 509
+        },
+        {
+          "name": "RepeatedAllocDeallocSameSize\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 509
+        },
+        {
+          "name": "RepeatedAllocDeallocSameSize\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 509
+        },
+        {
+          "name": "PowerOfTwoSizes\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 532
+        },
+        {
+          "name": "PowerOfTwoSizes\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 532
+        },
+        {
+          "name": "PowerOfTwoSizes\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 532
+        },
+        {
+          "name": "PowerOfTwoSizes\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 532
+        },
+        {
+          "name": "NonPowerOfTwoSizes\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 543
+        },
+        {
+          "name": "NonPowerOfTwoSizes\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 543
+        },
+        {
+          "name": "NonPowerOfTwoSizes\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 543
+        },
+        {
+          "name": "NonPowerOfTwoSizes\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 543
+        },
+        {
+          "name": "MoveConstructor\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 561
+        },
+        {
+          "name": "MoveConstructor\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 561
+        },
+        {
+          "name": "MoveConstructor\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 561
+        },
+        {
+          "name": "MoveConstructor\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 561
+        },
+        {
+          "name": "MoveAssignment\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 578
+        },
+        {
+          "name": "MoveAssignment\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 578
+        },
+        {
+          "name": "MoveAssignment\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 578
+        },
+        {
+          "name": "MoveAssignment\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 578
+        },
+        {
+          "name": "ConcurrentAllocationsBasic\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 599
+        },
+        {
+          "name": "ConcurrentAllocationsBasic\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 599
+        },
+        {
+          "name": "ConcurrentAllocationsBasic\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 599
+        },
+        {
+          "name": "ConcurrentAllocationsBasic\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 599
+        },
+        {
+          "name": "ConcurrentAllocDeallocMixed\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 639
+        },
+        {
+          "name": "ConcurrentAllocDeallocMixed\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 639
+        },
+        {
+          "name": "ConcurrentAllocDeallocMixed\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 639
+        },
+        {
+          "name": "ConcurrentAllocDeallocMixed\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 639
+        },
+        {
+          "name": "StressTestRandomSizes\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 686
+        },
+        {
+          "name": "StressTestRandomSizes\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 686
+        },
+        {
+          "name": "StressTestRandomSizes\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 686
+        },
+        {
+          "name": "StressTestRandomSizes\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 686
+        },
+        {
+          "name": "StressTestAllocDeallocCycles\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 719
+        },
+        {
+          "name": "StressTestAllocDeallocCycles\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 719
+        },
+        {
+          "name": "StressTestAllocDeallocCycles\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 719
+        },
+        {
+          "name": "StressTestAllocDeallocCycles\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 719
+        },
+        {
+          "name": "DestructorCleansUpAllocations\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 750
+        },
+        {
+          "name": "DestructorCleansUpAllocations\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 750
+        },
+        {
+          "name": "DestructorCleansUpAllocations\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 750
+        },
+        {
+          "name": "DestructorCleansUpAllocations\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 750
+        },
+        {
+          "name": "DefragmentAfterManyAllocations\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 768
+        },
+        {
+          "name": "DefragmentAfterManyAllocations\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 768
+        },
+        {
+          "name": "DefragmentAfterManyAllocations\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 768
+        },
+        {
+          "name": "DefragmentAfterManyAllocations\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 768
+        },
+        {
+          "name": "CacheReusesSmallerBlocks\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 803
+        },
+        {
+          "name": "CacheReusesSmallerBlocks\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 803
+        },
+        {
+          "name": "CacheReusesSmallerBlocks\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 803
+        },
+        {
+          "name": "CacheReusesSmallerBlocks\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 803
+        },
+        {
+          "name": "MultipleCachedBlocksOfSameSize\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 817
+        },
+        {
+          "name": "MultipleCachedBlocksOfSameSize\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 817
+        },
+        {
+          "name": "MultipleCachedBlocksOfSameSize\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 817
+        },
+        {
+          "name": "MultipleCachedBlocksOfSameSize\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 817
+        },
+        {
+          "name": "ComprehensiveFunctionalityTest\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 851
+        },
+        {
+          "name": "ComprehensiveFunctionalityTest\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 851
+        },
+        {
+          "name": "ComprehensiveFunctionalityTest\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 851
+        },
+        {
+          "name": "ComprehensiveFunctionalityTest\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 851
+        }
+      ]
+    }
+  ]
+}

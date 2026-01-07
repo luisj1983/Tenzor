@@ -1,0 +1,132 @@
+{
+  "tests": 24,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "AutocastMultiDTypeTest",
+      "tests": 24,
+      "testsuite": [
+        {
+          "name": "Float32ToFloat16Casting",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autocast_multidtype.cpp",
+          "line": 54
+        },
+        {
+          "name": "Float64ToFloat32Casting",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autocast_multidtype.cpp",
+          "line": 78
+        },
+        {
+          "name": "BFloat16Casting",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autocast_multidtype.cpp",
+          "line": 92
+        },
+        {
+          "name": "NestedContextsDifferentDtypes",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autocast_multidtype.cpp",
+          "line": 109
+        },
+        {
+          "name": "NestedContextsWithDisable",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autocast_multidtype.cpp",
+          "line": 135
+        },
+        {
+          "name": "DtypePreservation",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autocast_multidtype.cpp",
+          "line": 156
+        },
+        {
+          "name": "AllAutocastDtypes",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autocast_multidtype.cpp",
+          "line": 175
+        },
+        {
+          "name": "DeviceTypeFilteringMultiDtype",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autocast_multidtype.cpp",
+          "line": 191
+        },
+        {
+          "name": "ComputeHeavyOperationsMultiDtype",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autocast_multidtype.cpp",
+          "line": 209
+        },
+        {
+          "name": "StabilityCriticalOperationsMultiDtype",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autocast_multidtype.cpp",
+          "line": 225
+        },
+        {
+          "name": "DeeplyNestedContexts",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autocast_multidtype.cpp",
+          "line": 241
+        },
+        {
+          "name": "AutocastGuardMultiDtype",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autocast_multidtype.cpp",
+          "line": 272
+        },
+        {
+          "name": "AutocastDisabledMultiDtype",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autocast_multidtype.cpp",
+          "line": 287
+        },
+        {
+          "name": "InvalidDtypes",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autocast_multidtype.cpp",
+          "line": 306
+        },
+        {
+          "name": "DtypeTransitionsNested",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autocast_multidtype.cpp",
+          "line": 331
+        },
+        {
+          "name": "MultipleOperationsSameContext",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autocast_multidtype.cpp",
+          "line": 355
+        },
+        {
+          "name": "DtypeCastingRulesAllFloats",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autocast_multidtype.cpp",
+          "line": 374
+        },
+        {
+          "name": "HelperFunctionMultiDtype",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autocast_multidtype.cpp",
+          "line": 398
+        },
+        {
+          "name": "MultipleCyclesDifferentDtypes",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autocast_multidtype.cpp",
+          "line": 413
+        },
+        {
+          "name": "DeviceTypePersistenceMultiDtype",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autocast_multidtype.cpp",
+          "line": 432
+        },
+        {
+          "name": "AlternatingDtypes",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autocast_multidtype.cpp",
+          "line": 447
+        },
+        {
+          "name": "NoDeviceTypeSpecified",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autocast_multidtype.cpp",
+          "line": 464
+        },
+        {
+          "name": "EmptyOperationName",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autocast_multidtype.cpp",
+          "line": 476
+        },
+        {
+          "name": "ConsistencyAcrossQueries",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autocast_multidtype.cpp",
+          "line": 484
+        }
+      ]
+    }
+  ]
+}

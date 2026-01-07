@@ -1,0 +1,1596 @@
+{
+  "tests": 264,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "AllBackendsAllDTypes\/RNNMultiDTypeTest",
+      "tests": 264,
+      "testsuite": [
+        {
+          "name": "RNNCellBasicForward\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 119
+        },
+        {
+          "name": "RNNCellBasicForward\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 119
+        },
+        {
+          "name": "RNNCellBasicForward\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 119
+        },
+        {
+          "name": "RNNCellBasicForward\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 119
+        },
+        {
+          "name": "RNNCellBasicForward\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 119
+        },
+        {
+          "name": "RNNCellBasicForward\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 119
+        },
+        {
+          "name": "RNNCellBasicForward\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 119
+        },
+        {
+          "name": "RNNCellBasicForward\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 119
+        },
+        {
+          "name": "RNNCellBasicForward\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 119
+        },
+        {
+          "name": "RNNCellBasicForward\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 119
+        },
+        {
+          "name": "RNNCellBasicForward\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 119
+        },
+        {
+          "name": "RNNCellBasicForward\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 119
+        },
+        {
+          "name": "RNNCellReLUActivation\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 144
+        },
+        {
+          "name": "RNNCellReLUActivation\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 144
+        },
+        {
+          "name": "RNNCellReLUActivation\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 144
+        },
+        {
+          "name": "RNNCellReLUActivation\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 144
+        },
+        {
+          "name": "RNNCellReLUActivation\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 144
+        },
+        {
+          "name": "RNNCellReLUActivation\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 144
+        },
+        {
+          "name": "RNNCellReLUActivation\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 144
+        },
+        {
+          "name": "RNNCellReLUActivation\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 144
+        },
+        {
+          "name": "RNNCellReLUActivation\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 144
+        },
+        {
+          "name": "RNNCellReLUActivation\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 144
+        },
+        {
+          "name": "RNNCellReLUActivation\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 144
+        },
+        {
+          "name": "RNNCellReLUActivation\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 144
+        },
+        {
+          "name": "RNNCellNoInitialHidden\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 169
+        },
+        {
+          "name": "RNNCellNoInitialHidden\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 169
+        },
+        {
+          "name": "RNNCellNoInitialHidden\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 169
+        },
+        {
+          "name": "RNNCellNoInitialHidden\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 169
+        },
+        {
+          "name": "RNNCellNoInitialHidden\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 169
+        },
+        {
+          "name": "RNNCellNoInitialHidden\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 169
+        },
+        {
+          "name": "RNNCellNoInitialHidden\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 169
+        },
+        {
+          "name": "RNNCellNoInitialHidden\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 169
+        },
+        {
+          "name": "RNNCellNoInitialHidden\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 169
+        },
+        {
+          "name": "RNNCellNoInitialHidden\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 169
+        },
+        {
+          "name": "RNNCellNoInitialHidden\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 169
+        },
+        {
+          "name": "RNNCellNoInitialHidden\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 169
+        },
+        {
+          "name": "RNNCellNoBias\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 191
+        },
+        {
+          "name": "RNNCellNoBias\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 191
+        },
+        {
+          "name": "RNNCellNoBias\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 191
+        },
+        {
+          "name": "RNNCellNoBias\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 191
+        },
+        {
+          "name": "RNNCellNoBias\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 191
+        },
+        {
+          "name": "RNNCellNoBias\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 191
+        },
+        {
+          "name": "RNNCellNoBias\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 191
+        },
+        {
+          "name": "RNNCellNoBias\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 191
+        },
+        {
+          "name": "RNNCellNoBias\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 191
+        },
+        {
+          "name": "RNNCellNoBias\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 191
+        },
+        {
+          "name": "RNNCellNoBias\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 191
+        },
+        {
+          "name": "RNNCellNoBias\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 191
+        },
+        {
+          "name": "RNNCellInvalidNonlinearity\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 212
+        },
+        {
+          "name": "RNNCellInvalidNonlinearity\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 212
+        },
+        {
+          "name": "RNNCellInvalidNonlinearity\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 212
+        },
+        {
+          "name": "RNNCellInvalidNonlinearity\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 212
+        },
+        {
+          "name": "RNNCellInvalidNonlinearity\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 212
+        },
+        {
+          "name": "RNNCellInvalidNonlinearity\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 212
+        },
+        {
+          "name": "RNNCellInvalidNonlinearity\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 212
+        },
+        {
+          "name": "RNNCellInvalidNonlinearity\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 212
+        },
+        {
+          "name": "RNNCellInvalidNonlinearity\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 212
+        },
+        {
+          "name": "RNNCellInvalidNonlinearity\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 212
+        },
+        {
+          "name": "RNNCellInvalidNonlinearity\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 212
+        },
+        {
+          "name": "RNNCellInvalidNonlinearity\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 212
+        },
+        {
+          "name": "RNNBasicForward\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 225
+        },
+        {
+          "name": "RNNBasicForward\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 225
+        },
+        {
+          "name": "RNNBasicForward\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 225
+        },
+        {
+          "name": "RNNBasicForward\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 225
+        },
+        {
+          "name": "RNNBasicForward\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 225
+        },
+        {
+          "name": "RNNBasicForward\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 225
+        },
+        {
+          "name": "RNNBasicForward\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 225
+        },
+        {
+          "name": "RNNBasicForward\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 225
+        },
+        {
+          "name": "RNNBasicForward\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 225
+        },
+        {
+          "name": "RNNBasicForward\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 225
+        },
+        {
+          "name": "RNNBasicForward\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 225
+        },
+        {
+          "name": "RNNBasicForward\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 225
+        },
+        {
+          "name": "RNNMultiLayer\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 254
+        },
+        {
+          "name": "RNNMultiLayer\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 254
+        },
+        {
+          "name": "RNNMultiLayer\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 254
+        },
+        {
+          "name": "RNNMultiLayer\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 254
+        },
+        {
+          "name": "RNNMultiLayer\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 254
+        },
+        {
+          "name": "RNNMultiLayer\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 254
+        },
+        {
+          "name": "RNNMultiLayer\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 254
+        },
+        {
+          "name": "RNNMultiLayer\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 254
+        },
+        {
+          "name": "RNNMultiLayer\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 254
+        },
+        {
+          "name": "RNNMultiLayer\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 254
+        },
+        {
+          "name": "RNNMultiLayer\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 254
+        },
+        {
+          "name": "RNNMultiLayer\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 254
+        },
+        {
+          "name": "RNNBatchFirst\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 281
+        },
+        {
+          "name": "RNNBatchFirst\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 281
+        },
+        {
+          "name": "RNNBatchFirst\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 281
+        },
+        {
+          "name": "RNNBatchFirst\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 281
+        },
+        {
+          "name": "RNNBatchFirst\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 281
+        },
+        {
+          "name": "RNNBatchFirst\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 281
+        },
+        {
+          "name": "RNNBatchFirst\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 281
+        },
+        {
+          "name": "RNNBatchFirst\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 281
+        },
+        {
+          "name": "RNNBatchFirst\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 281
+        },
+        {
+          "name": "RNNBatchFirst\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 281
+        },
+        {
+          "name": "RNNBatchFirst\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 281
+        },
+        {
+          "name": "RNNBatchFirst\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 281
+        },
+        {
+          "name": "RNNBidirectional\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 303
+        },
+        {
+          "name": "RNNBidirectional\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 303
+        },
+        {
+          "name": "RNNBidirectional\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 303
+        },
+        {
+          "name": "RNNBidirectional\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 303
+        },
+        {
+          "name": "RNNBidirectional\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 303
+        },
+        {
+          "name": "RNNBidirectional\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 303
+        },
+        {
+          "name": "RNNBidirectional\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 303
+        },
+        {
+          "name": "RNNBidirectional\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 303
+        },
+        {
+          "name": "RNNBidirectional\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 303
+        },
+        {
+          "name": "RNNBidirectional\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 303
+        },
+        {
+          "name": "RNNBidirectional\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 303
+        },
+        {
+          "name": "RNNBidirectional\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 303
+        },
+        {
+          "name": "RNNBidirectionalMultiLayer\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 330
+        },
+        {
+          "name": "RNNBidirectionalMultiLayer\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 330
+        },
+        {
+          "name": "RNNBidirectionalMultiLayer\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 330
+        },
+        {
+          "name": "RNNBidirectionalMultiLayer\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 330
+        },
+        {
+          "name": "RNNBidirectionalMultiLayer\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 330
+        },
+        {
+          "name": "RNNBidirectionalMultiLayer\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 330
+        },
+        {
+          "name": "RNNBidirectionalMultiLayer\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 330
+        },
+        {
+          "name": "RNNBidirectionalMultiLayer\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 330
+        },
+        {
+          "name": "RNNBidirectionalMultiLayer\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 330
+        },
+        {
+          "name": "RNNBidirectionalMultiLayer\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 330
+        },
+        {
+          "name": "RNNBidirectionalMultiLayer\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 330
+        },
+        {
+          "name": "RNNBidirectionalMultiLayer\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 330
+        },
+        {
+          "name": "RNNWithDropout\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 352
+        },
+        {
+          "name": "RNNWithDropout\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 352
+        },
+        {
+          "name": "RNNWithDropout\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 352
+        },
+        {
+          "name": "RNNWithDropout\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 352
+        },
+        {
+          "name": "RNNWithDropout\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 352
+        },
+        {
+          "name": "RNNWithDropout\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 352
+        },
+        {
+          "name": "RNNWithDropout\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 352
+        },
+        {
+          "name": "RNNWithDropout\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 352
+        },
+        {
+          "name": "RNNWithDropout\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 352
+        },
+        {
+          "name": "RNNWithDropout\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 352
+        },
+        {
+          "name": "RNNWithDropout\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 352
+        },
+        {
+          "name": "RNNWithDropout\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 352
+        },
+        {
+          "name": "RNNInitialHiddenState\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 374
+        },
+        {
+          "name": "RNNInitialHiddenState\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 374
+        },
+        {
+          "name": "RNNInitialHiddenState\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 374
+        },
+        {
+          "name": "RNNInitialHiddenState\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 374
+        },
+        {
+          "name": "RNNInitialHiddenState\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 374
+        },
+        {
+          "name": "RNNInitialHiddenState\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 374
+        },
+        {
+          "name": "RNNInitialHiddenState\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 374
+        },
+        {
+          "name": "RNNInitialHiddenState\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 374
+        },
+        {
+          "name": "RNNInitialHiddenState\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 374
+        },
+        {
+          "name": "RNNInitialHiddenState\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 374
+        },
+        {
+          "name": "RNNInitialHiddenState\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 374
+        },
+        {
+          "name": "RNNInitialHiddenState\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 374
+        },
+        {
+          "name": "RNNSequenceLengthVariation\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 399
+        },
+        {
+          "name": "RNNSequenceLengthVariation\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 399
+        },
+        {
+          "name": "RNNSequenceLengthVariation\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 399
+        },
+        {
+          "name": "RNNSequenceLengthVariation\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 399
+        },
+        {
+          "name": "RNNSequenceLengthVariation\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 399
+        },
+        {
+          "name": "RNNSequenceLengthVariation\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 399
+        },
+        {
+          "name": "RNNSequenceLengthVariation\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 399
+        },
+        {
+          "name": "RNNSequenceLengthVariation\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 399
+        },
+        {
+          "name": "RNNSequenceLengthVariation\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 399
+        },
+        {
+          "name": "RNNSequenceLengthVariation\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 399
+        },
+        {
+          "name": "RNNSequenceLengthVariation\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 399
+        },
+        {
+          "name": "RNNSequenceLengthVariation\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 399
+        },
+        {
+          "name": "RNNBatchSizeVariation\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 427
+        },
+        {
+          "name": "RNNBatchSizeVariation\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 427
+        },
+        {
+          "name": "RNNBatchSizeVariation\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 427
+        },
+        {
+          "name": "RNNBatchSizeVariation\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 427
+        },
+        {
+          "name": "RNNBatchSizeVariation\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 427
+        },
+        {
+          "name": "RNNBatchSizeVariation\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 427
+        },
+        {
+          "name": "RNNBatchSizeVariation\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 427
+        },
+        {
+          "name": "RNNBatchSizeVariation\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 427
+        },
+        {
+          "name": "RNNBatchSizeVariation\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 427
+        },
+        {
+          "name": "RNNBatchSizeVariation\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 427
+        },
+        {
+          "name": "RNNBatchSizeVariation\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 427
+        },
+        {
+          "name": "RNNBatchSizeVariation\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 427
+        },
+        {
+          "name": "RNNSingleTimestep\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 455
+        },
+        {
+          "name": "RNNSingleTimestep\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 455
+        },
+        {
+          "name": "RNNSingleTimestep\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 455
+        },
+        {
+          "name": "RNNSingleTimestep\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 455
+        },
+        {
+          "name": "RNNSingleTimestep\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 455
+        },
+        {
+          "name": "RNNSingleTimestep\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 455
+        },
+        {
+          "name": "RNNSingleTimestep\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 455
+        },
+        {
+          "name": "RNNSingleTimestep\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 455
+        },
+        {
+          "name": "RNNSingleTimestep\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 455
+        },
+        {
+          "name": "RNNSingleTimestep\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 455
+        },
+        {
+          "name": "RNNSingleTimestep\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 455
+        },
+        {
+          "name": "RNNSingleTimestep\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 455
+        },
+        {
+          "name": "RNNOutputConsistency\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 475
+        },
+        {
+          "name": "RNNOutputConsistency\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 475
+        },
+        {
+          "name": "RNNOutputConsistency\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 475
+        },
+        {
+          "name": "RNNOutputConsistency\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 475
+        },
+        {
+          "name": "RNNOutputConsistency\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 475
+        },
+        {
+          "name": "RNNOutputConsistency\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 475
+        },
+        {
+          "name": "RNNOutputConsistency\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 475
+        },
+        {
+          "name": "RNNOutputConsistency\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 475
+        },
+        {
+          "name": "RNNOutputConsistency\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 475
+        },
+        {
+          "name": "RNNOutputConsistency\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 475
+        },
+        {
+          "name": "RNNOutputConsistency\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 475
+        },
+        {
+          "name": "RNNOutputConsistency\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 475
+        },
+        {
+          "name": "RNNGradientFlow\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 500
+        },
+        {
+          "name": "RNNGradientFlow\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 500
+        },
+        {
+          "name": "RNNGradientFlow\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 500
+        },
+        {
+          "name": "RNNGradientFlow\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 500
+        },
+        {
+          "name": "RNNGradientFlow\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 500
+        },
+        {
+          "name": "RNNGradientFlow\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 500
+        },
+        {
+          "name": "RNNGradientFlow\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 500
+        },
+        {
+          "name": "RNNGradientFlow\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 500
+        },
+        {
+          "name": "RNNGradientFlow\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 500
+        },
+        {
+          "name": "RNNGradientFlow\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 500
+        },
+        {
+          "name": "RNNGradientFlow\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 500
+        },
+        {
+          "name": "RNNGradientFlow\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 500
+        },
+        {
+          "name": "RNNTrainingMode\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 528
+        },
+        {
+          "name": "RNNTrainingMode\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 528
+        },
+        {
+          "name": "RNNTrainingMode\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 528
+        },
+        {
+          "name": "RNNTrainingMode\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 528
+        },
+        {
+          "name": "RNNTrainingMode\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 528
+        },
+        {
+          "name": "RNNTrainingMode\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 528
+        },
+        {
+          "name": "RNNTrainingMode\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 528
+        },
+        {
+          "name": "RNNTrainingMode\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 528
+        },
+        {
+          "name": "RNNTrainingMode\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 528
+        },
+        {
+          "name": "RNNTrainingMode\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 528
+        },
+        {
+          "name": "RNNTrainingMode\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 528
+        },
+        {
+          "name": "RNNTrainingMode\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 528
+        },
+        {
+          "name": "RNNParameterCount\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 544
+        },
+        {
+          "name": "RNNParameterCount\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 544
+        },
+        {
+          "name": "RNNParameterCount\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 544
+        },
+        {
+          "name": "RNNParameterCount\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 544
+        },
+        {
+          "name": "RNNParameterCount\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 544
+        },
+        {
+          "name": "RNNParameterCount\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 544
+        },
+        {
+          "name": "RNNParameterCount\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 544
+        },
+        {
+          "name": "RNNParameterCount\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 544
+        },
+        {
+          "name": "RNNParameterCount\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 544
+        },
+        {
+          "name": "RNNParameterCount\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 544
+        },
+        {
+          "name": "RNNParameterCount\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 544
+        },
+        {
+          "name": "RNNParameterCount\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 544
+        },
+        {
+          "name": "RNNLargeHidden\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 559
+        },
+        {
+          "name": "RNNLargeHidden\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 559
+        },
+        {
+          "name": "RNNLargeHidden\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 559
+        },
+        {
+          "name": "RNNLargeHidden\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 559
+        },
+        {
+          "name": "RNNLargeHidden\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 559
+        },
+        {
+          "name": "RNNLargeHidden\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 559
+        },
+        {
+          "name": "RNNLargeHidden\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 559
+        },
+        {
+          "name": "RNNLargeHidden\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 559
+        },
+        {
+          "name": "RNNLargeHidden\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 559
+        },
+        {
+          "name": "RNNLargeHidden\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 559
+        },
+        {
+          "name": "RNNLargeHidden\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 559
+        },
+        {
+          "name": "RNNLargeHidden\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 559
+        },
+        {
+          "name": "RNNInvalidNumLayers\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 580
+        },
+        {
+          "name": "RNNInvalidNumLayers\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 580
+        },
+        {
+          "name": "RNNInvalidNumLayers\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 580
+        },
+        {
+          "name": "RNNInvalidNumLayers\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 580
+        },
+        {
+          "name": "RNNInvalidNumLayers\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 580
+        },
+        {
+          "name": "RNNInvalidNumLayers\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 580
+        },
+        {
+          "name": "RNNInvalidNumLayers\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 580
+        },
+        {
+          "name": "RNNInvalidNumLayers\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 580
+        },
+        {
+          "name": "RNNInvalidNumLayers\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 580
+        },
+        {
+          "name": "RNNInvalidNumLayers\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 580
+        },
+        {
+          "name": "RNNInvalidNumLayers\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 580
+        },
+        {
+          "name": "RNNInvalidNumLayers\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 580
+        },
+        {
+          "name": "RNNInvalidDropout\/cpu_float32",
+          "value_param": "cpu_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 589
+        },
+        {
+          "name": "RNNInvalidDropout\/cpu_float64",
+          "value_param": "cpu_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 589
+        },
+        {
+          "name": "RNNInvalidDropout\/cpu_float16",
+          "value_param": "cpu_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 589
+        },
+        {
+          "name": "RNNInvalidDropout\/cuda_float32",
+          "value_param": "cuda_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 589
+        },
+        {
+          "name": "RNNInvalidDropout\/cuda_float64",
+          "value_param": "cuda_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 589
+        },
+        {
+          "name": "RNNInvalidDropout\/cuda_float16",
+          "value_param": "cuda_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 589
+        },
+        {
+          "name": "RNNInvalidDropout\/vulkan_float32",
+          "value_param": "vulkan_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 589
+        },
+        {
+          "name": "RNNInvalidDropout\/vulkan_float64",
+          "value_param": "vulkan_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 589
+        },
+        {
+          "name": "RNNInvalidDropout\/vulkan_float16",
+          "value_param": "vulkan_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 589
+        },
+        {
+          "name": "RNNInvalidDropout\/oneapi_float32",
+          "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 589
+        },
+        {
+          "name": "RNNInvalidDropout\/oneapi_float64",
+          "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 589
+        },
+        {
+          "name": "RNNInvalidDropout\/oneapi_float16",
+          "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 589
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,1308 @@
+{
+  "tests": 216,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "AllBackends\/Conv2dBackendTest",
+      "tests": 216,
+      "testsuite": [
+        {
+          "name": "ForwardShapeBasic\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 78
+        },
+        {
+          "name": "ForwardShapeBasic\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 78
+        },
+        {
+          "name": "ForwardShapeBasic\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 78
+        },
+        {
+          "name": "ForwardShapeBasic\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 78
+        },
+        {
+          "name": "ForwardShapeSingleBatch\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 91
+        },
+        {
+          "name": "ForwardShapeSingleBatch\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 91
+        },
+        {
+          "name": "ForwardShapeSingleBatch\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 91
+        },
+        {
+          "name": "ForwardShapeSingleBatch\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 91
+        },
+        {
+          "name": "ForwardShapeMultiBatch\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 102
+        },
+        {
+          "name": "ForwardShapeMultiBatch\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 102
+        },
+        {
+          "name": "ForwardShapeMultiBatch\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 102
+        },
+        {
+          "name": "ForwardShapeMultiBatch\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 102
+        },
+        {
+          "name": "KernelSize1x1\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 117
+        },
+        {
+          "name": "KernelSize1x1\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 117
+        },
+        {
+          "name": "KernelSize1x1\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 117
+        },
+        {
+          "name": "KernelSize1x1\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 117
+        },
+        {
+          "name": "KernelSize3x3\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 129
+        },
+        {
+          "name": "KernelSize3x3\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 129
+        },
+        {
+          "name": "KernelSize3x3\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 129
+        },
+        {
+          "name": "KernelSize3x3\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 129
+        },
+        {
+          "name": "KernelSize5x5\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 140
+        },
+        {
+          "name": "KernelSize5x5\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 140
+        },
+        {
+          "name": "KernelSize5x5\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 140
+        },
+        {
+          "name": "KernelSize5x5\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 140
+        },
+        {
+          "name": "KernelSize7x7\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 151
+        },
+        {
+          "name": "KernelSize7x7\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 151
+        },
+        {
+          "name": "KernelSize7x7\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 151
+        },
+        {
+          "name": "KernelSize7x7\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 151
+        },
+        {
+          "name": "Stride1\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 166
+        },
+        {
+          "name": "Stride1\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 166
+        },
+        {
+          "name": "Stride1\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 166
+        },
+        {
+          "name": "Stride1\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 166
+        },
+        {
+          "name": "Stride2\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 175
+        },
+        {
+          "name": "Stride2\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 175
+        },
+        {
+          "name": "Stride2\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 175
+        },
+        {
+          "name": "Stride2\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 175
+        },
+        {
+          "name": "Stride3\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 184
+        },
+        {
+          "name": "Stride3\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 184
+        },
+        {
+          "name": "Stride3\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 184
+        },
+        {
+          "name": "Stride3\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 184
+        },
+        {
+          "name": "Stride4\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 193
+        },
+        {
+          "name": "Stride4\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 193
+        },
+        {
+          "name": "Stride4\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 193
+        },
+        {
+          "name": "Stride4\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 193
+        },
+        {
+          "name": "Padding0\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 206
+        },
+        {
+          "name": "Padding0\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 206
+        },
+        {
+          "name": "Padding0\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 206
+        },
+        {
+          "name": "Padding0\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 206
+        },
+        {
+          "name": "Padding1\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 215
+        },
+        {
+          "name": "Padding1\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 215
+        },
+        {
+          "name": "Padding1\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 215
+        },
+        {
+          "name": "Padding1\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 215
+        },
+        {
+          "name": "Padding2\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 224
+        },
+        {
+          "name": "Padding2\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 224
+        },
+        {
+          "name": "Padding2\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 224
+        },
+        {
+          "name": "Padding2\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 224
+        },
+        {
+          "name": "PaddingSamePadding\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 233
+        },
+        {
+          "name": "PaddingSamePadding\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 233
+        },
+        {
+          "name": "PaddingSamePadding\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 233
+        },
+        {
+          "name": "PaddingSamePadding\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 233
+        },
+        {
+          "name": "Dilation1\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 247
+        },
+        {
+          "name": "Dilation1\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 247
+        },
+        {
+          "name": "Dilation1\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 247
+        },
+        {
+          "name": "Dilation1\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 247
+        },
+        {
+          "name": "Dilation2\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 256
+        },
+        {
+          "name": "Dilation2\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 256
+        },
+        {
+          "name": "Dilation2\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 256
+        },
+        {
+          "name": "Dilation2\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 256
+        },
+        {
+          "name": "Dilation3\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 265
+        },
+        {
+          "name": "Dilation3\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 265
+        },
+        {
+          "name": "Dilation3\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 265
+        },
+        {
+          "name": "Dilation3\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 265
+        },
+        {
+          "name": "DilationWithPadding\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 274
+        },
+        {
+          "name": "DilationWithPadding\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 274
+        },
+        {
+          "name": "DilationWithPadding\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 274
+        },
+        {
+          "name": "DilationWithPadding\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 274
+        },
+        {
+          "name": "Groups1Standard\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 288
+        },
+        {
+          "name": "Groups1Standard\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 288
+        },
+        {
+          "name": "Groups1Standard\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 288
+        },
+        {
+          "name": "Groups1Standard\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 288
+        },
+        {
+          "name": "GroupsDepthwise\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 300
+        },
+        {
+          "name": "GroupsDepthwise\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 300
+        },
+        {
+          "name": "GroupsDepthwise\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 300
+        },
+        {
+          "name": "GroupsDepthwise\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 300
+        },
+        {
+          "name": "Groups2\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 313
+        },
+        {
+          "name": "Groups2\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 313
+        },
+        {
+          "name": "Groups2\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 313
+        },
+        {
+          "name": "Groups2\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 313
+        },
+        {
+          "name": "Groups4\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 325
+        },
+        {
+          "name": "Groups4\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 325
+        },
+        {
+          "name": "Groups4\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 325
+        },
+        {
+          "name": "Groups4\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 325
+        },
+        {
+          "name": "WithBias\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 339
+        },
+        {
+          "name": "WithBias\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 339
+        },
+        {
+          "name": "WithBias\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 339
+        },
+        {
+          "name": "WithBias\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 339
+        },
+        {
+          "name": "NoBias\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 347
+        },
+        {
+          "name": "NoBias\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 347
+        },
+        {
+          "name": "NoBias\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 347
+        },
+        {
+          "name": "NoBias\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 347
+        },
+        {
+          "name": "BiasEffect\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 355
+        },
+        {
+          "name": "BiasEffect\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 355
+        },
+        {
+          "name": "BiasEffect\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 355
+        },
+        {
+          "name": "BiasEffect\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 355
+        },
+        {
+          "name": "WeightShape\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 372
+        },
+        {
+          "name": "WeightShape\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 372
+        },
+        {
+          "name": "WeightShape\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 372
+        },
+        {
+          "name": "WeightShape\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 372
+        },
+        {
+          "name": "WeightShapeWithGroups\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 385
+        },
+        {
+          "name": "WeightShapeWithGroups\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 385
+        },
+        {
+          "name": "WeightShapeWithGroups\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 385
+        },
+        {
+          "name": "WeightShapeWithGroups\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 385
+        },
+        {
+          "name": "EdgeCase1x1Image\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 401
+        },
+        {
+          "name": "EdgeCase1x1Image\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 401
+        },
+        {
+          "name": "EdgeCase1x1Image\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 401
+        },
+        {
+          "name": "EdgeCase1x1Image\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 401
+        },
+        {
+          "name": "EdgeCaseLargeImage\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 413
+        },
+        {
+          "name": "EdgeCaseLargeImage\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 413
+        },
+        {
+          "name": "EdgeCaseLargeImage\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 413
+        },
+        {
+          "name": "EdgeCaseLargeImage\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 413
+        },
+        {
+          "name": "EdgeCaseVeryLargeBatch\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 425
+        },
+        {
+          "name": "EdgeCaseVeryLargeBatch\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 425
+        },
+        {
+          "name": "EdgeCaseVeryLargeBatch\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 425
+        },
+        {
+          "name": "EdgeCaseVeryLargeBatch\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 425
+        },
+        {
+          "name": "EdgeCaseSingleChannel\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 435
+        },
+        {
+          "name": "EdgeCaseSingleChannel\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 435
+        },
+        {
+          "name": "EdgeCaseSingleChannel\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 435
+        },
+        {
+          "name": "EdgeCaseSingleChannel\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 435
+        },
+        {
+          "name": "EdgeCaseManyChannels\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 444
+        },
+        {
+          "name": "EdgeCaseManyChannels\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 444
+        },
+        {
+          "name": "EdgeCaseManyChannels\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 444
+        },
+        {
+          "name": "EdgeCaseManyChannels\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 444
+        },
+        {
+          "name": "CombinedStrideAndPadding\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 460
+        },
+        {
+          "name": "CombinedStrideAndPadding\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 460
+        },
+        {
+          "name": "CombinedStrideAndPadding\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 460
+        },
+        {
+          "name": "CombinedStrideAndPadding\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 460
+        },
+        {
+          "name": "CombinedAllParameters\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 469
+        },
+        {
+          "name": "CombinedAllParameters\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 469
+        },
+        {
+          "name": "CombinedAllParameters\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 469
+        },
+        {
+          "name": "CombinedAllParameters\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 469
+        },
+        {
+          "name": "ConsistentOutput\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 486
+        },
+        {
+          "name": "ConsistentOutput\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 486
+        },
+        {
+          "name": "ConsistentOutput\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 486
+        },
+        {
+          "name": "ConsistentOutput\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 486
+        },
+        {
+          "name": "DifferentInputsSameSize\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 504
+        },
+        {
+          "name": "DifferentInputsSameSize\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 504
+        },
+        {
+          "name": "DifferentInputsSameSize\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 504
+        },
+        {
+          "name": "DifferentInputsSameSize\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 504
+        },
+        {
+          "name": "RequiresGrad\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 524
+        },
+        {
+          "name": "RequiresGrad\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 524
+        },
+        {
+          "name": "RequiresGrad\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 524
+        },
+        {
+          "name": "RequiresGrad\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 524
+        },
+        {
+          "name": "NoGradWhenInputNoGrad\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 532
+        },
+        {
+          "name": "NoGradWhenInputNoGrad\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 532
+        },
+        {
+          "name": "NoGradWhenInputNoGrad\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 532
+        },
+        {
+          "name": "NoGradWhenInputNoGrad\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 532
+        },
+        {
+          "name": "BackwardPassExecutes\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 541
+        },
+        {
+          "name": "BackwardPassExecutes\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 541
+        },
+        {
+          "name": "BackwardPassExecutes\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 541
+        },
+        {
+          "name": "BackwardPassExecutes\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 541
+        },
+        {
+          "name": "GradientNonZero\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 562
+        },
+        {
+          "name": "GradientNonZero\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 562
+        },
+        {
+          "name": "GradientNonZero\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 562
+        },
+        {
+          "name": "GradientNonZero\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 562
+        },
+        {
+          "name": "ParameterCount\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 594
+        },
+        {
+          "name": "ParameterCount\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 594
+        },
+        {
+          "name": "ParameterCount\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 594
+        },
+        {
+          "name": "ParameterCount\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 594
+        },
+        {
+          "name": "ParameterSizes\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 606
+        },
+        {
+          "name": "ParameterSizes\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 606
+        },
+        {
+          "name": "ParameterSizes\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 606
+        },
+        {
+          "name": "ParameterSizes\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 606
+        },
+        {
+          "name": "BottleneckConfiguration\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 625
+        },
+        {
+          "name": "BottleneckConfiguration\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 625
+        },
+        {
+          "name": "BottleneckConfiguration\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 625
+        },
+        {
+          "name": "BottleneckConfiguration\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 625
+        },
+        {
+          "name": "ResidualConnection\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 642
+        },
+        {
+          "name": "ResidualConnection\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 642
+        },
+        {
+          "name": "ResidualConnection\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 642
+        },
+        {
+          "name": "ResidualConnection\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 642
+        },
+        {
+          "name": "MemoryEfficiencySmall\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 662
+        },
+        {
+          "name": "MemoryEfficiencySmall\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 662
+        },
+        {
+          "name": "MemoryEfficiencySmall\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 662
+        },
+        {
+          "name": "MemoryEfficiencySmall\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 662
+        },
+        {
+          "name": "MemoryEfficiencyLarge\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 672
+        },
+        {
+          "name": "MemoryEfficiencyLarge\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 672
+        },
+        {
+          "name": "MemoryEfficiencyLarge\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 672
+        },
+        {
+          "name": "MemoryEfficiencyLarge\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 672
+        },
+        {
+          "name": "InvalidInputDimensions\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 686
+        },
+        {
+          "name": "InvalidInputDimensions\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 686
+        },
+        {
+          "name": "InvalidInputDimensions\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 686
+        },
+        {
+          "name": "InvalidInputDimensions\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 686
+        },
+        {
+          "name": "InvalidChannelCount\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 696
+        },
+        {
+          "name": "InvalidChannelCount\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 696
+        },
+        {
+          "name": "InvalidChannelCount\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 696
+        },
+        {
+          "name": "InvalidChannelCount\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 696
+        },
+        {
+          "name": "InvalidGroupConfiguration\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 706
+        },
+        {
+          "name": "InvalidGroupConfiguration\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 706
+        },
+        {
+          "name": "InvalidGroupConfiguration\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 706
+        },
+        {
+          "name": "InvalidGroupConfiguration\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 706
+        },
+        {
+          "name": "VGGStyleBlock\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 722
+        },
+        {
+          "name": "VGGStyleBlock\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 722
+        },
+        {
+          "name": "VGGStyleBlock\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 722
+        },
+        {
+          "name": "VGGStyleBlock\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 722
+        },
+        {
+          "name": "InceptionStyleBranch\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 737
+        },
+        {
+          "name": "InceptionStyleBranch\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 737
+        },
+        {
+          "name": "InceptionStyleBranch\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 737
+        },
+        {
+          "name": "InceptionStyleBranch\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 737
+        },
+        {
+          "name": "MobileNetDepthwiseSeparable\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 754
+        },
+        {
+          "name": "MobileNetDepthwiseSeparable\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 754
+        },
+        {
+          "name": "MobileNetDepthwiseSeparable\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 754
+        },
+        {
+          "name": "MobileNetDepthwiseSeparable\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 754
+        },
+        {
+          "name": "ResNetBottleneck\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 774
+        },
+        {
+          "name": "ResNetBottleneck\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 774
+        },
+        {
+          "name": "ResNetBottleneck\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 774
+        },
+        {
+          "name": "ResNetBottleneck\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 774
+        }
+      ]
+    }
+  ]
+}

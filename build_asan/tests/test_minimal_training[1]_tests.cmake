@@ -1,0 +1,7 @@
+add_test([=[MinimalTraining.SimpleLinearRegression]=]  /home/lee/Projects/Tenzor/bin/test_minimal_training [==[--gtest_filter=MinimalTraining.SimpleLinearRegression]==] --gtest_also_run_disabled_tests)
+set_tests_properties([=[MinimalTraining.SimpleLinearRegression]=]  PROPERTIES DEF_SOURCE_LINE /home/lee/Projects/Tenzor/tests/test_minimal_training.cpp:29 WORKING_DIRECTORY /home/lee/Projects/Tenzor/build_asan/tests SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
+add_test([=[MinimalTraining.StandardAdamOnly]=]  /home/lee/Projects/Tenzor/bin/test_minimal_training [==[--gtest_filter=MinimalTraining.StandardAdamOnly]==] --gtest_also_run_disabled_tests)
+set_tests_properties([=[MinimalTraining.StandardAdamOnly]=]  PROPERTIES DEF_SOURCE_LINE /home/lee/Projects/Tenzor/tests/test_minimal_training.cpp:134 WORKING_DIRECTORY /home/lee/Projects/Tenzor/build_asan/tests SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
+add_test([=[MinimalTraining.IntegrationTestSetup]=]  /home/lee/Projects/Tenzor/bin/test_minimal_training [==[--gtest_filter=MinimalTraining.IntegrationTestSetup]==] --gtest_also_run_disabled_tests)
+set_tests_properties([=[MinimalTraining.IntegrationTestSetup]=]  PROPERTIES DEF_SOURCE_LINE /home/lee/Projects/Tenzor/tests/test_minimal_training.cpp:171 WORKING_DIRECTORY /home/lee/Projects/Tenzor/build_asan/tests SKIP_REGULAR_EXPRESSION [==[\[  SKIPPED \]]==])
+set(  test_minimal_training_TESTS MinimalTraining.SimpleLinearRegression MinimalTraining.StandardAdamOnly MinimalTraining.IntegrationTestSetup)

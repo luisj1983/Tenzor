@@ -1,0 +1,830 @@
+/**
+ * @file fused_lstm.hpp
+ * @brief Optimized fused LSTM operations
+ *
+ * Key features:
+ * - Fused gate computations (GEMM + activations)
+ * - SIMD-accelerated sigmoid and tanh
+ * - Efficient memory access patterns
+ * - OpenMP parallelization for batch dimension
+ *
+ * LSTM equations:
+ *   i_t = sigmoid(W_ii @ x_t + W_hi @ h_{t-1} + b_i)
+ *   f_t = sigmoid(W_if @ x_t + W_hf @ h_{t-1} + b_f)
+ *   g_t = tanh(W_ig @ x_t + W_hg @ h_{t-1} + b_g)
+ *   o_t = sigmoid(W_io @ x_t + W_ho @ h_{t-1} + b_o)
+ *   c_t = f_t * c_{t-1} + i_t * g_t
+ *   h_t = o_t * tanh(c_t)
+ */
+
+#pragma once
+
+#include <cstdint>
+#include <cstddef>
+#include <cmath>
+#include <cstring>
+#include <algorithm>
+#include <limits>
+#include <atomic>
+
+#include "buffer_pool.hpp"
+
+#if defined(__x86_64__) || defined(_M_X64)
+    #include <immintrin.h>
+    #if defined(__AVX512F__)
+        #define TENZOR_LSTM_AVX512
+    #endif
+    #if defined(__AVX2__)
+        #define TENZOR_LSTM_AVX2
+    #endif
+#endif
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
+// Include MKL header for threading control (even when using oneDNN for GEMM)
+#ifdef TENZOR_USE_MKL
+#include <mkl.h>
+#endif
+
+// Use oneDNN for GEMM operations to avoid MKL/ROCm interaction issues
+// The ROCm HIP runtime interferes with MKL's AVX-512 SGEMM implementation,
+// causing intermittent crashes. oneDNN doesn't have this issue.
+#ifdef TENZOR_USE_ONEDNN
+#include <dnnl.hpp>
+
+// Thread-local oneDNN engine and stream for LSTM GEMM operations
+namespace {
+static thread_local dnnl::engine* g_lstm_engine = nullptr;
+static thread_local dnnl::stream* g_lstm_stream = nullptr;
+
+inline void ensure_lstm_dnnl_engine() {
+    if (!g_lstm_engine) {
+        g_lstm_engine = new dnnl::engine(dnnl::engine::kind::cpu, 0);
+        g_lstm_stream = new dnnl::stream(*g_lstm_engine);
+    }
+}
+
+// oneDNN-based SGEMM: C = alpha * A @ B^T + beta * C
+// A is (M, K) row-major, B is (N, K) row-major (transposed)
+// NOTE: For LSTM, we always use alpha=1.0, beta=0.0, so this is simplified
+inline void onednn_sgemm_nt(
+    int64_t M, int64_t N, int64_t K,
+    float alpha, const float* A, int64_t lda,
+    const float* B, int64_t ldb,
+    float beta, float* C, int64_t ldc
+) {
+    (void)alpha; (void)beta;  // Always 1.0 and 0.0 for LSTM
+
+    ensure_lstm_dnnl_engine();
+    auto& engine = *g_lstm_engine;
+    auto& stream = *g_lstm_stream;
+
+    try {
+        // For C = A @ B^T where A is (M, K) and B is (N, K)
+        // We compute C = A @ transpose(B)
+        // In oneDNN terms: src=A (M,K), weights=B^T (K,N), dst=C (M,N)
+
+        // Memory descriptors with strides for row-major with leading dimensions
+        dnnl::memory::dims a_dims = {M, K};
+        dnnl::memory::dims bt_dims = {K, N};  // B transposed
+        dnnl::memory::dims c_dims = {M, N};
+
+        // A is row-major with stride lda
+        dnnl::memory::desc a_md(a_dims, dnnl::memory::data_type::f32,
+                                dnnl::memory::dims{lda, 1});
+
+        // B^T: B is (N, K) but we want it as (K, N)
+        // B[i][j] at offset i*ldb+j becomes B^T[j][i]
+        // For oneDNN, B^T has dims (K, N) with strides {1, ldb}
+        dnnl::memory::desc bt_md(bt_dims, dnnl::memory::data_type::f32,
+                                 dnnl::memory::dims{1, ldb});
+
+        // C is row-major with stride ldc
+        dnnl::memory::desc c_md(c_dims, dnnl::memory::data_type::f32,
+                                dnnl::memory::dims{ldc, 1});
+
+        // Create matmul primitive
+        auto matmul_pd = dnnl::matmul::primitive_desc(engine, a_md, bt_md, c_md);
+        auto matmul_prim = dnnl::matmul(matmul_pd);
+
+        // Create memory objects
+        auto a_mem = dnnl::memory(a_md, engine, const_cast<float*>(A));
+        auto bt_mem = dnnl::memory(bt_md, engine, const_cast<float*>(B));
+        auto c_mem = dnnl::memory(c_md, engine, C);
+
+        // Execute matmul: C = A @ B^T
+        matmul_prim.execute(stream, {
+            {DNNL_ARG_SRC, a_mem},
+            {DNNL_ARG_WEIGHTS, bt_mem},
+            {DNNL_ARG_DST, c_mem}
+        });
+        stream.wait();
+
+    } catch (const dnnl::error& e) {
+        // Fallback to naive implementation on error
+        fprintf(stderr, "[LSTM] oneDNN error: %s, falling back to naive\n", e.what());
+        for (int64_t i = 0; i < M; ++i) {
+            for (int64_t j = 0; j < N; ++j) {
+                float sum = 0.0f;
+                for (int64_t k = 0; k < K; ++k) {
+                    sum += A[i * lda + k] * B[j * ldb + k];
+                }
+                C[i * ldc + j] = sum;
+            }
+        }
+    }
+}
+} // anonymous namespace
+
+#define TENZOR_LSTM_USE_ONEDNN_GEMM 1
+#else
+// Fallback to MKL/CBLAS if oneDNN is not available
+// Note: MKL header already included above if TENZOR_USE_MKL is defined
+#ifdef TENZOR_USE_MKL
+using gemm_int = MKL_INT;
+#else
+extern "C" {
+    void cblas_sgemm(int, int, int, int, int, int,
+                     float, const float*, int, const float*, int,
+                     float, float*, int);
+    #define CblasRowMajor 101
+    #define CblasNoTrans 111
+    #define CblasTrans 112
+}
+using gemm_int = int;
+#endif
+#define TENZOR_LSTM_USE_ONEDNN_GEMM 0
+#endif
+
+// Helper function for LSTM GEMM that uses oneDNN when available, MKL otherwise
+#if TENZOR_LSTM_USE_ONEDNN_GEMM
+// Use oneDNN - avoids MKL/ROCm interaction issues
+#define LSTM_SGEMM_NT(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc) \
+    onednn_sgemm_nt(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc)
+#else
+// Use MKL/CBLAS
+#define LSTM_SGEMM_NT(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc) \
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, \
+                static_cast<gemm_int>(M), static_cast<gemm_int>(N), static_cast<gemm_int>(K), \
+                alpha, A, static_cast<gemm_int>(lda), \
+                B, static_cast<gemm_int>(ldb), \
+                beta, C, static_cast<gemm_int>(ldc))
+#endif
+
+namespace tenzor {
+namespace cpu {
+namespace lstm {
+
+// ============================================================================
+// SIMD Activation Functions
+// ============================================================================
+
+#ifdef TENZOR_LSTM_AVX2
+
+/**
+ * @brief Fast SIMD sigmoid approximation
+ * sigmoid(x) = 1 / (1 + exp(-x))
+ * Uses polynomial approximation for exp
+ */
+inline __m256 sigmoid_avx2(__m256 x) {
+    // Clamp x to prevent overflow
+    __m256 min_val = _mm256_set1_ps(-20.0f);
+    __m256 max_val = _mm256_set1_ps(20.0f);
+    x = _mm256_max_ps(x, min_val);
+    x = _mm256_min_ps(x, max_val);
+
+    // Compute exp(-x) using fast approximation
+    __m256 neg_x = _mm256_sub_ps(_mm256_setzero_ps(), x);
+
+    // Constants for exp approximation
+    __m256 log2e = _mm256_set1_ps(1.44269504088896341f);
+    __m256 ln2 = _mm256_set1_ps(0.693147180559945f);
+    __m256 one = _mm256_set1_ps(1.0f);
+    __m256 c1 = _mm256_set1_ps(1.0f);
+    __m256 c2 = _mm256_set1_ps(0.5f);
+    __m256 c3 = _mm256_set1_ps(0.166666667f);
+    __m256 c4 = _mm256_set1_ps(0.041666667f);
+    __m256 c5 = _mm256_set1_ps(0.008333333f);
+
+    // exp(x) = 2^k * exp(r) where k = round(x/ln2) and r = x - k*ln2
+    __m256 k = _mm256_round_ps(_mm256_mul_ps(neg_x, log2e), _MM_FROUND_TO_NEAREST_INT);
+    __m256 r = _mm256_fnmadd_ps(k, ln2, neg_x);
+
+    // Polynomial approximation for exp(r) on [-ln2/2, ln2/2]
+    __m256 p = _mm256_fmadd_ps(c5, r, c4);
+    p = _mm256_fmadd_ps(p, r, c3);
+    p = _mm256_fmadd_ps(p, r, c2);
+    p = _mm256_fmadd_ps(p, r, c1);
+    p = _mm256_fmadd_ps(p, r, one);
+
+    // Scale by 2^k
+    __m256i ki = _mm256_cvtps_epi32(k);
+    ki = _mm256_slli_epi32(ki, 23);
+    __m256 scale = _mm256_castsi256_ps(_mm256_add_epi32(ki, _mm256_set1_epi32(0x3f800000)));
+    __m256 exp_neg_x = _mm256_mul_ps(p, scale);
+
+    // sigmoid = 1 / (1 + exp(-x))
+    __m256 denom = _mm256_add_ps(one, exp_neg_x);
+    return _mm256_div_ps(one, denom);
+}
+
+/**
+ * @brief Fast SIMD tanh approximation
+ * tanh(x) = 2 * sigmoid(2x) - 1
+ */
+inline __m256 tanh_avx2(__m256 x) {
+    __m256 two = _mm256_set1_ps(2.0f);
+    __m256 one = _mm256_set1_ps(1.0f);
+    __m256 sig = sigmoid_avx2(_mm256_mul_ps(two, x));
+    return _mm256_sub_ps(_mm256_mul_ps(two, sig), one);
+}
+
+#endif // TENZOR_LSTM_AVX2
+
+#ifdef TENZOR_LSTM_AVX512
+
+inline __m512 sigmoid_avx512(__m512 x) {
+    __m512 min_val = _mm512_set1_ps(-20.0f);
+    __m512 max_val = _mm512_set1_ps(20.0f);
+    x = _mm512_max_ps(x, min_val);
+    x = _mm512_min_ps(x, max_val);
+
+    __m512 neg_x = _mm512_sub_ps(_mm512_setzero_ps(), x);
+
+    __m512 log2e = _mm512_set1_ps(1.44269504088896341f);
+    __m512 ln2 = _mm512_set1_ps(0.693147180559945f);
+    __m512 one = _mm512_set1_ps(1.0f);
+    __m512 c1 = _mm512_set1_ps(1.0f);
+    __m512 c2 = _mm512_set1_ps(0.5f);
+    __m512 c3 = _mm512_set1_ps(0.166666667f);
+    __m512 c4 = _mm512_set1_ps(0.041666667f);
+    __m512 c5 = _mm512_set1_ps(0.008333333f);
+
+    __m512 k = _mm512_roundscale_ps(_mm512_mul_ps(neg_x, log2e), _MM_FROUND_TO_NEAREST_INT);
+    __m512 r = _mm512_fnmadd_ps(k, ln2, neg_x);
+
+    __m512 p = _mm512_fmadd_ps(c5, r, c4);
+    p = _mm512_fmadd_ps(p, r, c3);
+    p = _mm512_fmadd_ps(p, r, c2);
+    p = _mm512_fmadd_ps(p, r, c1);
+    p = _mm512_fmadd_ps(p, r, one);
+
+    __m512i ki = _mm512_cvtps_epi32(k);
+    ki = _mm512_slli_epi32(ki, 23);
+    __m512 scale = _mm512_castsi512_ps(_mm512_add_epi32(ki, _mm512_set1_epi32(0x3f800000)));
+    __m512 exp_neg_x = _mm512_mul_ps(p, scale);
+
+    __m512 denom = _mm512_add_ps(one, exp_neg_x);
+    return _mm512_div_ps(one, denom);
+}
+
+inline __m512 tanh_avx512(__m512 x) {
+    __m512 two = _mm512_set1_ps(2.0f);
+    __m512 one = _mm512_set1_ps(1.0f);
+    __m512 sig = sigmoid_avx512(_mm512_mul_ps(two, x));
+    return _mm512_sub_ps(_mm512_mul_ps(two, sig), one);
+}
+
+#endif // TENZOR_LSTM_AVX512
+
+// Scalar fallbacks
+inline float sigmoid_scalar(float x) {
+    x = std::max(-20.0f, std::min(20.0f, x));
+    return 1.0f / (1.0f + std::exp(-x));
+}
+
+inline float tanh_scalar(float x) {
+    return std::tanh(x);
+}
+
+// ============================================================================
+// LSTM Gate Computation
+// ============================================================================
+
+/**
+ * @brief Compute LSTM gates for a single timestep with SIMD
+ *
+ * gates = W_ih @ x + W_hh @ h + bias
+ * Then apply activations: i,f,o = sigmoid, g = tanh
+ *
+ * @param gates_ih Pre-computed W_ih @ x (batch, 4*hidden)
+ * @param h Previous hidden state (batch, hidden)
+ * @param c Previous cell state (batch, hidden)
+ * @param W_hh Hidden-to-hidden weights (4*hidden, hidden)
+ * @param bias Bias terms (4*hidden) or nullptr
+ * @param h_out New hidden state output
+ * @param c_out New cell state output
+ * @param batch Batch size
+ * @param hidden Hidden size
+ */
+inline void lstm_cell_fused(
+    const float* gates_ih,  // (batch, 4*hidden) - pre-computed input gates
+    const float* h,         // (batch, hidden) - previous hidden
+    const float* c,         // (batch, hidden) - previous cell
+    const float* W_hh,      // (4*hidden, hidden) - hidden weights
+    const float* bias,      // (4*hidden) or nullptr
+    float* h_out,           // (batch, hidden) - new hidden
+    float* c_out,           // (batch, hidden) - new cell
+    float* workspace,       // (batch, 4*hidden) - temp buffer for gates_hh
+    int64_t batch,
+    int64_t hidden
+) {
+    int64_t gate_size = 4 * hidden;
+
+    // Step 1: Compute gates_hh = h @ W_hh^T using BLAS
+    // W_hh is (4*hidden, hidden), h is (batch, hidden)
+    // Result is (batch, 4*hidden)
+    // Uses oneDNN when available to avoid MKL/ROCm interaction crashes
+    LSTM_SGEMM_NT(batch, gate_size, hidden,
+                  1.0f, h, hidden,
+                  W_hh, hidden,
+                  0.0f, workspace, gate_size);
+
+    // Step 2: Fused gate computation with SIMD
+    // gates = gates_ih + gates_hh + bias
+    // i = sigmoid(gates[0:H]), f = sigmoid(gates[H:2H])
+    // g = tanh(gates[2H:3H]), o = sigmoid(gates[3H:4H])
+    // c_new = f * c + i * g
+    // h_new = o * tanh(c_new)
+
+    // NOTE: Avoid OMP here to prevent nested parallelism with MKL's internal threads
+    for (int64_t b = 0; b < batch; ++b) {
+        const float* g_ih = gates_ih + b * gate_size;
+        const float* g_hh = workspace + b * gate_size;
+        const float* h_prev = h + b * hidden;
+        const float* c_prev = c + b * hidden;
+        float* h_new = h_out + b * hidden;
+        float* c_new = c_out + b * hidden;
+
+        int64_t d = 0;
+
+#ifdef TENZOR_LSTM_AVX512
+        // Process 16 elements at a time with AVX512
+        for (; d + 16 <= hidden; d += 16) {
+            // Load pre-computed input gates
+            __m512 i_gate = _mm512_loadu_ps(g_ih + d);
+            __m512 f_gate = _mm512_loadu_ps(g_ih + hidden + d);
+            __m512 g_gate = _mm512_loadu_ps(g_ih + 2 * hidden + d);
+            __m512 o_gate = _mm512_loadu_ps(g_ih + 3 * hidden + d);
+
+            // Add hidden-to-hidden gates
+            i_gate = _mm512_add_ps(i_gate, _mm512_loadu_ps(g_hh + d));
+            f_gate = _mm512_add_ps(f_gate, _mm512_loadu_ps(g_hh + hidden + d));
+            g_gate = _mm512_add_ps(g_gate, _mm512_loadu_ps(g_hh + 2 * hidden + d));
+            o_gate = _mm512_add_ps(o_gate, _mm512_loadu_ps(g_hh + 3 * hidden + d));
+
+            // Add bias if provided
+            if (bias) {
+                i_gate = _mm512_add_ps(i_gate, _mm512_loadu_ps(bias + d));
+                f_gate = _mm512_add_ps(f_gate, _mm512_loadu_ps(bias + hidden + d));
+                g_gate = _mm512_add_ps(g_gate, _mm512_loadu_ps(bias + 2 * hidden + d));
+                o_gate = _mm512_add_ps(o_gate, _mm512_loadu_ps(bias + 3 * hidden + d));
+            }
+
+            // Apply activations
+            __m512 i = sigmoid_avx512(i_gate);
+            __m512 f = sigmoid_avx512(f_gate);
+            __m512 g = tanh_avx512(g_gate);
+            __m512 o = sigmoid_avx512(o_gate);
+
+            // Load previous states
+            __m512 c_p = _mm512_loadu_ps(c_prev + d);
+
+            // c_new = f * c_prev + i * g
+            __m512 c_n = _mm512_fmadd_ps(f, c_p, _mm512_mul_ps(i, g));
+
+            // h_new = o * tanh(c_new)
+            __m512 h_n = _mm512_mul_ps(o, tanh_avx512(c_n));
+
+            _mm512_storeu_ps(c_new + d, c_n);
+            _mm512_storeu_ps(h_new + d, h_n);
+        }
+#endif
+
+#ifdef TENZOR_LSTM_AVX2
+        // Process 8 elements at a time with AVX2
+        for (; d + 8 <= hidden; d += 8) {
+            // Load pre-computed input gates
+            __m256 i_gate = _mm256_loadu_ps(g_ih + d);
+            __m256 f_gate = _mm256_loadu_ps(g_ih + hidden + d);
+            __m256 g_gate = _mm256_loadu_ps(g_ih + 2 * hidden + d);
+            __m256 o_gate = _mm256_loadu_ps(g_ih + 3 * hidden + d);
+
+            // Add hidden-to-hidden gates
+            i_gate = _mm256_add_ps(i_gate, _mm256_loadu_ps(g_hh + d));
+            f_gate = _mm256_add_ps(f_gate, _mm256_loadu_ps(g_hh + hidden + d));
+            g_gate = _mm256_add_ps(g_gate, _mm256_loadu_ps(g_hh + 2 * hidden + d));
+            o_gate = _mm256_add_ps(o_gate, _mm256_loadu_ps(g_hh + 3 * hidden + d));
+
+            // Add bias if provided
+            if (bias) {
+                i_gate = _mm256_add_ps(i_gate, _mm256_loadu_ps(bias + d));
+                f_gate = _mm256_add_ps(f_gate, _mm256_loadu_ps(bias + hidden + d));
+                g_gate = _mm256_add_ps(g_gate, _mm256_loadu_ps(bias + 2 * hidden + d));
+                o_gate = _mm256_add_ps(o_gate, _mm256_loadu_ps(bias + 3 * hidden + d));
+            }
+
+            // Apply activations
+            __m256 i = sigmoid_avx2(i_gate);
+            __m256 f = sigmoid_avx2(f_gate);
+            __m256 g = tanh_avx2(g_gate);
+            __m256 o = sigmoid_avx2(o_gate);
+
+            // Load previous states
+            __m256 c_p = _mm256_loadu_ps(c_prev + d);
+
+            // c_new = f * c_prev + i * g
+            __m256 c_n = _mm256_fmadd_ps(f, c_p, _mm256_mul_ps(i, g));
+
+            // h_new = o * tanh(c_new)
+            __m256 h_n = _mm256_mul_ps(o, tanh_avx2(c_n));
+
+            _mm256_storeu_ps(c_new + d, c_n);
+            _mm256_storeu_ps(h_new + d, h_n);
+        }
+#endif
+
+        // Scalar fallback for remaining elements
+        for (; d < hidden; ++d) {
+            float i_gate = g_ih[d] + g_hh[d];
+            float f_gate = g_ih[hidden + d] + g_hh[hidden + d];
+            float g_gate = g_ih[2 * hidden + d] + g_hh[2 * hidden + d];
+            float o_gate = g_ih[3 * hidden + d] + g_hh[3 * hidden + d];
+
+            if (bias) {
+                i_gate += bias[d];
+                f_gate += bias[hidden + d];
+                g_gate += bias[2 * hidden + d];
+                o_gate += bias[3 * hidden + d];
+            }
+
+            float i = sigmoid_scalar(i_gate);
+            float f = sigmoid_scalar(f_gate);
+            float g = tanh_scalar(g_gate);
+            float o = sigmoid_scalar(o_gate);
+
+            float c_n = f * c_prev[d] + i * g;
+            float h_n = o * tanh_scalar(c_n);
+
+            c_new[d] = c_n;
+            h_new[d] = h_n;
+        }
+    }
+}
+
+// ============================================================================
+// Full LSTM Forward Pass
+// ============================================================================
+
+/**
+ * @brief Fused LSTM forward pass for entire sequence
+ *
+ * Processes all timesteps efficiently with:
+ * 1. Batched input transformation (one GEMM for all timesteps)
+ * 2. Fused gate computations with SIMD
+ * 3. Efficient memory reuse
+ *
+ * @param input Input sequence (seq_len, batch, input_size)
+ * @param W_ih Input-to-hidden weights (4*hidden, input_size)
+ * @param W_hh Hidden-to-hidden weights (4*hidden, hidden)
+ * @param bias Bias terms (4*hidden) or nullptr
+ * @param h0 Initial hidden state (batch, hidden)
+ * @param c0 Initial cell state (batch, hidden)
+ * @param output Output sequence (seq_len, batch, hidden)
+ * @param h_n Final hidden state (batch, hidden)
+ * @param c_n Final cell state (batch, hidden)
+ */
+inline void lstm_forward(
+    const float* input,     // (seq_len, batch, input_size)
+    const float* W_ih,      // (4*hidden, input_size)
+    const float* W_hh,      // (4*hidden, hidden)
+    const float* bias,      // (4*hidden) or nullptr
+    const float* h0,        // (batch, hidden)
+    const float* c0,        // (batch, hidden)
+    float* output,          // (seq_len, batch, hidden)
+    float* h_n,             // (batch, hidden)
+    float* c_n,             // (batch, hidden)
+    int64_t seq_len,
+    int64_t batch,
+    int64_t input_size,
+    int64_t hidden
+) {
+    int64_t gate_size = 4 * hidden;
+
+    // Validate input pointers
+    if (!input || !W_ih || !W_hh || !h0 || !c0 || !output || !h_n || !c_n) {
+        fprintf(stderr, "[LSTM] ERROR: NULL pointer detected!\n");
+        fprintf(stderr, "  input=%p W_ih=%p W_hh=%p h0=%p c0=%p\n",
+                (void*)input, (void*)W_ih, (void*)W_hh, (void*)h0, (void*)c0);
+        fprintf(stderr, "  output=%p h_n=%p c_n=%p\n",
+                (void*)output, (void*)h_n, (void*)c_n);
+        return;
+    }
+
+    // Memory fence to ensure all prior operations are complete
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+
+    // Validate memory is accessible by reading from each buffer
+    // This forces page faults before MKL threads access the memory
+    volatile float check_input = input[0];
+    volatile float check_input_last = input[(seq_len * batch * input_size) - 1];
+    volatile float check_wih = W_ih[0];
+    volatile float check_wih_last = W_ih[(gate_size * input_size) - 1];
+    volatile float check_whh = W_hh[0];
+    volatile float check_whh_last = W_hh[(gate_size * hidden) - 1];
+    volatile float check_h0 = h0[0];
+    volatile float check_h0_last = h0[(batch * hidden) - 1];
+    volatile float check_c0 = c0[0];
+    volatile float check_c0_last = c0[(batch * hidden) - 1];
+    (void)check_input; (void)check_input_last;
+    (void)check_wih; (void)check_wih_last;
+    (void)check_whh; (void)check_whh_last;
+    (void)check_h0; (void)check_h0_last;
+    (void)check_c0; (void)check_c0_last;
+
+    // Allocate workspace directly with posix_memalign (bypass buffer pool for debugging)
+    // Using direct allocations to debug intermittent crashes
+    constexpr size_t ALLOC_ALIGN = 64;
+    size_t gates_ih_size = seq_len * batch * gate_size * sizeof(float);
+    size_t gates_hh_size = batch * gate_size * sizeof(float);
+    size_t h_temp_size = batch * hidden * sizeof(float);
+    size_t c_temp_size = batch * hidden * sizeof(float);
+
+    float* gates_ih = nullptr;
+    float* gates_hh = nullptr;
+    float* h_curr = nullptr;
+    float* c_curr = nullptr;
+
+    if (posix_memalign((void**)&gates_ih, ALLOC_ALIGN, gates_ih_size) != 0 ||
+        posix_memalign((void**)&gates_hh, ALLOC_ALIGN, gates_hh_size) != 0 ||
+        posix_memalign((void**)&h_curr, ALLOC_ALIGN, h_temp_size) != 0 ||
+        posix_memalign((void**)&c_curr, ALLOC_ALIGN, c_temp_size) != 0) {
+        fprintf(stderr, "[LSTM] ERROR: Workspace allocation failed!\n");
+        free(gates_ih); free(gates_hh); free(h_curr); free(c_curr);
+        return;
+    }
+
+    // Pre-fault memory pages by touching all buffers
+    // This ensures pages are mapped before MKL worker threads access them
+    std::memset(gates_ih, 0, gates_ih_size);
+    std::memset(gates_hh, 0, gates_hh_size);
+    std::memset(h_curr, 0, h_temp_size);
+    std::memset(c_curr, 0, c_temp_size);
+
+    // Save and set MKL threading to avoid conflicts with OpenMP thread pool
+#ifdef TENZOR_USE_MKL
+    int saved_mkl_threads = mkl_get_max_threads();
+    mkl_set_num_threads(1);  // Use single-threaded MKL to avoid thread pool conflicts
+#endif
+
+    // Step 1: Pre-compute ALL input gates in one batched GEMM
+    // Uses oneDNN when available to avoid MKL/ROCm interaction crashes
+    LSTM_SGEMM_NT(seq_len * batch, gate_size, input_size,
+                  1.0f, input, input_size,
+                  W_ih, input_size,
+                  0.0f, gates_ih, gate_size);
+
+    // Initialize current states from h0, c0
+    std::memcpy(h_curr, h0, batch * hidden * sizeof(float));
+    std::memcpy(c_curr, c0, batch * hidden * sizeof(float));
+
+    // Step 2: Process each timestep
+    for (int64_t t = 0; t < seq_len; ++t) {
+        const float* gates_ih_t = gates_ih + t * batch * gate_size;
+        float* output_t = output + t * batch * hidden;
+
+        lstm_cell_fused(
+            gates_ih_t, h_curr, c_curr, W_hh, bias,
+            output_t, c_curr, gates_hh, batch, hidden
+        );
+
+        std::memcpy(h_curr, output_t, batch * hidden * sizeof(float));
+    }
+
+    // Copy final states
+    std::memcpy(h_n, h_curr, batch * hidden * sizeof(float));
+    std::memcpy(c_n, c_curr, batch * hidden * sizeof(float));
+
+    // Restore MKL threading
+#ifdef TENZOR_USE_MKL
+    mkl_set_num_threads(saved_mkl_threads);
+#endif
+
+    // Free workspace allocations
+    free(gates_ih);
+    free(gates_hh);
+    free(h_curr);
+    free(c_curr);
+}
+
+/**
+ * @brief Bidirectional LSTM forward pass
+ */
+inline void lstm_forward_bidirectional(
+    const float* input,
+    const float* W_ih_fwd, const float* W_hh_fwd, const float* bias_fwd,
+    const float* W_ih_bwd, const float* W_hh_bwd, const float* bias_bwd,
+    const float* h0_fwd, const float* c0_fwd,
+    const float* h0_bwd, const float* c0_bwd,
+    float* output,          // (seq_len, batch, 2*hidden)
+    float* h_n_fwd, float* c_n_fwd,
+    float* h_n_bwd, float* c_n_bwd,
+    int64_t seq_len,
+    int64_t batch,
+    int64_t input_size,
+    int64_t hidden
+) {
+    // Allocate buffers for forward and backward outputs
+    auto fwd_output_buf = acquire_buffer<float>(seq_len * batch * hidden);
+    auto bwd_output_buf = acquire_buffer<float>(seq_len * batch * hidden);
+    float* fwd_output = fwd_output_buf.data();
+    float* bwd_output = bwd_output_buf.data();
+
+    // Run forward and backward LSTMs in parallel
+    #pragma omp parallel sections if(batch >= 2)
+    {
+        #pragma omp section
+        {
+            lstm_forward(input, W_ih_fwd, W_hh_fwd, bias_fwd,
+                        h0_fwd, c0_fwd, fwd_output, h_n_fwd, c_n_fwd,
+                        seq_len, batch, input_size, hidden);
+        }
+        #pragma omp section
+        {
+            // Backward: reverse input order
+            auto input_rev_buf = acquire_buffer<float>(seq_len * batch * input_size);
+            float* input_rev = input_rev_buf.data();
+
+            // Reverse sequence
+            for (int64_t t = 0; t < seq_len; ++t) {
+                std::memcpy(input_rev + t * batch * input_size,
+                           input + (seq_len - 1 - t) * batch * input_size,
+                           batch * input_size * sizeof(float));
+            }
+
+            lstm_forward(input_rev, W_ih_bwd, W_hh_bwd, bias_bwd,
+                        h0_bwd, c0_bwd, bwd_output, h_n_bwd, c_n_bwd,
+                        seq_len, batch, input_size, hidden);
+        }
+    }
+
+    // Concatenate forward and backward outputs
+    #pragma omp parallel for if(seq_len * batch > 16)
+    for (int64_t t = 0; t < seq_len; ++t) {
+        for (int64_t b = 0; b < batch; ++b) {
+            float* out = output + (t * batch + b) * 2 * hidden;
+            const float* fwd = fwd_output + (t * batch + b) * hidden;
+            // Backward output is reversed
+            const float* bwd = bwd_output + ((seq_len - 1 - t) * batch + b) * hidden;
+
+            std::memcpy(out, fwd, hidden * sizeof(float));
+            std::memcpy(out + hidden, bwd, hidden * sizeof(float));
+        }
+    }
+}
+
+// ============================================================================
+// GRU Support (Similar structure)
+// ============================================================================
+
+/**
+ * @brief Fused GRU cell computation
+ *
+ * GRU equations:
+ *   r = sigmoid(W_ir @ x + W_hr @ h + b_r)
+ *   z = sigmoid(W_iz @ x + W_hz @ h + b_z)
+ *   n = tanh(W_in @ x + r * (W_hn @ h + b_hn) + b_n)
+ *   h_new = (1 - z) * n + z * h
+ */
+inline void gru_cell_fused(
+    const float* gates_ih,  // (batch, 3*hidden) - pre-computed input gates [r_i, z_i, n_i]
+    const float* h,         // (batch, hidden) - previous hidden
+    const float* W_hh,      // (3*hidden, hidden) - hidden weights
+    const float* bias,      // (3*hidden) or nullptr
+    float* h_out,           // (batch, hidden) - new hidden
+    float* workspace,       // (batch, 3*hidden) - temp buffer
+    int64_t batch,
+    int64_t hidden
+) {
+    int64_t gate_size = 3 * hidden;
+
+    // Compute gates_hh = h @ W_hh^T
+    // Uses oneDNN when available to avoid MKL/ROCm interaction crashes
+    LSTM_SGEMM_NT(batch, gate_size, hidden,
+                  1.0f, h, hidden,
+                  W_hh, hidden,
+                  0.0f, workspace, gate_size);
+
+    // NOTE: Avoid OMP here to prevent nested parallelism with BLAS threads
+    for (int64_t b = 0; b < batch; ++b) {
+        const float* g_ih = gates_ih + b * gate_size;
+        const float* g_hh = workspace + b * gate_size;
+        const float* h_prev = h + b * hidden;
+        float* h_new = h_out + b * hidden;
+
+        int64_t d = 0;
+
+#ifdef TENZOR_LSTM_AVX2
+        for (; d + 8 <= hidden; d += 8) {
+            __m256 r_gate = _mm256_add_ps(_mm256_loadu_ps(g_ih + d),
+                                          _mm256_loadu_ps(g_hh + d));
+            __m256 z_gate = _mm256_add_ps(_mm256_loadu_ps(g_ih + hidden + d),
+                                          _mm256_loadu_ps(g_hh + hidden + d));
+            __m256 n_ih = _mm256_loadu_ps(g_ih + 2 * hidden + d);
+            __m256 n_hh = _mm256_loadu_ps(g_hh + 2 * hidden + d);
+
+            if (bias) {
+                r_gate = _mm256_add_ps(r_gate, _mm256_loadu_ps(bias + d));
+                z_gate = _mm256_add_ps(z_gate, _mm256_loadu_ps(bias + hidden + d));
+                n_ih = _mm256_add_ps(n_ih, _mm256_loadu_ps(bias + 2 * hidden + d));
+            }
+
+            __m256 r = sigmoid_avx2(r_gate);
+            __m256 z = sigmoid_avx2(z_gate);
+
+            // n = tanh(n_ih + r * n_hh)
+            __m256 n_gate = _mm256_fmadd_ps(r, n_hh, n_ih);
+            __m256 n = tanh_avx2(n_gate);
+
+            // h_new = (1 - z) * n + z * h
+            __m256 h_p = _mm256_loadu_ps(h_prev + d);
+            __m256 one = _mm256_set1_ps(1.0f);
+            __m256 one_minus_z = _mm256_sub_ps(one, z);
+            __m256 h_n = _mm256_fmadd_ps(one_minus_z, n, _mm256_mul_ps(z, h_p));
+
+            _mm256_storeu_ps(h_new + d, h_n);
+        }
+#endif
+
+        for (; d < hidden; ++d) {
+            float r_gate = g_ih[d] + g_hh[d];
+            float z_gate = g_ih[hidden + d] + g_hh[hidden + d];
+            float n_ih = g_ih[2 * hidden + d];
+            float n_hh = g_hh[2 * hidden + d];
+
+            if (bias) {
+                r_gate += bias[d];
+                z_gate += bias[hidden + d];
+                n_ih += bias[2 * hidden + d];
+            }
+
+            float r = sigmoid_scalar(r_gate);
+            float z = sigmoid_scalar(z_gate);
+            float n = tanh_scalar(n_ih + r * n_hh);
+
+            h_new[d] = (1.0f - z) * n + z * h_prev[d];
+        }
+    }
+}
+
+/**
+ * @brief Fused GRU forward pass
+ */
+inline void gru_forward(
+    const float* input,
+    const float* W_ih,
+    const float* W_hh,
+    const float* bias,
+    const float* h0,
+    float* output,
+    float* h_n,
+    int64_t seq_len,
+    int64_t batch,
+    int64_t input_size,
+    int64_t hidden
+) {
+    int64_t gate_size = 3 * hidden;
+
+    auto gates_ih_buf = acquire_buffer<float>(seq_len * batch * gate_size);
+    auto gates_hh_buf = acquire_buffer<float>(batch * gate_size);
+    auto h_temp_buf = acquire_buffer<float>(batch * hidden);
+
+    float* gates_ih = gates_ih_buf.data();
+    float* gates_hh = gates_hh_buf.data();
+    float* h_curr = h_temp_buf.data();
+
+    // Pre-compute all input gates
+    // Uses oneDNN when available to avoid MKL/ROCm interaction crashes
+    LSTM_SGEMM_NT(seq_len * batch, gate_size, input_size,
+                  1.0f, input, input_size,
+                  W_ih, input_size,
+                  0.0f, gates_ih, gate_size);
+
+    std::memcpy(h_curr, h0, batch * hidden * sizeof(float));
+
+    for (int64_t t = 0; t < seq_len; ++t) {
+        const float* gates_ih_t = gates_ih + t * batch * gate_size;
+        float* output_t = output + t * batch * hidden;
+
+        gru_cell_fused(gates_ih_t, h_curr, W_hh, bias, output_t, gates_hh, batch, hidden);
+        std::memcpy(h_curr, output_t, batch * hidden * sizeof(float));
+    }
+
+    std::memcpy(h_n, h_curr, batch * hidden * sizeof(float));
+}
+
+} // namespace lstm
+} // namespace cpu
+} // namespace tenzor

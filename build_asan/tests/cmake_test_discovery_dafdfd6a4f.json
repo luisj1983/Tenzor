@@ -1,0 +1,242 @@
+{
+  "tests": 46,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "TransferEngineTest",
+      "tests": 46,
+      "testsuite": [
+        {
+          "name": "ConstructorWithValidConfig",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 118
+        },
+        {
+          "name": "ConstructorWithDefaultConfig",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 124
+        },
+        {
+          "name": "SyncCPUToGPU_BasicTransfer",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 135
+        },
+        {
+          "name": "SyncCPUToGPU_LargeTensor",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 147
+        },
+        {
+          "name": "SyncCPUToGPU_MultipleTensors",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 160
+        },
+        {
+          "name": "SyncCPUToGPU_EmptyTensor",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 179
+        },
+        {
+          "name": "SyncGPUToCPU_BasicTransfer",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 196
+        },
+        {
+          "name": "SyncGPUToCPU_LargeTensor",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 208
+        },
+        {
+          "name": "SyncGPUToCPU_RoundTrip",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 220
+        },
+        {
+          "name": "AsyncCPUToGPU_BasicTransfer",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 237
+        },
+        {
+          "name": "AsyncGPUToCPU_BasicTransfer",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 254
+        },
+        {
+          "name": "AsyncTransfer_HandleWait",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 268
+        },
+        {
+          "name": "AsyncTransfer_MultipleHandles",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 282
+        },
+        {
+          "name": "ConcurrentTransfers_Bidirectional",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 306
+        },
+        {
+          "name": "ConcurrentTransfers_UtilizesMultipleStreams",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 340
+        },
+        {
+          "name": "StreamSync_WaitForCompletion",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 370
+        },
+        {
+          "name": "StreamSync_MultipleTransfers",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 384
+        },
+        {
+          "name": "StreamSync_IndividualStream",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 403
+        },
+        {
+          "name": "Statistics_TrackTransfers",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 421
+        },
+        {
+          "name": "Statistics_TrackBytes",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 436
+        },
+        {
+          "name": "Statistics_GetStatistics",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 451
+        },
+        {
+          "name": "Statistics_Reset",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 468
+        },
+        {
+          "name": "Statistics_AverageBandwidth",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 484
+        },
+        {
+          "name": "BandwidthMeasurement_CPUToGPU",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 504
+        },
+        {
+          "name": "BandwidthMeasurement_GPUToCPU",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 524
+        },
+        {
+          "name": "SyncTransfer_Float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 548
+        },
+        {
+          "name": "SyncTransfer_Int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 561
+        },
+        {
+          "name": "SyncTransfer_Int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 581
+        },
+        {
+          "name": "PinnedMemory_LargeTensorBenefit",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 598
+        },
+        {
+          "name": "PinnedMemory_ReuseBuffer",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 633
+        },
+        {
+          "name": "Config_InvalidNumStreams",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 653
+        },
+        {
+          "name": "Config_InvalidQueueCapacity",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 662
+        },
+        {
+          "name": "Config_SingleStream",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 671
+        },
+        {
+          "name": "Config_ManyStreams",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 686
+        },
+        {
+          "name": "EmptyTensorTransfer",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 710
+        },
+        {
+          "name": "QueueOverflow_HandlesBackpressure",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 723
+        },
+        {
+          "name": "Error_TransferNonCPUTensorToGPU",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 743
+        },
+        {
+          "name": "Error_TransferNonGPUTensorToCPU",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 755
+        },
+        {
+          "name": "Error_AsyncTransferInvalidDevice",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 767
+        },
+        {
+          "name": "ThreadSafety_MultithreadedAsync",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 783
+        },
+        {
+          "name": "ThreadSafety_SynchronizeWhileTransferring",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 813
+        },
+        {
+          "name": "Handle_EmptyHandle",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 842
+        },
+        {
+          "name": "Handle_MultipleWaits",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 853
+        },
+        {
+          "name": "Handle_CheckReadyBeforeCompletion",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 869
+        },
+        {
+          "name": "Performance_MinimumBandwidth",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 892
+        },
+        {
+          "name": "Performance_AsyncOverlapping",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_transfer_engine.cpp",
+          "line": 917
+        }
+      ]
+    }
+  ]
+}

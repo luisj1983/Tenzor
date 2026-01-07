@@ -1,0 +1,600 @@
+{
+  "tests": 96,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "YOLOMultiDTypeTest\/0",
+      "tests": 32,
+      "testsuite": [
+        {
+          "name": "YOLOv3ForwardPass",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 88
+        },
+        {
+          "name": "YOLOv3GradientFlow",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "YOLOv3MultiScaleImageSizes",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 130
+        },
+        {
+          "name": "YOLOv3DetectionHeads",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 152
+        },
+        {
+          "name": "YOLOv3AnchorBoxes",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 172
+        },
+        {
+          "name": "YOLOv3BoundingBoxPredictions",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 192
+        },
+        {
+          "name": "YOLOv5NanoForwardPass",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 212
+        },
+        {
+          "name": "YOLOv5SmallForwardPass",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 222
+        },
+        {
+          "name": "YOLOv5MediumForwardPass",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 232
+        },
+        {
+          "name": "YOLOv5LargeForwardPass",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 241
+        },
+        {
+          "name": "YOLOv5XLargeForwardPass",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 250
+        },
+        {
+          "name": "YOLOv5GradientFlow",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 259
+        },
+        {
+          "name": "YOLOv5MultiScaleDetection",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 282
+        },
+        {
+          "name": "YOLOv5DetectionHeadsAndAnchors",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 302
+        },
+        {
+          "name": "YOLOv5BoundingBoxDecoding",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 324
+        },
+        {
+          "name": "YOLOv3NMSPostProcessing",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 353
+        },
+        {
+          "name": "YOLOv5NMSPostProcessing",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 376
+        },
+        {
+          "name": "YOLOv5VariableInputSizes",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 399
+        },
+        {
+          "name": "YOLOv3VariableInputSizes",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 418
+        },
+        {
+          "name": "YOLOv3BatchProcessing",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 436
+        },
+        {
+          "name": "YOLOv5BatchProcessing",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 448
+        },
+        {
+          "name": "YOLOv3EvalMode",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 464
+        },
+        {
+          "name": "YOLOv5EvalMode",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 475
+        },
+        {
+          "name": "YOLOv3DTypeConsistency",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 490
+        },
+        {
+          "name": "YOLOv5DTypeConsistency",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 500
+        },
+        {
+          "name": "YOLOv5ModelSizeComparison",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 514
+        },
+        {
+          "name": "YOLOv3NumericalStability",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 548
+        },
+        {
+          "name": "YOLOv5NumericalStability",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 562
+        },
+        {
+          "name": "YOLOv3CustomClasses",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 580
+        },
+        {
+          "name": "YOLOv5CustomClasses",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 592
+        },
+        {
+          "name": "YOLOv3OutputShapeConsistency",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 608
+        },
+        {
+          "name": "YOLOv5OutputShapeConsistency",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 622
+        }
+      ]
+    },
+    {
+      "name": "YOLOMultiDTypeTest\/1",
+      "tests": 32,
+      "testsuite": [
+        {
+          "name": "YOLOv3ForwardPass",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 88
+        },
+        {
+          "name": "YOLOv3GradientFlow",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "YOLOv3MultiScaleImageSizes",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 130
+        },
+        {
+          "name": "YOLOv3DetectionHeads",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 152
+        },
+        {
+          "name": "YOLOv3AnchorBoxes",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 172
+        },
+        {
+          "name": "YOLOv3BoundingBoxPredictions",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 192
+        },
+        {
+          "name": "YOLOv5NanoForwardPass",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 212
+        },
+        {
+          "name": "YOLOv5SmallForwardPass",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 222
+        },
+        {
+          "name": "YOLOv5MediumForwardPass",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 232
+        },
+        {
+          "name": "YOLOv5LargeForwardPass",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 241
+        },
+        {
+          "name": "YOLOv5XLargeForwardPass",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 250
+        },
+        {
+          "name": "YOLOv5GradientFlow",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 259
+        },
+        {
+          "name": "YOLOv5MultiScaleDetection",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 282
+        },
+        {
+          "name": "YOLOv5DetectionHeadsAndAnchors",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 302
+        },
+        {
+          "name": "YOLOv5BoundingBoxDecoding",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 324
+        },
+        {
+          "name": "YOLOv3NMSPostProcessing",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 353
+        },
+        {
+          "name": "YOLOv5NMSPostProcessing",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 376
+        },
+        {
+          "name": "YOLOv5VariableInputSizes",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 399
+        },
+        {
+          "name": "YOLOv3VariableInputSizes",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 418
+        },
+        {
+          "name": "YOLOv3BatchProcessing",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 436
+        },
+        {
+          "name": "YOLOv5BatchProcessing",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 448
+        },
+        {
+          "name": "YOLOv3EvalMode",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 464
+        },
+        {
+          "name": "YOLOv5EvalMode",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 475
+        },
+        {
+          "name": "YOLOv3DTypeConsistency",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 490
+        },
+        {
+          "name": "YOLOv5DTypeConsistency",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 500
+        },
+        {
+          "name": "YOLOv5ModelSizeComparison",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 514
+        },
+        {
+          "name": "YOLOv3NumericalStability",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 548
+        },
+        {
+          "name": "YOLOv5NumericalStability",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 562
+        },
+        {
+          "name": "YOLOv3CustomClasses",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 580
+        },
+        {
+          "name": "YOLOv5CustomClasses",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 592
+        },
+        {
+          "name": "YOLOv3OutputShapeConsistency",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 608
+        },
+        {
+          "name": "YOLOv5OutputShapeConsistency",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 622
+        }
+      ]
+    },
+    {
+      "name": "YOLOMultiDTypeTest\/2",
+      "tests": 32,
+      "testsuite": [
+        {
+          "name": "YOLOv3ForwardPass",
+          "type_param": "unsigned short",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 88
+        },
+        {
+          "name": "YOLOv3GradientFlow",
+          "type_param": "unsigned short",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 106
+        },
+        {
+          "name": "YOLOv3MultiScaleImageSizes",
+          "type_param": "unsigned short",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 130
+        },
+        {
+          "name": "YOLOv3DetectionHeads",
+          "type_param": "unsigned short",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 152
+        },
+        {
+          "name": "YOLOv3AnchorBoxes",
+          "type_param": "unsigned short",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 172
+        },
+        {
+          "name": "YOLOv3BoundingBoxPredictions",
+          "type_param": "unsigned short",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 192
+        },
+        {
+          "name": "YOLOv5NanoForwardPass",
+          "type_param": "unsigned short",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 212
+        },
+        {
+          "name": "YOLOv5SmallForwardPass",
+          "type_param": "unsigned short",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 222
+        },
+        {
+          "name": "YOLOv5MediumForwardPass",
+          "type_param": "unsigned short",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 232
+        },
+        {
+          "name": "YOLOv5LargeForwardPass",
+          "type_param": "unsigned short",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 241
+        },
+        {
+          "name": "YOLOv5XLargeForwardPass",
+          "type_param": "unsigned short",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 250
+        },
+        {
+          "name": "YOLOv5GradientFlow",
+          "type_param": "unsigned short",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 259
+        },
+        {
+          "name": "YOLOv5MultiScaleDetection",
+          "type_param": "unsigned short",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 282
+        },
+        {
+          "name": "YOLOv5DetectionHeadsAndAnchors",
+          "type_param": "unsigned short",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 302
+        },
+        {
+          "name": "YOLOv5BoundingBoxDecoding",
+          "type_param": "unsigned short",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 324
+        },
+        {
+          "name": "YOLOv3NMSPostProcessing",
+          "type_param": "unsigned short",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 353
+        },
+        {
+          "name": "YOLOv5NMSPostProcessing",
+          "type_param": "unsigned short",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 376
+        },
+        {
+          "name": "YOLOv5VariableInputSizes",
+          "type_param": "unsigned short",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 399
+        },
+        {
+          "name": "YOLOv3VariableInputSizes",
+          "type_param": "unsigned short",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 418
+        },
+        {
+          "name": "YOLOv3BatchProcessing",
+          "type_param": "unsigned short",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 436
+        },
+        {
+          "name": "YOLOv5BatchProcessing",
+          "type_param": "unsigned short",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 448
+        },
+        {
+          "name": "YOLOv3EvalMode",
+          "type_param": "unsigned short",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 464
+        },
+        {
+          "name": "YOLOv5EvalMode",
+          "type_param": "unsigned short",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 475
+        },
+        {
+          "name": "YOLOv3DTypeConsistency",
+          "type_param": "unsigned short",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 490
+        },
+        {
+          "name": "YOLOv5DTypeConsistency",
+          "type_param": "unsigned short",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 500
+        },
+        {
+          "name": "YOLOv5ModelSizeComparison",
+          "type_param": "unsigned short",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 514
+        },
+        {
+          "name": "YOLOv3NumericalStability",
+          "type_param": "unsigned short",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 548
+        },
+        {
+          "name": "YOLOv5NumericalStability",
+          "type_param": "unsigned short",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 562
+        },
+        {
+          "name": "YOLOv3CustomClasses",
+          "type_param": "unsigned short",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 580
+        },
+        {
+          "name": "YOLOv5CustomClasses",
+          "type_param": "unsigned short",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 592
+        },
+        {
+          "name": "YOLOv3OutputShapeConsistency",
+          "type_param": "unsigned short",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 608
+        },
+        {
+          "name": "YOLOv5OutputShapeConsistency",
+          "type_param": "unsigned short",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_yolo_multidtype.cpp",
+          "line": 622
+        }
+      ]
+    }
+  ]
+}

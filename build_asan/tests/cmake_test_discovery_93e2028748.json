@@ -1,0 +1,137 @@
+{
+  "tests": 25,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "ONNXImportTest",
+      "tests": 25,
+      "testsuite": [
+        {
+          "name": "ImporterConstruction",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_onnx_import.cpp",
+          "line": 94
+        },
+        {
+          "name": "InvalidFilePath",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_onnx_import.cpp",
+          "line": 100
+        },
+        {
+          "name": "EmptyFile",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_onnx_import.cpp",
+          "line": 105
+        },
+        {
+          "name": "CorruptedProtobuf",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_onnx_import.cpp",
+          "line": 116
+        },
+        {
+          "name": "VerboseMode",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_onnx_import.cpp",
+          "line": 129
+        },
+        {
+          "name": "DeviceSelection",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_onnx_import.cpp",
+          "line": 136
+        },
+        {
+          "name": "DataTypeConversion",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_onnx_import.cpp",
+          "line": 145
+        },
+        {
+          "name": "DataTypeToTenzor",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_onnx_import.cpp",
+          "line": 156
+        },
+        {
+          "name": "ONNXTensorDataCreation",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_onnx_import.cpp",
+          "line": 171
+        },
+        {
+          "name": "ONNXAttributeGetters",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_onnx_import.cpp",
+          "line": 183
+        },
+        {
+          "name": "ONNXNodeStructure",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_onnx_import.cpp",
+          "line": 210
+        },
+        {
+          "name": "ONNXImportValueInfo",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_onnx_import.cpp",
+          "line": 235
+        },
+        {
+          "name": "ONNXGraphStructure",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_onnx_import.cpp",
+          "line": 250
+        },
+        {
+          "name": "ONNXModelData",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_onnx_import.cpp",
+          "line": 282
+        },
+        {
+          "name": "ImportContextValueRegistration",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_onnx_import.cpp",
+          "line": 301
+        },
+        {
+          "name": "ImportContextModuleRegistration",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_onnx_import.cpp",
+          "line": 320
+        },
+        {
+          "name": "ImportContextDevice",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_onnx_import.cpp",
+          "line": 332
+        },
+        {
+          "name": "WeightLoadingConcept",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_onnx_import.cpp",
+          "line": 344
+        },
+        {
+          "name": "BatchNormBufferAccess",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_onnx_import.cpp",
+          "line": 376
+        },
+        {
+          "name": "Conv1dStructure",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_onnx_import.cpp",
+          "line": 412
+        },
+        {
+          "name": "Conv2dStructure",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_onnx_import.cpp",
+          "line": 427
+        },
+        {
+          "name": "BatchNorm2dStructure",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_onnx_import.cpp",
+          "line": 442
+        },
+        {
+          "name": "ImportFromBytesAPI",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_onnx_import.cpp",
+          "line": 464
+        },
+        {
+          "name": "GetModelDataAPI",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_onnx_import.cpp",
+          "line": 472
+        },
+        {
+          "name": "HighLevelImportAPI",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_onnx_import.cpp",
+          "line": 480
+        }
+      ]
+    }
+  ]
+}

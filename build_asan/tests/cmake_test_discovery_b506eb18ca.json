@@ -1,0 +1,127 @@
+{
+  "tests": 23,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "GPTTest",
+      "tests": 23,
+      "testsuite": [
+        {
+          "name": "EmbeddingsForwardShape",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gpt.cpp",
+          "line": 46
+        },
+        {
+          "name": "EmbeddingsWithPositionIds",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gpt.cpp",
+          "line": 67
+        },
+        {
+          "name": "EmbeddingsGradientFlow",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gpt.cpp",
+          "line": 95
+        },
+        {
+          "name": "DecoderLayerForwardShape",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gpt.cpp",
+          "line": 131
+        },
+        {
+          "name": "DecoderLayerWithCausalMask",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gpt.cpp",
+          "line": 147
+        },
+        {
+          "name": "DecoderLayerGradientFlow",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gpt.cpp",
+          "line": 165
+        },
+        {
+          "name": "GPT2ModelForwardShape",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gpt.cpp",
+          "line": 198
+        },
+        {
+          "name": "GPT2ModelParameterCount",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gpt.cpp",
+          "line": 217
+        },
+        {
+          "name": "GPT2ModelGradientFlow",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gpt.cpp",
+          "line": 241
+        },
+        {
+          "name": "GPT2LMHeadForwardShape",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gpt.cpp",
+          "line": 275
+        },
+        {
+          "name": "GPT2LMHeadLogitsRange",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gpt.cpp",
+          "line": 294
+        },
+        {
+          "name": "GPT2LMHeadGradientFlow",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gpt.cpp",
+          "line": 313
+        },
+        {
+          "name": "GPT3ModelConstruction",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gpt.cpp",
+          "line": 347
+        },
+        {
+          "name": "GPT3LMHeadModelForward",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gpt.cpp",
+          "line": 359
+        },
+        {
+          "name": "GeneratorGreedySearch",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gpt.cpp",
+          "line": 386
+        },
+        {
+          "name": "GeneratorTopKSampling",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gpt.cpp",
+          "line": 413
+        },
+        {
+          "name": "GeneratorTopPSampling",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gpt.cpp",
+          "line": 442
+        },
+        {
+          "name": "GeneratorBeamSearch",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gpt.cpp",
+          "line": 465
+        },
+        {
+          "name": "GeneratorGenericGenerate",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gpt.cpp",
+          "line": 491
+        },
+        {
+          "name": "GPT2ConfigPresets",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gpt.cpp",
+          "line": 515
+        },
+        {
+          "name": "GPT3ConfigPresets",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gpt.cpp",
+          "line": 534
+        },
+        {
+          "name": "EndToEndTextGeneration",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gpt.cpp",
+          "line": 564
+        },
+        {
+          "name": "TrainingModeVsEvalMode",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gpt.cpp",
+          "line": 603
+        }
+      ]
+    }
+  ]
+}

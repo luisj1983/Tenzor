@@ -5,6 +5,8 @@
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/autograd/function.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/ops/op_id.hpp"
 #include <stdexcept>
 #include <sstream>
 
@@ -154,6 +156,56 @@ auto LSTMCell::forward(const Variable& input, const Variable& hx, const Variable
     return {h_new, c_new};
 }
 
+auto LSTMCell::forward_with_precomputed_ih(const Tensor& gates_ih, const Variable& hx, const Variable& cx)
+    -> std::pair<Variable, Variable> {
+
+    int64_t batch_size = gates_ih.shape()[0];
+
+    // Initialize hidden and cell states if not provided
+    Variable h = hx;
+    Variable c = cx;
+
+    if (!h.is_initialized() || h.tensor().numel() == 0) {
+        h = Variable(zeros({batch_size, hidden_size_},
+                          gates_ih.dtype(), gates_ih.device()), false);
+    }
+    if (!c.is_initialized() || c.tensor().numel() == 0) {
+        c = Variable(zeros({batch_size, hidden_size_},
+                          gates_ih.dtype(), gates_ih.device()), false);
+    }
+
+    // Compute hidden-to-hidden gates
+    auto gates_hh = weight_hh_->forward(h);
+
+    // Combine gates: gates = gates_ih + gates_hh
+    auto gates_tensor = (gates_ih + gates_hh.tensor()).contiguous();
+
+    // Split gates into 4 chunks along dimension 1
+    auto gate_chunks = chunk(gates_tensor, 4, 1);
+
+    auto i_gate_tensor = gate_chunks[0];  // Input gate
+    auto f_gate_tensor = gate_chunks[1];  // Forget gate
+    auto g_gate_tensor = gate_chunks[2];  // Cell gate
+    auto o_gate_tensor = gate_chunks[3];  // Output gate
+
+    // Apply activations
+    auto i_t = nn::sigmoid(Variable(i_gate_tensor, true));
+    auto f_t = nn::sigmoid(Variable(f_gate_tensor, true));
+    auto g_t = nn::tanh(Variable(g_gate_tensor, true));
+    auto o_t = nn::sigmoid(Variable(o_gate_tensor, true));
+
+    // Update cell state: c_t = f_t ⊙ c_{t-1} + i_t ⊙ g_t
+    auto f_c = Variable(f_t.tensor() * c.tensor(), true);
+    auto i_g = Variable(i_t.tensor() * g_t.tensor(), true);
+    auto c_new = Variable(f_c.tensor() + i_g.tensor(), true);
+
+    // Update hidden state: h_t = o_t ⊙ tanh(c_t)
+    auto c_tanh = nn::tanh(c_new);
+    auto h_new = Variable(o_t.tensor() * c_tanh.tensor(), true);
+
+    return {h_new, c_new};
+}
+
 // ============================================================================
 // LSTM Implementation
 // ============================================================================
@@ -263,6 +315,66 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
         throw std::runtime_error("LSTM: invalid cell state shape");
     }
 
+    // =========================================================================
+    // FAST PATH: Use fused CPU backend kernel for inference
+    // Conditions: CPU, Float32, not training, single layer, not bidirectional
+    // =========================================================================
+    bool can_use_fused = input.device().type == Device::Type::CPU &&
+                         input.dtype() == DType::Float32 &&
+                         !is_training() &&
+                         num_layers_ == 1 &&
+                         !bidirectional_;
+
+    if (can_use_fused) {
+        // Get weight matrices from the cell
+        auto& cell = forward_cells_[0];
+        auto W_ih_linear = cell->weight_ih();
+        auto W_hh_var = cell->parameters()[2];  // weight_hh weight
+
+        // Get weight tensors (4*hidden, input_size) and (4*hidden, hidden_size)
+        auto W_ih_params = W_ih_linear->parameters();
+        Tensor W_ih_tensor = W_ih_params[0]->tensor().contiguous();
+        Tensor W_hh_tensor = W_hh_var->tensor().contiguous();
+
+        // Get bias (4*hidden) or empty tensor
+        Tensor bias_tensor;
+        if (W_ih_params.size() > 1) {
+            bias_tensor = W_ih_params[1]->tensor().contiguous();
+        } else {
+            bias_tensor = empty({0}, DType::Float32, input.device());
+        }
+
+        // Make input contiguous (seq, batch, input_size)
+        Tensor input_tensor = x.tensor().contiguous();
+
+        // Get initial states (batch, hidden)
+        Tensor h0_tensor = h.tensor().slice(0, 0, 1).reshape({batch_size, hidden_size_}).contiguous();
+        Tensor c0_tensor = c.tensor().slice(0, 0, 1).reshape({batch_size, hidden_size_}).contiguous();
+
+        // Call fused kernel via dispatch
+        // inputs: [input, W_ih, W_hh, bias, h0, c0]
+        std::vector<Tensor> inputs = {input_tensor, W_ih_tensor, W_hh_tensor,
+                                       bias_tensor, h0_tensor, c0_tensor};
+        auto outputs = dispatch<OpId::LSTMForward>(inputs);
+        // outputs: [output, h_n, c_n]
+
+        // Reshape output
+        Variable output(outputs[0], false);
+        if (batch_first_) {
+            output = Variable(output.tensor().transpose(0, 1), false);
+        }
+
+        // Reshape final states to (1, batch, hidden)
+        Variable h_final(outputs[1].reshape({1, batch_size, hidden_size_}), false);
+        Variable c_final(outputs[2].reshape({1, batch_size, hidden_size_}), false);
+
+        return {output, {h_final, c_final}};
+    }
+
+    // =========================================================================
+    // STANDARD PATH: Use autograd operations (required for training/gradients)
+    // =========================================================================
+
     // Split states by layer
     std::vector<Variable> h_layers;
     std::vector<Variable> c_layers;
@@ -288,16 +400,28 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
         Variable forward_h = h_layers[layer * num_directions];
         Variable forward_c = c_layers[layer * num_directions];
 
+        int64_t layer_feat_size = (layer == 0) ? input_size_ : (hidden_size_ * num_directions);
+
+        // OPTIMIZATION: Pre-compute all input-to-hidden gates at once
+        // Instead of calling weight_ih->forward() seq_len times, we do it ONCE
+        // Reshape from (seq, batch, feat) to (seq*batch, feat)
+        auto x_tensor = layer_input.tensor().contiguous();
+        auto x_flat = x_tensor.reshape({seq_len * batch_size, layer_feat_size});
+
+        // Compute all input gates at once: (seq*batch, 4*hidden)
+        auto all_gates_ih = forward_cell->weight_ih()->forward(Variable(x_flat, false));
+
+        // Reshape to (seq, batch, 4*hidden)
+        auto gates_ih_tensor = all_gates_ih.tensor().reshape({seq_len, batch_size, 4 * hidden_size_});
+
         std::vector<Variable> forward_outputs;
 
-        // Forward pass
+        // Forward pass with pre-computed input gates
         for (int64_t t = 0; t < seq_len; ++t) {
-            auto x_tensor = layer_input.tensor();
-            int64_t layer_feat_size = (layer == 0) ? input_size_ : (hidden_size_ * num_directions);
-            auto x_t = x_tensor.slice(0, t, t + 1).reshape({batch_size, layer_feat_size});
-            Variable x_t_var(x_t, layer_input.requires_grad());
+            // Extract pre-computed input gates for this timestep
+            auto gates_ih_t = gates_ih_tensor.slice(0, t, t + 1).reshape({batch_size, 4 * hidden_size_});
 
-            auto [h_next, c_next] = forward_cell->forward(x_t_var, forward_h, forward_c);
+            auto [h_next, c_next] = forward_cell->forward_with_precomputed_ih(gates_ih_t, forward_h, forward_c);
             forward_h = h_next;
             forward_c = c_next;
             forward_outputs.push_back(h_next);
@@ -313,16 +437,17 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
             Variable backward_h = h_layers[layer * num_directions + 1];
             Variable backward_c = c_layers[layer * num_directions + 1];
 
+            // Pre-compute all backward input gates
+            auto all_gates_ih_bwd = backward_cell->weight_ih()->forward(Variable(x_flat, false));
+            auto gates_ih_bwd_tensor = all_gates_ih_bwd.tensor().reshape({seq_len, batch_size, 4 * hidden_size_});
+
             std::vector<Variable> backward_outputs;
 
-            // Backward pass
+            // Backward pass with pre-computed input gates
             for (int64_t t = seq_len - 1; t >= 0; --t) {
-                auto x_tensor = layer_input.tensor();
-                int64_t layer_feat_size = (layer == 0) ? input_size_ : (hidden_size_ * 2);
-                auto x_t = x_tensor.slice(0, t, t + 1).reshape({batch_size, layer_feat_size});
-                Variable x_t_var(x_t, layer_input.requires_grad());
+                auto gates_ih_t = gates_ih_bwd_tensor.slice(0, t, t + 1).reshape({batch_size, 4 * hidden_size_});
 
-                auto [h_next, c_next] = backward_cell->forward(x_t_var, backward_h, backward_c);
+                auto [h_next, c_next] = backward_cell->forward_with_precomputed_ih(gates_ih_t, backward_h, backward_c);
                 backward_h = h_next;
                 backward_c = c_next;
                 backward_outputs.push_back(h_next);

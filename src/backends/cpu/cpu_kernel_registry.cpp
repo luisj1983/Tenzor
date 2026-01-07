@@ -175,7 +175,7 @@ namespace cpu {
     auto linspace_kernel(float start, float end, int64_t steps, DType dtype, const Device& device) -> Tensor;
     auto eye_kernel(int64_t n, int64_t m, DType dtype, const Device& device) -> Tensor;
 
-    // RNN
+    // RNN - Cell operations
     auto lstm_cell_forward_kernel(const Tensor& input, const Tensor& hx, const Tensor& cx,
                                    const Tensor& weight_ih, const Tensor& weight_hh,
                                    const Tensor& bias_ih, const Tensor& bias_hh) -> std::vector<Tensor>;
@@ -188,6 +188,12 @@ namespace cpu {
                                   const Tensor& bias_ih, const Tensor& bias_hh) -> Tensor;
     auto gru_cell_backward_kernel(const Tensor& grad_hy, const Tensor& input, const Tensor& hx,
                                    const Tensor& weight_ih, const Tensor& weight_hh) -> std::vector<Tensor>;
+
+    // RNN - Full sequence operations (fused, SIMD-optimized)
+    auto lstm_forward_kernel(const Tensor& input, const Tensor& W_ih, const Tensor& W_hh,
+                              const Tensor& bias, const Tensor& h0, const Tensor& c0) -> std::vector<Tensor>;
+    auto gru_forward_kernel(const Tensor& input, const Tensor& W_ih, const Tensor& W_hh,
+                             const Tensor& bias, const Tensor& h0) -> std::vector<Tensor>;
 
     // Embedding
     auto embedding_kernel(const Tensor& weight, const Tensor& indices) -> Tensor;
@@ -725,6 +731,21 @@ void register_cpu_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{cpu::gru_cell_forward_kernel(inputs[0], inputs[1],
                                                                   inputs[2], inputs[3],
                                                                   inputs[4], inputs[5])};
+    });
+
+    // Full-sequence RNN operations (fused, SIMD-optimized)
+    // inputs: [input, W_ih, W_hh, bias, h0, c0] for LSTM
+    // inputs: [input, W_ih, W_hh, bias, h0] for GRU
+    table.register_kernel(OpId::LSTMForward, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        // bias may be empty tensor if not provided
+        return cpu::lstm_forward_kernel(inputs[0], inputs[1], inputs[2],
+                                         inputs[3], inputs[4], inputs[5]);
+    });
+
+    table.register_kernel(OpId::GRUForward, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        // bias may be empty tensor if not provided
+        return cpu::gru_forward_kernel(inputs[0], inputs[1], inputs[2],
+                                        inputs[3], inputs[4]);
     });
 
     // Note: Creation operations (Zeros, Ones, etc.) are handled differently

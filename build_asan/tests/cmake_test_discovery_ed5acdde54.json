@@ -1,0 +1,107 @@
+{
+  "tests": 19,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "ZeROStage2IntegrationTest",
+      "tests": 19,
+      "testsuite": [
+        {
+          "name": "EndToEndTrainingConvergence",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage2_integration.cpp",
+          "line": 170
+        },
+        {
+          "name": "EndToEndTrainingDeepNetwork",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage2_integration.cpp",
+          "line": 193
+        },
+        {
+          "name": "EndToEndTrainingMultipleBatches",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage2_integration.cpp",
+          "line": 212
+        },
+        {
+          "name": "MultiRankConfigSingleProcess",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage2_integration.cpp",
+          "line": 248
+        },
+        {
+          "name": "MultiRankParameterPartitioning",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage2_integration.cpp",
+          "line": 269
+        },
+        {
+          "name": "MultiRankMemoryScaling",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage2_integration.cpp",
+          "line": 298
+        },
+        {
+          "name": "ComparisonStage1ConvergenceSimilar",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage2_integration.cpp",
+          "line": 340
+        },
+        {
+          "name": "ComparisonStage1MemoryReduction",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage2_integration.cpp",
+          "line": 378
+        },
+        {
+          "name": "GradientAccumulationBasic",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage2_integration.cpp",
+          "line": 413
+        },
+        {
+          "name": "GradientAccumulationVsNormalBatch",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage2_integration.cpp",
+          "line": 451
+        },
+        {
+          "name": "CPUOffloadEndToEndTraining",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage2_integration.cpp",
+          "line": 517
+        },
+        {
+          "name": "CPUOffloadMemoryLocation",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage2_integration.cpp",
+          "line": 538
+        },
+        {
+          "name": "CPUOffloadVsGPUConvergence",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage2_integration.cpp",
+          "line": 560
+        },
+        {
+          "name": "CheckpointSaveLoad",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage2_integration.cpp",
+          "line": 603
+        },
+        {
+          "name": "CheckpointResumeTraining",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage2_integration.cpp",
+          "line": 628
+        },
+        {
+          "name": "CheckpointMultiRankCompatibility",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage2_integration.cpp",
+          "line": 661
+        },
+        {
+          "name": "CheckpointWithCPUOffload",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage2_integration.cpp",
+          "line": 693
+        },
+        {
+          "name": "StabilityLongTraining",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage2_integration.cpp",
+          "line": 726
+        },
+        {
+          "name": "StabilityLargeGradients",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage2_integration.cpp",
+          "line": 749
+        }
+      ]
+    }
+  ]
+}

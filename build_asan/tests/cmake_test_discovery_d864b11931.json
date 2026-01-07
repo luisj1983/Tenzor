@@ -1,0 +1,426 @@
+{
+  "tests": 54,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "UNetConstructionTest\/0",
+      "tests": 3,
+      "testsuite": [
+        {
+          "name": "BasicConstruction",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 65
+        },
+        {
+          "name": "ParameterCount",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 87
+        },
+        {
+          "name": "DifferentChannelConfigurations",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 124
+        }
+      ]
+    },
+    {
+      "name": "UNetConstructionTest\/1",
+      "tests": 3,
+      "testsuite": [
+        {
+          "name": "BasicConstruction",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 65
+        },
+        {
+          "name": "ParameterCount",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 87
+        },
+        {
+          "name": "DifferentChannelConfigurations",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 124
+        }
+      ]
+    },
+    {
+      "name": "UNetArchitectureTest\/0",
+      "tests": 3,
+      "testsuite": [
+        {
+          "name": "EncoderPathDimensionality",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 166
+        },
+        {
+          "name": "DecoderPathReconstruction",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 181
+        },
+        {
+          "name": "BilinearVsTransposedConv",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 198
+        }
+      ]
+    },
+    {
+      "name": "UNetArchitectureTest\/1",
+      "tests": 3,
+      "testsuite": [
+        {
+          "name": "EncoderPathDimensionality",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 166
+        },
+        {
+          "name": "DecoderPathReconstruction",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 181
+        },
+        {
+          "name": "BilinearVsTransposedConv",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 198
+        }
+      ]
+    },
+    {
+      "name": "UNetSkipConnectionTest\/0",
+      "tests": 2,
+      "testsuite": [
+        {
+          "name": "GradientFlowThroughSkips",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 243
+        },
+        {
+          "name": "SkipConnectionFeaturePreservation",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 264
+        }
+      ]
+    },
+    {
+      "name": "UNetSkipConnectionTest\/1",
+      "tests": 2,
+      "testsuite": [
+        {
+          "name": "GradientFlowThroughSkips",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 243
+        },
+        {
+          "name": "SkipConnectionFeaturePreservation",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 264
+        }
+      ]
+    },
+    {
+      "name": "UNetImageSizeTest\/0",
+      "tests": 4,
+      "testsuite": [
+        {
+          "name": "MultipleImageSizes",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 307
+        },
+        {
+          "name": "NonSquareImages",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 325
+        },
+        {
+          "name": "BatchSizeVariation",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 349
+        },
+        {
+          "name": "SmallImageSizes",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 368
+        }
+      ]
+    },
+    {
+      "name": "UNetImageSizeTest\/1",
+      "tests": 4,
+      "testsuite": [
+        {
+          "name": "MultipleImageSizes",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 307
+        },
+        {
+          "name": "NonSquareImages",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 325
+        },
+        {
+          "name": "BatchSizeVariation",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 349
+        },
+        {
+          "name": "SmallImageSizes",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 368
+        }
+      ]
+    },
+    {
+      "name": "UNetOutputChannelTest\/0",
+      "tests": 4,
+      "testsuite": [
+        {
+          "name": "BinarySegmentation",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 406
+        },
+        {
+          "name": "MultiClassSegmentation",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 419
+        },
+        {
+          "name": "GrayscaleInput",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 435
+        },
+        {
+          "name": "MultiChannelInput",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 448
+        }
+      ]
+    },
+    {
+      "name": "UNetOutputChannelTest\/1",
+      "tests": 4,
+      "testsuite": [
+        {
+          "name": "BinarySegmentation",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 406
+        },
+        {
+          "name": "MultiClassSegmentation",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 419
+        },
+        {
+          "name": "GrayscaleInput",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 435
+        },
+        {
+          "name": "MultiChannelInput",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 448
+        }
+      ]
+    },
+    {
+      "name": "UNetUpsamplingTest\/0",
+      "tests": 4,
+      "testsuite": [
+        {
+          "name": "BilinearUpsampling",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 487
+        },
+        {
+          "name": "TransposedConvUpsampling",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 501
+        },
+        {
+          "name": "UpsamplingMethodComparison",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 515
+        },
+        {
+          "name": "UpsamplingWithGradients",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 540
+        }
+      ]
+    },
+    {
+      "name": "UNetUpsamplingTest\/1",
+      "tests": 4,
+      "testsuite": [
+        {
+          "name": "BilinearUpsampling",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 487
+        },
+        {
+          "name": "TransposedConvUpsampling",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 501
+        },
+        {
+          "name": "UpsamplingMethodComparison",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 515
+        },
+        {
+          "name": "UpsamplingWithGradients",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 540
+        }
+      ]
+    },
+    {
+      "name": "UNetModeTest\/0",
+      "tests": 3,
+      "testsuite": [
+        {
+          "name": "TrainingMode",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 587
+        },
+        {
+          "name": "InferenceMode",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 605
+        },
+        {
+          "name": "ModeToggling",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 622
+        }
+      ]
+    },
+    {
+      "name": "UNetModeTest\/1",
+      "tests": 3,
+      "testsuite": [
+        {
+          "name": "TrainingMode",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 587
+        },
+        {
+          "name": "InferenceMode",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 605
+        },
+        {
+          "name": "ModeToggling",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 622
+        }
+      ]
+    },
+    {
+      "name": "UNetEdgeCaseTest\/0",
+      "tests": 4,
+      "testsuite": [
+        {
+          "name": "MinimalImageSize",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 663
+        },
+        {
+          "name": "SingleClassSegmentation",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 676
+        },
+        {
+          "name": "LargeBatchSize",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 688
+        },
+        {
+          "name": "ConsistentOutputAcrossCalls",
+          "type_param": "float",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 703
+        }
+      ]
+    },
+    {
+      "name": "UNetEdgeCaseTest\/1",
+      "tests": 4,
+      "testsuite": [
+        {
+          "name": "MinimalImageSize",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 663
+        },
+        {
+          "name": "SingleClassSegmentation",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 676
+        },
+        {
+          "name": "LargeBatchSize",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 688
+        },
+        {
+          "name": "ConsistentOutputAcrossCalls",
+          "type_param": "double",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_unet_multidtype.cpp",
+          "line": 703
+        }
+      ]
+    }
+  ]
+}

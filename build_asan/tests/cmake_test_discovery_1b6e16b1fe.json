@@ -1,0 +1,62 @@
+{
+  "tests": 10,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "DTypeConversionTest",
+      "tests": 10,
+      "testsuite": [
+        {
+          "name": "Float32ToFloat64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_dtype_conversion.cpp",
+          "line": 21
+        },
+        {
+          "name": "Float32ToInt32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_dtype_conversion.cpp",
+          "line": 39
+        },
+        {
+          "name": "Int64ToFloat32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_dtype_conversion.cpp",
+          "line": 56
+        },
+        {
+          "name": "UInt8ToFloat32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_dtype_conversion.cpp",
+          "line": 71
+        },
+        {
+          "name": "BoolToFloat32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_dtype_conversion.cpp",
+          "line": 88
+        },
+        {
+          "name": "SameDType",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_dtype_conversion.cpp",
+          "line": 103
+        },
+        {
+          "name": "ShapePreservation",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_dtype_conversion.cpp",
+          "line": 112
+        },
+        {
+          "name": "RequiresGradPreservation",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_dtype_conversion.cpp",
+          "line": 123
+        },
+        {
+          "name": "Float32ToInt8",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_dtype_conversion.cpp",
+          "line": 133
+        },
+        {
+          "name": "MultipleConversions",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_dtype_conversion.cpp",
+          "line": 150
+        }
+      ]
+    }
+  ]
+}

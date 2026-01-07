@@ -1,0 +1,132 @@
+{
+  "tests": 24,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "SchedulerTest",
+      "tests": 24,
+      "testsuite": [
+        {
+          "name": "StepLR_SGD_BasicStep",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_schedulers.cpp",
+          "line": 25
+        },
+        {
+          "name": "StepLR_SGD_MultipleDecays",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_schedulers.cpp",
+          "line": 50
+        },
+        {
+          "name": "StepLR_SGD_EdgeCaseStepSize1",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_schedulers.cpp",
+          "line": 84
+        },
+        {
+          "name": "StepLR_SGD_VerySmallGamma",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_schedulers.cpp",
+          "line": 103
+        },
+        {
+          "name": "StepLR_Adam_BasicStep",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_schedulers.cpp",
+          "line": 121
+        },
+        {
+          "name": "StepLR_AdamW_BasicStep",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_schedulers.cpp",
+          "line": 139
+        },
+        {
+          "name": "ExponentialLR_SGD_BasicDecay",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_schedulers.cpp",
+          "line": 159
+        },
+        {
+          "name": "ExponentialLR_SGD_MultipleSteps",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_schedulers.cpp",
+          "line": 185
+        },
+        {
+          "name": "ExponentialLR_SGD_SmallGamma",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_schedulers.cpp",
+          "line": 201
+        },
+        {
+          "name": "ExponentialLR_Adam_BasicDecay",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_schedulers.cpp",
+          "line": 222
+        },
+        {
+          "name": "ExponentialLR_AdamW_BasicDecay",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_schedulers.cpp",
+          "line": 236
+        },
+        {
+          "name": "CosineAnnealingLR_SGD_BasicCycle",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_schedulers.cpp",
+          "line": 253
+        },
+        {
+          "name": "CosineAnnealingLR_SGD_WithEtaMin",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_schedulers.cpp",
+          "line": 285
+        },
+        {
+          "name": "CosineAnnealingLR_SGD_Symmetry",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_schedulers.cpp",
+          "line": 300
+        },
+        {
+          "name": "CosineAnnealingLR_SGD_SmallTMax",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_schedulers.cpp",
+          "line": 331
+        },
+        {
+          "name": "CosineAnnealingLR_Adam_BasicCycle",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_schedulers.cpp",
+          "line": 351
+        },
+        {
+          "name": "CosineAnnealingLR_AdamW_BasicCycle",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_schedulers.cpp",
+          "line": 367
+        },
+        {
+          "name": "StepLR_SGD_Integration",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_schedulers.cpp",
+          "line": 386
+        },
+        {
+          "name": "ExponentialLR_Adam_Integration",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_schedulers.cpp",
+          "line": 408
+        },
+        {
+          "name": "CosineAnnealingLR_SGD_Integration",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_schedulers.cpp",
+          "line": 426
+        },
+        {
+          "name": "StepLR_LargeEpoch",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_schedulers.cpp",
+          "line": 448
+        },
+        {
+          "name": "ExponentialLR_VerySmallGamma",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_schedulers.cpp",
+          "line": 464
+        },
+        {
+          "name": "CosineAnnealingLR_AfterTMax",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_schedulers.cpp",
+          "line": 477
+        },
+        {
+          "name": "GetLRAlias",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_schedulers.cpp",
+          "line": 494
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,372 @@
+{
+  "tests": 60,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "AllBackends\/EmbeddingTest",
+      "tests": 60,
+      "testsuite": [
+        {
+          "name": "BasicLookup\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 30
+        },
+        {
+          "name": "BasicLookup\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 30
+        },
+        {
+          "name": "BasicLookup\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 30
+        },
+        {
+          "name": "BasicLookup\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 30
+        },
+        {
+          "name": "MultiDimensionalInput\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 71
+        },
+        {
+          "name": "MultiDimensionalInput\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 71
+        },
+        {
+          "name": "MultiDimensionalInput\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 71
+        },
+        {
+          "name": "MultiDimensionalInput\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 71
+        },
+        {
+          "name": "PaddingIdx\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 99
+        },
+        {
+          "name": "PaddingIdx\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 99
+        },
+        {
+          "name": "PaddingIdx\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 99
+        },
+        {
+          "name": "PaddingIdx\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 99
+        },
+        {
+          "name": "MaxNormRenormalization\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 147
+        },
+        {
+          "name": "MaxNormRenormalization\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 147
+        },
+        {
+          "name": "MaxNormRenormalization\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 147
+        },
+        {
+          "name": "MaxNormRenormalization\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 147
+        },
+        {
+          "name": "OutOfRangeIndex\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 188
+        },
+        {
+          "name": "OutOfRangeIndex\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 188
+        },
+        {
+          "name": "OutOfRangeIndex\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 188
+        },
+        {
+          "name": "OutOfRangeIndex\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 188
+        },
+        {
+          "name": "WeightAccess\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 208
+        },
+        {
+          "name": "WeightAccess\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 208
+        },
+        {
+          "name": "WeightAccess\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 208
+        },
+        {
+          "name": "WeightAccess\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 208
+        },
+        {
+          "name": "EmbeddingBagSum\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 232
+        },
+        {
+          "name": "EmbeddingBagSum\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 232
+        },
+        {
+          "name": "EmbeddingBagSum\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 232
+        },
+        {
+          "name": "EmbeddingBagSum\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 232
+        },
+        {
+          "name": "EmbeddingBagMean\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 275
+        },
+        {
+          "name": "EmbeddingBagMean\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 275
+        },
+        {
+          "name": "EmbeddingBagMean\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 275
+        },
+        {
+          "name": "EmbeddingBagMean\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 275
+        },
+        {
+          "name": "EmbeddingBagMax\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 311
+        },
+        {
+          "name": "EmbeddingBagMax\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 311
+        },
+        {
+          "name": "EmbeddingBagMax\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 311
+        },
+        {
+          "name": "EmbeddingBagMax\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 311
+        },
+        {
+          "name": "EmbeddingBagWithOffsets\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 350
+        },
+        {
+          "name": "EmbeddingBagWithOffsets\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 350
+        },
+        {
+          "name": "EmbeddingBagWithOffsets\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 350
+        },
+        {
+          "name": "EmbeddingBagWithOffsets\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 350
+        },
+        {
+          "name": "EmbeddingBagEmptyBag\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 415
+        },
+        {
+          "name": "EmbeddingBagEmptyBag\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 415
+        },
+        {
+          "name": "EmbeddingBagEmptyBag\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 415
+        },
+        {
+          "name": "EmbeddingBagEmptyBag\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 415
+        },
+        {
+          "name": "EmbeddingBagInvalidMode\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 431
+        },
+        {
+          "name": "EmbeddingBagInvalidMode\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 431
+        },
+        {
+          "name": "EmbeddingBagInvalidMode\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 431
+        },
+        {
+          "name": "EmbeddingBagInvalidMode\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 431
+        },
+        {
+          "name": "InvalidParameters\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 439
+        },
+        {
+          "name": "InvalidParameters\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 439
+        },
+        {
+          "name": "InvalidParameters\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 439
+        },
+        {
+          "name": "InvalidParameters\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 439
+        },
+        {
+          "name": "EmbeddingInModule\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 463
+        },
+        {
+          "name": "EmbeddingInModule\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 463
+        },
+        {
+          "name": "EmbeddingInModule\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 463
+        },
+        {
+          "name": "EmbeddingInModule\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 463
+        },
+        {
+          "name": "EmbeddingTrainEvalMode\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 477
+        },
+        {
+          "name": "EmbeddingTrainEvalMode\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 477
+        },
+        {
+          "name": "EmbeddingTrainEvalMode\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 477
+        },
+        {
+          "name": "EmbeddingTrainEvalMode\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 477
+        }
+      ]
+    }
+  ]
+}

@@ -396,17 +396,12 @@ static void matmul_blocked_float32(
     const float* A, const float* B, float* C,
     int64_t M, int64_t N, int64_t K) {
 
-#ifdef TENZOR_USE_ONEDNN
-    // Try oneDNN first (can be faster for certain shapes due to better memory handling)
-    if (onednn_matmul_f32(A, B, C, M, N, K)) {
-        return;
-    }
-#endif
-
 #ifdef TENZOR_USE_MKL
-    // Use MKL SGEMM for any non-trivial matrix size
-    // Lowered threshold from 4096 to 512 - MKL is faster even for small matrices
-    if (M * N * K > 512) {
+    // Always use MKL SGEMM - it's the fastest option for CPU matmul
+    // Skip oneDNN for matmul as it has ~6ms primitive creation overhead per call
+    // MKL's overhead is negligible compared to the performance gains from optimized BLAS
+    // Only use custom GEMM for tiny matrices (< 100x100x100 = 1M ops)
+    if (M * N * K > 1000000 || (M >= 64 && N >= 64 && K >= 64)) {
         cblas_sgemm(
             CblasRowMajor,
             CblasNoTrans,
@@ -423,7 +418,17 @@ static void matmul_blocked_float32(
         return;
     }
 #endif
-    // Fall back to custom optimized GEMM for very small matrices
+
+#ifdef TENZOR_USE_ONEDNN
+#ifndef TENZOR_USE_MKL
+    // If MKL not available, try oneDNN as fallback
+    if (onednn_matmul_f32(A, B, C, M, N, K)) {
+        return;
+    }
+#endif
+#endif
+
+    // Fall back to custom optimized GEMM for very small matrices or when no BLAS available
     gemm::gemm_optimized(A, B, C, M, N, K, 1.0f, 0.0f);
 }
 
@@ -434,9 +439,9 @@ static void matmul_blocked_float64(
     int64_t M, int64_t N, int64_t K) {
 
 #ifdef TENZOR_USE_MKL
-    // Use MKL DGEMM for any non-trivial matrix size
-    // Lowered threshold - MKL is faster even for small matrices
-    if (M * N * K > 512) {
+    // Always use MKL DGEMM for any reasonable matrix size - it's consistently faster
+    // Same threshold logic as Float32
+    if (M * N * K > 1000000 || (M >= 64 && N >= 64 && K >= 64)) {
         cblas_dgemm(
             CblasRowMajor,
             CblasNoTrans,

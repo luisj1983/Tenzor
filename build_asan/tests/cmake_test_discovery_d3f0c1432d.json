@@ -1,0 +1,182 @@
+{
+  "tests": 34,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "ZeROStage1Test",
+      "tests": 34,
+      "testsuite": [
+        {
+          "name": "ConstructorWithValidConfig",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1.cpp",
+          "line": 71
+        },
+        {
+          "name": "ConstructorWithInvalidWorldSize",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1.cpp",
+          "line": 84
+        },
+        {
+          "name": "ConstructorWithInvalidRank",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1.cpp",
+          "line": 97
+        },
+        {
+          "name": "ConstructorWithNegativeRank",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1.cpp",
+          "line": 110
+        },
+        {
+          "name": "ConstructorWithNullOptimizer",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1.cpp",
+          "line": 123
+        },
+        {
+          "name": "ConstructorInitializesPartitions",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1.cpp",
+          "line": 131
+        },
+        {
+          "name": "PartitionParametersEvenSplit",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1.cpp",
+          "line": 149
+        },
+        {
+          "name": "PartitionParametersUnevenSplit",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1.cpp",
+          "line": 164
+        },
+        {
+          "name": "PartitionEmptyParameterList",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1.cpp",
+          "line": 181
+        },
+        {
+          "name": "PartitionSingleParameter",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1.cpp",
+          "line": 195
+        },
+        {
+          "name": "PartitionMixedParameterSizes",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1.cpp",
+          "line": 209
+        },
+        {
+          "name": "InitializeOptimizerStates",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1.cpp",
+          "line": 238
+        },
+        {
+          "name": "OptimizerStatesOnCPU",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1.cpp",
+          "line": 254
+        },
+        {
+          "name": "OptimizerStatesPreserveAfterStep",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1.cpp",
+          "line": 270
+        },
+        {
+          "name": "ZeroGradClearsGradients",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1.cpp",
+          "line": 298
+        },
+        {
+          "name": "StepWithZeroGradients",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1.cpp",
+          "line": 329
+        },
+        {
+          "name": "SaveStateDictToDict",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1.cpp",
+          "line": 350
+        },
+        {
+          "name": "LoadStateDictFromDict",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1.cpp",
+          "line": 373
+        },
+        {
+          "name": "LoadEmptyStateDict",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1.cpp",
+          "line": 401
+        },
+        {
+          "name": "EnableCPUOffload",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1.cpp",
+          "line": 421
+        },
+        {
+          "name": "DisableCPUOffload",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1.cpp",
+          "line": 436
+        },
+        {
+          "name": "CPUOffloadStepCompletes",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1.cpp",
+          "line": 450
+        },
+        {
+          "name": "WrapAdamOptimizer",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1.cpp",
+          "line": 474
+        },
+        {
+          "name": "WrapSGDOptimizer",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1.cpp",
+          "line": 487
+        },
+        {
+          "name": "WrapAdamWOptimizer",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1.cpp",
+          "line": 500
+        },
+        {
+          "name": "SingleGPUConfiguration",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1.cpp",
+          "line": 517
+        },
+        {
+          "name": "VeryLargeParameterCount",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1.cpp",
+          "line": 531
+        },
+        {
+          "name": "VerySmallParameters",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1.cpp",
+          "line": 546
+        },
+        {
+          "name": "FewerParametersThanRanks",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1.cpp",
+          "line": 567
+        },
+        {
+          "name": "GetMemoryStats",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1.cpp",
+          "line": 585
+        },
+        {
+          "name": "MemoryStatsAfterStep",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1.cpp",
+          "line": 601
+        },
+        {
+          "name": "GetRank",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1.cpp",
+          "line": 628
+        },
+        {
+          "name": "GetWorldSize",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1.cpp",
+          "line": 641
+        },
+        {
+          "name": "GetLocalParamCount",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage1.cpp",
+          "line": 654
+        }
+      ]
+    }
+  ]
+}

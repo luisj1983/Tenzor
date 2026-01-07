@@ -238,6 +238,8 @@ enum class OpId : uint16_t {
     LSTMCellBackward,
     GRUCellForward,
     GRUCellBackward,
+    LSTMForward,        // Full sequence LSTM forward
+    GRUForward,         // Full sequence GRU forward
 
     // =========================================================================
     // Embedding Operations (260-269)

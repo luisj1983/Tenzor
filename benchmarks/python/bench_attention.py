@@ -80,6 +80,7 @@ def benchmark_tenzor_attention(
         try:
             # Create multi-head attention layer
             mha = tz.nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
+            mha.eval()  # Set to inference mode for fused kernel optimization
 
             # Create input
             if device == "cuda":

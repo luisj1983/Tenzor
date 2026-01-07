@@ -1,0 +1,157 @@
+{
+  "tests": 29,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "MemoryManagerTest",
+      "tests": 29,
+      "testsuite": [
+        {
+          "name": "ConstructorWithValidConfig",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_memory_manager.cpp",
+          "line": 76
+        },
+        {
+          "name": "ConstructorWithDefaultConfig",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_memory_manager.cpp",
+          "line": 82
+        },
+        {
+          "name": "RegisterSingleTensor",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_memory_manager.cpp",
+          "line": 93
+        },
+        {
+          "name": "RegisterMultipleTensors",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_memory_manager.cpp",
+          "line": 103
+        },
+        {
+          "name": "UnregisterTensor",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_memory_manager.cpp",
+          "line": 123
+        },
+        {
+          "name": "TrackLocationCPU",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_memory_manager.cpp",
+          "line": 138
+        },
+        {
+          "name": "UpdateTensorLocation",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_memory_manager.cpp",
+          "line": 148
+        },
+        {
+          "name": "UpdateMultipleTensorLocations",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_memory_manager.cpp",
+          "line": 162
+        },
+        {
+          "name": "TrackCPUMemoryUsage",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_memory_manager.cpp",
+          "line": 190
+        },
+        {
+          "name": "TrackMemoryLimit",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_memory_manager.cpp",
+          "line": 201
+        },
+        {
+          "name": "MemoryUsageDecreasesAfterUnregister",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_memory_manager.cpp",
+          "line": 213
+        },
+        {
+          "name": "CalculateMemoryPressure",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_memory_manager.cpp",
+          "line": 235
+        },
+        {
+          "name": "MemoryPressureZeroWhenEmpty",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_memory_manager.cpp",
+          "line": 249
+        },
+        {
+          "name": "MemoryPressureIncreasesWithUsage",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_memory_manager.cpp",
+          "line": 257
+        },
+        {
+          "name": "IsOverThresholdDetectsHighPressure",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_memory_manager.cpp",
+          "line": 270
+        },
+        {
+          "name": "LRUEvictionOrderCorrect",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_memory_manager.cpp",
+          "line": 288
+        },
+        {
+          "name": "LRUEvictsOldestFirst",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_memory_manager.cpp",
+          "line": 318
+        },
+        {
+          "name": "MarkTensorUsedUpdatesLRU",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_memory_manager.cpp",
+          "line": 337
+        },
+        {
+          "name": "GetLRUTensorReturnsOldest",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_memory_manager.cpp",
+          "line": 355
+        },
+        {
+          "name": "ConcurrentRegistration",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_memory_manager.cpp",
+          "line": 373
+        },
+        {
+          "name": "ConcurrentReadWrites",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_memory_manager.cpp",
+          "line": 397
+        },
+        {
+          "name": "StatisticsAccuracy",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_memory_manager.cpp",
+          "line": 437
+        },
+        {
+          "name": "StatisticsPerDevice",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_memory_manager.cpp",
+          "line": 457
+        },
+        {
+          "name": "ResetStatistics",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_memory_manager.cpp",
+          "line": 470
+        },
+        {
+          "name": "GetTensorCount",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_memory_manager.cpp",
+          "line": 488
+        },
+        {
+          "name": "GetTensorCountPerDevice",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_memory_manager.cpp",
+          "line": 502
+        },
+        {
+          "name": "ZeroSizedTensor",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_memory_manager.cpp",
+          "line": 516
+        },
+        {
+          "name": "ManySmallTensors",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_memory_manager.cpp",
+          "line": 526
+        },
+        {
+          "name": "AlternatingRegistrationUnregistration",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_memory_manager.cpp",
+          "line": 539
+        }
+      ]
+    }
+  ]
+}

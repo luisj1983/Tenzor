@@ -1,0 +1,288 @@
+{
+  "tests": 44,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "AllDTypes\/AtrousSeparableConv2dMultiDTypeTest",
+      "tests": 10,
+      "testsuite": [
+        {
+          "name": "BasicForwardShape\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 114
+        },
+        {
+          "name": "BasicForwardShape\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 114
+        },
+        {
+          "name": "DilationRate1\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 131
+        },
+        {
+          "name": "DilationRate1\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 131
+        },
+        {
+          "name": "DilationRate6\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 146
+        },
+        {
+          "name": "DilationRate6\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 146
+        },
+        {
+          "name": "GradientFlow\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 161
+        },
+        {
+          "name": "GradientFlow\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 161
+        },
+        {
+          "name": "SmallInput\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 182
+        },
+        {
+          "name": "SmallInput\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 182
+        }
+      ]
+    },
+    {
+      "name": "AllDTypes\/ASPPMultiDTypeTest",
+      "tests": 14,
+      "testsuite": [
+        {
+          "name": "BasicForwardShape\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 219
+        },
+        {
+          "name": "BasicForwardShape\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 219
+        },
+        {
+          "name": "WithSeparableConvolution\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 237
+        },
+        {
+          "name": "WithSeparableConvolution\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 237
+        },
+        {
+          "name": "DifferentAtrousRates\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 253
+        },
+        {
+          "name": "DifferentAtrousRates\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 253
+        },
+        {
+          "name": "SmallSpatialDimensions\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 269
+        },
+        {
+          "name": "SmallSpatialDimensions\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 269
+        },
+        {
+          "name": "GradientFlow\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 285
+        },
+        {
+          "name": "GradientFlow\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 285
+        },
+        {
+          "name": "MultiScaleFeatureFusion\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 305
+        },
+        {
+          "name": "MultiScaleFeatureFusion\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 305
+        },
+        {
+          "name": "MultipleBatches\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 338
+        },
+        {
+          "name": "MultipleBatches\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 338
+        }
+      ]
+    },
+    {
+      "name": "AllDTypes\/BilinearUpsamplingMultiDTypeTest",
+      "tests": 20,
+      "testsuite": [
+        {
+          "name": "Upsample2x\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 375
+        },
+        {
+          "name": "Upsample2x\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 375
+        },
+        {
+          "name": "Upsample4x\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 388
+        },
+        {
+          "name": "Upsample4x\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 388
+        },
+        {
+          "name": "NonUniformScale\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 400
+        },
+        {
+          "name": "NonUniformScale\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 400
+        },
+        {
+          "name": "SinglePixelUpsampling\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 412
+        },
+        {
+          "name": "SinglePixelUpsampling\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 412
+        },
+        {
+          "name": "InterpolationSmoothnessIdentity\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 436
+        },
+        {
+          "name": "InterpolationSmoothnessIdentity\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 436
+        },
+        {
+          "name": "GradientFlow\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 471
+        },
+        {
+          "name": "GradientFlow\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 471
+        },
+        {
+          "name": "LargeBatchSize\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 488
+        },
+        {
+          "name": "LargeBatchSize\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 488
+        },
+        {
+          "name": "DownsampleOperation\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 500
+        },
+        {
+          "name": "DownsampleOperation\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 500
+        },
+        {
+          "name": "ASPPWithUpsampling\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 516
+        },
+        {
+          "name": "ASPPWithUpsampling\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 516
+        },
+        {
+          "name": "SequentialUpsampling\/float32",
+          "value_param": "float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 545
+        },
+        {
+          "name": "SequentialUpsampling\/float64",
+          "value_param": "float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_segmentation_multidtype.cpp",
+          "line": 545
+        }
+      ]
+    }
+  ]
+}

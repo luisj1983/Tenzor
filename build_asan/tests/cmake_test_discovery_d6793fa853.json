@@ -1,0 +1,27 @@
+{
+  "tests": 3,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "MinimalTraining",
+      "tests": 3,
+      "testsuite": [
+        {
+          "name": "SimpleLinearRegression",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_minimal_training.cpp",
+          "line": 29
+        },
+        {
+          "name": "StandardAdamOnly",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_minimal_training.cpp",
+          "line": 134
+        },
+        {
+          "name": "IntegrationTestSetup",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/test_minimal_training.cpp",
+          "line": 171
+        }
+      ]
+    }
+  ]
+}

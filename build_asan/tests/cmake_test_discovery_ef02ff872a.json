@@ -1,0 +1,177 @@
+{
+  "tests": 33,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "BertTest",
+      "tests": 33,
+      "testsuite": [
+        {
+          "name": "BertEmbeddingsForwardShape",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_bert.cpp",
+          "line": 88
+        },
+        {
+          "name": "BertEmbeddingsWithTokenTypes",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_bert.cpp",
+          "line": 101
+        },
+        {
+          "name": "BertEmbeddingsGradientFlow",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_bert.cpp",
+          "line": 114
+        },
+        {
+          "name": "BertEncoderForwardShape",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_bert.cpp",
+          "line": 141
+        },
+        {
+          "name": "BertEncoderWithMask",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_bert.cpp",
+          "line": 158
+        },
+        {
+          "name": "BertEncoderGradientFlow",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_bert.cpp",
+          "line": 175
+        },
+        {
+          "name": "BertPoolerForwardShape",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_bert.cpp",
+          "line": 201
+        },
+        {
+          "name": "BertPoolerTanhActivation",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_bert.cpp",
+          "line": 217
+        },
+        {
+          "name": "BertModelForwardShape",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_bert.cpp",
+          "line": 240
+        },
+        {
+          "name": "BertModelWithAllInputs",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_bert.cpp",
+          "line": 256
+        },
+        {
+          "name": "BertModelGradientFlow",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_bert.cpp",
+          "line": 273
+        },
+        {
+          "name": "BertModelTrainEvalMode",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_bert.cpp",
+          "line": 293
+        },
+        {
+          "name": "SequenceClassificationForwardShape",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_bert.cpp",
+          "line": 316
+        },
+        {
+          "name": "SequenceClassificationMultiClass",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_bert.cpp",
+          "line": 329
+        },
+        {
+          "name": "SequenceClassificationGradientFlow",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_bert.cpp",
+          "line": 340
+        },
+        {
+          "name": "TokenClassificationForwardShape",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_bert.cpp",
+          "line": 365
+        },
+        {
+          "name": "TokenClassificationWithMask",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_bert.cpp",
+          "line": 379
+        },
+        {
+          "name": "TokenClassificationGradientFlow",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_bert.cpp",
+          "line": 392
+        },
+        {
+          "name": "QuestionAnsweringForwardShape",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_bert.cpp",
+          "line": 415
+        },
+        {
+          "name": "QuestionAnsweringWithTokenTypes",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_bert.cpp",
+          "line": 432
+        },
+        {
+          "name": "QuestionAnsweringGradientFlow",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_bert.cpp",
+          "line": 444
+        },
+        {
+          "name": "BertConfigBase",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_bert.cpp",
+          "line": 467
+        },
+        {
+          "name": "BertConfigLarge",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_bert.cpp",
+          "line": 477
+        },
+        {
+          "name": "BertModelParameterCount",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_bert.cpp",
+          "line": 490
+        },
+        {
+          "name": "SequenceClassificationExtraParameters",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_bert.cpp",
+          "line": 511
+        },
+        {
+          "name": "BertModelCPU",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_bert.cpp",
+          "line": 527
+        },
+        {
+          "name": "BertModelStateDictSaveLoad",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_bert.cpp",
+          "line": 565
+        },
+        {
+          "name": "ModelHubParameterNameMapping",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_bert.cpp",
+          "line": 603
+        },
+        {
+          "name": "ModelHubDownloadNotImplemented",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_bert.cpp",
+          "line": 612
+        },
+        {
+          "name": "ModelHubLoadCheckpointNotImplemented",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_bert.cpp",
+          "line": 620
+        },
+        {
+          "name": "BertModelShortSequence",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_bert.cpp",
+          "line": 632
+        },
+        {
+          "name": "BertModelLongSequence",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_bert.cpp",
+          "line": 646
+        },
+        {
+          "name": "BertModelBatchSizeOne",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_bert.cpp",
+          "line": 661
+        }
+      ]
+    }
+  ]
+}

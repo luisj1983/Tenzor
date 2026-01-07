@@ -1,0 +1,324 @@
+{
+  "tests": 52,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "AllBackends\/GradCheckBackendTest",
+      "tests": 52,
+      "testsuite": [
+        {
+          "name": "QuadraticFunction\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 33
+        },
+        {
+          "name": "QuadraticFunction\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 33
+        },
+        {
+          "name": "QuadraticFunction\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 33
+        },
+        {
+          "name": "QuadraticFunction\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 33
+        },
+        {
+          "name": "LinearFunction\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 55
+        },
+        {
+          "name": "LinearFunction\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 55
+        },
+        {
+          "name": "LinearFunction\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 55
+        },
+        {
+          "name": "LinearFunction\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 55
+        },
+        {
+          "name": "SumReduction\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 75
+        },
+        {
+          "name": "SumReduction\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 75
+        },
+        {
+          "name": "SumReduction\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 75
+        },
+        {
+          "name": "SumReduction\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 75
+        },
+        {
+          "name": "ElementWiseOps\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 96
+        },
+        {
+          "name": "ElementWiseOps\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 96
+        },
+        {
+          "name": "ElementWiseOps\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 96
+        },
+        {
+          "name": "ElementWiseOps\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 96
+        },
+        {
+          "name": "MultiDimensional\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 116
+        },
+        {
+          "name": "MultiDimensional\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 116
+        },
+        {
+          "name": "MultiDimensional\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 116
+        },
+        {
+          "name": "MultiDimensional\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 116
+        },
+        {
+          "name": "DetailedResult\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 138
+        },
+        {
+          "name": "DetailedResult\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 138
+        },
+        {
+          "name": "DetailedResult\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 138
+        },
+        {
+          "name": "DetailedResult\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 138
+        },
+        {
+          "name": "Float64Precision\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 164
+        },
+        {
+          "name": "Float64Precision\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 164
+        },
+        {
+          "name": "Float64Precision\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 164
+        },
+        {
+          "name": "Float64Precision\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 164
+        },
+        {
+          "name": "RequiresGradCheck\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 193
+        },
+        {
+          "name": "RequiresGradCheck\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 193
+        },
+        {
+          "name": "RequiresGradCheck\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 193
+        },
+        {
+          "name": "RequiresGradCheck\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 193
+        },
+        {
+          "name": "NumericalGradientComputation\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 212
+        },
+        {
+          "name": "NumericalGradientComputation\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 212
+        },
+        {
+          "name": "NumericalGradientComputation\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 212
+        },
+        {
+          "name": "NumericalGradientComputation\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 212
+        },
+        {
+          "name": "CompareGradients\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 240
+        },
+        {
+          "name": "CompareGradients\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 240
+        },
+        {
+          "name": "CompareGradients\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 240
+        },
+        {
+          "name": "CompareGradients\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 240
+        },
+        {
+          "name": "EpsilonSensitivity\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 278
+        },
+        {
+          "name": "EpsilonSensitivity\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 278
+        },
+        {
+          "name": "EpsilonSensitivity\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 278
+        },
+        {
+          "name": "EpsilonSensitivity\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 278
+        },
+        {
+          "name": "ScalarOutput\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 302
+        },
+        {
+          "name": "ScalarOutput\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 302
+        },
+        {
+          "name": "ScalarOutput\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 302
+        },
+        {
+          "name": "ScalarOutput\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 302
+        },
+        {
+          "name": "PerformanceBenchmark\/cpu",
+          "value_param": "\"cpu\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 323
+        },
+        {
+          "name": "PerformanceBenchmark\/cuda",
+          "value_param": "\"cuda\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 323
+        },
+        {
+          "name": "PerformanceBenchmark\/vulkan",
+          "value_param": "\"vulkan\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 323
+        },
+        {
+          "name": "PerformanceBenchmark\/oneapi",
+          "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 323
+        }
+      ]
+    }
+  ]
+}

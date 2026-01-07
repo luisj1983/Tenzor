@@ -1,0 +1,396 @@
+{
+  "tests": 64,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "MultiBackend\/EdgeCaseTest",
+      "tests": 64,
+      "testsuite": [
+        {
+          "name": "MismatchedShapes_Addition\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 72
+        },
+        {
+          "name": "MismatchedShapes_Multiplication\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 81
+        },
+        {
+          "name": "MismatchedShapes_MatrixMultiplication\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 90
+        },
+        {
+          "name": "InvalidDimensionIndex_Negative\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 99
+        },
+        {
+          "name": "InvalidDimensionIndex_TooLarge\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 107
+        },
+        {
+          "name": "ZeroDimensionalTensor_Operations\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 115
+        },
+        {
+          "name": "EmptyTensor_ZeroElements\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 127
+        },
+        {
+          "name": "EmptyTensor_MultiDimensional\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 138
+        },
+        {
+          "name": "InvalidReshape_IncompatibleSize\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 146
+        },
+        {
+          "name": "InvalidReshape_NegativeSize\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 154
+        },
+        {
+          "name": "InvalidTranspose_DimensionOutOfBounds\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 162
+        },
+        {
+          "name": "InvalidSqueeze_DimensionNotOne\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 170
+        },
+        {
+          "name": "InvalidUnsqueeze_DimensionOutOfBounds\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 178
+        },
+        {
+          "name": "InvalidDTypeConversion_ComplexToReal\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 190
+        },
+        {
+          "name": "MixedDType_Operations\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 209
+        },
+        {
+          "name": "IntegerOverflow_Addition\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 224
+        },
+        {
+          "name": "IntegerUnderflow_Subtraction\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 237
+        },
+        {
+          "name": "DataTypeAccess_WrongType\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 249
+        },
+        {
+          "name": "ItemExtraction_NonScalar\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 257
+        },
+        {
+          "name": "InvalidDeviceIndex\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 269
+        },
+        {
+          "name": "CrossDevice_Operations_SameType\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 276
+        },
+        {
+          "name": "DeviceNotAvailable_CUDA\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 293
+        },
+        {
+          "name": "DeviceNotAvailable_ROCm\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 304
+        },
+        {
+          "name": "ExtremelyLargeTensor_OutOfMemory\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 319
+        },
+        {
+          "name": "NullPointerAccess_Uninitialized\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 328
+        },
+        {
+          "name": "DivisionByZero_ElementWise\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 340
+        },
+        {
+          "name": "DivisionByZero_Scalar\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 354
+        },
+        {
+          "name": "LogOfNegativeNumber\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 367
+        },
+        {
+          "name": "LogOfZero\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 380
+        },
+        {
+          "name": "SqrtOfNegativeNumber\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 394
+        },
+        {
+          "name": "VeryLargeNumbers_Overflow\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 407
+        },
+        {
+          "name": "VerySmallNumbers_Underflow\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 422
+        },
+        {
+          "name": "DenormalizedNumbers_Handling\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 438
+        },
+        {
+          "name": "NaN_Propagation\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 452
+        },
+        {
+          "name": "Infinity_Operations\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 467
+        },
+        {
+          "name": "BackwardOnNonLeafTensor\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 495
+        },
+        {
+          "name": "MultipleBackwardCalls_WithoutRetain\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 508
+        },
+        {
+          "name": "GradientOnNonFloatingTensor\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 523
+        },
+        {
+          "name": "BackwardWithoutRequiresGrad\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 532
+        },
+        {
+          "name": "GradientOnScalarOnly\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 544
+        },
+        {
+          "name": "OutOfBoundsIndexing_Positive\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 562
+        },
+        {
+          "name": "OutOfBoundsIndexing_Negative\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 570
+        },
+        {
+          "name": "InvalidSlicing_StartGreaterThanEnd\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 578
+        },
+        {
+          "name": "InvalidSlicing_OutOfBounds\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 587
+        },
+        {
+          "name": "NegativeIndices_Valid\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 596
+        },
+        {
+          "name": "EmptySlice\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 605
+        },
+        {
+          "name": "OperationOnUninitializedTensor\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 617
+        },
+        {
+          "name": "InvalidParameterCombination_Conv2D\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 625
+        },
+        {
+          "name": "InvalidParameterCombination_Pooling\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 640
+        },
+        {
+          "name": "InvalidParameterCombination_Linear\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 647
+        },
+        {
+          "name": "ThreadSafety_ConcurrentReads\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 659
+        },
+        {
+          "name": "ThreadSafety_ConcurrentWrites\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 685
+        },
+        {
+          "name": "CallingOperationsInWrongOrder_Backward\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 714
+        },
+        {
+          "name": "OptimizerStepBeforeBackward\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 732
+        },
+        {
+          "name": "ZeroGradWithoutGradient\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 755
+        },
+        {
+          "name": "BroadcastingWithIncompatibleShapes\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 770
+        },
+        {
+          "name": "CatWithEmptyTensors\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 780
+        },
+        {
+          "name": "CatWithMismatchedDimensions\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 791
+        },
+        {
+          "name": "StackWithMismatchedShapes\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 805
+        },
+        {
+          "name": "ReductionOnEmptyDimension\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 813
+        },
+        {
+          "name": "SoftmaxOnSingleElement\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 822
+        },
+        {
+          "name": "BatchNormWithBatchSize1\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 833
+        },
+        {
+          "name": "DropoutWithProbability0\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 849
+        },
+        {
+          "name": "DropoutWithProbability1\/CPU_0",
+          "value_param": "CPU_0",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_edge_cases.cpp",
+          "line": 866
+        }
+      ]
+    }
+  ]
+}

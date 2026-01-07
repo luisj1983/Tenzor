@@ -1,0 +1,112 @@
+{
+  "tests": 20,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "ZeROStage3IntegrationTest",
+      "tests": 20,
+      "testsuite": [
+        {
+          "name": "BasicTrainingLoop",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3_integration.cpp",
+          "line": 233
+        },
+        {
+          "name": "TrainingWithLargeModel",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3_integration.cpp",
+          "line": 266
+        },
+        {
+          "name": "TrainingWithMixedPrecision",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3_integration.cpp",
+          "line": 291
+        },
+        {
+          "name": "MultiGPUTrainingWorldSize2",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3_integration.cpp",
+          "line": 320
+        },
+        {
+          "name": "MultiGPUTrainingWorldSize4",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3_integration.cpp",
+          "line": 353
+        },
+        {
+          "name": "MultiGPUTrainingWorldSize8",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3_integration.cpp",
+          "line": 386
+        },
+        {
+          "name": "MemoryReductionVerification",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3_integration.cpp",
+          "line": 423
+        },
+        {
+          "name": "MemoryScalingWithWorldSize",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3_integration.cpp",
+          "line": 473
+        },
+        {
+          "name": "MemoryWithCPUOffload",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3_integration.cpp",
+          "line": 505
+        },
+        {
+          "name": "CorrectnessVsStandardOptimizer",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3_integration.cpp",
+          "line": 547
+        },
+        {
+          "name": "CorrectnessVsStage2",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3_integration.cpp",
+          "line": 582
+        },
+        {
+          "name": "CorrectnessWithCheckpointRestore",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3_integration.cpp",
+          "line": 623
+        },
+        {
+          "name": "PerformanceOverheadMeasurement",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3_integration.cpp",
+          "line": 669
+        },
+        {
+          "name": "PrefetchEffectiveness",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3_integration.cpp",
+          "line": 718
+        },
+        {
+          "name": "CommunicationOverlapBenefit",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3_integration.cpp",
+          "line": 771
+        },
+        {
+          "name": "ParameterGatherFreeLifecycle",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3_integration.cpp",
+          "line": 826
+        },
+        {
+          "name": "LongTrainingStability",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3_integration.cpp",
+          "line": 850
+        },
+        {
+          "name": "GradientAccumulationCompatibility",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3_integration.cpp",
+          "line": 873
+        },
+        {
+          "name": "PrefetchHitRateVerification",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3_integration.cpp",
+          "line": 912
+        },
+        {
+          "name": "StatisticsTracking",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/optim\/test_zero_stage3_integration.cpp",
+          "line": 940
+        }
+      ]
+    }
+  ]
+}

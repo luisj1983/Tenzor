@@ -1,0 +1,142 @@
+{
+  "tests": 26,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "ClassicModelsTest",
+      "tests": 26,
+      "testsuite": [
+        {
+          "name": "VGG11Construction",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_classic_models.cpp",
+          "line": 32
+        },
+        {
+          "name": "VGG11Forward",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_classic_models.cpp",
+          "line": 41
+        },
+        {
+          "name": "VGG13Construction",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_classic_models.cpp",
+          "line": 59
+        },
+        {
+          "name": "VGG16Construction",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_classic_models.cpp",
+          "line": 67
+        },
+        {
+          "name": "VGG16Forward",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_classic_models.cpp",
+          "line": 75
+        },
+        {
+          "name": "VGG19Construction",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_classic_models.cpp",
+          "line": 90
+        },
+        {
+          "name": "VGG19Forward",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_classic_models.cpp",
+          "line": 98
+        },
+        {
+          "name": "VGGWithoutBatchNorm",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_classic_models.cpp",
+          "line": 112
+        },
+        {
+          "name": "AlexNetConstruction",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_classic_models.cpp",
+          "line": 129
+        },
+        {
+          "name": "AlexNetForward",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_classic_models.cpp",
+          "line": 137
+        },
+        {
+          "name": "AlexNetCustomClasses",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_classic_models.cpp",
+          "line": 154
+        },
+        {
+          "name": "AlexNetBatchProcessing",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_classic_models.cpp",
+          "line": 166
+        },
+        {
+          "name": "GoogLeNetConstruction",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_classic_models.cpp",
+          "line": 184
+        },
+        {
+          "name": "GoogLeNetForward",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_classic_models.cpp",
+          "line": 192
+        },
+        {
+          "name": "GoogLeNetWithAuxiliaryClassifiers",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_classic_models.cpp",
+          "line": 207
+        },
+        {
+          "name": "GoogLeNetInferenceMode",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_classic_models.cpp",
+          "line": 229
+        },
+        {
+          "name": "InceptionModuleForward",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_classic_models.cpp",
+          "line": 243
+        },
+        {
+          "name": "ModelParameterCounts",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_classic_models.cpp",
+          "line": 270
+        },
+        {
+          "name": "TrainingModeSwitch",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_classic_models.cpp",
+          "line": 288
+        },
+        {
+          "name": "GradientTracking",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_classic_models.cpp",
+          "line": 303
+        },
+        {
+          "name": "PretrainedWeightsNotImplemented",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_classic_models.cpp",
+          "line": 316
+        },
+        {
+          "name": "LargeBatchVGG",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_classic_models.cpp",
+          "line": 327
+        },
+        {
+          "name": "SmallBatchGoogLeNet",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_classic_models.cpp",
+          "line": 340
+        },
+        {
+          "name": "VGGCustomDropout",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_classic_models.cpp",
+          "line": 357
+        },
+        {
+          "name": "AlexNetCustomDropout",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_classic_models.cpp",
+          "line": 366
+        },
+        {
+          "name": "GoogLeNetCustomDropout",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_classic_models.cpp",
+          "line": 379
+        }
+      ]
+    }
+  ]
+}

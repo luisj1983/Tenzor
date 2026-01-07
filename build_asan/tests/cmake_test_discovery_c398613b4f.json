@@ -1,0 +1,162 @@
+{
+  "tests": 30,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "PinnedAllocatorTest",
+      "tests": 30,
+      "testsuite": [
+        {
+          "name": "ConstructorWithValidConfig",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_pinned_allocator.cpp",
+          "line": 82
+        },
+        {
+          "name": "ConstructorInitializesPool",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_pinned_allocator.cpp",
+          "line": 88
+        },
+        {
+          "name": "AllocateSingleBlock",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_pinned_allocator.cpp",
+          "line": 100
+        },
+        {
+          "name": "AllocateMultipleBlocks",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_pinned_allocator.cpp",
+          "line": 109
+        },
+        {
+          "name": "AllocateZeroBytes",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_pinned_allocator.cpp",
+          "line": 124
+        },
+        {
+          "name": "AllocateMinBlockSize",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_pinned_allocator.cpp",
+          "line": 133
+        },
+        {
+          "name": "AllocateLargerThanPool",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_pinned_allocator.cpp",
+          "line": 141
+        },
+        {
+          "name": "DeallocateSingleBlock",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_pinned_allocator.cpp",
+          "line": 153
+        },
+        {
+          "name": "DeallocateMultipleBlocks",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_pinned_allocator.cpp",
+          "line": 162
+        },
+        {
+          "name": "DeallocateNullPointer",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_pinned_allocator.cpp",
+          "line": 175
+        },
+        {
+          "name": "ReuseFreedMemory",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_pinned_allocator.cpp",
+          "line": 185
+        },
+        {
+          "name": "MemoryAvailableAfterFree",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_pinned_allocator.cpp",
+          "line": 197
+        },
+        {
+          "name": "CoalesceAdjacentBlocks",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_pinned_allocator.cpp",
+          "line": 216
+        },
+        {
+          "name": "CoalesceOutOfOrder",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_pinned_allocator.cpp",
+          "line": 234
+        },
+        {
+          "name": "CoalescingReducesFragmentation",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_pinned_allocator.cpp",
+          "line": 251
+        },
+        {
+          "name": "OutOfMemoryReturnsNull",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_pinned_allocator.cpp",
+          "line": 274
+        },
+        {
+          "name": "OutOfMemoryAfterFragmentation",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_pinned_allocator.cpp",
+          "line": 286
+        },
+        {
+          "name": "MeasureFragmentation",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_pinned_allocator.cpp",
+          "line": 321
+        },
+        {
+          "name": "FragmentationIncreases",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_pinned_allocator.cpp",
+          "line": 328
+        },
+        {
+          "name": "DefragmentationWorks",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_pinned_allocator.cpp",
+          "line": 346
+        },
+        {
+          "name": "ConcurrentAllocations",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_pinned_allocator.cpp",
+          "line": 374
+        },
+        {
+          "name": "ConcurrentAllocationsAndDeallocations",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_pinned_allocator.cpp",
+          "line": 404
+        },
+        {
+          "name": "StatisticsTrackUsage",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_pinned_allocator.cpp",
+          "line": 454
+        },
+        {
+          "name": "StatisticsAccurate",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_pinned_allocator.cpp",
+          "line": 465
+        },
+        {
+          "name": "GetAllocationCount",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_pinned_allocator.cpp",
+          "line": 484
+        },
+        {
+          "name": "VariousSizeAllocations",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_pinned_allocator.cpp",
+          "line": 507
+        },
+        {
+          "name": "MixedSizePattern",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_pinned_allocator.cpp",
+          "line": 524
+        },
+        {
+          "name": "AllocatedMemoryIsAccessible",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_pinned_allocator.cpp",
+          "line": 552
+        },
+        {
+          "name": "MultipleBlocksIndependent",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_pinned_allocator.cpp",
+          "line": 563
+        },
+        {
+          "name": "ResetClearsAllocations",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/core\/test_pinned_allocator.cpp",
+          "line": 593
+        }
+      ]
+    }
+  ]
+}

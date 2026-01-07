@@ -1,0 +1,210 @@
+{
+  "tests": 36,
+  "name": "AllTests",
+  "testsuites": [
+    {
+      "name": "LayerNormTest",
+      "tests": 9,
+      "testsuite": [
+        {
+          "name": "ConstructorWithAffine",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization.cpp",
+          "line": 32
+        },
+        {
+          "name": "ConstructorWithoutAffine",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization.cpp",
+          "line": 38
+        },
+        {
+          "name": "ForwardNormalization1D",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization.cpp",
+          "line": 44
+        },
+        {
+          "name": "ForwardNormalization2D",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization.cpp",
+          "line": 75
+        },
+        {
+          "name": "ForwardWithAffineTransform",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization.cpp",
+          "line": 105
+        },
+        {
+          "name": "MultipleBatches",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization.cpp",
+          "line": 116
+        },
+        {
+          "name": "BackwardGradientFlow",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization.cpp",
+          "line": 140
+        },
+        {
+          "name": "NumericalGradientCheck",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization.cpp",
+          "line": 160
+        },
+        {
+          "name": "ParameterGradients",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization.cpp",
+          "line": 208
+        }
+      ]
+    },
+    {
+      "name": "RMSNormTest",
+      "tests": 10,
+      "testsuite": [
+        {
+          "name": "Constructor",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization.cpp",
+          "line": 244
+        },
+        {
+          "name": "ForwardNormalization1D",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization.cpp",
+          "line": 250
+        },
+        {
+          "name": "ForwardNormalization2D",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization.cpp",
+          "line": 277
+        },
+        {
+          "name": "MultipleBatches",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization.cpp",
+          "line": 294
+        },
+        {
+          "name": "BackwardGradientFlow",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization.cpp",
+          "line": 320
+        },
+        {
+          "name": "NumericalGradientCheck",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization.cpp",
+          "line": 340
+        },
+        {
+          "name": "ParameterGradients",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization.cpp",
+          "line": 386
+        },
+        {
+          "name": "EpsilonEffect",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization.cpp",
+          "line": 418
+        },
+        {
+          "name": "LargeInput",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization.cpp",
+          "line": 441
+        },
+        {
+          "name": "CompareWithManualRMS",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization.cpp",
+          "line": 453
+        }
+      ]
+    },
+    {
+      "name": "GroupNormTest",
+      "tests": 11,
+      "testsuite": [
+        {
+          "name": "ConstructorWithAffine",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization.cpp",
+          "line": 476
+        },
+        {
+          "name": "ConstructorWithoutAffine",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization.cpp",
+          "line": 482
+        },
+        {
+          "name": "InvalidGroupsThrows",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization.cpp",
+          "line": 488
+        },
+        {
+          "name": "ForwardNormalization",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization.cpp",
+          "line": 493
+        },
+        {
+          "name": "ForwardWithAffine",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization.cpp",
+          "line": 535
+        },
+        {
+          "name": "MultipleBatches",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization.cpp",
+          "line": 548
+        },
+        {
+          "name": "SingleGroup",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization.cpp",
+          "line": 561
+        },
+        {
+          "name": "GroupsEqualChannels",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization.cpp",
+          "line": 585
+        },
+        {
+          "name": "BackwardGradientFlow",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization.cpp",
+          "line": 611
+        },
+        {
+          "name": "NumericalGradientCheck",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization.cpp",
+          "line": 626
+        },
+        {
+          "name": "ParameterGradients",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization.cpp",
+          "line": 678
+        }
+      ]
+    },
+    {
+      "name": "NormalizationTest",
+      "tests": 6,
+      "testsuite": [
+        {
+          "name": "TrainEvalMode",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization.cpp",
+          "line": 705
+        },
+        {
+          "name": "ZeroGrad",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization.cpp",
+          "line": 715
+        },
+        {
+          "name": "LayerNormLargeInput",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization.cpp",
+          "line": 738
+        },
+        {
+          "name": "GroupNormLargeInput",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization.cpp",
+          "line": 751
+        },
+        {
+          "name": "CompareLayerNormGroupNorm",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization.cpp",
+          "line": 764
+        },
+        {
+          "name": "EpsilonEffect",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_normalization.cpp",
+          "line": 787
+        }
+      ]
+    }
+  ]
+}
