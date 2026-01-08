@@ -1,5 +1,0 @@
-if(EXISTS "/home/lee/Projects/Tenzor/build_asan/tests/integration/test_optimization[1]_tests.cmake")
-  include("/home/lee/Projects/Tenzor/build_asan/tests/integration/test_optimization[1]_tests.cmake")
-else()
-  add_test(test_optimization_NOT_BUILT test_optimization_NOT_BUILT)
-endif()

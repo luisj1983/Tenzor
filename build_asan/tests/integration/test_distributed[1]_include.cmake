@@ -1,5 +1,0 @@
-if(EXISTS "/home/lee/Projects/Tenzor/build_asan/tests/integration/test_distributed[1]_tests.cmake")
-  include("/home/lee/Projects/Tenzor/build_asan/tests/integration/test_distributed[1]_tests.cmake")
-else()
-  add_test(test_distributed_NOT_BUILT test_distributed_NOT_BUILT)
-endif()

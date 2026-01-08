@@ -1,5 +1,0 @@
-if(EXISTS "/home/lee/Projects/Tenzor/build_asan/tests/utils/test_utils_logging[1]_tests.cmake")
-  include("/home/lee/Projects/Tenzor/build_asan/tests/utils/test_utils_logging[1]_tests.cmake")
-else()
-  add_test(test_utils_logging_NOT_BUILT test_utils_logging_NOT_BUILT)
-endif()

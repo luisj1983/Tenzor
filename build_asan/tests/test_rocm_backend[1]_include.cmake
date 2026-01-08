@@ -1,5 +1,0 @@
-if(EXISTS "/home/lee/Projects/Tenzor/build_asan/tests/test_rocm_backend[1]_tests.cmake")
-  include("/home/lee/Projects/Tenzor/build_asan/tests/test_rocm_backend[1]_tests.cmake")
-else()
-  add_test(test_rocm_backend_NOT_BUILT test_rocm_backend_NOT_BUILT)
-endif()

@@ -1,5 +1,0 @@
-if(EXISTS "/home/lee/Projects/Tenzor/build_asan/tests/test_fp16[1]_tests.cmake")
-  include("/home/lee/Projects/Tenzor/build_asan/tests/test_fp16[1]_tests.cmake")
-else()
-  add_test(test_fp16_NOT_BUILT test_fp16_NOT_BUILT)
-endif()

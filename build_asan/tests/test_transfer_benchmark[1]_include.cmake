@@ -1,5 +1,0 @@
-if(EXISTS "/home/lee/Projects/Tenzor/build_asan/tests/test_transfer_benchmark[1]_tests.cmake")
-  include("/home/lee/Projects/Tenzor/build_asan/tests/test_transfer_benchmark[1]_tests.cmake")
-else()
-  add_test(test_transfer_benchmark_NOT_BUILT test_transfer_benchmark_NOT_BUILT)
-endif()

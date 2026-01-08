@@ -8,14 +8,15 @@ if(EXISTS "/opt/rocm/bin/hipcc")
     set(_ROCM_AVAILABLE TRUE)
 endif()
 
+
 # Set TENZOR_BUILD_ROCM before project() - use cache to preserve user preference
 # Default to ON only if ROCm is available on the system
 if(NOT DEFINED TENZOR_BUILD_ROCM)
-    if(_ROCM_AVAILABLE)
-        set(TENZOR_BUILD_ROCM ON CACHE BOOL "Build ROCm backend" FORCE)
-    else()
+    #if(_ROCM_AVAILABLE)
+    #    set(TENZOR_BUILD_ROCM ON CACHE BOOL "Build ROCm backend" FORCE)
+    #else()
         set(TENZOR_BUILD_ROCM OFF CACHE BOOL "Build ROCm backend" FORCE)
-    endif()
+    #endif()
 endif()
 
 # Set up HIP architectures if building ROCm backend
@@ -139,6 +140,7 @@ if(TENZOR_BUILD_PYTHON)
 
         # Copy Python package files
         file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/__init__.py
+                  ${CMAKE_CURRENT_SOURCE_DIR}/python/tenzor/nn.py
              DESTINATION ${CMAKE_BINARY_DIR}/python/tenzor)
     else()
         message(WARNING "pybind11 or Python not found, Python bindings will not be built")

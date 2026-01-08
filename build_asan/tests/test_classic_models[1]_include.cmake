@@ -1,5 +1,0 @@
-if(EXISTS "/home/lee/Projects/Tenzor/build_asan/tests/test_classic_models[1]_tests.cmake")
-  include("/home/lee/Projects/Tenzor/build_asan/tests/test_classic_models[1]_tests.cmake")
-else()
-  add_test(test_classic_models_NOT_BUILT test_classic_models_NOT_BUILT)
-endif()

@@ -1,5 +1,0 @@
-if(EXISTS "/home/lee/Projects/Tenzor/build_asan/tests/test_efficientnet[1]_tests.cmake")
-  include("/home/lee/Projects/Tenzor/build_asan/tests/test_efficientnet[1]_tests.cmake")
-else()
-  add_test(test_efficientnet_NOT_BUILT test_efficientnet_NOT_BUILT)
-endif()
