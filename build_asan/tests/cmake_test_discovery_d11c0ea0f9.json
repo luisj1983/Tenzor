@@ -1,10 +1,10 @@
 {
-  "tests": 168,
+  "tests": 210,
   "name": "AllTests",
   "testsuites": [
     {
       "name": "AllBackendsAllDTypes\/MultiheadAttentionMultiDTypeTest",
-      "tests": 104,
+      "tests": 130,
       "testsuite": [
         {
           "name": "Construction\/cpu_float32",
@@ -51,6 +51,18 @@
         {
           "name": "Construction\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 108
+        },
+        {
+          "name": "Construction\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 108
+        },
+        {
+          "name": "Construction\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
           "line": 108
         },
@@ -103,6 +115,18 @@
           "line": 120
         },
         {
+          "name": "InvalidConstruction\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 120
+        },
+        {
+          "name": "InvalidConstruction\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 120
+        },
+        {
           "name": "SelfAttentionShape\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
@@ -147,6 +171,18 @@
         {
           "name": "SelfAttentionShape\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 136
+        },
+        {
+          "name": "SelfAttentionShape\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 136
+        },
+        {
+          "name": "SelfAttentionShape\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
           "line": 136
         },
@@ -199,6 +235,18 @@
           "line": 162
         },
         {
+          "name": "CrossAttentionShape\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 162
+        },
+        {
+          "name": "CrossAttentionShape\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 162
+        },
+        {
           "name": "BatchFirstFalse\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
@@ -243,6 +291,18 @@
         {
           "name": "BatchFirstFalse\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 189
+        },
+        {
+          "name": "BatchFirstFalse\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 189
+        },
+        {
+          "name": "BatchFirstFalse\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
           "line": 189
         },
@@ -295,6 +355,18 @@
           "line": 207
         },
         {
+          "name": "SimpleForwardInterface\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 207
+        },
+        {
+          "name": "SimpleForwardInterface\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 207
+        },
+        {
           "name": "WithoutAttentionWeights\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
@@ -339,6 +411,18 @@
         {
           "name": "WithoutAttentionWeights\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 219
+        },
+        {
+          "name": "WithoutAttentionWeights\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 219
+        },
+        {
+          "name": "WithoutAttentionWeights\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
           "line": 219
         },
@@ -391,6 +475,18 @@
           "line": 236
         },
         {
+          "name": "SingleHead\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 236
+        },
+        {
+          "name": "SingleHead\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 236
+        },
+        {
           "name": "LargeSequence\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
@@ -435,6 +531,18 @@
         {
           "name": "LargeSequence\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 251
+        },
+        {
+          "name": "LargeSequence\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 251
+        },
+        {
+          "name": "LargeSequence\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
           "line": 251
         },
@@ -487,6 +595,18 @@
           "line": 263
         },
         {
+          "name": "SmallBatch\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 263
+        },
+        {
+          "name": "SmallBatch\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 263
+        },
+        {
           "name": "WithDropout\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
@@ -531,6 +651,18 @@
         {
           "name": "WithDropout\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 276
+        },
+        {
+          "name": "WithDropout\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 276
+        },
+        {
+          "name": "WithDropout\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
           "line": 276
         },
@@ -583,6 +715,18 @@
           "line": 319
         },
         {
+          "name": "EvalMode\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 319
+        },
+        {
+          "name": "EvalMode\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 319
+        },
+        {
           "name": "DifferentKeyValueDims\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
@@ -629,12 +773,24 @@
           "value_param": "oneapi_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
           "line": 360
+        },
+        {
+          "name": "DifferentKeyValueDims\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 360
+        },
+        {
+          "name": "DifferentKeyValueDims\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 360
         }
       ]
     },
     {
       "name": "AllBackendsAllDTypes\/CausalMaskMultiDTypeTest",
-      "tests": 32,
+      "tests": 40,
       "testsuite": [
         {
           "name": "Shape\/cpu_float32",
@@ -681,6 +837,18 @@
         {
           "name": "Shape\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 440
+        },
+        {
+          "name": "Shape\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 440
+        },
+        {
+          "name": "Shape\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
           "line": 440
         },
@@ -733,6 +901,18 @@
           "line": 449
         },
         {
+          "name": "Values\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 449
+        },
+        {
+          "name": "Values\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 449
+        },
+        {
           "name": "SmallSize\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
@@ -777,6 +957,18 @@
         {
           "name": "SmallSize\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 485
+        },
+        {
+          "name": "SmallSize\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 485
+        },
+        {
+          "name": "SmallSize\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
           "line": 485
         },
@@ -827,12 +1019,24 @@
           "value_param": "oneapi_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
           "line": 503
+        },
+        {
+          "name": "MediumSize\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 503
+        },
+        {
+          "name": "MediumSize\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 503
         }
       ]
     },
     {
       "name": "AllBackendsAllDTypes\/AttentionIntegrationMultiDTypeTest",
-      "tests": 32,
+      "tests": 40,
       "testsuite": [
         {
           "name": "ForwardBackward\/cpu_float32",
@@ -879,6 +1083,18 @@
         {
           "name": "ForwardBackward\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 589
+        },
+        {
+          "name": "ForwardBackward\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 589
+        },
+        {
+          "name": "ForwardBackward\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
           "line": 589
         },
@@ -931,6 +1147,18 @@
           "line": 609
         },
         {
+          "name": "ParameterCount\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 609
+        },
+        {
+          "name": "ParameterCount\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 609
+        },
+        {
           "name": "TrainEvalSwitch\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
@@ -979,6 +1207,18 @@
           "line": 620
         },
         {
+          "name": "TrainEvalSwitch\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 620
+        },
+        {
+          "name": "TrainEvalSwitch\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 620
+        },
+        {
           "name": "Deterministic\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
@@ -1023,6 +1263,18 @@
         {
           "name": "Deterministic\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 633
+        },
+        {
+          "name": "Deterministic\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
+          "line": 633
+        },
+        {
+          "name": "Deterministic\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention_multidtype.cpp",
           "line": 633
         }

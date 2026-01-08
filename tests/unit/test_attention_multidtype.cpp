@@ -668,7 +668,7 @@ TEST_P(AttentionIntegrationMultiDTypeTest, Deterministic) {
 // ============================================================================
 
 std::vector<BackendDTypeParam> GenerateBackendDTypeCombinations() {
-    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi"};
+    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "rocm"};
 
     // Test with floating-point dtypes (attention works with floating-point)
     std::vector<std::pair<DType, std::string>> dtypes = {

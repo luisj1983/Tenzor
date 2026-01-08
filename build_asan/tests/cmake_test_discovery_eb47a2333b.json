@@ -1,10 +1,10 @@
 {
-  "tests": 28,
+  "tests": 35,
   "name": "AllTests",
   "testsuites": [
     {
       "name": "AllBackends\/AcceleratorTrainingTest",
-      "tests": 28,
+      "tests": 35,
       "testsuite": [
         {
           "name": "SimpleCNN_MNIST\/cpu",
@@ -27,6 +27,12 @@
         {
           "name": "SimpleCNN_MNIST\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
+          "line": 196
+        },
+        {
+          "name": "SimpleCNN_MNIST\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
           "line": 196
         },
@@ -55,6 +61,12 @@
           "line": 247
         },
         {
+          "name": "MLP_Training\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
+          "line": 247
+        },
+        {
           "name": "CompleteTrainingLoop\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
@@ -75,6 +87,12 @@
         {
           "name": "CompleteTrainingLoop\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
+          "line": 303
+        },
+        {
+          "name": "CompleteTrainingLoop\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
           "line": 303
         },
@@ -103,6 +121,12 @@
           "line": 380
         },
         {
+          "name": "GradientFlowVerification\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
+          "line": 380
+        },
+        {
           "name": "BatchSizeScaling\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
@@ -123,6 +147,12 @@
         {
           "name": "BatchSizeScaling\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
+          "line": 442
+        },
+        {
+          "name": "BatchSizeScaling\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
           "line": 442
         },
@@ -151,6 +181,12 @@
           "line": 472
         },
         {
+          "name": "MultiEpochTrainingWithValidation\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
+          "line": 472
+        },
+        {
           "name": "BackendResultConsistency\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
@@ -171,6 +207,12 @@
         {
           "name": "BackendResultConsistency\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
+          "line": 529
+        },
+        {
+          "name": "BackendResultConsistency\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_cuda_training.cpp",
           "line": 529
         }

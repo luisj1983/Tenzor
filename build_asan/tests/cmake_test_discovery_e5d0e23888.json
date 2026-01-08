@@ -1,10 +1,10 @@
 {
-  "tests": 184,
+  "tests": 230,
   "name": "AllTests",
   "testsuites": [
     {
       "name": "AllBackendsFloatDTypes\/LossMultiDTypeTest",
-      "tests": 184,
+      "tests": 230,
       "testsuite": [
         {
           "name": "MSELossBasic\/cpu_float32",
@@ -51,6 +51,18 @@
         {
           "name": "MSELossBasic\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 168
+        },
+        {
+          "name": "MSELossBasic\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 168
+        },
+        {
+          "name": "MSELossBasic\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
           "line": 168
         },
@@ -103,6 +115,18 @@
           "line": 180
         },
         {
+          "name": "MSELossZero\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 180
+        },
+        {
+          "name": "MSELossZero\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 180
+        },
+        {
           "name": "MSELossSum\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
@@ -147,6 +171,18 @@
         {
           "name": "MSELossSum\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 191
+        },
+        {
+          "name": "MSELossSum\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 191
+        },
+        {
+          "name": "MSELossSum\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
           "line": 191
         },
@@ -199,6 +235,18 @@
           "line": 202
         },
         {
+          "name": "MSELossNone\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 202
+        },
+        {
+          "name": "MSELossNone\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 202
+        },
+        {
           "name": "MSELossHighPrecision\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
@@ -243,6 +291,18 @@
         {
           "name": "MSELossHighPrecision\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 214
+        },
+        {
+          "name": "MSELossHighPrecision\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 214
+        },
+        {
+          "name": "MSELossHighPrecision\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
           "line": 214
         },
@@ -295,6 +355,18 @@
           "line": 240
         },
         {
+          "name": "BCELossBasic\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 240
+        },
+        {
+          "name": "BCELossBasic\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 240
+        },
+        {
           "name": "BCELossPerfectPrediction\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
@@ -339,6 +411,18 @@
         {
           "name": "BCELossPerfectPrediction\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 261
+        },
+        {
+          "name": "BCELossPerfectPrediction\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 261
+        },
+        {
+          "name": "BCELossPerfectPrediction\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
           "line": 261
         },
@@ -391,6 +475,18 @@
           "line": 280
         },
         {
+          "name": "BCELossMixedTargets\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 280
+        },
+        {
+          "name": "BCELossMixedTargets\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 280
+        },
+        {
           "name": "L1LossBasic\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
@@ -435,6 +531,18 @@
         {
           "name": "L1LossBasic\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 302
+        },
+        {
+          "name": "L1LossBasic\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 302
+        },
+        {
+          "name": "L1LossBasic\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
           "line": 302
         },
@@ -487,6 +595,18 @@
           "line": 313
         },
         {
+          "name": "L1LossNegativeDiff\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 313
+        },
+        {
+          "name": "L1LossNegativeDiff\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 313
+        },
+        {
           "name": "L1LossSum\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
@@ -531,6 +651,18 @@
         {
           "name": "L1LossSum\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 324
+        },
+        {
+          "name": "L1LossSum\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 324
+        },
+        {
+          "name": "L1LossSum\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
           "line": 324
         },
@@ -583,6 +715,18 @@
           "line": 335
         },
         {
+          "name": "L1LossZero\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 335
+        },
+        {
+          "name": "L1LossZero\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 335
+        },
+        {
           "name": "L1LossNone\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
@@ -627,6 +771,18 @@
         {
           "name": "L1LossNone\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 345
+        },
+        {
+          "name": "L1LossNone\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 345
+        },
+        {
+          "name": "L1LossNone\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
           "line": 345
         },
@@ -679,6 +835,18 @@
           "line": 361
         },
         {
+          "name": "CrossEntropyBasic\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 361
+        },
+        {
+          "name": "CrossEntropyBasic\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 361
+        },
+        {
           "name": "CrossEntropyUniformLogits\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
@@ -723,6 +891,18 @@
         {
           "name": "CrossEntropyUniformLogits\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 394
+        },
+        {
+          "name": "CrossEntropyUniformLogits\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 394
+        },
+        {
+          "name": "CrossEntropyUniformLogits\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
           "line": 394
         },
@@ -775,6 +955,18 @@
           "line": 433
         },
         {
+          "name": "NLLLossBasic\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 433
+        },
+        {
+          "name": "NLLLossBasic\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 433
+        },
+        {
           "name": "MSELossClass\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
@@ -819,6 +1011,18 @@
         {
           "name": "MSELossClass\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 469
+        },
+        {
+          "name": "MSELossClass\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 469
+        },
+        {
+          "name": "MSELossClass\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
           "line": 469
         },
@@ -871,6 +1075,18 @@
           "line": 481
         },
         {
+          "name": "BCELossClass\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 481
+        },
+        {
+          "name": "BCELossClass\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 481
+        },
+        {
           "name": "L1LossClass\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
@@ -915,6 +1131,18 @@
         {
           "name": "L1LossClass\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 501
+        },
+        {
+          "name": "L1LossClass\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 501
+        },
+        {
+          "name": "L1LossClass\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
           "line": 501
         },
@@ -967,6 +1195,18 @@
           "line": 513
         },
         {
+          "name": "CrossEntropyLossClass\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 513
+        },
+        {
+          "name": "CrossEntropyLossClass\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 513
+        },
+        {
           "name": "MSELossGradientRequired\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
@@ -1011,6 +1251,18 @@
         {
           "name": "MSELossGradientRequired\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 549
+        },
+        {
+          "name": "MSELossGradientRequired\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 549
+        },
+        {
+          "name": "MSELossGradientRequired\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
           "line": 549
         },
@@ -1063,6 +1315,18 @@
           "line": 559
         },
         {
+          "name": "BCELossGradientRequired\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 559
+        },
+        {
+          "name": "BCELossGradientRequired\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 559
+        },
+        {
           "name": "L1LossGradientRequired\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
@@ -1107,6 +1371,18 @@
         {
           "name": "L1LossGradientRequired\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 568
+        },
+        {
+          "name": "L1LossGradientRequired\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
+          "line": 568
+        },
+        {
+          "name": "L1LossGradientRequired\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_losses_multidtype.cpp",
           "line": 568
         }

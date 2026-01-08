@@ -1,10 +1,10 @@
 {
-  "tests": 240,
+  "tests": 300,
   "name": "AllTests",
   "testsuites": [
     {
       "name": "AllBackendsAllDTypes\/OpsMultiDTypeTest",
-      "tests": 240,
+      "tests": 300,
       "testsuite": [
         {
           "name": "Zeros\/cpu_float32",
@@ -123,6 +123,36 @@
         {
           "name": "Zeros\/oneapi_bool",
           "value_param": "oneapi_bool",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 140
+        },
+        {
+          "name": "Zeros\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 140
+        },
+        {
+          "name": "Zeros\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 140
+        },
+        {
+          "name": "Zeros\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 140
+        },
+        {
+          "name": "Zeros\/rocm_int64",
+          "value_param": "rocm_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 140
+        },
+        {
+          "name": "Zeros\/rocm_bool",
+          "value_param": "rocm_bool",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
           "line": 140
         },
@@ -247,6 +277,36 @@
           "line": 149
         },
         {
+          "name": "Ones\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 149
+        },
+        {
+          "name": "Ones\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 149
+        },
+        {
+          "name": "Ones\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 149
+        },
+        {
+          "name": "Ones\/rocm_int64",
+          "value_param": "rocm_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 149
+        },
+        {
+          "name": "Ones\/rocm_bool",
+          "value_param": "rocm_bool",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 149
+        },
+        {
           "name": "Full\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
@@ -363,6 +423,36 @@
         {
           "name": "Full\/oneapi_bool",
           "value_param": "oneapi_bool",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 157
+        },
+        {
+          "name": "Full\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 157
+        },
+        {
+          "name": "Full\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 157
+        },
+        {
+          "name": "Full\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 157
+        },
+        {
+          "name": "Full\/rocm_int64",
+          "value_param": "rocm_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 157
+        },
+        {
+          "name": "Full\/rocm_bool",
+          "value_param": "rocm_bool",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
           "line": 157
         },
@@ -487,6 +577,36 @@
           "line": 176
         },
         {
+          "name": "Arange\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 176
+        },
+        {
+          "name": "Arange\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 176
+        },
+        {
+          "name": "Arange\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 176
+        },
+        {
+          "name": "Arange\/rocm_int64",
+          "value_param": "rocm_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 176
+        },
+        {
+          "name": "Arange\/rocm_bool",
+          "value_param": "rocm_bool",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 176
+        },
+        {
           "name": "ArangeStep\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
@@ -603,6 +723,36 @@
         {
           "name": "ArangeStep\/oneapi_bool",
           "value_param": "oneapi_bool",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 222
+        },
+        {
+          "name": "ArangeStep\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 222
+        },
+        {
+          "name": "ArangeStep\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 222
+        },
+        {
+          "name": "ArangeStep\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 222
+        },
+        {
+          "name": "ArangeStep\/rocm_int64",
+          "value_param": "rocm_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 222
+        },
+        {
+          "name": "ArangeStep\/rocm_bool",
+          "value_param": "rocm_bool",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
           "line": 222
         },
@@ -727,6 +877,36 @@
           "line": 269
         },
         {
+          "name": "ArangeFloat\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 269
+        },
+        {
+          "name": "ArangeFloat\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 269
+        },
+        {
+          "name": "ArangeFloat\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 269
+        },
+        {
+          "name": "ArangeFloat\/rocm_int64",
+          "value_param": "rocm_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 269
+        },
+        {
+          "name": "ArangeFloat\/rocm_bool",
+          "value_param": "rocm_bool",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 269
+        },
+        {
           "name": "Linspace\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
@@ -843,6 +1023,36 @@
         {
           "name": "Linspace\/oneapi_bool",
           "value_param": "oneapi_bool",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 295
+        },
+        {
+          "name": "Linspace\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 295
+        },
+        {
+          "name": "Linspace\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 295
+        },
+        {
+          "name": "Linspace\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 295
+        },
+        {
+          "name": "Linspace\/rocm_int64",
+          "value_param": "rocm_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 295
+        },
+        {
+          "name": "Linspace\/rocm_bool",
+          "value_param": "rocm_bool",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
           "line": 295
         },
@@ -967,6 +1177,36 @@
           "line": 321
         },
         {
+          "name": "LinspaceNegative\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 321
+        },
+        {
+          "name": "LinspaceNegative\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 321
+        },
+        {
+          "name": "LinspaceNegative\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 321
+        },
+        {
+          "name": "LinspaceNegative\/rocm_int64",
+          "value_param": "rocm_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 321
+        },
+        {
+          "name": "LinspaceNegative\/rocm_bool",
+          "value_param": "rocm_bool",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 321
+        },
+        {
           "name": "Eye\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
@@ -1083,6 +1323,36 @@
         {
           "name": "Eye\/oneapi_bool",
           "value_param": "oneapi_bool",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 350
+        },
+        {
+          "name": "Eye\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 350
+        },
+        {
+          "name": "Eye\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 350
+        },
+        {
+          "name": "Eye\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 350
+        },
+        {
+          "name": "Eye\/rocm_int64",
+          "value_param": "rocm_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 350
+        },
+        {
+          "name": "Eye\/rocm_bool",
+          "value_param": "rocm_bool",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
           "line": 350
         },
@@ -1207,6 +1477,36 @@
           "line": 411
         },
         {
+          "name": "EyeRectangular\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 411
+        },
+        {
+          "name": "EyeRectangular\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 411
+        },
+        {
+          "name": "EyeRectangular\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 411
+        },
+        {
+          "name": "EyeRectangular\/rocm_int64",
+          "value_param": "rocm_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 411
+        },
+        {
+          "name": "EyeRectangular\/rocm_bool",
+          "value_param": "rocm_bool",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 411
+        },
+        {
           "name": "Rand\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
@@ -1327,6 +1627,36 @@
           "line": 466
         },
         {
+          "name": "Rand\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 466
+        },
+        {
+          "name": "Rand\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 466
+        },
+        {
+          "name": "Rand\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 466
+        },
+        {
+          "name": "Rand\/rocm_int64",
+          "value_param": "rocm_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 466
+        },
+        {
+          "name": "Rand\/rocm_bool",
+          "value_param": "rocm_bool",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 466
+        },
+        {
           "name": "Randn\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
@@ -1443,6 +1773,36 @@
         {
           "name": "Randn\/oneapi_bool",
           "value_param": "oneapi_bool",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 494
+        },
+        {
+          "name": "Randn\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 494
+        },
+        {
+          "name": "Randn\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 494
+        },
+        {
+          "name": "Randn\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 494
+        },
+        {
+          "name": "Randn\/rocm_int64",
+          "value_param": "rocm_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
+          "line": 494
+        },
+        {
+          "name": "Randn\/rocm_bool",
+          "value_param": "rocm_bool",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_ops_multidtype.cpp",
           "line": 494
         }

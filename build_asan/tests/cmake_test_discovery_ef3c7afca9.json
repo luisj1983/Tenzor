@@ -1,10 +1,10 @@
 {
-  "tests": 408,
+  "tests": 510,
   "name": "AllTests",
   "testsuites": [
     {
       "name": "SwinMultiDType\/SwinMultiDTypeTest",
-      "tests": 408,
+      "tests": 510,
       "testsuite": [
         {
           "name": "SwinTinyForwardShape\/cpu_float32",
@@ -75,6 +75,24 @@
         {
           "name": "SwinTinyForwardShape\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 155
+        },
+        {
+          "name": "SwinTinyForwardShape\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 155
+        },
+        {
+          "name": "SwinTinyForwardShape\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 155
+        },
+        {
+          "name": "SwinTinyForwardShape\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
           "line": 155
         },
@@ -151,6 +169,24 @@
           "line": 170
         },
         {
+          "name": "SwinTinyGradientFlow\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 170
+        },
+        {
+          "name": "SwinTinyGradientFlow\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 170
+        },
+        {
+          "name": "SwinTinyGradientFlow\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 170
+        },
+        {
           "name": "SwinTinyParameterCount\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
@@ -219,6 +255,24 @@
         {
           "name": "SwinTinyParameterCount\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 194
+        },
+        {
+          "name": "SwinTinyParameterCount\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 194
+        },
+        {
+          "name": "SwinTinyParameterCount\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 194
+        },
+        {
+          "name": "SwinTinyParameterCount\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
           "line": 194
         },
@@ -295,6 +349,24 @@
           "line": 205
         },
         {
+          "name": "SwinTinyBatchSizeOne\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 205
+        },
+        {
+          "name": "SwinTinyBatchSizeOne\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 205
+        },
+        {
+          "name": "SwinTinyBatchSizeOne\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 205
+        },
+        {
           "name": "SwinTinyCustomClasses\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
@@ -363,6 +435,24 @@
         {
           "name": "SwinTinyCustomClasses\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 220
+        },
+        {
+          "name": "SwinTinyCustomClasses\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 220
+        },
+        {
+          "name": "SwinTinyCustomClasses\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 220
+        },
+        {
+          "name": "SwinTinyCustomClasses\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
           "line": 220
         },
@@ -439,6 +529,24 @@
           "line": 239
         },
         {
+          "name": "SwinSmallForwardShape\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 239
+        },
+        {
+          "name": "SwinSmallForwardShape\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 239
+        },
+        {
+          "name": "SwinSmallForwardShape\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 239
+        },
+        {
           "name": "SwinSmallGradientFlow\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
@@ -507,6 +615,24 @@
         {
           "name": "SwinSmallGradientFlow\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 254
+        },
+        {
+          "name": "SwinSmallGradientFlow\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 254
+        },
+        {
+          "name": "SwinSmallGradientFlow\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 254
+        },
+        {
+          "name": "SwinSmallGradientFlow\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
           "line": 254
         },
@@ -583,6 +709,24 @@
           "line": 270
         },
         {
+          "name": "SwinSmallParameterCount\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 270
+        },
+        {
+          "name": "SwinSmallParameterCount\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 270
+        },
+        {
+          "name": "SwinSmallParameterCount\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 270
+        },
+        {
           "name": "SwinBaseForwardShape\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
@@ -651,6 +795,24 @@
         {
           "name": "SwinBaseForwardShape\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 285
+        },
+        {
+          "name": "SwinBaseForwardShape\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 285
+        },
+        {
+          "name": "SwinBaseForwardShape\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 285
+        },
+        {
+          "name": "SwinBaseForwardShape\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
           "line": 285
         },
@@ -727,6 +889,24 @@
           "line": 300
         },
         {
+          "name": "SwinBaseGradientFlow\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 300
+        },
+        {
+          "name": "SwinBaseGradientFlow\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 300
+        },
+        {
+          "name": "SwinBaseGradientFlow\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 300
+        },
+        {
           "name": "SwinBaseParameterCount\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
@@ -795,6 +975,24 @@
         {
           "name": "SwinBaseParameterCount\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 316
+        },
+        {
+          "name": "SwinBaseParameterCount\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 316
+        },
+        {
+          "name": "SwinBaseParameterCount\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 316
+        },
+        {
+          "name": "SwinBaseParameterCount\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
           "line": 316
         },
@@ -871,6 +1069,24 @@
           "line": 331
         },
         {
+          "name": "SwinLargeForwardShape\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 331
+        },
+        {
+          "name": "SwinLargeForwardShape\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 331
+        },
+        {
+          "name": "SwinLargeForwardShape\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 331
+        },
+        {
           "name": "SwinLargeGradientFlow\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
@@ -939,6 +1155,24 @@
         {
           "name": "SwinLargeGradientFlow\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 346
+        },
+        {
+          "name": "SwinLargeGradientFlow\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 346
+        },
+        {
+          "name": "SwinLargeGradientFlow\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 346
+        },
+        {
+          "name": "SwinLargeGradientFlow\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
           "line": 346
         },
@@ -1015,6 +1249,24 @@
           "line": 375
         },
         {
+          "name": "SwinLargeParameterCount\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 375
+        },
+        {
+          "name": "SwinLargeParameterCount\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 375
+        },
+        {
+          "name": "SwinLargeParameterCount\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 375
+        },
+        {
           "name": "SwinTinyImageSize384\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
@@ -1083,6 +1335,24 @@
         {
           "name": "SwinTinyImageSize384\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 390
+        },
+        {
+          "name": "SwinTinyImageSize384\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 390
+        },
+        {
+          "name": "SwinTinyImageSize384\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 390
+        },
+        {
+          "name": "SwinTinyImageSize384\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
           "line": 390
         },
@@ -1159,6 +1429,24 @@
           "line": 409
         },
         {
+          "name": "SwinTinyImageSize448\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 409
+        },
+        {
+          "name": "SwinTinyImageSize448\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 409
+        },
+        {
+          "name": "SwinTinyImageSize448\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 409
+        },
+        {
           "name": "SwinSmallImageSize448\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
@@ -1227,6 +1515,24 @@
         {
           "name": "SwinSmallImageSize448\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 424
+        },
+        {
+          "name": "SwinSmallImageSize448\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 424
+        },
+        {
+          "name": "SwinSmallImageSize448\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 424
+        },
+        {
+          "name": "SwinSmallImageSize448\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
           "line": 424
         },
@@ -1303,6 +1609,24 @@
           "line": 439
         },
         {
+          "name": "SwinBaseImageSize560\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 439
+        },
+        {
+          "name": "SwinBaseImageSize560\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 439
+        },
+        {
+          "name": "SwinBaseImageSize560\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 439
+        },
+        {
           "name": "SwinTinyPatchMergingFeatures\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
@@ -1371,6 +1695,24 @@
         {
           "name": "SwinTinyPatchMergingFeatures\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 461
+        },
+        {
+          "name": "SwinTinyPatchMergingFeatures\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 461
+        },
+        {
+          "name": "SwinTinyPatchMergingFeatures\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 461
+        },
+        {
+          "name": "SwinTinyPatchMergingFeatures\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
           "line": 461
         },
@@ -1447,6 +1789,24 @@
           "line": 480
         },
         {
+          "name": "SwinSmallPatchMergingConsistency\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 480
+        },
+        {
+          "name": "SwinSmallPatchMergingConsistency\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 480
+        },
+        {
+          "name": "SwinSmallPatchMergingConsistency\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 480
+        },
+        {
           "name": "SwinTinyShiftedWindowGradients\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
@@ -1515,6 +1875,24 @@
         {
           "name": "SwinTinyShiftedWindowGradients\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 506
+        },
+        {
+          "name": "SwinTinyShiftedWindowGradients\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 506
+        },
+        {
+          "name": "SwinTinyShiftedWindowGradients\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 506
+        },
+        {
+          "name": "SwinTinyShiftedWindowGradients\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
           "line": 506
         },
@@ -1591,6 +1969,24 @@
           "line": 542
         },
         {
+          "name": "SwinBaseShiftedWindowAttention\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 542
+        },
+        {
+          "name": "SwinBaseShiftedWindowAttention\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 542
+        },
+        {
+          "name": "SwinBaseShiftedWindowAttention\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 542
+        },
+        {
           "name": "SwinTinyHierarchicalFeatures\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
@@ -1659,6 +2055,24 @@
         {
           "name": "SwinTinyHierarchicalFeatures\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 571
+        },
+        {
+          "name": "SwinTinyHierarchicalFeatures\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 571
+        },
+        {
+          "name": "SwinTinyHierarchicalFeatures\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 571
+        },
+        {
+          "name": "SwinTinyHierarchicalFeatures\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
           "line": 571
         },
@@ -1735,6 +2149,24 @@
           "line": 591
         },
         {
+          "name": "SwinSmallHierarchicalGradients\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 591
+        },
+        {
+          "name": "SwinSmallHierarchicalGradients\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 591
+        },
+        {
+          "name": "SwinSmallHierarchicalGradients\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 591
+        },
+        {
           "name": "SwinBaseHierarchicalFeatureExtraction\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
@@ -1803,6 +2235,24 @@
         {
           "name": "SwinBaseHierarchicalFeatureExtraction\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 618
+        },
+        {
+          "name": "SwinBaseHierarchicalFeatureExtraction\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 618
+        },
+        {
+          "name": "SwinBaseHierarchicalFeatureExtraction\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 618
+        },
+        {
+          "name": "SwinBaseHierarchicalFeatureExtraction\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
           "line": 618
         },
@@ -1879,6 +2329,24 @@
           "line": 647
         },
         {
+          "name": "SwinLargeHierarchicalMultiScale\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 647
+        },
+        {
+          "name": "SwinLargeHierarchicalMultiScale\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 647
+        },
+        {
+          "name": "SwinLargeHierarchicalMultiScale\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 647
+        },
+        {
           "name": "VariantParameterProgression\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
@@ -1947,6 +2415,24 @@
         {
           "name": "VariantParameterProgression\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 668
+        },
+        {
+          "name": "VariantParameterProgression\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 668
+        },
+        {
+          "name": "VariantParameterProgression\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 668
+        },
+        {
+          "name": "VariantParameterProgression\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
           "line": 668
         },
@@ -2023,6 +2509,24 @@
           "line": 685
         },
         {
+          "name": "VariantOutputConsistency\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 685
+        },
+        {
+          "name": "VariantOutputConsistency\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 685
+        },
+        {
+          "name": "VariantOutputConsistency\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 685
+        },
+        {
           "name": "SwinTinyMinimalBatch\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
@@ -2091,6 +2595,24 @@
         {
           "name": "SwinTinyMinimalBatch\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 721
+        },
+        {
+          "name": "SwinTinyMinimalBatch\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 721
+        },
+        {
+          "name": "SwinTinyMinimalBatch\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 721
+        },
+        {
+          "name": "SwinTinyMinimalBatch\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
           "line": 721
         },
@@ -2167,6 +2689,24 @@
           "line": 735
         },
         {
+          "name": "SwinSmallLargeBatch\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 735
+        },
+        {
+          "name": "SwinSmallLargeBatch\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 735
+        },
+        {
+          "name": "SwinSmallLargeBatch\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 735
+        },
+        {
           "name": "SwinBaseNumericalStability\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
@@ -2235,6 +2775,24 @@
         {
           "name": "SwinBaseNumericalStability\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 749
+        },
+        {
+          "name": "SwinBaseNumericalStability\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 749
+        },
+        {
+          "name": "SwinBaseNumericalStability\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 749
+        },
+        {
+          "name": "SwinBaseNumericalStability\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
           "line": 749
         },
@@ -2311,6 +2869,24 @@
           "line": 779
         },
         {
+          "name": "SwinLargeTrainEvalModeConsistency\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 779
+        },
+        {
+          "name": "SwinLargeTrainEvalModeConsistency\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 779
+        },
+        {
+          "name": "SwinLargeTrainEvalModeConsistency\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 779
+        },
+        {
           "name": "SwinTinyDTypePreservation\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
@@ -2383,6 +2959,24 @@
           "line": 806
         },
         {
+          "name": "SwinTinyDTypePreservation\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 806
+        },
+        {
+          "name": "SwinTinyDTypePreservation\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 806
+        },
+        {
+          "name": "SwinTinyDTypePreservation\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 806
+        },
+        {
           "name": "SwinSmallGradientDTypeConsistency\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
@@ -2451,6 +3045,24 @@
         {
           "name": "SwinSmallGradientDTypeConsistency\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 819
+        },
+        {
+          "name": "SwinSmallGradientDTypeConsistency\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 819
+        },
+        {
+          "name": "SwinSmallGradientDTypeConsistency\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
+          "line": 819
+        },
+        {
+          "name": "SwinSmallGradientDTypeConsistency\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_swin_transformer_multidtype.cpp",
           "line": 819
         }

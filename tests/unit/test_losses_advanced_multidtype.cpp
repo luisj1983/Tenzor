@@ -651,7 +651,7 @@ TEST_P(LossAdvancedMultiDTypeTest, DiceLoss_ZeroDenominator) {
 // ============================================================================
 
 std::vector<LossAdvancedDTypeParam> GenerateLossAdvancedDTypeCombinations() {
-    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi"};
+    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "rocm"};
 
     // Advanced loss functions should work with Float32 and Float64
     // Note: Loss functions involve log/exp operations which accumulate numerical error

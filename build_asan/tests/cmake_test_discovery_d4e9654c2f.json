@@ -1,10 +1,10 @@
 {
-  "tests": 56,
+  "tests": 70,
   "name": "AllTests",
   "testsuites": [
     {
       "name": "AllBackendsAllDTypes\/AutogradMultiDTypeTest",
-      "tests": 56,
+      "tests": 70,
       "testsuite": [
         {
           "name": "VariableCreation\/cpu_float32",
@@ -51,6 +51,18 @@
         {
           "name": "VariableCreation\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autograd_multidtype.cpp",
+          "line": 134
+        },
+        {
+          "name": "VariableCreation\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autograd_multidtype.cpp",
+          "line": 134
+        },
+        {
+          "name": "VariableCreation\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autograd_multidtype.cpp",
           "line": 134
         },
@@ -103,6 +115,18 @@
           "line": 142
         },
         {
+          "name": "Detach\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autograd_multidtype.cpp",
+          "line": 142
+        },
+        {
+          "name": "Detach\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autograd_multidtype.cpp",
+          "line": 142
+        },
+        {
           "name": "SimpleAddBackward\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autograd_multidtype.cpp",
@@ -147,6 +171,18 @@
         {
           "name": "SimpleAddBackward\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autograd_multidtype.cpp",
+          "line": 153
+        },
+        {
+          "name": "SimpleAddBackward\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autograd_multidtype.cpp",
+          "line": 153
+        },
+        {
+          "name": "SimpleAddBackward\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autograd_multidtype.cpp",
           "line": 153
         },
@@ -199,6 +235,18 @@
           "line": 175
         },
         {
+          "name": "SimpleSubBackward\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autograd_multidtype.cpp",
+          "line": 175
+        },
+        {
+          "name": "SimpleSubBackward\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autograd_multidtype.cpp",
+          "line": 175
+        },
+        {
           "name": "SimpleMulBackward\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autograd_multidtype.cpp",
@@ -243,6 +291,18 @@
         {
           "name": "SimpleMulBackward\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autograd_multidtype.cpp",
+          "line": 194
+        },
+        {
+          "name": "SimpleMulBackward\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autograd_multidtype.cpp",
+          "line": 194
+        },
+        {
+          "name": "SimpleMulBackward\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autograd_multidtype.cpp",
           "line": 194
         },
@@ -295,6 +355,18 @@
           "line": 216
         },
         {
+          "name": "SimpleDivBackward\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autograd_multidtype.cpp",
+          "line": 216
+        },
+        {
+          "name": "SimpleDivBackward\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autograd_multidtype.cpp",
+          "line": 216
+        },
+        {
           "name": "ChainedOperations\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autograd_multidtype.cpp",
@@ -339,6 +411,18 @@
         {
           "name": "ChainedOperations\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autograd_multidtype.cpp",
+          "line": 243
+        },
+        {
+          "name": "ChainedOperations\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autograd_multidtype.cpp",
+          "line": 243
+        },
+        {
+          "name": "ChainedOperations\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_autograd_multidtype.cpp",
           "line": 243
         }

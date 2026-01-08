@@ -707,7 +707,7 @@ TEST_P(NNMultiDTypeTest, GRUCell_SingleStep) {
 // ============================================================================
 
 std::vector<BackendDTypeParam> GenerateNNBackendDTypeCombinations() {
-    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi"};
+    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "rocm"};
 
     // Test with these dtypes (NN operations primarily use floating point)
     std::vector<std::pair<DType, std::string>> dtypes = {

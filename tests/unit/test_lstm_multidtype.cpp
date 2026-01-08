@@ -594,7 +594,7 @@ TEST_P(LSTMMultiDTypeTest, LSTMBatchFirstBidirectional) {
 // ============================================================================
 
 std::vector<BackendDTypeParam> GenerateLSTMBackendDTypeCombinations() {
-    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi"};
+    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "rocm"};
 
     // Test with floating-point dtypes only (LSTM requires float operations)
     // Note: Currently only testing Float32 because LSTM modules don't support

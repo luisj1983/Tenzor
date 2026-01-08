@@ -488,7 +488,7 @@ TEST_P(VisionComponentsMultiDTypeTest, SwinMLPDifferentDimensions) {
 // ============================================================================
 
 std::vector<BackendDTypeParam> GenerateVisionComponentsTestCombinations() {
-    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi"};
+    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "rocm"};
 
     std::vector<std::tuple<DType, std::string, float>> dtypes = {
         {DType::Float32, "float32", 1e-5f},

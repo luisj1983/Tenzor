@@ -1,10 +1,10 @@
 {
-  "tests": 100,
+  "tests": 125,
   "name": "AllTests",
   "testsuites": [
     {
       "name": "AllBackends\/LSTMCellTestFixture",
-      "tests": 16,
+      "tests": 20,
       "testsuite": [
         {
           "name": "BasicForward\/cpu",
@@ -27,6 +27,12 @@
         {
           "name": "BasicForward\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 14
+        },
+        {
+          "name": "BasicForward\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
           "line": 14
         },
@@ -55,6 +61,12 @@
           "line": 34
         },
         {
+          "name": "NoInitialStates\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 34
+        },
+        {
           "name": "NoBias\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
@@ -75,6 +87,12 @@
         {
           "name": "NoBias\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 52
+        },
+        {
+          "name": "NoBias\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
           "line": 52
         },
@@ -101,12 +119,18 @@
           "value_param": "\"oneapi\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
           "line": 65
+        },
+        {
+          "name": "CellStateEvolution\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 65
         }
       ]
     },
     {
       "name": "AllBackends\/LSTMTestFixture",
-      "tests": 84,
+      "tests": 105,
       "testsuite": [
         {
           "name": "BasicForward\/cpu",
@@ -129,6 +153,12 @@
         {
           "name": "BasicForward\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 89
+        },
+        {
+          "name": "BasicForward\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
           "line": 89
         },
@@ -157,6 +187,12 @@
           "line": 115
         },
         {
+          "name": "MultiLayer\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 115
+        },
+        {
           "name": "BatchFirst\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
@@ -177,6 +213,12 @@
         {
           "name": "BatchFirst\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 133
+        },
+        {
+          "name": "BatchFirst\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
           "line": 133
         },
@@ -205,6 +247,12 @@
           "line": 147
         },
         {
+          "name": "Bidirectional\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 147
+        },
+        {
           "name": "BidirectionalMultiLayer\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
@@ -225,6 +273,12 @@
         {
           "name": "BidirectionalMultiLayer\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 168
+        },
+        {
+          "name": "BidirectionalMultiLayer\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
           "line": 168
         },
@@ -253,6 +307,12 @@
           "line": 183
         },
         {
+          "name": "WithDropout\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 183
+        },
+        {
           "name": "InitialStates\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
@@ -273,6 +333,12 @@
         {
           "name": "InitialStates\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 197
+        },
+        {
+          "name": "InitialStates\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
           "line": 197
         },
@@ -301,6 +367,12 @@
           "line": 214
         },
         {
+          "name": "SequenceLengthVariation\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 214
+        },
+        {
           "name": "BatchSizeVariation\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
@@ -321,6 +393,12 @@
         {
           "name": "BatchSizeVariation\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 231
+        },
+        {
+          "name": "BatchSizeVariation\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
           "line": 231
         },
@@ -349,6 +427,12 @@
           "line": 248
         },
         {
+          "name": "SingleTimestep\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 248
+        },
+        {
           "name": "OutputConsistency\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
@@ -369,6 +453,12 @@
         {
           "name": "OutputConsistency\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 260
+        },
+        {
+          "name": "OutputConsistency\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
           "line": 260
         },
@@ -397,6 +487,12 @@
           "line": 276
         },
         {
+          "name": "GradientFlow\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 276
+        },
+        {
           "name": "TrainingMode\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
@@ -417,6 +513,12 @@
         {
           "name": "TrainingMode\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 297
+        },
+        {
+          "name": "TrainingMode\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
           "line": 297
         },
@@ -445,6 +547,12 @@
           "line": 312
         },
         {
+          "name": "ParameterCount\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 312
+        },
+        {
           "name": "LargeHidden\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
@@ -465,6 +573,12 @@
         {
           "name": "LargeHidden\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 328
+        },
+        {
+          "name": "LargeHidden\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
           "line": 328
         },
@@ -493,6 +607,12 @@
           "line": 340
         },
         {
+          "name": "VeryDeepNetwork\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 340
+        },
+        {
           "name": "LongSequence\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
@@ -513,6 +633,12 @@
         {
           "name": "LongSequence\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 354
+        },
+        {
+          "name": "LongSequence\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
           "line": 354
         },
@@ -541,6 +667,12 @@
           "line": 366
         },
         {
+          "name": "InvalidNumLayers\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 366
+        },
+        {
           "name": "InvalidDropout\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
@@ -561,6 +693,12 @@
         {
           "name": "InvalidDropout\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 375
+        },
+        {
+          "name": "InvalidDropout\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
           "line": 375
         },
@@ -589,6 +727,12 @@
           "line": 384
         },
         {
+          "name": "CellStateMemory\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 384
+        },
+        {
           "name": "BatchFirstBidirectional\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
@@ -609,6 +753,12 @@
         {
           "name": "BatchFirstBidirectional\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
+          "line": 407
+        },
+        {
+          "name": "BatchFirstBidirectional\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm.cpp",
           "line": 407
         }

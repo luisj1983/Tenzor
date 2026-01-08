@@ -602,6 +602,78 @@ extern "C" {
 }
 
 // ============================================================================
+// Softplus Activation
+// ============================================================================
+
+// Softplus: log(1 + exp(x))
+// Uses numerically stable implementation
+template<typename T>
+__global__ void softplus_forward_kernel(const T* input, T* output, int64_t n, T beta, T threshold) {
+    HIP_GRID_STRIDE_LOOP(idx, n) {
+        T x = input[idx];
+        T bx = beta * x;
+        if (bx > threshold) {
+            output[idx] = x;  // For large x, softplus(x) ≈ x
+        } else if (bx < -threshold) {
+            output[idx] = exp(bx) / beta;  // For very negative x
+        } else {
+            output[idx] = log(T(1) + exp(bx)) / beta;
+        }
+    }
+}
+
+// Softplus backward: grad_out * sigmoid(beta * x)
+template<typename T>
+__global__ void softplus_backward_kernel(const T* grad_output, const T* input,
+                                         T* grad_input, int64_t n, T beta, T threshold) {
+    HIP_GRID_STRIDE_LOOP(idx, n) {
+        T x = input[idx];
+        T bx = beta * x;
+        if (bx > threshold) {
+            grad_input[idx] = grad_output[idx];
+        } else if (bx < -threshold) {
+            grad_input[idx] = grad_output[idx] * exp(bx);
+        } else {
+            T sig = T(1) / (T(1) + exp(-bx));
+            grad_input[idx] = grad_output[idx] * sig;
+        }
+    }
+}
+
+// Host functions
+extern "C" {
+    void softplus_forward_float(const float* input, float* output, int64_t n, float beta, float threshold) {
+        int num_blocks = get_num_blocks(n);
+        hipLaunchKernelGGL(softplus_forward_kernel<float>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, 0,
+                          input, output, n, beta, threshold);
+        HIP_CHECK(hipGetLastError());
+    }
+
+    void softplus_forward_double(const double* input, double* output, int64_t n, double beta, double threshold) {
+        int num_blocks = get_num_blocks(n);
+        hipLaunchKernelGGL(softplus_forward_kernel<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, 0,
+                          input, output, n, beta, threshold);
+        HIP_CHECK(hipGetLastError());
+    }
+
+    void softplus_backward_float(const float* grad_output, const float* input,
+                                 float* grad_input, int64_t n, float beta, float threshold) {
+        int num_blocks = get_num_blocks(n);
+        hipLaunchKernelGGL(softplus_backward_kernel<float>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, 0,
+                          grad_output, input, grad_input, n, beta, threshold);
+        HIP_CHECK(hipGetLastError());
+    }
+
+    void softplus_backward_double(const double* grad_output, const double* input,
+                                  double* grad_input, int64_t n, double beta, double threshold) {
+        int num_blocks = get_num_blocks(n);
+        hipLaunchKernelGGL(softplus_backward_kernel<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, 0,
+                          grad_output, input, grad_input, n, beta, threshold);
+        HIP_CHECK(hipGetLastError());
+    }
+}
+
+// ============================================================================
 // Softmax Activation with AMD GPU Optimizations
 // ============================================================================
 
@@ -1435,6 +1507,296 @@ auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output
     hipError_t err = hipGetLastError();
     if (err != hipSuccess) {
         throw std::runtime_error(std::string("HIP error in log_softmax_backward_kernel: ") + hipGetErrorString(err));
+    }
+
+    return result;
+}
+
+// ============================================================================
+// ELU wrapper
+// ============================================================================
+auto elu_kernel(const Tensor& input, float alpha, hipStream_t stream) -> Tensor {
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+    int64_t n = input.numel();
+
+    if (n == 0) return result;
+
+    int num_blocks = get_num_blocks(n);
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(elu_forward_kernel<float>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          input.data<float>(), result.data<float>(), n, alpha);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(elu_forward_kernel<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          input.data<double>(), result.data<double>(), n, static_cast<double>(alpha));
+    } else {
+        throw std::runtime_error("ELU only supports Float32 and Float64 dtypes");
+    }
+
+    hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+        throw std::runtime_error(std::string("HIP error in elu_kernel: ") + hipGetErrorString(err));
+    }
+
+    return result;
+}
+
+// ELU backward wrapper
+auto elu_backward_kernel(const Tensor& grad_output, const Tensor& input, float alpha, hipStream_t stream) -> Tensor {
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+    int64_t n = input.numel();
+
+    if (n == 0) return result;
+
+    int num_blocks = get_num_blocks(n);
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(elu_backward_kernel<float>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          grad_output.data<float>(), input.data<float>(), result.data<float>(), n, alpha);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(elu_backward_kernel<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          grad_output.data<double>(), input.data<double>(), result.data<double>(), n, static_cast<double>(alpha));
+    } else {
+        throw std::runtime_error("ELU backward only supports Float32 and Float64 dtypes");
+    }
+
+    hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+        throw std::runtime_error(std::string("HIP error in elu_backward_kernel: ") + hipGetErrorString(err));
+    }
+
+    return result;
+}
+
+// ============================================================================
+// SELU wrapper
+// ============================================================================
+auto selu_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+    int64_t n = input.numel();
+
+    if (n == 0) return result;
+
+    int num_blocks = get_num_blocks(n);
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(selu_forward_kernel<float>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(selu_forward_kernel<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          input.data<double>(), result.data<double>(), n);
+    } else {
+        throw std::runtime_error("SELU only supports Float32 and Float64 dtypes");
+    }
+
+    hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+        throw std::runtime_error(std::string("HIP error in selu_kernel: ") + hipGetErrorString(err));
+    }
+
+    return result;
+}
+
+// SELU backward wrapper
+auto selu_backward_kernel(const Tensor& grad_output, const Tensor& input, hipStream_t stream) -> Tensor {
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+    int64_t n = input.numel();
+
+    if (n == 0) return result;
+
+    int num_blocks = get_num_blocks(n);
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(selu_backward_kernel<float>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          grad_output.data<float>(), input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(selu_backward_kernel<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          grad_output.data<double>(), input.data<double>(), result.data<double>(), n);
+    } else {
+        throw std::runtime_error("SELU backward only supports Float32 and Float64 dtypes");
+    }
+
+    hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+        throw std::runtime_error(std::string("HIP error in selu_backward_kernel: ") + hipGetErrorString(err));
+    }
+
+    return result;
+}
+
+// ============================================================================
+// Swish wrapper
+// ============================================================================
+auto swish_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+    int64_t n = input.numel();
+
+    if (n == 0) return result;
+
+    int num_blocks = get_num_blocks(n);
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(swish_forward_kernel<float>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(swish_forward_kernel<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          input.data<double>(), result.data<double>(), n);
+    } else {
+        throw std::runtime_error("Swish only supports Float32 and Float64 dtypes");
+    }
+
+    hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+        throw std::runtime_error(std::string("HIP error in swish_kernel: ") + hipGetErrorString(err));
+    }
+
+    return result;
+}
+
+// Swish backward wrapper
+auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input, hipStream_t stream) -> Tensor {
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+    int64_t n = input.numel();
+
+    if (n == 0) return result;
+
+    int num_blocks = get_num_blocks(n);
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(swish_backward_kernel<float>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          grad_output.data<float>(), input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(swish_backward_kernel<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          grad_output.data<double>(), input.data<double>(), result.data<double>(), n);
+    } else {
+        throw std::runtime_error("Swish backward only supports Float32 and Float64 dtypes");
+    }
+
+    hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+        throw std::runtime_error(std::string("HIP error in swish_backward_kernel: ") + hipGetErrorString(err));
+    }
+
+    return result;
+}
+
+// ============================================================================
+// Mish wrapper
+// ============================================================================
+auto mish_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+    int64_t n = input.numel();
+
+    if (n == 0) return result;
+
+    int num_blocks = get_num_blocks(n);
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(mish_forward_kernel<float>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(mish_forward_kernel<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          input.data<double>(), result.data<double>(), n);
+    } else {
+        throw std::runtime_error("Mish only supports Float32 and Float64 dtypes");
+    }
+
+    hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+        throw std::runtime_error(std::string("HIP error in mish_kernel: ") + hipGetErrorString(err));
+    }
+
+    return result;
+}
+
+// Mish backward wrapper
+auto mish_backward_kernel(const Tensor& grad_output, const Tensor& input, hipStream_t stream) -> Tensor {
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+    int64_t n = input.numel();
+
+    if (n == 0) return result;
+
+    int num_blocks = get_num_blocks(n);
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(mish_backward_kernel<float>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          grad_output.data<float>(), input.data<float>(), result.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(mish_backward_kernel<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          grad_output.data<double>(), input.data<double>(), result.data<double>(), n);
+    } else {
+        throw std::runtime_error("Mish backward only supports Float32 and Float64 dtypes");
+    }
+
+    hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+        throw std::runtime_error(std::string("HIP error in mish_backward_kernel: ") + hipGetErrorString(err));
+    }
+
+    return result;
+}
+
+// ============================================================================
+// Softplus wrapper
+// ============================================================================
+auto softplus_kernel(const Tensor& input, float beta, float threshold, hipStream_t stream) -> Tensor {
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+    int64_t n = input.numel();
+
+    if (n == 0) return result;
+
+    int num_blocks = get_num_blocks(n);
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(softplus_forward_kernel<float>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          input.data<float>(), result.data<float>(), n, beta, threshold);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(softplus_forward_kernel<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          input.data<double>(), result.data<double>(), n, static_cast<double>(beta), static_cast<double>(threshold));
+    } else {
+        throw std::runtime_error("Softplus only supports Float32 and Float64 dtypes");
+    }
+
+    hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+        throw std::runtime_error(std::string("HIP error in softplus_kernel: ") + hipGetErrorString(err));
+    }
+
+    return result;
+}
+
+// Softplus backward wrapper
+auto softplus_backward_kernel(const Tensor& grad_output, const Tensor& input, float beta, float threshold, hipStream_t stream) -> Tensor {
+    std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
+    Tensor result(shape, input.dtype(), input.device());
+    int64_t n = input.numel();
+
+    if (n == 0) return result;
+
+    int num_blocks = get_num_blocks(n);
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(softplus_backward_kernel<float>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          grad_output.data<float>(), input.data<float>(), result.data<float>(), n, beta, threshold);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(softplus_backward_kernel<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          grad_output.data<double>(), input.data<double>(), result.data<double>(), n, static_cast<double>(beta), static_cast<double>(threshold));
+    } else {
+        throw std::runtime_error("Softplus backward only supports Float32 and Float64 dtypes");
+    }
+
+    hipError_t err = hipGetLastError();
+    if (err != hipSuccess) {
+        throw std::runtime_error(std::string("HIP error in softplus_backward_kernel: ") + hipGetErrorString(err));
     }
 
     return result;

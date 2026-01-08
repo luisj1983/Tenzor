@@ -1,10 +1,10 @@
 {
-  "tests": 396,
+  "tests": 495,
   "name": "AllTests",
   "testsuites": [
     {
       "name": "AllBackendsAllDTypes\/PositionalEncodingMultiDTypeTest",
-      "tests": 48,
+      "tests": 60,
       "testsuite": [
         {
           "name": "Construction\/cpu_float32",
@@ -79,6 +79,24 @@
           "line": 120
         },
         {
+          "name": "Construction\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 120
+        },
+        {
+          "name": "Construction\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 120
+        },
+        {
+          "name": "Construction\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 120
+        },
+        {
           "name": "ForwardShape\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
@@ -147,6 +165,24 @@
         {
           "name": "ForwardShape\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 132
+        },
+        {
+          "name": "ForwardShape\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 132
+        },
+        {
+          "name": "ForwardShape\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 132
+        },
+        {
+          "name": "ForwardShape\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
           "line": 132
         },
@@ -223,6 +259,24 @@
           "line": 155
         },
         {
+          "name": "ExceedsMaxLen\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 155
+        },
+        {
+          "name": "ExceedsMaxLen\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 155
+        },
+        {
+          "name": "ExceedsMaxLen\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 155
+        },
+        {
           "name": "WithDropout\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
@@ -293,12 +347,30 @@
           "value_param": "oneapi_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
           "line": 168
+        },
+        {
+          "name": "WithDropout\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 168
+        },
+        {
+          "name": "WithDropout\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 168
+        },
+        {
+          "name": "WithDropout\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 168
         }
       ]
     },
     {
       "name": "AllBackendsAllDTypes\/TransformerEncoderLayerMultiDTypeTest",
-      "tests": 72,
+      "tests": 90,
       "testsuite": [
         {
           "name": "Construction\/cpu_float32",
@@ -369,6 +441,24 @@
         {
           "name": "Construction\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 187
+        },
+        {
+          "name": "Construction\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 187
+        },
+        {
+          "name": "Construction\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 187
+        },
+        {
+          "name": "Construction\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
           "line": 187
         },
@@ -445,6 +535,24 @@
           "line": 199
         },
         {
+          "name": "InvalidActivation\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 199
+        },
+        {
+          "name": "InvalidActivation\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 199
+        },
+        {
+          "name": "InvalidActivation\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 199
+        },
+        {
           "name": "ForwardShape\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
@@ -513,6 +621,24 @@
         {
           "name": "ForwardShape\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 207
+        },
+        {
+          "name": "ForwardShape\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 207
+        },
+        {
+          "name": "ForwardShape\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 207
+        },
+        {
+          "name": "ForwardShape\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
           "line": 207
         },
@@ -589,6 +715,24 @@
           "line": 228
         },
         {
+          "name": "BatchFirstFalse\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 228
+        },
+        {
+          "name": "BatchFirstFalse\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 228
+        },
+        {
+          "name": "BatchFirstFalse\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 228
+        },
+        {
           "name": "WithMask\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
@@ -657,6 +801,24 @@
         {
           "name": "WithMask\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 248
+        },
+        {
+          "name": "WithMask\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 248
+        },
+        {
+          "name": "WithMask\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 248
+        },
+        {
+          "name": "WithMask\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
           "line": 248
         },
@@ -731,12 +893,30 @@
           "value_param": "oneapi_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
           "line": 264
+        },
+        {
+          "name": "GeLUActivation\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 264
+        },
+        {
+          "name": "GeLUActivation\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 264
+        },
+        {
+          "name": "GeLUActivation\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 264
         }
       ]
     },
     {
       "name": "AllBackendsAllDTypes\/TransformerEncoderMultiDTypeTest",
-      "tests": 48,
+      "tests": 60,
       "testsuite": [
         {
           "name": "Construction\/cpu_float32",
@@ -811,6 +991,24 @@
           "line": 286
         },
         {
+          "name": "Construction\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 286
+        },
+        {
+          "name": "Construction\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 286
+        },
+        {
+          "name": "Construction\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 286
+        },
+        {
           "name": "ForwardShape\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
@@ -879,6 +1077,24 @@
         {
           "name": "ForwardShape\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 301
+        },
+        {
+          "name": "ForwardShape\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 301
+        },
+        {
+          "name": "ForwardShape\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 301
+        },
+        {
+          "name": "ForwardShape\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
           "line": 301
         },
@@ -955,6 +1171,24 @@
           "line": 318
         },
         {
+          "name": "MultipleLayersProcessing\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 318
+        },
+        {
+          "name": "MultipleLayersProcessing\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 318
+        },
+        {
+          "name": "MultipleLayersProcessing\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 318
+        },
+        {
           "name": "WithNormalization\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
@@ -1025,12 +1259,30 @@
           "value_param": "oneapi_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
           "line": 337
+        },
+        {
+          "name": "WithNormalization\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 337
+        },
+        {
+          "name": "WithNormalization\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 337
+        },
+        {
+          "name": "WithNormalization\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 337
         }
       ]
     },
     {
       "name": "AllBackendsAllDTypes\/TransformerDecoderLayerMultiDTypeTest",
-      "tests": 48,
+      "tests": 60,
       "testsuite": [
         {
           "name": "Construction\/cpu_float32",
@@ -1105,6 +1357,24 @@
           "line": 361
         },
         {
+          "name": "Construction\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 361
+        },
+        {
+          "name": "Construction\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 361
+        },
+        {
+          "name": "Construction\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 361
+        },
+        {
           "name": "ForwardShape\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
@@ -1173,6 +1443,24 @@
         {
           "name": "ForwardShape\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 373
+        },
+        {
+          "name": "ForwardShape\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 373
+        },
+        {
+          "name": "ForwardShape\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 373
+        },
+        {
+          "name": "ForwardShape\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
           "line": 373
         },
@@ -1249,6 +1537,24 @@
           "line": 396
         },
         {
+          "name": "WithCausalMask\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 396
+        },
+        {
+          "name": "WithCausalMask\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 396
+        },
+        {
+          "name": "WithCausalMask\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 396
+        },
+        {
           "name": "InvalidSingleInputForward\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
@@ -1319,12 +1625,30 @@
           "value_param": "oneapi_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
           "line": 415
+        },
+        {
+          "name": "InvalidSingleInputForward\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 415
+        },
+        {
+          "name": "InvalidSingleInputForward\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 415
+        },
+        {
+          "name": "InvalidSingleInputForward\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 415
         }
       ]
     },
     {
       "name": "AllBackendsAllDTypes\/TransformerDecoderMultiDTypeTest",
-      "tests": 36,
+      "tests": 45,
       "testsuite": [
         {
           "name": "Construction\/cpu_float32",
@@ -1399,6 +1723,24 @@
           "line": 434
         },
         {
+          "name": "Construction\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 434
+        },
+        {
+          "name": "Construction\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 434
+        },
+        {
+          "name": "Construction\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 434
+        },
+        {
           "name": "ForwardShape\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
@@ -1467,6 +1809,24 @@
         {
           "name": "ForwardShape\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 449
+        },
+        {
+          "name": "ForwardShape\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 449
+        },
+        {
+          "name": "ForwardShape\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 449
+        },
+        {
+          "name": "ForwardShape\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
           "line": 449
         },
@@ -1541,12 +1901,30 @@
           "value_param": "oneapi_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
           "line": 468
+        },
+        {
+          "name": "MultipleLayersProcessing\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 468
+        },
+        {
+          "name": "MultipleLayersProcessing\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 468
+        },
+        {
+          "name": "MultipleLayersProcessing\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 468
         }
       ]
     },
     {
       "name": "AllBackendsAllDTypes\/TransformerMultiDTypeTest",
-      "tests": 72,
+      "tests": 90,
       "testsuite": [
         {
           "name": "Construction\/cpu_float32",
@@ -1621,6 +1999,24 @@
           "line": 493
         },
         {
+          "name": "Construction\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 493
+        },
+        {
+          "name": "Construction\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 493
+        },
+        {
+          "name": "Construction\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 493
+        },
+        {
           "name": "ForwardShape\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
@@ -1689,6 +2085,24 @@
         {
           "name": "ForwardShape\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 505
+        },
+        {
+          "name": "ForwardShape\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 505
+        },
+        {
+          "name": "ForwardShape\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 505
+        },
+        {
+          "name": "ForwardShape\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
           "line": 505
         },
@@ -1765,6 +2179,24 @@
           "line": 529
         },
         {
+          "name": "WithMasks\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 529
+        },
+        {
+          "name": "WithMasks\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 529
+        },
+        {
+          "name": "WithMasks\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 529
+        },
+        {
           "name": "InvalidSingleInputForward\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
@@ -1833,6 +2265,24 @@
         {
           "name": "InvalidSingleInputForward\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 548
+        },
+        {
+          "name": "InvalidSingleInputForward\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 548
+        },
+        {
+          "name": "InvalidSingleInputForward\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 548
+        },
+        {
+          "name": "InvalidSingleInputForward\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
           "line": 548
         },
@@ -1909,6 +2359,24 @@
           "line": 561
         },
         {
+          "name": "BERTConfig\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 561
+        },
+        {
+          "name": "BERTConfig\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 561
+        },
+        {
+          "name": "BERTConfig\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 561
+        },
+        {
           "name": "GPTLikeConfig\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
@@ -1979,12 +2447,30 @@
           "value_param": "oneapi_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
           "line": 588
+        },
+        {
+          "name": "GPTLikeConfig\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 588
+        },
+        {
+          "name": "GPTLikeConfig\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 588
+        },
+        {
+          "name": "GPTLikeConfig\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 588
         }
       ]
     },
     {
       "name": "AllBackendsAllDTypes\/TransformerIntegrationMultiDTypeTest",
-      "tests": 72,
+      "tests": 90,
       "testsuite": [
         {
           "name": "ForwardBackward\/cpu_float32",
@@ -2055,6 +2541,24 @@
         {
           "name": "ForwardBackward\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 624
+        },
+        {
+          "name": "ForwardBackward\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 624
+        },
+        {
+          "name": "ForwardBackward\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 624
+        },
+        {
+          "name": "ForwardBackward\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
           "line": 624
         },
@@ -2131,6 +2635,24 @@
           "line": 644
         },
         {
+          "name": "ParameterCount\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 644
+        },
+        {
+          "name": "ParameterCount\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 644
+        },
+        {
+          "name": "ParameterCount\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 644
+        },
+        {
           "name": "TrainEvalSwitch\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
@@ -2199,6 +2721,24 @@
         {
           "name": "TrainEvalSwitch\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 658
+        },
+        {
+          "name": "TrainEvalSwitch\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 658
+        },
+        {
+          "name": "TrainEvalSwitch\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 658
+        },
+        {
+          "name": "TrainEvalSwitch\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
           "line": 658
         },
@@ -2275,6 +2815,24 @@
           "line": 674
         },
         {
+          "name": "SmallModelConsistency\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 674
+        },
+        {
+          "name": "SmallModelConsistency\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 674
+        },
+        {
+          "name": "SmallModelConsistency\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 674
+        },
+        {
           "name": "DifferentSequenceLengths\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
@@ -2347,6 +2905,24 @@
           "line": 722
         },
         {
+          "name": "DifferentSequenceLengths\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 722
+        },
+        {
+          "name": "DifferentSequenceLengths\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 722
+        },
+        {
+          "name": "DifferentSequenceLengths\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 722
+        },
+        {
           "name": "DTypePrecisionComparison\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
@@ -2415,6 +2991,24 @@
         {
           "name": "DTypePrecisionComparison\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 744
+        },
+        {
+          "name": "DTypePrecisionComparison\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 744
+        },
+        {
+          "name": "DTypePrecisionComparison\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
+          "line": 744
+        },
+        {
+          "name": "DTypePrecisionComparison\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer_multidtype.cpp",
           "line": 744
         }

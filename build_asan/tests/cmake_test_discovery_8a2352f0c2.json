@@ -1,10 +1,10 @@
 {
-  "tests": 88,
+  "tests": 110,
   "name": "AllTests",
   "testsuites": [
     {
       "name": "AllBackends\/RNNCellTestFixture",
-      "tests": 20,
+      "tests": 25,
       "testsuite": [
         {
           "name": "BasicForward\/cpu",
@@ -27,6 +27,12 @@
         {
           "name": "BasicForward\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
+          "line": 14
+        },
+        {
+          "name": "BasicForward\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
           "line": 14
         },
@@ -55,6 +61,12 @@
           "line": 29
         },
         {
+          "name": "ReLUActivation\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
+          "line": 29
+        },
+        {
           "name": "NoInitialHidden\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
@@ -75,6 +87,12 @@
         {
           "name": "NoInitialHidden\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
+          "line": 44
+        },
+        {
+          "name": "NoInitialHidden\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
           "line": 44
         },
@@ -103,6 +121,12 @@
           "line": 58
         },
         {
+          "name": "NoBias\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
+          "line": 58
+        },
+        {
           "name": "InvalidNonlinearity\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
@@ -125,12 +149,18 @@
           "value_param": "\"oneapi\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
           "line": 71
+        },
+        {
+          "name": "InvalidNonlinearity\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
+          "line": 71
         }
       ]
     },
     {
       "name": "AllBackends\/RNNTestFixture",
-      "tests": 68,
+      "tests": 85,
       "testsuite": [
         {
           "name": "BasicForward\/cpu",
@@ -153,6 +183,12 @@
         {
           "name": "BasicForward\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
+          "line": 88
+        },
+        {
+          "name": "BasicForward\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
           "line": 88
         },
@@ -181,6 +217,12 @@
           "line": 108
         },
         {
+          "name": "MultiLayer\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
+          "line": 108
+        },
+        {
           "name": "BatchFirst\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
@@ -201,6 +243,12 @@
         {
           "name": "BatchFirst\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
+          "line": 126
+        },
+        {
+          "name": "BatchFirst\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
           "line": 126
         },
@@ -229,6 +277,12 @@
           "line": 140
         },
         {
+          "name": "Bidirectional\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
+          "line": 140
+        },
+        {
           "name": "BidirectionalMultiLayer\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
@@ -249,6 +303,12 @@
         {
           "name": "BidirectionalMultiLayer\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
+          "line": 158
+        },
+        {
+          "name": "BidirectionalMultiLayer\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
           "line": 158
         },
@@ -277,6 +337,12 @@
           "line": 171
         },
         {
+          "name": "WithDropout\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
+          "line": 171
+        },
+        {
           "name": "InitialHiddenState\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
@@ -297,6 +363,12 @@
         {
           "name": "InitialHiddenState\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
+          "line": 185
+        },
+        {
+          "name": "InitialHiddenState\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
           "line": 185
         },
@@ -325,6 +397,12 @@
           "line": 199
         },
         {
+          "name": "SequenceLengthVariation\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
+          "line": 199
+        },
+        {
           "name": "BatchSizeVariation\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
@@ -345,6 +423,12 @@
         {
           "name": "BatchSizeVariation\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
+          "line": 216
+        },
+        {
+          "name": "BatchSizeVariation\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
           "line": 216
         },
@@ -373,6 +457,12 @@
           "line": 233
         },
         {
+          "name": "SingleTimestep\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
+          "line": 233
+        },
+        {
           "name": "OutputConsistency\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
@@ -393,6 +483,12 @@
         {
           "name": "OutputConsistency\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
+          "line": 245
+        },
+        {
+          "name": "OutputConsistency\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
           "line": 245
         },
@@ -421,6 +517,12 @@
           "line": 262
         },
         {
+          "name": "GradientFlow\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
+          "line": 262
+        },
+        {
           "name": "TrainingMode\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
@@ -441,6 +543,12 @@
         {
           "name": "TrainingMode\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
+          "line": 283
+        },
+        {
+          "name": "TrainingMode\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
           "line": 283
         },
@@ -469,6 +577,12 @@
           "line": 298
         },
         {
+          "name": "ParameterCount\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
+          "line": 298
+        },
+        {
           "name": "LargeHidden\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
@@ -489,6 +603,12 @@
         {
           "name": "LargeHidden\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
+          "line": 312
+        },
+        {
+          "name": "LargeHidden\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
           "line": 312
         },
@@ -517,6 +637,12 @@
           "line": 325
         },
         {
+          "name": "InvalidNumLayers\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
+          "line": 325
+        },
+        {
           "name": "InvalidDropout\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
@@ -537,6 +663,12 @@
         {
           "name": "InvalidDropout\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
+          "line": 334
+        },
+        {
+          "name": "InvalidDropout\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn.cpp",
           "line": 334
         }

@@ -403,7 +403,7 @@ TEST_P(DetectionComponentsMultiDTypeTest, ROIAlignDifferentOutputSizes) {
 // ============================================================================
 
 std::vector<BackendDTypeParam> GenerateDetectionComponentsTestCombinations() {
-    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi"};
+    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "rocm"};
 
     std::vector<std::tuple<DType, std::string, float>> dtypes = {
         {DType::Float32, "float32", 1e-3f},

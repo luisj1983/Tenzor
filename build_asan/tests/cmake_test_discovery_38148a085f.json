@@ -1,10 +1,10 @@
 {
-  "tests": 288,
+  "tests": 360,
   "name": "AllTests",
   "testsuites": [
     {
       "name": "AllBackendsAllDTypes\/ComparisonOpsMultiDTypeTest",
-      "tests": 192,
+      "tests": 240,
       "testsuite": [
         {
           "name": "EqualOperator_SameValues\/cpu_float32",
@@ -99,6 +99,30 @@
         {
           "name": "EqualOperator_SameValues\/oneapi_int64",
           "value_param": "oneapi_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 155
+        },
+        {
+          "name": "EqualOperator_SameValues\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 155
+        },
+        {
+          "name": "EqualOperator_SameValues\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 155
+        },
+        {
+          "name": "EqualOperator_SameValues\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 155
+        },
+        {
+          "name": "EqualOperator_SameValues\/rocm_int64",
+          "value_param": "rocm_int64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
           "line": 155
         },
@@ -199,6 +223,30 @@
           "line": 163
         },
         {
+          "name": "EqualOperator_DifferentValues\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 163
+        },
+        {
+          "name": "EqualOperator_DifferentValues\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 163
+        },
+        {
+          "name": "EqualOperator_DifferentValues\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 163
+        },
+        {
+          "name": "EqualOperator_DifferentValues\/rocm_int64",
+          "value_param": "rocm_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 163
+        },
+        {
           "name": "NotEqualOperator\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
@@ -291,6 +339,30 @@
         {
           "name": "NotEqualOperator\/oneapi_int64",
           "value_param": "oneapi_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 171
+        },
+        {
+          "name": "NotEqualOperator\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 171
+        },
+        {
+          "name": "NotEqualOperator\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 171
+        },
+        {
+          "name": "NotEqualOperator\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 171
+        },
+        {
+          "name": "NotEqualOperator\/rocm_int64",
+          "value_param": "rocm_int64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
           "line": 171
         },
@@ -391,6 +463,30 @@
           "line": 179
         },
         {
+          "name": "NotEqualOperator_SameValues\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 179
+        },
+        {
+          "name": "NotEqualOperator_SameValues\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 179
+        },
+        {
+          "name": "NotEqualOperator_SameValues\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 179
+        },
+        {
+          "name": "NotEqualOperator_SameValues\/rocm_int64",
+          "value_param": "rocm_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 179
+        },
+        {
           "name": "LessThanOperator\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
@@ -483,6 +579,30 @@
         {
           "name": "LessThanOperator\/oneapi_int64",
           "value_param": "oneapi_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 187
+        },
+        {
+          "name": "LessThanOperator\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 187
+        },
+        {
+          "name": "LessThanOperator\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 187
+        },
+        {
+          "name": "LessThanOperator\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 187
+        },
+        {
+          "name": "LessThanOperator\/rocm_int64",
+          "value_param": "rocm_int64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
           "line": 187
         },
@@ -583,6 +703,30 @@
           "line": 195
         },
         {
+          "name": "LessThanOperator_False\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 195
+        },
+        {
+          "name": "LessThanOperator_False\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 195
+        },
+        {
+          "name": "LessThanOperator_False\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 195
+        },
+        {
+          "name": "LessThanOperator_False\/rocm_int64",
+          "value_param": "rocm_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 195
+        },
+        {
           "name": "LessEqualOperator_Equal\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
@@ -675,6 +819,30 @@
         {
           "name": "LessEqualOperator_Equal\/oneapi_int64",
           "value_param": "oneapi_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 203
+        },
+        {
+          "name": "LessEqualOperator_Equal\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 203
+        },
+        {
+          "name": "LessEqualOperator_Equal\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 203
+        },
+        {
+          "name": "LessEqualOperator_Equal\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 203
+        },
+        {
+          "name": "LessEqualOperator_Equal\/rocm_int64",
+          "value_param": "rocm_int64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
           "line": 203
         },
@@ -775,6 +943,30 @@
           "line": 211
         },
         {
+          "name": "LessEqualOperator_Less\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 211
+        },
+        {
+          "name": "LessEqualOperator_Less\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 211
+        },
+        {
+          "name": "LessEqualOperator_Less\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 211
+        },
+        {
+          "name": "LessEqualOperator_Less\/rocm_int64",
+          "value_param": "rocm_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 211
+        },
+        {
           "name": "GreaterThanOperator\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
@@ -867,6 +1059,30 @@
         {
           "name": "GreaterThanOperator\/oneapi_int64",
           "value_param": "oneapi_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 219
+        },
+        {
+          "name": "GreaterThanOperator\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 219
+        },
+        {
+          "name": "GreaterThanOperator\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 219
+        },
+        {
+          "name": "GreaterThanOperator\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 219
+        },
+        {
+          "name": "GreaterThanOperator\/rocm_int64",
+          "value_param": "rocm_int64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
           "line": 219
         },
@@ -967,6 +1183,30 @@
           "line": 227
         },
         {
+          "name": "GreaterThanOperator_False\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 227
+        },
+        {
+          "name": "GreaterThanOperator_False\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 227
+        },
+        {
+          "name": "GreaterThanOperator_False\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 227
+        },
+        {
+          "name": "GreaterThanOperator_False\/rocm_int64",
+          "value_param": "rocm_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 227
+        },
+        {
           "name": "GreaterEqualOperator_Equal\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
@@ -1059,6 +1299,30 @@
         {
           "name": "GreaterEqualOperator_Equal\/oneapi_int64",
           "value_param": "oneapi_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 235
+        },
+        {
+          "name": "GreaterEqualOperator_Equal\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 235
+        },
+        {
+          "name": "GreaterEqualOperator_Equal\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 235
+        },
+        {
+          "name": "GreaterEqualOperator_Equal\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 235
+        },
+        {
+          "name": "GreaterEqualOperator_Equal\/rocm_int64",
+          "value_param": "rocm_int64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
           "line": 235
         },
@@ -1157,12 +1421,36 @@
           "value_param": "oneapi_int64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
           "line": 243
+        },
+        {
+          "name": "GreaterEqualOperator_Greater\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 243
+        },
+        {
+          "name": "GreaterEqualOperator_Greater\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 243
+        },
+        {
+          "name": "GreaterEqualOperator_Greater\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 243
+        },
+        {
+          "name": "GreaterEqualOperator_Greater\/rocm_int64",
+          "value_param": "rocm_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 243
         }
       ]
     },
     {
       "name": "FloatEdgeCases\/ComparisonOpsFloatEdgeCases",
-      "tests": 48,
+      "tests": 60,
       "testsuite": [
         {
           "name": "NaN_NotEqualToItself\/cpu_float32",
@@ -1257,6 +1545,30 @@
         {
           "name": "NaN_NotEqualToItself\/oneapi_int64",
           "value_param": "oneapi_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 257
+        },
+        {
+          "name": "NaN_NotEqualToItself\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 257
+        },
+        {
+          "name": "NaN_NotEqualToItself\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 257
+        },
+        {
+          "name": "NaN_NotEqualToItself\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 257
+        },
+        {
+          "name": "NaN_NotEqualToItself\/rocm_int64",
+          "value_param": "rocm_int64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
           "line": 257
         },
@@ -1357,6 +1669,30 @@
           "line": 287
         },
         {
+          "name": "NaN_ComparisonAlwaysFalse\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 287
+        },
+        {
+          "name": "NaN_ComparisonAlwaysFalse\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 287
+        },
+        {
+          "name": "NaN_ComparisonAlwaysFalse\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 287
+        },
+        {
+          "name": "NaN_ComparisonAlwaysFalse\/rocm_int64",
+          "value_param": "rocm_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 287
+        },
+        {
           "name": "Infinity_Comparisons\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
@@ -1451,12 +1787,36 @@
           "value_param": "oneapi_int64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
           "line": 325
+        },
+        {
+          "name": "Infinity_Comparisons\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 325
+        },
+        {
+          "name": "Infinity_Comparisons\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 325
+        },
+        {
+          "name": "Infinity_Comparisons\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 325
+        },
+        {
+          "name": "Infinity_Comparisons\/rocm_int64",
+          "value_param": "rocm_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 325
         }
       ]
     },
     {
       "name": "IntEdgeCases\/ComparisonOpsIntEdgeCases",
-      "tests": 48,
+      "tests": 60,
       "testsuite": [
         {
           "name": "MaxValue_Comparisons\/cpu_float32",
@@ -1551,6 +1911,30 @@
         {
           "name": "MaxValue_Comparisons\/oneapi_int64",
           "value_param": "oneapi_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 376
+        },
+        {
+          "name": "MaxValue_Comparisons\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 376
+        },
+        {
+          "name": "MaxValue_Comparisons\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 376
+        },
+        {
+          "name": "MaxValue_Comparisons\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 376
+        },
+        {
+          "name": "MaxValue_Comparisons\/rocm_int64",
+          "value_param": "rocm_int64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
           "line": 376
         },
@@ -1651,6 +2035,30 @@
           "line": 411
         },
         {
+          "name": "MinValue_Comparisons\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 411
+        },
+        {
+          "name": "MinValue_Comparisons\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 411
+        },
+        {
+          "name": "MinValue_Comparisons\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 411
+        },
+        {
+          "name": "MinValue_Comparisons\/rocm_int64",
+          "value_param": "rocm_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 411
+        },
+        {
           "name": "Zero_Comparisons\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
@@ -1743,6 +2151,30 @@
         {
           "name": "Zero_Comparisons\/oneapi_int64",
           "value_param": "oneapi_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 446
+        },
+        {
+          "name": "Zero_Comparisons\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 446
+        },
+        {
+          "name": "Zero_Comparisons\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 446
+        },
+        {
+          "name": "Zero_Comparisons\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
+          "line": 446
+        },
+        {
+          "name": "Zero_Comparisons\/rocm_int64",
+          "value_param": "rocm_int64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_comparison_ops_multidtype.cpp",
           "line": 446
         }

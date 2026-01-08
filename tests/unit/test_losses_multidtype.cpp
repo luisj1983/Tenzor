@@ -579,7 +579,7 @@ TEST_P(LossMultiDTypeTest, L1LossGradientRequired) {
 // ============================================================================
 
 std::vector<LossDTypeParam> GenerateLossDTypeCombinations() {
-    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi"};
+    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "rocm"};
 
     // Loss functions should work with Float32 and Float64
     // Float32: Standard training precision

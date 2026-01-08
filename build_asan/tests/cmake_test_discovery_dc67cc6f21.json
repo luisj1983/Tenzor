@@ -1,10 +1,10 @@
 {
-  "tests": 240,
+  "tests": 300,
   "name": "AllTests",
   "testsuites": [
     {
       "name": "AllBackendsAllDTypes\/GRUCellMultiDTypeTest",
-      "tests": 40,
+      "tests": 50,
       "testsuite": [
         {
           "name": "BasicForward\/cpu_float32",
@@ -51,6 +51,18 @@
         {
           "name": "BasicForward\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 118
+        },
+        {
+          "name": "BasicForward\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 118
+        },
+        {
+          "name": "BasicForward\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
           "line": 118
         },
@@ -103,6 +115,18 @@
           "line": 135
         },
         {
+          "name": "NoInitialHidden\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 135
+        },
+        {
+          "name": "NoInitialHidden\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 135
+        },
+        {
           "name": "NoBias\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
@@ -147,6 +171,18 @@
         {
           "name": "NoBias\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 151
+        },
+        {
+          "name": "NoBias\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 151
+        },
+        {
+          "name": "NoBias\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
           "line": 151
         },
@@ -199,6 +235,18 @@
           "line": 166
         },
         {
+          "name": "HiddenStateEvolution\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 166
+        },
+        {
+          "name": "HiddenStateEvolution\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 166
+        },
+        {
           "name": "ParameterCount\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
@@ -245,12 +293,24 @@
           "value_param": "oneapi_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
           "line": 184
+        },
+        {
+          "name": "ParameterCount\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 184
+        },
+        {
+          "name": "ParameterCount\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 184
         }
       ]
     },
     {
       "name": "AllBackendsAllDTypes\/GRUMultiDTypeTest",
-      "tests": 200,
+      "tests": 250,
       "testsuite": [
         {
           "name": "BasicForward\/cpu_float32",
@@ -297,6 +357,18 @@
         {
           "name": "BasicForward\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 266
+        },
+        {
+          "name": "BasicForward\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 266
+        },
+        {
+          "name": "BasicForward\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
           "line": 266
         },
@@ -349,6 +421,18 @@
           "line": 290
         },
         {
+          "name": "MultiLayer\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 290
+        },
+        {
+          "name": "MultiLayer\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 290
+        },
+        {
           "name": "BatchFirst\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
@@ -393,6 +477,18 @@
         {
           "name": "BatchFirst\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 308
+        },
+        {
+          "name": "BatchFirst\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 308
+        },
+        {
+          "name": "BatchFirst\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
           "line": 308
         },
@@ -445,6 +541,18 @@
           "line": 324
         },
         {
+          "name": "Bidirectional\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 324
+        },
+        {
+          "name": "Bidirectional\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 324
+        },
+        {
           "name": "BidirectionalMultiLayer\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
@@ -489,6 +597,18 @@
         {
           "name": "BidirectionalMultiLayer\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 342
+        },
+        {
+          "name": "BidirectionalMultiLayer\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 342
+        },
+        {
+          "name": "BidirectionalMultiLayer\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
           "line": 342
         },
@@ -541,6 +661,18 @@
           "line": 357
         },
         {
+          "name": "WithDropout\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 357
+        },
+        {
+          "name": "WithDropout\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 357
+        },
+        {
           "name": "InitialHiddenState\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
@@ -585,6 +717,18 @@
         {
           "name": "InitialHiddenState\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 373
+        },
+        {
+          "name": "InitialHiddenState\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 373
+        },
+        {
+          "name": "InitialHiddenState\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
           "line": 373
         },
@@ -637,6 +781,18 @@
           "line": 389
         },
         {
+          "name": "SequenceLengthVariation\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 389
+        },
+        {
+          "name": "SequenceLengthVariation\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 389
+        },
+        {
           "name": "BatchSizeVariation\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
@@ -681,6 +837,18 @@
         {
           "name": "BatchSizeVariation\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 410
+        },
+        {
+          "name": "BatchSizeVariation\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 410
+        },
+        {
+          "name": "BatchSizeVariation\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
           "line": 410
         },
@@ -733,6 +901,18 @@
           "line": 431
         },
         {
+          "name": "SingleTimestep\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 431
+        },
+        {
+          "name": "SingleTimestep\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 431
+        },
+        {
           "name": "OutputConsistency\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
@@ -777,6 +957,18 @@
         {
           "name": "OutputConsistency\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 445
+        },
+        {
+          "name": "OutputConsistency\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 445
+        },
+        {
+          "name": "OutputConsistency\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
           "line": 445
         },
@@ -829,6 +1021,18 @@
           "line": 464
         },
         {
+          "name": "GradientFlow\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 464
+        },
+        {
+          "name": "GradientFlow\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 464
+        },
+        {
           "name": "TrainingMode\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
@@ -873,6 +1077,18 @@
         {
           "name": "TrainingMode\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 486
+        },
+        {
+          "name": "TrainingMode\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 486
+        },
+        {
+          "name": "TrainingMode\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
           "line": 486
         },
@@ -925,6 +1141,18 @@
           "line": 501
         },
         {
+          "name": "ParameterCount\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 501
+        },
+        {
+          "name": "ParameterCount\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 501
+        },
+        {
           "name": "LargeHidden\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
@@ -969,6 +1197,18 @@
         {
           "name": "LargeHidden\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 516
+        },
+        {
+          "name": "LargeHidden\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 516
+        },
+        {
+          "name": "LargeHidden\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
           "line": 516
         },
@@ -1021,6 +1261,18 @@
           "line": 530
         },
         {
+          "name": "VeryDeepNetwork\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 530
+        },
+        {
+          "name": "VeryDeepNetwork\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 530
+        },
+        {
           "name": "LongSequence\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
@@ -1065,6 +1317,18 @@
         {
           "name": "LongSequence\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 544
+        },
+        {
+          "name": "LongSequence\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 544
+        },
+        {
+          "name": "LongSequence\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
           "line": 544
         },
@@ -1117,6 +1381,18 @@
           "line": 558
         },
         {
+          "name": "InvalidNumLayers\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 558
+        },
+        {
+          "name": "InvalidNumLayers\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 558
+        },
+        {
           "name": "InvalidDropout\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
@@ -1161,6 +1437,18 @@
         {
           "name": "InvalidDropout\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 567
+        },
+        {
+          "name": "InvalidDropout\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 567
+        },
+        {
+          "name": "InvalidDropout\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
           "line": 567
         },
@@ -1213,6 +1501,18 @@
           "line": 576
         },
         {
+          "name": "GateOutputRanges\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 576
+        },
+        {
+          "name": "GateOutputRanges\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 576
+        },
+        {
           "name": "BatchFirstBidirectional\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
@@ -1257,6 +1557,18 @@
         {
           "name": "BatchFirstBidirectional\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 617
+        },
+        {
+          "name": "BatchFirstBidirectional\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 617
+        },
+        {
+          "name": "BatchFirstBidirectional\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
           "line": 617
         },
@@ -1309,6 +1621,18 @@
           "line": 633
         },
         {
+          "name": "ComparisonWithLSTM\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 633
+        },
+        {
+          "name": "ComparisonWithLSTM\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 633
+        },
+        {
           "name": "MemoryEfficiency\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
@@ -1353,6 +1677,18 @@
         {
           "name": "MemoryEfficiency\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 661
+        },
+        {
+          "name": "MemoryEfficiency\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 661
+        },
+        {
+          "name": "MemoryEfficiency\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
           "line": 661
         },
@@ -1405,6 +1741,18 @@
           "line": 689
         },
         {
+          "name": "NumericalPrecision\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 689
+        },
+        {
+          "name": "NumericalPrecision\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 689
+        },
+        {
           "name": "CrossDTypeConsistency\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
@@ -1449,6 +1797,18 @@
         {
           "name": "CrossDTypeConsistency\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 727
+        },
+        {
+          "name": "CrossDTypeConsistency\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
+          "line": 727
+        },
+        {
+          "name": "CrossDTypeConsistency\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_gru_multidtype.cpp",
           "line": 727
         }

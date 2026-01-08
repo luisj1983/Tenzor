@@ -1,10 +1,10 @@
 {
-  "tests": 84,
+  "tests": 105,
   "name": "AllTests",
   "testsuites": [
     {
       "name": "AllBackends\/MultiheadAttentionTest",
-      "tests": 52,
+      "tests": 65,
       "testsuite": [
         {
           "name": "Construction\/cpu",
@@ -27,6 +27,12 @@
         {
           "name": "Construction\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
+          "line": 28
+        },
+        {
+          "name": "Construction\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
           "line": 28
         },
@@ -55,6 +61,12 @@
           "line": 40
         },
         {
+          "name": "InvalidConstruction\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
+          "line": 40
+        },
+        {
           "name": "SelfAttentionShape\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
@@ -75,6 +87,12 @@
         {
           "name": "SelfAttentionShape\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
+          "line": 56
+        },
+        {
+          "name": "SelfAttentionShape\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
           "line": 56
         },
@@ -103,6 +121,12 @@
           "line": 82
         },
         {
+          "name": "CrossAttentionShape\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
+          "line": 82
+        },
+        {
           "name": "BatchFirstFalse\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
@@ -123,6 +147,12 @@
         {
           "name": "BatchFirstFalse\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
+          "line": 109
+        },
+        {
+          "name": "BatchFirstFalse\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
           "line": 109
         },
@@ -151,6 +181,12 @@
           "line": 127
         },
         {
+          "name": "SimpleForwardInterface\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
+          "line": 127
+        },
+        {
           "name": "WithoutAttentionWeights\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
@@ -171,6 +207,12 @@
         {
           "name": "WithoutAttentionWeights\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
+          "line": 139
+        },
+        {
+          "name": "WithoutAttentionWeights\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
           "line": 139
         },
@@ -199,6 +241,12 @@
           "line": 156
         },
         {
+          "name": "SingleHead\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
+          "line": 156
+        },
+        {
           "name": "LargeSequence\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
@@ -219,6 +267,12 @@
         {
           "name": "LargeSequence\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
+          "line": 171
+        },
+        {
+          "name": "LargeSequence\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
           "line": 171
         },
@@ -247,6 +301,12 @@
           "line": 183
         },
         {
+          "name": "SmallBatch\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
+          "line": 183
+        },
+        {
           "name": "WithDropout\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
@@ -267,6 +327,12 @@
         {
           "name": "WithDropout\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
+          "line": 196
+        },
+        {
+          "name": "WithDropout\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
           "line": 196
         },
@@ -295,6 +361,12 @@
           "line": 228
         },
         {
+          "name": "EvalMode\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
+          "line": 228
+        },
+        {
           "name": "DifferentKeyValueDims\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
@@ -317,12 +389,18 @@
           "value_param": "\"oneapi\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
           "line": 258
+        },
+        {
+          "name": "DifferentKeyValueDims\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
+          "line": 258
         }
       ]
     },
     {
       "name": "AllBackends\/CausalMaskTest",
-      "tests": 16,
+      "tests": 20,
       "testsuite": [
         {
           "name": "Shape\/cpu",
@@ -345,6 +423,12 @@
         {
           "name": "Shape\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
+          "line": 285
+        },
+        {
+          "name": "Shape\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
           "line": 285
         },
@@ -373,6 +457,12 @@
           "line": 294
         },
         {
+          "name": "Values\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
+          "line": 294
+        },
+        {
           "name": "SmallSize\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
@@ -393,6 +483,12 @@
         {
           "name": "SmallSize\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
+          "line": 315
+        },
+        {
+          "name": "SmallSize\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
           "line": 315
         },
@@ -419,12 +515,18 @@
           "value_param": "\"oneapi\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
           "line": 326
+        },
+        {
+          "name": "MediumSize\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
+          "line": 326
         }
       ]
     },
     {
       "name": "AllBackends\/AttentionIntegrationTest",
-      "tests": 16,
+      "tests": 20,
       "testsuite": [
         {
           "name": "ForwardBackward\/cpu",
@@ -447,6 +549,12 @@
         {
           "name": "ForwardBackward\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
+          "line": 351
+        },
+        {
+          "name": "ForwardBackward\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
           "line": 351
         },
@@ -475,6 +583,12 @@
           "line": 371
         },
         {
+          "name": "ParameterCount\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
+          "line": 371
+        },
+        {
           "name": "TrainEvalSwitch\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
@@ -499,6 +613,12 @@
           "line": 381
         },
         {
+          "name": "TrainEvalSwitch\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
+          "line": 381
+        },
+        {
           "name": "Deterministic\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
@@ -519,6 +639,12 @@
         {
           "name": "Deterministic\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
+          "line": 393
+        },
+        {
+          "name": "Deterministic\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_attention.cpp",
           "line": 393
         }

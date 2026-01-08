@@ -1,10 +1,10 @@
 {
-  "tests": 72,
+  "tests": 90,
   "name": "AllTests",
   "testsuites": [
     {
       "name": "AllBackendsAllDTypes\/BroadcastingMultiDTypeTest",
-      "tests": 72,
+      "tests": 90,
       "testsuite": [
         {
           "name": "AddBroadcast_ScalarToVector\/cpu_float32",
@@ -75,6 +75,24 @@
         {
           "name": "AddBroadcast_ScalarToVector\/oneapi_int32",
           "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_broadcasting_multidtype.cpp",
+          "line": 119
+        },
+        {
+          "name": "AddBroadcast_ScalarToVector\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_broadcasting_multidtype.cpp",
+          "line": 119
+        },
+        {
+          "name": "AddBroadcast_ScalarToVector\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_broadcasting_multidtype.cpp",
+          "line": 119
+        },
+        {
+          "name": "AddBroadcast_ScalarToVector\/rocm_int32",
+          "value_param": "rocm_int32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_broadcasting_multidtype.cpp",
           "line": 119
         },
@@ -151,6 +169,24 @@
           "line": 160
         },
         {
+          "name": "AddBroadcast_RowToMatrix\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_broadcasting_multidtype.cpp",
+          "line": 160
+        },
+        {
+          "name": "AddBroadcast_RowToMatrix\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_broadcasting_multidtype.cpp",
+          "line": 160
+        },
+        {
+          "name": "AddBroadcast_RowToMatrix\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_broadcasting_multidtype.cpp",
+          "line": 160
+        },
+        {
           "name": "AddBroadcast_ColumnToMatrix\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_broadcasting_multidtype.cpp",
@@ -219,6 +255,24 @@
         {
           "name": "AddBroadcast_ColumnToMatrix\/oneapi_int32",
           "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_broadcasting_multidtype.cpp",
+          "line": 203
+        },
+        {
+          "name": "AddBroadcast_ColumnToMatrix\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_broadcasting_multidtype.cpp",
+          "line": 203
+        },
+        {
+          "name": "AddBroadcast_ColumnToMatrix\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_broadcasting_multidtype.cpp",
+          "line": 203
+        },
+        {
+          "name": "AddBroadcast_ColumnToMatrix\/rocm_int32",
+          "value_param": "rocm_int32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_broadcasting_multidtype.cpp",
           "line": 203
         },
@@ -295,6 +349,24 @@
           "line": 246
         },
         {
+          "name": "AddBroadcast_ScalarToMatrix\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_broadcasting_multidtype.cpp",
+          "line": 246
+        },
+        {
+          "name": "AddBroadcast_ScalarToMatrix\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_broadcasting_multidtype.cpp",
+          "line": 246
+        },
+        {
+          "name": "AddBroadcast_ScalarToMatrix\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_broadcasting_multidtype.cpp",
+          "line": 246
+        },
+        {
           "name": "AddBroadcast_DifferentDimensions\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_broadcasting_multidtype.cpp",
@@ -367,6 +439,24 @@
           "line": 289
         },
         {
+          "name": "AddBroadcast_DifferentDimensions\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_broadcasting_multidtype.cpp",
+          "line": 289
+        },
+        {
+          "name": "AddBroadcast_DifferentDimensions\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_broadcasting_multidtype.cpp",
+          "line": 289
+        },
+        {
+          "name": "AddBroadcast_DifferentDimensions\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_broadcasting_multidtype.cpp",
+          "line": 289
+        },
+        {
           "name": "AddNoBroadcast_SameShape\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_broadcasting_multidtype.cpp",
@@ -435,6 +525,24 @@
         {
           "name": "AddNoBroadcast_SameShape\/oneapi_int32",
           "value_param": "oneapi_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_broadcasting_multidtype.cpp",
+          "line": 332
+        },
+        {
+          "name": "AddNoBroadcast_SameShape\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_broadcasting_multidtype.cpp",
+          "line": 332
+        },
+        {
+          "name": "AddNoBroadcast_SameShape\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_broadcasting_multidtype.cpp",
+          "line": 332
+        },
+        {
+          "name": "AddNoBroadcast_SameShape\/rocm_int32",
+          "value_param": "rocm_int32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_broadcasting_multidtype.cpp",
           "line": 332
         }

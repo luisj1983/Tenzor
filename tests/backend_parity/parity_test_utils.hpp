@@ -53,7 +53,13 @@ inline std::vector<Device> get_available_backends() {
         std::cout << "Vulkan backend not available, skipping Vulkan tests" << std::endl;
     }
 
-    // SKIP ROCm - causes system crashes
+    // Check ROCm availability
+    try {
+        auto t = zeros({2, 2}, DType::Float32, Device::rocm(0));
+        backends.push_back(Device::rocm(0));
+    } catch (...) {
+        std::cout << "ROCm backend not available, skipping ROCm tests" << std::endl;
+    }
 
     return backends;
 }

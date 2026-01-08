@@ -319,7 +319,7 @@ TEST_P(ModelCheckpointMultiDTypeTest, AutoCheckpointMetricMode) {
 // ==============================================================================
 
 std::vector<BackendDTypeParam> GenerateCheckpointCombinations() {
-    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi"};
+    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "rocm"};
 
     // Float32 and Float64 for model parameters
     std::vector<std::pair<DType, std::string>> dtypes = {

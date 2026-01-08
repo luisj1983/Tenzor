@@ -125,7 +125,7 @@ protected:
 INSTANTIATE_TEST_SUITE_P(
     AllBackends,
     HRMMultiBackendTest,
-    ::testing::Values("cpu", "cuda", "vulkan", "oneapi"),
+    ::testing::Values("cpu", "cuda", "vulkan", "oneapi", "rocm"),
     [](const ::testing::TestParamInfo<std::string>& info) {
         return info.param;
     }

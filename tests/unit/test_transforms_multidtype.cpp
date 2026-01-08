@@ -344,7 +344,7 @@ TEST_P(TransformMultiDTypeTest, Combined_PermuteTranspose) {
 // ==============================================================================
 
 std::vector<BackendDTypeParam> GenerateTransformCombinations() {
-    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi"};
+    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "rocm"};
 
     std::vector<std::pair<DType, std::string>> dtypes = {
         {DType::Float32, "float32"},

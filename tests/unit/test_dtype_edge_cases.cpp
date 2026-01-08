@@ -714,7 +714,7 @@ TEST_P(ComparisonOpsTest, BoolComparisons) {
 // ============================================================================
 
 std::vector<BackendDTypeParam> GenerateDTypeEdgeCaseCombinations() {
-    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi"};
+    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "rocm"};
 
     std::vector<std::pair<DType, std::string>> dtypes = {
         // Integer types for overflow tests

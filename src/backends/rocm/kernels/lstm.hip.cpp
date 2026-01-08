@@ -1,5 +1,6 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
+#include <rocblas/rocblas.h>
 #include <cmath>
 #include <cfloat>
 #include <cstdio>
@@ -33,6 +34,17 @@ constexpr int BLOCK_SIZE = 256;
 
 inline int get_num_blocks(int64_t n, int block_size = BLOCK_SIZE) {
     return (n + block_size - 1) / block_size;
+}
+
+// Kernel to add bias (broadcasted across batch dimension)
+template<typename T>
+__global__ void add_bias_kernel(const T* __restrict__ bias, T* __restrict__ gates,
+                                 int64_t batch, int64_t gate_size) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < batch * gate_size) {
+        int64_t g = idx % gate_size;
+        gates[idx] += bias[g];
+    }
 }
 
 // ==================================================================
@@ -395,6 +407,214 @@ auto lstm_cell_backward_kernel(
     HIP_CHECK(hipGetLastError());
 
     return {grad_gates, grad_c_prev};
+}
+
+// ============================================================================
+// Full Sequence LSTM Forward
+// ============================================================================
+
+/**
+ * @brief Full sequence LSTM forward pass
+ *
+ * Processes entire sequence using rocBLAS for efficient matrix operations.
+ *
+ * @param input Input sequence (seq_len, batch, input_size)
+ * @param W_ih Input-to-hidden weights (4*hidden, input_size)
+ * @param W_hh Hidden-to-hidden weights (4*hidden, hidden)
+ * @param bias Combined bias (4*hidden) or empty tensor
+ * @param h0 Initial hidden state (batch, hidden)
+ * @param c0 Initial cell state (batch, hidden)
+ * @param stream HIP stream for async execution
+ * @return vector of [output, h_n, c_n]
+ */
+auto lstm_forward_kernel(
+    const Tensor& input,
+    const Tensor& W_ih,
+    const Tensor& W_hh,
+    const Tensor& bias,
+    const Tensor& h0,
+    const Tensor& c0,
+    hipStream_t stream) -> std::vector<Tensor> {
+
+    // Get dimensions
+    auto input_shape = input.shape();
+    int64_t seq_len = input_shape[0];
+    int64_t batch = input_shape[1];
+    int64_t input_size = input_shape[2];
+    int64_t hidden = h0.shape()[1];
+
+    // Allocate output tensors
+    Tensor output({seq_len, batch, hidden}, input.dtype(), input.device());
+    Tensor h_n({batch, hidden}, input.dtype(), input.device());
+    Tensor c_n({batch, hidden}, input.dtype(), input.device());
+
+    // Temporary tensors for gate computations
+    // gates shape: (batch, 4 * hidden)
+    Tensor gates({batch, 4 * hidden}, input.dtype(), input.device());
+
+    // Copy initial states to current states
+    Tensor h_t({batch, hidden}, input.dtype(), input.device());
+    Tensor c_t({batch, hidden}, input.dtype(), input.device());
+
+    // Copy h0 and c0 to h_t and c_t
+    hipMemcpyAsync(h_t.data<void>(), h0.data<void>(),
+                   batch * hidden * dtype_size(input.dtype()),
+                   hipMemcpyDeviceToDevice, stream);
+    hipMemcpyAsync(c_t.data<void>(), c0.data<void>(),
+                   batch * hidden * dtype_size(input.dtype()),
+                   hipMemcpyDeviceToDevice, stream);
+
+    if (input.dtype() == DType::Float32) {
+        // Get rocBLAS handle
+        rocblas_handle handle;
+        rocblas_create_handle(&handle);
+        rocblas_set_stream(handle, stream);
+
+        const float alpha = 1.0f;
+        const float beta_zero = 0.0f;
+        const float beta_one = 1.0f;
+
+        const float* W_ih_ptr = W_ih.data<float>();
+        const float* W_hh_ptr = W_hh.data<float>();
+        const float* input_ptr = input.data<float>();
+        const float* bias_ptr = bias.numel() > 0 ? bias.data<float>() : nullptr;
+        float* gates_ptr = gates.data<float>();
+        float* h_t_ptr = h_t.data<float>();
+        float* c_t_ptr = c_t.data<float>();
+        float* output_ptr = output.data<float>();
+
+        // Process each timestep
+        for (int64_t t = 0; t < seq_len; ++t) {
+            const float* x_t = input_ptr + t * batch * input_size;
+
+            // Compute input contribution: gates = x_t @ W_ih^T
+            // x_t: (batch, input_size), W_ih: (4*hidden, input_size)
+            // Result: (batch, 4*hidden)
+            rocblas_sgemm(handle, rocblas_operation_transpose, rocblas_operation_none,
+                         4 * hidden, batch, input_size,
+                         &alpha,
+                         W_ih_ptr, input_size,
+                         x_t, input_size,
+                         &beta_zero,
+                         gates_ptr, 4 * hidden);
+
+            // Add hidden contribution: gates += h_t @ W_hh^T
+            rocblas_sgemm(handle, rocblas_operation_transpose, rocblas_operation_none,
+                         4 * hidden, batch, hidden,
+                         &alpha,
+                         W_hh_ptr, hidden,
+                         h_t_ptr, hidden,
+                         &beta_one,
+                         gates_ptr, 4 * hidden);
+
+            // Add bias if present
+            if (bias_ptr != nullptr) {
+                int64_t total = batch * 4 * hidden;
+                int num_blocks = get_num_blocks(total);
+                hipLaunchKernelGGL(add_bias_kernel<float>,
+                    dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                    bias_ptr, gates_ptr, batch, 4 * hidden);
+            }
+
+            // Apply LSTM cell operations using fused kernel
+            hipLaunchKernelGGL(lstm_cell_forward_fused<float>,
+                              dim3(get_num_blocks(batch * hidden)), dim3(BLOCK_SIZE), 0, stream,
+                              gates_ptr, c_t_ptr, h_t_ptr, c_t_ptr,
+                              batch, hidden);
+
+            // Copy h_t to output[t]
+            hipMemcpyAsync(output_ptr + t * batch * hidden, h_t_ptr,
+                          batch * hidden * sizeof(float),
+                          hipMemcpyDeviceToDevice, stream);
+        }
+
+        rocblas_destroy_handle(handle);
+
+        // Copy final states
+        hipMemcpyAsync(h_n.data<float>(), h_t_ptr,
+                      batch * hidden * sizeof(float),
+                      hipMemcpyDeviceToDevice, stream);
+        hipMemcpyAsync(c_n.data<float>(), c_t_ptr,
+                      batch * hidden * sizeof(float),
+                      hipMemcpyDeviceToDevice, stream);
+    } else if (input.dtype() == DType::Float64) {
+        // Get rocBLAS handle
+        rocblas_handle handle;
+        rocblas_create_handle(&handle);
+        rocblas_set_stream(handle, stream);
+
+        const double alpha = 1.0;
+        const double beta_zero = 0.0;
+        const double beta_one = 1.0;
+
+        const double* W_ih_ptr = W_ih.data<double>();
+        const double* W_hh_ptr = W_hh.data<double>();
+        const double* input_ptr = input.data<double>();
+        const double* bias_ptr = bias.numel() > 0 ? bias.data<double>() : nullptr;
+        double* gates_ptr = gates.data<double>();
+        double* h_t_ptr = h_t.data<double>();
+        double* c_t_ptr = c_t.data<double>();
+        double* output_ptr = output.data<double>();
+
+        // Process each timestep
+        for (int64_t t = 0; t < seq_len; ++t) {
+            const double* x_t = input_ptr + t * batch * input_size;
+
+            // Compute input contribution: gates = x_t @ W_ih^T
+            rocblas_dgemm(handle, rocblas_operation_transpose, rocblas_operation_none,
+                         4 * hidden, batch, input_size,
+                         &alpha,
+                         W_ih_ptr, input_size,
+                         x_t, input_size,
+                         &beta_zero,
+                         gates_ptr, 4 * hidden);
+
+            // Add hidden contribution: gates += h_t @ W_hh^T
+            rocblas_dgemm(handle, rocblas_operation_transpose, rocblas_operation_none,
+                         4 * hidden, batch, hidden,
+                         &alpha,
+                         W_hh_ptr, hidden,
+                         h_t_ptr, hidden,
+                         &beta_one,
+                         gates_ptr, 4 * hidden);
+
+            // Add bias if present
+            if (bias_ptr != nullptr) {
+                int64_t total = batch * 4 * hidden;
+                int num_blocks = get_num_blocks(total);
+                hipLaunchKernelGGL(add_bias_kernel<double>,
+                    dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                    bias_ptr, gates_ptr, batch, 4 * hidden);
+            }
+
+            // Apply LSTM cell operations using fused kernel
+            hipLaunchKernelGGL(lstm_cell_forward_fused<double>,
+                              dim3(get_num_blocks(batch * hidden)), dim3(BLOCK_SIZE), 0, stream,
+                              gates_ptr, c_t_ptr, h_t_ptr, c_t_ptr,
+                              batch, hidden);
+
+            // Copy h_t to output[t]
+            hipMemcpyAsync(output_ptr + t * batch * hidden, h_t_ptr,
+                          batch * hidden * sizeof(double),
+                          hipMemcpyDeviceToDevice, stream);
+        }
+
+        rocblas_destroy_handle(handle);
+
+        // Copy final states
+        hipMemcpyAsync(h_n.data<double>(), h_t_ptr,
+                      batch * hidden * sizeof(double),
+                      hipMemcpyDeviceToDevice, stream);
+        hipMemcpyAsync(c_n.data<double>(), c_t_ptr,
+                      batch * hidden * sizeof(double),
+                      hipMemcpyDeviceToDevice, stream);
+    } else {
+        throw std::runtime_error("LSTM forward only supports Float32 and Float64");
+    }
+
+    HIP_CHECK(hipGetLastError());
+
+    return {output, h_n, c_n};
 }
 
 } // namespace rocm

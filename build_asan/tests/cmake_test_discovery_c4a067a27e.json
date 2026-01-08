@@ -1,10 +1,10 @@
 {
-  "tests": 60,
+  "tests": 75,
   "name": "AllTests",
   "testsuites": [
     {
       "name": "AllBackends\/EmbeddingTest",
-      "tests": 60,
+      "tests": 75,
       "testsuite": [
         {
           "name": "BasicLookup\/cpu",
@@ -27,6 +27,12 @@
         {
           "name": "BasicLookup\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 30
+        },
+        {
+          "name": "BasicLookup\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
           "line": 30
         },
@@ -55,6 +61,12 @@
           "line": 71
         },
         {
+          "name": "MultiDimensionalInput\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 71
+        },
+        {
           "name": "PaddingIdx\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
@@ -75,6 +87,12 @@
         {
           "name": "PaddingIdx\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 99
+        },
+        {
+          "name": "PaddingIdx\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
           "line": 99
         },
@@ -103,6 +121,12 @@
           "line": 147
         },
         {
+          "name": "MaxNormRenormalization\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 147
+        },
+        {
           "name": "OutOfRangeIndex\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
@@ -123,6 +147,12 @@
         {
           "name": "OutOfRangeIndex\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 188
+        },
+        {
+          "name": "OutOfRangeIndex\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
           "line": 188
         },
@@ -151,6 +181,12 @@
           "line": 208
         },
         {
+          "name": "WeightAccess\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 208
+        },
+        {
           "name": "EmbeddingBagSum\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
@@ -171,6 +207,12 @@
         {
           "name": "EmbeddingBagSum\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 232
+        },
+        {
+          "name": "EmbeddingBagSum\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
           "line": 232
         },
@@ -199,6 +241,12 @@
           "line": 275
         },
         {
+          "name": "EmbeddingBagMean\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 275
+        },
+        {
           "name": "EmbeddingBagMax\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
@@ -219,6 +267,12 @@
         {
           "name": "EmbeddingBagMax\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 311
+        },
+        {
+          "name": "EmbeddingBagMax\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
           "line": 311
         },
@@ -247,6 +301,12 @@
           "line": 350
         },
         {
+          "name": "EmbeddingBagWithOffsets\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 350
+        },
+        {
           "name": "EmbeddingBagEmptyBag\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
@@ -267,6 +327,12 @@
         {
           "name": "EmbeddingBagEmptyBag\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 415
+        },
+        {
+          "name": "EmbeddingBagEmptyBag\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
           "line": 415
         },
@@ -295,6 +361,12 @@
           "line": 431
         },
         {
+          "name": "EmbeddingBagInvalidMode\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 431
+        },
+        {
           "name": "InvalidParameters\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
@@ -315,6 +387,12 @@
         {
           "name": "InvalidParameters\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 439
+        },
+        {
+          "name": "InvalidParameters\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
           "line": 439
         },
@@ -343,6 +421,12 @@
           "line": 463
         },
         {
+          "name": "EmbeddingInModule\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 463
+        },
+        {
           "name": "EmbeddingTrainEvalMode\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
@@ -363,6 +447,12 @@
         {
           "name": "EmbeddingTrainEvalMode\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
+          "line": 477
+        },
+        {
+          "name": "EmbeddingTrainEvalMode\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_embedding.cpp",
           "line": 477
         }

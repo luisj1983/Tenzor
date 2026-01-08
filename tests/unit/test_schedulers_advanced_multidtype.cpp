@@ -550,7 +550,7 @@ TEST_P(SchedulerAdvancedMultiDTypeTest, CyclicLR_PrecisionTest) {
 // ============================================================================
 
 std::vector<SchedulerDTypeParam> GenerateSchedulerDTypeCombinations() {
-    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi"};
+    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "rocm"};
 
     // Schedulers operate on learning rates (double precision internally)
     // But test with different parameter dtypes

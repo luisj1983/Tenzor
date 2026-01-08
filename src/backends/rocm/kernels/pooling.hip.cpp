@@ -603,5 +603,184 @@ auto adaptive_maxpool2d_hip(
     return {output, indices};
 }
 
+// ==============================================================================
+// Adaptive Average Pooling 2D Backward
+// ==============================================================================
+
+template<typename T>
+__global__ void adaptive_avgpool2d_backward_kernel(
+    const T* grad_output,
+    T* grad_input,
+    int64_t N,
+    int64_t C,
+    int64_t in_H,
+    int64_t in_W,
+    int64_t out_H,
+    int64_t out_W
+) {
+    int64_t total = N * C * in_H * in_W;
+
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < total;
+         idx += blockDim.x * gridDim.x) {
+
+        int64_t iw = idx % in_W;
+        int64_t ih = (idx / in_W) % in_H;
+        int64_t c = (idx / (in_W * in_H)) % C;
+        int64_t n = idx / (in_W * in_H * C);
+
+        T sum = T(0);
+
+        // Find all output positions that this input contributes to
+        for (int64_t oh = 0; oh < out_H; ++oh) {
+            int64_t start_h = (ih * out_H) / in_H;
+            int64_t end_h = ((ih + 1) * out_H + in_H - 1) / in_H;
+
+            if (oh < start_h || oh >= end_h) continue;
+
+            int64_t pool_start_h = (oh * in_H) / out_H;
+            int64_t pool_end_h = ((oh + 1) * in_H + out_H - 1) / out_H;
+            if (ih < pool_start_h || ih >= pool_end_h) continue;
+
+            for (int64_t ow = 0; ow < out_W; ++ow) {
+                int64_t start_w = (iw * out_W) / in_W;
+                int64_t end_w = ((iw + 1) * out_W + in_W - 1) / in_W;
+
+                if (ow < start_w || ow >= end_w) continue;
+
+                int64_t pool_start_w = (ow * in_W) / out_W;
+                int64_t pool_end_w = ((ow + 1) * in_W + out_W - 1) / out_W;
+                if (iw < pool_start_w || iw >= pool_end_w) continue;
+
+                T pool_size = T((pool_end_h - pool_start_h) * (pool_end_w - pool_start_w));
+                int64_t grad_idx = n * (C * out_H * out_W) + c * (out_H * out_W) + oh * out_W + ow;
+                sum += grad_output[grad_idx] / pool_size;
+            }
+        }
+
+        grad_input[idx] = sum;
+    }
+}
+
+auto adaptive_avgpool2d_backward_hip(
+    const Tensor& grad_output,
+    const Tensor& input,
+    hipStream_t stream
+) -> Tensor {
+    auto input_shape = input.shape();
+    auto grad_shape = grad_output.shape();
+
+    int64_t N = input_shape[0];
+    int64_t C = input_shape[1];
+    int64_t in_H = input_shape[2];
+    int64_t in_W = input_shape[3];
+    int64_t out_H = grad_shape[2];
+    int64_t out_W = grad_shape[3];
+
+    Tensor grad_input(std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                      input.dtype(), input.device());
+
+    int64_t total = grad_input.numel();
+    int threads = 256;
+    int blocks = (total + threads - 1) / threads;
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(adaptive_avgpool2d_backward_kernel<float>,
+            dim3(blocks), dim3(threads), 0, stream,
+            grad_output.data<float>(),
+            grad_input.data<float>(),
+            N, C, in_H, in_W, out_H, out_W);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(adaptive_avgpool2d_backward_kernel<double>,
+            dim3(blocks), dim3(threads), 0, stream,
+            grad_output.data<double>(),
+            grad_input.data<double>(),
+            N, C, in_H, in_W, out_H, out_W);
+    } else {
+        throw std::runtime_error("adaptive_avgpool2d_backward: unsupported dtype");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return grad_input;
+}
+
+// ==============================================================================
+// Adaptive Max Pooling 2D Backward
+// ==============================================================================
+
+template<typename T>
+__global__ void adaptive_maxpool2d_backward_kernel(
+    const T* grad_output,
+    const int64_t* indices,
+    T* grad_input,
+    int64_t N,
+    int64_t C,
+    int64_t in_H,
+    int64_t in_W,
+    int64_t out_H,
+    int64_t out_W
+) {
+    int64_t total = N * C * out_H * out_W;
+
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < total;
+         idx += blockDim.x * gridDim.x) {
+
+        int64_t ow = idx % out_W;
+        int64_t oh = (idx / out_W) % out_H;
+        int64_t c = (idx / (out_W * out_H)) % C;
+        int64_t n = idx / (out_W * out_H * C);
+
+        int64_t max_idx = indices[idx];
+        int64_t grad_input_idx = n * (C * in_H * in_W) + c * (in_H * in_W) + max_idx;
+        atomicAdd(&grad_input[grad_input_idx], grad_output[idx]);
+    }
+}
+
+auto adaptive_maxpool2d_backward_hip(
+    const Tensor& grad_output,
+    const Tensor& indices,
+    const Tensor& input,
+    hipStream_t stream
+) -> Tensor {
+    auto input_shape = input.shape();
+    auto grad_shape = grad_output.shape();
+
+    int64_t N = input_shape[0];
+    int64_t C = input_shape[1];
+    int64_t in_H = input_shape[2];
+    int64_t in_W = input_shape[3];
+    int64_t out_H = grad_shape[2];
+    int64_t out_W = grad_shape[3];
+
+    Tensor grad_input(std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                      input.dtype(), input.device());
+    HIP_CHECK(hipMemsetAsync(grad_input.data<uint8_t>(), 0,
+        grad_input.numel() * dtype_size(input.dtype()), stream));
+
+    int64_t total = grad_output.numel();
+    int threads = 256;
+    int blocks = (total + threads - 1) / threads;
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(adaptive_maxpool2d_backward_kernel<float>,
+            dim3(blocks), dim3(threads), 0, stream,
+            grad_output.data<float>(),
+            indices.data<int64_t>(),
+            grad_input.data<float>(),
+            N, C, in_H, in_W, out_H, out_W);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(adaptive_maxpool2d_backward_kernel<double>,
+            dim3(blocks), dim3(threads), 0, stream,
+            grad_output.data<double>(),
+            indices.data<int64_t>(),
+            grad_input.data<double>(),
+            N, C, in_H, in_W, out_H, out_W);
+    } else {
+        throw std::runtime_error("adaptive_maxpool2d_backward: unsupported dtype");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return grad_input;
+}
+
 } // namespace rocm
 } // namespace tenzor

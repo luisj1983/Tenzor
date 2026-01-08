@@ -1,10 +1,10 @@
 {
-  "tests": 160,
+  "tests": 200,
   "name": "AllTests",
   "testsuites": [
     {
       "name": "AllBackendsAllDTypes\/OptimizersMultiDTypeTest",
-      "tests": 160,
+      "tests": 200,
       "testsuite": [
         {
           "name": "SGDBasicStep\/cpu_float32",
@@ -51,6 +51,18 @@
         {
           "name": "SGDBasicStep\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
+          "line": 141
+        },
+        {
+          "name": "SGDBasicStep\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
+          "line": 141
+        },
+        {
+          "name": "SGDBasicStep\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
           "line": 141
         },
@@ -103,6 +115,18 @@
           "line": 154
         },
         {
+          "name": "SGDMultipleSteps\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
+          "line": 154
+        },
+        {
+          "name": "SGDMultipleSteps\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
+          "line": 154
+        },
+        {
           "name": "SGDWithMomentum\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
@@ -147,6 +171,18 @@
         {
           "name": "SGDWithMomentum\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
+          "line": 170
+        },
+        {
+          "name": "SGDWithMomentum\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
+          "line": 170
+        },
+        {
+          "name": "SGDWithMomentum\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
           "line": 170
         },
@@ -199,6 +235,18 @@
           "line": 187
         },
         {
+          "name": "SGDWithWeightDecay\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
+          "line": 187
+        },
+        {
+          "name": "SGDWithWeightDecay\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
+          "line": 187
+        },
+        {
           "name": "SGDMultipleParameters\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
@@ -243,6 +291,18 @@
         {
           "name": "SGDMultipleParameters\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
+          "line": 199
+        },
+        {
+          "name": "SGDMultipleParameters\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
+          "line": 199
+        },
+        {
+          "name": "SGDMultipleParameters\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
           "line": 199
         },
@@ -295,6 +355,18 @@
           "line": 218
         },
         {
+          "name": "SGDZeroGrad\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
+          "line": 218
+        },
+        {
+          "name": "SGDZeroGrad\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
+          "line": 218
+        },
+        {
           "name": "SGDNoGradient\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
@@ -339,6 +411,18 @@
         {
           "name": "SGDNoGradient\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
+          "line": 231
+        },
+        {
+          "name": "SGDNoGradient\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
+          "line": 231
+        },
+        {
+          "name": "SGDNoGradient\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
           "line": 231
         },
@@ -391,6 +475,18 @@
           "line": 247
         },
         {
+          "name": "AdamBasicStep\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
+          "line": 247
+        },
+        {
+          "name": "AdamBasicStep\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
+          "line": 247
+        },
+        {
           "name": "AdamBiasCorrection\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
@@ -435,6 +531,18 @@
         {
           "name": "AdamBiasCorrection\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
+          "line": 278
+        },
+        {
+          "name": "AdamBiasCorrection\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
+          "line": 278
+        },
+        {
+          "name": "AdamBiasCorrection\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
           "line": 278
         },
@@ -487,6 +595,18 @@
           "line": 297
         },
         {
+          "name": "AdamMultipleSteps\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
+          "line": 297
+        },
+        {
+          "name": "AdamMultipleSteps\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
+          "line": 297
+        },
+        {
           "name": "AdamWithWeightDecay\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
@@ -531,6 +651,18 @@
         {
           "name": "AdamWithWeightDecay\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
+          "line": 327
+        },
+        {
+          "name": "AdamWithWeightDecay\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
+          "line": 327
+        },
+        {
+          "name": "AdamWithWeightDecay\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
           "line": 327
         },
@@ -583,6 +715,18 @@
           "line": 356
         },
         {
+          "name": "AdamConvergenceTest\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
+          "line": 356
+        },
+        {
+          "name": "AdamConvergenceTest\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
+          "line": 356
+        },
+        {
           "name": "AdamMultipleParameters\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
@@ -627,6 +771,18 @@
         {
           "name": "AdamMultipleParameters\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
+          "line": 375
+        },
+        {
+          "name": "AdamMultipleParameters\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
+          "line": 375
+        },
+        {
+          "name": "AdamMultipleParameters\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
           "line": 375
         },
@@ -679,6 +835,18 @@
           "line": 408
         },
         {
+          "name": "AdamZeroGrad\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
+          "line": 408
+        },
+        {
+          "name": "AdamZeroGrad\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
+          "line": 408
+        },
+        {
           "name": "AdamNoGradient\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
@@ -723,6 +891,18 @@
         {
           "name": "AdamNoGradient\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
+          "line": 421
+        },
+        {
+          "name": "AdamNoGradient\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
+          "line": 421
+        },
+        {
+          "name": "AdamNoGradient\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
           "line": 421
         },
@@ -775,6 +955,18 @@
           "line": 437
         },
         {
+          "name": "SGDLearningRateChange\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
+          "line": 437
+        },
+        {
+          "name": "SGDLearningRateChange\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
+          "line": 437
+        },
+        {
           "name": "AdamLearningRateChange\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
@@ -819,6 +1011,18 @@
         {
           "name": "AdamLearningRateChange\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
+          "line": 455
+        },
+        {
+          "name": "AdamLearningRateChange\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
+          "line": 455
+        },
+        {
+          "name": "AdamLearningRateChange\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
           "line": 455
         },
@@ -871,6 +1075,18 @@
           "line": 472
         },
         {
+          "name": "SGDSimpleLinearRegression\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
+          "line": 472
+        },
+        {
+          "name": "SGDSimpleLinearRegression\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
+          "line": 472
+        },
+        {
           "name": "SGDNumericalStability\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
@@ -919,6 +1135,18 @@
           "line": 558
         },
         {
+          "name": "SGDNumericalStability\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
+          "line": 558
+        },
+        {
+          "name": "SGDNumericalStability\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
+          "line": 558
+        },
+        {
           "name": "AdamNumericalStability\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
@@ -963,6 +1191,18 @@
         {
           "name": "AdamNumericalStability\/oneapi_float64",
           "value_param": "oneapi_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
+          "line": 576
+        },
+        {
+          "name": "AdamNumericalStability\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
+          "line": 576
+        },
+        {
+          "name": "AdamNumericalStability\/rocm_float64",
+          "value_param": "rocm_float64",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_optimizers_multidtype.cpp",
           "line": 576
         }

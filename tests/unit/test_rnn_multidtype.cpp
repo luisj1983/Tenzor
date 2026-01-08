@@ -600,7 +600,7 @@ TEST_P(RNNMultiDTypeTest, RNNInvalidDropout) {
 // ============================================================================
 
 std::vector<BackendDTypeParam> GenerateBackendDTypeCombinations() {
-    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi"};
+    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "rocm"};
 
     // Test with floating-point dtypes
     std::vector<std::pair<DType, std::string>> dtypes = {

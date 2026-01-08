@@ -450,5 +450,419 @@ auto flip_kernel(const Tensor& input, int64_t dim, hipStream_t stream) -> Tensor
     return result;
 }
 
+// ==============================================================================
+// Flatten Kernel - flatten dimensions start_dim to end_dim
+// ==============================================================================
+
+auto flatten_kernel(const Tensor& input, int64_t start_dim, int64_t end_dim, hipStream_t stream) -> Tensor {
+    auto input_shape = input.shape();
+    int64_t ndim = input_shape.size();
+
+    // Handle negative dimensions
+    if (start_dim < 0) start_dim += ndim;
+    if (end_dim < 0) end_dim += ndim;
+
+    // Compute flattened size
+    int64_t flattened_size = 1;
+    for (int64_t i = start_dim; i <= end_dim; ++i) {
+        flattened_size *= input_shape[i];
+    }
+
+    // Build new shape
+    std::vector<int64_t> new_shape;
+    for (int64_t i = 0; i < start_dim; ++i) {
+        new_shape.push_back(input_shape[i]);
+    }
+    new_shape.push_back(flattened_size);
+    for (int64_t i = end_dim + 1; i < ndim; ++i) {
+        new_shape.push_back(input_shape[i]);
+    }
+
+    // Flatten is just a reshape
+    return reshape_kernel(input, new_shape, stream);
+}
+
+// ==============================================================================
+// Repeat Kernel - repeat tensor along dimensions
+// ==============================================================================
+
+template<typename T>
+__global__ void repeat_kernel_impl(
+    const T* input,
+    T* output,
+    const int64_t* input_shape,
+    const int64_t* output_shape,
+    const int64_t* repeats,
+    int64_t ndim,
+    int64_t total_elements
+) {
+    HIP_GRID_STRIDE_LOOP(idx, total_elements) {
+        // Convert output index to coordinates
+        int64_t temp = idx;
+        int64_t input_offset = 0;
+        int64_t input_stride = 1;
+
+        for (int64_t d = ndim - 1; d >= 0; --d) {
+            int64_t coord = temp % output_shape[d];
+            temp /= output_shape[d];
+
+            // Map to input coordinate (wrap around)
+            int64_t input_coord = coord % input_shape[d];
+
+            // Compute input offset
+            input_offset += input_coord * input_stride;
+            input_stride *= input_shape[d];
+        }
+
+        output[idx] = input[input_offset];
+    }
+}
+
+auto repeat_kernel(const Tensor& input, const std::vector<int64_t>& repeats, hipStream_t stream) -> Tensor {
+    auto input_shape = input.shape();
+    int64_t ndim = input_shape.size();
+
+    // Compute output shape
+    std::vector<int64_t> output_shape(ndim);
+    for (int64_t i = 0; i < ndim; ++i) {
+        output_shape[i] = input_shape[i] * repeats[i];
+    }
+
+    Tensor output(output_shape, input.dtype(), input.device());
+    int64_t total_elements = output.numel();
+
+    if (total_elements == 0) return output;
+
+    // Copy shapes to device
+    int64_t* d_input_shape;
+    int64_t* d_output_shape;
+    int64_t* d_repeats;
+    HIP_CHECK(hipMalloc(&d_input_shape, ndim * sizeof(int64_t)));
+    HIP_CHECK(hipMalloc(&d_output_shape, ndim * sizeof(int64_t)));
+    HIP_CHECK(hipMalloc(&d_repeats, ndim * sizeof(int64_t)));
+    HIP_CHECK(hipMemcpy(d_input_shape, input_shape.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(d_output_shape, output_shape.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(d_repeats, repeats.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
+
+    int num_blocks = get_num_blocks(total_elements);
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(repeat_kernel_impl<float>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            input.data<float>(), output.data<float>(),
+            d_input_shape, d_output_shape, d_repeats, ndim, total_elements);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(repeat_kernel_impl<double>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            input.data<double>(), output.data<double>(),
+            d_input_shape, d_output_shape, d_repeats, ndim, total_elements);
+    } else if (input.dtype() == DType::Int32) {
+        hipLaunchKernelGGL(repeat_kernel_impl<int32_t>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            input.data<int32_t>(), output.data<int32_t>(),
+            d_input_shape, d_output_shape, d_repeats, ndim, total_elements);
+    } else if (input.dtype() == DType::Int64) {
+        hipLaunchKernelGGL(repeat_kernel_impl<int64_t>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            input.data<int64_t>(), output.data<int64_t>(),
+            d_input_shape, d_output_shape, d_repeats, ndim, total_elements);
+    } else {
+        HIP_CHECK(hipFree(d_input_shape));
+        HIP_CHECK(hipFree(d_output_shape));
+        HIP_CHECK(hipFree(d_repeats));
+        throw std::runtime_error("repeat_kernel: unsupported dtype");
+    }
+
+    HIP_CHECK(hipFree(d_input_shape));
+    HIP_CHECK(hipFree(d_output_shape));
+    HIP_CHECK(hipFree(d_repeats));
+    HIP_CHECK(hipGetLastError());
+
+    return output;
+}
+
+// ==============================================================================
+// Tile Kernel - tile tensor (like repeat but prepends dimensions if needed)
+// ==============================================================================
+
+auto tile_kernel(const Tensor& input, const std::vector<int64_t>& reps, hipStream_t stream) -> Tensor {
+    auto input_shape = input.shape();
+    int64_t ndim = input_shape.size();
+    int64_t reps_size = reps.size();
+
+    // Pad input shape or reps to match
+    std::vector<int64_t> new_input_shape;
+    std::vector<int64_t> new_reps;
+
+    if (reps_size > ndim) {
+        // Prepend 1s to input shape
+        for (int64_t i = 0; i < reps_size - ndim; ++i) {
+            new_input_shape.push_back(1);
+        }
+        for (int64_t i = 0; i < ndim; ++i) {
+            new_input_shape.push_back(input_shape[i]);
+        }
+        new_reps = reps;
+    } else {
+        new_input_shape = std::vector<int64_t>(input_shape.begin(), input_shape.end());
+        // Prepend 1s to reps
+        for (int64_t i = 0; i < ndim - reps_size; ++i) {
+            new_reps.push_back(1);
+        }
+        for (int64_t i = 0; i < reps_size; ++i) {
+            new_reps.push_back(reps[i]);
+        }
+    }
+
+    // Use repeat kernel with reshaped input
+    Tensor reshaped = reshape_kernel(input, new_input_shape, stream);
+    return repeat_kernel(reshaped, new_reps, stream);
+}
+
+// ==============================================================================
+// Stack Kernel - stack tensors along new dimension
+// ==============================================================================
+
+template<typename T>
+__global__ void stack_kernel_impl(
+    const T* const* inputs,
+    T* output,
+    int64_t num_tensors,
+    int64_t tensor_size
+) {
+    int64_t total_elements = num_tensors * tensor_size;
+
+    HIP_GRID_STRIDE_LOOP(idx, total_elements) {
+        int64_t tensor_idx = idx / tensor_size;
+        int64_t elem_idx = idx % tensor_size;
+        output[idx] = inputs[tensor_idx][elem_idx];
+    }
+}
+
+auto stack_kernel(const std::vector<Tensor>& tensors, int64_t dim, hipStream_t stream) -> std::vector<Tensor> {
+    if (tensors.empty()) {
+        throw std::runtime_error("stack_kernel: tensors list cannot be empty");
+    }
+
+    auto& first = tensors[0];
+    auto first_shape = first.shape();
+    int64_t ndim = first_shape.size();
+
+    // Handle negative dim
+    if (dim < 0) dim += ndim + 1;
+
+    // Build output shape (insert new dimension)
+    std::vector<int64_t> output_shape;
+    for (int64_t i = 0; i < dim; ++i) {
+        output_shape.push_back(first_shape[i]);
+    }
+    output_shape.push_back(static_cast<int64_t>(tensors.size()));
+    for (int64_t i = dim; i < ndim; ++i) {
+        output_shape.push_back(first_shape[i]);
+    }
+
+    Tensor output(output_shape, first.dtype(), first.device());
+
+    // Copy input pointers to device
+    std::vector<const void*> h_input_ptrs(tensors.size());
+    for (size_t i = 0; i < tensors.size(); ++i) {
+        h_input_ptrs[i] = tensors[i].data_ptr();
+    }
+
+    void** d_input_ptrs;
+    HIP_CHECK(hipMalloc(&d_input_ptrs, tensors.size() * sizeof(void*)));
+    HIP_CHECK(hipMemcpy(d_input_ptrs, h_input_ptrs.data(), tensors.size() * sizeof(void*), hipMemcpyHostToDevice));
+
+    int64_t tensor_size = first.numel();
+    int64_t total_elements = tensors.size() * tensor_size;
+    int num_blocks = get_num_blocks(total_elements);
+
+    if (first.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(stack_kernel_impl<float>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            (const float* const*)d_input_ptrs, output.data<float>(),
+            static_cast<int64_t>(tensors.size()), tensor_size);
+    } else if (first.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(stack_kernel_impl<double>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            (const double* const*)d_input_ptrs, output.data<double>(),
+            static_cast<int64_t>(tensors.size()), tensor_size);
+    } else if (first.dtype() == DType::Int32) {
+        hipLaunchKernelGGL(stack_kernel_impl<int32_t>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            (const int32_t* const*)d_input_ptrs, output.data<int32_t>(),
+            static_cast<int64_t>(tensors.size()), tensor_size);
+    } else if (first.dtype() == DType::Int64) {
+        hipLaunchKernelGGL(stack_kernel_impl<int64_t>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            (const int64_t* const*)d_input_ptrs, output.data<int64_t>(),
+            static_cast<int64_t>(tensors.size()), tensor_size);
+    } else {
+        HIP_CHECK(hipFree(d_input_ptrs));
+        throw std::runtime_error("stack_kernel: unsupported dtype");
+    }
+
+    HIP_CHECK(hipStreamSynchronize(stream));
+    HIP_CHECK(hipFree(d_input_ptrs));
+    HIP_CHECK(hipGetLastError());
+
+    return {output};
+}
+
+// ==============================================================================
+// Split Kernel - split tensor into chunks
+// ==============================================================================
+
+auto split_kernel(const Tensor& input, int64_t split_size, int64_t dim, hipStream_t stream) -> std::vector<Tensor> {
+    auto input_shape = input.shape();
+    int64_t dim_size = input_shape[dim];
+
+    std::vector<Tensor> results;
+    int64_t current_offset = 0;
+
+    while (current_offset < dim_size) {
+        int64_t current_size = std::min(split_size, dim_size - current_offset);
+
+        // Create output tensor for this split
+        std::vector<int64_t> split_shape(input_shape.begin(), input_shape.end());
+        split_shape[dim] = current_size;
+
+        Tensor split_tensor(split_shape, input.dtype(), input.device());
+
+        // Calculate dimensions for copy
+        int64_t outer_size = 1;
+        for (int64_t i = 0; i < dim; ++i) {
+            outer_size *= input_shape[i];
+        }
+
+        int64_t inner_size = 1;
+        for (size_t i = dim + 1; i < input_shape.size(); ++i) {
+            inner_size *= input_shape[i];
+        }
+
+        // Copy data
+        size_t elem_size = dtype_size(input.dtype());
+        for (int64_t o = 0; o < outer_size; ++o) {
+            const uint8_t* src = input.data<uint8_t>() +
+                (o * dim_size + current_offset) * inner_size * elem_size;
+            uint8_t* dst = split_tensor.data<uint8_t>() +
+                o * current_size * inner_size * elem_size;
+            HIP_CHECK(hipMemcpyAsync(dst, src,
+                current_size * inner_size * elem_size,
+                hipMemcpyDeviceToDevice, stream));
+        }
+
+        results.push_back(split_tensor);
+        current_offset += current_size;
+    }
+
+    HIP_CHECK(hipStreamSynchronize(stream));
+    return results;
+}
+
+// ==============================================================================
+// Expand Kernel - expand tensor to new shape (broadcast)
+// ==============================================================================
+
+template<typename T>
+__global__ void expand_kernel_impl(
+    const T* input,
+    T* output,
+    const int64_t* input_shape,
+    const int64_t* input_strides,
+    const int64_t* output_shape,
+    int64_t ndim,
+    int64_t total_elements
+) {
+    HIP_GRID_STRIDE_LOOP(idx, total_elements) {
+        // Convert output index to input index using broadcast rules
+        int64_t temp = idx;
+        int64_t input_offset = 0;
+
+        for (int64_t d = ndim - 1; d >= 0; --d) {
+            int64_t coord = temp % output_shape[d];
+            temp /= output_shape[d];
+
+            // If input has size 1 in this dim, don't advance (broadcast)
+            if (input_shape[d] != 1) {
+                input_offset += coord * input_strides[d];
+            }
+        }
+
+        output[idx] = input[input_offset];
+    }
+}
+
+auto expand_kernel(const Tensor& input, const std::vector<int64_t>& new_shape, void* stream_ptr) -> Tensor {
+    hipStream_t stream = static_cast<hipStream_t>(stream_ptr);
+    auto input_shape = input.shape();
+    auto input_strides = input.strides();
+    int64_t ndim = new_shape.size();
+
+    // Pad input shape/strides if needed
+    std::vector<int64_t> padded_input_shape(ndim, 1);
+    std::vector<int64_t> padded_input_strides(ndim, 0);
+
+    int64_t input_ndim = input_shape.size();
+    int64_t pad_size = ndim - input_ndim;
+
+    for (int64_t i = 0; i < input_ndim; ++i) {
+        padded_input_shape[pad_size + i] = input_shape[i];
+        padded_input_strides[pad_size + i] = input_strides[i];
+    }
+
+    Tensor output(new_shape, input.dtype(), input.device());
+    int64_t total_elements = output.numel();
+
+    if (total_elements == 0) return output;
+
+    // Copy to device
+    int64_t* d_input_shape;
+    int64_t* d_input_strides;
+    int64_t* d_output_shape;
+    HIP_CHECK(hipMalloc(&d_input_shape, ndim * sizeof(int64_t)));
+    HIP_CHECK(hipMalloc(&d_input_strides, ndim * sizeof(int64_t)));
+    HIP_CHECK(hipMalloc(&d_output_shape, ndim * sizeof(int64_t)));
+    HIP_CHECK(hipMemcpy(d_input_shape, padded_input_shape.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(d_input_strides, padded_input_strides.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(d_output_shape, new_shape.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
+
+    int num_blocks = get_num_blocks(total_elements);
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(expand_kernel_impl<float>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            input.data<float>(), output.data<float>(),
+            d_input_shape, d_input_strides, d_output_shape, ndim, total_elements);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(expand_kernel_impl<double>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            input.data<double>(), output.data<double>(),
+            d_input_shape, d_input_strides, d_output_shape, ndim, total_elements);
+    } else if (input.dtype() == DType::Int32) {
+        hipLaunchKernelGGL(expand_kernel_impl<int32_t>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            input.data<int32_t>(), output.data<int32_t>(),
+            d_input_shape, d_input_strides, d_output_shape, ndim, total_elements);
+    } else if (input.dtype() == DType::Int64) {
+        hipLaunchKernelGGL(expand_kernel_impl<int64_t>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            input.data<int64_t>(), output.data<int64_t>(),
+            d_input_shape, d_input_strides, d_output_shape, ndim, total_elements);
+    } else {
+        HIP_CHECK(hipFree(d_input_shape));
+        HIP_CHECK(hipFree(d_input_strides));
+        HIP_CHECK(hipFree(d_output_shape));
+        throw std::runtime_error("expand_kernel: unsupported dtype");
+    }
+
+    HIP_CHECK(hipFree(d_input_shape));
+    HIP_CHECK(hipFree(d_input_strides));
+    HIP_CHECK(hipFree(d_output_shape));
+    HIP_CHECK(hipGetLastError());
+
+    return output;
+}
+
 } // namespace rocm
 } // namespace tenzor

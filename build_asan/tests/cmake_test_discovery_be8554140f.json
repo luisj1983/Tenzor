@@ -1,10 +1,10 @@
 {
-  "tests": 672,
+  "tests": 840,
   "name": "AllTests",
   "testsuites": [
     {
       "name": "AllBackendsAllDTypes\/Conv2dMultiDTypeTest",
-      "tests": 672,
+      "tests": 840,
       "testsuite": [
         {
           "name": "ForwardShapeBasic\/cpu_float32",
@@ -75,6 +75,24 @@
         {
           "name": "ForwardShapeBasic\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 255
+        },
+        {
+          "name": "ForwardShapeBasic\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 255
+        },
+        {
+          "name": "ForwardShapeBasic\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 255
+        },
+        {
+          "name": "ForwardShapeBasic\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
           "line": 255
         },
@@ -151,6 +169,24 @@
           "line": 269
         },
         {
+          "name": "ForwardShapeSingleBatch\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 269
+        },
+        {
+          "name": "ForwardShapeSingleBatch\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 269
+        },
+        {
+          "name": "ForwardShapeSingleBatch\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 269
+        },
+        {
           "name": "ForwardShapeMultiBatch\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
@@ -219,6 +255,24 @@
         {
           "name": "ForwardShapeMultiBatch\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 281
+        },
+        {
+          "name": "ForwardShapeMultiBatch\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 281
+        },
+        {
+          "name": "ForwardShapeMultiBatch\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 281
+        },
+        {
+          "name": "ForwardShapeMultiBatch\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
           "line": 281
         },
@@ -295,6 +349,24 @@
           "line": 297
         },
         {
+          "name": "KernelSize1x1\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 297
+        },
+        {
+          "name": "KernelSize1x1\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 297
+        },
+        {
+          "name": "KernelSize1x1\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 297
+        },
+        {
           "name": "KernelSize3x3\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
@@ -363,6 +435,24 @@
         {
           "name": "KernelSize3x3\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 310
+        },
+        {
+          "name": "KernelSize3x3\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 310
+        },
+        {
+          "name": "KernelSize3x3\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 310
+        },
+        {
+          "name": "KernelSize3x3\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
           "line": 310
         },
@@ -439,6 +529,24 @@
           "line": 322
         },
         {
+          "name": "KernelSize5x5\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 322
+        },
+        {
+          "name": "KernelSize5x5\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 322
+        },
+        {
+          "name": "KernelSize5x5\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 322
+        },
+        {
           "name": "KernelSize7x7\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
@@ -507,6 +615,24 @@
         {
           "name": "KernelSize7x7\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 334
+        },
+        {
+          "name": "KernelSize7x7\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 334
+        },
+        {
+          "name": "KernelSize7x7\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 334
+        },
+        {
+          "name": "KernelSize7x7\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
           "line": 334
         },
@@ -583,6 +709,24 @@
           "line": 350
         },
         {
+          "name": "Stride1\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 350
+        },
+        {
+          "name": "Stride1\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 350
+        },
+        {
+          "name": "Stride1\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 350
+        },
+        {
           "name": "Stride2\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
@@ -651,6 +795,24 @@
         {
           "name": "Stride2\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 360
+        },
+        {
+          "name": "Stride2\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 360
+        },
+        {
+          "name": "Stride2\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 360
+        },
+        {
+          "name": "Stride2\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
           "line": 360
         },
@@ -727,6 +889,24 @@
           "line": 370
         },
         {
+          "name": "Stride3\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 370
+        },
+        {
+          "name": "Stride3\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 370
+        },
+        {
+          "name": "Stride3\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 370
+        },
+        {
           "name": "Stride4\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
@@ -795,6 +975,24 @@
         {
           "name": "Stride4\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 380
+        },
+        {
+          "name": "Stride4\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 380
+        },
+        {
+          "name": "Stride4\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 380
+        },
+        {
+          "name": "Stride4\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
           "line": 380
         },
@@ -871,6 +1069,24 @@
           "line": 394
         },
         {
+          "name": "Padding0\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 394
+        },
+        {
+          "name": "Padding0\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 394
+        },
+        {
+          "name": "Padding0\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 394
+        },
+        {
           "name": "Padding1\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
@@ -939,6 +1155,24 @@
         {
           "name": "Padding1\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 404
+        },
+        {
+          "name": "Padding1\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 404
+        },
+        {
+          "name": "Padding1\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 404
+        },
+        {
+          "name": "Padding1\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
           "line": 404
         },
@@ -1015,6 +1249,24 @@
           "line": 414
         },
         {
+          "name": "Padding2\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 414
+        },
+        {
+          "name": "Padding2\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 414
+        },
+        {
+          "name": "Padding2\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 414
+        },
+        {
           "name": "PaddingSamePadding\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
@@ -1083,6 +1335,24 @@
         {
           "name": "PaddingSamePadding\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 424
+        },
+        {
+          "name": "PaddingSamePadding\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 424
+        },
+        {
+          "name": "PaddingSamePadding\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 424
+        },
+        {
+          "name": "PaddingSamePadding\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
           "line": 424
         },
@@ -1159,6 +1429,24 @@
           "line": 439
         },
         {
+          "name": "Dilation1\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 439
+        },
+        {
+          "name": "Dilation1\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 439
+        },
+        {
+          "name": "Dilation1\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 439
+        },
+        {
           "name": "Dilation2\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
@@ -1227,6 +1515,24 @@
         {
           "name": "Dilation2\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 449
+        },
+        {
+          "name": "Dilation2\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 449
+        },
+        {
+          "name": "Dilation2\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 449
+        },
+        {
+          "name": "Dilation2\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
           "line": 449
         },
@@ -1303,6 +1609,24 @@
           "line": 459
         },
         {
+          "name": "Dilation3\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 459
+        },
+        {
+          "name": "Dilation3\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 459
+        },
+        {
+          "name": "Dilation3\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 459
+        },
+        {
           "name": "DilationWithPadding\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
@@ -1371,6 +1695,24 @@
         {
           "name": "DilationWithPadding\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 469
+        },
+        {
+          "name": "DilationWithPadding\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 469
+        },
+        {
+          "name": "DilationWithPadding\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 469
+        },
+        {
+          "name": "DilationWithPadding\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
           "line": 469
         },
@@ -1447,6 +1789,24 @@
           "line": 484
         },
         {
+          "name": "Groups1Standard\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 484
+        },
+        {
+          "name": "Groups1Standard\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 484
+        },
+        {
+          "name": "Groups1Standard\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 484
+        },
+        {
           "name": "GroupsDepthwise\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
@@ -1515,6 +1875,24 @@
         {
           "name": "GroupsDepthwise\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 497
+        },
+        {
+          "name": "GroupsDepthwise\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 497
+        },
+        {
+          "name": "GroupsDepthwise\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 497
+        },
+        {
+          "name": "GroupsDepthwise\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
           "line": 497
         },
@@ -1591,6 +1969,24 @@
           "line": 511
         },
         {
+          "name": "Groups2\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 511
+        },
+        {
+          "name": "Groups2\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 511
+        },
+        {
+          "name": "Groups2\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 511
+        },
+        {
           "name": "Groups4\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
@@ -1659,6 +2055,24 @@
         {
           "name": "Groups4\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 524
+        },
+        {
+          "name": "Groups4\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 524
+        },
+        {
+          "name": "Groups4\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 524
+        },
+        {
+          "name": "Groups4\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
           "line": 524
         },
@@ -1735,6 +2149,24 @@
           "line": 539
         },
         {
+          "name": "WithBias\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 539
+        },
+        {
+          "name": "WithBias\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 539
+        },
+        {
+          "name": "WithBias\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 539
+        },
+        {
           "name": "NoBias\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
@@ -1803,6 +2235,24 @@
         {
           "name": "NoBias\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 547
+        },
+        {
+          "name": "NoBias\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 547
+        },
+        {
+          "name": "NoBias\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 547
+        },
+        {
+          "name": "NoBias\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
           "line": 547
         },
@@ -1879,6 +2329,24 @@
           "line": 555
         },
         {
+          "name": "BiasEffect\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 555
+        },
+        {
+          "name": "BiasEffect\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 555
+        },
+        {
+          "name": "BiasEffect\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 555
+        },
+        {
           "name": "WeightShape\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
@@ -1947,6 +2415,24 @@
         {
           "name": "WeightShape\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 573
+        },
+        {
+          "name": "WeightShape\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 573
+        },
+        {
+          "name": "WeightShape\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 573
+        },
+        {
+          "name": "WeightShape\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
           "line": 573
         },
@@ -2023,6 +2509,24 @@
           "line": 586
         },
         {
+          "name": "WeightShapeWithGroups\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 586
+        },
+        {
+          "name": "WeightShapeWithGroups\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 586
+        },
+        {
+          "name": "WeightShapeWithGroups\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 586
+        },
+        {
           "name": "EdgeCase1x1Image\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
@@ -2091,6 +2595,24 @@
         {
           "name": "EdgeCase1x1Image\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 602
+        },
+        {
+          "name": "EdgeCase1x1Image\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 602
+        },
+        {
+          "name": "EdgeCase1x1Image\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 602
+        },
+        {
+          "name": "EdgeCase1x1Image\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
           "line": 602
         },
@@ -2167,6 +2689,24 @@
           "line": 615
         },
         {
+          "name": "EdgeCaseLargeImage\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 615
+        },
+        {
+          "name": "EdgeCaseLargeImage\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 615
+        },
+        {
+          "name": "EdgeCaseLargeImage\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 615
+        },
+        {
           "name": "EdgeCaseVeryLargeBatch\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
@@ -2235,6 +2775,24 @@
         {
           "name": "EdgeCaseVeryLargeBatch\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 628
+        },
+        {
+          "name": "EdgeCaseVeryLargeBatch\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 628
+        },
+        {
+          "name": "EdgeCaseVeryLargeBatch\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 628
+        },
+        {
+          "name": "EdgeCaseVeryLargeBatch\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
           "line": 628
         },
@@ -2311,6 +2869,24 @@
           "line": 639
         },
         {
+          "name": "EdgeCaseSingleChannel\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 639
+        },
+        {
+          "name": "EdgeCaseSingleChannel\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 639
+        },
+        {
+          "name": "EdgeCaseSingleChannel\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 639
+        },
+        {
           "name": "EdgeCaseManyChannels\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
@@ -2379,6 +2955,24 @@
         {
           "name": "EdgeCaseManyChannels\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 649
+        },
+        {
+          "name": "EdgeCaseManyChannels\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 649
+        },
+        {
+          "name": "EdgeCaseManyChannels\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 649
+        },
+        {
+          "name": "EdgeCaseManyChannels\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
           "line": 649
         },
@@ -2455,6 +3049,24 @@
           "line": 666
         },
         {
+          "name": "CombinedStrideAndPadding\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 666
+        },
+        {
+          "name": "CombinedStrideAndPadding\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 666
+        },
+        {
+          "name": "CombinedStrideAndPadding\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 666
+        },
+        {
           "name": "CombinedAllParameters\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
@@ -2523,6 +3135,24 @@
         {
           "name": "CombinedAllParameters\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 676
+        },
+        {
+          "name": "CombinedAllParameters\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 676
+        },
+        {
+          "name": "CombinedAllParameters\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 676
+        },
+        {
+          "name": "CombinedAllParameters\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
           "line": 676
         },
@@ -2599,6 +3229,24 @@
           "line": 694
         },
         {
+          "name": "ConsistentOutput\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 694
+        },
+        {
+          "name": "ConsistentOutput\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 694
+        },
+        {
+          "name": "ConsistentOutput\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 694
+        },
+        {
           "name": "DifferentInputsSameSize\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
@@ -2667,6 +3315,24 @@
         {
           "name": "DifferentInputsSameSize\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 712
+        },
+        {
+          "name": "DifferentInputsSameSize\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 712
+        },
+        {
+          "name": "DifferentInputsSameSize\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 712
+        },
+        {
+          "name": "DifferentInputsSameSize\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
           "line": 712
         },
@@ -2743,6 +3409,24 @@
           "line": 732
         },
         {
+          "name": "RequiresGrad\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 732
+        },
+        {
+          "name": "RequiresGrad\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 732
+        },
+        {
+          "name": "RequiresGrad\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 732
+        },
+        {
           "name": "NoGradWhenInputNoGrad\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
@@ -2811,6 +3495,24 @@
         {
           "name": "NoGradWhenInputNoGrad\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 740
+        },
+        {
+          "name": "NoGradWhenInputNoGrad\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 740
+        },
+        {
+          "name": "NoGradWhenInputNoGrad\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 740
+        },
+        {
+          "name": "NoGradWhenInputNoGrad\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
           "line": 740
         },
@@ -2887,6 +3589,24 @@
           "line": 749
         },
         {
+          "name": "BackwardPassExecutes\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 749
+        },
+        {
+          "name": "BackwardPassExecutes\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 749
+        },
+        {
+          "name": "BackwardPassExecutes\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 749
+        },
+        {
           "name": "GradientNonZero\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
@@ -2955,6 +3675,24 @@
         {
           "name": "GradientNonZero\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 770
+        },
+        {
+          "name": "GradientNonZero\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 770
+        },
+        {
+          "name": "GradientNonZero\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 770
+        },
+        {
+          "name": "GradientNonZero\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
           "line": 770
         },
@@ -3031,6 +3769,24 @@
           "line": 822
         },
         {
+          "name": "ParameterCount\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 822
+        },
+        {
+          "name": "ParameterCount\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 822
+        },
+        {
+          "name": "ParameterCount\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 822
+        },
+        {
           "name": "ParameterSizes\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
@@ -3099,6 +3855,24 @@
         {
           "name": "ParameterSizes\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 834
+        },
+        {
+          "name": "ParameterSizes\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 834
+        },
+        {
+          "name": "ParameterSizes\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 834
+        },
+        {
+          "name": "ParameterSizes\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
           "line": 834
         },
@@ -3175,6 +3949,24 @@
           "line": 853
         },
         {
+          "name": "BottleneckConfiguration\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 853
+        },
+        {
+          "name": "BottleneckConfiguration\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 853
+        },
+        {
+          "name": "BottleneckConfiguration\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 853
+        },
+        {
           "name": "ResidualConnection\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
@@ -3243,6 +4035,24 @@
         {
           "name": "ResidualConnection\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 871
+        },
+        {
+          "name": "ResidualConnection\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 871
+        },
+        {
+          "name": "ResidualConnection\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 871
+        },
+        {
+          "name": "ResidualConnection\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
           "line": 871
         },
@@ -3319,6 +4129,24 @@
           "line": 891
         },
         {
+          "name": "MemoryEfficiencySmall\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 891
+        },
+        {
+          "name": "MemoryEfficiencySmall\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 891
+        },
+        {
+          "name": "MemoryEfficiencySmall\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 891
+        },
+        {
           "name": "MemoryEfficiencyLarge\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
@@ -3387,6 +4215,24 @@
         {
           "name": "MemoryEfficiencyLarge\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 901
+        },
+        {
+          "name": "MemoryEfficiencyLarge\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 901
+        },
+        {
+          "name": "MemoryEfficiencyLarge\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 901
+        },
+        {
+          "name": "MemoryEfficiencyLarge\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
           "line": 901
         },
@@ -3463,6 +4309,24 @@
           "line": 915
         },
         {
+          "name": "InvalidInputDimensions\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 915
+        },
+        {
+          "name": "InvalidInputDimensions\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 915
+        },
+        {
+          "name": "InvalidInputDimensions\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 915
+        },
+        {
           "name": "InvalidChannelCount\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
@@ -3531,6 +4395,24 @@
         {
           "name": "InvalidChannelCount\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 925
+        },
+        {
+          "name": "InvalidChannelCount\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 925
+        },
+        {
+          "name": "InvalidChannelCount\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 925
+        },
+        {
+          "name": "InvalidChannelCount\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
           "line": 925
         },
@@ -3607,6 +4489,24 @@
           "line": 935
         },
         {
+          "name": "InvalidGroupConfiguration\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 935
+        },
+        {
+          "name": "InvalidGroupConfiguration\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 935
+        },
+        {
+          "name": "InvalidGroupConfiguration\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 935
+        },
+        {
           "name": "VGGStyleBlock\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
@@ -3675,6 +4575,24 @@
         {
           "name": "VGGStyleBlock\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 951
+        },
+        {
+          "name": "VGGStyleBlock\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 951
+        },
+        {
+          "name": "VGGStyleBlock\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 951
+        },
+        {
+          "name": "VGGStyleBlock\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
           "line": 951
         },
@@ -3751,6 +4669,24 @@
           "line": 967
         },
         {
+          "name": "InceptionStyleBranch\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 967
+        },
+        {
+          "name": "InceptionStyleBranch\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 967
+        },
+        {
+          "name": "InceptionStyleBranch\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 967
+        },
+        {
           "name": "MobileNetDepthwiseSeparable\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
@@ -3819,6 +4755,24 @@
         {
           "name": "MobileNetDepthwiseSeparable\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 984
+        },
+        {
+          "name": "MobileNetDepthwiseSeparable\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 984
+        },
+        {
+          "name": "MobileNetDepthwiseSeparable\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 984
+        },
+        {
+          "name": "MobileNetDepthwiseSeparable\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
           "line": 984
         },
@@ -3895,6 +4849,24 @@
           "line": 1005
         },
         {
+          "name": "ResNetBottleneck\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 1005
+        },
+        {
+          "name": "ResNetBottleneck\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 1005
+        },
+        {
+          "name": "ResNetBottleneck\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 1005
+        },
+        {
           "name": "DTypePreservationForward\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
@@ -3967,6 +4939,24 @@
           "line": 1027
         },
         {
+          "name": "DTypePreservationForward\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 1027
+        },
+        {
+          "name": "DTypePreservationForward\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 1027
+        },
+        {
+          "name": "DTypePreservationForward\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 1027
+        },
+        {
           "name": "DTypePreservationBackward\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
@@ -4035,6 +5025,24 @@
         {
           "name": "DTypePreservationBackward\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 1037
+        },
+        {
+          "name": "DTypePreservationBackward\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 1037
+        },
+        {
+          "name": "DTypePreservationBackward\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
+          "line": 1037
+        },
+        {
+          "name": "DTypePreservationBackward\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d_multidtype.cpp",
           "line": 1037
         }

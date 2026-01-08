@@ -384,7 +384,7 @@ TEST_P(GradientCheckpointMultiDTypeTest, MemorySavingsEstimation) {
 // ==============================================================================
 
 std::vector<BackendDTypeParam> GenerateCheckpointCombinations() {
-    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi"};
+    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "rocm"};
 
     // Only Float32 and Float64 for gradient operations
     std::vector<std::pair<DType, std::string>> dtypes = {

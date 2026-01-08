@@ -53,6 +53,12 @@ protected:
             }
             device = Device::oneapi(0);
         }
+        else if (backend_name == "rocm") {
+            if (!isBackendAvailable(Device::Type::ROCm)) {
+                GTEST_SKIP() << "ROCm backend not available";
+            }
+            device = Device::rocm(0);
+        }
         else {
             FAIL() << "Unknown backend: " << backend_name;
         }
@@ -96,7 +102,7 @@ inline bool BackendTest::initialized = false;
     INSTANTIATE_TEST_SUITE_P( \
         AllBackends, \
         TestSuiteName, \
-        ::testing::Values("cpu", "cuda", "vulkan", "oneapi"), \
+        ::testing::Values("cpu", "cuda", "vulkan", "oneapi", "rocm"), \
         [](const ::testing::TestParamInfo<std::string>& info) { \
             return info.param; \
         } \

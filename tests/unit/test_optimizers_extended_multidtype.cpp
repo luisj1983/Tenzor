@@ -501,7 +501,7 @@ TEST_P(OptimizersExtendedMultiDTypeTest, AdadeltaNumericalStability) {
 // ============================================================================
 
 std::vector<OptimizerExtDTypeParam> GenerateOptimizerExtDTypeCombinations() {
-    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi"};
+    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "rocm"};
 
     // Test with floating-point dtypes
     std::vector<std::tuple<DType, std::string, double, double>> dtypes = {

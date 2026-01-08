@@ -1,10 +1,10 @@
 {
-  "tests": 52,
+  "tests": 65,
   "name": "AllTests",
   "testsuites": [
     {
       "name": "AllBackends\/GradCheckBackendTest",
-      "tests": 52,
+      "tests": 65,
       "testsuite": [
         {
           "name": "QuadraticFunction\/cpu",
@@ -27,6 +27,12 @@
         {
           "name": "QuadraticFunction\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 33
+        },
+        {
+          "name": "QuadraticFunction\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
           "line": 33
         },
@@ -55,6 +61,12 @@
           "line": 55
         },
         {
+          "name": "LinearFunction\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 55
+        },
+        {
           "name": "SumReduction\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
@@ -75,6 +87,12 @@
         {
           "name": "SumReduction\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 75
+        },
+        {
+          "name": "SumReduction\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
           "line": 75
         },
@@ -103,6 +121,12 @@
           "line": 96
         },
         {
+          "name": "ElementWiseOps\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 96
+        },
+        {
           "name": "MultiDimensional\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
@@ -123,6 +147,12 @@
         {
           "name": "MultiDimensional\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 116
+        },
+        {
+          "name": "MultiDimensional\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
           "line": 116
         },
@@ -151,6 +181,12 @@
           "line": 138
         },
         {
+          "name": "DetailedResult\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 138
+        },
+        {
           "name": "Float64Precision\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
@@ -171,6 +207,12 @@
         {
           "name": "Float64Precision\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 164
+        },
+        {
+          "name": "Float64Precision\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
           "line": 164
         },
@@ -199,6 +241,12 @@
           "line": 193
         },
         {
+          "name": "RequiresGradCheck\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 193
+        },
+        {
           "name": "NumericalGradientComputation\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
@@ -219,6 +267,12 @@
         {
           "name": "NumericalGradientComputation\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 212
+        },
+        {
+          "name": "NumericalGradientComputation\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
           "line": 212
         },
@@ -247,6 +301,12 @@
           "line": 240
         },
         {
+          "name": "CompareGradients\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 240
+        },
+        {
           "name": "EpsilonSensitivity\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
@@ -267,6 +327,12 @@
         {
           "name": "EpsilonSensitivity\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 278
+        },
+        {
+          "name": "EpsilonSensitivity\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
           "line": 278
         },
@@ -295,6 +361,12 @@
           "line": 302
         },
         {
+          "name": "ScalarOutput\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 302
+        },
+        {
           "name": "PerformanceBenchmark\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
@@ -315,6 +387,12 @@
         {
           "name": "PerformanceBenchmark\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
+          "line": 323
+        },
+        {
+          "name": "PerformanceBenchmark\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/autograd\/test_gradcheck.cpp",
           "line": 323
         }

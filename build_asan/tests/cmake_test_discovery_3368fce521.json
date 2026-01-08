@@ -1,10 +1,10 @@
 {
-  "tests": 160,
+  "tests": 200,
   "name": "AllTests",
   "testsuites": [
     {
       "name": "AllBackends\/CachingAllocatorTest",
-      "tests": 160,
+      "tests": 200,
       "testsuite": [
         {
           "name": "ConstructorValidBackend\/cpu",
@@ -27,6 +27,12 @@
         {
           "name": "ConstructorValidBackend\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 78
+        },
+        {
+          "name": "ConstructorValidBackend\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
           "line": 78
         },
@@ -55,6 +61,12 @@
           "line": 84
         },
         {
+          "name": "ConstructorNullBackendThrows\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 84
+        },
+        {
           "name": "AllocateBasicSizes\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
@@ -75,6 +87,12 @@
         {
           "name": "AllocateBasicSizes\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 90
+        },
+        {
+          "name": "AllocateBasicSizes\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
           "line": 90
         },
@@ -103,6 +121,12 @@
           "line": 104
         },
         {
+          "name": "AllocateZeroSizeThrows\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 104
+        },
+        {
           "name": "DeallocateNullIsNoOp\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
@@ -123,6 +147,12 @@
         {
           "name": "DeallocateNullIsNoOp\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 110
+        },
+        {
+          "name": "DeallocateNullIsNoOp\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
           "line": 110
         },
@@ -151,6 +181,12 @@
           "line": 116
         },
         {
+          "name": "DeallocateInvalidPointerThrows\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 116
+        },
+        {
           "name": "DoubleDeallocateThrows\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
@@ -171,6 +207,12 @@
         {
           "name": "DoubleDeallocateThrows\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 125
+        },
+        {
+          "name": "DoubleDeallocateThrows\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
           "line": 125
         },
@@ -199,6 +241,12 @@
           "line": 134
         },
         {
+          "name": "MultipleAllocations\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 134
+        },
+        {
           "name": "AllocateDifferentSizes\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
@@ -219,6 +267,12 @@
         {
           "name": "AllocateDifferentSizes\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 157
+        },
+        {
+          "name": "AllocateDifferentSizes\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
           "line": 157
         },
@@ -247,6 +301,12 @@
           "line": 177
         },
         {
+          "name": "CacheReuseExactSize\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 177
+        },
+        {
           "name": "CacheHitRate\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
@@ -267,6 +327,12 @@
         {
           "name": "CacheHitRate\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 200
+        },
+        {
+          "name": "CacheHitRate\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
           "line": 200
         },
@@ -295,6 +361,12 @@
           "line": 220
         },
         {
+          "name": "CacheMissNewSize\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 220
+        },
+        {
           "name": "DefragmentEmptiesCache\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
@@ -315,6 +387,12 @@
         {
           "name": "DefragmentEmptiesCache\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 238
+        },
+        {
+          "name": "DefragmentEmptiesCache\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
           "line": 238
         },
@@ -343,6 +421,12 @@
           "line": 261
         },
         {
+          "name": "DefragmentPreservesActiveAllocations\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 261
+        },
+        {
           "name": "BestFitStrategy\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
@@ -363,6 +447,12 @@
         {
           "name": "BestFitStrategy\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 294
+        },
+        {
+          "name": "BestFitStrategy\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
           "line": 294
         },
@@ -391,6 +481,12 @@
           "line": 320
         },
         {
+          "name": "InitialStatistics\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 320
+        },
+        {
           "name": "AllocationIncreasesStats\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
@@ -411,6 +507,12 @@
         {
           "name": "AllocationIncreasesStats\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 328
+        },
+        {
+          "name": "AllocationIncreasesStats\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
           "line": 328
         },
@@ -439,6 +541,12 @@
           "line": 341
         },
         {
+          "name": "DeallocationIncreasesCachedStats\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 341
+        },
+        {
           "name": "TotalAllocatedBytesTracking\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
@@ -459,6 +567,12 @@
         {
           "name": "TotalAllocatedBytesTracking\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 351
+        },
+        {
+          "name": "TotalAllocatedBytesTracking\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
           "line": 351
         },
@@ -487,6 +601,12 @@
           "line": 370
         },
         {
+          "name": "CachedBytesTracking\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 370
+        },
+        {
           "name": "CacheHitRateZeroInitially\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
@@ -507,6 +627,12 @@
         {
           "name": "CacheHitRateZeroInitially\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 392
+        },
+        {
+          "name": "CacheHitRateZeroInitially\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
           "line": 392
         },
@@ -535,6 +661,12 @@
           "line": 397
         },
         {
+          "name": "CacheHitRateCalculation\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 397
+        },
+        {
           "name": "DeviceProperty\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
@@ -555,6 +687,12 @@
         {
           "name": "DeviceProperty\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 418
+        },
+        {
+          "name": "DeviceProperty\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
           "line": 418
         },
@@ -583,6 +721,12 @@
           "line": 427
         },
         {
+          "name": "VeryLargeAllocation\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 427
+        },
+        {
           "name": "ManySmallAllocations\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
@@ -603,6 +747,12 @@
         {
           "name": "ManySmallAllocations\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 447
+        },
+        {
+          "name": "ManySmallAllocations\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
           "line": 447
         },
@@ -631,6 +781,12 @@
           "line": 487
         },
         {
+          "name": "InterleavedAllocDealloc\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 487
+        },
+        {
           "name": "RepeatedAllocDeallocSameSize\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
@@ -651,6 +807,12 @@
         {
           "name": "RepeatedAllocDeallocSameSize\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 509
+        },
+        {
+          "name": "RepeatedAllocDeallocSameSize\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
           "line": 509
         },
@@ -679,6 +841,12 @@
           "line": 532
         },
         {
+          "name": "PowerOfTwoSizes\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 532
+        },
+        {
           "name": "NonPowerOfTwoSizes\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
@@ -699,6 +867,12 @@
         {
           "name": "NonPowerOfTwoSizes\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 543
+        },
+        {
+          "name": "NonPowerOfTwoSizes\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
           "line": 543
         },
@@ -727,6 +901,12 @@
           "line": 561
         },
         {
+          "name": "MoveConstructor\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 561
+        },
+        {
           "name": "MoveAssignment\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
@@ -747,6 +927,12 @@
         {
           "name": "MoveAssignment\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 578
+        },
+        {
+          "name": "MoveAssignment\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
           "line": 578
         },
@@ -775,6 +961,12 @@
           "line": 599
         },
         {
+          "name": "ConcurrentAllocationsBasic\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 599
+        },
+        {
           "name": "ConcurrentAllocDeallocMixed\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
@@ -795,6 +987,12 @@
         {
           "name": "ConcurrentAllocDeallocMixed\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 639
+        },
+        {
+          "name": "ConcurrentAllocDeallocMixed\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
           "line": 639
         },
@@ -823,6 +1021,12 @@
           "line": 686
         },
         {
+          "name": "StressTestRandomSizes\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 686
+        },
+        {
           "name": "StressTestAllocDeallocCycles\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
@@ -843,6 +1047,12 @@
         {
           "name": "StressTestAllocDeallocCycles\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 719
+        },
+        {
+          "name": "StressTestAllocDeallocCycles\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
           "line": 719
         },
@@ -871,6 +1081,12 @@
           "line": 750
         },
         {
+          "name": "DestructorCleansUpAllocations\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 750
+        },
+        {
           "name": "DefragmentAfterManyAllocations\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
@@ -891,6 +1107,12 @@
         {
           "name": "DefragmentAfterManyAllocations\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 768
+        },
+        {
+          "name": "DefragmentAfterManyAllocations\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
           "line": 768
         },
@@ -919,6 +1141,12 @@
           "line": 803
         },
         {
+          "name": "CacheReusesSmallerBlocks\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 803
+        },
+        {
           "name": "MultipleCachedBlocksOfSameSize\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
@@ -943,6 +1171,12 @@
           "line": 817
         },
         {
+          "name": "MultipleCachedBlocksOfSameSize\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 817
+        },
+        {
           "name": "ComprehensiveFunctionalityTest\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
@@ -963,6 +1197,12 @@
         {
           "name": "ComprehensiveFunctionalityTest\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
+          "line": 851
+        },
+        {
+          "name": "ComprehensiveFunctionalityTest\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_caching_allocator.cpp",
           "line": 851
         }

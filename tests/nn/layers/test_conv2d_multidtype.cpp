@@ -57,7 +57,7 @@ void PrintTo(const BackendDTypeParam& param, std::ostream* os) {
 
 // Generate test combinations for all backends and dtypes
 std::vector<BackendDTypeParam> GenerateBackendDTypeCombinations() {
-    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi"};
+    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "rocm"};
 
     struct DTypeConfig {
         DType dtype;

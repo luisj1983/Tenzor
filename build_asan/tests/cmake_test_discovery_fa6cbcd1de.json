@@ -1,10 +1,10 @@
 {
-  "tests": 264,
+  "tests": 330,
   "name": "AllTests",
   "testsuites": [
     {
       "name": "AllBackendsAllDTypes\/RNNMultiDTypeTest",
-      "tests": 264,
+      "tests": 330,
       "testsuite": [
         {
           "name": "RNNCellBasicForward\/cpu_float32",
@@ -75,6 +75,24 @@
         {
           "name": "RNNCellBasicForward\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 119
+        },
+        {
+          "name": "RNNCellBasicForward\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 119
+        },
+        {
+          "name": "RNNCellBasicForward\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 119
+        },
+        {
+          "name": "RNNCellBasicForward\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
           "line": 119
         },
@@ -151,6 +169,24 @@
           "line": 144
         },
         {
+          "name": "RNNCellReLUActivation\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 144
+        },
+        {
+          "name": "RNNCellReLUActivation\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 144
+        },
+        {
+          "name": "RNNCellReLUActivation\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 144
+        },
+        {
           "name": "RNNCellNoInitialHidden\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
@@ -219,6 +255,24 @@
         {
           "name": "RNNCellNoInitialHidden\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 169
+        },
+        {
+          "name": "RNNCellNoInitialHidden\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 169
+        },
+        {
+          "name": "RNNCellNoInitialHidden\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 169
+        },
+        {
+          "name": "RNNCellNoInitialHidden\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
           "line": 169
         },
@@ -295,6 +349,24 @@
           "line": 191
         },
         {
+          "name": "RNNCellNoBias\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 191
+        },
+        {
+          "name": "RNNCellNoBias\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 191
+        },
+        {
+          "name": "RNNCellNoBias\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 191
+        },
+        {
           "name": "RNNCellInvalidNonlinearity\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
@@ -363,6 +435,24 @@
         {
           "name": "RNNCellInvalidNonlinearity\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 212
+        },
+        {
+          "name": "RNNCellInvalidNonlinearity\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 212
+        },
+        {
+          "name": "RNNCellInvalidNonlinearity\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 212
+        },
+        {
+          "name": "RNNCellInvalidNonlinearity\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
           "line": 212
         },
@@ -439,6 +529,24 @@
           "line": 225
         },
         {
+          "name": "RNNBasicForward\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 225
+        },
+        {
+          "name": "RNNBasicForward\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 225
+        },
+        {
+          "name": "RNNBasicForward\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 225
+        },
+        {
           "name": "RNNMultiLayer\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
@@ -507,6 +615,24 @@
         {
           "name": "RNNMultiLayer\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 254
+        },
+        {
+          "name": "RNNMultiLayer\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 254
+        },
+        {
+          "name": "RNNMultiLayer\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 254
+        },
+        {
+          "name": "RNNMultiLayer\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
           "line": 254
         },
@@ -583,6 +709,24 @@
           "line": 281
         },
         {
+          "name": "RNNBatchFirst\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 281
+        },
+        {
+          "name": "RNNBatchFirst\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 281
+        },
+        {
+          "name": "RNNBatchFirst\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 281
+        },
+        {
           "name": "RNNBidirectional\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
@@ -651,6 +795,24 @@
         {
           "name": "RNNBidirectional\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 303
+        },
+        {
+          "name": "RNNBidirectional\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 303
+        },
+        {
+          "name": "RNNBidirectional\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 303
+        },
+        {
+          "name": "RNNBidirectional\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
           "line": 303
         },
@@ -727,6 +889,24 @@
           "line": 330
         },
         {
+          "name": "RNNBidirectionalMultiLayer\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 330
+        },
+        {
+          "name": "RNNBidirectionalMultiLayer\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 330
+        },
+        {
+          "name": "RNNBidirectionalMultiLayer\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 330
+        },
+        {
           "name": "RNNWithDropout\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
@@ -795,6 +975,24 @@
         {
           "name": "RNNWithDropout\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 352
+        },
+        {
+          "name": "RNNWithDropout\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 352
+        },
+        {
+          "name": "RNNWithDropout\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 352
+        },
+        {
+          "name": "RNNWithDropout\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
           "line": 352
         },
@@ -871,6 +1069,24 @@
           "line": 374
         },
         {
+          "name": "RNNInitialHiddenState\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 374
+        },
+        {
+          "name": "RNNInitialHiddenState\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 374
+        },
+        {
+          "name": "RNNInitialHiddenState\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 374
+        },
+        {
           "name": "RNNSequenceLengthVariation\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
@@ -939,6 +1155,24 @@
         {
           "name": "RNNSequenceLengthVariation\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 399
+        },
+        {
+          "name": "RNNSequenceLengthVariation\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 399
+        },
+        {
+          "name": "RNNSequenceLengthVariation\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 399
+        },
+        {
+          "name": "RNNSequenceLengthVariation\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
           "line": 399
         },
@@ -1015,6 +1249,24 @@
           "line": 427
         },
         {
+          "name": "RNNBatchSizeVariation\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 427
+        },
+        {
+          "name": "RNNBatchSizeVariation\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 427
+        },
+        {
+          "name": "RNNBatchSizeVariation\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 427
+        },
+        {
           "name": "RNNSingleTimestep\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
@@ -1083,6 +1335,24 @@
         {
           "name": "RNNSingleTimestep\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 455
+        },
+        {
+          "name": "RNNSingleTimestep\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 455
+        },
+        {
+          "name": "RNNSingleTimestep\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 455
+        },
+        {
+          "name": "RNNSingleTimestep\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
           "line": 455
         },
@@ -1159,6 +1429,24 @@
           "line": 475
         },
         {
+          "name": "RNNOutputConsistency\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 475
+        },
+        {
+          "name": "RNNOutputConsistency\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 475
+        },
+        {
+          "name": "RNNOutputConsistency\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 475
+        },
+        {
           "name": "RNNGradientFlow\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
@@ -1227,6 +1515,24 @@
         {
           "name": "RNNGradientFlow\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 500
+        },
+        {
+          "name": "RNNGradientFlow\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 500
+        },
+        {
+          "name": "RNNGradientFlow\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 500
+        },
+        {
+          "name": "RNNGradientFlow\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
           "line": 500
         },
@@ -1303,6 +1609,24 @@
           "line": 528
         },
         {
+          "name": "RNNTrainingMode\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 528
+        },
+        {
+          "name": "RNNTrainingMode\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 528
+        },
+        {
+          "name": "RNNTrainingMode\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 528
+        },
+        {
           "name": "RNNParameterCount\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
@@ -1371,6 +1695,24 @@
         {
           "name": "RNNParameterCount\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 544
+        },
+        {
+          "name": "RNNParameterCount\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 544
+        },
+        {
+          "name": "RNNParameterCount\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 544
+        },
+        {
+          "name": "RNNParameterCount\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
           "line": 544
         },
@@ -1447,6 +1789,24 @@
           "line": 559
         },
         {
+          "name": "RNNLargeHidden\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 559
+        },
+        {
+          "name": "RNNLargeHidden\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 559
+        },
+        {
+          "name": "RNNLargeHidden\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 559
+        },
+        {
           "name": "RNNInvalidNumLayers\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
@@ -1519,6 +1879,24 @@
           "line": 580
         },
         {
+          "name": "RNNInvalidNumLayers\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 580
+        },
+        {
+          "name": "RNNInvalidNumLayers\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 580
+        },
+        {
+          "name": "RNNInvalidNumLayers\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 580
+        },
+        {
           "name": "RNNInvalidDropout\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
@@ -1587,6 +1965,24 @@
         {
           "name": "RNNInvalidDropout\/oneapi_float16",
           "value_param": "oneapi_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 589
+        },
+        {
+          "name": "RNNInvalidDropout\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 589
+        },
+        {
+          "name": "RNNInvalidDropout\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
+          "line": 589
+        },
+        {
+          "name": "RNNInvalidDropout\/rocm_float16",
+          "value_param": "rocm_float16",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_rnn_multidtype.cpp",
           "line": 589
         }

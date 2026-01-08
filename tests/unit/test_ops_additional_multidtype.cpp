@@ -615,7 +615,7 @@ TEST_P(OpsAdditionalMultiDTypeTest, InequalityComparisons) {
 //==============================================================================
 
 std::vector<BackendDTypeParam> GenerateOpsAdditionalBackendDTypeCombinations() {
-    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi"};
+    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "rocm"};
 
     // Test with these dtypes
     std::vector<std::pair<DType, std::string>> dtypes = {

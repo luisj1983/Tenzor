@@ -1,10 +1,10 @@
 {
-  "tests": 488,
+  "tests": 610,
   "name": "AllTests",
   "testsuites": [
     {
       "name": "AllBackendsAllDTypes\/DTypeEdgeCaseTest",
-      "tests": 480,
+      "tests": 600,
       "testsuite": [
         {
           "name": "Int8Overflow\/cpu_int8",
@@ -195,6 +195,54 @@
         {
           "name": "Int8Overflow\/oneapi_bool",
           "value_param": "oneapi_bool",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 91
+        },
+        {
+          "name": "Int8Overflow\/rocm_int8",
+          "value_param": "rocm_int8",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 91
+        },
+        {
+          "name": "Int8Overflow\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 91
+        },
+        {
+          "name": "Int8Overflow\/rocm_int64",
+          "value_param": "rocm_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 91
+        },
+        {
+          "name": "Int8Overflow\/rocm_uint8",
+          "value_param": "rocm_uint8",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 91
+        },
+        {
+          "name": "Int8Overflow\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 91
+        },
+        {
+          "name": "Int8Overflow\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 91
+        },
+        {
+          "name": "Int8Overflow\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 91
+        },
+        {
+          "name": "Int8Overflow\/rocm_bool",
+          "value_param": "rocm_bool",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
           "line": 91
         },
@@ -391,6 +439,54 @@
           "line": 118
         },
         {
+          "name": "Int8Underflow\/rocm_int8",
+          "value_param": "rocm_int8",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 118
+        },
+        {
+          "name": "Int8Underflow\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 118
+        },
+        {
+          "name": "Int8Underflow\/rocm_int64",
+          "value_param": "rocm_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 118
+        },
+        {
+          "name": "Int8Underflow\/rocm_uint8",
+          "value_param": "rocm_uint8",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 118
+        },
+        {
+          "name": "Int8Underflow\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 118
+        },
+        {
+          "name": "Int8Underflow\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 118
+        },
+        {
+          "name": "Int8Underflow\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 118
+        },
+        {
+          "name": "Int8Underflow\/rocm_bool",
+          "value_param": "rocm_bool",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 118
+        },
+        {
           "name": "UInt8Overflow\/cpu_int8",
           "value_param": "cpu_int8",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
@@ -579,6 +675,54 @@
         {
           "name": "UInt8Overflow\/oneapi_bool",
           "value_param": "oneapi_bool",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 145
+        },
+        {
+          "name": "UInt8Overflow\/rocm_int8",
+          "value_param": "rocm_int8",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 145
+        },
+        {
+          "name": "UInt8Overflow\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 145
+        },
+        {
+          "name": "UInt8Overflow\/rocm_int64",
+          "value_param": "rocm_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 145
+        },
+        {
+          "name": "UInt8Overflow\/rocm_uint8",
+          "value_param": "rocm_uint8",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 145
+        },
+        {
+          "name": "UInt8Overflow\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 145
+        },
+        {
+          "name": "UInt8Overflow\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 145
+        },
+        {
+          "name": "UInt8Overflow\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 145
+        },
+        {
+          "name": "UInt8Overflow\/rocm_bool",
+          "value_param": "rocm_bool",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
           "line": 145
         },
@@ -775,6 +919,54 @@
           "line": 171
         },
         {
+          "name": "Int32Overflow\/rocm_int8",
+          "value_param": "rocm_int8",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 171
+        },
+        {
+          "name": "Int32Overflow\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 171
+        },
+        {
+          "name": "Int32Overflow\/rocm_int64",
+          "value_param": "rocm_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 171
+        },
+        {
+          "name": "Int32Overflow\/rocm_uint8",
+          "value_param": "rocm_uint8",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 171
+        },
+        {
+          "name": "Int32Overflow\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 171
+        },
+        {
+          "name": "Int32Overflow\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 171
+        },
+        {
+          "name": "Int32Overflow\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 171
+        },
+        {
+          "name": "Int32Overflow\/rocm_bool",
+          "value_param": "rocm_bool",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 171
+        },
+        {
           "name": "Int64Overflow\/cpu_int8",
           "value_param": "cpu_int8",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
@@ -963,6 +1155,54 @@
         {
           "name": "Int64Overflow\/oneapi_bool",
           "value_param": "oneapi_bool",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 199
+        },
+        {
+          "name": "Int64Overflow\/rocm_int8",
+          "value_param": "rocm_int8",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 199
+        },
+        {
+          "name": "Int64Overflow\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 199
+        },
+        {
+          "name": "Int64Overflow\/rocm_int64",
+          "value_param": "rocm_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 199
+        },
+        {
+          "name": "Int64Overflow\/rocm_uint8",
+          "value_param": "rocm_uint8",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 199
+        },
+        {
+          "name": "Int64Overflow\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 199
+        },
+        {
+          "name": "Int64Overflow\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 199
+        },
+        {
+          "name": "Int64Overflow\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 199
+        },
+        {
+          "name": "Int64Overflow\/rocm_bool",
+          "value_param": "rocm_bool",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
           "line": 199
         },
@@ -1159,6 +1399,54 @@
           "line": 230
         },
         {
+          "name": "Float16PrecisionLoss\/rocm_int8",
+          "value_param": "rocm_int8",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 230
+        },
+        {
+          "name": "Float16PrecisionLoss\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 230
+        },
+        {
+          "name": "Float16PrecisionLoss\/rocm_int64",
+          "value_param": "rocm_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 230
+        },
+        {
+          "name": "Float16PrecisionLoss\/rocm_uint8",
+          "value_param": "rocm_uint8",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 230
+        },
+        {
+          "name": "Float16PrecisionLoss\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 230
+        },
+        {
+          "name": "Float16PrecisionLoss\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 230
+        },
+        {
+          "name": "Float16PrecisionLoss\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 230
+        },
+        {
+          "name": "Float16PrecisionLoss\/rocm_bool",
+          "value_param": "rocm_bool",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 230
+        },
+        {
           "name": "Float32VsFloat64Precision\/cpu_int8",
           "value_param": "cpu_int8",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
@@ -1347,6 +1635,54 @@
         {
           "name": "Float32VsFloat64Precision\/oneapi_bool",
           "value_param": "oneapi_bool",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 264
+        },
+        {
+          "name": "Float32VsFloat64Precision\/rocm_int8",
+          "value_param": "rocm_int8",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 264
+        },
+        {
+          "name": "Float32VsFloat64Precision\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 264
+        },
+        {
+          "name": "Float32VsFloat64Precision\/rocm_int64",
+          "value_param": "rocm_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 264
+        },
+        {
+          "name": "Float32VsFloat64Precision\/rocm_uint8",
+          "value_param": "rocm_uint8",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 264
+        },
+        {
+          "name": "Float32VsFloat64Precision\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 264
+        },
+        {
+          "name": "Float32VsFloat64Precision\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 264
+        },
+        {
+          "name": "Float32VsFloat64Precision\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 264
+        },
+        {
+          "name": "Float32VsFloat64Precision\/rocm_bool",
+          "value_param": "rocm_bool",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
           "line": 264
         },
@@ -1543,6 +1879,54 @@
           "line": 300
         },
         {
+          "name": "DenormalNumbers\/rocm_int8",
+          "value_param": "rocm_int8",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 300
+        },
+        {
+          "name": "DenormalNumbers\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 300
+        },
+        {
+          "name": "DenormalNumbers\/rocm_int64",
+          "value_param": "rocm_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 300
+        },
+        {
+          "name": "DenormalNumbers\/rocm_uint8",
+          "value_param": "rocm_uint8",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 300
+        },
+        {
+          "name": "DenormalNumbers\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 300
+        },
+        {
+          "name": "DenormalNumbers\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 300
+        },
+        {
+          "name": "DenormalNumbers\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 300
+        },
+        {
+          "name": "DenormalNumbers\/rocm_bool",
+          "value_param": "rocm_bool",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 300
+        },
+        {
           "name": "FloatToIntTruncation\/cpu_int8",
           "value_param": "cpu_int8",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
@@ -1731,6 +2115,54 @@
         {
           "name": "FloatToIntTruncation\/oneapi_bool",
           "value_param": "oneapi_bool",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 348
+        },
+        {
+          "name": "FloatToIntTruncation\/rocm_int8",
+          "value_param": "rocm_int8",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 348
+        },
+        {
+          "name": "FloatToIntTruncation\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 348
+        },
+        {
+          "name": "FloatToIntTruncation\/rocm_int64",
+          "value_param": "rocm_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 348
+        },
+        {
+          "name": "FloatToIntTruncation\/rocm_uint8",
+          "value_param": "rocm_uint8",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 348
+        },
+        {
+          "name": "FloatToIntTruncation\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 348
+        },
+        {
+          "name": "FloatToIntTruncation\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 348
+        },
+        {
+          "name": "FloatToIntTruncation\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 348
+        },
+        {
+          "name": "FloatToIntTruncation\/rocm_bool",
+          "value_param": "rocm_bool",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
           "line": 348
         },
@@ -1927,6 +2359,54 @@
           "line": 386
         },
         {
+          "name": "IntToFloatPrecisionLoss\/rocm_int8",
+          "value_param": "rocm_int8",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 386
+        },
+        {
+          "name": "IntToFloatPrecisionLoss\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 386
+        },
+        {
+          "name": "IntToFloatPrecisionLoss\/rocm_int64",
+          "value_param": "rocm_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 386
+        },
+        {
+          "name": "IntToFloatPrecisionLoss\/rocm_uint8",
+          "value_param": "rocm_uint8",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 386
+        },
+        {
+          "name": "IntToFloatPrecisionLoss\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 386
+        },
+        {
+          "name": "IntToFloatPrecisionLoss\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 386
+        },
+        {
+          "name": "IntToFloatPrecisionLoss\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 386
+        },
+        {
+          "name": "IntToFloatPrecisionLoss\/rocm_bool",
+          "value_param": "rocm_bool",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 386
+        },
+        {
           "name": "LossyConversionChain\/cpu_int8",
           "value_param": "cpu_int8",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
@@ -2115,6 +2595,54 @@
         {
           "name": "LossyConversionChain\/oneapi_bool",
           "value_param": "oneapi_bool",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 422
+        },
+        {
+          "name": "LossyConversionChain\/rocm_int8",
+          "value_param": "rocm_int8",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 422
+        },
+        {
+          "name": "LossyConversionChain\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 422
+        },
+        {
+          "name": "LossyConversionChain\/rocm_int64",
+          "value_param": "rocm_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 422
+        },
+        {
+          "name": "LossyConversionChain\/rocm_uint8",
+          "value_param": "rocm_uint8",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 422
+        },
+        {
+          "name": "LossyConversionChain\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 422
+        },
+        {
+          "name": "LossyConversionChain\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 422
+        },
+        {
+          "name": "LossyConversionChain\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 422
+        },
+        {
+          "name": "LossyConversionChain\/rocm_bool",
+          "value_param": "rocm_bool",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
           "line": 422
         },
@@ -2311,6 +2839,54 @@
           "line": 457
         },
         {
+          "name": "BoolConversion\/rocm_int8",
+          "value_param": "rocm_int8",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 457
+        },
+        {
+          "name": "BoolConversion\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 457
+        },
+        {
+          "name": "BoolConversion\/rocm_int64",
+          "value_param": "rocm_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 457
+        },
+        {
+          "name": "BoolConversion\/rocm_uint8",
+          "value_param": "rocm_uint8",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 457
+        },
+        {
+          "name": "BoolConversion\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 457
+        },
+        {
+          "name": "BoolConversion\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 457
+        },
+        {
+          "name": "BoolConversion\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 457
+        },
+        {
+          "name": "BoolConversion\/rocm_bool",
+          "value_param": "rocm_bool",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 457
+        },
+        {
           "name": "NaNPropagation\/cpu_int8",
           "value_param": "cpu_int8",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
@@ -2499,6 +3075,54 @@
         {
           "name": "NaNPropagation\/oneapi_bool",
           "value_param": "oneapi_bool",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 498
+        },
+        {
+          "name": "NaNPropagation\/rocm_int8",
+          "value_param": "rocm_int8",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 498
+        },
+        {
+          "name": "NaNPropagation\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 498
+        },
+        {
+          "name": "NaNPropagation\/rocm_int64",
+          "value_param": "rocm_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 498
+        },
+        {
+          "name": "NaNPropagation\/rocm_uint8",
+          "value_param": "rocm_uint8",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 498
+        },
+        {
+          "name": "NaNPropagation\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 498
+        },
+        {
+          "name": "NaNPropagation\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 498
+        },
+        {
+          "name": "NaNPropagation\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 498
+        },
+        {
+          "name": "NaNPropagation\/rocm_bool",
+          "value_param": "rocm_bool",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
           "line": 498
         },
@@ -2695,6 +3319,54 @@
           "line": 538
         },
         {
+          "name": "InfinityArithmetic\/rocm_int8",
+          "value_param": "rocm_int8",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 538
+        },
+        {
+          "name": "InfinityArithmetic\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 538
+        },
+        {
+          "name": "InfinityArithmetic\/rocm_int64",
+          "value_param": "rocm_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 538
+        },
+        {
+          "name": "InfinityArithmetic\/rocm_uint8",
+          "value_param": "rocm_uint8",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 538
+        },
+        {
+          "name": "InfinityArithmetic\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 538
+        },
+        {
+          "name": "InfinityArithmetic\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 538
+        },
+        {
+          "name": "InfinityArithmetic\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 538
+        },
+        {
+          "name": "InfinityArithmetic\/rocm_bool",
+          "value_param": "rocm_bool",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 538
+        },
+        {
           "name": "NegativeZero\/cpu_int8",
           "value_param": "cpu_int8",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
@@ -2885,12 +3557,60 @@
           "value_param": "oneapi_bool",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
           "line": 591
+        },
+        {
+          "name": "NegativeZero\/rocm_int8",
+          "value_param": "rocm_int8",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 591
+        },
+        {
+          "name": "NegativeZero\/rocm_int32",
+          "value_param": "rocm_int32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 591
+        },
+        {
+          "name": "NegativeZero\/rocm_int64",
+          "value_param": "rocm_int64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 591
+        },
+        {
+          "name": "NegativeZero\/rocm_uint8",
+          "value_param": "rocm_uint8",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 591
+        },
+        {
+          "name": "NegativeZero\/rocm_float16",
+          "value_param": "rocm_float16",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 591
+        },
+        {
+          "name": "NegativeZero\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 591
+        },
+        {
+          "name": "NegativeZero\/rocm_float64",
+          "value_param": "rocm_float64",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 591
+        },
+        {
+          "name": "NegativeZero\/rocm_bool",
+          "value_param": "rocm_bool",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 591
         }
       ]
     },
     {
       "name": "AllBackends\/ComparisonOpsTest",
-      "tests": 8,
+      "tests": 10,
       "testsuite": [
         {
           "name": "ComparisonOutputDType\/cpu",
@@ -2917,6 +3637,12 @@
           "line": 639
         },
         {
+          "name": "ComparisonOutputDType\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 639
+        },
+        {
           "name": "BoolComparisons\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
@@ -2937,6 +3663,12 @@
         {
           "name": "BoolComparisons\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
+          "line": 674
+        },
+        {
+          "name": "BoolComparisons\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_dtype_edge_cases.cpp",
           "line": 674
         }

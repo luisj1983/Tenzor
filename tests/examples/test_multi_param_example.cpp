@@ -110,7 +110,7 @@ TEST_P(MathOpsMultiParamTest, AddBasic) {
 
 // Generate all combinations of backend × dtype
 std::vector<BackendDTypeParam> GenerateBackendDTypeCombinations() {
-    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi"};
+    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "rocm"};
 
     // Define dtypes to test per operation type
     std::vector<std::pair<DType, std::string>> dtypes = {

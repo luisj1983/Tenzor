@@ -328,7 +328,7 @@ TEST_P(DTypeEdgeCaseEnhancedTest, ConversionRoundtrip) {
 // ============================================================================
 
 std::vector<BackendDTypeParam> GenerateEnhancedEdgeCaseCombinations() {
-    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi"};
+    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "rocm"};
 
     std::vector<std::pair<DType, std::string>> dtypes = {
         {DType::Int8, "int8"},

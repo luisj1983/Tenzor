@@ -1,10 +1,10 @@
 {
-  "tests": 100,
+  "tests": 125,
   "name": "AllTests",
   "testsuites": [
     {
       "name": "AllBackendsAllDTypes\/LSTMMultiDTypeTest",
-      "tests": 100,
+      "tests": 125,
       "testsuite": [
         {
           "name": "LSTMCellBasicForward\/cpu_float32",
@@ -27,6 +27,12 @@
         {
           "name": "LSTMCellBasicForward\/oneapi_float32",
           "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
+          "line": 117
+        },
+        {
+          "name": "LSTMCellBasicForward\/rocm_float32",
+          "value_param": "rocm_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
           "line": 117
         },
@@ -55,6 +61,12 @@
           "line": 140
         },
         {
+          "name": "LSTMCellNoInitialStates\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
+          "line": 140
+        },
+        {
           "name": "LSTMCellNoBias\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
@@ -75,6 +87,12 @@
         {
           "name": "LSTMCellNoBias\/oneapi_float32",
           "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
+          "line": 161
+        },
+        {
+          "name": "LSTMCellNoBias\/rocm_float32",
+          "value_param": "rocm_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
           "line": 161
         },
@@ -103,6 +121,12 @@
           "line": 176
         },
         {
+          "name": "LSTMCellStateEvolution\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
+          "line": 176
+        },
+        {
           "name": "LSTMBasicForward\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
@@ -123,6 +147,12 @@
         {
           "name": "LSTMBasicForward\/oneapi_float32",
           "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
+          "line": 198
+        },
+        {
+          "name": "LSTMBasicForward\/rocm_float32",
+          "value_param": "rocm_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
           "line": 198
         },
@@ -151,6 +181,12 @@
           "line": 228
         },
         {
+          "name": "LSTMMultiLayer\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
+          "line": 228
+        },
+        {
           "name": "LSTMBatchFirst\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
@@ -171,6 +207,12 @@
         {
           "name": "LSTMBatchFirst\/oneapi_float32",
           "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
+          "line": 250
+        },
+        {
+          "name": "LSTMBatchFirst\/rocm_float32",
+          "value_param": "rocm_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
           "line": 250
         },
@@ -199,6 +241,12 @@
           "line": 266
         },
         {
+          "name": "LSTMBidirectional\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
+          "line": 266
+        },
+        {
           "name": "LSTMBidirectionalMultiLayer\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
@@ -219,6 +267,12 @@
         {
           "name": "LSTMBidirectionalMultiLayer\/oneapi_float32",
           "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
+          "line": 291
+        },
+        {
+          "name": "LSTMBidirectionalMultiLayer\/rocm_float32",
+          "value_param": "rocm_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
           "line": 291
         },
@@ -247,6 +301,12 @@
           "line": 308
         },
         {
+          "name": "LSTMWithDropout\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
+          "line": 308
+        },
+        {
           "name": "LSTMInitialStates\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
@@ -267,6 +327,12 @@
         {
           "name": "LSTMInitialStates\/oneapi_float32",
           "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
+          "line": 324
+        },
+        {
+          "name": "LSTMInitialStates\/rocm_float32",
+          "value_param": "rocm_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
           "line": 324
         },
@@ -295,6 +361,12 @@
           "line": 343
         },
         {
+          "name": "LSTMSequenceLengthVariation\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
+          "line": 343
+        },
+        {
           "name": "LSTMBatchSizeVariation\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
@@ -315,6 +387,12 @@
         {
           "name": "LSTMBatchSizeVariation\/oneapi_float32",
           "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
+          "line": 363
+        },
+        {
+          "name": "LSTMBatchSizeVariation\/rocm_float32",
+          "value_param": "rocm_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
           "line": 363
         },
@@ -343,6 +421,12 @@
           "line": 383
         },
         {
+          "name": "LSTMSingleTimestep\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
+          "line": 383
+        },
+        {
           "name": "LSTMOutputConsistency\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
@@ -363,6 +447,12 @@
         {
           "name": "LSTMOutputConsistency\/oneapi_float32",
           "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
+          "line": 397
+        },
+        {
+          "name": "LSTMOutputConsistency\/rocm_float32",
+          "value_param": "rocm_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
           "line": 397
         },
@@ -391,6 +481,12 @@
           "line": 415
         },
         {
+          "name": "LSTMGradientFlow\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
+          "line": 415
+        },
+        {
           "name": "LSTMTrainingMode\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
@@ -411,6 +507,12 @@
         {
           "name": "LSTMTrainingMode\/oneapi_float32",
           "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
+          "line": 438
+        },
+        {
+          "name": "LSTMTrainingMode\/rocm_float32",
+          "value_param": "rocm_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
           "line": 438
         },
@@ -439,6 +541,12 @@
           "line": 454
         },
         {
+          "name": "LSTMParameterCount\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
+          "line": 454
+        },
+        {
           "name": "LSTMLargeHidden\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
@@ -459,6 +567,12 @@
         {
           "name": "LSTMLargeHidden\/oneapi_float32",
           "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
+          "line": 471
+        },
+        {
+          "name": "LSTMLargeHidden\/rocm_float32",
+          "value_param": "rocm_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
           "line": 471
         },
@@ -487,6 +601,12 @@
           "line": 485
         },
         {
+          "name": "LSTMVeryDeepNetwork\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
+          "line": 485
+        },
+        {
           "name": "LSTMLongSequence\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
@@ -507,6 +627,12 @@
         {
           "name": "LSTMLongSequence\/oneapi_float32",
           "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
+          "line": 501
+        },
+        {
+          "name": "LSTMLongSequence\/rocm_float32",
+          "value_param": "rocm_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
           "line": 501
         },
@@ -535,6 +661,12 @@
           "line": 515
         },
         {
+          "name": "LSTMInvalidNumLayers\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
+          "line": 515
+        },
+        {
           "name": "LSTMInvalidDropout\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
@@ -555,6 +687,12 @@
         {
           "name": "LSTMInvalidDropout\/oneapi_float32",
           "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
+          "line": 524
+        },
+        {
+          "name": "LSTMInvalidDropout\/rocm_float32",
+          "value_param": "rocm_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
           "line": 524
         },
@@ -583,6 +721,12 @@
           "line": 533
         },
         {
+          "name": "LSTMCellStateMemory\/rocm_float32",
+          "value_param": "rocm_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
+          "line": 533
+        },
+        {
           "name": "LSTMBatchFirstBidirectional\/cpu_float32",
           "value_param": "cpu_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
@@ -603,6 +747,12 @@
         {
           "name": "LSTMBatchFirstBidirectional\/oneapi_float32",
           "value_param": "oneapi_float32",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
+          "line": 576
+        },
+        {
+          "name": "LSTMBatchFirstBidirectional\/rocm_float32",
+          "value_param": "rocm_float32",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_lstm_multidtype.cpp",
           "line": 576
         }

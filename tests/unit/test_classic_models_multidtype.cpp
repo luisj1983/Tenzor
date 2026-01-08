@@ -602,7 +602,7 @@ TEST_P(ClassicModelsMultiDTypeTest, Float16ReducedComplexity) {
 std::vector<BackendDTypeParam> GenerateParams() {
     std::vector<BackendDTypeParam> params;
 
-    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi"};
+    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "rocm"};
     std::vector<std::pair<DType, std::string>> dtypes = {
         {DType::Float32, "float32"},
         {DType::Float64, "float64"},

@@ -1177,5 +1177,247 @@ auto conv2d_backward_bias(
     return grad_bias;
 }
 
+// ==============================================================================
+// Transpose Convolution (Deconvolution) Forward
+// ==============================================================================
+
+template<typename T>
+__global__ void conv_transpose2d_forward_kernel(
+    const T* input,
+    const T* weight,
+    const T* bias,
+    T* output,
+    int64_t batch,
+    int64_t in_channels,
+    int64_t in_h,
+    int64_t in_w,
+    int64_t out_channels,
+    int64_t out_h,
+    int64_t out_w,
+    int64_t kernel_h,
+    int64_t kernel_w,
+    int64_t stride_h,
+    int64_t stride_w,
+    int64_t padding_h,
+    int64_t padding_w,
+    int64_t output_padding_h,
+    int64_t output_padding_w
+) {
+    int64_t total_elements = batch * out_channels * out_h * out_w;
+
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < total_elements;
+         idx += blockDim.x * gridDim.x) {
+
+        int64_t ow = idx % out_w;
+        int64_t oh = (idx / out_w) % out_h;
+        int64_t oc = (idx / (out_w * out_h)) % out_channels;
+        int64_t n = idx / (out_w * out_h * out_channels);
+
+        T sum = bias ? bias[oc] : T(0);
+
+        // Iterate over input positions that contribute to this output
+        for (int64_t ic = 0; ic < in_channels; ++ic) {
+            for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                    // Find corresponding input position
+                    int64_t h_offset = oh + padding_h - kh;
+                    int64_t w_offset = ow + padding_w - kw;
+
+                    if (h_offset % stride_h != 0 || w_offset % stride_w != 0) continue;
+
+                    int64_t ih = h_offset / stride_h;
+                    int64_t iw = w_offset / stride_w;
+
+                    if (ih >= 0 && ih < in_h && iw >= 0 && iw < in_w) {
+                        int64_t input_idx = n * (in_channels * in_h * in_w) +
+                                           ic * (in_h * in_w) + ih * in_w + iw;
+                        // Weight: [in_channels, out_channels, kh, kw]
+                        int64_t weight_idx = ic * (out_channels * kernel_h * kernel_w) +
+                                            oc * (kernel_h * kernel_w) + kh * kernel_w + kw;
+                        sum += input[input_idx] * weight[weight_idx];
+                    }
+                }
+            }
+        }
+
+        output[idx] = sum;
+    }
+}
+
+auto conv_transpose2d_forward_kernel(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias,
+    int64_t stride_h,
+    int64_t stride_w,
+    int64_t padding_h,
+    int64_t padding_w,
+    int64_t output_padding_h,
+    int64_t output_padding_w,
+    hipStream_t stream
+) -> Tensor {
+    auto input_shape = input.shape();
+    auto weight_shape = weight.shape();
+
+    int64_t batch = input_shape[0];
+    int64_t in_channels = input_shape[1];
+    int64_t in_h = input_shape[2];
+    int64_t in_w = input_shape[3];
+
+    int64_t out_channels = weight_shape[1];
+    int64_t kernel_h = weight_shape[2];
+    int64_t kernel_w = weight_shape[3];
+
+    // Output size for transpose conv
+    int64_t out_h = (in_h - 1) * stride_h - 2 * padding_h + kernel_h + output_padding_h;
+    int64_t out_w = (in_w - 1) * stride_w - 2 * padding_w + kernel_w + output_padding_w;
+
+    Tensor output({batch, out_channels, out_h, out_w}, input.dtype(), input.device());
+
+    int64_t total_elements = output.numel();
+    int threads = 256;
+    int blocks = (total_elements + threads - 1) / threads;
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(conv_transpose2d_forward_kernel<float>,
+            dim3(blocks), dim3(threads), 0, stream,
+            input.data<float>(), weight.data<float>(),
+            bias ? bias->data<float>() : nullptr,
+            output.data<float>(),
+            batch, in_channels, in_h, in_w, out_channels, out_h, out_w,
+            kernel_h, kernel_w, stride_h, stride_w,
+            padding_h, padding_w, output_padding_h, output_padding_w);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(conv_transpose2d_forward_kernel<double>,
+            dim3(blocks), dim3(threads), 0, stream,
+            input.data<double>(), weight.data<double>(),
+            bias ? bias->data<double>() : nullptr,
+            output.data<double>(),
+            batch, in_channels, in_h, in_w, out_channels, out_h, out_w,
+            kernel_h, kernel_w, stride_h, stride_w,
+            padding_h, padding_w, output_padding_h, output_padding_w);
+    } else {
+        throw std::runtime_error("conv_transpose2d_forward: unsupported dtype");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return output;
+}
+
+// ==============================================================================
+// Depthwise Convolution Forward
+// ==============================================================================
+
+template<typename T>
+__global__ void depthwise_conv2d_forward_kernel(
+    const T* input,
+    const T* weight,
+    const T* bias,
+    T* output,
+    int64_t batch,
+    int64_t channels,
+    int64_t in_h,
+    int64_t in_w,
+    int64_t out_h,
+    int64_t out_w,
+    int64_t kernel_h,
+    int64_t kernel_w,
+    int64_t stride_h,
+    int64_t stride_w,
+    int64_t padding_h,
+    int64_t padding_w,
+    int64_t dilation_h,
+    int64_t dilation_w
+) {
+    int64_t total_elements = batch * channels * out_h * out_w;
+
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < total_elements;
+         idx += blockDim.x * gridDim.x) {
+
+        int64_t ow = idx % out_w;
+        int64_t oh = (idx / out_w) % out_h;
+        int64_t c = (idx / (out_w * out_h)) % channels;
+        int64_t n = idx / (out_w * out_h * channels);
+
+        T sum = bias ? bias[c] : T(0);
+
+        for (int64_t kh = 0; kh < kernel_h; ++kh) {
+            for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                int64_t ih = oh * stride_h - padding_h + kh * dilation_h;
+                int64_t iw = ow * stride_w - padding_w + kw * dilation_w;
+
+                if (ih >= 0 && ih < in_h && iw >= 0 && iw < in_w) {
+                    int64_t input_idx = n * (channels * in_h * in_w) +
+                                       c * (in_h * in_w) + ih * in_w + iw;
+                    // Weight: [channels, 1, kh, kw]
+                    int64_t weight_idx = c * (kernel_h * kernel_w) + kh * kernel_w + kw;
+                    sum += input[input_idx] * weight[weight_idx];
+                }
+            }
+        }
+
+        output[idx] = sum;
+    }
+}
+
+auto depthwise_conv2d_kernel(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias,
+    int64_t stride_h,
+    int64_t stride_w,
+    int64_t padding_h,
+    int64_t padding_w,
+    int64_t dilation_h,
+    int64_t dilation_w,
+    hipStream_t stream
+) -> Tensor {
+    auto input_shape = input.shape();
+    auto weight_shape = weight.shape();
+
+    int64_t batch = input_shape[0];
+    int64_t channels = input_shape[1];
+    int64_t in_h = input_shape[2];
+    int64_t in_w = input_shape[3];
+
+    int64_t kernel_h = weight_shape[2];
+    int64_t kernel_w = weight_shape[3];
+
+    // Compute output dimensions
+    int64_t out_h = (in_h + 2 * padding_h - dilation_h * (kernel_h - 1) - 1) / stride_h + 1;
+    int64_t out_w = (in_w + 2 * padding_w - dilation_w * (kernel_w - 1) - 1) / stride_w + 1;
+
+    Tensor output({batch, channels, out_h, out_w}, input.dtype(), input.device());
+
+    int64_t total_elements = output.numel();
+    int threads = 256;
+    int blocks = (total_elements + threads - 1) / threads;
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(depthwise_conv2d_forward_kernel<float>,
+            dim3(blocks), dim3(threads), 0, stream,
+            input.data<float>(), weight.data<float>(),
+            bias ? bias->data<float>() : nullptr,
+            output.data<float>(),
+            batch, channels, in_h, in_w, out_h, out_w,
+            kernel_h, kernel_w, stride_h, stride_w,
+            padding_h, padding_w, dilation_h, dilation_w);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(depthwise_conv2d_forward_kernel<double>,
+            dim3(blocks), dim3(threads), 0, stream,
+            input.data<double>(), weight.data<double>(),
+            bias ? bias->data<double>() : nullptr,
+            output.data<double>(),
+            batch, channels, in_h, in_w, out_h, out_w,
+            kernel_h, kernel_w, stride_h, stride_w,
+            padding_h, padding_w, dilation_h, dilation_w);
+    } else {
+        throw std::runtime_error("depthwise_conv2d: unsupported dtype");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return output;
+}
+
 } // namespace rocm
 } // namespace tenzor

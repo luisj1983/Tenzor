@@ -1,10 +1,10 @@
 {
-  "tests": 128,
+  "tests": 160,
   "name": "AllTests",
   "testsuites": [
     {
       "name": "AllBackends\/PositionalEncodingTest",
-      "tests": 16,
+      "tests": 20,
       "testsuite": [
         {
           "name": "Construction\/cpu",
@@ -31,6 +31,12 @@
           "line": 17
         },
         {
+          "name": "Construction\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
+          "line": 17
+        },
+        {
           "name": "ForwardShape\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
@@ -51,6 +57,12 @@
         {
           "name": "ForwardShape\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
+          "line": 29
+        },
+        {
+          "name": "ForwardShape\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
           "line": 29
         },
@@ -79,6 +91,12 @@
           "line": 47
         },
         {
+          "name": "ExceedsMaxLen\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
+          "line": 47
+        },
+        {
           "name": "WithDropout\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
@@ -101,12 +119,18 @@
           "value_param": "\"oneapi\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
           "line": 59
+        },
+        {
+          "name": "WithDropout\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
+          "line": 59
         }
       ]
     },
     {
       "name": "AllBackends\/TransformerEncoderLayerTest",
-      "tests": 24,
+      "tests": 30,
       "testsuite": [
         {
           "name": "Construction\/cpu",
@@ -129,6 +153,12 @@
         {
           "name": "Construction\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
+          "line": 77
+        },
+        {
+          "name": "Construction\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
           "line": 77
         },
@@ -157,6 +187,12 @@
           "line": 89
         },
         {
+          "name": "InvalidActivation\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
+          "line": 89
+        },
+        {
           "name": "ForwardShape\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
@@ -177,6 +213,12 @@
         {
           "name": "ForwardShape\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
+          "line": 96
+        },
+        {
+          "name": "ForwardShape\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
           "line": 96
         },
@@ -205,6 +247,12 @@
           "line": 113
         },
         {
+          "name": "BatchFirstFalse\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
+          "line": 113
+        },
+        {
           "name": "WithMask\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
@@ -225,6 +273,12 @@
         {
           "name": "WithMask\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
+          "line": 129
+        },
+        {
+          "name": "WithMask\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
           "line": 129
         },
@@ -251,12 +305,18 @@
           "value_param": "\"oneapi\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
           "line": 144
+        },
+        {
+          "name": "GeLUActivation\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
+          "line": 144
         }
       ]
     },
     {
       "name": "AllBackends\/TransformerEncoderTest",
-      "tests": 16,
+      "tests": 20,
       "testsuite": [
         {
           "name": "Construction\/cpu",
@@ -283,6 +343,12 @@
           "line": 162
         },
         {
+          "name": "Construction\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
+          "line": 162
+        },
+        {
           "name": "ForwardShape\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
@@ -303,6 +369,12 @@
         {
           "name": "ForwardShape\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
+          "line": 177
+        },
+        {
+          "name": "ForwardShape\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
           "line": 177
         },
@@ -331,6 +403,12 @@
           "line": 190
         },
         {
+          "name": "MultipleLayersProcessing\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
+          "line": 190
+        },
+        {
           "name": "WithNormalization\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
@@ -353,12 +431,18 @@
           "value_param": "\"oneapi\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
           "line": 204
+        },
+        {
+          "name": "WithNormalization\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
+          "line": 204
         }
       ]
     },
     {
       "name": "AllBackends\/TransformerDecoderLayerTest",
-      "tests": 16,
+      "tests": 20,
       "testsuite": [
         {
           "name": "Construction\/cpu",
@@ -385,6 +469,12 @@
           "line": 224
         },
         {
+          "name": "Construction\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
+          "line": 224
+        },
+        {
           "name": "ForwardShape\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
@@ -405,6 +495,12 @@
         {
           "name": "ForwardShape\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
+          "line": 236
+        },
+        {
+          "name": "ForwardShape\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
           "line": 236
         },
@@ -433,6 +529,12 @@
           "line": 255
         },
         {
+          "name": "WithCausalMask\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
+          "line": 255
+        },
+        {
           "name": "InvalidSingleInputForward\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
@@ -455,12 +557,18 @@
           "value_param": "\"oneapi\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
           "line": 273
+        },
+        {
+          "name": "InvalidSingleInputForward\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
+          "line": 273
         }
       ]
     },
     {
       "name": "AllBackends\/TransformerDecoderTest",
-      "tests": 12,
+      "tests": 15,
       "testsuite": [
         {
           "name": "Construction\/cpu",
@@ -487,6 +595,12 @@
           "line": 291
         },
         {
+          "name": "Construction\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
+          "line": 291
+        },
+        {
           "name": "ForwardShape\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
@@ -507,6 +621,12 @@
         {
           "name": "ForwardShape\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
+          "line": 306
+        },
+        {
+          "name": "ForwardShape\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
           "line": 306
         },
@@ -533,12 +653,18 @@
           "value_param": "\"oneapi\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
           "line": 321
+        },
+        {
+          "name": "MultipleLayersProcessing\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
+          "line": 321
         }
       ]
     },
     {
       "name": "AllBackends\/TransformerTest",
-      "tests": 24,
+      "tests": 30,
       "testsuite": [
         {
           "name": "Construction\/cpu",
@@ -565,6 +691,12 @@
           "line": 342
         },
         {
+          "name": "Construction\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
+          "line": 342
+        },
+        {
           "name": "ForwardShape\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
@@ -585,6 +717,12 @@
         {
           "name": "ForwardShape\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
+          "line": 354
+        },
+        {
+          "name": "ForwardShape\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
           "line": 354
         },
@@ -613,6 +751,12 @@
           "line": 374
         },
         {
+          "name": "WithMasks\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
+          "line": 374
+        },
+        {
           "name": "InvalidSingleInputForward\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
@@ -633,6 +777,12 @@
         {
           "name": "InvalidSingleInputForward\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
+          "line": 392
+        },
+        {
+          "name": "InvalidSingleInputForward\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
           "line": 392
         },
@@ -661,6 +811,12 @@
           "line": 404
         },
         {
+          "name": "BERTConfig\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
+          "line": 404
+        },
+        {
           "name": "GPTLikeConfig\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
@@ -683,12 +839,18 @@
           "value_param": "\"oneapi\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
           "line": 420
+        },
+        {
+          "name": "GPTLikeConfig\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
+          "line": 420
         }
       ]
     },
     {
       "name": "AllBackends\/TransformerIntegrationTest",
-      "tests": 20,
+      "tests": 25,
       "testsuite": [
         {
           "name": "ForwardBackward\/cpu",
@@ -711,6 +873,12 @@
         {
           "name": "ForwardBackward\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
+          "line": 446
+        },
+        {
+          "name": "ForwardBackward\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
           "line": 446
         },
@@ -739,6 +907,12 @@
           "line": 464
         },
         {
+          "name": "ParameterCount\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
+          "line": 464
+        },
+        {
           "name": "TrainEvalSwitch\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
@@ -759,6 +933,12 @@
         {
           "name": "TrainEvalSwitch\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
+          "line": 477
+        },
+        {
+          "name": "TrainEvalSwitch\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
           "line": 477
         },
@@ -787,6 +967,12 @@
           "line": 490
         },
         {
+          "name": "SmallModelOverfit\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
+          "line": 490
+        },
+        {
           "name": "DifferentSequenceLengths\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
@@ -807,6 +993,12 @@
         {
           "name": "DifferentSequenceLengths\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
+          "line": 514
+        },
+        {
+          "name": "DifferentSequenceLengths\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/unit\/test_transformer.cpp",
           "line": 514
         }

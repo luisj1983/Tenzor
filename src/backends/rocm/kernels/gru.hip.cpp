@@ -1,5 +1,6 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_fp16.h>
+#include <rocblas/rocblas.h>
 #include <cmath>
 #include <cfloat>
 #include <cstdio>
@@ -33,6 +34,67 @@ constexpr int BLOCK_SIZE = 256;
 
 inline int get_num_blocks(int64_t n, int block_size = BLOCK_SIZE) {
     return (n + block_size - 1) / block_size;
+}
+
+// Kernel to add bias (broadcasted across batch dimension)
+template<typename T>
+__global__ void add_bias_kernel(const T* __restrict__ bias, T* __restrict__ gates,
+                                 int64_t batch, int64_t gate_size) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < batch * gate_size) {
+        int64_t g = idx % gate_size;
+        gates[idx] += bias[g];
+    }
+}
+
+// Kernel to combine r and z gates from ih and hh parts
+template<typename T>
+__global__ void combine_rz_gates_kernel(const T* __restrict__ gates_ih,
+                                         const T* __restrict__ gates_hh,
+                                         T* __restrict__ rz_gates,
+                                         int64_t batch,
+                                         int64_t hidden) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < batch * 2 * hidden) {
+        rz_gates[idx] = gates_ih[idx] + gates_hh[idx];
+    }
+}
+
+// Kernel to compute GRU from pre-computed gate values
+// For full sequence GRU, we compute: gates = [r_ih + r_hh, z_ih + z_hh, n_ih, n_hh]
+// This kernel applies the GRU equations given these pre-computed values
+template<typename T>
+__global__ void gru_sequence_step_kernel(
+    const T* __restrict__ rz_gates,    // (batch, 2*hidden) - combined r,z gates
+    const T* __restrict__ n_ih_gates,  // (batch, hidden) - new gate input part
+    const T* __restrict__ n_hh_gates,  // (batch, hidden) - new gate hidden part
+    const T* __restrict__ h_prev,
+    T* __restrict__ h_out,
+    int64_t batch,
+    int64_t hidden) {
+
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < batch * hidden) {
+        int64_t b = idx / hidden;
+        int64_t h = idx % hidden;
+
+        // Load gate values
+        T r_gate = rz_gates[b * 2 * hidden + h];
+        T z_gate = rz_gates[b * 2 * hidden + hidden + h];
+        T n_ih = n_ih_gates[idx];
+        T n_hh = n_hh_gates[idx];
+        T h_prev_val = h_prev[idx];
+
+        // Apply sigmoid to r and z
+        T r_t = T(1) / (T(1) + exp(-r_gate));
+        T z_t = T(1) / (T(1) + exp(-z_gate));
+
+        // Compute new gate: n_t = tanh(n_ih + r_t * n_hh)
+        T n_t = tanh(n_ih + r_t * n_hh);
+
+        // Compute new hidden state: h_t = (1 - z_t) * n_t + z_t * h_prev
+        h_out[idx] = (T(1) - z_t) * n_t + z_t * h_prev_val;
+    }
 }
 
 // ============================================================================
@@ -423,6 +485,230 @@ auto gru_cell_backward_kernel(
     HIP_CHECK(hipGetLastError());
 
     return outputs;
+}
+
+// ============================================================================
+// Full Sequence GRU Forward
+// ============================================================================
+
+/**
+ * @brief Full sequence GRU forward pass
+ *
+ * Processes entire sequence using rocBLAS for efficient matrix operations.
+ *
+ * @param input Input sequence (seq_len, batch, input_size)
+ * @param W_ih Input-to-hidden weights (3*hidden, input_size)
+ * @param W_hh Hidden-to-hidden weights (3*hidden, hidden)
+ * @param bias Combined bias (3*hidden) or empty tensor
+ * @param h0 Initial hidden state (batch, hidden)
+ * @param stream HIP stream for async execution
+ * @return vector of [output, h_n]
+ */
+auto gru_forward_kernel(
+    const Tensor& input,
+    const Tensor& W_ih,
+    const Tensor& W_hh,
+    const Tensor& bias,
+    const Tensor& h0,
+    hipStream_t stream) -> std::vector<Tensor> {
+
+    // Get dimensions
+    auto input_shape = input.shape();
+    int64_t seq_len = input_shape[0];
+    int64_t batch = input_shape[1];
+    int64_t input_size = input_shape[2];
+    int64_t hidden = h0.shape()[1];
+
+    // Allocate output tensors
+    Tensor output({seq_len, batch, hidden}, input.dtype(), input.device());
+    Tensor h_n({batch, hidden}, input.dtype(), input.device());
+
+    // Temporary tensors for gate computations
+    // GRU has 3 gates: r(reset), z(update), n(new)
+    // We compute gates_ih (from input) and gates_hh (from hidden) separately for n gate
+    Tensor gates_ih({batch, 3 * hidden}, input.dtype(), input.device());  // r_ih, z_ih, n_ih
+    Tensor gates_hh({batch, 3 * hidden}, input.dtype(), input.device());  // r_hh, z_hh, n_hh
+    Tensor rz_gates({batch, 2 * hidden}, input.dtype(), input.device());  // combined r, z
+
+    // Current hidden state
+    Tensor h_t({batch, hidden}, input.dtype(), input.device());
+
+    // Copy h0 to h_t
+    hipMemcpyAsync(h_t.data<void>(), h0.data<void>(),
+                   batch * hidden * dtype_size(input.dtype()),
+                   hipMemcpyDeviceToDevice, stream);
+
+    if (input.dtype() == DType::Float32) {
+        rocblas_handle handle;
+        rocblas_create_handle(&handle);
+        rocblas_set_stream(handle, stream);
+
+        const float alpha = 1.0f;
+        const float beta_zero = 0.0f;
+        const float beta_one = 1.0f;
+
+        const float* W_ih_ptr = W_ih.data<float>();
+        const float* W_hh_ptr = W_hh.data<float>();
+        const float* input_ptr = input.data<float>();
+        const float* bias_ptr = bias.numel() > 0 ? bias.data<float>() : nullptr;
+        float* gates_ih_ptr = gates_ih.data<float>();
+        float* gates_hh_ptr = gates_hh.data<float>();
+        float* rz_gates_ptr = rz_gates.data<float>();
+        float* h_t_ptr = h_t.data<float>();
+        float* output_ptr = output.data<float>();
+
+        // Process each timestep
+        for (int64_t t = 0; t < seq_len; ++t) {
+            const float* x_t = input_ptr + t * batch * input_size;
+
+            // Compute input contribution: gates_ih = x_t @ W_ih^T
+            rocblas_sgemm(handle, rocblas_operation_transpose, rocblas_operation_none,
+                         3 * hidden, batch, input_size,
+                         &alpha,
+                         W_ih_ptr, input_size,
+                         x_t, input_size,
+                         &beta_zero,
+                         gates_ih_ptr, 3 * hidden);
+
+            // Compute hidden contribution: gates_hh = h_t @ W_hh^T
+            rocblas_sgemm(handle, rocblas_operation_transpose, rocblas_operation_none,
+                         3 * hidden, batch, hidden,
+                         &alpha,
+                         W_hh_ptr, hidden,
+                         h_t_ptr, hidden,
+                         &beta_zero,
+                         gates_hh_ptr, 3 * hidden);
+
+            // Add bias if present (split between ih and hh parts)
+            if (bias_ptr != nullptr) {
+                // Add bias to gates_ih
+                int64_t total = batch * 3 * hidden;
+                int num_blocks = get_num_blocks(total);
+                hipLaunchKernelGGL(add_bias_kernel<float>,
+                    dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                    bias_ptr, gates_ih_ptr, batch, 3 * hidden);
+            }
+
+            // Combine r and z gates: rz = gates_ih[:, :2*hidden] + gates_hh[:, :2*hidden]
+            // n_ih = gates_ih[:, 2*hidden:]
+            // n_hh = gates_hh[:, 2*hidden:]
+            // Apply GRU step kernel
+            int64_t total = batch * hidden;
+            int num_blocks = get_num_blocks(total);
+
+            // Combine the rz gates
+            hipLaunchKernelGGL(combine_rz_gates_kernel<float>,
+                dim3(get_num_blocks(batch * 2 * hidden)), dim3(BLOCK_SIZE), 0, stream,
+                gates_ih_ptr, gates_hh_ptr, rz_gates_ptr, batch, hidden);
+
+            // Apply GRU step
+            hipLaunchKernelGGL(gru_sequence_step_kernel<float>,
+                              dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                              rz_gates_ptr,
+                              gates_ih_ptr + 2 * hidden,  // n_ih part
+                              gates_hh_ptr + 2 * hidden,  // n_hh part
+                              h_t_ptr,
+                              h_t_ptr,
+                              batch, hidden);
+
+            // Copy h_t to output[t]
+            hipMemcpyAsync(output_ptr + t * batch * hidden, h_t_ptr,
+                          batch * hidden * sizeof(float),
+                          hipMemcpyDeviceToDevice, stream);
+        }
+
+        rocblas_destroy_handle(handle);
+
+        // Copy final state
+        hipMemcpyAsync(h_n.data<float>(), h_t_ptr,
+                      batch * hidden * sizeof(float),
+                      hipMemcpyDeviceToDevice, stream);
+    } else if (input.dtype() == DType::Float64) {
+        rocblas_handle handle;
+        rocblas_create_handle(&handle);
+        rocblas_set_stream(handle, stream);
+
+        const double alpha = 1.0;
+        const double beta_zero = 0.0;
+        const double beta_one = 1.0;
+
+        const double* W_ih_ptr = W_ih.data<double>();
+        const double* W_hh_ptr = W_hh.data<double>();
+        const double* input_ptr = input.data<double>();
+        const double* bias_ptr = bias.numel() > 0 ? bias.data<double>() : nullptr;
+        double* gates_ih_ptr = gates_ih.data<double>();
+        double* gates_hh_ptr = gates_hh.data<double>();
+        double* rz_gates_ptr = rz_gates.data<double>();
+        double* h_t_ptr = h_t.data<double>();
+        double* output_ptr = output.data<double>();
+
+        // Process each timestep
+        for (int64_t t = 0; t < seq_len; ++t) {
+            const double* x_t = input_ptr + t * batch * input_size;
+
+            // Compute input contribution: gates_ih = x_t @ W_ih^T
+            rocblas_dgemm(handle, rocblas_operation_transpose, rocblas_operation_none,
+                         3 * hidden, batch, input_size,
+                         &alpha,
+                         W_ih_ptr, input_size,
+                         x_t, input_size,
+                         &beta_zero,
+                         gates_ih_ptr, 3 * hidden);
+
+            // Compute hidden contribution: gates_hh = h_t @ W_hh^T
+            rocblas_dgemm(handle, rocblas_operation_transpose, rocblas_operation_none,
+                         3 * hidden, batch, hidden,
+                         &alpha,
+                         W_hh_ptr, hidden,
+                         h_t_ptr, hidden,
+                         &beta_zero,
+                         gates_hh_ptr, 3 * hidden);
+
+            // Add bias if present
+            if (bias_ptr != nullptr) {
+                int64_t total = batch * 3 * hidden;
+                int num_blocks = get_num_blocks(total);
+                hipLaunchKernelGGL(add_bias_kernel<double>,
+                    dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                    bias_ptr, gates_ih_ptr, batch, 3 * hidden);
+            }
+
+            // Combine rz gates and apply GRU step
+            int64_t total = batch * hidden;
+            int num_blocks = get_num_blocks(total);
+
+            hipLaunchKernelGGL(combine_rz_gates_kernel<double>,
+                dim3(get_num_blocks(batch * 2 * hidden)), dim3(BLOCK_SIZE), 0, stream,
+                gates_ih_ptr, gates_hh_ptr, rz_gates_ptr, batch, hidden);
+
+            hipLaunchKernelGGL(gru_sequence_step_kernel<double>,
+                              dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                              rz_gates_ptr,
+                              gates_ih_ptr + 2 * hidden,
+                              gates_hh_ptr + 2 * hidden,
+                              h_t_ptr,
+                              h_t_ptr,
+                              batch, hidden);
+
+            // Copy h_t to output[t]
+            hipMemcpyAsync(output_ptr + t * batch * hidden, h_t_ptr,
+                          batch * hidden * sizeof(double),
+                          hipMemcpyDeviceToDevice, stream);
+        }
+
+        rocblas_destroy_handle(handle);
+
+        // Copy final state
+        hipMemcpyAsync(h_n.data<double>(), h_t_ptr,
+                      batch * hidden * sizeof(double),
+                      hipMemcpyDeviceToDevice, stream);
+    } else {
+        throw std::runtime_error("GRU forward only supports Float32 and Float64");
+    }
+
+    HIP_CHECK(hipGetLastError());
+
+    return {output, h_n};
 }
 
 } // namespace rocm

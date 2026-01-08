@@ -1,10 +1,10 @@
 {
-  "tests": 216,
+  "tests": 270,
   "name": "AllTests",
   "testsuites": [
     {
       "name": "AllBackends\/Conv2dBackendTest",
-      "tests": 216,
+      "tests": 270,
       "testsuite": [
         {
           "name": "ForwardShapeBasic\/cpu",
@@ -27,6 +27,12 @@
         {
           "name": "ForwardShapeBasic\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 78
+        },
+        {
+          "name": "ForwardShapeBasic\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
           "line": 78
         },
@@ -55,6 +61,12 @@
           "line": 91
         },
         {
+          "name": "ForwardShapeSingleBatch\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 91
+        },
+        {
           "name": "ForwardShapeMultiBatch\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
@@ -75,6 +87,12 @@
         {
           "name": "ForwardShapeMultiBatch\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 102
+        },
+        {
+          "name": "ForwardShapeMultiBatch\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
           "line": 102
         },
@@ -103,6 +121,12 @@
           "line": 117
         },
         {
+          "name": "KernelSize1x1\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 117
+        },
+        {
           "name": "KernelSize3x3\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
@@ -123,6 +147,12 @@
         {
           "name": "KernelSize3x3\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 129
+        },
+        {
+          "name": "KernelSize3x3\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
           "line": 129
         },
@@ -151,6 +181,12 @@
           "line": 140
         },
         {
+          "name": "KernelSize5x5\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 140
+        },
+        {
           "name": "KernelSize7x7\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
@@ -171,6 +207,12 @@
         {
           "name": "KernelSize7x7\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 151
+        },
+        {
+          "name": "KernelSize7x7\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
           "line": 151
         },
@@ -199,6 +241,12 @@
           "line": 166
         },
         {
+          "name": "Stride1\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 166
+        },
+        {
           "name": "Stride2\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
@@ -219,6 +267,12 @@
         {
           "name": "Stride2\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 175
+        },
+        {
+          "name": "Stride2\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
           "line": 175
         },
@@ -247,6 +301,12 @@
           "line": 184
         },
         {
+          "name": "Stride3\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 184
+        },
+        {
           "name": "Stride4\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
@@ -267,6 +327,12 @@
         {
           "name": "Stride4\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 193
+        },
+        {
+          "name": "Stride4\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
           "line": 193
         },
@@ -295,6 +361,12 @@
           "line": 206
         },
         {
+          "name": "Padding0\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 206
+        },
+        {
           "name": "Padding1\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
@@ -315,6 +387,12 @@
         {
           "name": "Padding1\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 215
+        },
+        {
+          "name": "Padding1\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
           "line": 215
         },
@@ -343,6 +421,12 @@
           "line": 224
         },
         {
+          "name": "Padding2\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 224
+        },
+        {
           "name": "PaddingSamePadding\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
@@ -363,6 +447,12 @@
         {
           "name": "PaddingSamePadding\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 233
+        },
+        {
+          "name": "PaddingSamePadding\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
           "line": 233
         },
@@ -391,6 +481,12 @@
           "line": 247
         },
         {
+          "name": "Dilation1\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 247
+        },
+        {
           "name": "Dilation2\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
@@ -411,6 +507,12 @@
         {
           "name": "Dilation2\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 256
+        },
+        {
+          "name": "Dilation2\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
           "line": 256
         },
@@ -439,6 +541,12 @@
           "line": 265
         },
         {
+          "name": "Dilation3\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 265
+        },
+        {
           "name": "DilationWithPadding\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
@@ -459,6 +567,12 @@
         {
           "name": "DilationWithPadding\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 274
+        },
+        {
+          "name": "DilationWithPadding\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
           "line": 274
         },
@@ -487,6 +601,12 @@
           "line": 288
         },
         {
+          "name": "Groups1Standard\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 288
+        },
+        {
           "name": "GroupsDepthwise\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
@@ -507,6 +627,12 @@
         {
           "name": "GroupsDepthwise\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 300
+        },
+        {
+          "name": "GroupsDepthwise\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
           "line": 300
         },
@@ -535,6 +661,12 @@
           "line": 313
         },
         {
+          "name": "Groups2\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 313
+        },
+        {
           "name": "Groups4\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
@@ -555,6 +687,12 @@
         {
           "name": "Groups4\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 325
+        },
+        {
+          "name": "Groups4\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
           "line": 325
         },
@@ -583,6 +721,12 @@
           "line": 339
         },
         {
+          "name": "WithBias\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 339
+        },
+        {
           "name": "NoBias\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
@@ -603,6 +747,12 @@
         {
           "name": "NoBias\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 347
+        },
+        {
+          "name": "NoBias\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
           "line": 347
         },
@@ -631,6 +781,12 @@
           "line": 355
         },
         {
+          "name": "BiasEffect\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 355
+        },
+        {
           "name": "WeightShape\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
@@ -651,6 +807,12 @@
         {
           "name": "WeightShape\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 372
+        },
+        {
+          "name": "WeightShape\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
           "line": 372
         },
@@ -679,6 +841,12 @@
           "line": 385
         },
         {
+          "name": "WeightShapeWithGroups\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 385
+        },
+        {
           "name": "EdgeCase1x1Image\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
@@ -699,6 +867,12 @@
         {
           "name": "EdgeCase1x1Image\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 401
+        },
+        {
+          "name": "EdgeCase1x1Image\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
           "line": 401
         },
@@ -727,6 +901,12 @@
           "line": 413
         },
         {
+          "name": "EdgeCaseLargeImage\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 413
+        },
+        {
           "name": "EdgeCaseVeryLargeBatch\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
@@ -747,6 +927,12 @@
         {
           "name": "EdgeCaseVeryLargeBatch\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 425
+        },
+        {
+          "name": "EdgeCaseVeryLargeBatch\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
           "line": 425
         },
@@ -775,6 +961,12 @@
           "line": 435
         },
         {
+          "name": "EdgeCaseSingleChannel\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 435
+        },
+        {
           "name": "EdgeCaseManyChannels\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
@@ -795,6 +987,12 @@
         {
           "name": "EdgeCaseManyChannels\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 444
+        },
+        {
+          "name": "EdgeCaseManyChannels\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
           "line": 444
         },
@@ -823,6 +1021,12 @@
           "line": 460
         },
         {
+          "name": "CombinedStrideAndPadding\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 460
+        },
+        {
           "name": "CombinedAllParameters\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
@@ -843,6 +1047,12 @@
         {
           "name": "CombinedAllParameters\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 469
+        },
+        {
+          "name": "CombinedAllParameters\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
           "line": 469
         },
@@ -871,6 +1081,12 @@
           "line": 486
         },
         {
+          "name": "ConsistentOutput\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 486
+        },
+        {
           "name": "DifferentInputsSameSize\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
@@ -891,6 +1107,12 @@
         {
           "name": "DifferentInputsSameSize\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 504
+        },
+        {
+          "name": "DifferentInputsSameSize\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
           "line": 504
         },
@@ -919,6 +1141,12 @@
           "line": 524
         },
         {
+          "name": "RequiresGrad\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 524
+        },
+        {
           "name": "NoGradWhenInputNoGrad\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
@@ -939,6 +1167,12 @@
         {
           "name": "NoGradWhenInputNoGrad\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 532
+        },
+        {
+          "name": "NoGradWhenInputNoGrad\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
           "line": 532
         },
@@ -967,6 +1201,12 @@
           "line": 541
         },
         {
+          "name": "BackwardPassExecutes\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 541
+        },
+        {
           "name": "GradientNonZero\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
@@ -987,6 +1227,12 @@
         {
           "name": "GradientNonZero\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 562
+        },
+        {
+          "name": "GradientNonZero\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
           "line": 562
         },
@@ -1015,6 +1261,12 @@
           "line": 594
         },
         {
+          "name": "ParameterCount\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 594
+        },
+        {
           "name": "ParameterSizes\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
@@ -1035,6 +1287,12 @@
         {
           "name": "ParameterSizes\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 606
+        },
+        {
+          "name": "ParameterSizes\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
           "line": 606
         },
@@ -1063,6 +1321,12 @@
           "line": 625
         },
         {
+          "name": "BottleneckConfiguration\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 625
+        },
+        {
           "name": "ResidualConnection\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
@@ -1083,6 +1347,12 @@
         {
           "name": "ResidualConnection\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 642
+        },
+        {
+          "name": "ResidualConnection\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
           "line": 642
         },
@@ -1111,6 +1381,12 @@
           "line": 662
         },
         {
+          "name": "MemoryEfficiencySmall\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 662
+        },
+        {
           "name": "MemoryEfficiencyLarge\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
@@ -1131,6 +1407,12 @@
         {
           "name": "MemoryEfficiencyLarge\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 672
+        },
+        {
+          "name": "MemoryEfficiencyLarge\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
           "line": 672
         },
@@ -1159,6 +1441,12 @@
           "line": 686
         },
         {
+          "name": "InvalidInputDimensions\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 686
+        },
+        {
           "name": "InvalidChannelCount\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
@@ -1179,6 +1467,12 @@
         {
           "name": "InvalidChannelCount\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 696
+        },
+        {
+          "name": "InvalidChannelCount\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
           "line": 696
         },
@@ -1207,6 +1501,12 @@
           "line": 706
         },
         {
+          "name": "InvalidGroupConfiguration\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 706
+        },
+        {
           "name": "VGGStyleBlock\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
@@ -1227,6 +1527,12 @@
         {
           "name": "VGGStyleBlock\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 722
+        },
+        {
+          "name": "VGGStyleBlock\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
           "line": 722
         },
@@ -1255,6 +1561,12 @@
           "line": 737
         },
         {
+          "name": "InceptionStyleBranch\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 737
+        },
+        {
           "name": "MobileNetDepthwiseSeparable\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
@@ -1279,6 +1591,12 @@
           "line": 754
         },
         {
+          "name": "MobileNetDepthwiseSeparable\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 754
+        },
+        {
           "name": "ResNetBottleneck\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
@@ -1299,6 +1617,12 @@
         {
           "name": "ResNetBottleneck\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
+          "line": 774
+        },
+        {
+          "name": "ResNetBottleneck\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/nn\/layers\/test_conv2d.cpp",
           "line": 774
         }

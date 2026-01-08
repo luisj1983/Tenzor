@@ -385,7 +385,7 @@ TEST_P(BroadcastingMultiDTypeTest, AddNoBroadcast_SameShape) {
 // ============================================================================
 
 std::vector<BackendDTypeParam> GenerateBackendDTypeCombinations() {
-    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi"};
+    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "rocm"};
 
     // Test with these dtypes - broadcasting works with all numeric types
     std::vector<std::pair<DType, std::string>> dtypes = {

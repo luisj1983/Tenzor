@@ -606,7 +606,7 @@ TEST_P(OptimizersMultiDTypeTest, AdamNumericalStability) {
 // ============================================================================
 
 std::vector<BackendDTypeParam> GenerateOptimizerBackendDTypeCombinations() {
-    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi"};
+    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "rocm"};
 
     // Test with floating-point dtypes only (optimizers work with gradients)
     std::vector<std::pair<DType, std::string>> dtypes = {

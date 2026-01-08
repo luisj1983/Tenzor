@@ -510,7 +510,7 @@ TEST_P(ALBERTandT5MultiDTypeTest, T5VariableSequenceLength) {
 // ============================================================================
 
 std::vector<BackendDTypeParam> GenerateBackendDTypeCombinations() {
-    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi"};
+    std::vector<std::string> backends = {"cpu", "cuda", "vulkan", "oneapi", "rocm"};
 
     // NLP models primarily use floating-point types
     std::vector<std::pair<DType, std::string>> dtypes = {

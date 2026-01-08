@@ -1,10 +1,10 @@
 {
-  "tests": 108,
+  "tests": 135,
   "name": "AllTests",
   "testsuites": [
     {
       "name": "AllBackends\/NNTest",
-      "tests": 36,
+      "tests": 45,
       "testsuite": [
         {
           "name": "LinearLayer\/cpu",
@@ -27,6 +27,12 @@
         {
           "name": "LinearLayer\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_nn.cpp",
+          "line": 26
+        },
+        {
+          "name": "LinearLayer\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_nn.cpp",
           "line": 26
         },
@@ -55,6 +61,12 @@
           "line": 39
         },
         {
+          "name": "Sequential\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_nn.cpp",
+          "line": 39
+        },
+        {
           "name": "Conv2dLayer\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_nn.cpp",
@@ -75,6 +87,12 @@
         {
           "name": "Conv2dLayer\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_nn.cpp",
+          "line": 55
+        },
+        {
+          "name": "Conv2dLayer\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_nn.cpp",
           "line": 55
         },
@@ -103,6 +121,12 @@
           "line": 69
         },
         {
+          "name": "BatchNorm2d\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_nn.cpp",
+          "line": 69
+        },
+        {
           "name": "ReLUActivation\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_nn.cpp",
@@ -123,6 +147,12 @@
         {
           "name": "ReLUActivation\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_nn.cpp",
+          "line": 84
+        },
+        {
+          "name": "ReLUActivation\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_nn.cpp",
           "line": 84
         },
@@ -151,6 +181,12 @@
           "line": 103
         },
         {
+          "name": "DropoutInTrainMode\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_nn.cpp",
+          "line": 103
+        },
+        {
           "name": "DropoutInEvalMode\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_nn.cpp",
@@ -171,6 +207,12 @@
         {
           "name": "DropoutInEvalMode\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_nn.cpp",
+          "line": 115
+        },
+        {
+          "name": "DropoutInEvalMode\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_nn.cpp",
           "line": 115
         },
@@ -199,6 +241,12 @@
           "line": 131
         },
         {
+          "name": "MaxPool2d\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_nn.cpp",
+          "line": 131
+        },
+        {
           "name": "Flatten\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_nn.cpp",
@@ -221,12 +269,18 @@
           "value_param": "\"oneapi\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_nn.cpp",
           "line": 144
+        },
+        {
+          "name": "Flatten\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_nn.cpp",
+          "line": 144
         }
       ]
     },
     {
       "name": "AllBackends\/TrainingTest",
-      "tests": 32,
+      "tests": 40,
       "testsuite": [
         {
           "name": "SimpleOptimization\/cpu",
@@ -249,6 +303,12 @@
         {
           "name": "SimpleOptimization\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_training.cpp",
+          "line": 14
+        },
+        {
+          "name": "SimpleOptimization\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_training.cpp",
           "line": 14
         },
@@ -277,6 +337,12 @@
           "line": 58
         },
         {
+          "name": "MultiStepTraining\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_training.cpp",
+          "line": 58
+        },
+        {
           "name": "AdamOptimizer\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_training.cpp",
@@ -297,6 +363,12 @@
         {
           "name": "AdamOptimizer\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_training.cpp",
+          "line": 95
+        },
+        {
+          "name": "AdamOptimizer\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_training.cpp",
           "line": 95
         },
@@ -325,6 +397,12 @@
           "line": 126
         },
         {
+          "name": "TrainingVsEvalMode\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_training.cpp",
+          "line": 126
+        },
+        {
           "name": "GradientAccumulation\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_training.cpp",
@@ -345,6 +423,12 @@
         {
           "name": "GradientAccumulation\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_training.cpp",
+          "line": 150
+        },
+        {
+          "name": "GradientAccumulation\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_training.cpp",
           "line": 150
         },
@@ -373,6 +457,12 @@
           "line": 185
         },
         {
+          "name": "SimpleMLP_Training\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_training.cpp",
+          "line": 185
+        },
+        {
           "name": "CrossEntropyLoss\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_training.cpp",
@@ -393,6 +483,12 @@
         {
           "name": "CrossEntropyLoss\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_training.cpp",
+          "line": 247
+        },
+        {
+          "name": "CrossEntropyLoss\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_training.cpp",
           "line": 247
         },
@@ -419,12 +515,18 @@
           "value_param": "\"oneapi\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_training.cpp",
           "line": 286
+        },
+        {
+          "name": "ParameterUpdate\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_training.cpp",
+          "line": 286
         }
       ]
     },
     {
       "name": "AllBackends\/DebugMLPTest",
-      "tests": 40,
+      "tests": 50,
       "testsuite": [
         {
           "name": "DirectMatmulComparison\/cpu",
@@ -447,6 +549,12 @@
         {
           "name": "DirectMatmulComparison\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_debug_mlp.cpp",
+          "line": 24
+        },
+        {
+          "name": "DirectMatmulComparison\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_debug_mlp.cpp",
           "line": 24
         },
@@ -475,6 +583,12 @@
           "line": 76
         },
         {
+          "name": "VariableMatmulWithPermute\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_debug_mlp.cpp",
+          "line": 76
+        },
+        {
           "name": "LinearLayerSimulation\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_debug_mlp.cpp",
@@ -495,6 +609,12 @@
         {
           "name": "LinearLayerSimulation\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_debug_mlp.cpp",
+          "line": 130
+        },
+        {
+          "name": "LinearLayerSimulation\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_debug_mlp.cpp",
           "line": 130
         },
@@ -523,6 +643,12 @@
           "line": 225
         },
         {
+          "name": "MatmulWithTranspose\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_debug_mlp.cpp",
+          "line": 225
+        },
+        {
           "name": "LinearForwardComparison\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_debug_mlp.cpp",
@@ -543,6 +669,12 @@
         {
           "name": "LinearForwardComparison\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_debug_mlp.cpp",
+          "line": 285
+        },
+        {
+          "name": "LinearForwardComparison\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_debug_mlp.cpp",
           "line": 285
         },
@@ -571,6 +703,12 @@
           "line": 354
         },
         {
+          "name": "CPUForwardThenDeviceForward\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_debug_mlp.cpp",
+          "line": 354
+        },
+        {
           "name": "TraceNaN\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_debug_mlp.cpp",
@@ -591,6 +729,12 @@
         {
           "name": "TraceNaN\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_debug_mlp.cpp",
+          "line": 399
+        },
+        {
+          "name": "TraceNaN\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_debug_mlp.cpp",
           "line": 399
         },
@@ -619,6 +763,12 @@
           "line": 573
         },
         {
+          "name": "RawMatmulDimensionScan\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_debug_mlp.cpp",
+          "line": 573
+        },
+        {
           "name": "RawMatmulWithPermute50x30\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_debug_mlp.cpp",
@@ -643,6 +793,12 @@
           "line": 678
         },
         {
+          "name": "RawMatmulWithPermute50x30\/rocm",
+          "value_param": "\"rocm\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_debug_mlp.cpp",
+          "line": 678
+        },
+        {
           "name": "CompareSingleLinearForward\/cpu",
           "value_param": "\"cpu\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_debug_mlp.cpp",
@@ -663,6 +819,12 @@
         {
           "name": "CompareSingleLinearForward\/oneapi",
           "value_param": "\"oneapi\"",
+          "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_debug_mlp.cpp",
+          "line": 779
+        },
+        {
+          "name": "CompareSingleLinearForward\/rocm",
+          "value_param": "\"rocm\"",
           "file": "\/home\/lee\/Projects\/Tenzor\/tests\/integration\/test_debug_mlp.cpp",
           "line": 779
         }
