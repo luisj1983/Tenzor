@@ -317,56 +317,308 @@ auto LSTM::forward(const Variable& input, const std::pair<Variable, Variable>& h
 
     // =========================================================================
     // FAST PATH: Use fused CPU backend kernel for inference
-    // Conditions: CPU, Float32, not training, single layer, not bidirectional
+    // Conditions: CPU, Float32, not training
+    // Uses oneDNN fused LSTM primitives for optimal performance
     // =========================================================================
     bool can_use_fused = input.device().type == Device::Type::CPU &&
                          input.dtype() == DType::Float32 &&
-                         !is_training() &&
-                         num_layers_ == 1 &&
-                         !bidirectional_;
+                         !is_training();
 
-    if (can_use_fused) {
-        // Get weight matrices from the cell
-        auto& cell = forward_cells_[0];
-        auto W_ih_linear = cell->weight_ih();
-        auto W_hh_var = cell->parameters()[2];  // weight_hh weight
+    // Special fast path for single-layer bidirectional LSTM
+    if (can_use_fused && bidirectional_ && num_layers_ == 1) {
+        Tensor layer_input = x.tensor().contiguous();
+        int64_t kernel_batch = layer_input.shape()[1];
 
-        // Get weight tensors (4*hidden, input_size) and (4*hidden, hidden_size)
-        auto W_ih_params = W_ih_linear->parameters();
-        Tensor W_ih_tensor = W_ih_params[0]->tensor().contiguous();
-        Tensor W_hh_tensor = W_hh_var->tensor().contiguous();
+        // Get forward direction weights
+        auto& fwd_cell = forward_cells_[0];
+        auto W_ih_fwd_linear = fwd_cell->weight_ih();
+        auto W_hh_fwd_linear = fwd_cell->weight_hh();
+        auto W_ih_fwd_params = W_ih_fwd_linear->parameters();
+        auto W_hh_fwd_params = W_hh_fwd_linear->parameters();
 
-        // Get bias (4*hidden) or empty tensor
-        Tensor bias_tensor;
-        if (W_ih_params.size() > 1) {
-            bias_tensor = W_ih_params[1]->tensor().contiguous();
-        } else {
-            bias_tensor = empty({0}, DType::Float32, input.device());
-        }
+        Tensor W_ih_fwd = W_ih_fwd_params[0]->tensor().contiguous();
+        Tensor W_hh_fwd = W_hh_fwd_params[0]->tensor().contiguous();
+        Tensor bias_ih_fwd = W_ih_fwd_params.size() > 1 ?
+            W_ih_fwd_params[1]->tensor() : empty({0}, DType::Float32, input.device());
+        Tensor bias_hh_fwd = W_hh_fwd_params.size() > 1 ?
+            W_hh_fwd_params[1]->tensor() : empty({0}, DType::Float32, input.device());
 
-        // Make input contiguous (seq, batch, input_size)
-        Tensor input_tensor = x.tensor().contiguous();
+        // Get backward direction weights
+        auto& bwd_cell = backward_cells_[0];
+        auto W_ih_bwd_linear = bwd_cell->weight_ih();
+        auto W_hh_bwd_linear = bwd_cell->weight_hh();
+        auto W_ih_bwd_params = W_ih_bwd_linear->parameters();
+        auto W_hh_bwd_params = W_hh_bwd_linear->parameters();
 
-        // Get initial states (batch, hidden)
-        Tensor h0_tensor = h.tensor().slice(0, 0, 1).reshape({batch_size, hidden_size_}).contiguous();
-        Tensor c0_tensor = c.tensor().slice(0, 0, 1).reshape({batch_size, hidden_size_}).contiguous();
+        Tensor W_ih_bwd = W_ih_bwd_params[0]->tensor().contiguous();
+        Tensor W_hh_bwd = W_hh_bwd_params[0]->tensor().contiguous();
+        Tensor bias_ih_bwd = W_ih_bwd_params.size() > 1 ?
+            W_ih_bwd_params[1]->tensor() : empty({0}, DType::Float32, input.device());
+        Tensor bias_hh_bwd = W_hh_bwd_params.size() > 1 ?
+            W_hh_bwd_params[1]->tensor() : empty({0}, DType::Float32, input.device());
 
-        // Call fused kernel via dispatch
-        // inputs: [input, W_ih, W_hh, bias, h0, c0]
-        std::vector<Tensor> inputs = {input_tensor, W_ih_tensor, W_hh_tensor,
-                                       bias_tensor, h0_tensor, c0_tensor};
-        auto outputs = dispatch<OpId::LSTMForward>(inputs);
-        // outputs: [output, h_n, c_n]
+        // h0, c0 are (num_layers * num_directions, batch, hidden) = (2, batch, hidden) for single-layer BiLSTM
+        Tensor h0_tensor = h.tensor().contiguous();
+        Tensor c0_tensor = c.tensor().contiguous();
 
-        // Reshape output
+        std::vector<Tensor> inputs = {
+            layer_input, h0_tensor, c0_tensor,
+            W_ih_fwd, W_hh_fwd, bias_ih_fwd, bias_hh_fwd,
+            W_ih_bwd, W_hh_bwd, bias_ih_bwd, bias_hh_bwd
+        };
+
+        auto outputs = dispatch<OpId::BiLSTMForward>(inputs);
+
         Variable output(outputs[0], false);
         if (batch_first_) {
             output = Variable(output.tensor().transpose(0, 1), false);
         }
 
-        // Reshape final states to (1, batch, hidden)
-        Variable h_final(outputs[1].reshape({1, batch_size, hidden_size_}), false);
-        Variable c_final(outputs[2].reshape({1, batch_size, hidden_size_}), false);
+        return {output, {Variable(outputs[1], false), Variable(outputs[2], false)}};
+    }
+
+    // Multi-layer bidirectional LSTM fast path
+    if (can_use_fused && bidirectional_ && num_layers_ > 1) {
+        Tensor layer_input = x.tensor().contiguous();
+        int64_t kernel_batch = layer_input.shape()[1];
+
+        std::vector<Tensor> final_h_states;
+        std::vector<Tensor> final_c_states;
+
+        for (int64_t layer = 0; layer < num_layers_; ++layer) {
+            // Get forward direction weights for this layer
+            auto& fwd_cell = forward_cells_[layer];
+            auto W_ih_fwd_linear = fwd_cell->weight_ih();
+            auto W_hh_fwd_linear = fwd_cell->weight_hh();
+            auto W_ih_fwd_params = W_ih_fwd_linear->parameters();
+            auto W_hh_fwd_params = W_hh_fwd_linear->parameters();
+
+            Tensor W_ih_fwd = W_ih_fwd_params[0]->tensor().contiguous();
+            Tensor W_hh_fwd = W_hh_fwd_params[0]->tensor().contiguous();
+            Tensor bias_ih_fwd = W_ih_fwd_params.size() > 1 ?
+                W_ih_fwd_params[1]->tensor() : empty({0}, DType::Float32, input.device());
+            Tensor bias_hh_fwd = W_hh_fwd_params.size() > 1 ?
+                W_hh_fwd_params[1]->tensor() : empty({0}, DType::Float32, input.device());
+
+            // Get backward direction weights for this layer
+            auto& bwd_cell = backward_cells_[layer];
+            auto W_ih_bwd_linear = bwd_cell->weight_ih();
+            auto W_hh_bwd_linear = bwd_cell->weight_hh();
+            auto W_ih_bwd_params = W_ih_bwd_linear->parameters();
+            auto W_hh_bwd_params = W_hh_bwd_linear->parameters();
+
+            Tensor W_ih_bwd = W_ih_bwd_params[0]->tensor().contiguous();
+            Tensor W_hh_bwd = W_hh_bwd_params[0]->tensor().contiguous();
+            Tensor bias_ih_bwd = W_ih_bwd_params.size() > 1 ?
+                W_ih_bwd_params[1]->tensor() : empty({0}, DType::Float32, input.device());
+            Tensor bias_hh_bwd = W_hh_bwd_params.size() > 1 ?
+                W_hh_bwd_params[1]->tensor() : empty({0}, DType::Float32, input.device());
+
+            // h0, c0 for this layer: extract from (num_layers*2, batch, hidden)
+            // Layout: [layer0_fwd, layer0_bwd, layer1_fwd, layer1_bwd, ...]
+            int64_t fwd_idx = layer * 2;
+            int64_t bwd_idx = layer * 2 + 1;
+
+            Tensor h0_fwd = h.tensor().slice(0, fwd_idx, fwd_idx + 1)
+                            .reshape({kernel_batch, hidden_size_}).contiguous();
+            Tensor c0_fwd = c.tensor().slice(0, fwd_idx, fwd_idx + 1)
+                            .reshape({kernel_batch, hidden_size_}).contiguous();
+            Tensor h0_bwd = h.tensor().slice(0, bwd_idx, bwd_idx + 1)
+                            .reshape({kernel_batch, hidden_size_}).contiguous();
+            Tensor c0_bwd = c.tensor().slice(0, bwd_idx, bwd_idx + 1)
+                            .reshape({kernel_batch, hidden_size_}).contiguous();
+
+            // Stack h0 and c0 for BiLSTM kernel: (2, batch, hidden)
+            std::vector<Tensor> h0_list = {h0_fwd, h0_bwd};
+            std::vector<Tensor> c0_list = {c0_fwd, c0_bwd};
+            Tensor h0_stacked = stack(std::span<const Tensor>(h0_list), 0);
+            Tensor c0_stacked = stack(std::span<const Tensor>(c0_list), 0);
+
+            std::vector<Tensor> inputs = {
+                layer_input, h0_stacked, c0_stacked,
+                W_ih_fwd, W_hh_fwd, bias_ih_fwd, bias_hh_fwd,
+                W_ih_bwd, W_hh_bwd, bias_ih_bwd, bias_hh_bwd
+            };
+
+            auto outputs = dispatch<OpId::BiLSTMForward>(inputs);
+
+            // outputs[0]: (seq, batch, 2*hidden)
+            // outputs[1]: h_n (2, batch, hidden)
+            // outputs[2]: c_n (2, batch, hidden)
+
+            // Store final states for this layer
+            final_h_states.push_back(outputs[1].slice(0, 0, 1).reshape({1, kernel_batch, hidden_size_}));
+            final_h_states.push_back(outputs[1].slice(0, 1, 2).reshape({1, kernel_batch, hidden_size_}));
+            final_c_states.push_back(outputs[2].slice(0, 0, 1).reshape({1, kernel_batch, hidden_size_}));
+            final_c_states.push_back(outputs[2].slice(0, 1, 2).reshape({1, kernel_batch, hidden_size_}));
+
+            // Output becomes input for next layer
+            layer_input = outputs[0].contiguous();
+
+            // Apply dropout between layers (but not after last layer)
+            if (dropout_ && layer < num_layers_ - 1) {
+                layer_input = dropout_->forward(Variable(layer_input, false)).tensor();
+            }
+        }
+
+        Variable output(layer_input, false);
+        if (batch_first_) {
+            output = Variable(output.tensor().transpose(0, 1), false);
+        }
+
+        // Stack all hidden states: (num_layers*2, batch, hidden)
+        Variable h_final(cat(std::span<const Tensor>(final_h_states), 0), false);
+        Variable c_final(cat(std::span<const Tensor>(final_c_states), 0), false);
+
+        return {output, {h_final, c_final}};
+    }
+
+    // For unidirectional LSTM, continue with existing fast path
+    can_use_fused = can_use_fused && !bidirectional_;
+
+    if (can_use_fused) {
+        // x is already transposed to (seq, batch, input) format above (line 279)
+        // Use tensor directly if already contiguous (avoid copy)
+        const Tensor& x_tensor = x.tensor();
+        Tensor layer_input = x_tensor.is_contiguous() ? x_tensor : x_tensor.contiguous();
+
+        // SINGLE-LAYER: Direct dispatch (most efficient)
+        if (num_layers_ == 1) {
+            auto& cell = forward_cells_[0];
+
+            // Access weights directly from Linear layers (cached in module)
+            const Tensor& W_ih_tensor = cell->weight_ih()->weight()->tensor();
+            const Tensor& W_hh_tensor = cell->weight_hh()->weight()->tensor();
+            Tensor bias_ih_tensor = cell->weight_ih()->has_bias() ?
+                cell->weight_ih()->bias()->tensor() : empty({0}, DType::Float32, input.device());
+            Tensor bias_hh_tensor = cell->weight_hh()->has_bias() ?
+                cell->weight_hh()->bias()->tensor() : empty({0}, DType::Float32, input.device());
+
+            // For single-layer, h0/c0 shape is (1, batch, hidden)
+            // We can squeeze the first dim instead of slice+reshape if contiguous
+            const Tensor& h_tensor = h.tensor();
+            const Tensor& c_tensor = c.tensor();
+            int64_t kernel_batch = layer_input.shape()[1];
+
+            // Fast path: if h0/c0 are contiguous and shape is (1, batch, hidden),
+            // the data layout is already (batch, hidden) - just view it
+            Tensor h0_tensor, c0_tensor;
+            if (h_tensor.is_contiguous() && h_tensor.shape()[0] == 1) {
+                h0_tensor = h_tensor.reshape({kernel_batch, hidden_size_});
+            } else {
+                h0_tensor = h_tensor.slice(0, 0, 1).reshape({kernel_batch, hidden_size_}).contiguous();
+            }
+            if (c_tensor.is_contiguous() && c_tensor.shape()[0] == 1) {
+                c0_tensor = c_tensor.reshape({kernel_batch, hidden_size_});
+            } else {
+                c0_tensor = c_tensor.slice(0, 0, 1).reshape({kernel_batch, hidden_size_}).contiguous();
+            }
+
+            // Pass both bias_ih and bias_hh for kernel to combine during cache setup
+            std::vector<Tensor> inputs = {layer_input, W_ih_tensor, W_hh_tensor,
+                                           bias_ih_tensor, bias_hh_tensor, h0_tensor, c0_tensor};
+            auto outputs = dispatch<OpId::LSTMForward>(inputs);
+
+            Variable output(outputs[0], false);
+            if (batch_first_) {
+                output = Variable(output.tensor().transpose(0, 1), false);
+            }
+
+            // outputs[1] is (batch, hidden) - unsqueeze to (1, batch, hidden)
+            Variable h_final(outputs[1].unsqueeze(0), false);
+            Variable c_final(outputs[2].unsqueeze(0), false);
+
+            return {output, {h_final, c_final}};
+        }
+
+        // MULTI-LAYER without dropout: Use fused multi-layer kernel
+        if (!dropout_ || dropout_p_ == 0.0) {
+            std::vector<Tensor> kernel_inputs;
+            kernel_inputs.push_back(layer_input);
+            kernel_inputs.push_back(h.tensor().contiguous());
+            kernel_inputs.push_back(c.tensor().contiguous());
+
+            for (int64_t layer = 0; layer < num_layers_; ++layer) {
+                auto& cell = forward_cells_[layer];
+                auto W_ih_linear = cell->weight_ih();
+                auto W_hh_linear = cell->weight_hh();
+
+                auto W_ih_params = W_ih_linear->parameters();
+                auto W_hh_params = W_hh_linear->parameters();
+                kernel_inputs.push_back(W_ih_params[0]->tensor());
+                kernel_inputs.push_back(W_hh_params[0]->tensor());
+
+                if (W_ih_params.size() > 1) {
+                    kernel_inputs.push_back(W_ih_params[1]->tensor());
+                } else {
+                    kernel_inputs.push_back(empty({0}, DType::Float32, input.device()));
+                }
+            }
+
+            OpAttributes attrs;
+            attrs["num_layers"] = std::to_string(num_layers_);
+            auto outputs = dispatch<OpId::LSTMMultiLayerForward>(kernel_inputs, attrs);
+
+            Variable output(outputs[0], false);
+            if (batch_first_) {
+                output = Variable(output.tensor().transpose(0, 1), false);
+            }
+
+            return {output, {Variable(outputs[1], false), Variable(outputs[2], false)}};
+        }
+
+        // MULTI-LAYER with dropout: Process layers sequentially
+        std::vector<Tensor> final_h_states;
+        std::vector<Tensor> final_c_states;
+
+        for (int64_t layer = 0; layer < num_layers_; ++layer) {
+            auto& cell = forward_cells_[layer];
+            auto W_ih_linear = cell->weight_ih();
+            auto W_hh_linear = cell->weight_hh();
+
+            auto W_ih_params = W_ih_linear->parameters();
+            auto W_hh_params = W_hh_linear->parameters();
+            const Tensor& W_ih_tensor = W_ih_params[0]->tensor();
+            const Tensor& W_hh_tensor = W_hh_params[0]->tensor();
+
+            // Get bias tensors - pass both to kernel for combining during cache setup
+            Tensor bias_ih_tensor, bias_hh_tensor;
+            if (W_ih_params.size() > 1) {
+                bias_ih_tensor = W_ih_params[1]->tensor();
+            } else {
+                bias_ih_tensor = empty({0}, DType::Float32, input.device());
+            }
+            if (W_hh_params.size() > 1) {
+                bias_hh_tensor = W_hh_params[1]->tensor();
+            } else {
+                bias_hh_tensor = empty({0}, DType::Float32, input.device());
+            }
+
+            Tensor h0_layer = h.tensor().slice(0, layer, layer + 1)
+                                .reshape({batch_size, hidden_size_}).contiguous();
+            Tensor c0_layer = c.tensor().slice(0, layer, layer + 1)
+                                .reshape({batch_size, hidden_size_}).contiguous();
+
+            std::vector<Tensor> inputs = {layer_input, W_ih_tensor, W_hh_tensor,
+                                           bias_ih_tensor, bias_hh_tensor, h0_layer, c0_layer};
+            auto outputs = dispatch<OpId::LSTMForward>(inputs);
+
+            final_h_states.push_back(outputs[1]);
+            final_c_states.push_back(outputs[2]);
+            layer_input = outputs[0];
+
+            if (dropout_ && layer < num_layers_ - 1) {
+                layer_input = dropout_->forward(Variable(layer_input, false)).tensor();
+            }
+        }
+
+        Variable output(layer_input, false);
+        if (batch_first_) {
+            output = Variable(output.tensor().transpose(0, 1), false);
+        }
+
+        Variable h_final(stack(std::span<const Tensor>(final_h_states), 0), false);
+        Variable c_final(stack(std::span<const Tensor>(final_c_states), 0), false);
 
         return {output, {h_final, c_final}};
     }

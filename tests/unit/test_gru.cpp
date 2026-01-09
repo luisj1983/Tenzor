@@ -70,10 +70,11 @@ TEST_P(GRUCellTest, ParameterCount) {
     nn::GRUCell cell(10, 20);
     auto params = cell.parameters();
 
-    // GRU has 3 gates (reset, update, new)
-    // Each gate has input and hidden transformations
-    // 6 linear layers * 2 params (weight + bias) = 12 parameters
-    EXPECT_EQ(params.size(), 12) << "Failed on " << device.to_string();
+    // GRU uses PyTorch-style combined weight matrices:
+    // weight_ih: (3*hidden, input) - input-to-hidden for all 3 gates combined
+    // weight_hh: (3*hidden, hidden) - hidden-to-hidden for all 3 gates combined
+    // 2 linear layers * 2 params (weight + bias) = 4 parameters
+    EXPECT_EQ(params.size(), 4) << "Failed on " << device.to_string();
 }
 
 // ============================================================================
@@ -279,12 +280,10 @@ TEST_P(GRUTest, ParameterCount) {
     nn::GRU gru(10, 20, 2);
     auto params = gru.parameters();
 
-    // Each layer has 6 linear transformations (3 gates * 2 transforms each)
-    // Each linear has weight and bias
-    // Layer 0: 6 * 2 = 12 params
-    // Layer 1: 6 * 2 = 12 params
-    // Total: 24 parameters
-    EXPECT_EQ(params.size(), 24) << "Failed on " << device.to_string();
+    // Each GRUCell uses PyTorch-style combined weight matrices:
+    // weight_ih + weight_hh = 2 linear layers * 2 params = 4 params per cell
+    // 2 layers * 4 params = 8 parameters total
+    EXPECT_EQ(params.size(), 8) << "Failed on " << device.to_string();
 }
 
 TEST_P(GRUTest, LargeHidden) {

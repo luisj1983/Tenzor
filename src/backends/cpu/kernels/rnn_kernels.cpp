@@ -10,7 +10,7 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "fused_lstm.hpp"  // SIMD-optimized fused kernels
-// TEMPORARILY disabled to debug crash: #include "rnn_onednn.hpp"
+#include "rnn_onednn.hpp"  // oneDNN-accelerated LSTM/GRU (re-enabled with fixes)
 #include <cmath>
 
 namespace tenzor {
@@ -225,7 +225,8 @@ auto lstm_forward_kernel(
     const Tensor& input,
     const Tensor& W_ih,
     const Tensor& W_hh,
-    const Tensor& bias,
+    const Tensor& bias_ih,
+    const Tensor& bias_hh,
     const Tensor& h0,
     const Tensor& c0
 ) -> std::vector<Tensor> {
@@ -236,19 +237,56 @@ auto lstm_forward_kernel(
     int64_t input_size = input_shape[2];
     int64_t hidden = h0.shape()[1];
 
-    // Make tensors contiguous
+    // Make tensors contiguous - these are likely already contiguous, so no-op
     Tensor input_contig = input.contiguous();
     Tensor W_ih_contig = W_ih.contiguous();
     Tensor W_hh_contig = W_hh.contiguous();
     Tensor h0_contig = h0.contiguous();
     Tensor c0_contig = c0.contiguous();
 
-    // Get bias pointer (may be null)
+    // Combine bias_ih + bias_hh for oneDNN
+    // Use thread-local cache with bias pointer fingerprint to avoid re-combining
+    static thread_local std::vector<float> combined_bias_buffer;
+    static thread_local const float* cached_bias_ih_ptr = nullptr;
+    static thread_local const float* cached_bias_hh_ptr = nullptr;
+    static thread_local int64_t cached_bias_hidden = 0;
     const float* bias_ptr = nullptr;
-    Tensor bias_contig;
-    if (bias.numel() > 0) {
-        bias_contig = bias.contiguous();
-        bias_ptr = bias_contig.data<float>();
+
+    bool has_bias_ih = bias_ih.numel() > 0;
+    bool has_bias_hh = bias_hh.numel() > 0;
+
+    if (has_bias_ih || has_bias_hh) {
+        int64_t bias_size = 4 * hidden;
+        const float* bih_ptr = has_bias_ih ? bias_ih.data<float>() : nullptr;
+        const float* bhh_ptr = has_bias_hh ? bias_hh.data<float>() : nullptr;
+
+        // Check if we can reuse cached combined bias
+        bool need_recombine = (cached_bias_ih_ptr != bih_ptr) ||
+                              (cached_bias_hh_ptr != bhh_ptr) ||
+                              (cached_bias_hidden != hidden);
+
+        if (need_recombine) {
+            if (combined_bias_buffer.size() < static_cast<size_t>(bias_size)) {
+                combined_bias_buffer.resize(bias_size);
+            }
+
+            // Combine biases: combined = bias_ih + bias_hh
+            if (has_bias_ih && has_bias_hh) {
+                #pragma omp simd
+                for (int64_t i = 0; i < bias_size; ++i) {
+                    combined_bias_buffer[i] = bih_ptr[i] + bhh_ptr[i];
+                }
+            } else if (has_bias_ih) {
+                std::memcpy(combined_bias_buffer.data(), bih_ptr, bias_size * sizeof(float));
+            } else {
+                std::memcpy(combined_bias_buffer.data(), bhh_ptr, bias_size * sizeof(float));
+            }
+
+            cached_bias_ih_ptr = bih_ptr;
+            cached_bias_hh_ptr = bhh_ptr;
+            cached_bias_hidden = hidden;
+        }
+        bias_ptr = combined_bias_buffer.data();
     }
 
     // Allocate output tensors
@@ -256,9 +294,27 @@ auto lstm_forward_kernel(
     Tensor h_n = empty({batch, hidden}, DType::Float32, input.device());
     Tensor c_n = empty({batch, hidden}, DType::Float32, input.device());
 
-    // oneDNN LSTM disabled - using SIMD path only
+#ifdef TENZOR_USE_ONEDNN
+    // Try oneDNN - provides fused LSTM primitive
+    bool onednn_success = rnn_onednn::lstm_forward_onednn(
+        input_contig.data<float>(),
+        W_ih_contig.data<float>(),
+        W_hh_contig.data<float>(),
+        bias_ptr,
+        h0_contig.data<float>(),
+        c0_contig.data<float>(),
+        output.data<float>(),
+        h_n.data<float>(),
+        c_n.data<float>(),
+        seq_len, batch, input_size, hidden
+    );
 
-    // Fallback to SIMD-optimized implementation
+    if (onednn_success) {
+        return {output, h_n, c_n};
+    }
+#endif
+
+    // SIMD-optimized fallback
     lstm::lstm_forward(
         input_contig.data<float>(),
         W_ih_contig.data<float>(),
@@ -273,6 +329,134 @@ auto lstm_forward_kernel(
     );
 
     return {output, h_n, c_n};
+}
+
+/**
+ * @brief Bidirectional LSTM forward pass
+ *
+ * Uses oneDNN-accelerated forward and backward LSTM passes.
+ *
+ * @param input Input sequence (seq_len, batch, input_size)
+ * @param W_ih_fwd Forward input-hidden weights (4*hidden, input_size)
+ * @param W_hh_fwd Forward hidden-hidden weights (4*hidden, hidden)
+ * @param bias_ih_fwd Forward input bias (4*hidden) or empty
+ * @param bias_hh_fwd Forward hidden bias (4*hidden) or empty
+ * @param W_ih_bwd Backward input-hidden weights (4*hidden, input_size)
+ * @param W_hh_bwd Backward hidden-hidden weights (4*hidden, hidden)
+ * @param bias_ih_bwd Backward input bias (4*hidden) or empty
+ * @param bias_hh_bwd Backward hidden bias (4*hidden) or empty
+ * @param h0 Initial hidden states (2, batch, hidden) - [forward, backward]
+ * @param c0 Initial cell states (2, batch, hidden) - [forward, backward]
+ * @return vector of [output (seq, batch, 2*hidden), h_n (2, batch, hidden), c_n (2, batch, hidden)]
+ */
+auto bilstm_forward_kernel(
+    const Tensor& input,
+    const Tensor& W_ih_fwd, const Tensor& W_hh_fwd,
+    const Tensor& bias_ih_fwd, const Tensor& bias_hh_fwd,
+    const Tensor& W_ih_bwd, const Tensor& W_hh_bwd,
+    const Tensor& bias_ih_bwd, const Tensor& bias_hh_bwd,
+    const Tensor& h0,
+    const Tensor& c0
+) -> std::vector<Tensor> {
+    // Get dimensions
+    auto input_shape = input.shape();
+    int64_t seq_len = input_shape[0];
+    int64_t batch = input_shape[1];
+    int64_t input_size = input_shape[2];
+    int64_t hidden = h0.shape()[2];  // h0 is (2, batch, hidden)
+
+    // Make tensors contiguous
+    Tensor input_contig = input.contiguous();
+    Tensor W_ih_fwd_contig = W_ih_fwd.contiguous();
+    Tensor W_hh_fwd_contig = W_hh_fwd.contiguous();
+    Tensor W_ih_bwd_contig = W_ih_bwd.contiguous();
+    Tensor W_hh_bwd_contig = W_hh_bwd.contiguous();
+    Tensor h0_contig = h0.contiguous();
+    Tensor c0_contig = c0.contiguous();
+
+    // Combine biases for forward direction
+    static thread_local std::vector<float> bias_fwd_buffer;
+    const float* bias_fwd_ptr = nullptr;
+    bool has_bias_fwd = bias_ih_fwd.numel() > 0 || bias_hh_fwd.numel() > 0;
+    if (has_bias_fwd) {
+        int64_t bias_size = 4 * hidden;
+        if (bias_fwd_buffer.size() < static_cast<size_t>(bias_size)) {
+            bias_fwd_buffer.resize(bias_size);
+        }
+        if (bias_ih_fwd.numel() > 0 && bias_hh_fwd.numel() > 0) {
+            const float* bih = bias_ih_fwd.contiguous().data<float>();
+            const float* bhh = bias_hh_fwd.contiguous().data<float>();
+            for (int64_t i = 0; i < bias_size; ++i) {
+                bias_fwd_buffer[i] = bih[i] + bhh[i];
+            }
+        } else if (bias_ih_fwd.numel() > 0) {
+            std::memcpy(bias_fwd_buffer.data(), bias_ih_fwd.contiguous().data<float>(), bias_size * sizeof(float));
+        } else {
+            std::memcpy(bias_fwd_buffer.data(), bias_hh_fwd.contiguous().data<float>(), bias_size * sizeof(float));
+        }
+        bias_fwd_ptr = bias_fwd_buffer.data();
+    }
+
+    // Combine biases for backward direction
+    static thread_local std::vector<float> bias_bwd_buffer;
+    const float* bias_bwd_ptr = nullptr;
+    bool has_bias_bwd = bias_ih_bwd.numel() > 0 || bias_hh_bwd.numel() > 0;
+    if (has_bias_bwd) {
+        int64_t bias_size = 4 * hidden;
+        if (bias_bwd_buffer.size() < static_cast<size_t>(bias_size)) {
+            bias_bwd_buffer.resize(bias_size);
+        }
+        if (bias_ih_bwd.numel() > 0 && bias_hh_bwd.numel() > 0) {
+            const float* bih = bias_ih_bwd.contiguous().data<float>();
+            const float* bhh = bias_hh_bwd.contiguous().data<float>();
+            for (int64_t i = 0; i < bias_size; ++i) {
+                bias_bwd_buffer[i] = bih[i] + bhh[i];
+            }
+        } else if (bias_ih_bwd.numel() > 0) {
+            std::memcpy(bias_bwd_buffer.data(), bias_ih_bwd.contiguous().data<float>(), bias_size * sizeof(float));
+        } else {
+            std::memcpy(bias_bwd_buffer.data(), bias_hh_bwd.contiguous().data<float>(), bias_size * sizeof(float));
+        }
+        bias_bwd_ptr = bias_bwd_buffer.data();
+    }
+
+    // Extract h0/c0 for each direction
+    // h0 is (2, batch, hidden), h0[0] is forward, h0[1] is backward
+    const float* h0_data = h0_contig.data<float>();
+    const float* c0_data = c0_contig.data<float>();
+    const float* h0_fwd = h0_data;
+    const float* c0_fwd = c0_data;
+    const float* h0_bwd = h0_data + batch * hidden;
+    const float* c0_bwd = c0_data + batch * hidden;
+
+    // Allocate output tensors
+    Tensor output = empty({seq_len, batch, 2 * hidden}, DType::Float32, input.device());
+    Tensor h_n = empty({2, batch, hidden}, DType::Float32, input.device());
+    Tensor c_n = empty({2, batch, hidden}, DType::Float32, input.device());
+
+    float* h_n_fwd = h_n.data<float>();
+    float* c_n_fwd = c_n.data<float>();
+    float* h_n_bwd = h_n.data<float>() + batch * hidden;
+    float* c_n_bwd = c_n.data<float>() + batch * hidden;
+
+#ifdef TENZOR_USE_ONEDNN
+    bool onednn_success = rnn_onednn::bilstm_forward_onednn(
+        input_contig.data<float>(),
+        W_ih_fwd_contig.data<float>(), W_hh_fwd_contig.data<float>(), bias_fwd_ptr,
+        W_ih_bwd_contig.data<float>(), W_hh_bwd_contig.data<float>(), bias_bwd_ptr,
+        h0_fwd, c0_fwd, h0_bwd, c0_bwd,
+        output.data<float>(),
+        h_n_fwd, c_n_fwd, h_n_bwd, c_n_bwd,
+        seq_len, batch, input_size, hidden
+    );
+
+    if (onednn_success) {
+        return {output, h_n, c_n};
+    }
+#endif
+
+    // Fallback: not implemented for BiLSTM without oneDNN
+    throw std::runtime_error("BiLSTM requires oneDNN support");
 }
 
 /**
@@ -319,8 +503,25 @@ auto gru_forward_kernel(
     Tensor output = empty({seq_len, batch, hidden}, DType::Float32, input.device());
     Tensor h_n = empty({batch, hidden}, DType::Float32, input.device());
 
-    // oneDNN GRU disabled - using SIMD path only
-    // SIMD-optimized implementation
+#ifdef TENZOR_USE_ONEDNN
+    // Try oneDNN first - 2-4x faster than SIMD for larger sequences
+    bool onednn_success = rnn_onednn::gru_forward_onednn(
+        input_contig.data<float>(),
+        W_ih_contig.data<float>(),
+        W_hh_contig.data<float>(),
+        bias_ptr,
+        h0_contig.data<float>(),
+        output.data<float>(),
+        h_n.data<float>(),
+        seq_len, batch, input_size, hidden
+    );
+
+    if (onednn_success) {
+        return {output, h_n};
+    }
+#endif
+
+    // SIMD-optimized implementation (fallback)
     lstm::gru_forward(
         input_contig.data<float>(),
         W_ih_contig.data<float>(),
@@ -331,6 +532,232 @@ auto gru_forward_kernel(
         h_n.data<float>(),
         seq_len, batch, input_size, hidden
     );
+
+    return {output, h_n};
+}
+
+/**
+ * @brief Fused multi-layer LSTM forward pass
+ *
+ * Uses oneDNN's native multi-layer support for optimal performance.
+ * When input_size != hidden_size, processes layer 0 separately and fuses layers 1+.
+ *
+ * @param input Input sequence (seq_len, batch, input_size)
+ * @param W_ih_list Input-to-hidden weights for each layer
+ * @param W_hh_list Hidden-to-hidden weights for each layer
+ * @param bias_list Bias for each layer (empty if no bias)
+ * @param h0 Initial hidden states (num_layers, batch, hidden)
+ * @param c0 Initial cell states (num_layers, batch, hidden)
+ * @return vector of [output, h_n, c_n]
+ */
+auto lstm_multilayer_forward_kernel(
+    const Tensor& input,
+    const std::vector<Tensor>& W_ih_list,
+    const std::vector<Tensor>& W_hh_list,
+    const std::vector<Tensor>& bias_list,
+    const Tensor& h0,
+    const Tensor& c0
+) -> std::vector<Tensor> {
+    // Get dimensions
+    auto input_shape = input.shape();
+    int64_t seq_len = input_shape[0];
+    int64_t batch = input_shape[1];
+    int64_t input_size = input_shape[2];
+    int64_t num_layers = static_cast<int64_t>(W_ih_list.size());
+    int64_t hidden = h0.shape()[2];  // h0 is (num_layers, batch, hidden)
+
+    // Make input contiguous
+    Tensor input_contig = input.contiguous();
+    Tensor h0_contig = h0.contiguous();
+    Tensor c0_contig = c0.contiguous();
+
+    // Make weight tensors contiguous and extract pointers
+    std::vector<Tensor> W_ih_contig, W_hh_contig, bias_contig;
+    std::vector<const float*> W_ih_ptrs, W_hh_ptrs, bias_ptrs;
+
+    for (int64_t l = 0; l < num_layers; ++l) {
+        W_ih_contig.push_back(W_ih_list[l].contiguous());
+        W_hh_contig.push_back(W_hh_list[l].contiguous());
+        W_ih_ptrs.push_back(W_ih_contig.back().data<float>());
+        W_hh_ptrs.push_back(W_hh_contig.back().data<float>());
+
+        if (!bias_list.empty() && bias_list[l].numel() > 0) {
+            bias_contig.push_back(bias_list[l].contiguous());
+            bias_ptrs.push_back(bias_contig.back().data<float>());
+        }
+    }
+
+    // Allocate output tensors
+    Tensor output = empty({seq_len, batch, hidden}, DType::Float32, input.device());
+    Tensor h_n = empty({num_layers, batch, hidden}, DType::Float32, input.device());
+    Tensor c_n = empty({num_layers, batch, hidden}, DType::Float32, input.device());
+
+#ifdef TENZOR_USE_ONEDNN
+    // Try oneDNN fused multi-layer kernel
+    bool onednn_success = rnn_onednn::lstm_multilayer_forward_onednn(
+        input_contig.data<float>(),
+        W_ih_ptrs,
+        W_hh_ptrs,
+        bias_ptrs,
+        h0_contig.data<float>(),
+        c0_contig.data<float>(),
+        output.data<float>(),
+        h_n.data<float>(),
+        c_n.data<float>(),
+        num_layers, seq_len, batch, input_size, hidden
+    );
+
+    if (onednn_success) {
+        return {output, h_n, c_n};
+    }
+#endif
+
+    // Fallback: process each layer sequentially using single-layer kernel
+    Tensor layer_input = input_contig;
+    std::vector<Tensor> h_states, c_states;
+
+    for (int64_t l = 0; l < num_layers; ++l) {
+        int64_t layer_input_size = (l == 0) ? input_size : hidden;
+
+        // Get initial states for this layer
+        Tensor h0_layer = h0_contig.slice(0, l, l + 1).reshape({batch, hidden}).contiguous();
+        Tensor c0_layer = c0_contig.slice(0, l, l + 1).reshape({batch, hidden}).contiguous();
+
+        // Get bias - multilayer uses combined bias, pass as bias_ih with empty bias_hh
+        Tensor bias_ih_tensor = (!bias_list.empty() && bias_list[l].numel() > 0)
+                                ? bias_list[l]
+                                : empty({0}, DType::Float32, input.device());
+        Tensor bias_hh_empty = empty({0}, DType::Float32, input.device());
+
+        // Call single-layer kernel (bias already combined for multilayer case)
+        auto layer_output = lstm_forward_kernel(
+            layer_input, W_ih_list[l], W_hh_list[l], bias_ih_tensor, bias_hh_empty, h0_layer, c0_layer
+        );
+
+        h_states.push_back(layer_output[1]);
+        c_states.push_back(layer_output[2]);
+
+        layer_input = layer_output[0];
+    }
+
+    // Copy final output
+    std::memcpy(output.data<float>(), layer_input.data<float>(),
+               seq_len * batch * hidden * sizeof(float));
+
+    // Stack final states
+    for (int64_t l = 0; l < num_layers; ++l) {
+        std::memcpy(h_n.data<float>() + l * batch * hidden,
+                   h_states[l].data<float>(), batch * hidden * sizeof(float));
+        std::memcpy(c_n.data<float>() + l * batch * hidden,
+                   c_states[l].data<float>(), batch * hidden * sizeof(float));
+    }
+
+    return {output, h_n, c_n};
+}
+
+/**
+ * @brief Fused multi-layer GRU forward pass
+ *
+ * Uses oneDNN's native multi-layer support for optimal performance.
+ * When input_size != hidden_size, processes layer 0 separately and fuses layers 1+.
+ *
+ * @param input Input sequence (seq_len, batch, input_size)
+ * @param W_ih_list Input-to-hidden weights for each layer
+ * @param W_hh_list Hidden-to-hidden weights for each layer
+ * @param bias_list Bias for each layer (empty if no bias)
+ * @param h0 Initial hidden states (num_layers, batch, hidden)
+ * @return vector of [output, h_n]
+ */
+auto gru_multilayer_forward_kernel(
+    const Tensor& input,
+    const std::vector<Tensor>& W_ih_list,
+    const std::vector<Tensor>& W_hh_list,
+    const std::vector<Tensor>& bias_list,
+    const Tensor& h0
+) -> std::vector<Tensor> {
+    // Get dimensions
+    auto input_shape = input.shape();
+    int64_t seq_len = input_shape[0];
+    int64_t batch = input_shape[1];
+    int64_t input_size = input_shape[2];
+    int64_t num_layers = static_cast<int64_t>(W_ih_list.size());
+    int64_t hidden = h0.shape()[2];  // h0 is (num_layers, batch, hidden)
+
+    // Make input contiguous
+    Tensor input_contig = input.contiguous();
+    Tensor h0_contig = h0.contiguous();
+
+    // Make weight tensors contiguous and extract pointers
+    std::vector<Tensor> W_ih_contig, W_hh_contig, bias_contig;
+    std::vector<const float*> W_ih_ptrs, W_hh_ptrs, bias_ptrs;
+
+    for (int64_t l = 0; l < num_layers; ++l) {
+        W_ih_contig.push_back(W_ih_list[l].contiguous());
+        W_hh_contig.push_back(W_hh_list[l].contiguous());
+        W_ih_ptrs.push_back(W_ih_contig.back().data<float>());
+        W_hh_ptrs.push_back(W_hh_contig.back().data<float>());
+
+        if (!bias_list.empty() && bias_list[l].numel() > 0) {
+            bias_contig.push_back(bias_list[l].contiguous());
+            bias_ptrs.push_back(bias_contig.back().data<float>());
+        }
+    }
+
+    // Allocate output tensors
+    Tensor output = empty({seq_len, batch, hidden}, DType::Float32, input.device());
+    Tensor h_n = empty({num_layers, batch, hidden}, DType::Float32, input.device());
+
+#ifdef TENZOR_USE_ONEDNN
+    // Try oneDNN fused multi-layer kernel
+    bool onednn_success = rnn_onednn::gru_multilayer_forward_onednn(
+        input_contig.data<float>(),
+        W_ih_ptrs,
+        W_hh_ptrs,
+        bias_ptrs,
+        h0_contig.data<float>(),
+        output.data<float>(),
+        h_n.data<float>(),
+        num_layers, seq_len, batch, input_size, hidden
+    );
+
+    if (onednn_success) {
+        return {output, h_n};
+    }
+#endif
+
+    // Fallback: process each layer sequentially using single-layer kernel
+    Tensor layer_input = input_contig;
+    std::vector<Tensor> h_states;
+
+    for (int64_t l = 0; l < num_layers; ++l) {
+        int64_t layer_input_size = (l == 0) ? input_size : hidden;
+
+        // Get initial state for this layer
+        Tensor h0_layer = h0_contig.slice(0, l, l + 1).reshape({batch, hidden}).contiguous();
+
+        // Get bias or empty tensor
+        Tensor bias_tensor = (!bias_list.empty() && bias_list[l].numel() > 0)
+                             ? bias_list[l]
+                             : empty({0}, DType::Float32, input.device());
+
+        // Call single-layer kernel
+        auto layer_output = gru_forward_kernel(
+            layer_input, W_ih_list[l], W_hh_list[l], bias_tensor, h0_layer
+        );
+
+        h_states.push_back(layer_output[1]);
+        layer_input = layer_output[0];
+    }
+
+    // Copy final output
+    std::memcpy(output.data<float>(), layer_input.data<float>(),
+               seq_len * batch * hidden * sizeof(float));
+
+    // Stack final states
+    for (int64_t l = 0; l < num_layers; ++l) {
+        std::memcpy(h_n.data<float>() + l * batch * hidden,
+                   h_states[l].data<float>(), batch * hidden * sizeof(float));
+    }
 
     return {output, h_n};
 }

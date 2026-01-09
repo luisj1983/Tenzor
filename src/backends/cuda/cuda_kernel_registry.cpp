@@ -181,6 +181,11 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::MatMul, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         return std::vector<Tensor>{cuda::matmul_kernel(inputs[0], inputs[1], get_cuda_stream(attrs))};
     });
+    // Bmm (batched matrix multiplication) uses the same kernel as MatMul
+    // The CUDA matmul kernel already handles batched inputs via cublasSgemmStridedBatched
+    table.register_kernel(OpId::Bmm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return std::vector<Tensor>{cuda::matmul_kernel(inputs[0], inputs[1], get_cuda_stream(attrs))};
+    });
     table.register_kernel(OpId::Dot, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         return std::vector<Tensor>{cuda::dot_kernel(inputs[0], inputs[1], get_cuda_stream(attrs))};
     });

@@ -191,9 +191,28 @@ namespace cpu {
 
     // RNN - Full sequence operations (fused, SIMD-optimized)
     auto lstm_forward_kernel(const Tensor& input, const Tensor& W_ih, const Tensor& W_hh,
-                              const Tensor& bias, const Tensor& h0, const Tensor& c0) -> std::vector<Tensor>;
+                              const Tensor& bias_ih, const Tensor& bias_hh,
+                              const Tensor& h0, const Tensor& c0) -> std::vector<Tensor>;
     auto gru_forward_kernel(const Tensor& input, const Tensor& W_ih, const Tensor& W_hh,
                              const Tensor& bias, const Tensor& h0) -> std::vector<Tensor>;
+    auto bilstm_forward_kernel(const Tensor& input,
+                                const Tensor& W_ih_fwd, const Tensor& W_hh_fwd,
+                                const Tensor& bias_ih_fwd, const Tensor& bias_hh_fwd,
+                                const Tensor& W_ih_bwd, const Tensor& W_hh_bwd,
+                                const Tensor& bias_ih_bwd, const Tensor& bias_hh_bwd,
+                                const Tensor& h0, const Tensor& c0) -> std::vector<Tensor>;
+
+    // RNN - Fused multi-layer operations
+    auto lstm_multilayer_forward_kernel(const Tensor& input,
+                                         const std::vector<Tensor>& W_ih_list,
+                                         const std::vector<Tensor>& W_hh_list,
+                                         const std::vector<Tensor>& bias_list,
+                                         const Tensor& h0, const Tensor& c0) -> std::vector<Tensor>;
+    auto gru_multilayer_forward_kernel(const Tensor& input,
+                                        const std::vector<Tensor>& W_ih_list,
+                                        const std::vector<Tensor>& W_hh_list,
+                                        const std::vector<Tensor>& bias_list,
+                                        const Tensor& h0) -> std::vector<Tensor>;
 
     // Embedding
     auto embedding_kernel(const Tensor& weight, const Tensor& indices) -> Tensor;
@@ -734,18 +753,84 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     });
 
     // Full-sequence RNN operations (fused, SIMD-optimized)
-    // inputs: [input, W_ih, W_hh, bias, h0, c0] for LSTM
-    // inputs: [input, W_ih, W_hh, bias, h0] for GRU
+    // inputs: [input, W_ih, W_hh, bias_ih, bias_hh, h0, c0] for LSTM (7 inputs)
+    // inputs: [input, W_ih, W_hh, bias, h0] for GRU (5 inputs)
     table.register_kernel(OpId::LSTMForward, [](std::span<const Tensor> inputs, const OpAttributes&) {
-        // bias may be empty tensor if not provided
+        // bias_ih and bias_hh may be empty tensors if not provided
+        // Combined inside kernel during cache setup for oneDNN
         return cpu::lstm_forward_kernel(inputs[0], inputs[1], inputs[2],
-                                         inputs[3], inputs[4], inputs[5]);
+                                         inputs[3], inputs[4], inputs[5], inputs[6]);
     });
 
     table.register_kernel(OpId::GRUForward, [](std::span<const Tensor> inputs, const OpAttributes&) {
         // bias may be empty tensor if not provided
         return cpu::gru_forward_kernel(inputs[0], inputs[1], inputs[2],
                                         inputs[3], inputs[4]);
+    });
+
+    // Multi-layer LSTM with fused oneDNN primitive
+    // inputs: [input, h0, c0, W_ih_0, W_hh_0, bias_0, W_ih_1, W_hh_1, bias_1, ...]
+    // Each layer has 3 tensors: W_ih, W_hh, bias (bias may be empty)
+    table.register_kernel(OpId::LSTMMultiLayerForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t num_layers = parse_attr<int64_t>(attrs, "num_layers", 1);
+
+        const Tensor& input = inputs[0];
+        const Tensor& h0 = inputs[1];
+        const Tensor& c0 = inputs[2];
+
+        std::vector<Tensor> W_ih_list, W_hh_list, bias_list;
+        for (int64_t l = 0; l < num_layers; ++l) {
+            size_t base_idx = 3 + l * 3;  // input, h0, c0, then 3 tensors per layer
+            W_ih_list.push_back(inputs[base_idx]);
+            W_hh_list.push_back(inputs[base_idx + 1]);
+            bias_list.push_back(inputs[base_idx + 2]);
+        }
+
+        return cpu::lstm_multilayer_forward_kernel(input, W_ih_list, W_hh_list, bias_list, h0, c0);
+    });
+
+    // Multi-layer GRU with fused oneDNN primitive
+    // inputs: [input, h0, W_ih_0, W_hh_0, bias_0, W_ih_1, W_hh_1, bias_1, ...]
+    // Each layer has 3 tensors: W_ih, W_hh, bias (bias may be empty)
+    table.register_kernel(OpId::GRUMultiLayerForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t num_layers = parse_attr<int64_t>(attrs, "num_layers", 1);
+
+        const Tensor& input = inputs[0];
+        const Tensor& h0 = inputs[1];
+
+        std::vector<Tensor> W_ih_list, W_hh_list, bias_list;
+        for (int64_t l = 0; l < num_layers; ++l) {
+            size_t base_idx = 2 + l * 3;  // input, h0, then 3 tensors per layer
+            W_ih_list.push_back(inputs[base_idx]);
+            W_hh_list.push_back(inputs[base_idx + 1]);
+            bias_list.push_back(inputs[base_idx + 2]);
+        }
+
+        return cpu::gru_multilayer_forward_kernel(input, W_ih_list, W_hh_list, bias_list, h0);
+    });
+
+    // Bidirectional LSTM
+    // inputs: [input, h0, c0, W_ih_fwd, W_hh_fwd, bias_ih_fwd, bias_hh_fwd,
+    //          W_ih_bwd, W_hh_bwd, bias_ih_bwd, bias_hh_bwd]
+    table.register_kernel(OpId::BiLSTMForward, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        const Tensor& input = inputs[0];
+        const Tensor& h0 = inputs[1];
+        const Tensor& c0 = inputs[2];
+        const Tensor& W_ih_fwd = inputs[3];
+        const Tensor& W_hh_fwd = inputs[4];
+        const Tensor& bias_ih_fwd = inputs[5];
+        const Tensor& bias_hh_fwd = inputs[6];
+        const Tensor& W_ih_bwd = inputs[7];
+        const Tensor& W_hh_bwd = inputs[8];
+        const Tensor& bias_ih_bwd = inputs[9];
+        const Tensor& bias_hh_bwd = inputs[10];
+
+        return cpu::bilstm_forward_kernel(
+            input,
+            W_ih_fwd, W_hh_fwd, bias_ih_fwd, bias_hh_fwd,
+            W_ih_bwd, W_hh_bwd, bias_ih_bwd, bias_hh_bwd,
+            h0, c0
+        );
     });
 
     // Note: Creation operations (Zeros, Ones, etc.) are handled differently

@@ -38,7 +38,7 @@ if(TENZOR_BUILD_ROCM AND _ROCM_AVAILABLE)
             message(STATUS "Auto-detected GPU architecture: ${DETECTED_ARCH}")
         else()
             # Fallback to common architectures
-            set(CMAKE_HIP_ARCHITECTURES "gfx900;gfx90c;gfx906;gfx908" CACHE STRING "HIP GPU architectures" FORCE)
+            set(CMAKE_HIP_ARCHITECTURES "gfx1150;gfx900;gfx90c;gfx906;gfx908" CACHE STRING "HIP GPU architectures" FORCE)
             message(STATUS "Could not detect GPU, using common architectures: gfx900;gfx90c;gfx906;gfx908")
         endif()
     endif()

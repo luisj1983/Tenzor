@@ -248,56 +248,116 @@ auto GRU::forward(const Variable& input, const Variable& hx)
 
     // =========================================================================
     // FAST PATH: Use fused CPU backend kernel for inference
-    // Conditions: CPU, Float32, not training, single layer, not bidirectional
+    // Conditions: CPU, Float32, not training, not bidirectional
+    // Uses oneDNN fused multi-layer GRU primitive for optimal performance
     // =========================================================================
     bool can_use_fused = input.device().type == Device::Type::CPU &&
                          input.dtype() == DType::Float32 &&
                          !is_training() &&
-                         num_layers_ == 1 &&
                          !bidirectional_;
 
     if (can_use_fused) {
-        // Get weight matrices from the cell
-        auto& cell = forward_cells_[0];
-        auto W_ih_linear = cell->weight_ih();
+        // Prepare input tensor for kernel (batch_first format for optimal oneDNN performance)
+        Tensor layer_input = x.tensor();
+        if (batch_first_) {
+            layer_input = layer_input.transpose(0, 1);
+        }
+        layer_input = layer_input.contiguous();
 
-        // Get weight tensors (3*hidden, input_size) and (3*hidden, hidden_size)
-        auto W_ih_params = W_ih_linear->parameters();
-        Tensor W_ih_tensor = W_ih_params[0]->tensor().contiguous();
+        // For multi-layer GRU without dropout, use fused kernel
+        // Dropout requires per-layer execution
+        bool use_multilayer_fused = (num_layers_ > 1) && (!dropout_ || dropout_p_ == 0.0);
 
-        // Get W_hh from cell's registered modules
-        auto cell_params = cell->parameters();
-        Tensor W_hh_tensor = cell_params[2]->tensor().contiguous();
+        if (use_multilayer_fused) {
+            // Collect weights from all layers
+            // Input format: [input, h0, W_ih_0, W_hh_0, bias_0, W_ih_1, ...]
+            std::vector<Tensor> kernel_inputs;
+            kernel_inputs.push_back(layer_input);
+            kernel_inputs.push_back(h.tensor().contiguous());
 
-        // Get bias (3*hidden) or empty tensor
-        Tensor bias_tensor;
-        if (W_ih_params.size() > 1) {
-            bias_tensor = W_ih_params[1]->tensor().contiguous();
-        } else {
-            bias_tensor = empty({0}, DType::Float32, input.device());
+            for (int64_t layer = 0; layer < num_layers_; ++layer) {
+                auto& cell = forward_cells_[layer];
+                auto W_ih_linear = cell->weight_ih();
+                auto cell_params = cell->parameters();
+
+                auto W_ih_params = W_ih_linear->parameters();
+                kernel_inputs.push_back(W_ih_params[0]->tensor());  // W_ih
+                kernel_inputs.push_back(cell_params[2]->tensor());  // W_hh
+
+                // Bias or empty tensor
+                if (W_ih_params.size() > 1) {
+                    kernel_inputs.push_back(W_ih_params[1]->tensor());
+                } else {
+                    kernel_inputs.push_back(empty({0}, DType::Float32, input.device()));
+                }
+            }
+
+            // Call fused multi-layer kernel
+            OpAttributes attrs;
+            attrs["num_layers"] = std::to_string(num_layers_);
+            auto outputs = dispatch<OpId::GRUMultiLayerForward>(kernel_inputs, attrs);
+
+            // Reshape output
+            Variable output(outputs[0], false);
+            if (batch_first_) {
+                output = Variable(output.tensor().transpose(0, 1), false);
+            }
+
+            Variable h_final(outputs[1], false);
+
+            return {output, h_final};
         }
 
-        // Make input contiguous (seq, batch, input_size)
-        Tensor input_tensor = x.tensor().contiguous();
+        // Single-layer or dropout case: process layers sequentially using fused kernels
+        std::vector<Tensor> final_h_states;
 
-        // Get initial state (batch, hidden)
-        Tensor h0_tensor = h.tensor().slice(0, 0, 1).reshape({batch_size, hidden_size_}).contiguous();
+        for (int64_t layer = 0; layer < num_layers_; ++layer) {
+            auto& cell = forward_cells_[layer];
+            auto W_ih_linear = cell->weight_ih();
+            auto cell_params = cell->parameters();
 
-        // Call fused kernel via dispatch
-        // inputs: [input, W_ih, W_hh, bias, h0]
-        std::vector<Tensor> inputs = {input_tensor, W_ih_tensor, W_hh_tensor,
-                                       bias_tensor, h0_tensor};
-        auto outputs = dispatch<OpId::GRUForward>(inputs);
-        // outputs: [output, h_n]
+            // Get weight tensors
+            auto W_ih_params = W_ih_linear->parameters();
+            Tensor W_ih_tensor = W_ih_params[0]->tensor().contiguous();
+            Tensor W_hh_tensor = cell_params[2]->tensor().contiguous();
+
+            // Get bias or empty tensor
+            Tensor bias_tensor;
+            if (W_ih_params.size() > 1) {
+                bias_tensor = W_ih_params[1]->tensor().contiguous();
+            } else {
+                bias_tensor = empty({0}, DType::Float32, input.device());
+            }
+
+            // Get initial state for this layer
+            Tensor h0_layer = h.tensor().slice(0, layer, layer + 1)
+                                .reshape({batch_size, hidden_size_}).contiguous();
+
+            // Call fused kernel
+            std::vector<Tensor> inputs = {layer_input, W_ih_tensor, W_hh_tensor,
+                                           bias_tensor, h0_layer};
+            auto outputs = dispatch<OpId::GRUForward>(inputs);
+
+            // Store final state
+            final_h_states.push_back(outputs[1]);
+
+            // Output becomes input for next layer
+            layer_input = outputs[0];
+
+            // Apply dropout between layers (not after last layer)
+            if (dropout_ && layer < num_layers_ - 1) {
+                layer_input = dropout_->forward(Variable(layer_input, false)).tensor();
+            }
+        }
 
         // Reshape output
-        Variable output(outputs[0], false);
+        Variable output(layer_input, false);
         if (batch_first_) {
             output = Variable(output.tensor().transpose(0, 1), false);
         }
 
-        // Reshape final state to (1, batch, hidden)
-        Variable h_final(outputs[1].reshape({1, batch_size, hidden_size_}), false);
+        // Stack final states: (num_layers, batch, hidden)
+        Variable h_final(stack(std::span<const Tensor>(final_h_states), 0), false);
 
         return {output, h_final};
     }

@@ -243,6 +243,9 @@ public:
     /** @brief Get input-to-hidden weight matrix for batched optimization */
     std::shared_ptr<Linear> weight_ih() const { return weight_ih_; }
 
+    /** @brief Get hidden-to-hidden weight matrix for batched optimization */
+    std::shared_ptr<Linear> weight_hh() const { return weight_hh_; }
+
     /** @brief Get hidden size */
     int64_t hidden_size() const { return hidden_size_; }
 
@@ -402,6 +405,9 @@ public:
 
     /** @brief Get input-to-hidden weight matrix for batched optimization */
     std::shared_ptr<Linear> weight_ih() const { return weight_ih_; }
+
+    /** @brief Get hidden-to-hidden weight matrix for batched optimization */
+    std::shared_ptr<Linear> weight_hh() const { return weight_hh_; }
 
     /** @brief Get hidden size */
     int64_t hidden_size() const { return hidden_size_; }

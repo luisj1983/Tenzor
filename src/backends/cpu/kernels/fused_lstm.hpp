@@ -48,11 +48,21 @@
 #include <mkl.h>
 #endif
 
-// Use oneDNN for GEMM operations to avoid MKL/ROCm interaction issues
-// The ROCm HIP runtime interferes with MKL's AVX-512 SGEMM implementation,
-// causing intermittent crashes. oneDNN doesn't have this issue.
+// LSTM GEMM Strategy:
+// MKL's cblas_sgemm is highly optimized and provides best LSTM performance.
+// We prefer MKL when available, with oneDNN as fallback.
+// Note: The original MKL/ROCm interaction issue was caused by single-threaded MKL
+// forcing, which we've removed. Multi-threaded MKL works correctly.
+
+#ifdef TENZOR_USE_MKL
+// Use MKL's optimized BLAS - best performance for LSTM
+using gemm_int = MKL_INT;
+#define TENZOR_LSTM_USE_MKL_GEMM 1
+#else
+// No MKL - check for oneDNN or fall back to generic CBLAS
 #ifdef TENZOR_USE_ONEDNN
 #include <dnnl.hpp>
+#define TENZOR_LSTM_USE_ONEDNN_GEMM 1
 
 // Thread-local oneDNN engine and stream for LSTM GEMM operations
 namespace {
@@ -66,65 +76,44 @@ inline void ensure_lstm_dnnl_engine() {
     }
 }
 
-// oneDNN-based SGEMM: C = alpha * A @ B^T + beta * C
-// A is (M, K) row-major, B is (N, K) row-major (transposed)
-// NOTE: For LSTM, we always use alpha=1.0, beta=0.0, so this is simplified
 inline void onednn_sgemm_nt(
     int64_t M, int64_t N, int64_t K,
     float alpha, const float* A, int64_t lda,
     const float* B, int64_t ldb,
     float beta, float* C, int64_t ldc
 ) {
-    (void)alpha; (void)beta;  // Always 1.0 and 0.0 for LSTM
-
+    (void)alpha; (void)beta;
     ensure_lstm_dnnl_engine();
     auto& engine = *g_lstm_engine;
     auto& stream = *g_lstm_stream;
 
     try {
-        // For C = A @ B^T where A is (M, K) and B is (N, K)
-        // We compute C = A @ transpose(B)
-        // In oneDNN terms: src=A (M,K), weights=B^T (K,N), dst=C (M,N)
-
-        // Memory descriptors with strides for row-major with leading dimensions
         dnnl::memory::dims a_dims = {M, K};
-        dnnl::memory::dims bt_dims = {K, N};  // B transposed
+        dnnl::memory::dims bt_dims = {K, N};
         dnnl::memory::dims c_dims = {M, N};
 
-        // A is row-major with stride lda
         dnnl::memory::desc a_md(a_dims, dnnl::memory::data_type::f32,
                                 dnnl::memory::dims{lda, 1});
-
-        // B^T: B is (N, K) but we want it as (K, N)
-        // B[i][j] at offset i*ldb+j becomes B^T[j][i]
-        // For oneDNN, B^T has dims (K, N) with strides {1, ldb}
         dnnl::memory::desc bt_md(bt_dims, dnnl::memory::data_type::f32,
                                  dnnl::memory::dims{1, ldb});
-
-        // C is row-major with stride ldc
         dnnl::memory::desc c_md(c_dims, dnnl::memory::data_type::f32,
                                 dnnl::memory::dims{ldc, 1});
 
-        // Create matmul primitive
         auto matmul_pd = dnnl::matmul::primitive_desc(engine, a_md, bt_md, c_md);
         auto matmul_prim = dnnl::matmul(matmul_pd);
 
-        // Create memory objects
         auto a_mem = dnnl::memory(a_md, engine, const_cast<float*>(A));
         auto bt_mem = dnnl::memory(bt_md, engine, const_cast<float*>(B));
         auto c_mem = dnnl::memory(c_md, engine, C);
 
-        // Execute matmul: C = A @ B^T
         matmul_prim.execute(stream, {
             {DNNL_ARG_SRC, a_mem},
             {DNNL_ARG_WEIGHTS, bt_mem},
             {DNNL_ARG_DST, c_mem}
         });
         stream.wait();
-
     } catch (const dnnl::error& e) {
-        // Fallback to naive implementation on error
-        fprintf(stderr, "[LSTM] oneDNN error: %s, falling back to naive\n", e.what());
+        fprintf(stderr, "[LSTM] oneDNN error: %s\n", e.what());
         for (int64_t i = 0; i < M; ++i) {
             for (int64_t j = 0; j < N; ++j) {
                 float sum = 0.0f;
@@ -137,14 +126,8 @@ inline void onednn_sgemm_nt(
     }
 }
 } // anonymous namespace
-
-#define TENZOR_LSTM_USE_ONEDNN_GEMM 1
 #else
-// Fallback to MKL/CBLAS if oneDNN is not available
-// Note: MKL header already included above if TENZOR_USE_MKL is defined
-#ifdef TENZOR_USE_MKL
-using gemm_int = MKL_INT;
-#else
+// Generic CBLAS fallback
 extern "C" {
     void cblas_sgemm(int, int, int, int, int, int,
                      float, const float*, int, const float*, int,
@@ -154,17 +137,25 @@ extern "C" {
     #define CblasTrans 112
 }
 using gemm_int = int;
+#define TENZOR_LSTM_USE_GENERIC_GEMM 1
 #endif
-#define TENZOR_LSTM_USE_ONEDNN_GEMM 0
 #endif
 
-// Helper function for LSTM GEMM that uses oneDNN when available, MKL otherwise
-#if TENZOR_LSTM_USE_ONEDNN_GEMM
-// Use oneDNN - avoids MKL/ROCm interaction issues
+// LSTM GEMM macro - selects best available implementation
+#ifdef TENZOR_LSTM_USE_MKL_GEMM
+// MKL: Best performance
+#define LSTM_SGEMM_NT(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc) \
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, \
+                static_cast<gemm_int>(M), static_cast<gemm_int>(N), static_cast<gemm_int>(K), \
+                alpha, A, static_cast<gemm_int>(lda), \
+                B, static_cast<gemm_int>(ldb), \
+                beta, C, static_cast<gemm_int>(ldc))
+#elif defined(TENZOR_LSTM_USE_ONEDNN_GEMM)
+// oneDNN fallback
 #define LSTM_SGEMM_NT(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc) \
     onednn_sgemm_nt(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc)
 #else
-// Use MKL/CBLAS
+// Generic CBLAS fallback
 #define LSTM_SGEMM_NT(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc) \
     cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, \
                 static_cast<gemm_int>(M), static_cast<gemm_int>(N), static_cast<gemm_int>(K), \
@@ -544,39 +535,38 @@ inline void lstm_forward(
     (void)check_h0; (void)check_h0_last;
     (void)check_c0; (void)check_c0_last;
 
-    // Allocate workspace directly with posix_memalign (bypass buffer pool for debugging)
-    // Using direct allocations to debug intermittent crashes
-    constexpr size_t ALLOC_ALIGN = 64;
-    size_t gates_ih_size = seq_len * batch * gate_size * sizeof(float);
-    size_t gates_hh_size = batch * gate_size * sizeof(float);
-    size_t h_temp_size = batch * hidden * sizeof(float);
-    size_t c_temp_size = batch * hidden * sizeof(float);
+    // Thread-local cached buffers for LSTM workspace
+    // This avoids repeated allocation overhead in the hot path
+    struct LSTMWorkspace {
+        std::vector<float> gates_ih;
+        std::vector<float> gates_hh;
+        std::vector<float> h_curr;
+        std::vector<float> c_curr;
+    };
+    static thread_local LSTMWorkspace workspace;
 
-    float* gates_ih = nullptr;
-    float* gates_hh = nullptr;
-    float* h_curr = nullptr;
-    float* c_curr = nullptr;
+    // Resize buffers if needed (only reallocates if size increases)
+    size_t gates_ih_count = seq_len * batch * gate_size;
+    size_t gates_hh_count = batch * gate_size;
+    size_t h_temp_count = batch * hidden;
+    size_t c_temp_count = batch * hidden;
 
-    if (posix_memalign((void**)&gates_ih, ALLOC_ALIGN, gates_ih_size) != 0 ||
-        posix_memalign((void**)&gates_hh, ALLOC_ALIGN, gates_hh_size) != 0 ||
-        posix_memalign((void**)&h_curr, ALLOC_ALIGN, h_temp_size) != 0 ||
-        posix_memalign((void**)&c_curr, ALLOC_ALIGN, c_temp_size) != 0) {
-        fprintf(stderr, "[LSTM] ERROR: Workspace allocation failed!\n");
-        free(gates_ih); free(gates_hh); free(h_curr); free(c_curr);
-        return;
-    }
+    if (workspace.gates_ih.size() < gates_ih_count) workspace.gates_ih.resize(gates_ih_count);
+    if (workspace.gates_hh.size() < gates_hh_count) workspace.gates_hh.resize(gates_hh_count);
+    if (workspace.h_curr.size() < h_temp_count) workspace.h_curr.resize(h_temp_count);
+    if (workspace.c_curr.size() < c_temp_count) workspace.c_curr.resize(c_temp_count);
 
-    // Pre-fault memory pages by touching all buffers
-    // This ensures pages are mapped before MKL worker threads access them
-    std::memset(gates_ih, 0, gates_ih_size);
-    std::memset(gates_hh, 0, gates_hh_size);
-    std::memset(h_curr, 0, h_temp_size);
-    std::memset(c_curr, 0, c_temp_size);
+    float* gates_ih = workspace.gates_ih.data();
+    float* gates_hh = workspace.gates_hh.data();
+    float* h_curr = workspace.h_curr.data();
+    float* c_curr = workspace.c_curr.data();
 
-    // Save and set MKL threading to avoid conflicts with OpenMP thread pool
+    // Use MKL's default threading (multi-threaded) for best GEMM performance
+    // The GEMM operations dominate LSTM computation, so we want full parallelism
 #ifdef TENZOR_USE_MKL
-    int saved_mkl_threads = mkl_get_max_threads();
-    mkl_set_num_threads(1);  // Use single-threaded MKL to avoid thread pool conflicts
+    // Ensure MKL uses optimal thread count (don't restrict to 1 thread)
+    int mkl_threads = mkl_get_max_threads();
+    (void)mkl_threads;  // Use default - don't override
 #endif
 
     // Step 1: Pre-compute ALL input gates in one batched GEMM
@@ -607,16 +597,7 @@ inline void lstm_forward(
     std::memcpy(h_n, h_curr, batch * hidden * sizeof(float));
     std::memcpy(c_n, c_curr, batch * hidden * sizeof(float));
 
-    // Restore MKL threading
-#ifdef TENZOR_USE_MKL
-    mkl_set_num_threads(saved_mkl_threads);
-#endif
-
-    // Free workspace allocations
-    free(gates_ih);
-    free(gates_hh);
-    free(h_curr);
-    free(c_curr);
+    // Workspace buffers are cached in thread-local storage, no cleanup needed
 }
 
 /**

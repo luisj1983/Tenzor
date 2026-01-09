@@ -238,8 +238,11 @@ enum class OpId : uint16_t {
     LSTMCellBackward,
     GRUCellForward,
     GRUCellBackward,
-    LSTMForward,        // Full sequence LSTM forward
-    GRUForward,         // Full sequence GRU forward
+    LSTMForward,              // Full sequence LSTM forward (single layer)
+    GRUForward,               // Full sequence GRU forward (single layer)
+    LSTMMultiLayerForward,    // Fused multi-layer LSTM forward
+    GRUMultiLayerForward,     // Fused multi-layer GRU forward
+    BiLSTMForward,            // Bidirectional LSTM forward (single layer)
 
     // =========================================================================
     // Embedding Operations (260-269)
