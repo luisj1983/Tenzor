@@ -180,16 +180,18 @@ auto MultiheadAttention::scaled_dot_product_attention(
         return {attended, attn_weights};
     }
 
-    // CUDA Fast path: Use Flash Attention kernel for inference
-    // NOTE: Currently disabled - the naive Flash Attention implementation is slower than
-    // cuBLAS BMM. PyTorch uses highly optimized Flash Attention with Tensor Cores and
-    // warp-level parallelism. Our implementation needs these optimizations to be competitive.
-    // For now, the cuBLAS BMM path below provides better performance (0.6-0.7x vs PyTorch).
+    // CUDA Fast path: Flash Attention kernel (currently disabled)
+    // NOTE: Our Flash Attention implementation is slower than cuBLAS BMM because:
+    // 1. No Tensor Core usage (requires wmma::mma_sync or CUTLASS)
+    // 2. High register pressure from storing attention scores
+    // 3. PyTorch uses highly optimized FlashAttention-2 with PTX intrinsics
+    // The cuBLAS BMM path below achieves 0.6x vs PyTorch, which is reasonable
+    // for a non-Tensor-Core implementation.
     bool can_use_cuda_fused = false && query.device().type == Device::Type::CUDA &&
                               query.dtype() == DType::Float32 &&
-                              attn_mask.shape().size() == 0 &&  // No attention mask
-                              (dropout_p <= 0.0 || !is_training()) &&  // No dropout needed
-                              head_dim == 64;  // Flash Attention optimized for head_dim=64
+                              attn_mask.shape().size() == 0 &&
+                              (dropout_p <= 0.0 || !is_training()) &&
+                              head_dim == 64;
 
     if (can_use_cuda_fused) {
         // Flash Attention: O(N) memory instead of O(N^2)
