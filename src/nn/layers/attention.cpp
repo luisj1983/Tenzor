@@ -16,6 +16,9 @@
 // Include fused attention kernel for CPU optimization
 #include "../../backends/cpu/kernels/fused_attention.hpp"
 
+// Include dispatch for fused attention
+#include "tenzor/backend/fast_dispatch.hpp"
+
 namespace tenzor {
 namespace nn {
 
@@ -177,7 +180,54 @@ auto MultiheadAttention::scaled_dot_product_attention(
         return {attended, attn_weights};
     }
 
-    // Standard path: Use separate autograd operations (required for gradients)
+    // CUDA Fast path: Use Flash Attention kernel for inference
+    // NOTE: Currently disabled - the naive Flash Attention implementation is slower than
+    // cuBLAS BMM. PyTorch uses highly optimized Flash Attention with Tensor Cores and
+    // warp-level parallelism. Our implementation needs these optimizations to be competitive.
+    // For now, the cuBLAS BMM path below provides better performance (0.6-0.7x vs PyTorch).
+    bool can_use_cuda_fused = false && query.device().type == Device::Type::CUDA &&
+                              query.dtype() == DType::Float32 &&
+                              attn_mask.shape().size() == 0 &&  // No attention mask
+                              (dropout_p <= 0.0 || !is_training()) &&  // No dropout needed
+                              head_dim == 64;  // Flash Attention optimized for head_dim=64
+
+    if (can_use_cuda_fused) {
+        // Flash Attention: O(N) memory instead of O(N^2)
+        float scale_f = 1.0f / std::sqrt(static_cast<float>(head_dim));
+
+        // Reshape from (batch, num_heads, seq_len, head_dim) to (batch*num_heads, seq_len, head_dim)
+        int64_t batch_heads = batch_size * num_heads;
+        std::vector<int64_t> reshaped_shape = {batch_heads, seq_len_q, head_dim};
+        std::vector<int64_t> reshaped_k_shape = {batch_heads, seq_len_k, head_dim};
+
+        // Make tensors contiguous for fused kernel
+        Tensor q_contig = query.tensor().is_contiguous() ? query.tensor() : query.tensor().contiguous();
+        Tensor k_contig = key.tensor().is_contiguous() ? key.tensor() : key.tensor().contiguous();
+        Tensor v_contig = value.tensor().is_contiguous() ? value.tensor() : value.tensor().contiguous();
+
+        // Reshape to 3D for Flash Attention
+        Tensor q_3d = reshape(q_contig, reshaped_shape);
+        Tensor k_3d = reshape(k_contig, reshaped_k_shape);
+        Tensor v_3d = reshape(v_contig, reshaped_k_shape);
+
+        // Call Flash Attention via dispatch system
+        OpAttributes attrs;
+        attrs["scale"] = std::to_string(scale_f);
+        std::vector<Tensor> fused_inputs = {q_3d, k_3d, v_3d};
+        Tensor output_3d = dispatch<OpId::FusedAttention>(fused_inputs, attrs)[0];
+
+        // Reshape back to (batch, num_heads, seq_len_q, head_dim)
+        std::vector<int64_t> out_shape = {batch_size, num_heads, seq_len_q, head_dim};
+        Tensor output_4d = reshape(output_3d, out_shape);
+
+        Variable attended(output_4d, false);
+        Tensor empty_weights;
+        Variable attn_weights_empty(empty_weights, false);
+
+        return {attended, attn_weights_empty};
+    }
+
+    // Standard path: Use cuBLAS bmm operations (fast for all cases)
 
     // Compute scaling factor
     double scale = 1.0 / std::sqrt(static_cast<double>(head_dim));

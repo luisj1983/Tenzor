@@ -4,9 +4,19 @@
 #include <algorithm>
 #include <stdexcept>
 #include <sstream>
+#include <iostream>
+#include <cstdlib>
 
 namespace tenzor {
 namespace backend {
+
+// Debug logging (enable with TENZOR_DEBUG_ALLOCATOR=1)
+static bool debug_allocator() {
+    static bool enabled = (std::getenv("TENZOR_DEBUG_ALLOCATOR") != nullptr);
+    return enabled;
+}
+
+#define ALLOC_DEBUG(msg) if (debug_allocator()) { std::cerr << "[ALLOC] " << msg << std::endl; }
 
 // Default configuration
 constexpr size_t DEFAULT_ALIGNMENT = 512;
@@ -37,6 +47,7 @@ void* CachingAllocator::allocate(size_t size, int device, cudaStream_t stream) {
     std::lock_guard<std::mutex> lock(mutex_);
 
     // Round size to alignment
+    size_t original_size = size;
     size = round_size(size);
 
     auto& device_alloc = device_allocators_[device];
@@ -50,8 +61,12 @@ void* CachingAllocator::allocate(size_t size, int device, cudaStream_t stream) {
     if (!block) {
         // No suitable cached block, allocate new one
         block = allocate_new_block(size, device, stream);
+        ALLOC_DEBUG("NEW alloc: ptr=" << block->ptr << " size=" << size
+                    << " (requested=" << original_size << ") device=" << device);
     } else {
         device_alloc.stats.num_cache_hits++;
+        ALLOC_DEBUG("CACHE HIT: ptr=" << block->ptr << " block_size=" << block->size
+                    << " requested=" << size << " device=" << device);
     }
 
     // Mark block as allocated
@@ -81,13 +96,24 @@ void CachingAllocator::free(void* ptr, int device) {
     // Find the block
     auto it = device_alloc.all_blocks.find(ptr);
     if (it == device_alloc.all_blocks.end()) {
+        ALLOC_DEBUG("FREE ERROR: ptr=" << ptr << " device=" << device << " NOT FOUND in all_blocks!");
+        // Check all devices
+        for (const auto& [dev_id, dev_alloc] : device_allocators_) {
+            auto found = dev_alloc.all_blocks.find(ptr);
+            if (found != dev_alloc.all_blocks.end()) {
+                ALLOC_DEBUG("  -> Found in device " << dev_id << " instead!");
+            }
+        }
         throw std::runtime_error("Attempted to free pointer not allocated by CachingAllocator");
     }
 
     Block* block = it->second.get();
     if (!block->allocated) {
+        ALLOC_DEBUG("FREE ERROR: ptr=" << ptr << " DOUBLE FREE!");
         throw std::runtime_error("Attempted to free already freed pointer");
     }
+
+    ALLOC_DEBUG("FREE: ptr=" << ptr << " size=" << block->size << " device=" << device);
 
     // Mark as free
     block->allocated = false;
@@ -333,8 +359,13 @@ bool CachingAllocator::split_block(Block* block, size_t size) {
 
     // Create new block for remaining memory
     void* new_ptr = static_cast<char*>(block->ptr) + size;
+
+    ALLOC_DEBUG("SPLIT: original_ptr=" << block->ptr << " original_size=" << block->size
+                << " -> keep_size=" << size << " split_ptr=" << new_ptr << " split_size=" << remaining_size);
+
     auto new_block = std::make_unique<Block>(new_ptr, remaining_size, block->device, block->stream);
     new_block->allocated = false;
+    new_block->original_ptr = block->original_ptr;  // Inherit from parent for merge tracking
     Block* new_block_ptr = new_block.get();
 
     // Add to all_blocks
@@ -364,7 +395,12 @@ bool CachingAllocator::try_merge_blocks(Block* block) {
 
     if (next_it != device_alloc.all_blocks.end()) {
         Block* next_block = next_it->second.get();
-        if (!next_block->allocated) {
+        // Only merge blocks from the same original cudaMalloc allocation
+        if (!next_block->allocated && next_block->original_ptr == block->original_ptr) {
+            ALLOC_DEBUG("MERGE: block_ptr=" << block->ptr << " block_size=" << block->size
+                        << " + next_ptr=" << next_block->ptr << " next_size=" << next_block->size
+                        << " -> merged_size=" << (block->size + next_block->size));
+
             // Merge with next block
             device_alloc.free_blocks.erase(next_block);
 

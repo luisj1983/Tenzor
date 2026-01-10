@@ -657,6 +657,40 @@ auto LayerNorm::forward_impl(const Variable& input) -> Variable {
     const bool needs_grad = is_grad_enabled() &&
         (input.requires_grad() || (elementwise_affine_ && cached_weight_ && cached_weight_->requires_grad()));
 
+    // ============================================================================
+    // CUDA FAST PATH: Use fused LayerNorm kernel via dispatch (single kernel launch!)
+    // ============================================================================
+    if (!needs_grad && input.tensor().device().type == Device::Type::CUDA && input.tensor().dtype() == DType::Float32) {
+        const Tensor& x = input.tensor();
+
+        // Get weight/bias tensors, ensure on CUDA
+        Tensor weight_cuda = (elementwise_affine_ && cached_weight_) ? cached_weight_->tensor() : weight_.tensor();
+        Tensor bias_cuda = (elementwise_affine_ && cached_bias_) ? cached_bias_->tensor() : bias_.tensor();
+
+        if (weight_cuda.device().type != Device::Type::CUDA) {
+            weight_cuda = weight_cuda.to(Device::cuda());
+        }
+        if (bias_cuda.device().type != Device::Type::CUDA) {
+            bias_cuda = bias_cuda.to(Device::cuda());
+        }
+
+        // Build normalized_shape as comma-separated string for attrs
+        std::string norm_shape_str;
+        for (size_t i = 0; i < normalized_shape_.size(); ++i) {
+            if (i > 0) norm_shape_str += ",";
+            norm_shape_str += std::to_string(normalized_shape_[i]);
+        }
+
+        // Dispatch to fused CUDA kernel (single kernel launch for max performance)
+        OpAttributes attrs;
+        attrs["normalized_shape"] = norm_shape_str;
+        attrs["eps"] = std::to_string(eps_);
+
+        std::vector<Tensor> inputs_vec = {x, weight_cuda, bias_cuda};
+        auto results = dispatch<OpId::FusedLayerNorm>(inputs_vec, attrs);
+        return Variable(results[0], false);  // results[0] is output, [1] is mean, [2] is inv_std
+    }
+
     if (!needs_grad && input.tensor().device().type == Device::Type::CPU && input.tensor().dtype() == DType::Float32) {
         // Ultra-fast path: CPU Float32 inference with no gradient tracking
         const Tensor& input_tensor = input.tensor();
@@ -1610,9 +1644,29 @@ auto RMSNorm::forward_impl(const Variable& input) -> Variable {
     // ============================================================================
     // FAST INFERENCE PATH: Skip all autograd overhead when gradients not needed
     // ============================================================================
-    // Use cached pointer to avoid hash map lookups (~2-3ms savings per call)
     const bool needs_grad = is_grad_enabled() &&
         (input.requires_grad() || (cached_weight_ && cached_weight_->requires_grad()));
+
+    // ============================================================================
+    // CUDA FAST PATH: Use fused RMSNorm kernel via dispatch (single kernel launch!)
+    // ============================================================================
+    if (!needs_grad && input.tensor().device().type == Device::Type::CUDA && input.tensor().dtype() == DType::Float32) {
+        const Tensor& x = input.tensor();
+
+        // Get weight tensor, ensure on CUDA
+        Tensor weight_cuda = cached_weight_ ? cached_weight_->tensor() : weight_.tensor();
+        if (weight_cuda.device().type != Device::Type::CUDA) {
+            weight_cuda = weight_cuda.to(Device::cuda());
+        }
+
+        // Dispatch to fused CUDA kernel (single kernel launch for max performance)
+        OpAttributes attrs;
+        attrs["eps"] = std::to_string(eps_);
+
+        std::vector<Tensor> inputs_vec = {x, weight_cuda};
+        auto results = dispatch<OpId::FusedRMSNorm>(inputs_vec, attrs);
+        return Variable(results[0], false);  // results[0] is output, [1] is rrms
+    }
 
     if (!needs_grad && input.tensor().device().type == Device::Type::CPU && input.tensor().dtype() == DType::Float32) {
         // Ultra-fast path: CPU Float32 inference with no gradient tracking

@@ -218,6 +218,8 @@ enum class OpId : uint16_t {
     FusedAddReLU,
     FusedGelu,
     FusedLayerNorm,
+    FusedRMSNorm,
+    FusedAttention,
 
     // =========================================================================
     // Creation Operations (230-249)

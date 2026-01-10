@@ -10,6 +10,7 @@
 #include <limits>
 #include <cstdlib>
 #include <sstream>
+#include <iostream>
 
 namespace tenzor {
 
@@ -177,9 +178,10 @@ namespace cuda {
 class CUDABackend : public Backend {
 public:
     CUDABackend() {
-        // Check if caching allocator is enabled via environment variable
-        const char* enable_caching = std::getenv("TENZOR_ENABLE_CACHING_ALLOCATOR");
-        use_caching_allocator_ = (enable_caching != nullptr && std::string(enable_caching) == "1");
+        // Caching allocator provides significant performance improvement (up to 2x faster for BMM)
+        // Enabled by default. Disable with TENZOR_DISABLE_CACHING_ALLOCATOR=1 if issues arise.
+        const char* disable_caching = std::getenv("TENZOR_DISABLE_CACHING_ALLOCATOR");
+        use_caching_allocator_ = (disable_caching == nullptr || std::string(disable_caching) != "1");
     }
 
     auto name() const -> std::string_view override {
@@ -311,6 +313,14 @@ public:
 
         cudaError_t err = cudaMemcpy(dst, src, bytes, cuda_kind);
         if (err != cudaSuccess) {
+            // Debug: check pointer attributes
+            cudaPointerAttributes dst_attrs, src_attrs;
+            cudaPointerGetAttributes(&dst_attrs, dst);
+            cudaPointerGetAttributes(&src_attrs, src);
+            std::cerr << "[COPY ERROR] dst=" << dst << " src=" << src << " bytes=" << bytes
+                      << " kind=" << static_cast<int>(kind)
+                      << " dst_type=" << dst_attrs.type << " src_type=" << src_attrs.type
+                      << std::endl;
             throw std::runtime_error(
                 std::string("CUDA copy failed: ") + cudaGetErrorString(err)
             );

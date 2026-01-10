@@ -27,9 +27,10 @@ struct Block {
     bool allocated;         // Whether block is currently allocated
     int device;             // CUDA device ID
     cudaStream_t stream;    // Associated stream (for async operations)
+    void* original_ptr;     // Original cudaMalloc pointer (for merge tracking)
 
     Block(void* p, size_t s, int dev, cudaStream_t str = nullptr)
-        : ptr(p), size(s), allocated(false), device(dev), stream(str) {}
+        : ptr(p), size(s), allocated(false), device(dev), stream(str), original_ptr(p) {}
 
     // Comparison for ordered containers (by size, then by pointer)
     bool operator<(const Block& other) const {

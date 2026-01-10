@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <charconv>
 #include <limits>
+#include <tuple>
 
 namespace tenzor {
 
@@ -145,14 +146,52 @@ namespace cuda {
     auto batchnorm2d_forward_affine(const Tensor& input, const Tensor& mean, const Tensor& variance, const Tensor& gamma, const Tensor& beta, float epsilon, cudaStream_t stream) -> Tensor;
     auto batchnorm2d_update_running_stats(Tensor& running_mean, Tensor& running_var, const Tensor& batch_mean, const Tensor& batch_var, float momentum, cudaStream_t stream) -> void;
 
+    // Fused LayerNorm operation
+    auto fused_layer_norm_cuda(
+        const Tensor& input,
+        const std::vector<int64_t>& normalized_shape,
+        const Tensor& weight,
+        const Tensor& bias,
+        float eps
+    ) -> std::tuple<Tensor, Tensor, Tensor>;
+
+    // Fused RMSNorm operation
+    auto fused_rms_norm_cuda(
+        const Tensor& input,
+        const Tensor& weight,
+        float eps
+    ) -> std::tuple<Tensor, Tensor>;
+
+    // Fused Attention operation
+    auto fused_attention_cuda(
+        const Tensor& Q,
+        const Tensor& K,
+        const Tensor& V,
+        float scale
+    ) -> Tensor;
+
     // Conv2d operations
     auto conv2d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t dilation, int64_t groups, cudaStream_t stream) -> Tensor;
 
-    // Pooling operations
+    // Pooling operations (custom kernels - fallback)
     auto maxpool2d_forward_kernel(const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding, int64_t dilation, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
     auto maxpool2d_backward_kernel(const Tensor& grad_output, const Tensor& indices, const std::vector<int64_t>& input_shape, cudaStream_t stream) -> Tensor;
     auto avgpool2d_forward_kernel(const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding, cudaStream_t stream) -> Tensor;
     auto avgpool2d_backward_kernel(const Tensor& grad_output, const std::vector<int64_t>& input_shape, int64_t kernel_size, int64_t stride, int64_t padding, cudaStream_t stream) -> Tensor;
+
+#ifdef TENZOR_HAS_CUDNN
+    // cuDNN pooling operations (faster than custom kernels)
+    auto cudnn_maxpool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
+    auto cudnn_maxpool2d_backward(const Tensor& grad_output, const Tensor& input, const Tensor& output, int64_t kernel_size, int64_t stride, int64_t padding, cudaStream_t stream) -> Tensor;
+    auto cudnn_avgpool2d_forward(const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding, cudaStream_t stream) -> Tensor;
+    auto cudnn_avgpool2d_backward(const Tensor& grad_output, const Tensor& input, int64_t kernel_size, int64_t stride, int64_t padding, cudaStream_t stream) -> Tensor;
+
+    // cuDNN softmax operations (faster than custom kernels)
+    auto cudnn_softmax_forward(const Tensor& input, int64_t dim, cudaStream_t stream) -> Tensor;
+    auto cudnn_softmax_backward(const Tensor& grad_output, const Tensor& output, int64_t dim, cudaStream_t stream) -> Tensor;
+    auto cudnn_log_softmax_forward(const Tensor& input, int64_t dim, cudaStream_t stream) -> Tensor;
+    auto cudnn_log_softmax_backward(const Tensor& grad_output, const Tensor& output, int64_t dim, cudaStream_t stream) -> Tensor;
+#endif
 
     // Fill operations
     auto fill_kernel(const Tensor& tensor, float value, cudaStream_t stream) -> Tensor;
@@ -441,7 +480,25 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         return std::vector<Tensor>{cuda::softplus_backward_kernel(inputs[0], inputs[1], beta, threshold, get_cuda_stream(attrs))};
     });
 
-    // Softmax operations
+    // Softmax operations (use cuDNN when available for better performance)
+#ifdef TENZOR_HAS_CUDNN
+    table.register_kernel(OpId::Softmax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
+        return std::vector<Tensor>{cuda::cudnn_softmax_forward(inputs[0], dim, get_cuda_stream(attrs))};
+    });
+    table.register_kernel(OpId::SoftmaxBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
+        return std::vector<Tensor>{cuda::cudnn_softmax_backward(inputs[0], inputs[1], dim, get_cuda_stream(attrs))};
+    });
+    table.register_kernel(OpId::LogSoftmax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
+        return std::vector<Tensor>{cuda::cudnn_log_softmax_forward(inputs[0], dim, get_cuda_stream(attrs))};
+    });
+    table.register_kernel(OpId::LogSoftmaxBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
+        return std::vector<Tensor>{cuda::cudnn_log_softmax_backward(inputs[0], inputs[1], dim, get_cuda_stream(attrs))};
+    });
+#else
     table.register_kernel(OpId::Softmax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
         return std::vector<Tensor>{cuda::softmax_kernel(inputs[0], dim, get_cuda_stream(attrs))};
@@ -458,6 +515,7 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
         return std::vector<Tensor>{cuda::log_softmax_backward_kernel(inputs[0], inputs[1], dim, get_cuda_stream(attrs))};
     });
+#endif
 
     // =========================================================================
     // Transform Operations
@@ -533,6 +591,40 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     });
 
     // =========================================================================
+    // Pooling Operations (use cuDNN when available for better performance)
+    // =========================================================================
+#ifdef TENZOR_HAS_CUDNN
+    table.register_kernel(OpId::MaxPool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t kernel_size = parse_attr<int64_t>(attrs, "kernel_size", 2);
+        int64_t stride = parse_attr<int64_t>(attrs, "stride", kernel_size);
+        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
+        auto [output, indices] = cuda::cudnn_maxpool2d_forward(inputs[0], kernel_size, stride, padding, get_cuda_stream(attrs));
+        return std::vector<Tensor>{output, indices};
+    });
+    table.register_kernel(OpId::AvgPool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t kernel_size = parse_attr<int64_t>(attrs, "kernel_size", 2);
+        int64_t stride = parse_attr<int64_t>(attrs, "stride", kernel_size);
+        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
+        return std::vector<Tensor>{cuda::cudnn_avgpool2d_forward(inputs[0], kernel_size, stride, padding, get_cuda_stream(attrs))};
+    });
+#else
+    table.register_kernel(OpId::MaxPool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t kernel_size = parse_attr<int64_t>(attrs, "kernel_size", 2);
+        int64_t stride = parse_attr<int64_t>(attrs, "stride", kernel_size);
+        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
+        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
+        auto [output, indices] = cuda::maxpool2d_forward_kernel(inputs[0], kernel_size, stride, padding, dilation, get_cuda_stream(attrs));
+        return std::vector<Tensor>{output, indices};
+    });
+    table.register_kernel(OpId::AvgPool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t kernel_size = parse_attr<int64_t>(attrs, "kernel_size", 2);
+        int64_t stride = parse_attr<int64_t>(attrs, "stride", kernel_size);
+        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
+        return std::vector<Tensor>{cuda::avgpool2d_forward_kernel(inputs[0], kernel_size, stride, padding, get_cuda_stream(attrs))};
+    });
+#endif
+
+    // =========================================================================
     // Normalization Operations
     // =========================================================================
     table.register_kernel(OpId::BatchNorm2dMeanVar, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -555,6 +647,42 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         Tensor running_var = inputs[1];
         cuda::batchnorm2d_update_running_stats(running_mean, running_var, inputs[2], inputs[3], momentum, get_cuda_stream(attrs));
         return std::vector<Tensor>{running_mean, running_var};
+    });
+
+    // =========================================================================
+    // Fused LayerNorm (single kernel launch for maximum performance)
+    // =========================================================================
+    table.register_kernel(OpId::FusedLayerNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // inputs: [input, weight, bias]
+        // attrs: normalized_shape (comma-separated), eps
+        float eps = parse_attr<float>(attrs, "eps", 1e-5f);
+        auto normalized_shape = parse_int_list(attrs, "normalized_shape");
+        auto [output, mean, inv_std] = cuda::fused_layer_norm_cuda(
+            inputs[0], normalized_shape, inputs[1], inputs[2], eps
+        );
+        return std::vector<Tensor>{output, mean, inv_std};
+    });
+
+    // =========================================================================
+    // Fused RMSNorm (single kernel launch for maximum performance)
+    // =========================================================================
+    table.register_kernel(OpId::FusedRMSNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // inputs: [input, weight]
+        // attrs: eps
+        float eps = parse_attr<float>(attrs, "eps", 1e-5f);
+        auto [output, rrms] = cuda::fused_rms_norm_cuda(inputs[0], inputs[1], eps);
+        return std::vector<Tensor>{output, rrms};
+    });
+
+    // =========================================================================
+    // Fused Attention (single kernel launch for maximum performance)
+    // =========================================================================
+    table.register_kernel(OpId::FusedAttention, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // inputs: [Q, K, V] - all (batch_heads, seq_len, head_dim)
+        // attrs: scale
+        float scale = parse_attr<float>(attrs, "scale", 1.0f);
+        auto output = cuda::fused_attention_cuda(inputs[0], inputs[1], inputs[2], scale);
+        return std::vector<Tensor>{output};
     });
 }
 

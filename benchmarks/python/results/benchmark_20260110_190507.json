@@ -1,0 +1,1058 @@
+{
+  "system_info": {
+    "timestamp": "2026-01-10T19:05:07.270318",
+    "platform": "Linux-6.18.3-arch1-1-x86_64-with-glibc2.42",
+    "python_version": "3.13.11",
+    "processor": "",
+    "cpu_count": 24,
+    "gpu_name": "NVIDIA GeForce RTX 5070 Laptop GPU",
+    "gpu_memory": "8151 MiB",
+    "gpu_driver": "590.48.01"
+  },
+  "results": [
+    {
+      "name": "Conv2d 3->64 k=7 s=2 @ 32x32",
+      "category": "conv2d",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 0.13892605056753382,
+      "std_ms": 0.033263031826598156,
+      "min_ms": 0.12656499166041613,
+      "max_ms": 0.36091500078327954,
+      "median_ms": 0.13010149996262044,
+      "p95_ms": 0.2001910179387778,
+      "p99_ms": 0.36091500078327954,
+      "gflops": 1109.51597177284,
+      "bandwidth_gbps": null,
+      "iterations": 100,
+      "warmup_iterations": 5,
+      "parameters": {
+        "in_channels": 3,
+        "out_channels": 64,
+        "kernel_size": 7,
+        "stride": 2,
+        "padding": 3,
+        "input_size": [
+          32,
+          32
+        ],
+        "batch_size": 32
+      }
+    },
+    {
+      "name": "Conv2d 3->64 k=7 s=2 @ 56x56",
+      "category": "conv2d",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 0.1697487782803364,
+      "std_ms": 0.00899042073357793,
+      "min_ms": 0.1572479959577322,
+      "max_ms": 0.22457301383838058,
+      "median_ms": 0.1687875046627596,
+      "p95_ms": 0.18171902047470212,
+      "p99_ms": 0.22457301383838058,
+      "gflops": 2780.9084270427566,
+      "bandwidth_gbps": null,
+      "iterations": 100,
+      "warmup_iterations": 5,
+      "parameters": {
+        "in_channels": 3,
+        "out_channels": 64,
+        "kernel_size": 7,
+        "stride": 2,
+        "padding": 3,
+        "input_size": [
+          56,
+          56
+        ],
+        "batch_size": 32
+      }
+    },
+    {
+      "name": "Conv2d 64->64 k=3 s=1 @ 32x32",
+      "category": "conv2d",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 0.27342196146491915,
+      "std_ms": 0.014150177590617548,
+      "min_ms": 0.26440000510774553,
+      "max_ms": 0.34250301541760564,
+      "median_ms": 0.2683570055523887,
+      "p95_ms": 0.30875601805746555,
+      "p99_ms": 0.34250301541760564,
+      "gflops": 8835.863407080302,
+      "bandwidth_gbps": null,
+      "iterations": 100,
+      "warmup_iterations": 5,
+      "parameters": {
+        "in_channels": 64,
+        "out_channels": 64,
+        "kernel_size": 3,
+        "stride": 1,
+        "padding": 1,
+        "input_size": [
+          32,
+          32
+        ],
+        "batch_size": 32
+      }
+    },
+    {
+      "name": "Conv2d 64->64 k=3 s=1 @ 56x56",
+      "category": "conv2d",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 0.7710062497062609,
+      "std_ms": 0.00804043473882229,
+      "min_ms": 0.7571199967060238,
+      "max_ms": 0.8051710028667003,
+      "median_ms": 0.768363504903391,
+      "p95_ms": 0.7881729979999363,
+      "p99_ms": 0.8051710028667003,
+      "gflops": 9596.22864123188,
+      "bandwidth_gbps": null,
+      "iterations": 100,
+      "warmup_iterations": 5,
+      "parameters": {
+        "in_channels": 64,
+        "out_channels": 64,
+        "kernel_size": 3,
+        "stride": 1,
+        "padding": 1,
+        "input_size": [
+          56,
+          56
+        ],
+        "batch_size": 32
+      }
+    },
+    {
+      "name": "Conv2d 64->128 k=3 s=2 @ 32x32",
+      "category": "conv2d",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 0.1839711598586291,
+      "std_ms": 0.006499285406074673,
+      "min_ms": 0.17218399443663657,
+      "max_ms": 0.22368101053871214,
+      "median_ms": 0.18339698726776987,
+      "p95_ms": 0.19239800167270005,
+      "p99_ms": 0.22368101053871214,
+      "gflops": 6566.026723581267,
+      "bandwidth_gbps": null,
+      "iterations": 100,
+      "warmup_iterations": 5,
+      "parameters": {
+        "in_channels": 64,
+        "out_channels": 128,
+        "kernel_size": 3,
+        "stride": 2,
+        "padding": 1,
+        "input_size": [
+          32,
+          32
+        ],
+        "batch_size": 32
+      }
+    },
+    {
+      "name": "Conv2d 64->128 k=3 s=2 @ 56x56",
+      "category": "conv2d",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 0.4608718689996749,
+      "std_ms": 0.015347156232570644,
+      "min_ms": 0.444495992269367,
+      "max_ms": 0.5450579919852316,
+      "median_ms": 0.45707798562943935,
+      "p95_ms": 0.4929100105073303,
+      "p99_ms": 0.5450579919852316,
+      "gflops": 8026.908077573747,
+      "bandwidth_gbps": null,
+      "iterations": 100,
+      "warmup_iterations": 5,
+      "parameters": {
+        "in_channels": 64,
+        "out_channels": 128,
+        "kernel_size": 3,
+        "stride": 2,
+        "padding": 1,
+        "input_size": [
+          56,
+          56
+        ],
+        "batch_size": 32
+      }
+    },
+    {
+      "name": "Conv2d 3->64 k=7 s=2 @ 32x32",
+      "category": "conv2d",
+      "device": "cuda",
+      "framework": "pytorch",
+      "mean_ms": 0.05950787861365825,
+      "std_ms": 0.0018531731393267865,
+      "min_ms": 0.056666991440579295,
+      "max_ms": 0.07295497925952077,
+      "median_ms": 0.059120997320860624,
+      "p95_ms": 0.06145500810816884,
+      "p99_ms": 0.07295497925952077,
+      "gflops": 2590.256544023763,
+      "bandwidth_gbps": null,
+      "iterations": 100,
+      "warmup_iterations": 5,
+      "parameters": {
+        "in_channels": 3,
+        "out_channels": 64,
+        "kernel_size": 7,
+        "stride": 2,
+        "padding": 3,
+        "input_size": [
+          32,
+          32
+        ],
+        "batch_size": 32
+      }
+    },
+    {
+      "name": "Conv2d 3->64 k=7 s=2 @ 56x56",
+      "category": "conv2d",
+      "device": "cuda",
+      "framework": "pytorch",
+      "mean_ms": 0.08171189081622288,
+      "std_ms": 0.0015450895720404405,
+      "min_ms": 0.07984600961208344,
+      "max_ms": 0.0869779905769974,
+      "median_ms": 0.08082800195552409,
+      "p95_ms": 0.08492398774251342,
+      "p99_ms": 0.0869779905769974,
+      "gflops": 5777.076056919236,
+      "bandwidth_gbps": null,
+      "iterations": 100,
+      "warmup_iterations": 5,
+      "parameters": {
+        "in_channels": 3,
+        "out_channels": 64,
+        "kernel_size": 7,
+        "stride": 2,
+        "padding": 3,
+        "input_size": [
+          56,
+          56
+        ],
+        "batch_size": 32
+      }
+    },
+    {
+      "name": "Conv2d 64->64 k=3 s=1 @ 32x32",
+      "category": "conv2d",
+      "device": "cuda",
+      "framework": "pytorch",
+      "mean_ms": 0.18691635894356295,
+      "std_ms": 0.0015661786636496677,
+      "min_ms": 0.18400399130769074,
+      "max_ms": 0.19007400260306895,
+      "median_ms": 0.18699299835134298,
+      "p95_ms": 0.1898529881145805,
+      "p99_ms": 0.19007400260306895,
+      "gflops": 12925.134630561985,
+      "bandwidth_gbps": null,
+      "iterations": 100,
+      "warmup_iterations": 5,
+      "parameters": {
+        "in_channels": 64,
+        "out_channels": 64,
+        "kernel_size": 3,
+        "stride": 1,
+        "padding": 1,
+        "input_size": [
+          32,
+          32
+        ],
+        "batch_size": 32
+      }
+    },
+    {
+      "name": "Conv2d 64->64 k=3 s=1 @ 56x56",
+      "category": "conv2d",
+      "device": "cuda",
+      "framework": "pytorch",
+      "mean_ms": 0.7332682094420306,
+      "std_ms": 0.023645202484784387,
+      "min_ms": 0.7122429960872978,
+      "max_ms": 0.8672870171722025,
+      "median_ms": 0.7275489770108834,
+      "p95_ms": 0.8001730020623654,
+      "p99_ms": 0.8672870171722025,
+      "gflops": 10090.103676566,
+      "bandwidth_gbps": null,
+      "iterations": 100,
+      "warmup_iterations": 5,
+      "parameters": {
+        "in_channels": 64,
+        "out_channels": 64,
+        "kernel_size": 3,
+        "stride": 1,
+        "padding": 1,
+        "input_size": [
+          56,
+          56
+        ],
+        "batch_size": 32
+      }
+    },
+    {
+      "name": "Conv2d 64->128 k=3 s=2 @ 32x32",
+      "category": "conv2d",
+      "device": "cuda",
+      "framework": "pytorch",
+      "mean_ms": 0.1053087692707777,
+      "std_ms": 0.001358250332335518,
+      "min_ms": 0.10303599992766976,
+      "max_ms": 0.11212099343538284,
+      "median_ms": 0.10520400246605277,
+      "p95_ms": 0.10803400073200464,
+      "p99_ms": 0.11212099343538284,
+      "gflops": 11470.64542074369,
+      "bandwidth_gbps": null,
+      "iterations": 100,
+      "warmup_iterations": 5,
+      "parameters": {
+        "in_channels": 64,
+        "out_channels": 128,
+        "kernel_size": 3,
+        "stride": 2,
+        "padding": 1,
+        "input_size": [
+          32,
+          32
+        ],
+        "batch_size": 32
+      }
+    },
+    {
+      "name": "Conv2d 64->128 k=3 s=2 @ 56x56",
+      "category": "conv2d",
+      "device": "cuda",
+      "framework": "pytorch",
+      "mean_ms": 0.3738281424739398,
+      "std_ms": 0.004521304155214567,
+      "min_ms": 0.3664839896373451,
+      "max_ms": 0.4115500196348876,
+      "median_ms": 0.3733254998223856,
+      "p95_ms": 0.3800569975282997,
+      "p99_ms": 0.4115500196348876,
+      "gflops": 9895.927319751989,
+      "bandwidth_gbps": null,
+      "iterations": 100,
+      "warmup_iterations": 5,
+      "parameters": {
+        "in_channels": 64,
+        "out_channels": 128,
+        "kernel_size": 3,
+        "stride": 2,
+        "padding": 1,
+        "input_size": [
+          56,
+          56
+        ],
+        "batch_size": 32
+      }
+    },
+    {
+      "name": "Conv2d 3->64 k=7 s=2 @ 224x224",
+      "category": "conv2d",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 2.3994994795066305,
+      "std_ms": 0.04936973838966606,
+      "min_ms": 2.301770990015939,
+      "max_ms": 2.5133519957307726,
+      "median_ms": 2.4064504978014156,
+      "p95_ms": 2.475968998624012,
+      "p99_ms": 2.5133519957307726,
+      "gflops": 3147.6951724752935,
+      "bandwidth_gbps": null,
+      "iterations": 100,
+      "warmup_iterations": 5,
+      "parameters": {
+        "in_channels": 3,
+        "out_channels": 64,
+        "kernel_size": 7,
+        "stride": 2,
+        "padding": 3,
+        "input_size": [
+          224,
+          224
+        ],
+        "batch_size": 32
+      }
+    },
+    {
+      "name": "Conv2d 3->64 k=7 s=2 @ 224x224",
+      "category": "conv2d",
+      "device": "cuda",
+      "framework": "pytorch",
+      "mean_ms": 1.9814051713910885,
+      "std_ms": 0.02227461889809938,
+      "min_ms": 1.952346006873995,
+      "max_ms": 2.074254007311538,
+      "median_ms": 1.9756460096687078,
+      "p95_ms": 2.0341860072221607,
+      "p99_ms": 2.074254007311538,
+      "gflops": 3811.887158191541,
+      "bandwidth_gbps": null,
+      "iterations": 100,
+      "warmup_iterations": 5,
+      "parameters": {
+        "in_channels": 3,
+        "out_channels": 64,
+        "kernel_size": 7,
+        "stride": 2,
+        "padding": 3,
+        "input_size": [
+          224,
+          224
+        ],
+        "batch_size": 32
+      }
+    },
+    {
+      "name": "Conv2d 64->64 k=3 s=1 @ 56x56",
+      "category": "conv2d",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 0.7648815092397854,
+      "std_ms": 0.01037732788994883,
+      "min_ms": 0.7536739867646247,
+      "max_ms": 0.8087080204859376,
+      "median_ms": 0.761822986532934,
+      "p95_ms": 0.7954559987410903,
+      "p99_ms": 0.8087080204859376,
+      "gflops": 9673.069837122366,
+      "bandwidth_gbps": null,
+      "iterations": 100,
+      "warmup_iterations": 5,
+      "parameters": {
+        "in_channels": 64,
+        "out_channels": 64,
+        "kernel_size": 3,
+        "stride": 1,
+        "padding": 1,
+        "input_size": [
+          56,
+          56
+        ],
+        "batch_size": 32
+      }
+    },
+    {
+      "name": "Conv2d 64->64 k=3 s=1 @ 56x56",
+      "category": "conv2d",
+      "device": "cuda",
+      "framework": "pytorch",
+      "mean_ms": 0.7286063994979486,
+      "std_ms": 0.011799177057845323,
+      "min_ms": 0.7109120197128505,
+      "max_ms": 0.8226219797506928,
+      "median_ms": 0.7280805002665147,
+      "p95_ms": 0.7397299923468381,
+      "p99_ms": 0.8226219797506928,
+      "gflops": 10154.662738480149,
+      "bandwidth_gbps": null,
+      "iterations": 100,
+      "warmup_iterations": 5,
+      "parameters": {
+        "in_channels": 64,
+        "out_channels": 64,
+        "kernel_size": 3,
+        "stride": 1,
+        "padding": 1,
+        "input_size": [
+          56,
+          56
+        ],
+        "batch_size": 32
+      }
+    },
+    {
+      "name": "Conv2d 64->256 k=1 s=1 @ 56x56",
+      "category": "conv2d",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 1.4473384304437786,
+      "std_ms": 0.03701123643988567,
+      "min_ms": 1.3981329975649714,
+      "max_ms": 1.5580260078422725,
+      "median_ms": 1.4370150020113215,
+      "p95_ms": 1.5231059805955738,
+      "p99_ms": 1.5580260078422725,
+      "gflops": 2271.987164046864,
+      "bandwidth_gbps": null,
+      "iterations": 100,
+      "warmup_iterations": 5,
+      "parameters": {
+        "in_channels": 64,
+        "out_channels": 256,
+        "kernel_size": 1,
+        "stride": 1,
+        "padding": 0,
+        "input_size": [
+          56,
+          56
+        ],
+        "batch_size": 32
+      }
+    },
+    {
+      "name": "Conv2d 64->256 k=1 s=1 @ 56x56",
+      "category": "conv2d",
+      "device": "cuda",
+      "framework": "pytorch",
+      "mean_ms": 1.0005476311198436,
+      "std_ms": 0.008297517072660228,
+      "min_ms": 0.9908989886753261,
+      "max_ms": 1.0537060152273625,
+      "median_ms": 0.9986220102291554,
+      "p95_ms": 1.017904985928908,
+      "p99_ms": 1.0537060152273625,
+      "gflops": 3286.534527416347,
+      "bandwidth_gbps": null,
+      "iterations": 100,
+      "warmup_iterations": 5,
+      "parameters": {
+        "in_channels": 64,
+        "out_channels": 256,
+        "kernel_size": 1,
+        "stride": 1,
+        "padding": 0,
+        "input_size": [
+          56,
+          56
+        ],
+        "batch_size": 32
+      }
+    },
+    {
+      "name": "Conv2d 256->128 k=1 s=1 @ 56x56",
+      "category": "conv2d",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 0.946061810827814,
+      "std_ms": 0.026930088920881643,
+      "min_ms": 0.9314670169260353,
+      "max_ms": 1.1995740060228854,
+      "median_ms": 0.941735488595441,
+      "p95_ms": 0.9641939832363278,
+      "p99_ms": 1.1995740060228854,
+      "gflops": 6951.626835296676,
+      "bandwidth_gbps": null,
+      "iterations": 100,
+      "warmup_iterations": 5,
+      "parameters": {
+        "in_channels": 256,
+        "out_channels": 128,
+        "kernel_size": 1,
+        "stride": 1,
+        "padding": 0,
+        "input_size": [
+          56,
+          56
+        ],
+        "batch_size": 32
+      }
+    },
+    {
+      "name": "Conv2d 256->128 k=1 s=1 @ 56x56",
+      "category": "conv2d",
+      "device": "cuda",
+      "framework": "pytorch",
+      "mean_ms": 0.7626460585743189,
+      "std_ms": 0.002533598732779064,
+      "min_ms": 0.7566299755126238,
+      "max_ms": 0.7709240016993135,
+      "median_ms": 0.7623245037393644,
+      "p95_ms": 0.7675680099055171,
+      "p99_ms": 0.7709240016993135,
+      "gflops": 8623.487393738511,
+      "bandwidth_gbps": null,
+      "iterations": 100,
+      "warmup_iterations": 5,
+      "parameters": {
+        "in_channels": 256,
+        "out_channels": 128,
+        "kernel_size": 1,
+        "stride": 1,
+        "padding": 0,
+        "input_size": [
+          56,
+          56
+        ],
+        "batch_size": 32
+      }
+    },
+    {
+      "name": "Conv2d 128->128 k=3 s=2 @ 56x56",
+      "category": "conv2d",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 0.7835618907120079,
+      "std_ms": 0.028082967792472685,
+      "min_ms": 0.746333011193201,
+      "max_ms": 0.8787489787209779,
+      "median_ms": 0.7759635045658797,
+      "p95_ms": 0.8439990051556379,
+      "p99_ms": 0.8787489787209779,
+      "gflops": 9442.46056846498,
+      "bandwidth_gbps": null,
+      "iterations": 100,
+      "warmup_iterations": 5,
+      "parameters": {
+        "in_channels": 128,
+        "out_channels": 128,
+        "kernel_size": 3,
+        "stride": 2,
+        "padding": 1,
+        "input_size": [
+          56,
+          56
+        ],
+        "batch_size": 32
+      }
+    },
+    {
+      "name": "Conv2d 128->128 k=3 s=2 @ 56x56",
+      "category": "conv2d",
+      "device": "cuda",
+      "framework": "pytorch",
+      "mean_ms": 0.7072394085116684,
+      "std_ms": 0.012796286761085846,
+      "min_ms": 0.6974690186325461,
+      "max_ms": 0.7793989789206535,
+      "median_ms": 0.7030134875094518,
+      "p95_ms": 0.7363850018009543,
+      "p99_ms": 0.7793989789206535,
+      "gflops": 10461.453599665934,
+      "bandwidth_gbps": null,
+      "iterations": 100,
+      "warmup_iterations": 5,
+      "parameters": {
+        "in_channels": 128,
+        "out_channels": 128,
+        "kernel_size": 3,
+        "stride": 2,
+        "padding": 1,
+        "input_size": [
+          56,
+          56
+        ],
+        "batch_size": 32
+      }
+    },
+    {
+      "name": "Conv2d 128->512 k=1 s=1 @ 28x28",
+      "category": "conv2d",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 0.8134498383151367,
+      "std_ms": 0.024671968827026783,
+      "min_ms": 0.7886250095907599,
+      "max_ms": 0.9351740009151399,
+      "median_ms": 0.8045419963309541,
+      "p95_ms": 0.8714360010344535,
+      "p99_ms": 0.9351740009151399,
+      "gflops": 4042.454962940289,
+      "bandwidth_gbps": null,
+      "iterations": 100,
+      "warmup_iterations": 5,
+      "parameters": {
+        "in_channels": 128,
+        "out_channels": 512,
+        "kernel_size": 1,
+        "stride": 1,
+        "padding": 0,
+        "input_size": [
+          28,
+          28
+        ],
+        "batch_size": 32
+      }
+    },
+    {
+      "name": "Conv2d 128->512 k=1 s=1 @ 28x28",
+      "category": "conv2d",
+      "device": "cuda",
+      "framework": "pytorch",
+      "mean_ms": 0.5439745410694741,
+      "std_ms": 0.003470877173130549,
+      "min_ms": 0.5393599858507514,
+      "max_ms": 0.5694310239050537,
+      "median_ms": 0.5437520158011466,
+      "p95_ms": 0.5475640064105392,
+      "p99_ms": 0.5694310239050537,
+      "gflops": 6045.015139008185,
+      "bandwidth_gbps": null,
+      "iterations": 100,
+      "warmup_iterations": 5,
+      "parameters": {
+        "in_channels": 128,
+        "out_channels": 512,
+        "kernel_size": 1,
+        "stride": 1,
+        "padding": 0,
+        "input_size": [
+          28,
+          28
+        ],
+        "batch_size": 32
+      }
+    },
+    {
+      "name": "Conv2d 512->256 k=1 s=1 @ 28x28",
+      "category": "conv2d",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 0.6430588706280105,
+      "std_ms": 0.01019360100594721,
+      "min_ms": 0.6296939973253757,
+      "max_ms": 0.7020269986242056,
+      "median_ms": 0.6416395044652745,
+      "p95_ms": 0.6589730037376285,
+      "p99_ms": 0.7020269986242056,
+      "gflops": 10227.164218382111,
+      "bandwidth_gbps": null,
+      "iterations": 100,
+      "warmup_iterations": 5,
+      "parameters": {
+        "in_channels": 512,
+        "out_channels": 256,
+        "kernel_size": 1,
+        "stride": 1,
+        "padding": 0,
+        "input_size": [
+          28,
+          28
+        ],
+        "batch_size": 32
+      }
+    },
+    {
+      "name": "Conv2d 512->256 k=1 s=1 @ 28x28",
+      "category": "conv2d",
+      "device": "cuda",
+      "framework": "pytorch",
+      "mean_ms": 0.47464071976719424,
+      "std_ms": 0.010811946634391044,
+      "min_ms": 0.45772999874316156,
+      "max_ms": 0.4993820039089769,
+      "median_ms": 0.46910000673960894,
+      "p95_ms": 0.49091700930148363,
+      "p99_ms": 0.4993820039089769,
+      "gflops": 13856.098725001471,
+      "bandwidth_gbps": null,
+      "iterations": 100,
+      "warmup_iterations": 5,
+      "parameters": {
+        "in_channels": 512,
+        "out_channels": 256,
+        "kernel_size": 1,
+        "stride": 1,
+        "padding": 0,
+        "input_size": [
+          28,
+          28
+        ],
+        "batch_size": 32
+      }
+    },
+    {
+      "name": "Conv2d 256->256 k=3 s=2 @ 28x28",
+      "category": "conv2d",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 0.6249758612830192,
+      "std_ms": 0.01455235563605284,
+      "min_ms": 0.6074760167393833,
+      "max_ms": 0.6883449968881905,
+      "median_ms": 0.6203529919730499,
+      "p95_ms": 0.6548769888468087,
+      "p99_ms": 0.6883449968881905,
+      "gflops": 11838.460834008898,
+      "bandwidth_gbps": null,
+      "iterations": 100,
+      "warmup_iterations": 5,
+      "parameters": {
+        "in_channels": 256,
+        "out_channels": 256,
+        "kernel_size": 3,
+        "stride": 2,
+        "padding": 1,
+        "input_size": [
+          28,
+          28
+        ],
+        "batch_size": 32
+      }
+    },
+    {
+      "name": "Conv2d 256->256 k=3 s=2 @ 28x28",
+      "category": "conv2d",
+      "device": "cuda",
+      "framework": "pytorch",
+      "mean_ms": 0.5300827993778512,
+      "std_ms": 0.003864962423935427,
+      "min_ms": 0.5238839949015528,
+      "max_ms": 0.5442789988592267,
+      "median_ms": 0.5296884919516742,
+      "p95_ms": 0.5365349934436381,
+      "p99_ms": 0.5442789988592267,
+      "gflops": 13957.729367343714,
+      "bandwidth_gbps": null,
+      "iterations": 100,
+      "warmup_iterations": 5,
+      "parameters": {
+        "in_channels": 256,
+        "out_channels": 256,
+        "kernel_size": 3,
+        "stride": 2,
+        "padding": 1,
+        "input_size": [
+          28,
+          28
+        ],
+        "batch_size": 32
+      }
+    },
+    {
+      "name": "Conv2d 256->1024 k=1 s=1 @ 14x14",
+      "category": "conv2d",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 0.45532889722380787,
+      "std_ms": 0.009855546492403442,
+      "min_ms": 0.44649100163951516,
+      "max_ms": 0.5016160139348358,
+      "median_ms": 0.45197148574516177,
+      "p95_ms": 0.4823629860766232,
+      "p99_ms": 0.5016160139348358,
+      "gflops": 7221.888081449144,
+      "bandwidth_gbps": null,
+      "iterations": 100,
+      "warmup_iterations": 5,
+      "parameters": {
+        "in_channels": 256,
+        "out_channels": 1024,
+        "kernel_size": 1,
+        "stride": 1,
+        "padding": 0,
+        "input_size": [
+          14,
+          14
+        ],
+        "batch_size": 32
+      }
+    },
+    {
+      "name": "Conv2d 256->1024 k=1 s=1 @ 14x14",
+      "category": "conv2d",
+      "device": "cuda",
+      "framework": "pytorch",
+      "mean_ms": 0.28581992053659633,
+      "std_ms": 0.0027994816054840374,
+      "min_ms": 0.2826619893312454,
+      "max_ms": 0.29750799876637757,
+      "median_ms": 0.28486600785981864,
+      "p95_ms": 0.2920880215242505,
+      "p99_ms": 0.29750799876637757,
+      "gflops": 11504.916556643442,
+      "bandwidth_gbps": null,
+      "iterations": 100,
+      "warmup_iterations": 5,
+      "parameters": {
+        "in_channels": 256,
+        "out_channels": 1024,
+        "kernel_size": 1,
+        "stride": 1,
+        "padding": 0,
+        "input_size": [
+          14,
+          14
+        ],
+        "batch_size": 32
+      }
+    },
+    {
+      "name": "Conv2d 1024->512 k=1 s=1 @ 14x14",
+      "category": "conv2d",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 0.5953377988771535,
+      "std_ms": 0.01249187006028345,
+      "min_ms": 0.5825240223202854,
+      "max_ms": 0.6613580044358969,
+      "median_ms": 0.5914640059927478,
+      "p95_ms": 0.6301249959506094,
+      "p99_ms": 0.6613580044358969,
+      "gflops": 11046.952980986645,
+      "bandwidth_gbps": null,
+      "iterations": 100,
+      "warmup_iterations": 5,
+      "parameters": {
+        "in_channels": 1024,
+        "out_channels": 512,
+        "kernel_size": 1,
+        "stride": 1,
+        "padding": 0,
+        "input_size": [
+          14,
+          14
+        ],
+        "batch_size": 32
+      }
+    },
+    {
+      "name": "Conv2d 1024->512 k=1 s=1 @ 14x14",
+      "category": "conv2d",
+      "device": "cuda",
+      "framework": "pytorch",
+      "mean_ms": 0.45175764855230227,
+      "std_ms": 0.013459674958583885,
+      "min_ms": 0.4432059940882027,
+      "max_ms": 0.5750209966208786,
+      "median_ms": 0.45079899427946657,
+      "p95_ms": 0.4615470243152231,
+      "p99_ms": 0.5750209966208786,
+      "gflops": 14557.957553293281,
+      "bandwidth_gbps": null,
+      "iterations": 100,
+      "warmup_iterations": 5,
+      "parameters": {
+        "in_channels": 1024,
+        "out_channels": 512,
+        "kernel_size": 1,
+        "stride": 1,
+        "padding": 0,
+        "input_size": [
+          14,
+          14
+        ],
+        "batch_size": 32
+      }
+    },
+    {
+      "name": "Conv2d 512->512 k=3 s=2 @ 14x14",
+      "category": "conv2d",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 0.6901892204768956,
+      "std_ms": 0.05919565337431,
+      "min_ms": 0.6099710008129478,
+      "max_ms": 0.9967809892259538,
+      "median_ms": 0.6949959933990613,
+      "p95_ms": 0.726088008377701,
+      "p99_ms": 0.9967809892259538,
+      "gflops": 10719.889613587027,
+      "bandwidth_gbps": null,
+      "iterations": 100,
+      "warmup_iterations": 5,
+      "parameters": {
+        "in_channels": 512,
+        "out_channels": 512,
+        "kernel_size": 3,
+        "stride": 2,
+        "padding": 1,
+        "input_size": [
+          14,
+          14
+        ],
+        "batch_size": 32
+      }
+    },
+    {
+      "name": "Conv2d 512->512 k=3 s=2 @ 14x14",
+      "category": "conv2d",
+      "device": "cuda",
+      "framework": "pytorch",
+      "mean_ms": 0.5106904907734133,
+      "std_ms": 0.002359851116597532,
+      "min_ms": 0.5067239981144667,
+      "max_ms": 0.5191160016693175,
+      "median_ms": 0.5103604926262051,
+      "p95_ms": 0.515050021931529,
+      "p99_ms": 0.5191160016693175,
+      "gflops": 14487.7423599468,
+      "bandwidth_gbps": null,
+      "iterations": 100,
+      "warmup_iterations": 5,
+      "parameters": {
+        "in_channels": 512,
+        "out_channels": 512,
+        "kernel_size": 3,
+        "stride": 2,
+        "padding": 1,
+        "input_size": [
+          14,
+          14
+        ],
+        "batch_size": 32
+      }
+    },
+    {
+      "name": "Conv2d 512->2048 k=1 s=1 @ 7x7",
+      "category": "conv2d",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 0.4620314805652015,
+      "std_ms": 0.014509550415622272,
+      "min_ms": 0.45086999307386577,
+      "max_ms": 0.5686210060957819,
+      "median_ms": 0.45772100565955043,
+      "p95_ms": 0.48544802120886743,
+      "p99_ms": 0.5686210060957819,
+      "gflops": 7117.121828965836,
+      "bandwidth_gbps": null,
+      "iterations": 100,
+      "warmup_iterations": 5,
+      "parameters": {
+        "in_channels": 512,
+        "out_channels": 2048,
+        "kernel_size": 1,
+        "stride": 1,
+        "padding": 0,
+        "input_size": [
+          7,
+          7
+        ],
+        "batch_size": 32
+      }
+    },
+    {
+      "name": "Conv2d 512->2048 k=1 s=1 @ 7x7",
+      "category": "conv2d",
+      "device": "cuda",
+      "framework": "pytorch",
+      "mean_ms": 0.2973976917564869,
+      "std_ms": 0.00441954923574243,
+      "min_ms": 0.2932900097221136,
+      "max_ms": 0.324332999298349,
+      "median_ms": 0.2962300059152767,
+      "p95_ms": 0.3040189913008362,
+      "p99_ms": 0.324332999298349,
+      "gflops": 11057.027095867748,
+      "bandwidth_gbps": null,
+      "iterations": 100,
+      "warmup_iterations": 5,
+      "parameters": {
+        "in_channels": 512,
+        "out_channels": 2048,
+        "kernel_size": 1,
+        "stride": 1,
+        "padding": 0,
+        "input_size": [
+          7,
+          7
+        ],
+        "batch_size": 32
+      }
+    }
+  ]
+}

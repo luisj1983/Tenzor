@@ -31,11 +31,15 @@ set(CUDA_BACKEND_SOURCES
     kernels/nms.cu
     kernels/roi_align.cu
     kernels/vision.cu
+    kernels/fused_ops.cu
     cudnn_ops.cu
 )
 
 # Create CUDA backend shared library
 add_library(tenzor_backend_cuda SHARED ${CUDA_BACKEND_SOURCES})
+
+# Define CUDA availability macro for fused ops
+target_compile_definitions(tenzor_backend_cuda PRIVATE TENZOR_CUDA_AVAILABLE)
 
 # Set CUDA properties
 set_target_properties(tenzor_backend_cuda PROPERTIES

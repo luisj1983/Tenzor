@@ -768,12 +768,16 @@ cublasHandle_t get_cublas_handle() {
             if (status != CUBLAS_STATUS_SUCCESS) {
                 throw std::runtime_error("Failed to create cuBLAS handle");
             }
+            // Enable TF32 Tensor Core acceleration for FP32 operations
+            // This provides significant speedup on Ampere+ GPUs (SM >= 8.0)
+            // TF32 uses 19-bit precision which is sufficient for most ML workloads
+            cublasSetMathMode(cublas_handle, CUBLAS_TF32_TENSOR_OP_MATH);
         }
     }
     return cublas_handle;
 }
 
-// Use cuBLAS for large matrices (more optimized than our custom kernels)
+// Use cuBLAS for large matrices with Tensor Core acceleration (TF32)
 void matmul_cublas_f32(
     const float* A, const float* B, float* C,
     int64_t M, int64_t N, int64_t K) {
@@ -782,27 +786,30 @@ void matmul_cublas_f32(
 
     // cuBLAS uses column-major order, we use row-major
     // To compute C = A @ B in row-major, we compute C^T = B^T @ A^T
-    // Which means: cublasSgemm(..., B, A, C)
+    // Which means: cublasGemm(..., B, A, C)
 
     const float alpha = 1.0f;
     const float beta = 0.0f;
 
-    cublasStatus_t status = cublasSgemm(
+    // Use cublasGemmEx for TF32 Tensor Core acceleration on Ampere+ GPUs
+    cublasStatus_t status = cublasGemmEx(
         handle,
-        CUBLAS_OP_N,    // B is not transposed
-        CUBLAS_OP_N,    // A is not transposed
-        N,              // Rows of B^T (cols of B)
-        M,              // Cols of A^T (rows of A)
-        K,              // Cols of B^T = Rows of A^T
+        CUBLAS_OP_N,        // B is not transposed
+        CUBLAS_OP_N,        // A is not transposed
+        N,                  // Rows of B^T (cols of B)
+        M,                  // Cols of A^T (rows of A)
+        K,                  // Cols of B^T = Rows of A^T
         &alpha,
-        B, N,           // B matrix with leading dimension N
-        A, K,           // A matrix with leading dimension K
+        B, CUDA_R_32F, N,   // B matrix with leading dimension N
+        A, CUDA_R_32F, K,   // A matrix with leading dimension K
         &beta,
-        C, N            // C matrix with leading dimension N
+        C, CUDA_R_32F, N,   // C matrix with leading dimension N
+        CUBLAS_COMPUTE_32F_FAST_TF32,  // Use TF32 Tensor Cores
+        CUBLAS_GEMM_DEFAULT
     );
 
     if (status != CUBLAS_STATUS_SUCCESS) {
-        throw std::runtime_error("cuBLAS SGEMM failed");
+        throw std::runtime_error("cuBLAS GemmEx failed with status: " + std::to_string(status));
     }
 }
 
@@ -832,7 +839,7 @@ void matmul_cublas_f64(
     }
 }
 
-// Batched cuBLAS matmul
+// Batched cuBLAS matmul with Tensor Core acceleration (TF32)
 void batched_matmul_cublas_f32(
     const float* A, const float* B, float* C,
     int64_t batch_size, int64_t M, int64_t N, int64_t K,
@@ -843,21 +850,25 @@ void batched_matmul_cublas_f32(
     const float alpha = 1.0f;
     const float beta = 0.0f;
 
-    cublasStatus_t status = cublasSgemmStridedBatched(
+    // Use cublasGemmStridedBatchedEx for Tensor Core acceleration
+    // This enables TF32 on Ampere+ GPUs for ~2x speedup over cublasSgemmStridedBatched
+    cublasStatus_t status = cublasGemmStridedBatchedEx(
         handle,
-        CUBLAS_OP_N,
-        CUBLAS_OP_N,
-        N, M, K,
+        CUBLAS_OP_N,        // B not transposed (for row-major trick)
+        CUBLAS_OP_N,        // A not transposed
+        N, M, K,            // Dimensions (swapped for row-major)
         &alpha,
-        B, N, stride_b,
-        A, K, stride_a,
+        B, CUDA_R_32F, N, stride_b,   // B matrix
+        A, CUDA_R_32F, K, stride_a,   // A matrix
         &beta,
-        C, N, stride_c,
-        batch_size
+        C, CUDA_R_32F, N, stride_c,   // C matrix
+        batch_size,
+        CUBLAS_COMPUTE_32F_FAST_TF32, // Use TF32 Tensor Cores
+        CUBLAS_GEMM_DEFAULT           // Let cuBLAS pick best algorithm
     );
 
     if (status != CUBLAS_STATUS_SUCCESS) {
-        throw std::runtime_error("cuBLAS batched SGEMM failed");
+        throw std::runtime_error("cuBLAS batched GemmEx failed with status: " + std::to_string(status));
     }
 }
 
@@ -896,7 +907,9 @@ void batched_matmul_cublas_f64(
 // ============================================================================
 
 // Threshold for using cuBLAS vs custom kernels
-constexpr int64_t CUBLAS_THRESHOLD = 512;
+// cuBLAS is faster than custom kernels even for small matrices,
+// so we use a low threshold. Set to 0 to always use cuBLAS.
+constexpr int64_t CUBLAS_THRESHOLD = 32;
 
 void matmul_f32(
     const float* A, const float* B, float* C,
@@ -1186,7 +1199,7 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Ten
             );
         }
 
-        cudaStreamSynchronize(stream);
+        // Note: No sync here - cuBLAS calls are async and sync happens when data is accessed
         return result;
     }
 
@@ -1253,7 +1266,7 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Ten
             );
         }
 
-        cudaStreamSynchronize(stream);
+        // Note: No sync here - cuBLAS calls are async and sync happens when data is accessed
         return result;
     }
 

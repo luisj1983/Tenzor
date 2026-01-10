@@ -7,6 +7,9 @@
 #include <stdexcept>
 #include <string>
 #include <memory>
+#include <unordered_map>
+#include <mutex>
+#include <cstdint>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 
@@ -28,11 +31,29 @@ namespace cuda {
 } while(0)
 
 // ============================================================================
-// cuDNN Handle Manager (RAII)
+// cuDNN Handle Manager (Singleton for performance)
 // ============================================================================
 
 class CuDNNHandle {
 public:
+    // Get the singleton cuDNN handle
+    static cudnnHandle_t get() {
+        static CuDNNHandle instance;
+        return instance.handle_;
+    }
+
+    // Set stream on the singleton handle
+    static void set_stream(cudaStream_t stream) {
+        CUDNN_CHECK(cudnnSetStream(get(), stream));
+    }
+
+    // Non-copyable, non-movable singleton
+    CuDNNHandle(const CuDNNHandle&) = delete;
+    CuDNNHandle& operator=(const CuDNNHandle&) = delete;
+    CuDNNHandle(CuDNNHandle&&) = delete;
+    CuDNNHandle& operator=(CuDNNHandle&&) = delete;
+
+private:
     CuDNNHandle() {
         CUDNN_CHECK(cudnnCreate(&handle_));
     }
@@ -43,34 +64,211 @@ public:
         }
     }
 
-    // No copy
-    CuDNNHandle(const CuDNNHandle&) = delete;
-    CuDNNHandle& operator=(const CuDNNHandle&) = delete;
+    cudnnHandle_t handle_ = nullptr;
+};
 
-    // Move support
-    CuDNNHandle(CuDNNHandle&& other) noexcept : handle_(other.handle_) {
-        other.handle_ = nullptr;
-    }
+// ============================================================================
+// Workspace Manager (Persistent buffer for cuDNN operations)
+// ============================================================================
 
-    CuDNNHandle& operator=(CuDNNHandle&& other) noexcept {
-        if (this != &other) {
-            if (handle_) {
-                cudnnDestroy(handle_);
-            }
-            handle_ = other.handle_;
-            other.handle_ = nullptr;
+class CuDNNWorkspace {
+public:
+    static void* get(size_t required_size) {
+        static CuDNNWorkspace instance;
+        if (required_size > instance.size_) {
+            instance.resize(required_size);
         }
-        return *this;
+        return instance.buffer_;
     }
 
-    cudnnHandle_t get() const { return handle_; }
+    static size_t current_size() {
+        static CuDNNWorkspace instance;
+        return instance.size_;
+    }
 
-    void set_stream(cudaStream_t stream) {
-        CUDNN_CHECK(cudnnSetStream(handle_, stream));
+    CuDNNWorkspace(const CuDNNWorkspace&) = delete;
+    CuDNNWorkspace& operator=(const CuDNNWorkspace&) = delete;
+
+private:
+    CuDNNWorkspace() : buffer_(nullptr), size_(0) {}
+
+    ~CuDNNWorkspace() {
+        if (buffer_) {
+            cudaFree(buffer_);
+        }
+    }
+
+    void resize(size_t new_size) {
+        if (buffer_) {
+            cudaFree(buffer_);
+        }
+        // Allocate with some extra headroom to reduce reallocations
+        size_ = new_size + (new_size / 4);  // 25% extra
+        cudaMalloc(&buffer_, size_);
+    }
+
+    void* buffer_;
+    size_t size_;
+};
+
+// ============================================================================
+// Algorithm Cache for Conv2d (avoids per-call algorithm selection)
+// ============================================================================
+
+// Key for conv2d algorithm cache
+struct Conv2dCacheKey {
+    int64_t batch;
+    int64_t in_channels;
+    int64_t height;
+    int64_t width;
+    int64_t out_channels;
+    int64_t kernel_h;
+    int64_t kernel_w;
+    int64_t stride;
+    int64_t padding;
+    int64_t dilation;
+    int64_t groups;
+    cudnnDataType_t dtype;
+
+    bool operator==(const Conv2dCacheKey& other) const {
+        return batch == other.batch &&
+               in_channels == other.in_channels &&
+               height == other.height &&
+               width == other.width &&
+               out_channels == other.out_channels &&
+               kernel_h == other.kernel_h &&
+               kernel_w == other.kernel_w &&
+               stride == other.stride &&
+               padding == other.padding &&
+               dilation == other.dilation &&
+               groups == other.groups &&
+               dtype == other.dtype;
+    }
+};
+
+// Hash function for Conv2dCacheKey
+struct Conv2dCacheKeyHash {
+    size_t operator()(const Conv2dCacheKey& k) const {
+        // Combine all fields into a single hash
+        size_t h = 0;
+        auto hash_combine = [&h](auto val) {
+            h ^= std::hash<decltype(val)>{}(val) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        };
+        hash_combine(k.batch);
+        hash_combine(k.in_channels);
+        hash_combine(k.height);
+        hash_combine(k.width);
+        hash_combine(k.out_channels);
+        hash_combine(k.kernel_h);
+        hash_combine(k.kernel_w);
+        hash_combine(k.stride);
+        hash_combine(k.padding);
+        hash_combine(k.dilation);
+        hash_combine(k.groups);
+        hash_combine(static_cast<int>(k.dtype));
+        return h;
+    }
+};
+
+// Cached algorithm info
+struct CachedFwdAlgo {
+    cudnnConvolutionFwdAlgo_t algo;
+    size_t workspace_size;
+};
+
+struct CachedBwdDataAlgo {
+    cudnnConvolutionBwdDataAlgo_t algo;
+    size_t workspace_size;
+};
+
+struct CachedBwdFilterAlgo {
+    cudnnConvolutionBwdFilterAlgo_t algo;
+    size_t workspace_size;
+};
+
+// Thread-safe algorithm cache
+class Conv2dAlgoCache {
+public:
+    static Conv2dAlgoCache& instance() {
+        static Conv2dAlgoCache cache;
+        return cache;
+    }
+
+    // Forward algorithm cache
+    bool get_fwd(const Conv2dCacheKey& key, CachedFwdAlgo& result) {
+        std::lock_guard<std::mutex> lock(fwd_mutex_);
+        auto it = fwd_cache_.find(key);
+        if (it != fwd_cache_.end()) {
+            result = it->second;
+            return true;
+        }
+        return false;
+    }
+
+    void set_fwd(const Conv2dCacheKey& key, const CachedFwdAlgo& algo) {
+        std::lock_guard<std::mutex> lock(fwd_mutex_);
+        fwd_cache_[key] = algo;
+    }
+
+    // Backward data algorithm cache
+    bool get_bwd_data(const Conv2dCacheKey& key, CachedBwdDataAlgo& result) {
+        std::lock_guard<std::mutex> lock(bwd_data_mutex_);
+        auto it = bwd_data_cache_.find(key);
+        if (it != bwd_data_cache_.end()) {
+            result = it->second;
+            return true;
+        }
+        return false;
+    }
+
+    void set_bwd_data(const Conv2dCacheKey& key, const CachedBwdDataAlgo& algo) {
+        std::lock_guard<std::mutex> lock(bwd_data_mutex_);
+        bwd_data_cache_[key] = algo;
+    }
+
+    // Backward filter algorithm cache
+    bool get_bwd_filter(const Conv2dCacheKey& key, CachedBwdFilterAlgo& result) {
+        std::lock_guard<std::mutex> lock(bwd_filter_mutex_);
+        auto it = bwd_filter_cache_.find(key);
+        if (it != bwd_filter_cache_.end()) {
+            result = it->second;
+            return true;
+        }
+        return false;
+    }
+
+    void set_bwd_filter(const Conv2dCacheKey& key, const CachedBwdFilterAlgo& algo) {
+        std::lock_guard<std::mutex> lock(bwd_filter_mutex_);
+        bwd_filter_cache_[key] = algo;
+    }
+
+    // Clear all caches (useful for benchmarking)
+    void clear() {
+        {
+            std::lock_guard<std::mutex> lock(fwd_mutex_);
+            fwd_cache_.clear();
+        }
+        {
+            std::lock_guard<std::mutex> lock(bwd_data_mutex_);
+            bwd_data_cache_.clear();
+        }
+        {
+            std::lock_guard<std::mutex> lock(bwd_filter_mutex_);
+            bwd_filter_cache_.clear();
+        }
     }
 
 private:
-    cudnnHandle_t handle_ = nullptr;
+    Conv2dAlgoCache() = default;
+
+    std::unordered_map<Conv2dCacheKey, CachedFwdAlgo, Conv2dCacheKeyHash> fwd_cache_;
+    std::mutex fwd_mutex_;
+
+    std::unordered_map<Conv2dCacheKey, CachedBwdDataAlgo, Conv2dCacheKeyHash> bwd_data_cache_;
+    std::mutex bwd_data_mutex_;
+
+    std::unordered_map<Conv2dCacheKey, CachedBwdFilterAlgo, Conv2dCacheKeyHash> bwd_filter_cache_;
+    std::mutex bwd_filter_mutex_;
 };
 
 // ============================================================================
@@ -205,6 +403,52 @@ private:
     cudnnConvolutionDescriptor_t desc_ = nullptr;
 };
 
+class PoolingDescriptor {
+public:
+    PoolingDescriptor() {
+        CUDNN_CHECK(cudnnCreatePoolingDescriptor(&desc_));
+    }
+
+    ~PoolingDescriptor() {
+        if (desc_) {
+            cudnnDestroyPoolingDescriptor(desc_);
+        }
+    }
+
+    PoolingDescriptor(const PoolingDescriptor&) = delete;
+    PoolingDescriptor& operator=(const PoolingDescriptor&) = delete;
+
+    cudnnPoolingDescriptor_t get() const { return desc_; }
+
+    void set_maxpool(int kernel_h, int kernel_w, int pad_h, int pad_w, int stride_h, int stride_w) {
+        CUDNN_CHECK(cudnnSetPooling2dDescriptor(
+            desc_,
+            CUDNN_POOLING_MAX,
+            CUDNN_NOT_PROPAGATE_NAN,
+            kernel_h, kernel_w,
+            pad_h, pad_w,
+            stride_h, stride_w
+        ));
+    }
+
+    void set_avgpool(int kernel_h, int kernel_w, int pad_h, int pad_w, int stride_h, int stride_w, bool count_include_pad = false) {
+        cudnnPoolingMode_t mode = count_include_pad ?
+            CUDNN_POOLING_AVERAGE_COUNT_INCLUDE_PADDING :
+            CUDNN_POOLING_AVERAGE_COUNT_EXCLUDE_PADDING;
+        CUDNN_CHECK(cudnnSetPooling2dDescriptor(
+            desc_,
+            mode,
+            CUDNN_NOT_PROPAGATE_NAN,
+            kernel_h, kernel_w,
+            pad_h, pad_w,
+            stride_h, stride_w
+        ));
+    }
+
+private:
+    cudnnPoolingDescriptor_t desc_ = nullptr;
+};
+
 class RNNDescriptor {
 public:
     RNNDescriptor() {
@@ -336,6 +580,75 @@ auto cudnn_lstm_backward(
     float dropout,
     cudaStream_t stream
 ) -> std::tuple<Tensor, Tensor, Tensor, Tensor>;
+
+// ============================================================================
+// cuDNN Pooling Operations
+// ============================================================================
+
+auto cudnn_maxpool2d_forward(
+    const Tensor& input,
+    int64_t kernel_size,
+    int64_t stride,
+    int64_t padding,
+    cudaStream_t stream
+) -> std::pair<Tensor, Tensor>;  // Returns (output, indices)
+
+auto cudnn_maxpool2d_backward(
+    const Tensor& grad_output,
+    const Tensor& input,
+    const Tensor& output,
+    int64_t kernel_size,
+    int64_t stride,
+    int64_t padding,
+    cudaStream_t stream
+) -> Tensor;
+
+auto cudnn_avgpool2d_forward(
+    const Tensor& input,
+    int64_t kernel_size,
+    int64_t stride,
+    int64_t padding,
+    cudaStream_t stream
+) -> Tensor;
+
+auto cudnn_avgpool2d_backward(
+    const Tensor& grad_output,
+    const Tensor& input,
+    int64_t kernel_size,
+    int64_t stride,
+    int64_t padding,
+    cudaStream_t stream
+) -> Tensor;
+
+// ============================================================================
+// cuDNN Softmax Operations
+// ============================================================================
+
+auto cudnn_softmax_forward(
+    const Tensor& input,
+    int64_t dim,
+    cudaStream_t stream
+) -> Tensor;
+
+auto cudnn_softmax_backward(
+    const Tensor& grad_output,
+    const Tensor& output,
+    int64_t dim,
+    cudaStream_t stream
+) -> Tensor;
+
+auto cudnn_log_softmax_forward(
+    const Tensor& input,
+    int64_t dim,
+    cudaStream_t stream
+) -> Tensor;
+
+auto cudnn_log_softmax_backward(
+    const Tensor& grad_output,
+    const Tensor& output,
+    int64_t dim,
+    cudaStream_t stream
+) -> Tensor;
 
 } // namespace cuda
 } // namespace tenzor

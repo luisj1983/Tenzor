@@ -82,8 +82,9 @@ def benchmark_tenzor_attention(
             mha = tz.nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
             mha.eval()  # Set to inference mode for fused kernel optimization
 
-            # Create input
+            # Create input and move model to device
             if device == "cuda":
+                mha.cuda()  # Move model weights to GPU
                 x = tz.randn([batch, seq_len, embed_dim]).cuda()
             else:
                 x = tz.randn([batch, seq_len, embed_dim])

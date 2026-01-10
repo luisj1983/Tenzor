@@ -302,6 +302,9 @@ def benchmark_tenzor_rmsnorm(
 
             x_var = tz.Variable(x, False)
 
+            # Disable gradient computation for inference (like PyTorch's torch.no_grad())
+            tz.set_grad_enabled(False)
+
             def rms_fn():
                 return rms.forward(x_var)
 
@@ -326,7 +329,11 @@ def benchmark_tenzor_rmsnorm(
             results.append(result)
             print_result(result)
 
+            # Re-enable gradients after benchmark
+            tz.set_grad_enabled(True)
+
         except Exception as e:
+            tz.set_grad_enabled(True)  # Ensure re-enabled on error
             print(f"  [SKIP] RMSNorm {name}: {e}")
 
     return results

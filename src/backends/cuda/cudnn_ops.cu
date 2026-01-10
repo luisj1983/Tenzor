@@ -43,9 +43,9 @@ auto cudnn_conv2d_forward(
     std::vector<int64_t> output_shape = {batch, out_channels, out_h, out_w};
     Tensor output(output_shape, input.dtype(), input.device());
 
-    // Create cuDNN handle
-    CuDNNHandle handle;
-    handle.set_stream(stream);
+    // Use singleton cuDNN handle (much faster than creating new one each time)
+    cudnnHandle_t handle = CuDNNHandle::get();
+    CuDNNHandle::set_stream(stream);
 
     // Convert dtype
     cudnnDataType_t cudnn_dtype;
@@ -71,31 +71,58 @@ auto cudnn_conv2d_forward(
         conv_desc.set_group_count(groups);
     }
 
-    // Find best convolution algorithm
-    int requested_algo_count = 10;
-    int returned_algo_count = 0;
-    std::vector<cudnnConvolutionFwdAlgoPerf_t> perf_results(requested_algo_count);
+    // Create cache key for algorithm lookup
+    Conv2dCacheKey cache_key{
+        batch, in_channels, height, width,
+        out_channels, kernel_h, kernel_w,
+        stride, padding, dilation, groups,
+        cudnn_dtype
+    };
 
-    CUDNN_CHECK(cudnnFindConvolutionForwardAlgorithm(
-        handle.get(),
-        input_desc.get(),
-        filter_desc.get(),
-        conv_desc.get(),
-        output_desc.get(),
-        requested_algo_count,
-        &returned_algo_count,
-        perf_results.data()
-    ));
+    cudnnConvolutionFwdAlgo_t algo;
+    size_t workspace_size;
 
-    // Use the fastest algorithm
-    cudnnConvolutionFwdAlgo_t algo = perf_results[0].algo;
-    size_t workspace_size = perf_results[0].memory;
+    // Try to get cached algorithm
+    CachedFwdAlgo cached;
+    if (Conv2dAlgoCache::instance().get_fwd(cache_key, cached)) {
+        // Cache hit - use cached algorithm
+        algo = cached.algo;
+        workspace_size = cached.workspace_size;
+    } else {
+        // Cache miss - query algorithm and cache it
+        int returned_algo_count = 0;
+        cudnnConvolutionFwdAlgoPerf_t perf_result;
 
-    // Allocate workspace
-    void* workspace = nullptr;
-    if (workspace_size > 0) {
-        cudaMalloc(&workspace, workspace_size);
+        CUDNN_CHECK(cudnnGetConvolutionForwardAlgorithm_v7(
+            handle,
+            input_desc.get(),
+            filter_desc.get(),
+            conv_desc.get(),
+            output_desc.get(),
+            1,  // Request just 1 algorithm (the best heuristic choice)
+            &returned_algo_count,
+            &perf_result
+        ));
+
+        algo = perf_result.algo;
+
+        // Get workspace size for the selected algorithm
+        CUDNN_CHECK(cudnnGetConvolutionForwardWorkspaceSize(
+            handle,
+            input_desc.get(),
+            filter_desc.get(),
+            conv_desc.get(),
+            output_desc.get(),
+            algo,
+            &workspace_size
+        ));
+
+        // Cache the result
+        Conv2dAlgoCache::instance().set_fwd(cache_key, {algo, workspace_size});
     }
+
+    // Use persistent workspace buffer (avoids malloc/free per call)
+    void* workspace = CuDNNWorkspace::get(workspace_size);
 
     // Set alpha and beta for the operation: output = alpha * conv(input) + beta * output
     const float alpha = 1.0f;
@@ -104,7 +131,7 @@ auto cudnn_conv2d_forward(
     // Perform convolution
     if (input.dtype() == DType::Float32) {
         CUDNN_CHECK(cudnnConvolutionForward(
-            handle.get(),
+            handle,
             &alpha,
             input_desc.get(),
             input.data<float>(),
@@ -122,7 +149,7 @@ auto cudnn_conv2d_forward(
         const double alpha_d = 1.0;
         const double beta_d = 0.0;
         CUDNN_CHECK(cudnnConvolutionForward(
-            handle.get(),
+            handle,
             &alpha_d,
             input_desc.get(),
             input.data<double>(),
@@ -138,7 +165,7 @@ auto cudnn_conv2d_forward(
         ));
     } else if (input.dtype() == DType::Float16) {
         CUDNN_CHECK(cudnnConvolutionForward(
-            handle.get(),
+            handle,
             &alpha,
             input_desc.get(),
             input.data<Float16>(),
@@ -164,7 +191,7 @@ auto cudnn_conv2d_forward(
 
         if (input.dtype() == DType::Float32) {
             CUDNN_CHECK(cudnnAddTensor(
-                handle.get(),
+                handle,
                 &alpha_bias,
                 bias_desc.get(),
                 bias->data<float>(),
@@ -176,7 +203,7 @@ auto cudnn_conv2d_forward(
             const double alpha_bias_d = 1.0;
             const double beta_bias_d = 1.0;
             CUDNN_CHECK(cudnnAddTensor(
-                handle.get(),
+                handle,
                 &alpha_bias_d,
                 bias_desc.get(),
                 bias->data<double>(),
@@ -186,7 +213,7 @@ auto cudnn_conv2d_forward(
             ));
         } else if (input.dtype() == DType::Float16) {
             CUDNN_CHECK(cudnnAddTensor(
-                handle.get(),
+                handle,
                 &alpha_bias,
                 bias_desc.get(),
                 bias->data<Float16>(),
@@ -197,10 +224,7 @@ auto cudnn_conv2d_forward(
         }
     }
 
-    // Cleanup workspace
-    if (workspace) {
-        cudaFree(workspace);
-    }
+    // No cleanup needed - workspace is persistent
 
     return output;
 }
@@ -244,9 +268,9 @@ auto cudnn_conv2d_backward(
     Tensor grad_weight({out_channels, in_channels / groups, kernel_h, kernel_w}, weight.dtype(), weight.device());
     Tensor grad_bias({out_channels}, weight.dtype(), weight.device());
 
-    // Create cuDNN handle
-    CuDNNHandle handle;
-    handle.set_stream(stream);
+    // Use singleton cuDNN handle
+    cudnnHandle_t handle = CuDNNHandle::get();
+    CuDNNHandle::set_stream(stream);
 
     // Convert dtype
     cudnnDataType_t cudnn_dtype;
@@ -272,38 +296,63 @@ auto cudnn_conv2d_backward(
         conv_desc.set_group_count(groups);
     }
 
+    // Create cache key for algorithm lookup
+    Conv2dCacheKey cache_key{
+        batch, in_channels, height, width,
+        out_channels, kernel_h, kernel_w,
+        stride, padding, dilation, groups,
+        cudnn_dtype
+    };
+
     const float alpha = 1.0f;
     const float beta = 0.0f;
 
     // Compute gradient w.r.t. input
     if (compute_grad_input) {
-        // Find best algorithm
-        int requested_algo_count = 10;
-        int returned_algo_count = 0;
-        std::vector<cudnnConvolutionBwdDataAlgoPerf_t> perf_results(requested_algo_count);
+        cudnnConvolutionBwdDataAlgo_t algo;
+        size_t workspace_size;
 
-        CUDNN_CHECK(cudnnFindConvolutionBackwardDataAlgorithm(
-            handle.get(),
-            filter_desc.get(),
-            grad_output_desc.get(),
-            conv_desc.get(),
-            input_desc.get(),
-            requested_algo_count,
-            &returned_algo_count,
-            perf_results.data()
-        ));
+        // Try to get cached algorithm
+        CachedBwdDataAlgo cached;
+        if (Conv2dAlgoCache::instance().get_bwd_data(cache_key, cached)) {
+            algo = cached.algo;
+            workspace_size = cached.workspace_size;
+        } else {
+            // Cache miss - query algorithm and cache it
+            int returned_algo_count = 0;
+            cudnnConvolutionBwdDataAlgoPerf_t perf_result;
 
-        cudnnConvolutionBwdDataAlgo_t algo = perf_results[0].algo;
-        size_t workspace_size = perf_results[0].memory;
+            CUDNN_CHECK(cudnnGetConvolutionBackwardDataAlgorithm_v7(
+                handle,
+                filter_desc.get(),
+                grad_output_desc.get(),
+                conv_desc.get(),
+                input_desc.get(),
+                1,
+                &returned_algo_count,
+                &perf_result
+            ));
 
-        void* workspace = nullptr;
-        if (workspace_size > 0) {
-            cudaMalloc(&workspace, workspace_size);
+            algo = perf_result.algo;
+
+            CUDNN_CHECK(cudnnGetConvolutionBackwardDataWorkspaceSize(
+                handle,
+                filter_desc.get(),
+                grad_output_desc.get(),
+                conv_desc.get(),
+                input_desc.get(),
+                algo,
+                &workspace_size
+            ));
+
+            Conv2dAlgoCache::instance().set_bwd_data(cache_key, {algo, workspace_size});
         }
+
+        void* workspace = CuDNNWorkspace::get(workspace_size);
 
         if (input.dtype() == DType::Float32) {
             CUDNN_CHECK(cudnnConvolutionBackwardData(
-                handle.get(),
+                handle,
                 &alpha,
                 filter_desc.get(),
                 weight.data<float>(),
@@ -321,7 +370,7 @@ auto cudnn_conv2d_backward(
             const double alpha_d = 1.0;
             const double beta_d = 0.0;
             CUDNN_CHECK(cudnnConvolutionBackwardData(
-                handle.get(),
+                handle,
                 &alpha_d,
                 filter_desc.get(),
                 weight.data<double>(),
@@ -337,7 +386,7 @@ auto cudnn_conv2d_backward(
             ));
         } else if (input.dtype() == DType::Float16) {
             CUDNN_CHECK(cudnnConvolutionBackwardData(
-                handle.get(),
+                handle,
                 &alpha,
                 filter_desc.get(),
                 weight.data<Float16>(),
@@ -352,41 +401,54 @@ auto cudnn_conv2d_backward(
                 grad_input.data<Float16>()
             ));
         }
-
-        if (workspace) {
-            cudaFree(workspace);
-        }
     }
 
     // Compute gradient w.r.t. weight
     if (compute_grad_weight) {
-        // Find best algorithm
-        int requested_algo_count = 10;
-        int returned_algo_count = 0;
-        std::vector<cudnnConvolutionBwdFilterAlgoPerf_t> perf_results(requested_algo_count);
+        cudnnConvolutionBwdFilterAlgo_t algo;
+        size_t workspace_size;
 
-        CUDNN_CHECK(cudnnFindConvolutionBackwardFilterAlgorithm(
-            handle.get(),
-            input_desc.get(),
-            grad_output_desc.get(),
-            conv_desc.get(),
-            filter_desc.get(),
-            requested_algo_count,
-            &returned_algo_count,
-            perf_results.data()
-        ));
+        // Try to get cached algorithm
+        CachedBwdFilterAlgo cached;
+        if (Conv2dAlgoCache::instance().get_bwd_filter(cache_key, cached)) {
+            algo = cached.algo;
+            workspace_size = cached.workspace_size;
+        } else {
+            // Cache miss - query algorithm and cache it
+            int returned_algo_count = 0;
+            cudnnConvolutionBwdFilterAlgoPerf_t perf_result;
 
-        cudnnConvolutionBwdFilterAlgo_t algo = perf_results[0].algo;
-        size_t workspace_size = perf_results[0].memory;
+            CUDNN_CHECK(cudnnGetConvolutionBackwardFilterAlgorithm_v7(
+                handle,
+                input_desc.get(),
+                grad_output_desc.get(),
+                conv_desc.get(),
+                filter_desc.get(),
+                1,
+                &returned_algo_count,
+                &perf_result
+            ));
 
-        void* workspace = nullptr;
-        if (workspace_size > 0) {
-            cudaMalloc(&workspace, workspace_size);
+            algo = perf_result.algo;
+
+            CUDNN_CHECK(cudnnGetConvolutionBackwardFilterWorkspaceSize(
+                handle,
+                input_desc.get(),
+                grad_output_desc.get(),
+                conv_desc.get(),
+                filter_desc.get(),
+                algo,
+                &workspace_size
+            ));
+
+            Conv2dAlgoCache::instance().set_bwd_filter(cache_key, {algo, workspace_size});
         }
+
+        void* workspace = CuDNNWorkspace::get(workspace_size);
 
         if (input.dtype() == DType::Float32) {
             CUDNN_CHECK(cudnnConvolutionBackwardFilter(
-                handle.get(),
+                handle,
                 &alpha,
                 input_desc.get(),
                 input.data<float>(),
@@ -404,7 +466,7 @@ auto cudnn_conv2d_backward(
             const double alpha_d = 1.0;
             const double beta_d = 0.0;
             CUDNN_CHECK(cudnnConvolutionBackwardFilter(
-                handle.get(),
+                handle,
                 &alpha_d,
                 input_desc.get(),
                 input.data<double>(),
@@ -420,7 +482,7 @@ auto cudnn_conv2d_backward(
             ));
         } else if (input.dtype() == DType::Float16) {
             CUDNN_CHECK(cudnnConvolutionBackwardFilter(
-                handle.get(),
+                handle,
                 &alpha,
                 input_desc.get(),
                 input.data<Float16>(),
@@ -435,10 +497,6 @@ auto cudnn_conv2d_backward(
                 grad_weight.data<Float16>()
             ));
         }
-
-        if (workspace) {
-            cudaFree(workspace);
-        }
     }
 
     // Compute gradient w.r.t. bias
@@ -448,7 +506,7 @@ auto cudnn_conv2d_backward(
 
         if (input.dtype() == DType::Float32) {
             CUDNN_CHECK(cudnnConvolutionBackwardBias(
-                handle.get(),
+                handle,
                 &alpha,
                 grad_output_desc.get(),
                 grad_output.data<float>(),
@@ -460,7 +518,7 @@ auto cudnn_conv2d_backward(
             const double alpha_d = 1.0;
             const double beta_d = 0.0;
             CUDNN_CHECK(cudnnConvolutionBackwardBias(
-                handle.get(),
+                handle,
                 &alpha_d,
                 grad_output_desc.get(),
                 grad_output.data<double>(),
@@ -470,7 +528,7 @@ auto cudnn_conv2d_backward(
             ));
         } else if (input.dtype() == DType::Float16) {
             CUDNN_CHECK(cudnnConvolutionBackwardBias(
-                handle.get(),
+                handle,
                 &alpha,
                 grad_output_desc.get(),
                 grad_output.data<Float16>(),
@@ -725,6 +783,494 @@ auto cudnn_lstm_backward(
     return std::make_tuple(grad_input, grad_hx, grad_cx, grad_weights);
 }
 #endif // Disabled cuDNN LSTM - using custom CUDA kernels
+
+// ============================================================================
+// cuDNN MaxPool2d Forward Implementation
+// ============================================================================
+
+auto cudnn_maxpool2d_forward(
+    const Tensor& input,
+    int64_t kernel_size,
+    int64_t stride,
+    int64_t padding,
+    cudaStream_t stream
+) -> std::pair<Tensor, Tensor> {
+    auto shape = input.shape();
+    int64_t batch = shape[0];
+    int64_t channels = shape[1];
+    int64_t height = shape[2];
+    int64_t width = shape[3];
+
+    // Calculate output dimensions
+    int64_t out_h = (height + 2 * padding - kernel_size) / stride + 1;
+    int64_t out_w = (width + 2 * padding - kernel_size) / stride + 1;
+
+    // Create output tensor
+    Tensor output({batch, channels, out_h, out_w}, input.dtype(), input.device());
+    // cuDNN doesn't return indices directly, we'll compute them separately if needed
+    Tensor indices({batch, channels, out_h, out_w}, DType::Int64, input.device());
+
+    cudnnHandle_t handle = CuDNNHandle::get();
+    CuDNNHandle::set_stream(stream);
+
+    // Setup descriptors
+    cudnnDataType_t cudnn_dtype;
+    switch (input.dtype()) {
+        case DType::Float32: cudnn_dtype = CUDNN_DATA_FLOAT; break;
+        case DType::Float64: cudnn_dtype = CUDNN_DATA_DOUBLE; break;
+        case DType::Float16: cudnn_dtype = CUDNN_DATA_HALF; break;
+        default:
+            throw std::runtime_error("cuDNN MaxPool2d: unsupported dtype");
+    }
+
+    TensorDescriptor input_desc, output_desc;
+    PoolingDescriptor pool_desc;
+
+    input_desc.set(cudnn_dtype, batch, channels, height, width);
+    output_desc.set(cudnn_dtype, batch, channels, out_h, out_w);
+    pool_desc.set_maxpool(kernel_size, kernel_size, padding, padding, stride, stride);
+
+    float alpha = 1.0f, beta = 0.0f;
+
+    CUDNN_CHECK(cudnnPoolingForward(
+        handle,
+        pool_desc.get(),
+        &alpha,
+        input_desc.get(),
+        input.data_ptr(),
+        &beta,
+        output_desc.get(),
+        output.data_ptr()
+    ));
+
+    return {output, indices};
+}
+
+// ============================================================================
+// cuDNN MaxPool2d Backward Implementation
+// ============================================================================
+
+auto cudnn_maxpool2d_backward(
+    const Tensor& grad_output,
+    const Tensor& input,
+    const Tensor& output,
+    int64_t kernel_size,
+    int64_t stride,
+    int64_t padding,
+    cudaStream_t stream
+) -> Tensor {
+    auto in_shape = input.shape();
+    int64_t batch = in_shape[0];
+    int64_t channels = in_shape[1];
+    int64_t height = in_shape[2];
+    int64_t width = in_shape[3];
+
+    auto out_shape = output.shape();
+    int64_t out_h = out_shape[2];
+    int64_t out_w = out_shape[3];
+
+    Tensor grad_input({batch, channels, height, width}, input.dtype(), input.device());
+
+    cudnnHandle_t handle = CuDNNHandle::get();
+    CuDNNHandle::set_stream(stream);
+
+    cudnnDataType_t cudnn_dtype;
+    switch (input.dtype()) {
+        case DType::Float32: cudnn_dtype = CUDNN_DATA_FLOAT; break;
+        case DType::Float64: cudnn_dtype = CUDNN_DATA_DOUBLE; break;
+        case DType::Float16: cudnn_dtype = CUDNN_DATA_HALF; break;
+        default:
+            throw std::runtime_error("cuDNN MaxPool2d backward: unsupported dtype");
+    }
+
+    TensorDescriptor input_desc, output_desc;
+    PoolingDescriptor pool_desc;
+
+    input_desc.set(cudnn_dtype, batch, channels, height, width);
+    output_desc.set(cudnn_dtype, batch, channels, out_h, out_w);
+    pool_desc.set_maxpool(kernel_size, kernel_size, padding, padding, stride, stride);
+
+    float alpha = 1.0f, beta = 0.0f;
+
+    CUDNN_CHECK(cudnnPoolingBackward(
+        handle,
+        pool_desc.get(),
+        &alpha,
+        output_desc.get(),
+        output.data_ptr(),
+        output_desc.get(),
+        grad_output.data_ptr(),
+        input_desc.get(),
+        input.data_ptr(),
+        &beta,
+        input_desc.get(),
+        grad_input.data_ptr()
+    ));
+
+    return grad_input;
+}
+
+// ============================================================================
+// cuDNN AvgPool2d Forward Implementation
+// ============================================================================
+
+auto cudnn_avgpool2d_forward(
+    const Tensor& input,
+    int64_t kernel_size,
+    int64_t stride,
+    int64_t padding,
+    cudaStream_t stream
+) -> Tensor {
+    auto shape = input.shape();
+    int64_t batch = shape[0];
+    int64_t channels = shape[1];
+    int64_t height = shape[2];
+    int64_t width = shape[3];
+
+    int64_t out_h = (height + 2 * padding - kernel_size) / stride + 1;
+    int64_t out_w = (width + 2 * padding - kernel_size) / stride + 1;
+
+    Tensor output({batch, channels, out_h, out_w}, input.dtype(), input.device());
+
+    cudnnHandle_t handle = CuDNNHandle::get();
+    CuDNNHandle::set_stream(stream);
+
+    cudnnDataType_t cudnn_dtype;
+    switch (input.dtype()) {
+        case DType::Float32: cudnn_dtype = CUDNN_DATA_FLOAT; break;
+        case DType::Float64: cudnn_dtype = CUDNN_DATA_DOUBLE; break;
+        case DType::Float16: cudnn_dtype = CUDNN_DATA_HALF; break;
+        default:
+            throw std::runtime_error("cuDNN AvgPool2d: unsupported dtype");
+    }
+
+    TensorDescriptor input_desc, output_desc;
+    PoolingDescriptor pool_desc;
+
+    input_desc.set(cudnn_dtype, batch, channels, height, width);
+    output_desc.set(cudnn_dtype, batch, channels, out_h, out_w);
+    pool_desc.set_avgpool(kernel_size, kernel_size, padding, padding, stride, stride);
+
+    float alpha = 1.0f, beta = 0.0f;
+
+    CUDNN_CHECK(cudnnPoolingForward(
+        handle,
+        pool_desc.get(),
+        &alpha,
+        input_desc.get(),
+        input.data_ptr(),
+        &beta,
+        output_desc.get(),
+        output.data_ptr()
+    ));
+
+    return output;
+}
+
+// ============================================================================
+// cuDNN AvgPool2d Backward Implementation
+// ============================================================================
+
+auto cudnn_avgpool2d_backward(
+    const Tensor& grad_output,
+    const Tensor& input,
+    int64_t kernel_size,
+    int64_t stride,
+    int64_t padding,
+    cudaStream_t stream
+) -> Tensor {
+    auto in_shape = input.shape();
+    int64_t batch = in_shape[0];
+    int64_t channels = in_shape[1];
+    int64_t height = in_shape[2];
+    int64_t width = in_shape[3];
+
+    auto out_shape = grad_output.shape();
+    int64_t out_h = out_shape[2];
+    int64_t out_w = out_shape[3];
+
+    Tensor grad_input({batch, channels, height, width}, input.dtype(), input.device());
+
+    cudnnHandle_t handle = CuDNNHandle::get();
+    CuDNNHandle::set_stream(stream);
+
+    cudnnDataType_t cudnn_dtype;
+    switch (input.dtype()) {
+        case DType::Float32: cudnn_dtype = CUDNN_DATA_FLOAT; break;
+        case DType::Float64: cudnn_dtype = CUDNN_DATA_DOUBLE; break;
+        case DType::Float16: cudnn_dtype = CUDNN_DATA_HALF; break;
+        default:
+            throw std::runtime_error("cuDNN AvgPool2d backward: unsupported dtype");
+    }
+
+    TensorDescriptor input_desc, output_desc;
+    PoolingDescriptor pool_desc;
+
+    input_desc.set(cudnn_dtype, batch, channels, height, width);
+    output_desc.set(cudnn_dtype, batch, channels, out_h, out_w);
+    pool_desc.set_avgpool(kernel_size, kernel_size, padding, padding, stride, stride);
+
+    float alpha = 1.0f, beta = 0.0f;
+
+    // AvgPool backward doesn't need original output, but cuDNN API requires all params
+    Tensor dummy_output({batch, channels, out_h, out_w}, input.dtype(), input.device());
+
+    CUDNN_CHECK(cudnnPoolingBackward(
+        handle,
+        pool_desc.get(),
+        &alpha,
+        output_desc.get(),
+        dummy_output.data_ptr(),
+        output_desc.get(),
+        grad_output.data_ptr(),
+        input_desc.get(),
+        input.data_ptr(),
+        &beta,
+        input_desc.get(),
+        grad_input.data_ptr()
+    ));
+
+    return grad_input;
+}
+
+// ============================================================================
+// cuDNN Softmax Forward Implementation
+// ============================================================================
+
+auto cudnn_softmax_forward(
+    const Tensor& input,
+    int64_t dim,
+    cudaStream_t stream
+) -> Tensor {
+    // cuDNN softmax works best with 4D tensors in NCHW format
+    // We reshape the input to [N, C, 1, 1] where softmax is over C dimension
+    auto shape = input.shape();
+    int64_t ndim = shape.size();
+
+    // Normalize dim
+    if (dim < 0) dim += ndim;
+
+    // Calculate sizes before and after the softmax dimension
+    int64_t outer_size = 1;
+    for (int64_t i = 0; i < dim; ++i) outer_size *= shape[i];
+
+    int64_t inner_size = 1;
+    for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
+
+    int64_t dim_size = shape[dim];
+
+    Tensor output = Tensor(std::vector<int64_t>(shape.begin(), shape.end()), input.dtype(), input.device());
+
+    cudnnHandle_t handle = CuDNNHandle::get();
+    CuDNNHandle::set_stream(stream);
+
+    cudnnDataType_t cudnn_dtype;
+    switch (input.dtype()) {
+        case DType::Float32: cudnn_dtype = CUDNN_DATA_FLOAT; break;
+        case DType::Float64: cudnn_dtype = CUDNN_DATA_DOUBLE; break;
+        case DType::Float16: cudnn_dtype = CUDNN_DATA_HALF; break;
+        default:
+            throw std::runtime_error("cuDNN Softmax: unsupported dtype");
+    }
+
+    TensorDescriptor input_desc, output_desc;
+    // Reshape as [outer_size, dim_size, inner_size, 1] for cuDNN
+    input_desc.set(cudnn_dtype, outer_size, dim_size, inner_size, 1);
+    output_desc.set(cudnn_dtype, outer_size, dim_size, inner_size, 1);
+
+    float alpha = 1.0f, beta = 0.0f;
+
+    CUDNN_CHECK(cudnnSoftmaxForward(
+        handle,
+        CUDNN_SOFTMAX_ACCURATE,
+        CUDNN_SOFTMAX_MODE_CHANNEL,
+        &alpha,
+        input_desc.get(),
+        input.data_ptr(),
+        &beta,
+        output_desc.get(),
+        output.data_ptr()
+    ));
+
+    return output;
+}
+
+// ============================================================================
+// cuDNN Softmax Backward Implementation
+// ============================================================================
+
+auto cudnn_softmax_backward(
+    const Tensor& grad_output,
+    const Tensor& output,
+    int64_t dim,
+    cudaStream_t stream
+) -> Tensor {
+    auto shape = output.shape();
+    int64_t ndim = shape.size();
+
+    if (dim < 0) dim += ndim;
+
+    int64_t outer_size = 1;
+    for (int64_t i = 0; i < dim; ++i) outer_size *= shape[i];
+
+    int64_t inner_size = 1;
+    for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
+
+    int64_t dim_size = shape[dim];
+
+    Tensor grad_input = Tensor(std::vector<int64_t>(shape.begin(), shape.end()), output.dtype(), output.device());
+
+    cudnnHandle_t handle = CuDNNHandle::get();
+    CuDNNHandle::set_stream(stream);
+
+    cudnnDataType_t cudnn_dtype;
+    switch (output.dtype()) {
+        case DType::Float32: cudnn_dtype = CUDNN_DATA_FLOAT; break;
+        case DType::Float64: cudnn_dtype = CUDNN_DATA_DOUBLE; break;
+        case DType::Float16: cudnn_dtype = CUDNN_DATA_HALF; break;
+        default:
+            throw std::runtime_error("cuDNN Softmax backward: unsupported dtype");
+    }
+
+    TensorDescriptor output_desc, grad_desc;
+    output_desc.set(cudnn_dtype, outer_size, dim_size, inner_size, 1);
+    grad_desc.set(cudnn_dtype, outer_size, dim_size, inner_size, 1);
+
+    float alpha = 1.0f, beta = 0.0f;
+
+    CUDNN_CHECK(cudnnSoftmaxBackward(
+        handle,
+        CUDNN_SOFTMAX_ACCURATE,
+        CUDNN_SOFTMAX_MODE_CHANNEL,
+        &alpha,
+        output_desc.get(),
+        output.data_ptr(),
+        grad_desc.get(),
+        grad_output.data_ptr(),
+        &beta,
+        grad_desc.get(),
+        grad_input.data_ptr()
+    ));
+
+    return grad_input;
+}
+
+// ============================================================================
+// cuDNN Log-Softmax Forward Implementation
+// ============================================================================
+
+auto cudnn_log_softmax_forward(
+    const Tensor& input,
+    int64_t dim,
+    cudaStream_t stream
+) -> Tensor {
+    auto shape = input.shape();
+    int64_t ndim = shape.size();
+
+    if (dim < 0) dim += ndim;
+
+    int64_t outer_size = 1;
+    for (int64_t i = 0; i < dim; ++i) outer_size *= shape[i];
+
+    int64_t inner_size = 1;
+    for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
+
+    int64_t dim_size = shape[dim];
+
+    Tensor output = Tensor(std::vector<int64_t>(shape.begin(), shape.end()), input.dtype(), input.device());
+
+    cudnnHandle_t handle = CuDNNHandle::get();
+    CuDNNHandle::set_stream(stream);
+
+    cudnnDataType_t cudnn_dtype;
+    switch (input.dtype()) {
+        case DType::Float32: cudnn_dtype = CUDNN_DATA_FLOAT; break;
+        case DType::Float64: cudnn_dtype = CUDNN_DATA_DOUBLE; break;
+        case DType::Float16: cudnn_dtype = CUDNN_DATA_HALF; break;
+        default:
+            throw std::runtime_error("cuDNN LogSoftmax: unsupported dtype");
+    }
+
+    TensorDescriptor input_desc, output_desc;
+    input_desc.set(cudnn_dtype, outer_size, dim_size, inner_size, 1);
+    output_desc.set(cudnn_dtype, outer_size, dim_size, inner_size, 1);
+
+    float alpha = 1.0f, beta = 0.0f;
+
+    CUDNN_CHECK(cudnnSoftmaxForward(
+        handle,
+        CUDNN_SOFTMAX_LOG,
+        CUDNN_SOFTMAX_MODE_CHANNEL,
+        &alpha,
+        input_desc.get(),
+        input.data_ptr(),
+        &beta,
+        output_desc.get(),
+        output.data_ptr()
+    ));
+
+    return output;
+}
+
+// ============================================================================
+// cuDNN Log-Softmax Backward Implementation
+// ============================================================================
+
+auto cudnn_log_softmax_backward(
+    const Tensor& grad_output,
+    const Tensor& output,
+    int64_t dim,
+    cudaStream_t stream
+) -> Tensor {
+    auto shape = output.shape();
+    int64_t ndim = shape.size();
+
+    if (dim < 0) dim += ndim;
+
+    int64_t outer_size = 1;
+    for (int64_t i = 0; i < dim; ++i) outer_size *= shape[i];
+
+    int64_t inner_size = 1;
+    for (int64_t i = dim + 1; i < ndim; ++i) inner_size *= shape[i];
+
+    int64_t dim_size = shape[dim];
+
+    Tensor grad_input = Tensor(std::vector<int64_t>(shape.begin(), shape.end()), output.dtype(), output.device());
+
+    cudnnHandle_t handle = CuDNNHandle::get();
+    CuDNNHandle::set_stream(stream);
+
+    cudnnDataType_t cudnn_dtype;
+    switch (output.dtype()) {
+        case DType::Float32: cudnn_dtype = CUDNN_DATA_FLOAT; break;
+        case DType::Float64: cudnn_dtype = CUDNN_DATA_DOUBLE; break;
+        case DType::Float16: cudnn_dtype = CUDNN_DATA_HALF; break;
+        default:
+            throw std::runtime_error("cuDNN LogSoftmax backward: unsupported dtype");
+    }
+
+    TensorDescriptor output_desc, grad_desc;
+    output_desc.set(cudnn_dtype, outer_size, dim_size, inner_size, 1);
+    grad_desc.set(cudnn_dtype, outer_size, dim_size, inner_size, 1);
+
+    float alpha = 1.0f, beta = 0.0f;
+
+    CUDNN_CHECK(cudnnSoftmaxBackward(
+        handle,
+        CUDNN_SOFTMAX_LOG,
+        CUDNN_SOFTMAX_MODE_CHANNEL,
+        &alpha,
+        output_desc.get(),
+        output.data_ptr(),
+        grad_desc.get(),
+        grad_output.data_ptr(),
+        &beta,
+        grad_desc.get(),
+        grad_input.data_ptr()
+    ));
+
+    return grad_input;
+}
 
 } // namespace cuda
 } // namespace tenzor
