@@ -3,6 +3,7 @@
 #include "tenzor/backend/loader.hpp"
 #include "tenzor/backend/dispatch_table.hpp"
 #include <iostream>
+#include <fstream>
 #include <filesystem>
 #include <dlfcn.h>
 #include <thread>
@@ -21,12 +22,49 @@ auto initialize() -> void {
         return;
     }
 
-    // Configure OpenMP to use all available hardware threads by default
+    // Configure OpenMP to use optimal thread count
+    // Use physical cores (not logical/hyperthreaded) to avoid contention
     // Users can override with OMP_NUM_THREADS environment variable
 #ifdef _OPENMP
     if (std::getenv("OMP_NUM_THREADS") == nullptr) {
-        int num_threads = std::max(1u, std::thread::hardware_concurrency());
+        unsigned int logical_cores = std::thread::hardware_concurrency();
+        unsigned int physical_cores = logical_cores;
+
+        // Try to detect physical cores on Linux via sysfs
+        // thread_siblings_list contains comma-separated list of sibling CPUs
+        // e.g., "0,12" means CPU 0 and 12 are hyperthreaded pairs (2 threads/core)
+        std::ifstream siblings("/sys/devices/system/cpu/cpu0/topology/thread_siblings_list");
+        if (siblings.good()) {
+            std::string line;
+            if (std::getline(siblings, line)) {
+                // Count entries in comma-separated list
+                int threads_per_core = 1;
+                for (char c : line) {
+                    if (c == ',') threads_per_core++;
+                }
+                if (threads_per_core > 1) {
+                    physical_cores = logical_cores / threads_per_core;
+                }
+            }
+        }
+
+        // Use physical cores for optimal performance (avoids HT contention)
+        int num_threads = std::max(1u, physical_cores);
         omp_set_num_threads(num_threads);
+
+        // Set environment variables for thread-aware libraries
+        // These affect libraries loaded later and ensure consistent threading
+        std::string threads_str = std::to_string(num_threads);
+
+        // Set OMP_NUM_THREADS for libraries that check env var during static init
+        setenv("OMP_NUM_THREADS", threads_str.c_str(), 0);
+
+        if (std::getenv("MKL_NUM_THREADS") == nullptr) {
+            setenv("MKL_NUM_THREADS", threads_str.c_str(), 0);
+        }
+        if (std::getenv("DNNL_CPU_RUNTIME") == nullptr) {
+            setenv("DNNL_CPU_RUNTIME", "OMP", 0);
+        }
     }
 #endif
 

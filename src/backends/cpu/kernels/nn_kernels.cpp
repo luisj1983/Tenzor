@@ -10,6 +10,8 @@
 #include <cmath>
 #include <iostream>
 #include <tuple>
+#include <fstream>
+#include <thread>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -42,10 +44,58 @@ namespace cpu {
 // Thread-local RNG for dropout
 static thread_local std::mt19937 tl_rng(std::random_device{}());
 
+// Configure optimal thread count once per thread
+// Uses physical cores (not hyperthreaded) to avoid contention
+inline void configure_threads() {
+    static thread_local bool configured = false;
+    if (configured) return;
+    configured = true;
+
+#ifdef _OPENMP
+    unsigned int logical_cores = std::thread::hardware_concurrency();
+    unsigned int physical_cores = logical_cores;
+
+    // Detect physical cores via Linux sysfs
+    std::ifstream siblings("/sys/devices/system/cpu/cpu0/topology/thread_siblings_list");
+    if (siblings.good()) {
+        std::string line;
+        if (std::getline(siblings, line)) {
+            int threads_per_core = 1;
+            for (char c : line) {
+                if (c == ',') threads_per_core++;
+            }
+            if (threads_per_core > 1) {
+                physical_cores = logical_cores / threads_per_core;
+            }
+        }
+    }
+
+    int num_threads = std::max(1u, physical_cores);
+    omp_set_num_threads(num_threads);
+#endif
+}
+
 #ifdef TENZOR_USE_ONEDNN
-// Thread-local oneDNN engine and stream for reuse
-static thread_local dnnl::engine g_nn_engine(dnnl::engine::kind::cpu, 0);
-static thread_local dnnl::stream g_nn_stream(g_nn_engine);
+// Thread-local oneDNN engine and stream with proper thread configuration
+inline dnnl::engine& get_nn_engine() {
+    static thread_local std::unique_ptr<dnnl::engine> engine;
+
+    // Ensure threads are configured before using oneDNN
+    configure_threads();
+
+    if (!engine) {
+        engine = std::make_unique<dnnl::engine>(dnnl::engine::kind::cpu, 0);
+    }
+    return *engine;
+}
+
+inline dnnl::stream& get_nn_stream() {
+    static thread_local std::unique_ptr<dnnl::stream> stream;
+    if (!stream) {
+        stream = std::make_unique<dnnl::stream>(get_nn_engine());
+    }
+    return *stream;
+}
 
 // --------------------------------------------------------------------------
 // LayerNorm Primitive Caching (eliminates ~1-5ms primitive creation overhead)
@@ -112,8 +162,8 @@ static bool linear_onednn(
     int64_t batch_size, int64_t in_features, int64_t out_features
 ) {
     try {
-        auto& engine = g_nn_engine;
-        auto& stream = g_nn_stream;
+        auto& engine = get_nn_engine();
+        auto& stream = get_nn_stream();
 
         // Create memory descriptors
         dnnl::memory::dims src_dims = {batch_size, in_features};
@@ -709,8 +759,8 @@ static bool layer_norm_onednn(
     int64_t batch_size, int64_t norm_size, float eps
 ) {
     try {
-        auto& engine = g_nn_engine;
-        auto& stream = g_nn_stream;
+        auto& engine = get_nn_engine();
+        auto& stream = get_nn_stream();
 
         // Create cache key
         LayerNormCacheKey cache_key{batch_size, norm_size};
@@ -783,6 +833,9 @@ static void layer_norm_simd_with_stats(
     float* mean_out, float* rstd_out,
     int64_t batch_size, int64_t norm_size, float eps
 ) {
+    // Configure optimal thread count (no-op after first call)
+    configure_threads();
+
     // Prefetch distance (cache lines ahead)
     constexpr int64_t PREFETCH_DISTANCE = 64;
 
@@ -919,6 +972,9 @@ static void layer_norm_simd(
     const float* weight, const float* bias,
     int64_t batch_size, int64_t norm_size, float eps
 ) {
+    // Configure optimal thread count (no-op after first call)
+    configure_threads();
+
     // Prefetch distance (cache lines ahead)
     constexpr int64_t PREFETCH_DISTANCE = 64;
 
@@ -1072,14 +1128,19 @@ auto layer_norm_kernel(const Tensor& input, const std::vector<int64_t>& normaliz
     float* out_data = output.data<float>();
 
 #ifdef TENZOR_USE_ONEDNN
-    // Try oneDNN first for maximum performance
-    if (input_cont.dtype() == DType::Float32 &&
+    // Use oneDNN only for very large inputs - SIMD implementation is highly optimized
+    // and faster for typical transformer sizes (batch*seq*hidden < 8M)
+    // oneDNN primitive cache helps but doesn't beat well-tuned AVX-512 code
+    const int64_t total_elements = batch_size * norm_size;
+    const bool use_onednn = total_elements >= 8 * 1024 * 1024;  // 8M threshold (original)
+
+    if (use_onednn && input_cont.dtype() == DType::Float32 &&
         layer_norm_onednn(in_data, out_data, w_data, b_data, batch_size, norm_size, eps)) {
         return output;
     }
 #endif
 
-    // Fall back to SIMD-optimized implementation
+    // Use SIMD-optimized implementation for small inputs or as fallback
     layer_norm_simd(in_data, out_data, w_data, b_data, batch_size, norm_size, eps);
 
     return output;

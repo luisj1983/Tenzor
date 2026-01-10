@@ -18,17 +18,36 @@
 #ifdef _OPENMP
 #include <omp.h>
 #include <thread>
+#include <fstream>
+#include <string>
 #endif
 
 // Get optimal thread count for compute-bound operations
+// Uses physical cores (not hyperthreaded) to avoid contention
 static inline int get_optimal_threads() {
 #ifdef _OPENMP
     static int optimal = []() {
-        // Use all hardware threads for compute-bound work
-        int hw_threads = static_cast<int>(std::max(1u, std::thread::hardware_concurrency()));
-        // Ensure OpenMP uses this count
-        omp_set_num_threads(hw_threads);
-        return hw_threads;
+        unsigned int logical_cores = std::thread::hardware_concurrency();
+        unsigned int physical_cores = logical_cores;
+
+        // Detect physical cores via Linux sysfs
+        std::ifstream siblings("/sys/devices/system/cpu/cpu0/topology/thread_siblings_list");
+        if (siblings.good()) {
+            std::string line;
+            if (std::getline(siblings, line)) {
+                int threads_per_core = 1;
+                for (char c : line) {
+                    if (c == ',') threads_per_core++;
+                }
+                if (threads_per_core > 1) {
+                    physical_cores = logical_cores / threads_per_core;
+                }
+            }
+        }
+
+        int num_threads = std::max(1u, physical_cores);
+        omp_set_num_threads(num_threads);
+        return num_threads;
     }();
     return optimal;
 #else
@@ -59,8 +78,15 @@ static void fused_layer_norm_f32(
 {
     const float inv_n = 1.0f / static_cast<float>(norm_size);
 
-    // Only parallelize for large total work to avoid thread overhead
-    #pragma omp parallel for if(batch_size * norm_size > 65536)
+    // LayerNorm is memory-bound, so parallelization only helps for very large data
+    // Single-threaded SIMD achieves ~50 GB/s, close to single-core memory bandwidth
+    // Parallelization overhead is ~100-500us, so only use for >4M elements (~16MB)
+    // Also limit thread count to avoid cache thrashing
+    const int64_t total_elements = batch_size * norm_size;
+    const bool use_parallel = total_elements > 4 * 1024 * 1024;  // 4M elements
+    const int max_threads = use_parallel ? std::min(4, static_cast<int>(batch_size / 256)) : 1;
+
+    #pragma omp parallel for if(use_parallel) num_threads(std::max(1, max_threads))
     for (int64_t b = 0; b < batch_size; b++) {
         const float* in_ptr = input + b * norm_size;
         float* out_ptr = output + b * norm_size;

@@ -398,25 +398,23 @@ static void matmul_blocked_float32(
 
 #ifdef TENZOR_USE_MKL
     // Always use MKL SGEMM - it's the fastest option for CPU matmul
-    // Skip oneDNN for matmul as it has ~6ms primitive creation overhead per call
-    // MKL's overhead is negligible compared to the performance gains from optimized BLAS
-    // Only use custom GEMM for tiny matrices (< 100x100x100 = 1M ops)
-    if (M * N * K > 1000000 || (M >= 64 && N >= 64 && K >= 64)) {
-        cblas_sgemm(
-            CblasRowMajor,
-            CblasNoTrans,
-            CblasNoTrans,
-            static_cast<MKL_INT>(M),
-            static_cast<MKL_INT>(N),
-            static_cast<MKL_INT>(K),
-            1.0f,
-            A, static_cast<MKL_INT>(K),
-            B, static_cast<MKL_INT>(N),
-            0.0f,
-            C, static_cast<MKL_INT>(N)
-        );
-        return;
-    }
+    // MKL is highly optimized for all matrix sizes including small ones
+    // Previous threshold (M*N*K > 1M) caused 7x slowdown for small matrices
+    // like 128x128 because it fell back to slower custom GEMM
+    cblas_sgemm(
+        CblasRowMajor,
+        CblasNoTrans,
+        CblasNoTrans,
+        static_cast<MKL_INT>(M),
+        static_cast<MKL_INT>(N),
+        static_cast<MKL_INT>(K),
+        1.0f,
+        A, static_cast<MKL_INT>(K),
+        B, static_cast<MKL_INT>(N),
+        0.0f,
+        C, static_cast<MKL_INT>(N)
+    );
+    return;
 #endif
 
 #ifdef TENZOR_USE_ONEDNN
@@ -439,24 +437,21 @@ static void matmul_blocked_float64(
     int64_t M, int64_t N, int64_t K) {
 
 #ifdef TENZOR_USE_MKL
-    // Always use MKL DGEMM for any reasonable matrix size - it's consistently faster
-    // Same threshold logic as Float32
-    if (M * N * K > 1000000 || (M >= 64 && N >= 64 && K >= 64)) {
-        cblas_dgemm(
-            CblasRowMajor,
-            CblasNoTrans,
-            CblasNoTrans,
-            static_cast<MKL_INT>(M),
-            static_cast<MKL_INT>(N),
-            static_cast<MKL_INT>(K),
-            1.0,
-            A, static_cast<MKL_INT>(K),
-            B, static_cast<MKL_INT>(N),
-            0.0,
-            C, static_cast<MKL_INT>(N)
-        );
-        return;
-    }
+    // Always use MKL DGEMM - optimized for all matrix sizes
+    cblas_dgemm(
+        CblasRowMajor,
+        CblasNoTrans,
+        CblasNoTrans,
+        static_cast<MKL_INT>(M),
+        static_cast<MKL_INT>(N),
+        static_cast<MKL_INT>(K),
+        1.0,
+        A, static_cast<MKL_INT>(K),
+        B, static_cast<MKL_INT>(N),
+        0.0,
+        C, static_cast<MKL_INT>(N)
+    );
+    return;
 #endif
 
     // Zero-initialize output

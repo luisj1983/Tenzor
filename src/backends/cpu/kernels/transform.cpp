@@ -3,6 +3,8 @@
 #include "tenzor/core/shape.hpp"
 #include <cstring>
 #include <iostream>
+#include <omp.h>
+#include <immintrin.h>
 
 namespace tenzor {
 namespace cpu {
@@ -160,54 +162,145 @@ auto contiguous_kernel(const Tensor& input) -> Tensor {
     Tensor result(std::vector<int64_t>(input.shape().begin(), input.shape().end()),
                   input.dtype(), input.device());
 
-    // Copy data using strides to access elements in correct order
     const int64_t total_elements = input.numel();
     const size_t element_size = dtype_size(input.dtype());
 
-    // Get raw storage pointers WITHOUT offset
-    // input.impl_->storage->data() returns the base pointer
-    // We'll apply offset manually in the loop using element-based indexing
     auto* src = static_cast<uint8_t*>(const_cast<void*>(input.impl_->storage->data()));
     auto* dst = static_cast<uint8_t*>(static_cast<void*>(result.impl_->storage->data()));
 
     const int64_t ndims = input.ndim();
 
     if (ndims == 0) {
-        // Scalar tensor - direct copy (account for offset)
         std::memcpy(dst, src + input.impl_->offset * element_size, element_size);
         return result;
     }
-
-    // Multi-dimensional copy using stride calculations
-    std::vector<int64_t> indices(ndims, 0);
-    int64_t dst_offset = 0;
 
     auto strides = input.strides();
     auto shape = input.shape();
     const int64_t input_offset = input.impl_->offset;
 
-    for (int64_t i = 0; i < total_elements; ++i) {
-        // Calculate source offset using strides (including base offset)
-        int64_t src_offset = input_offset;
-        for (int64_t dim = 0; dim < ndims; ++dim) {
-            src_offset += indices[dim] * strides[dim];
+    // Find the largest contiguous block size from the innermost dimension
+    // This allows us to copy multiple elements at once when inner strides are contiguous
+    int64_t inner_block_size = 1;
+    int64_t expected_stride = 1;
+    int64_t block_dim = ndims;  // First non-contiguous dimension from the end
+
+    for (int64_t dim = ndims - 1; dim >= 0; --dim) {
+        if (strides[dim] == expected_stride) {
+            inner_block_size *= shape[dim];
+            expected_stride *= shape[dim];
+            block_dim = dim;
+        } else {
+            break;
         }
+    }
 
-        // Copy single element
-        std::memcpy(dst + dst_offset * element_size,
-                    src + src_offset * element_size,
-                    element_size);
+    const size_t block_bytes = inner_block_size * element_size;
+    const int64_t num_blocks = total_elements / inner_block_size;
 
-        // Increment destination offset (contiguous layout)
-        ++dst_offset;
+    // Special optimized path for 4D tensors (common in attention: batch, heads, seq, head_dim)
+    if (ndims == 4 && inner_block_size > 1) {
+        const int64_t d0 = shape[0], d1 = shape[1], d2 = shape[2], d3 = shape[3];
+        const int64_t s0 = strides[0], s1 = strides[1], s2 = strides[2], s3 = strides[3];
 
-        // Increment indices (row-major order)
-        for (int64_t dim = ndims - 1; dim >= 0; --dim) {
-            if (++indices[dim] < shape[dim]) {
-                break;
+        #pragma omp parallel for collapse(2) schedule(static)
+        for (int64_t i0 = 0; i0 < d0; ++i0) {
+            for (int64_t i1 = 0; i1 < d1; ++i1) {
+                for (int64_t i2 = 0; i2 < d2; ++i2) {
+                    int64_t src_base = input_offset + i0 * s0 + i1 * s1 + i2 * s2;
+                    int64_t dst_base = ((i0 * d1 + i1) * d2 + i2) * d3;
+
+                    if (s3 == 1) {
+                        // Innermost dimension is contiguous - use memcpy
+                        std::memcpy(dst + dst_base * element_size,
+                                    src + src_base * element_size,
+                                    d3 * element_size);
+                    } else {
+                        // Non-contiguous innermost - copy element by element
+                        for (int64_t i3 = 0; i3 < d3; ++i3) {
+                            std::memcpy(dst + (dst_base + i3) * element_size,
+                                        src + (src_base + i3 * s3) * element_size,
+                                        element_size);
+                        }
+                    }
+                }
             }
-            indices[dim] = 0;
         }
+        return result;
+    }
+
+    // Special optimized path for 3D tensors (common in batched operations)
+    if (ndims == 3 && inner_block_size > 1) {
+        const int64_t d0 = shape[0], d1 = shape[1], d2 = shape[2];
+        const int64_t s0 = strides[0], s1 = strides[1], s2 = strides[2];
+
+        #pragma omp parallel for collapse(2) schedule(static)
+        for (int64_t i0 = 0; i0 < d0; ++i0) {
+            for (int64_t i1 = 0; i1 < d1; ++i1) {
+                int64_t src_base = input_offset + i0 * s0 + i1 * s1;
+                int64_t dst_base = (i0 * d1 + i1) * d2;
+
+                if (s2 == 1) {
+                    std::memcpy(dst + dst_base * element_size,
+                                src + src_base * element_size,
+                                d2 * element_size);
+                } else {
+                    for (int64_t i2 = 0; i2 < d2; ++i2) {
+                        std::memcpy(dst + (dst_base + i2) * element_size,
+                                    src + (src_base + i2 * s2) * element_size,
+                                    element_size);
+                    }
+                }
+            }
+        }
+        return result;
+    }
+
+    // General case with block copying - parallelize outer blocks
+    if (block_dim > 0 && inner_block_size > 1) {
+        // Calculate outer dimensions for parallelization
+        int64_t outer_size = 1;
+        for (int64_t dim = 0; dim < block_dim; ++dim) {
+            outer_size *= shape[dim];
+        }
+
+        #pragma omp parallel for schedule(static)
+        for (int64_t block_idx = 0; block_idx < num_blocks; ++block_idx) {
+            // Convert block index to multi-dimensional indices for outer dims
+            int64_t src_offset_calc = input_offset;
+            int64_t temp = block_idx;
+
+            for (int64_t dim = block_dim - 1; dim >= 0; --dim) {
+                int64_t idx = temp % shape[dim];
+                temp /= shape[dim];
+                src_offset_calc += idx * strides[dim];
+            }
+
+            int64_t dst_offset_calc = block_idx * inner_block_size;
+
+            std::memcpy(dst + dst_offset_calc * element_size,
+                        src + src_offset_calc * element_size,
+                        block_bytes);
+        }
+        return result;
+    }
+
+    // Fallback: element-by-element copy with OpenMP parallelization
+    #pragma omp parallel for schedule(static)
+    for (int64_t i = 0; i < total_elements; ++i) {
+        // Calculate multi-dimensional index from linear index
+        int64_t src_offset_calc = input_offset;
+        int64_t temp = i;
+
+        for (int64_t dim = ndims - 1; dim >= 0; --dim) {
+            int64_t idx = temp % shape[dim];
+            temp /= shape[dim];
+            src_offset_calc += idx * strides[dim];
+        }
+
+        std::memcpy(dst + i * element_size,
+                    src + src_offset_calc * element_size,
+                    element_size);
     }
 
     return result;

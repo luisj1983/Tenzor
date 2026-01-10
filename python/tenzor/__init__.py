@@ -30,6 +30,20 @@ import sys as _sys
 import importlib.util as _importlib_util
 import os as _os
 
+# Configure optimal thread count before loading C++ library
+# This prevents OpenMP from initializing with too many threads
+if 'OMP_NUM_THREADS' not in _os.environ:
+    try:
+        # Detect physical cores on Linux
+        with open('/sys/devices/system/cpu/cpu0/topology/thread_siblings_list') as f:
+            siblings = f.read().strip()
+            threads_per_core = siblings.count(',') + 1
+            logical_cores = _os.cpu_count() or 1
+            physical_cores = max(1, logical_cores // threads_per_core)
+            _os.environ['OMP_NUM_THREADS'] = str(physical_cores)
+    except (OSError, IOError):
+        pass  # Use default if detection fails
+
 # Import C++ core module first
 # NOTE: This will also register tenzor.nn in sys.modules pointing to C++ nn
 from .tenzor_core import *

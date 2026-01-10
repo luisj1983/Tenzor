@@ -14,7 +14,15 @@
 #ifdef TENZOR_USE_ONEDNN
 
 #include <dnnl.hpp>
+#include <iostream>
+#include <chrono>
+#include <fstream>
 #include <cstdint>
+#include <thread>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 #include <cstring>
 #include <memory>
 #include <vector>
@@ -33,6 +41,36 @@ namespace rnn_onednn {
 
 inline dnnl::engine& get_engine() {
     static thread_local std::unique_ptr<dnnl::engine> engine;
+    static thread_local bool threads_configured = false;
+
+    if (!threads_configured) {
+        threads_configured = true;
+#ifdef _OPENMP
+        // Configure optimal thread count for oneDNN
+        // Use physical cores (not hyperthreaded) to avoid contention
+        unsigned int logical_cores = std::thread::hardware_concurrency();
+        unsigned int physical_cores = logical_cores;
+
+        // Detect physical cores via Linux sysfs
+        std::ifstream siblings("/sys/devices/system/cpu/cpu0/topology/thread_siblings_list");
+        if (siblings.good()) {
+            std::string line;
+            if (std::getline(siblings, line)) {
+                int threads_per_core = 1;
+                for (char c : line) {
+                    if (c == ',') threads_per_core++;
+                }
+                if (threads_per_core > 1) {
+                    physical_cores = logical_cores / threads_per_core;
+                }
+            }
+        }
+
+        int num_threads = std::max(1u, physical_cores);
+        omp_set_num_threads(num_threads);
+#endif
+    }
+
     if (!engine) {
         engine = std::make_unique<dnnl::engine>(dnnl::engine::kind::cpu, 0);
     }
@@ -135,7 +173,7 @@ inline std::shared_ptr<LSTMCachedPrimitive>& get_lstm_backward_cached() {
  * PyTorch LSTM weights: (4*hidden, input_size) row-major
  * oneDNN LSTM weights: ldigo format (1, 1, input_size, 4, hidden_size)
  *
- * Optimized with OpenMP parallelization for large weight matrices.
+ * Optimized with block tiling for cache-friendly access (same pattern as GRU).
  */
 inline void reorder_weights_to_ldigo(
     const float* src,           // PyTorch format: (4*hidden, in_features)
@@ -144,19 +182,21 @@ inline void reorder_weights_to_ldigo(
     int64_t hidden_size
 ) {
     // ldigo layout: dst[i * 4 * hidden + g * hidden + h] = src[(g * hidden + h) * in_features + i]
-    // Parallelize over input features for large matrices
-    const int64_t stride_4h = 4 * hidden_size;
+    // Use block tiling for cache-friendly access (matches GRU optimization)
+    constexpr int64_t BLOCK = 32;
 
-    #pragma omp parallel for if(in_features * hidden_size > 65536) schedule(static)
-    for (int64_t i = 0; i < in_features; ++i) {
-        float* dst_row = dst + i * stride_4h;
+    for (int64_t i_block = 0; i_block < in_features; i_block += BLOCK) {
+        int64_t i_end = std::min(i_block + BLOCK, in_features);
 
         for (int64_t g = 0; g < 4; ++g) {
             const float* src_gate = src + g * hidden_size * in_features;
-            float* dst_gate = dst_row + g * hidden_size;
 
             for (int64_t h = 0; h < hidden_size; ++h) {
-                dst_gate[h] = src_gate[h * in_features + i];
+                const float* src_row = src_gate + h * in_features;
+
+                for (int64_t i = i_block; i < i_end; ++i) {
+                    dst[i * 4 * hidden_size + g * hidden_size + h] = src_row[i];
+                }
             }
         }
     }
@@ -336,7 +376,6 @@ inline bool lstm_forward_onednn(
 
         // Execute with pre-built args (no allocation)
         cached->prim.execute(stream, cached->args);
-
         stream.wait();
         return true;
 
@@ -958,12 +997,29 @@ inline bool lstm_multilayer_forward_onednn(
 
     // For multi-layer, use sequential single-layer primitives like PyTorch
     // This is faster than fused multi-layer due to better brgemm utilization
+    // Use persistent thread-local buffers and per-layer caches to avoid overhead
     try {
-        std::vector<float> layer_input_buf(seq_len * batch * hidden_size);
-        std::vector<float> layer_output_buf(seq_len * batch * hidden_size);
+        // Thread-local persistent buffers - only reallocate if size increases
+        static thread_local std::vector<float> layer_input_buf;
+        static thread_local std::vector<float> layer_output_buf;
+        static thread_local int64_t cached_buffer_size = 0;
+
+        const int64_t required_size = seq_len * batch * hidden_size;
+        if (required_size > cached_buffer_size) {
+            layer_input_buf.resize(required_size);
+            layer_output_buf.resize(required_size);
+            cached_buffer_size = required_size;
+        }
 
         const float* layer_input = input;
         float* layer_output = layer_output_buf.data();
+
+        // Per-layer caches to avoid cache thrashing between layers
+        // Each layer has different weight pointers, so sharing a cache causes rebuilds
+        static thread_local std::vector<std::shared_ptr<LSTMCachedPrimitive>> layer_caches;
+        if (layer_caches.size() < static_cast<size_t>(num_layers)) {
+            layer_caches.resize(num_layers);
+        }
 
         for (int64_t l = 0; l < num_layers; ++l) {
             int64_t layer_input_size = (l == 0) ? input_size : hidden_size;
@@ -979,7 +1035,9 @@ inline bool lstm_multilayer_forward_onednn(
             // Output goes to final buffer for last layer, temp buffer otherwise
             float* current_output = (l == num_layers - 1) ? output : layer_output;
 
-            bool ok = lstm_forward_onednn(
+            // Use per-layer cache to avoid rebuilds when weight pointers differ
+            bool ok = lstm_forward_onednn_with_cache(
+                layer_caches[l],
                 layer_input,
                 W_ih_list[l], W_hh_list[l],
                 bias_list.empty() ? nullptr : bias_list[l],
@@ -990,11 +1048,11 @@ inline bool lstm_multilayer_forward_onednn(
 
             if (!ok) return false;
 
-            // Swap buffers for next layer
+            // For next layer: input = current output, output = other buffer
             if (l < num_layers - 1) {
-                std::swap(layer_input_buf, layer_output_buf);
-                layer_input = layer_input_buf.data();
-                layer_output = layer_output_buf.data();
+                layer_input = current_output;
+                layer_output = (current_output == layer_output_buf.data()) ?
+                               layer_input_buf.data() : layer_output_buf.data();
             }
         }
 
