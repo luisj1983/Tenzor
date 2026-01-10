@@ -1010,15 +1010,12 @@ void batched_matmul_f32(
     int64_t stride_c = M * N;
 
 #ifdef TENZOR_HAS_CUBLAS
-    // Use cuBLAS for large batched matrices
-    if (M >= CUBLAS_THRESHOLD || N >= CUBLAS_THRESHOLD || K >= CUBLAS_THRESHOLD) {
-        batched_matmul_cublas_f32(A, B, C, batch_size, M, N, K,
-                                   stride_a, stride_b, stride_c);
-        return;
-    }
-#endif
-
-    // Use custom batched kernel
+    // Always use cuBLAS for batched matmul - cublasSgemmStridedBatched is
+    // highly optimized and amortizes kernel launch overhead across the batch
+    batched_matmul_cublas_f32(A, B, C, batch_size, M, N, K,
+                               stride_a, stride_b, stride_c);
+#else
+    // Fallback to custom batched kernel when cuBLAS is not available
     dim3 block(TILE_SIZE, TILE_SIZE);
     dim3 grid((N + TILE_SIZE - 1) / TILE_SIZE,
               (M + TILE_SIZE - 1) / TILE_SIZE,
@@ -1030,6 +1027,7 @@ void batched_matmul_f32(
             stride_a, stride_b, stride_c);
 
     CUDA_CHECK(cudaGetLastError());
+#endif
 }
 
 void batched_matmul_f64(
@@ -1042,15 +1040,12 @@ void batched_matmul_f64(
     int64_t stride_c = M * N;
 
 #ifdef TENZOR_HAS_CUBLAS
-    // Use cuBLAS for large batched matrices
-    if (M >= CUBLAS_THRESHOLD || N >= CUBLAS_THRESHOLD || K >= CUBLAS_THRESHOLD) {
-        batched_matmul_cublas_f64(A, B, C, batch_size, M, N, K,
-                                   stride_a, stride_b, stride_c);
-        return;
-    }
-#endif
-
-    // Use custom batched kernel
+    // Always use cuBLAS for batched matmul - cublasDgemmStridedBatched is
+    // highly optimized and amortizes kernel launch overhead across the batch
+    batched_matmul_cublas_f64(A, B, C, batch_size, M, N, K,
+                               stride_a, stride_b, stride_c);
+#else
+    // Fallback to custom batched kernel when cuBLAS is not available
     dim3 block(TILE_SIZE, TILE_SIZE);
     dim3 grid((N + TILE_SIZE - 1) / TILE_SIZE,
               (M + TILE_SIZE - 1) / TILE_SIZE,
@@ -1062,6 +1057,7 @@ void batched_matmul_f64(
             stride_a, stride_b, stride_c);
 
     CUDA_CHECK(cudaGetLastError());
+#endif
 }
 
 /**

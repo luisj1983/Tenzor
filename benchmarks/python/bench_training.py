@@ -38,9 +38,8 @@ def benchmark_mlp_training_tenzor(
             modules.append(tz.nn.ReLU())
 
     model = tz.nn.Sequential(*modules)
-    optimizer = tz.optim.Adam(model.parameters(), lr=1e-3)
 
-    # Create data
+    # Create data and move model to device BEFORE creating optimizer
     if device == "cuda":
         x = tz.randn([batch_size, layers[0]]).cuda()
         y = tz.randn([batch_size, layers[-1]]).cuda()
@@ -48,6 +47,9 @@ def benchmark_mlp_training_tenzor(
     else:
         x = tz.randn([batch_size, layers[0]])
         y = tz.randn([batch_size, layers[-1]])
+
+    # Create optimizer AFTER model is on the correct device
+    optimizer = tz.optim.Adam(model.parameters(), lr=1e-3)
 
     # Both input and target need to be Variables for mse_loss
     y_var = tz.Variable(y, requires_grad=False)
@@ -186,8 +188,7 @@ def benchmark_cnn_training_tenzor(
         tz.nn.Linear(128, 10),
     )
 
-    optimizer = tz.optim.Adam(model.parameters(), lr=1e-3)
-
+    # Move model to device BEFORE creating optimizer
     if device == "cuda":
         x = tz.randn([batch_size, 1, 28, 28]).cuda()
         y = tz.randn([batch_size, 10]).cuda()
@@ -195,6 +196,9 @@ def benchmark_cnn_training_tenzor(
     else:
         x = tz.randn([batch_size, 1, 28, 28])
         y = tz.randn([batch_size, 10])
+
+    # Create optimizer AFTER model is on the correct device
+    optimizer = tz.optim.Adam(model.parameters(), lr=1e-3)
 
     # Both input and target need to be Variables for mse_loss
     y_var = tz.Variable(y, requires_grad=False)
@@ -323,8 +327,8 @@ def benchmark_optimizer_comparison(device: str, config: BenchmarkConfig) -> List
 
     for opt_name, opt_fn in optimizers.items():
         model = tz.nn.Sequential(*modules)
-        optimizer = opt_fn(model.parameters())
 
+        # Move model to device BEFORE creating optimizer
         if device == "cuda":
             x = tz.randn([batch_size, layers[0]]).cuda()
             y = tz.randn([batch_size, layers[-1]]).cuda()
@@ -332,6 +336,9 @@ def benchmark_optimizer_comparison(device: str, config: BenchmarkConfig) -> List
         else:
             x = tz.randn([batch_size, layers[0]])
             y = tz.randn([batch_size, layers[-1]])
+
+        # Create optimizer AFTER model is on the correct device
+        optimizer = opt_fn(model.parameters())
 
         # Both input and target need to be Variables for mse_loss
         y_var = tz.Variable(y, requires_grad=False)

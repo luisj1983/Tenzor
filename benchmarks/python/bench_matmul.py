@@ -287,17 +287,23 @@ def run_matmul_benchmarks(config: BenchmarkConfig = None) -> List[BenchmarkResul
 
         # Batched matmul
         print("\n--- Tenzor Batched MatMul ---")
-        batch_tz = benchmark_batched_matmul_tenzor(
-            config.batch_sizes, (256, 256, 256), device, config
-        )
-        all_results.extend(batch_tz)
+        if device != "cuda" or check_tenzor_cuda_available():
+            batch_tz = benchmark_batched_matmul_tenzor(
+                config.batch_sizes, (256, 256, 256), device, config
+            )
+            all_results.extend(batch_tz)
+        else:
+            print("  [SKIP] Tenzor CUDA not available")
 
         if config.compare_with_pytorch:
             print("\n--- PyTorch Batched MatMul ---")
-            batch_pt = benchmark_batched_matmul_pytorch(
-                config.batch_sizes, (256, 256, 256), device, config
-            )
-            all_results.extend(batch_pt)
+            if device != "cuda" or check_pytorch_cuda_available():
+                batch_pt = benchmark_batched_matmul_pytorch(
+                    config.batch_sizes, (256, 256, 256), device, config
+                )
+                all_results.extend(batch_pt)
+            else:
+                print("  [SKIP] PyTorch CUDA not available")
 
     return all_results
 

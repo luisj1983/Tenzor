@@ -80,6 +80,7 @@ def check_tenzor_cuda_available() -> bool:
     """Check if Tenzor has CUDA support available."""
     try:
         import tenzor as tz
+        tz.initialize()  # Ensure backends are loaded before checking CUDA
         # Try different possible ways Tenzor might expose CUDA availability
         if hasattr(tz, 'cuda') and hasattr(tz.cuda, 'is_available'):
             return tz.cuda.is_available()
