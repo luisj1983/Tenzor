@@ -414,6 +414,23 @@ PYBIND11_MODULE(tenzor_core, m) {
         .value("complex64", tenzor::DType::Complex64)
         .value("complex128", tenzor::DType::Complex128);
 
+    // Memory format enum (PyTorch-compatible channels_last support)
+    py::enum_<tenzor::MemoryFormat>(m, "memory_format")
+        .value("contiguous_format", tenzor::MemoryFormat::Contiguous,
+               "Standard row-major (NCHW for 4D tensors)")
+        .value("channels_last", tenzor::MemoryFormat::ChannelsLast,
+               "Channels-last layout (NHWC for 4D tensors) - optimized for Tensor Cores")
+        .value("channels_last_3d", tenzor::MemoryFormat::ChannelsLast3d,
+               "Channels-last for 5D tensors (NDHWC)")
+        .value("preserve_format", tenzor::MemoryFormat::Preserve,
+               "Preserve input format in operations");
+
+    // Convenient module-level attributes for memory formats (PyTorch-style)
+    m.attr("contiguous_format") = tenzor::MemoryFormat::Contiguous;
+    m.attr("channels_last") = tenzor::MemoryFormat::ChannelsLast;
+    m.attr("channels_last_3d") = tenzor::MemoryFormat::ChannelsLast3d;
+    m.attr("preserve_format") = tenzor::MemoryFormat::Preserve;
+
     // Tensor class
     py::class_<tenzor::Tensor>(m, "Tensor")
         .def(py::init<std::vector<int64_t>, tenzor::DType, tenzor::Device>(),
@@ -429,8 +446,23 @@ PYBIND11_MODULE(tenzor_core, m) {
         .def_property_readonly("dtype", &tenzor::Tensor::dtype)
         .def_property_readonly("device", &tenzor::Tensor::device)
         .def_property_readonly("numel", &tenzor::Tensor::numel)
-        .def_property_readonly("is_contiguous", &tenzor::Tensor::is_contiguous)
-        .def("to", py::overload_cast<tenzor::Device>(&tenzor::Tensor::to, py::const_))
+        .def("is_contiguous",
+            [](const tenzor::Tensor& t, std::optional<tenzor::MemoryFormat> fmt) {
+                if (fmt.has_value()) {
+                    return t.is_contiguous(fmt.value());
+                }
+                return t.is_contiguous();
+            },
+            py::arg("memory_format") = py::none(),
+            "Check if tensor is contiguous. Optionally specify memory_format (channels_last, etc)")
+        .def("memory_format", &tenzor::Tensor::memory_format,
+             "Get the memory format of the tensor (contiguous_format or channels_last)")
+        .def("to", py::overload_cast<tenzor::Device>(&tenzor::Tensor::to, py::const_),
+             py::arg("device"),
+             "Move tensor to specified device")
+        .def("to", py::overload_cast<tenzor::MemoryFormat>(&tenzor::Tensor::to, py::const_),
+             py::arg("memory_format"),
+             "Convert tensor to specified memory format (e.g., channels_last for NHWC)")
         .def("reshape", &tenzor::Tensor::reshape)
         // Shape manipulation
         .def("transpose", &tenzor::Tensor::transpose,

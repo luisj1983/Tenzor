@@ -121,6 +121,7 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::Stack)] = "stack";
     names[static_cast<size_t>(OpId::Split)] = "split";
     names[static_cast<size_t>(OpId::Chunk)] = "chunk";
+    names[static_cast<size_t>(OpId::ToMemoryFormat)] = "to_memory_format";
 
     // Indexing
     names[static_cast<size_t>(OpId::IndexSelect)] = "index_select";

@@ -662,7 +662,7 @@ auto cudnn_conv2d_forward_nhwc(
     int64_t padding,
     int64_t dilation,
     int64_t groups,
-    cudaStream_t stream
+    void* stream
 ) -> Tensor;
 
 auto cudnn_conv2d_backward(
@@ -693,7 +693,7 @@ auto cudnn_conv2d_backward_nhwc(
     bool compute_grad_input,
     bool compute_grad_weight,
     bool compute_grad_bias,
-    cudaStream_t stream
+    void* stream
 ) -> std::tuple<Tensor, Tensor, Tensor>;
 
 // ============================================================================

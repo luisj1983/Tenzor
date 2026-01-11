@@ -10,6 +10,7 @@
 #include "tenzor/backend/kernel_registry.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/core/tensor.hpp"
 #ifdef TENZOR_HAS_CUDNN
 #include "tenzor/backend/cudnn_wrapper.hpp"
 #endif
@@ -126,6 +127,9 @@ namespace cuda {
     auto expand_kernel(const Tensor& input, const std::vector<int64_t>& shape, void* stream) -> Tensor;
     auto repeat_kernel(const Tensor& input, const std::vector<int64_t>& repeats, cudaStream_t stream) -> Tensor;
     auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, cudaStream_t stream) -> Tensor;
+
+    // Memory format conversion
+    auto to_memory_format_kernel(const Tensor& input, MemoryFormat format, void* stream) -> Tensor;
 
     // Comparison operations
     auto eq_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor;
@@ -603,6 +607,11 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::Repeat, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         auto repeats = parse_int_list(attrs, "repeats");
         return std::vector<Tensor>{cuda::repeat_kernel(inputs[0], repeats, get_cuda_stream(attrs))};
+    });
+    table.register_kernel(OpId::ToMemoryFormat, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int format_int = parse_attr<int>(attrs, "memory_format", 0);
+        MemoryFormat format = static_cast<MemoryFormat>(format_int);
+        return std::vector<Tensor>{cuda::to_memory_format_kernel(inputs[0], format, get_cuda_stream(attrs))};
     });
 
     // =========================================================================

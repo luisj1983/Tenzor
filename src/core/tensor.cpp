@@ -1324,4 +1324,91 @@ auto Tensor::zeros_like(const Tensor& other) -> Tensor {
     return tenzor::zeros(shape_vec, other.dtype(), other.device());
 }
 
+// ============================================================================
+// Memory Format Support
+// ============================================================================
+
+auto Tensor::memory_format() const noexcept -> MemoryFormat {
+    if (!impl_) return MemoryFormat::Contiguous;
+
+    // Only 4D tensors can be ChannelsLast
+    if (impl_->shape.size() != 4) {
+        return MemoryFormat::Contiguous;
+    }
+
+    // Check if strides match NHWC pattern
+    auto nhwc_strides = compute_channels_last_strides(impl_->shape);
+    if (impl_->strides == nhwc_strides && impl_->offset == 0) {
+        return MemoryFormat::ChannelsLast;
+    }
+
+    // Check for 5D ChannelsLast3d
+    if (impl_->shape.size() == 5) {
+        auto ndhwc_strides = compute_channels_last_3d_strides(impl_->shape);
+        if (impl_->strides == ndhwc_strides && impl_->offset == 0) {
+            return MemoryFormat::ChannelsLast3d;
+        }
+    }
+
+    return MemoryFormat::Contiguous;
+}
+
+auto Tensor::is_contiguous(MemoryFormat format) const noexcept -> bool {
+    if (!impl_) return true;
+
+    switch (format) {
+        case MemoryFormat::Contiguous: {
+            // Standard row-major contiguous check
+            auto expected = compute_strides(impl_->shape);
+            return impl_->strides == expected && impl_->offset == 0;
+        }
+        case MemoryFormat::ChannelsLast: {
+            if (impl_->shape.size() != 4) return false;
+            auto expected = compute_channels_last_strides(impl_->shape);
+            return impl_->strides == expected && impl_->offset == 0;
+        }
+        case MemoryFormat::ChannelsLast3d: {
+            if (impl_->shape.size() != 5) return false;
+            auto expected = compute_channels_last_3d_strides(impl_->shape);
+            return impl_->strides == expected && impl_->offset == 0;
+        }
+        case MemoryFormat::Preserve:
+            // Preserve means "keep current format", so any contiguous layout counts
+            return is_contiguous() || is_contiguous(MemoryFormat::ChannelsLast);
+    }
+
+    return false;
+}
+
+auto Tensor::to(MemoryFormat format) const -> Tensor {
+    if (!impl_) return *this;
+
+    // If already in the target format, return as-is
+    if (is_contiguous(format)) {
+        return *this;
+    }
+
+    // Handle Preserve format - no conversion needed
+    if (format == MemoryFormat::Preserve) {
+        return *this;
+    }
+
+    // For non-4D tensors, ChannelsLast doesn't apply
+    if (format == MemoryFormat::ChannelsLast && impl_->shape.size() != 4) {
+        return *this;
+    }
+
+    // For non-5D tensors, ChannelsLast3d doesn't apply
+    if (format == MemoryFormat::ChannelsLast3d && impl_->shape.size() != 5) {
+        return *this;
+    }
+
+    // Dispatch to backend for memory format conversion
+    OpAttributes attrs;
+    attrs["memory_format"] = std::to_string(static_cast<int>(format));
+
+    std::vector<Tensor> inputs = {*this};
+    return dispatch(OpId::ToMemoryFormat, inputs, attrs)[0];
+}
+
 } // namespace tenzor

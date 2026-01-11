@@ -180,6 +180,55 @@ inline auto compute_strides(std::span<const int64_t> shape) -> std::vector<int64
 }
 
 /**
+ * @brief Compute channels-last (NHWC) strides from 4D shape.
+ *
+ * For a 4D tensor with logical shape [N, C, H, W], computes strides
+ * that arrange the data in NHWC memory layout. This enables better
+ * Tensor Core utilization on NVIDIA GPUs.
+ *
+ * @param shape Tensor dimensions [N, C, H, W]
+ * @return Strides for NHWC layout: [H*W*C, 1, W*C, C]
+ *
+ * @code
+ * // For shape {1, 64, 32, 32} (NCHW)
+ * auto strides = compute_channels_last_strides({1, 64, 32, 32});
+ * // Returns {65536, 1, 2048, 64} for NHWC layout
+ * @endcode
+ *
+ * @note Returns standard row-major strides for non-4D shapes.
+ */
+inline auto compute_channels_last_strides(std::span<const int64_t> shape)
+    -> std::vector<int64_t> {
+    if (shape.size() != 4) {
+        return compute_strides(shape);
+    }
+    // Shape is [N, C, H, W], compute NHWC strides
+    int64_t C = shape[1], H = shape[2], W = shape[3];
+    return {H * W * C, 1, W * C, C};
+}
+
+/**
+ * @brief Compute channels-last-3d (NDHWC) strides from 5D shape.
+ *
+ * For a 5D tensor with logical shape [N, C, D, H, W], computes strides
+ * that arrange the data in NDHWC memory layout.
+ *
+ * @param shape Tensor dimensions [N, C, D, H, W]
+ * @return Strides for NDHWC layout: [D*H*W*C, 1, H*W*C, W*C, C]
+ *
+ * @note Returns standard row-major strides for non-5D shapes.
+ */
+inline auto compute_channels_last_3d_strides(std::span<const int64_t> shape)
+    -> std::vector<int64_t> {
+    if (shape.size() != 5) {
+        return compute_strides(shape);
+    }
+    // Shape is [N, C, D, H, W], compute NDHWC strides
+    int64_t C = shape[1], D = shape[2], H = shape[3], W = shape[4];
+    return {D * H * W * C, 1, H * W * C, W * C, C};
+}
+
+/**
  * @brief Compute broadcasted shape from two input shapes.
  *
  * Applies NumPy-style broadcasting rules to determine the result shape

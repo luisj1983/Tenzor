@@ -16,8 +16,30 @@
 #include "dtype.hpp"
 #include "device.hpp"
 #include "storage.hpp"
+#include "shape.hpp"
 
 namespace tenzor {
+
+/**
+ * @brief Memory format for tensor layout optimization.
+ *
+ * Describes the physical memory layout of tensor data. Memory format is
+ * expressed through stride patterns while keeping the logical dimension
+ * order unchanged.
+ *
+ * For a 4D tensor with shape [N, C, H, W]:
+ * - Contiguous (NCHW): strides = [C*H*W, H*W, W, 1]
+ * - ChannelsLast (NHWC): strides = [H*W*C, 1, W*C, C]
+ *
+ * Using ChannelsLast format on modern GPUs with Tensor Cores can provide
+ * 30-100% speedup for convolution operations.
+ */
+enum class MemoryFormat {
+    Contiguous,      ///< Standard row-major (NCHW for 4D)
+    ChannelsLast,    ///< Channels-last layout (NHWC for 4D)
+    ChannelsLast3d,  ///< Channels-last for 5D (NDHWC)
+    Preserve         ///< Preserve input format in operations
+};
 
 // Forward declarations
 class TensorImpl;
@@ -46,6 +68,9 @@ namespace cuda {
     auto squeeze_kernel(const tenzor::Tensor& input, int64_t dim) -> tenzor::Tensor;
     auto unsqueeze_kernel(const tenzor::Tensor& input, int64_t dim) -> tenzor::Tensor;
     auto contiguous_kernel(const tenzor::Tensor& input) -> tenzor::Tensor;
+    auto to_memory_format_kernel(const tenzor::Tensor& input, tenzor::MemoryFormat format, void* stream) -> tenzor::Tensor;
+    auto cudnn_conv2d_forward_nhwc(const tenzor::Tensor& input, const tenzor::Tensor& weight, const tenzor::Tensor* bias, int64_t stride, int64_t padding, int64_t dilation, int64_t groups, void* stream) -> tenzor::Tensor;
+    auto cudnn_conv2d_backward_nhwc(const tenzor::Tensor& grad_output, const tenzor::Tensor& input, const tenzor::Tensor& weight, int64_t stride, int64_t padding, int64_t dilation, int64_t groups, bool compute_grad_input, bool compute_grad_weight, bool compute_grad_bias, void* stream) -> std::tuple<tenzor::Tensor, tenzor::Tensor, tenzor::Tensor>;
 }
 namespace rocm {
     class HIPKernelAccess;  // Forward declaration for friend access
@@ -728,6 +753,70 @@ public:
     auto contiguous() const -> Tensor;
 
     // ============================================================================
+    // Memory Format Support
+    // ============================================================================
+
+    /**
+     * @brief Get the memory format of the tensor.
+     *
+     * Detects memory format from stride pattern. For 4D tensors:
+     * - ChannelsLast if strides match NHWC pattern
+     * - Contiguous otherwise
+     *
+     * @return Detected memory format
+     *
+     * @code
+     * Tensor x = randn({1, 3, 224, 224}).to(MemoryFormat::ChannelsLast);
+     * auto fmt = x.memory_format();  // MemoryFormat::ChannelsLast
+     * @endcode
+     */
+    auto memory_format() const noexcept -> MemoryFormat;
+
+    /**
+     * @brief Check if tensor is contiguous in the specified memory format.
+     *
+     * @param format Memory format to check against
+     * @return true if tensor's strides match the format's expected strides
+     *
+     * @code
+     * Tensor x({1, 64, 32, 32}, DType::Float32, Device::cuda());
+     * bool is_nchw = x.is_contiguous(MemoryFormat::Contiguous);    // true
+     * bool is_nhwc = x.is_contiguous(MemoryFormat::ChannelsLast);  // false
+     * @endcode
+     */
+    auto is_contiguous(MemoryFormat format) const noexcept -> bool;
+
+    /**
+     * @brief Convert tensor to specified memory format.
+     *
+     * Creates a new tensor with data rearranged to match the target format.
+     * If tensor is already in the target format, returns a shallow copy.
+     *
+     * For 4D tensors:
+     * - ChannelsLast: NCHW data → NHWC layout (same logical shape)
+     * - Contiguous: NHWC data → NCHW layout
+     *
+     * @param format Target memory format
+     * @return Tensor in the specified format
+     *
+     * @code
+     * // Convert once at the start
+     * Tensor x = randn({1, 3, 224, 224}).to(MemoryFormat::ChannelsLast);
+     *
+     * // Operations preserve format - no conversion overhead
+     * Tensor y = conv2d(x, weight);  // Stays in NHWC
+     * Tensor z = batchnorm(y);       // Still NHWC
+     *
+     * // Convert back if needed for interop
+     * Tensor output = z.to(MemoryFormat::Contiguous);
+     * @endcode
+     *
+     * @note This is the PyTorch-compatible approach. Using ChannelsLast
+     *       on Tensor Core GPUs provides 30-100% Conv2D speedup.
+     */
+    auto to(MemoryFormat format) const -> Tensor;
+
+    // ============================================================================
     // Utility Methods (Phase 8 additions)
     // ============================================================================
 
@@ -807,6 +896,9 @@ private:
     friend auto cuda::squeeze_kernel(const Tensor& input, int64_t dim) -> Tensor;
     friend auto cuda::unsqueeze_kernel(const Tensor& input, int64_t dim) -> Tensor;
     friend auto cuda::contiguous_kernel(const Tensor& input) -> Tensor;
+    friend auto cuda::to_memory_format_kernel(const Tensor& input, MemoryFormat format, void* stream) -> Tensor;
+    friend auto cuda::cudnn_conv2d_forward_nhwc(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t dilation, int64_t groups, void* stream) -> Tensor;
+    friend auto cuda::cudnn_conv2d_backward_nhwc(const Tensor& grad_output, const Tensor& input, const Tensor& weight, int64_t stride, int64_t padding, int64_t dilation, int64_t groups, bool compute_grad_input, bool compute_grad_weight, bool compute_grad_bias, void* stream) -> std::tuple<Tensor, Tensor, Tensor>;
 };
 
 /**

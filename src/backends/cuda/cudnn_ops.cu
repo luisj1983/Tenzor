@@ -1,6 +1,8 @@
 #ifdef TENZOR_HAS_CUDNN
 
 #include "tenzor/backend/cudnn_wrapper.hpp"
+#include "tenzor/core/tensor.hpp"
+#include "tenzor/core/shape.hpp"
 #include <cuda_runtime.h>
 #include <algorithm>
 #include <limits>
@@ -259,6 +261,125 @@ auto filter_nchw_to_nhwc(const Tensor& weight, cudaStream_t stream) -> Tensor {
         );
     } else {
         throw std::runtime_error("filter_nchw_to_nhwc: unsupported dtype");
+    }
+
+    return output;
+}
+
+/**
+ * @brief Convert tensor to specified memory format (persistent format support)
+ *
+ * This is the key function for PyTorch-compatible memory format support.
+ * Unlike nchw_to_nhwc/nhwc_to_nchw which change the logical shape, this function:
+ * - Keeps the logical shape unchanged [N, C, H, W]
+ * - Reorders data to match the target format's physical layout
+ * - Sets strides to reflect the new memory layout
+ *
+ * For ChannelsLast: logical [N,C,H,W] with strides [H*W*C, 1, W*C, C]
+ * For Contiguous:   logical [N,C,H,W] with strides [C*H*W, H*W, W, 1]
+ */
+auto to_memory_format_kernel(const Tensor& input, MemoryFormat format, void* stream_ptr) -> Tensor {
+    cudaStream_t stream = static_cast<cudaStream_t>(stream_ptr);
+
+    // Get input shape
+    auto shape = input.shape();
+
+    // Only 4D tensors support ChannelsLast
+    if (shape.size() != 4) {
+        if (format == MemoryFormat::ChannelsLast) {
+            return input;  // No-op for non-4D
+        }
+        // For Contiguous, just return a contiguous copy
+        return input.contiguous();
+    }
+
+    int64_t N = shape[0];
+    int64_t C = shape[1];
+    int64_t H = shape[2];
+    int64_t W = shape[3];
+
+    // Create output tensor with target format's strides
+    // We need to manually set the strides after creation
+    Tensor output = Tensor::empty_uninitialized(
+        std::vector<int64_t>{N, C, H, W},
+        input.dtype(),
+        input.device()
+    );
+
+    // Calculate target strides based on format
+    std::vector<int64_t> target_strides;
+    if (format == MemoryFormat::ChannelsLast) {
+        // NHWC physical layout: strides = [H*W*C, 1, W*C, C]
+        target_strides = {H * W * C, 1, W * C, C};
+    } else {
+        // NCHW (Contiguous): strides = [C*H*W, H*W, W, 1]
+        target_strides = {C * H * W, H * W, W, 1};
+    }
+
+    // Set the output tensor's strides
+    output.impl_->strides = target_strides;
+
+    // Determine current format from input strides
+    auto input_strides = input.strides();
+    bool input_is_nhwc = (input_strides.size() == 4 &&
+                          input_strides[1] == 1 &&
+                          input_strides[3] == C);
+
+    const int64_t total = N * C * H * W;
+    const int block_size = 256;
+    const int grid_size = std::min(static_cast<int>((total + block_size - 1) / block_size), 65535);
+
+    // Choose conversion direction
+    if (format == MemoryFormat::ChannelsLast) {
+        // NCHW -> NHWC (but keeping logical shape [N,C,H,W])
+        if (input.dtype() == DType::Float32) {
+            nchw_to_nhwc_kernel<float><<<grid_size, block_size, 0, stream>>>(
+                input.data<float>(), output.data<float>(),
+                N, C, H, W
+            );
+        } else if (input.dtype() == DType::Float16) {
+            nchw_to_nhwc_kernel<Float16><<<grid_size, block_size, 0, stream>>>(
+                input.data<Float16>(), output.data<Float16>(),
+                N, C, H, W
+            );
+        } else if (input.dtype() == DType::Float64) {
+            nchw_to_nhwc_kernel<double><<<grid_size, block_size, 0, stream>>>(
+                input.data<double>(), output.data<double>(),
+                N, C, H, W
+            );
+        } else if (input.dtype() == DType::BFloat16) {
+            nchw_to_nhwc_kernel<BFloat16><<<grid_size, block_size, 0, stream>>>(
+                input.data<BFloat16>(), output.data<BFloat16>(),
+                N, C, H, W
+            );
+        } else {
+            throw std::runtime_error("to_memory_format_kernel: unsupported dtype for ChannelsLast");
+        }
+    } else {
+        // NHWC -> NCHW (but keeping logical shape [N,C,H,W])
+        if (input.dtype() == DType::Float32) {
+            nhwc_to_nchw_kernel<float><<<grid_size, block_size, 0, stream>>>(
+                input.data<float>(), output.data<float>(),
+                N, C, H, W
+            );
+        } else if (input.dtype() == DType::Float16) {
+            nhwc_to_nchw_kernel<Float16><<<grid_size, block_size, 0, stream>>>(
+                input.data<Float16>(), output.data<Float16>(),
+                N, C, H, W
+            );
+        } else if (input.dtype() == DType::Float64) {
+            nhwc_to_nchw_kernel<double><<<grid_size, block_size, 0, stream>>>(
+                input.data<double>(), output.data<double>(),
+                N, C, H, W
+            );
+        } else if (input.dtype() == DType::BFloat16) {
+            nhwc_to_nchw_kernel<BFloat16><<<grid_size, block_size, 0, stream>>>(
+                input.data<BFloat16>(), output.data<BFloat16>(),
+                N, C, H, W
+            );
+        } else {
+            throw std::runtime_error("to_memory_format_kernel: unsupported dtype for Contiguous");
+        }
     }
 
     return output;
@@ -886,6 +1007,72 @@ auto cudnn_conv2d_backward(
 // NHWC-Optimized Conv2d Forward Implementation
 // ============================================================================
 
+// ============================================================================
+// Weight Conversion Cache for NHWC Conv2D
+// ============================================================================
+// Caches NCHW->NHWC converted weights to avoid conversion on every forward pass.
+// Uses weak reference semantics - when the original NCHW weight is deallocated,
+// the cache entry becomes invalid and will be replaced on next access.
+namespace {
+
+struct WeightCacheEntry {
+    const void* original_data_ptr = nullptr;  // Pointer to original NCHW weight data
+    std::vector<int64_t> shape;               // Shape of the weight
+    Tensor nhwc_weight;                       // Cached NHWC-converted weight
+
+    WeightCacheEntry() = default;
+    WeightCacheEntry(const void* ptr, const std::vector<int64_t>& s, const Tensor& t)
+        : original_data_ptr(ptr), shape(s), nhwc_weight(t) {}
+};
+
+class NHWCWeightCache {
+public:
+    static NHWCWeightCache& instance() {
+        static NHWCWeightCache cache;
+        return cache;
+    }
+
+    // Try to get cached NHWC weight. Returns true if found and valid.
+    bool get(const Tensor& weight, Tensor& nhwc_out) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        auto it = cache_.find(weight.data_ptr());
+        if (it != cache_.end()) {
+            // Verify shape matches (data pointer could be reused after dealloc)
+            auto weight_shape = weight.shape();
+            std::vector<int64_t> weight_shape_vec(weight_shape.begin(), weight_shape.end());
+            if (it->second.shape == weight_shape_vec) {
+                nhwc_out = it->second.nhwc_weight;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Store converted NHWC weight in cache
+    void set(const Tensor& weight, const Tensor& nhwc_weight) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        // Limit cache size to prevent unbounded growth
+        if (cache_.size() >= kMaxCacheSize) {
+            cache_.clear();  // Simple eviction: clear all when full
+        }
+        auto weight_shape = weight.shape();
+        std::vector<int64_t> weight_shape_vec(weight_shape.begin(), weight_shape.end());
+        cache_[weight.data_ptr()] = WeightCacheEntry(
+            weight.data_ptr(),
+            weight_shape_vec,
+            nhwc_weight
+        );
+    }
+
+private:
+    NHWCWeightCache() = default;
+    static constexpr size_t kMaxCacheSize = 128;
+    std::unordered_map<const void*, WeightCacheEntry> cache_;
+    std::mutex mutex_;
+};
+
+} // anonymous namespace
+
 /**
  * @brief NHWC-optimized Conv2D forward using cuDNN
  *
@@ -899,6 +1086,8 @@ auto cudnn_conv2d_backward(
  * remains unchanged. For very small convolutions where conversion overhead
  * exceeds the compute benefit, consider using the NCHW version.
  *
+ * Weight tensors are cached after NHWC conversion to avoid repeated conversions.
+ *
  * Typical speedup: 1.3-2.0x on RTX 30xx/40xx/50xx series GPUs
  */
 auto cudnn_conv2d_forward_nhwc(
@@ -909,9 +1098,11 @@ auto cudnn_conv2d_forward_nhwc(
     int64_t padding,
     int64_t dilation,
     int64_t groups,
-    cudaStream_t stream
+    void* stream_ptr
 ) -> Tensor {
-    // Extract dimensions from NCHW input
+    cudaStream_t stream = static_cast<cudaStream_t>(stream_ptr);
+
+    // Extract dimensions - input has logical shape [N, C, H, W]
     auto input_shape = input.shape();
     auto weight_shape = weight.shape();
 
@@ -928,13 +1119,41 @@ auto cudnn_conv2d_forward_nhwc(
     int64_t out_h = (height + 2 * padding - dilation * (kernel_h - 1) - 1) / stride + 1;
     int64_t out_w = (width + 2 * padding - dilation * (kernel_w - 1) - 1) / stride + 1;
 
-    // Convert input and weight to NHWC format
-    Tensor input_nhwc = nchw_to_nhwc(input, stream);
-    Tensor weight_nhwc = filter_nchw_to_nhwc(weight, stream);
+    // Check if input is already in NHWC format (via strides)
+    bool input_is_nhwc = (input.memory_format() == MemoryFormat::ChannelsLast);
 
-    // Create output tensor in NHWC format: [N, oH, oW, K]
-    std::vector<int64_t> output_nhwc_shape = {batch, out_h, out_w, out_channels};
-    Tensor output_nhwc(output_nhwc_shape, input.dtype(), input.device());
+    // If input is already NHWC, use it directly; otherwise convert
+    Tensor input_nhwc;
+    if (input_is_nhwc) {
+        // Input already has NHWC physical layout - use directly
+        input_nhwc = input;
+    } else {
+        // Convert NCHW to NHWC
+        input_nhwc = nchw_to_nhwc(input, stream);
+    }
+
+    // Get or convert weight to NHWC format
+    // Use cache to avoid repeated conversions for the same weight tensor
+    Tensor weight_nhwc;
+    bool weight_is_nhwc = (weight.memory_format() == MemoryFormat::ChannelsLast);
+    if (weight_is_nhwc) {
+        // Weight is already in NHWC format - use directly
+        weight_nhwc = weight;
+    } else if (NHWCWeightCache::instance().get(weight, weight_nhwc)) {
+        // Cache hit - use cached NHWC weight (no conversion needed)
+    } else {
+        // Cache miss - convert and cache
+        weight_nhwc = filter_nchw_to_nhwc(weight, stream);
+        NHWCWeightCache::instance().set(weight, weight_nhwc);
+    }
+
+    // Create output tensor with NCHW logical shape but NHWC physical layout
+    // First allocate with physical shape [N, H, W, C], then set logical shape and NHWC strides
+    std::vector<int64_t> output_physical_shape = {batch, out_h, out_w, out_channels};
+    Tensor output_nhwc(output_physical_shape, input.dtype(), input.device());
+    // Immediately set to logical NCHW shape with NHWC strides
+    output_nhwc.impl_->shape = {batch, out_channels, out_h, out_w};
+    output_nhwc.impl_->strides = {out_h * out_w * out_channels, 1, out_w * out_channels, out_channels};
 
     // Use singleton cuDNN handle
     cudnnHandle_t handle = CuDNNHandle::get();
@@ -1142,10 +1361,13 @@ auto cudnn_conv2d_forward_nhwc(
         }
     }
 
-    // Convert output back to NCHW format
-    Tensor output = nhwc_to_nchw(output_nhwc, out_channels, stream);
+    // If input was already NHWC, return output directly (it already has NHWC strides)
+    if (input_is_nhwc) {
+        return output_nhwc;
+    }
 
-    return output;
+    // For NCHW input, convert output from NHWC strides to contiguous NCHW
+    return output_nhwc.contiguous();
 }
 
 // ============================================================================
@@ -1163,8 +1385,10 @@ auto cudnn_conv2d_backward_nhwc(
     bool compute_grad_input,
     bool compute_grad_weight,
     bool compute_grad_bias,
-    cudaStream_t stream
+    void* stream_ptr
 ) -> std::tuple<Tensor, Tensor, Tensor> {
+    cudaStream_t stream = static_cast<cudaStream_t>(stream_ptr);
+
     // Extract dimensions
     auto input_shape = input.shape();
     auto weight_shape = weight.shape();

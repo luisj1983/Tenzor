@@ -139,6 +139,7 @@ enum class OpId : uint16_t {
     Stack,
     Split,
     Chunk,
+    ToMemoryFormat,  // Memory format conversion (NCHW <-> NHWC)
 
     // =========================================================================
     // Indexing Operations (120-139)
