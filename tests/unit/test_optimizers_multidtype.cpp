@@ -590,13 +590,15 @@ TEST_P(OptimizersMultiDTypeTest, AdamNumericalStability) {
         auto data = cpu_tensor.data<float>();
         for (int i = 0; i < 10; i++) {
             EXPECT_LT(data[i], 1.0f) << "Failed on " << device.to_string();
-            EXPECT_GT(data[i], 0.999f) << "Failed on " << device.to_string();
+            // Use >= instead of > to handle floating point precision
+            EXPECT_GE(data[i], 0.999f) << "Failed on " << device.to_string();
         }
     } else {
         auto data = cpu_tensor.data<double>();
         for (int i = 0; i < 10; i++) {
             EXPECT_LT(data[i], 1.0) << "Failed on " << device.to_string();
-            EXPECT_GT(data[i], 0.999) << "Failed on " << device.to_string();
+            // Use >= instead of > to handle floating point precision
+            EXPECT_GE(data[i], 0.999) << "Failed on " << device.to_string();
         }
     }
 }

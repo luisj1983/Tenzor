@@ -1,5 +1,7 @@
 #include "tenzor/nn/optim/sgd.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/ops/op_id.hpp"
 
 namespace tenzor::optim {
 
@@ -16,11 +18,37 @@ auto SGD::step() -> void {
         if (!param_ptr || !param_ptr->has_grad()) continue;
         auto& param = *param_ptr;
 
-        auto grad = param.grad()->clone();
+        Tensor& param_tensor = param.tensor();
+        const Tensor& grad_tensor = *param.grad();
+
+        // Use fused CUDA kernel for Float32 CUDA tensors (single kernel launch!)
+        if (param_tensor.device().type == Device::Type::CUDA &&
+            param_tensor.dtype() == DType::Float32) {
+            // Prepare inputs for dispatch
+            std::vector<Tensor> inputs = {param_tensor, grad_tensor};
+            if (momentum_ > 0.0) {
+                inputs.push_back(velocity_buffers_[i]);
+            }
+
+            // Prepare attributes
+            OpAttributes attrs;
+            attrs["lr"] = std::to_string(static_cast<float>(lr_));
+            attrs["momentum"] = std::to_string(static_cast<float>(momentum_));
+            attrs["weight_decay"] = std::to_string(static_cast<float>(weight_decay_));
+            attrs["dampening"] = std::to_string(static_cast<float>(dampening_));
+            attrs["nesterov"] = nesterov_ ? "true" : "false";
+
+            // Dispatch to fused kernel (modifies param and momentum buffer in-place)
+            dispatch(OpId::FusedSGDStep, inputs, attrs);
+            continue;
+        }
+
+        // CPU fallback: use tensor operations
+        auto grad = grad_tensor.clone();
 
         // Weight decay
         if (weight_decay_ > 0.0) {
-            grad = grad + param.tensor() * static_cast<float>(weight_decay_);
+            grad = grad + param_tensor * static_cast<float>(weight_decay_);
         }
 
         // Momentum
@@ -37,7 +65,7 @@ auto SGD::step() -> void {
         }
 
         // Update parameters
-        param.tensor() = param.tensor() - grad * static_cast<float>(lr_);
+        param_tensor = param_tensor - grad * static_cast<float>(lr_);
     }
 }
 

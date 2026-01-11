@@ -149,6 +149,7 @@ namespace cuda {
     auto batchnorm2d_forward_affine(const Tensor& input, const Tensor& mean, const Tensor& variance, const Tensor& gamma, const Tensor& beta, float epsilon, cudaStream_t stream) -> Tensor;
     auto batchnorm2d_forward_affine_optimized(const Tensor& input, const Tensor& mean, const Tensor& variance, const Tensor& gamma, const Tensor& beta, float epsilon, cudaStream_t stream) -> Tensor;
     auto batchnorm2d_update_running_stats(Tensor& running_mean, Tensor& running_var, const Tensor& batch_mean, const Tensor& batch_var, float momentum, cudaStream_t stream) -> void;
+    auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const Tensor& mean, const Tensor& variance, const Tensor& gamma, float epsilon, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
 
     // Fused LayerNorm operation
     auto fused_layer_norm_cuda(
@@ -173,6 +174,34 @@ namespace cuda {
         const Tensor& V,
         float scale
     ) -> Tensor;
+
+    // Fused optimizer operations
+    auto fused_sgd_step_cuda(
+        Tensor& param,
+        const Tensor& grad,
+        Tensor* momentum_buffer,
+        float lr,
+        float momentum,
+        float weight_decay,
+        float dampening,
+        bool nesterov,
+        cudaStream_t stream
+    ) -> void;
+
+    auto fused_adam_step_cuda(
+        Tensor& param,
+        const Tensor& grad,
+        Tensor& exp_avg,
+        Tensor& exp_avg_sq,
+        float lr,
+        float beta1,
+        float beta2,
+        float eps,
+        float weight_decay,
+        int64_t step,
+        bool decoupled_weight_decay,
+        cudaStream_t stream
+    ) -> void;
 
     // Linear layer operations (fused cuBLAS with bias)
     auto linear_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, cudaStream_t stream) -> Tensor;
@@ -199,6 +228,10 @@ namespace cuda {
     auto cudnn_softmax_backward(const Tensor& grad_output, const Tensor& output, int64_t dim, cudaStream_t stream) -> Tensor;
     auto cudnn_log_softmax_forward(const Tensor& input, int64_t dim, cudaStream_t stream) -> Tensor;
     auto cudnn_log_softmax_backward(const Tensor& grad_output, const Tensor& output, int64_t dim, cudaStream_t stream) -> Tensor;
+
+    // cuDNN BatchNorm2d operations
+    auto cudnn_batchnorm2d_forward_training(const Tensor& input, Tensor& running_mean, Tensor& running_var, const Tensor& gamma, const Tensor& beta, float momentum, float epsilon, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
+    auto cudnn_batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const Tensor& gamma, const Tensor& saved_mean, const Tensor& saved_inv_var, float epsilon, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
 #endif
 
     // Fill operations
@@ -675,6 +708,28 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         );
         return std::vector<Tensor>{output, running_mean, running_var, saved_mean, saved_inv_var};
     });
+
+    // cuDNN BatchNorm2d backward - significantly faster than separate tensor ops
+    table.register_kernel(OpId::BatchNorm2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // inputs: [grad_output, input, gamma, saved_mean, saved_inv_var]
+        float epsilon = parse_attr<float>(attrs, "epsilon", 1e-5f);
+        auto [grad_input, grad_gamma, grad_beta] = cuda::cudnn_batchnorm2d_backward(
+            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
+            epsilon, get_cuda_stream(attrs)
+        );
+        return std::vector<Tensor>{grad_input, grad_gamma, grad_beta};
+    });
+#else
+    // Custom CUDA kernel backward - fallback when cuDNN is not available
+    table.register_kernel(OpId::BatchNorm2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // inputs: [grad_output, input, mean, variance, gamma]
+        float epsilon = parse_attr<float>(attrs, "epsilon", 1e-5f);
+        auto [grad_input, grad_gamma, grad_beta] = cuda::batchnorm2d_backward(
+            inputs[0], inputs[1], inputs[2], inputs[3], inputs[4],
+            epsilon, get_cuda_stream(attrs)
+        );
+        return std::vector<Tensor>{grad_input, grad_gamma, grad_beta};
+    });
 #endif
 
     // =========================================================================
@@ -734,6 +789,59 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_kernel(OpId::LinearBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         // inputs: [grad_output, input, weight]
         return cuda::linear_backward_kernel(inputs[0], inputs[1], inputs[2], get_cuda_stream(attrs));
+    });
+
+    // =========================================================================
+    // Fused SGD Optimizer Step (single kernel launch for all SGD operations)
+    // =========================================================================
+    table.register_kernel(OpId::FusedSGDStep, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // inputs: [param, grad, momentum_buffer (optional)]
+        // attrs: lr, momentum, weight_decay, dampening, nesterov
+        // Note: param and momentum_buffer are modified in-place
+        float lr = parse_attr<float>(attrs, "lr", 0.01f);
+        float momentum = parse_attr<float>(attrs, "momentum", 0.0f);
+        float weight_decay = parse_attr<float>(attrs, "weight_decay", 0.0f);
+        float dampening = parse_attr<float>(attrs, "dampening", 0.0f);
+        bool nesterov = parse_attr<bool>(attrs, "nesterov", false);
+
+        // Cast away const for in-place modification (safe because we control the API)
+        Tensor& param = const_cast<Tensor&>(inputs[0]);
+        Tensor* momentum_buffer = (inputs.size() > 2 && momentum > 0.0f)
+            ? &const_cast<Tensor&>(inputs[2]) : nullptr;
+
+        cuda::fused_sgd_step_cuda(
+            param, inputs[1], momentum_buffer,
+            lr, momentum, weight_decay, dampening, nesterov,
+            get_cuda_stream(attrs)
+        );
+        return std::vector<Tensor>{param};  // Return modified param
+    });
+
+    // =========================================================================
+    // Fused Adam Optimizer Step (single kernel launch for all Adam operations)
+    // =========================================================================
+    table.register_kernel(OpId::FusedAdamStep, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // inputs: [param, grad, exp_avg, exp_avg_sq]
+        // attrs: lr, beta1, beta2, eps, weight_decay, step, decoupled
+        float lr = parse_attr<float>(attrs, "lr", 0.001f);
+        float beta1 = parse_attr<float>(attrs, "beta1", 0.9f);
+        float beta2 = parse_attr<float>(attrs, "beta2", 0.999f);
+        float eps = parse_attr<float>(attrs, "eps", 1e-8f);
+        float weight_decay = parse_attr<float>(attrs, "weight_decay", 0.0f);
+        int64_t step = parse_attr<int64_t>(attrs, "step", 1);
+        bool decoupled = parse_attr<bool>(attrs, "decoupled", false);
+
+        // Cast away const for in-place modification
+        Tensor& param = const_cast<Tensor&>(inputs[0]);
+        Tensor& exp_avg = const_cast<Tensor&>(inputs[2]);
+        Tensor& exp_avg_sq = const_cast<Tensor&>(inputs[3]);
+
+        cuda::fused_adam_step_cuda(
+            param, inputs[1], exp_avg, exp_avg_sq,
+            lr, beta1, beta2, eps, weight_decay, step, decoupled,
+            get_cuda_stream(attrs)
+        );
+        return std::vector<Tensor>{param};  // Return modified param
     });
 }
 

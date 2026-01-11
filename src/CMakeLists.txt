@@ -185,6 +185,7 @@ if(TENZOR_BUILD_CUDA)
     target_link_libraries(tenzor_core PRIVATE
         CUDA::cudart
     )
+
     # Link NCCL if available
     find_library(NCCL_LIBRARY nccl PATHS /usr/lib /usr/local/lib)
     if(NCCL_LIBRARY)

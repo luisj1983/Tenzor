@@ -86,19 +86,22 @@ public:
         return instance.size_;
     }
 
-    // Get maximum workspace size for algorithm search (based on available GPU memory)
+    // Get maximum workspace size for algorithm search
+    // Dynamic based on available memory, but conservative to leave room for tensors
     static size_t max_workspace_size() {
         size_t free_mem = 0, total_mem = 0;
         cudaMemGetInfo(&free_mem, &total_mem);
 
-        // Use up to 50% of free memory for workspace, capped at 8GB
-        // This allows cuDNN to select optimal algorithms for large convolutions
-        constexpr size_t kMaxCap = 8ULL * 1024 * 1024 * 1024;  // 8 GB cap
-        size_t max_workspace = std::min(free_mem / 2, kMaxCap);
+        // Use 10% of free memory for workspace, leaving 90% for model tensors
+        // This allows good algorithm selection while avoiding OOM
+        size_t dynamic_max = free_mem / 10;
 
-        // Minimum 1GB to ensure good algorithm selection
-        constexpr size_t kMinWorkspace = 1024ULL * 1024 * 1024;  // 1 GB minimum
-        return std::max(max_workspace, kMinWorkspace);
+        // Cap at 1GB - larger workspaces rarely provide better algorithms
+        constexpr size_t kMaxCap = 1024ULL * 1024 * 1024;  // 1 GB
+        // Minimum 64MB to ensure basic algorithms work
+        constexpr size_t kMinWorkspace = 64ULL * 1024 * 1024;  // 64 MB
+
+        return std::max(std::min(dynamic_max, kMaxCap), kMinWorkspace);
     }
 
     CuDNNWorkspace(const CuDNNWorkspace&) = delete;

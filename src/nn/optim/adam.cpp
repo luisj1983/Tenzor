@@ -2,9 +2,8 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/core/device.hpp"
-#ifdef TENZOR_CUDA_AVAILABLE
-#include "tenzor/backend/fused_ops.hpp"
-#endif
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/ops/op_id.hpp"
 #include <cmath>
 
 namespace tenzor::optim {
@@ -27,29 +26,29 @@ auto Adam::step() -> void {
 
         const Tensor& grad = param.grad().value();
 
-#ifdef TENZOR_CUDA_AVAILABLE
         // Use fused CUDA kernel for CUDA tensors (single kernel vs ~15 kernels)
         if (param.tensor().device().type == Device::Type::CUDA &&
             grad.device().type == Device::Type::CUDA &&
             param.tensor().dtype() == DType::Float32) {
 
-            cuda::fused_adam_step_cuda(
-                param.tensor(),
-                grad,
-                exp_avg_[i],
-                exp_avg_sq_[i],
-                static_cast<float>(lr_),
-                static_cast<float>(beta1_),
-                static_cast<float>(beta2_),
-                static_cast<float>(eps_),
-                static_cast<float>(weight_decay_),
-                step_count_,
-                false,  // L2 regularization (not decoupled)
-                nullptr  // Default stream
-            );
+            // Prepare inputs for dispatch
+            std::vector<Tensor> inputs = {
+                param.tensor(), grad, exp_avg_[i], exp_avg_sq_[i]
+            };
+
+            // Prepare attributes
+            OpAttributes attrs;
+            attrs["lr"] = std::to_string(static_cast<float>(lr_));
+            attrs["beta1"] = std::to_string(static_cast<float>(beta1_));
+            attrs["beta2"] = std::to_string(static_cast<float>(beta2_));
+            attrs["eps"] = std::to_string(static_cast<float>(eps_));
+            attrs["weight_decay"] = std::to_string(static_cast<float>(weight_decay_));
+            attrs["step"] = std::to_string(step_count_);
+            attrs["decoupled"] = "false";  // L2 regularization for Adam
+
+            dispatch(OpId::FusedAdamStep, inputs, attrs);
             continue;
         }
-#endif
 
         // CPU fallback path
         auto grad_copy = grad.clone();
@@ -194,29 +193,29 @@ auto AdamW::step() -> void {
 
         const Tensor& grad = param.grad().value();
 
-#ifdef TENZOR_CUDA_AVAILABLE
         // Use fused CUDA kernel for CUDA tensors (single kernel vs ~15 kernels)
         if (param.tensor().device().type == Device::Type::CUDA &&
             grad.device().type == Device::Type::CUDA &&
             param.tensor().dtype() == DType::Float32) {
 
-            cuda::fused_adam_step_cuda(
-                param.tensor(),
-                grad,
-                exp_avg_[i],
-                exp_avg_sq_[i],
-                static_cast<float>(lr_),
-                static_cast<float>(beta1_),
-                static_cast<float>(beta2_),
-                static_cast<float>(eps_),
-                static_cast<float>(weight_decay_),
-                step_count_,
-                true,    // Decoupled weight decay (AdamW style)
-                nullptr  // Default stream
-            );
+            // Prepare inputs for dispatch
+            std::vector<Tensor> inputs = {
+                param.tensor(), grad, exp_avg_[i], exp_avg_sq_[i]
+            };
+
+            // Prepare attributes
+            OpAttributes attrs;
+            attrs["lr"] = std::to_string(static_cast<float>(lr_));
+            attrs["beta1"] = std::to_string(static_cast<float>(beta1_));
+            attrs["beta2"] = std::to_string(static_cast<float>(beta2_));
+            attrs["eps"] = std::to_string(static_cast<float>(eps_));
+            attrs["weight_decay"] = std::to_string(static_cast<float>(weight_decay_));
+            attrs["step"] = std::to_string(step_count_);
+            attrs["decoupled"] = "true";  // Decoupled weight decay for AdamW
+
+            dispatch(OpId::FusedAdamStep, inputs, attrs);
             continue;
         }
-#endif
 
         // CPU fallback path
         auto grad_copy = grad.clone();

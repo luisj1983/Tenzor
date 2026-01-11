@@ -1171,6 +1171,49 @@ public:
             }
             return {cpu::conv2d_backward_bias_kernel(inputs[0])};
         }
+        else if (op_name == "conv2d_backward") {
+            // Unified conv2d backward: computes grad_input, grad_weight, and optionally grad_bias
+            // inputs: [grad_output, input, weight]
+            if (inputs.size() != 3) {
+                throw std::invalid_argument("conv2d_backward operation requires exactly 3 inputs (grad_output, input, weight)");
+            }
+            const Tensor& grad_output = inputs[0];
+            const Tensor& input = inputs[1];
+            const Tensor& weight = inputs[2];
+
+            int64_t stride = 1, padding = 0, dilation = 1, groups = 1;
+            bool compute_grad_input = true, compute_grad_weight = true, compute_grad_bias = false;
+
+            if (attrs.contains("stride")) stride = std::stoll(attrs.at("stride"));
+            if (attrs.contains("padding")) padding = std::stoll(attrs.at("padding"));
+            if (attrs.contains("dilation")) dilation = std::stoll(attrs.at("dilation"));
+            if (attrs.contains("groups")) groups = std::stoll(attrs.at("groups"));
+            if (attrs.contains("compute_grad_input")) compute_grad_input = (attrs.at("compute_grad_input") == "1");
+            if (attrs.contains("compute_grad_weight")) compute_grad_weight = (attrs.at("compute_grad_weight") == "1");
+            if (attrs.contains("compute_grad_bias")) compute_grad_bias = (attrs.at("compute_grad_bias") == "1");
+
+            std::vector<int64_t> input_shape(input.shape().begin(), input.shape().end());
+            std::vector<int64_t> weight_shape(weight.shape().begin(), weight.shape().end());
+
+            std::vector<Tensor> results;
+
+            // Compute grad_input
+            if (compute_grad_input) {
+                results.push_back(cpu::conv2d_backward_input_kernel(grad_output, weight, input_shape, stride, padding, dilation, groups));
+            }
+
+            // Compute grad_weight
+            if (compute_grad_weight) {
+                results.push_back(cpu::conv2d_backward_weight_kernel(grad_output, input, weight_shape, stride, padding, dilation, groups));
+            }
+
+            // Compute grad_bias
+            if (compute_grad_bias) {
+                results.push_back(cpu::conv2d_backward_bias_kernel(grad_output));
+            }
+
+            return results;
+        }
         else if (op_name == "conv_transpose2d_forward") {
             if (inputs.size() < 2) {
                 throw std::invalid_argument("conv_transpose2d_forward operation requires at least 2 inputs (input, weight)");

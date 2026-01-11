@@ -8,15 +8,6 @@
 #include <stdexcept>
 #include <iostream>
 
-// Include CUDA kernel headers when available
-#ifdef TENZOR_HAS_CUDA
-#include "tenzor/backends/cuda/conv_kernels.hpp"
-#endif
-
-#ifdef TENZOR_HAS_CUDNN
-#include "tenzor/backend/cudnn_wrapper.hpp"
-#endif
-
 namespace tenzor::nn {
 
 // Helper namespace for convolution operations
@@ -154,131 +145,40 @@ public:
     }
 
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
-        Device original_device = grad_outputs[0].device();
-
         const Tensor& grad_output = grad_outputs[0];
         const Tensor& input = saved_tensors_[0];
         const Tensor& weight = saved_tensors_[1];
 
-        auto weight_shape = weight.shape();
-        int64_t out_channels = weight_shape[0];
-        int64_t in_channels_per_group = weight_shape[1];
-        int64_t kernel_h = weight_shape[2];
-        int64_t kernel_w = weight_shape[3];
-
-        auto input_shape = input.shape();
-        int64_t batch = input_shape[0];
-        int64_t in_channels = in_channels_per_group * groups_;
-        int64_t height = input_shape[2];
-        int64_t width = input_shape[3];
-
-        // Use backend dispatcher for gradient computation
-        #ifdef TENZOR_HAS_CUDA
-        if (original_device.type == Device::Type::CUDA) {
-            // Use CUDA kernels directly
-            #ifdef TENZOR_HAS_CUDNN
-            // Try cuDNN first for better performance
-            try {
-                auto [grad_input, grad_weight, grad_bias] = cuda::cudnn_conv2d_backward(
-                    grad_output, input, weight,
-                    stride_, padding_, dilation_, groups_,
-                    true, true, saved_tensors_.size() > 2,
-                    nullptr
-                );
-
-                if (saved_tensors_.size() > 2) {
-                    return {grad_input, grad_weight, grad_bias};
-                } else {
-                    return {grad_input, grad_weight};
-                }
-            } catch (const std::exception& e) {
-                // Fall back to custom CUDA kernels
-                auto [grad_input, grad_weight, grad_bias] = cuda::conv2d_backward_kernel(
-                    grad_output, input, weight,
-                    stride_, padding_, dilation_, groups_,
-                    true, true, saved_tensors_.size() > 2,
-                    nullptr
-                );
-
-                if (saved_tensors_.size() > 2) {
-                    return {grad_input, grad_weight, grad_bias};
-                } else {
-                    return {grad_input, grad_weight};
-                }
-            }
-            #else
-            // Use custom CUDA kernels
-            auto [grad_input, grad_weight, grad_bias] = cuda::conv2d_backward_kernel(
-                grad_output, input, weight,
-                stride_, padding_, dilation_, groups_,
-                true, true, saved_tensors_.size() > 2,
-                nullptr
-            );
-
-            if (saved_tensors_.size() > 2) {
-                return {grad_input, grad_weight, grad_bias};
-            } else {
-                return {grad_input, grad_weight};
-            }
-            #endif
-        }
-        #endif
-
-        // Use CPU backend through operation registry for proper dtype support
+        // Use backend dispatcher for gradient computation (routes to CUDA/cuDNN automatically)
+        // Use single unified backward dispatch for better performance (one cuDNN call vs 3)
         std::vector<Tensor> tensors_for_dispatch = {grad_output};
         auto* backend = Dispatcher::get_backend(tensors_for_dispatch);
 
-        // Prepare input shape for backward computation
-        std::string input_shape_str = std::to_string(batch) + "," + std::to_string(in_channels) + "," +
-                                      std::to_string(height) + "," + std::to_string(width);
-        std::string weight_shape_str = std::to_string(out_channels) + "," + std::to_string(in_channels_per_group) + "," +
-                                       std::to_string(kernel_h) + "," + std::to_string(kernel_w);
+        bool has_bias = saved_tensors_.size() > 2;
 
-        // Compute gradients using backend operations
-        std::vector<Tensor> grad_input_inputs = {grad_output, weight};
-        OpAttributes grad_input_attrs = {
-            {"input_shape", input_shape_str},
+        // Prepare attributes for unified backward
+        OpAttributes backward_attrs = {
             {"stride", std::to_string(stride_)},
             {"padding", std::to_string(padding_)},
             {"dilation", std::to_string(dilation_)},
-            {"groups", std::to_string(groups_)}
+            {"groups", std::to_string(groups_)},
+            {"compute_grad_input", "1"},
+            {"compute_grad_weight", "1"},
+            {"compute_grad_bias", has_bias ? "1" : "0"}
         };
-        auto grad_input_result = backend->dispatch(
-            "conv2d_backward_input",
-            grad_input_inputs,
-            grad_input_attrs
-        );
-        Tensor grad_input = grad_input_result[0];
 
-        std::vector<Tensor> grad_weight_inputs = {grad_output, input};
-        OpAttributes grad_weight_attrs = {
-            {"weight_shape", weight_shape_str},
-            {"stride", std::to_string(stride_)},
-            {"padding", std::to_string(padding_)},
-            {"dilation", std::to_string(dilation_)},
-            {"groups", std::to_string(groups_)}
-        };
-        auto grad_weight_result = backend->dispatch(
-            "conv2d_backward_weight",
-            grad_weight_inputs,
-            grad_weight_attrs
+        // Single dispatch call: conv2d_backward(grad_output, input, weight) -> [grad_input, grad_weight, grad_bias]
+        std::vector<Tensor> backward_inputs = {grad_output, input, weight};
+        auto backward_result = backend->dispatch(
+            "conv2d_backward",
+            backward_inputs,
+            backward_attrs
         );
-        Tensor grad_weight = grad_weight_result[0];
 
-        // Gradient w.r.t bias
-        if (saved_tensors_.size() > 2) {
-            std::vector<Tensor> grad_bias_inputs = {grad_output};
-            OpAttributes empty_attrs{};
-            auto grad_bias_result = backend->dispatch(
-                "conv2d_backward_bias",
-                grad_bias_inputs,
-                empty_attrs
-            );
-            Tensor grad_bias = grad_bias_result[0];
-            return {grad_input, grad_weight, grad_bias};
+        if (has_bias) {
+            return {backward_result[0], backward_result[1], backward_result[2]};
         }
-
-        return {grad_input, grad_weight};
+        return {backward_result[0], backward_result[1]};
 
         /*
         // Old CPU fallback implementation - replaced with backend call above
@@ -498,59 +398,28 @@ auto Conv2d::forward_impl(const Variable& input) -> Variable {
 
     Tensor output;
 
-    #ifdef TENZOR_HAS_CUDA
-    if (original_device.type == Device::Type::CUDA) {
-        #ifdef TENZOR_HAS_CUDNN
-        // Try cuDNN first for optimal performance
-        try {
-            output = cuda::cudnn_conv2d_forward(
-                input.tensor(), weight_matched.tensor(), bias_ptr,
-                stride_, padding_, dilation_, groups_,
-                nullptr
-            );
-        } catch (const std::exception& e) {
-            // Fall back to custom CUDA kernels
-            output = cuda::conv2d_forward_kernel(
-                input.tensor(), weight_matched.tensor(), bias_ptr,
-                stride_, padding_, dilation_, groups_,
-                nullptr
-            );
-        }
-        #else
-        // Use custom CUDA kernels
-        output = cuda::conv2d_forward_kernel(
-            input.tensor(), weight_matched.tensor(), bias_ptr,
-            stride_, padding_, dilation_, groups_,
-            nullptr
-        );
-        #endif
-    } else
-    #endif
-    {
-        // Use CPU backend through operation registry for proper dtype support
-        std::vector<Tensor> tensors_for_dispatch = {input.tensor()};
-        auto* backend = Dispatcher::get_backend(tensors_for_dispatch);
+    // Use backend dispatcher (routes to CUDA/cuDNN/CPU automatically based on tensor device)
+    std::vector<Tensor> tensors_for_dispatch = {input.tensor()};
+    auto* backend = Dispatcher::get_backend(tensors_for_dispatch);
 
-        // Compute output using backend operation
-        // Pass bias as third input if present
-        std::vector<Tensor> inputs_vec = {input.tensor(), weight_matched.tensor()};
-        if (bias_ptr != nullptr) {
-            inputs_vec.push_back(*bias_ptr);
-        }
-
-        OpAttributes forward_attrs = {
-            {"stride", std::to_string(stride_)},
-            {"padding", std::to_string(padding_)},
-            {"dilation", std::to_string(dilation_)},
-            {"groups", std::to_string(groups_)}
-        };
-        auto output_result = backend->dispatch(
-            "conv2d_forward",
-            std::span<const Tensor>(inputs_vec),
-            forward_attrs
-        );
-        output = output_result[0];
+    // Compute output using backend operation
+    std::vector<Tensor> inputs_vec = {input.tensor(), weight_matched.tensor()};
+    if (bias_ptr != nullptr) {
+        inputs_vec.push_back(*bias_ptr);
     }
+
+    OpAttributes forward_attrs = {
+        {"stride", std::to_string(stride_)},
+        {"padding", std::to_string(padding_)},
+        {"dilation", std::to_string(dilation_)},
+        {"groups", std::to_string(groups_)}
+    };
+    auto output_result = backend->dispatch(
+        "conv2d_forward",
+        std::span<const Tensor>(inputs_vec),
+        forward_attrs
+    );
+    output = output_result[0];
 
     auto result = Variable(output, input.requires_grad() || weight.requires_grad());
 

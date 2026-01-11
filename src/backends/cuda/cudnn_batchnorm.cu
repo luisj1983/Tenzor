@@ -135,9 +135,15 @@ auto cudnn_batchnorm2d_forward_inference(
             epsilon
         ));
     } else if (input.dtype() == DType::Float16) {
-        // For FP16, cuDNN requires FP32 alpha/beta
+        // For FP16 input, cuDNN requires FP32 for bnScale, bnBias, mean, variance
         const float alpha = 1.0f;
         const float zero = 0.0f;
+
+        // Convert parameters to Float32 as required by cuDNN
+        Tensor gamma_f32 = gamma_c.to(DType::Float32);
+        Tensor beta_f32 = beta_c.to(DType::Float32);
+        Tensor mean_f32 = mean_c.to(DType::Float32);
+        Tensor var_f32 = var_c.to(DType::Float32);
 
         CUDNN_CHECK(cudnnBatchNormalizationForwardInference(
             handle,
@@ -149,10 +155,10 @@ auto cudnn_batchnorm2d_forward_inference(
             output_desc.get(),
             output.data_ptr(),
             bn_desc,
-            gamma_c.data_ptr(),
-            beta_c.data_ptr(),
-            mean_c.data_ptr(),
-            var_c.data_ptr(),
+            gamma_f32.data<float>(),
+            beta_f32.data<float>(),
+            mean_f32.data<float>(),
+            var_f32.data<float>(),
             epsilon
         ));
     }
@@ -225,10 +231,13 @@ auto cudnn_batchnorm2d_forward_training(
         CUDNN_BATCHNORM_SPATIAL
     ));
 
-    // Create output and saved tensors
+    // Create output tensor (same dtype as input)
     Tensor output(std::vector<int64_t>(shape.begin(), shape.end()), input.dtype(), input.device());
-    Tensor saved_mean({C}, input.dtype(), input.device());
-    Tensor saved_inv_var({C}, input.dtype(), input.device());
+
+    // For Float16 input, cuDNN requires saved stats to be Float32
+    DType stats_dtype = (input.dtype() == DType::Float16) ? DType::Float32 : input.dtype();
+    Tensor saved_mean({C}, stats_dtype, input.device());
+    Tensor saved_inv_var({C}, stats_dtype, input.device());
 
     Tensor input_c = input.is_contiguous() ? input : input.contiguous();
     Tensor gamma_c = gamma.is_contiguous() ? gamma : gamma.contiguous();
@@ -281,8 +290,17 @@ auto cudnn_batchnorm2d_forward_training(
             saved_inv_var.data<double>()
         ));
     } else if (input.dtype() == DType::Float16) {
+        // For FP16 input, cuDNN requires FP32 for all BN parameters
         const float alpha = 1.0f;
         const float zero = 0.0f;
+
+        // Convert parameters to Float32 as required by cuDNN
+        Tensor gamma_f32 = gamma_c.to(DType::Float32);
+        Tensor beta_f32 = beta_c.to(DType::Float32);
+
+        // Convert running stats to Float32, update, then copy back
+        Tensor running_mean_f32 = running_mean.to(DType::Float32);
+        Tensor running_var_f32 = running_var.to(DType::Float32);
 
         CUDNN_CHECK(cudnnBatchNormalizationForwardTraining(
             handle,
@@ -294,15 +312,23 @@ auto cudnn_batchnorm2d_forward_training(
             output_desc.get(),
             output.data_ptr(),
             bn_desc,
-            gamma_c.data_ptr(),
-            beta_c.data_ptr(),
+            gamma_f32.data<float>(),
+            beta_f32.data<float>(),
             momentum,
-            running_mean.data_ptr(),
-            running_var.data_ptr(),
+            running_mean_f32.data<float>(),
+            running_var_f32.data<float>(),
             epsilon,
-            saved_mean.data_ptr(),
-            saved_inv_var.data_ptr()
+            saved_mean.data<float>(),
+            saved_inv_var.data<float>()
         ));
+
+        // Copy updated running stats back to original Float16 tensors
+        auto rm_f16 = running_mean_f32.to(DType::Float16);
+        auto rv_f16 = running_var_f32.to(DType::Float16);
+        cudaMemcpyAsync(running_mean.data_ptr(), rm_f16.data_ptr(),
+                        running_mean.numel() * sizeof(Float16), cudaMemcpyDeviceToDevice, stream);
+        cudaMemcpyAsync(running_var.data_ptr(), rv_f16.data_ptr(),
+                        running_var.numel() * sizeof(Float16), cudaMemcpyDeviceToDevice, stream);
     }
 
     cudnnDestroyTensorDescriptor(bn_desc);
@@ -369,7 +395,7 @@ auto cudnn_batchnorm2d_backward(
         CUDNN_BATCHNORM_SPATIAL
     ));
 
-    // Create gradient tensors
+    // Create gradient tensors (same dtype as input to match original parameters)
     Tensor grad_input(std::vector<int64_t>(shape.begin(), shape.end()), input.dtype(), input.device());
     Tensor grad_gamma({C}, input.dtype(), input.device());
     Tensor grad_beta({C}, input.dtype(), input.device());
@@ -431,8 +457,18 @@ auto cudnn_batchnorm2d_backward(
             inv_var_c.data<double>()
         ));
     } else if (input.dtype() == DType::Float16) {
+        // For FP16 input, cuDNN requires FP32 for gamma, saved_mean, saved_inv_var
         const float alpha = 1.0f;
         const float zero = 0.0f;
+
+        // Convert parameters to Float32 as required by cuDNN
+        Tensor gamma_f32 = gamma_c.to(DType::Float32);
+        Tensor mean_f32 = mean_c.to(DType::Float32);
+        Tensor inv_var_f32 = inv_var_c.to(DType::Float32);
+
+        // Temporary Float32 tensors for gradients
+        Tensor grad_gamma_f32({C}, DType::Float32, input.device());
+        Tensor grad_beta_f32({C}, DType::Float32, input.device());
 
         CUDNN_CHECK(cudnnBatchNormalizationBackward(
             handle,
@@ -448,13 +484,17 @@ auto cudnn_batchnorm2d_backward(
             input_desc.get(),
             grad_input.data_ptr(),
             bn_desc,
-            gamma_c.data_ptr(),
-            grad_gamma.data_ptr(),
-            grad_beta.data_ptr(),
+            gamma_f32.data<float>(),
+            grad_gamma_f32.data<float>(),
+            grad_beta_f32.data<float>(),
             epsilon,
-            mean_c.data_ptr(),
-            inv_var_c.data_ptr()
+            mean_f32.data<float>(),
+            inv_var_f32.data<float>()
         ));
+
+        // Convert gradients back to Float16 to match original parameter dtypes
+        grad_gamma = grad_gamma_f32.to(DType::Float16);
+        grad_beta = grad_beta_f32.to(DType::Float16);
     }
 
     cudnnDestroyTensorDescriptor(bn_desc);

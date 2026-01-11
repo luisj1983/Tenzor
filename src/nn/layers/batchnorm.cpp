@@ -61,7 +61,7 @@ public:
         // Ensure all saved tensors are contiguous
         auto input = saved[0].contiguous();
         auto mean = saved[1].contiguous();
-        auto invstd = saved[2].contiguous();
+        auto invstd = saved[2].contiguous();  // saved_inv_var from cuDNN or computed invstd
         auto weight = saved[3].contiguous();
 
         // grad_output: [N, C, H, W]
@@ -72,6 +72,29 @@ public:
         int64_t W = shape[3];
         int64_t spatial_size = H * W;
         int64_t batch_size = N * spatial_size;
+
+        // ================================================================
+        // FAST CUDA PATH: Use cuDNN backward kernel (single kernel launch)
+        // ================================================================
+        if (input.device().type == Device::Type::CUDA &&
+            (input.dtype() == DType::Float32 || input.dtype() == DType::Float16 || input.dtype() == DType::Float64)) {
+            // Dispatch to cuDNN/CUDA kernel for BatchNorm backward
+            // inputs: [grad_output, input, gamma, saved_mean, saved_inv_var]
+            OpAttributes backward_attrs;
+            std::ostringstream eps_ss;
+            eps_ss << std::scientific << std::setprecision(9) << static_cast<float>(eps_);
+            backward_attrs["epsilon"] = eps_ss.str();
+
+            std::vector<Tensor> backward_inputs = {grad_output, input, weight, mean, invstd};
+            std::vector<Tensor> backward_results = dispatch(OpId::BatchNorm2dBackward, backward_inputs, backward_attrs);
+
+            // Return gradients in the order of input_vars: [input, weight, bias]
+            return {backward_results[0], backward_results[1], backward_results[2]};
+        }
+
+        // ================================================================
+        // CPU FALLBACK: Use tensor operations
+        // ================================================================
 
         // Compute normalized input for gradient computation
         auto mean_broadcast = mean.unsqueeze(0).unsqueeze(2).unsqueeze(3).contiguous();

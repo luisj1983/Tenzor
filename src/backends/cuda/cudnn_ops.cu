@@ -105,15 +105,16 @@ auto cudnn_conv2d_forward(
         cudnnConvolutionFwdAlgoPerf_t perf_results[kMaxAlgos];
 
         // Actually run and time each algorithm
+        // Use data_ptr() for correct dtype handling (cuDNN uses void* internally)
         cudnnStatus_t find_status = cudnnFindConvolutionForwardAlgorithmEx(
             handle,
             input_desc.get(),
-            input.data<float>(),
+            input.data_ptr(),
             filter_desc.get(),
-            weight.data<float>(),
+            weight.data_ptr(),
             conv_desc.get(),
             output_desc.get(),
-            output.data<float>(),
+            output.data_ptr(),
             kMaxAlgos,
             &returned_algo_count,
             perf_results,
@@ -914,18 +915,32 @@ auto cudnn_maxpool2d_forward(
     output_desc.set(cudnn_dtype, batch, channels, out_h, out_w);
     pool_desc.set_maxpool(kernel_size, kernel_size, padding, padding, stride, stride);
 
-    float alpha = 1.0f, beta = 0.0f;
-
-    CUDNN_CHECK(cudnnPoolingForward(
-        handle,
-        pool_desc.get(),
-        &alpha,
-        input_desc.get(),
-        input.data_ptr(),
-        &beta,
-        output_desc.get(),
-        output.data_ptr()
-    ));
+    // cuDNN requires alpha/beta type to match tensor dtype
+    if (input.dtype() == DType::Float64) {
+        double alpha = 1.0, beta = 0.0;
+        CUDNN_CHECK(cudnnPoolingForward(
+            handle,
+            pool_desc.get(),
+            &alpha,
+            input_desc.get(),
+            input.data_ptr(),
+            &beta,
+            output_desc.get(),
+            output.data_ptr()
+        ));
+    } else {
+        float alpha = 1.0f, beta = 0.0f;
+        CUDNN_CHECK(cudnnPoolingForward(
+            handle,
+            pool_desc.get(),
+            &alpha,
+            input_desc.get(),
+            input.data_ptr(),
+            &beta,
+            output_desc.get(),
+            output.data_ptr()
+        ));
+    }
 
     return {output, indices};
 }
@@ -974,22 +989,40 @@ auto cudnn_maxpool2d_backward(
     output_desc.set(cudnn_dtype, batch, channels, out_h, out_w);
     pool_desc.set_maxpool(kernel_size, kernel_size, padding, padding, stride, stride);
 
-    float alpha = 1.0f, beta = 0.0f;
-
-    CUDNN_CHECK(cudnnPoolingBackward(
-        handle,
-        pool_desc.get(),
-        &alpha,
-        output_desc.get(),
-        output.data_ptr(),
-        output_desc.get(),
-        grad_output.data_ptr(),
-        input_desc.get(),
-        input.data_ptr(),
-        &beta,
-        input_desc.get(),
-        grad_input.data_ptr()
-    ));
+    // cuDNN requires alpha/beta type to match tensor dtype
+    if (input.dtype() == DType::Float64) {
+        double alpha = 1.0, beta = 0.0;
+        CUDNN_CHECK(cudnnPoolingBackward(
+            handle,
+            pool_desc.get(),
+            &alpha,
+            output_desc.get(),
+            output.data_ptr(),
+            output_desc.get(),
+            grad_output.data_ptr(),
+            input_desc.get(),
+            input.data_ptr(),
+            &beta,
+            input_desc.get(),
+            grad_input.data_ptr()
+        ));
+    } else {
+        float alpha = 1.0f, beta = 0.0f;
+        CUDNN_CHECK(cudnnPoolingBackward(
+            handle,
+            pool_desc.get(),
+            &alpha,
+            output_desc.get(),
+            output.data_ptr(),
+            output_desc.get(),
+            grad_output.data_ptr(),
+            input_desc.get(),
+            input.data_ptr(),
+            &beta,
+            input_desc.get(),
+            grad_input.data_ptr()
+        ));
+    }
 
     return grad_input;
 }
@@ -1035,18 +1068,32 @@ auto cudnn_avgpool2d_forward(
     output_desc.set(cudnn_dtype, batch, channels, out_h, out_w);
     pool_desc.set_avgpool(kernel_size, kernel_size, padding, padding, stride, stride);
 
-    float alpha = 1.0f, beta = 0.0f;
-
-    CUDNN_CHECK(cudnnPoolingForward(
-        handle,
-        pool_desc.get(),
-        &alpha,
-        input_desc.get(),
-        input.data_ptr(),
-        &beta,
-        output_desc.get(),
-        output.data_ptr()
-    ));
+    // cuDNN requires alpha/beta type to match tensor dtype
+    if (input.dtype() == DType::Float64) {
+        double alpha = 1.0, beta = 0.0;
+        CUDNN_CHECK(cudnnPoolingForward(
+            handle,
+            pool_desc.get(),
+            &alpha,
+            input_desc.get(),
+            input.data_ptr(),
+            &beta,
+            output_desc.get(),
+            output.data_ptr()
+        ));
+    } else {
+        float alpha = 1.0f, beta = 0.0f;
+        CUDNN_CHECK(cudnnPoolingForward(
+            handle,
+            pool_desc.get(),
+            &alpha,
+            input_desc.get(),
+            input.data_ptr(),
+            &beta,
+            output_desc.get(),
+            output.data_ptr()
+        ));
+    }
 
     return output;
 }
@@ -1094,25 +1141,43 @@ auto cudnn_avgpool2d_backward(
     output_desc.set(cudnn_dtype, batch, channels, out_h, out_w);
     pool_desc.set_avgpool(kernel_size, kernel_size, padding, padding, stride, stride);
 
-    float alpha = 1.0f, beta = 0.0f;
-
     // AvgPool backward doesn't need original output, but cuDNN API requires all params
     Tensor dummy_output({batch, channels, out_h, out_w}, input.dtype(), input.device());
 
-    CUDNN_CHECK(cudnnPoolingBackward(
-        handle,
-        pool_desc.get(),
-        &alpha,
-        output_desc.get(),
-        dummy_output.data_ptr(),
-        output_desc.get(),
-        grad_output.data_ptr(),
-        input_desc.get(),
-        input.data_ptr(),
-        &beta,
-        input_desc.get(),
-        grad_input.data_ptr()
-    ));
+    // cuDNN requires alpha/beta type to match tensor dtype
+    if (input.dtype() == DType::Float64) {
+        double alpha = 1.0, beta = 0.0;
+        CUDNN_CHECK(cudnnPoolingBackward(
+            handle,
+            pool_desc.get(),
+            &alpha,
+            output_desc.get(),
+            dummy_output.data_ptr(),
+            output_desc.get(),
+            grad_output.data_ptr(),
+            input_desc.get(),
+            input.data_ptr(),
+            &beta,
+            input_desc.get(),
+            grad_input.data_ptr()
+        ));
+    } else {
+        float alpha = 1.0f, beta = 0.0f;
+        CUDNN_CHECK(cudnnPoolingBackward(
+            handle,
+            pool_desc.get(),
+            &alpha,
+            output_desc.get(),
+            dummy_output.data_ptr(),
+            output_desc.get(),
+            grad_output.data_ptr(),
+            input_desc.get(),
+            input.data_ptr(),
+            &beta,
+            input_desc.get(),
+            grad_input.data_ptr()
+        ));
+    }
 
     return grad_input;
 }
@@ -1162,19 +1227,34 @@ auto cudnn_softmax_forward(
     input_desc.set(cudnn_dtype, outer_size, dim_size, inner_size, 1);
     output_desc.set(cudnn_dtype, outer_size, dim_size, inner_size, 1);
 
-    float alpha = 1.0f, beta = 0.0f;
-
-    CUDNN_CHECK(cudnnSoftmaxForward(
-        handle,
-        CUDNN_SOFTMAX_ACCURATE,
-        CUDNN_SOFTMAX_MODE_CHANNEL,
-        &alpha,
-        input_desc.get(),
-        input.data_ptr(),
-        &beta,
-        output_desc.get(),
-        output.data_ptr()
-    ));
+    // cuDNN requires alpha/beta type to match tensor dtype
+    if (input.dtype() == DType::Float64) {
+        double alpha = 1.0, beta = 0.0;
+        CUDNN_CHECK(cudnnSoftmaxForward(
+            handle,
+            CUDNN_SOFTMAX_ACCURATE,
+            CUDNN_SOFTMAX_MODE_CHANNEL,
+            &alpha,
+            input_desc.get(),
+            input.data_ptr(),
+            &beta,
+            output_desc.get(),
+            output.data_ptr()
+        ));
+    } else {
+        float alpha = 1.0f, beta = 0.0f;
+        CUDNN_CHECK(cudnnSoftmaxForward(
+            handle,
+            CUDNN_SOFTMAX_ACCURATE,
+            CUDNN_SOFTMAX_MODE_CHANNEL,
+            &alpha,
+            input_desc.get(),
+            input.data_ptr(),
+            &beta,
+            output_desc.get(),
+            output.data_ptr()
+        ));
+    }
 
     return output;
 }
@@ -1220,21 +1300,38 @@ auto cudnn_softmax_backward(
     output_desc.set(cudnn_dtype, outer_size, dim_size, inner_size, 1);
     grad_desc.set(cudnn_dtype, outer_size, dim_size, inner_size, 1);
 
-    float alpha = 1.0f, beta = 0.0f;
-
-    CUDNN_CHECK(cudnnSoftmaxBackward(
-        handle,
-        CUDNN_SOFTMAX_ACCURATE,
-        CUDNN_SOFTMAX_MODE_CHANNEL,
-        &alpha,
-        output_desc.get(),
-        output.data_ptr(),
-        grad_desc.get(),
-        grad_output.data_ptr(),
-        &beta,
-        grad_desc.get(),
-        grad_input.data_ptr()
-    ));
+    // cuDNN requires alpha/beta type to match tensor dtype
+    if (output.dtype() == DType::Float64) {
+        double alpha = 1.0, beta = 0.0;
+        CUDNN_CHECK(cudnnSoftmaxBackward(
+            handle,
+            CUDNN_SOFTMAX_ACCURATE,
+            CUDNN_SOFTMAX_MODE_CHANNEL,
+            &alpha,
+            output_desc.get(),
+            output.data_ptr(),
+            grad_desc.get(),
+            grad_output.data_ptr(),
+            &beta,
+            grad_desc.get(),
+            grad_input.data_ptr()
+        ));
+    } else {
+        float alpha = 1.0f, beta = 0.0f;
+        CUDNN_CHECK(cudnnSoftmaxBackward(
+            handle,
+            CUDNN_SOFTMAX_ACCURATE,
+            CUDNN_SOFTMAX_MODE_CHANNEL,
+            &alpha,
+            output_desc.get(),
+            output.data_ptr(),
+            grad_desc.get(),
+            grad_output.data_ptr(),
+            &beta,
+            grad_desc.get(),
+            grad_input.data_ptr()
+        ));
+    }
 
     return grad_input;
 }
@@ -1279,19 +1376,34 @@ auto cudnn_log_softmax_forward(
     input_desc.set(cudnn_dtype, outer_size, dim_size, inner_size, 1);
     output_desc.set(cudnn_dtype, outer_size, dim_size, inner_size, 1);
 
-    float alpha = 1.0f, beta = 0.0f;
-
-    CUDNN_CHECK(cudnnSoftmaxForward(
-        handle,
-        CUDNN_SOFTMAX_LOG,
-        CUDNN_SOFTMAX_MODE_CHANNEL,
-        &alpha,
-        input_desc.get(),
-        input.data_ptr(),
-        &beta,
-        output_desc.get(),
-        output.data_ptr()
-    ));
+    // cuDNN requires alpha/beta type to match tensor dtype
+    if (input.dtype() == DType::Float64) {
+        double alpha = 1.0, beta = 0.0;
+        CUDNN_CHECK(cudnnSoftmaxForward(
+            handle,
+            CUDNN_SOFTMAX_LOG,
+            CUDNN_SOFTMAX_MODE_CHANNEL,
+            &alpha,
+            input_desc.get(),
+            input.data_ptr(),
+            &beta,
+            output_desc.get(),
+            output.data_ptr()
+        ));
+    } else {
+        float alpha = 1.0f, beta = 0.0f;
+        CUDNN_CHECK(cudnnSoftmaxForward(
+            handle,
+            CUDNN_SOFTMAX_LOG,
+            CUDNN_SOFTMAX_MODE_CHANNEL,
+            &alpha,
+            input_desc.get(),
+            input.data_ptr(),
+            &beta,
+            output_desc.get(),
+            output.data_ptr()
+        ));
+    }
 
     return output;
 }
@@ -1337,21 +1449,38 @@ auto cudnn_log_softmax_backward(
     output_desc.set(cudnn_dtype, outer_size, dim_size, inner_size, 1);
     grad_desc.set(cudnn_dtype, outer_size, dim_size, inner_size, 1);
 
-    float alpha = 1.0f, beta = 0.0f;
-
-    CUDNN_CHECK(cudnnSoftmaxBackward(
-        handle,
-        CUDNN_SOFTMAX_LOG,
-        CUDNN_SOFTMAX_MODE_CHANNEL,
-        &alpha,
-        output_desc.get(),
-        output.data_ptr(),
-        grad_desc.get(),
-        grad_output.data_ptr(),
-        &beta,
-        grad_desc.get(),
-        grad_input.data_ptr()
-    ));
+    // cuDNN requires alpha/beta type to match tensor dtype
+    if (output.dtype() == DType::Float64) {
+        double alpha = 1.0, beta = 0.0;
+        CUDNN_CHECK(cudnnSoftmaxBackward(
+            handle,
+            CUDNN_SOFTMAX_LOG,
+            CUDNN_SOFTMAX_MODE_CHANNEL,
+            &alpha,
+            output_desc.get(),
+            output.data_ptr(),
+            grad_desc.get(),
+            grad_output.data_ptr(),
+            &beta,
+            grad_desc.get(),
+            grad_input.data_ptr()
+        ));
+    } else {
+        float alpha = 1.0f, beta = 0.0f;
+        CUDNN_CHECK(cudnnSoftmaxBackward(
+            handle,
+            CUDNN_SOFTMAX_LOG,
+            CUDNN_SOFTMAX_MODE_CHANNEL,
+            &alpha,
+            output_desc.get(),
+            output.data_ptr(),
+            grad_desc.get(),
+            grad_output.data_ptr(),
+            &beta,
+            grad_desc.get(),
+            grad_input.data_ptr()
+        ));
+    }
 
     return grad_input;
 }

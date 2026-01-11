@@ -4,6 +4,10 @@
 #include <tuple>
 #include <vector>
 
+// Forward declare CUDA stream type to avoid including CUDA headers
+struct CUstream_st;
+typedef struct CUstream_st* cudaStream_t;
+
 namespace tenzor {
 namespace cuda {
 

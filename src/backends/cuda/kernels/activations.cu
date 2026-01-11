@@ -101,6 +101,30 @@ __global__ void relu_backward_kernel(const T* grad_output, const T* input,
     }
 }
 
+// Vectorized ReLU backward using float4 for 4x memory throughput
+__global__ void relu_backward_vectorized_kernel(const float4* grad_output, const float4* input,
+                                                float4* grad_input, int64_t n4) {
+    CUDA_GRID_STRIDE_LOOP(idx, n4) {
+        float4 g = grad_output[idx];
+        float4 x = input[idx];
+        float4 result;
+        result.x = g.x * (x.x > 0.0f ? 1.0f : 0.0f);
+        result.y = g.y * (x.y > 0.0f ? 1.0f : 0.0f);
+        result.z = g.z * (x.z > 0.0f ? 1.0f : 0.0f);
+        result.w = g.w * (x.w > 0.0f ? 1.0f : 0.0f);
+        grad_input[idx] = result;
+    }
+}
+
+// Handle remainder elements
+__global__ void relu_backward_remainder_kernel(const float* grad_output, const float* input,
+                                               float* grad_input, int64_t start, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x + start;
+    if (idx < n) {
+        grad_input[idx] = grad_output[idx] * (input[idx] > 0.0f ? 1.0f : 0.0f);
+    }
+}
+
 // Host functions
 extern "C" {
     void relu_forward_float(const float* input, float* output, int64_t n) {
@@ -1121,7 +1145,7 @@ auto relu_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     return result;
 }
 
-// ReLU backward wrapper
+// ReLU backward wrapper - uses vectorized float4 for 4x memory throughput
 auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaStream_t stream) -> Tensor {
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
@@ -1133,9 +1157,29 @@ auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaSt
     }
 
     if (input.dtype() == DType::Float32) {
-        int num_blocks = get_num_blocks(n);
-        relu_backward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-            grad_output.data<float>(), input.data<float>(), result.data<float>(), n);
+        // Use vectorized kernel for Float32 - 4x memory throughput
+        const float* grad_ptr = grad_output.data<float>();
+        const float* input_ptr = input.data<float>();
+        float* result_ptr = result.data<float>();
+
+        int64_t n4 = n / 4;  // Number of float4 elements
+        int64_t remainder = n % 4;
+
+        if (n4 > 0) {
+            int num_blocks = get_num_blocks(n4);
+            relu_backward_vectorized_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                reinterpret_cast<const float4*>(grad_ptr),
+                reinterpret_cast<const float4*>(input_ptr),
+                reinterpret_cast<float4*>(result_ptr), n4);
+        }
+
+        // Handle remainder elements
+        if (remainder > 0) {
+            int64_t start = n4 * 4;
+            int num_blocks_rem = (remainder + BLOCK_SIZE - 1) / BLOCK_SIZE;
+            relu_backward_remainder_kernel<<<num_blocks_rem, BLOCK_SIZE, 0, stream>>>(
+                grad_ptr, input_ptr, result_ptr, start, n);
+        }
     } else if (input.dtype() == DType::Float64) {
         int num_blocks = get_num_blocks(n);
         relu_backward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(

@@ -27,15 +27,17 @@ auto temperature_softmax(
         throw std::runtime_error("Temperature must be positive");
     }
 
-    // Cast to Float32 only if needed for consistent dtype in all operations
-    Variable logits_fp32 = (logits.tensor().dtype() == DType::Float32)
-        ? logits
-        : Variable(logits.tensor().to(DType::Float32), logits.requires_grad());
+    // Only convert Float16 to Float32 for numerical stability
+    // Preserve Float32 and Float64 as-is
+    Variable logits_processed = logits;
+    if (logits.tensor().dtype() == DType::Float16) {
+        logits_processed = Variable(logits.tensor().to(DType::Float32), logits.requires_grad());
+    }
 
     // Scale logits by temperature: logits / T
     // Lower temperature → sharper distribution
     // Higher temperature → softer distribution
-    Variable scaled_logits = logits_fp32 / temperature;
+    Variable scaled_logits = logits_processed / temperature;
 
     // Apply numerically stable softmax
     // The softmax function already implements:
@@ -53,13 +55,15 @@ auto temperature_log_softmax(
         throw std::runtime_error("Temperature must be positive");
     }
 
-    // Cast to Float32 only if needed for consistent dtype in all operations
-    Variable logits_fp32 = (logits.tensor().dtype() == DType::Float32)
-        ? logits
-        : Variable(logits.tensor().to(DType::Float32), logits.requires_grad());
+    // Only convert Float16 to Float32 for numerical stability
+    // Preserve Float32 and Float64 as-is
+    Variable logits_processed = logits;
+    if (logits.tensor().dtype() == DType::Float16) {
+        logits_processed = Variable(logits.tensor().to(DType::Float32), logits.requires_grad());
+    }
 
     // Scale logits by temperature: logits / T
-    Variable scaled_logits = logits_fp32 / temperature;
+    Variable scaled_logits = logits_processed / temperature;
 
     // Apply numerically stable log-softmax
     // The log_softmax function already implements:

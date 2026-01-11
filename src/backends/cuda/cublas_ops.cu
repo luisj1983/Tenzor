@@ -496,6 +496,100 @@ __global__ void bias_add_kernel_vec4(
 }
 
 // ============================================================================
+// Bias Gradient Reduction - Sum over batch dimension for backward pass
+// ============================================================================
+
+/**
+ * @brief CUDA kernel for computing bias gradients via sum reduction
+ *
+ * Computes grad_bias[j] = sum_i(grad_output[i, j]) for all j in [0, out_features)
+ * Each block handles one output feature, using efficient parallel reduction.
+ */
+template<typename T, int BLOCK_SIZE = 256>
+__global__ void bias_grad_reduce_kernel(
+    const T* __restrict__ grad_output,
+    T* __restrict__ grad_bias,
+    int64_t batch_size,
+    int64_t out_features
+) {
+    // Each block handles one output feature
+    int64_t feature_idx = blockIdx.x;
+    if (feature_idx >= out_features) return;
+
+    __shared__ T shared[BLOCK_SIZE];
+
+    // Each thread accumulates multiple elements
+    T sum = 0;
+    for (int64_t i = threadIdx.x; i < batch_size; i += BLOCK_SIZE) {
+        sum += grad_output[i * out_features + feature_idx];
+    }
+    shared[threadIdx.x] = sum;
+    __syncthreads();
+
+    // Parallel reduction within block
+    for (int stride = BLOCK_SIZE / 2; stride > 0; stride >>= 1) {
+        if (threadIdx.x < stride) {
+            shared[threadIdx.x] += shared[threadIdx.x + stride];
+        }
+        __syncthreads();
+    }
+
+    // Write result
+    if (threadIdx.x == 0) {
+        grad_bias[feature_idx] = shared[0];
+    }
+}
+
+/**
+ * @brief Vectorized bias gradient reduction using warp shuffles
+ *
+ * More efficient for larger batch sizes - uses warp-level reduction.
+ */
+template<typename T, int BLOCK_SIZE = 256>
+__global__ void bias_grad_reduce_warp_kernel(
+    const T* __restrict__ grad_output,
+    T* __restrict__ grad_bias,
+    int64_t batch_size,
+    int64_t out_features
+) {
+    // Each block handles one output feature
+    int64_t feature_idx = blockIdx.x;
+    if (feature_idx >= out_features) return;
+
+    // Each thread accumulates multiple elements
+    T sum = 0;
+    for (int64_t i = threadIdx.x; i < batch_size; i += BLOCK_SIZE) {
+        sum += grad_output[i * out_features + feature_idx];
+    }
+
+    // Warp-level reduction using shuffle
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        sum += __shfl_down_sync(0xffffffff, sum, offset);
+    }
+
+    // First thread of each warp writes to shared memory
+    __shared__ T warp_sums[BLOCK_SIZE / 32];
+    int warp_id = threadIdx.x / 32;
+    int lane_id = threadIdx.x % 32;
+
+    if (lane_id == 0) {
+        warp_sums[warp_id] = sum;
+    }
+    __syncthreads();
+
+    // Final reduction across warps (first warp only)
+    if (warp_id == 0 && lane_id < (BLOCK_SIZE / 32)) {
+        sum = warp_sums[lane_id];
+        for (int offset = (BLOCK_SIZE / 32) / 2; offset > 0; offset >>= 1) {
+            sum += __shfl_down_sync(0xffffffff, sum, offset);
+        }
+        if (lane_id == 0) {
+            grad_bias[feature_idx] = sum;
+        }
+    }
+}
+
+// ============================================================================
 // Fused Linear Layer - Single cuBLAS call with bias fusion
 // ============================================================================
 
@@ -757,15 +851,11 @@ auto linear_backward_kernel(
     int64_t in_features = w_shape[1];
     int64_t out_features = w_shape[0];
 
-    // Create gradient tensors
+    // Create gradient tensors (no need to zero - GEMM uses beta=0 and reduction overwrites)
     Tensor grad_input(std::vector<int64_t>(in_shape.begin(), in_shape.end()),
                       input_c.dtype(), input_c.device());
     Tensor grad_weight({out_features, in_features}, weight_c.dtype(), weight_c.device());
     Tensor grad_bias({out_features}, grad_out_c.dtype(), grad_out_c.device());
-
-    // Initialize grad_weight and grad_bias to zero
-    cudaMemsetAsync(grad_weight.data_ptr(), 0, grad_weight.numel() * dtype_size(grad_weight.dtype()), stream);
-    cudaMemsetAsync(grad_bias.data_ptr(), 0, grad_bias.numel() * dtype_size(grad_bias.dtype()), stream);
 
     cublasHandle_t handle = CuBLASHandleManager::get_handle();
     if (stream) {
@@ -825,53 +915,17 @@ auto linear_backward_kernel(
             CUBLAS_GEMM_DEFAULT_TENSOR_OP
         ));
 
-        // grad_bias = sum(grad_output, dim=0)
-        // Use cublas gemv with ones vector for efficient reduction
-        // grad_bias = grad_output.T @ ones = sum over batch dimension
-        // Alternatively, use a simple reduction kernel
+        // grad_bias = sum(grad_output, dim=0) using efficient parallel reduction
+        // Each block handles one output feature
         {
-            int threads = 256;
-            int blocks = std::min(static_cast<int>((out_features + threads - 1) / threads), 65535);
-
-            // Simple but efficient parallel reduction for bias gradient
-            // Each thread handles one output feature
-            auto bias_grad_kernel = [&]() {
-                float* grad_bias_ptr = grad_bias.data<float>();
-                const float* grad_out_ptr = grad_out_c.data<float>();
-
-                // Use cuBLAS gemv for efficient sum
-                // grad_bias = grad_output^T @ ones = sum(grad_output, dim=0)
-                // This is equivalent to: grad_bias[j] = sum_i(grad_output[i,j])
-                Tensor ones({batch_size}, DType::Float32, input_c.device());
-                cudaMemsetAsync(ones.data_ptr(), 0, ones.numel() * sizeof(float), stream);
-                // Fill with ones
-                float one = 1.0f;
-                for (int64_t i = 0; i < batch_size; ++i) {
-                    cudaMemcpyAsync(
-                        reinterpret_cast<float*>(ones.data_ptr()) + i,
-                        &one,
-                        sizeof(float),
-                        cudaMemcpyHostToDevice,
-                        stream
-                    );
-                }
-
-                CUBLAS_CHECK(cublasSgemv(
-                    handle,
-                    CUBLAS_OP_N,
-                    out_features,
-                    batch_size,
-                    &alpha,
-                    grad_out_ptr,
-                    out_features,
-                    ones.data<float>(),
-                    1,
-                    &beta,
-                    grad_bias_ptr,
-                    1
-                ));
-            };
-            bias_grad_kernel();
+            constexpr int BLOCK_SIZE = 256;
+            int blocks = static_cast<int>(out_features);
+            bias_grad_reduce_kernel<float, BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
+                grad_out_c.data<float>(),
+                grad_bias.data<float>(),
+                batch_size,
+                out_features
+            );
         }
     } else if (input_c.dtype() == DType::Float64) {
         const double alpha = 1.0;
@@ -913,32 +967,17 @@ auto linear_backward_kernel(
             in_features
         ));
 
-        // grad_bias = sum(grad_output, dim=0)
-        Tensor ones({batch_size}, DType::Float64, input_c.device());
-        double one = 1.0;
-        for (int64_t i = 0; i < batch_size; ++i) {
-            cudaMemcpyAsync(
-                reinterpret_cast<double*>(ones.data_ptr()) + i,
-                &one,
-                sizeof(double),
-                cudaMemcpyHostToDevice,
-                stream
+        // grad_bias = sum(grad_output, dim=0) using efficient parallel reduction
+        {
+            constexpr int BLOCK_SIZE = 256;
+            int blocks = static_cast<int>(out_features);
+            bias_grad_reduce_kernel<double, BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
+                grad_out_c.data<double>(),
+                grad_bias.data<double>(),
+                batch_size,
+                out_features
             );
         }
-        CUBLAS_CHECK(cublasDgemv(
-            handle,
-            CUBLAS_OP_N,
-            out_features,
-            batch_size,
-            &alpha,
-            grad_out_c.data<double>(),
-            out_features,
-            ones.data<double>(),
-            1,
-            &beta,
-            grad_bias.data<double>(),
-            1
-        ));
     } else {
         throw std::runtime_error("linear_backward_kernel: Unsupported dtype");
     }

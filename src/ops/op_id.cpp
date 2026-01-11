@@ -186,6 +186,10 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::FusedAddReLU)] = "fused_add_relu";
     names[static_cast<size_t>(OpId::FusedGelu)] = "fused_gelu";
     names[static_cast<size_t>(OpId::FusedLayerNorm)] = "fused_layer_norm";
+    names[static_cast<size_t>(OpId::FusedRMSNorm)] = "fused_rms_norm";
+    names[static_cast<size_t>(OpId::FusedAttention)] = "fused_attention";
+    names[static_cast<size_t>(OpId::FusedSGDStep)] = "fused_sgd_step";
+    names[static_cast<size_t>(OpId::FusedAdamStep)] = "fused_adam_step";
 
     // Creation
     names[static_cast<size_t>(OpId::Zeros)] = "zeros";

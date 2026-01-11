@@ -90,9 +90,21 @@ auto AddBackward::forward(std::vector<Variable> inputs) -> std::vector<Variable>
 }
 
 auto AddBackward::backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> {
-    // Reduce gradients to match input shapes (handle broadcasting)
-    auto grad_a = reduce_grad_for_broadcasting(grad_outputs[0], input_shape_a_);
-    auto grad_b = reduce_grad_for_broadcasting(grad_outputs[0], input_shape_b_);
+    const auto& grad = grad_outputs[0];
+
+    // Fast path: same shape (common case for residual connections)
+    // Avoids function call overhead and vector comparisons
+    if (input_shape_a_ == input_shape_b_) {
+        auto grad_shape = std::vector<int64_t>(grad.shape().begin(), grad.shape().end());
+        if (grad_shape == input_shape_a_) {
+            // Both inputs have same shape as gradient - just return gradient twice
+            return {grad, grad};
+        }
+    }
+
+    // Slow path: handle broadcasting
+    auto grad_a = reduce_grad_for_broadcasting(grad, input_shape_a_);
+    auto grad_b = reduce_grad_for_broadcasting(grad, input_shape_b_);
     return {grad_a, grad_b};
 }
 
