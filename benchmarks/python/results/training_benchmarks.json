@@ -1,0 +1,1364 @@
+{
+  "system_info": {
+    "timestamp": "2026-01-11T02:58:15.606024",
+    "platform": "Linux-6.18.3-arch1-1-x86_64-with-glibc2.42",
+    "python_version": "3.13.11",
+    "processor": "",
+    "cpu_count": 24,
+    "gpu_name": "NVIDIA GeForce RTX 5070 Laptop GPU",
+    "gpu_memory": "8151 MiB",
+    "gpu_driver": "590.48.01"
+  },
+  "results": [
+    {
+      "name": "Train small_mlp B=32",
+      "category": "training",
+      "device": "cpu",
+      "framework": "tenzor",
+      "mean_ms": 2.1602240070933476,
+      "std_ms": 0.8385263887311065,
+      "min_ms": 1.6503090155310929,
+      "max_ms": 4.096242017112672,
+      "median_ms": 1.6997405036818236,
+      "p95_ms": 4.096242017112672,
+      "p99_ms": 4.096242017112672,
+      "gflops": 18.0660375367792,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          256,
+          10
+        ],
+        "batch_size": 32,
+        "optimizer": "Adam"
+      }
+    },
+    {
+      "name": "Train small_mlp B=32",
+      "category": "training",
+      "device": "cpu",
+      "framework": "pytorch",
+      "mean_ms": 28.46171770361252,
+      "std_ms": 16.201760825669123,
+      "min_ms": 10.906928015174344,
+      "max_ms": 54.072027996880934,
+      "median_ms": 24.108416997478344,
+      "p95_ms": 54.072027996880934,
+      "p99_ms": 54.072027996880934,
+      "gflops": 1.3711993213623404,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          256,
+          10
+        ],
+        "batch_size": 32,
+        "optimizer": "Adam"
+      }
+    },
+    {
+      "name": "Train small_mlp B=64",
+      "category": "training",
+      "device": "cpu",
+      "framework": "tenzor",
+      "mean_ms": 3.227398096350953,
+      "std_ms": 1.136999981931342,
+      "min_ms": 2.557330997660756,
+      "max_ms": 6.132349983090535,
+      "median_ms": 2.789859485346824,
+      "p95_ms": 6.132349983090535,
+      "p99_ms": 6.132349983090535,
+      "gflops": 24.18461363296049,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          256,
+          10
+        ],
+        "batch_size": 64,
+        "optimizer": "Adam"
+      }
+    },
+    {
+      "name": "Train small_mlp B=64",
+      "category": "training",
+      "device": "cpu",
+      "framework": "pytorch",
+      "mean_ms": 23.460009097470902,
+      "std_ms": 15.45224810287807,
+      "min_ms": 10.004573996411636,
+      "max_ms": 48.78424201160669,
+      "median_ms": 14.954279002267867,
+      "p95_ms": 48.78424201160669,
+      "p99_ms": 48.78424201160669,
+      "gflops": 3.327082085761617,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          256,
+          10
+        ],
+        "batch_size": 64,
+        "optimizer": "Adam"
+      }
+    },
+    {
+      "name": "Train small_mlp B=128",
+      "category": "training",
+      "device": "cpu",
+      "framework": "tenzor",
+      "mean_ms": 7.719624997116625,
+      "std_ms": 6.225637460167474,
+      "min_ms": 2.5522210053168237,
+      "max_ms": 18.63280200632289,
+      "median_ms": 5.545645995880477,
+      "p95_ms": 18.63280200632289,
+      "p99_ms": 18.63280200632289,
+      "gflops": 20.222064162223916,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          256,
+          10
+        ],
+        "batch_size": 128,
+        "optimizer": "Adam"
+      }
+    },
+    {
+      "name": "Train small_mlp B=128",
+      "category": "training",
+      "device": "cpu",
+      "framework": "pytorch",
+      "mean_ms": 28.9055937086232,
+      "std_ms": 20.1168111588346,
+      "min_ms": 7.212316006189212,
+      "max_ms": 53.62901100306772,
+      "median_ms": 23.304267015191726,
+      "p95_ms": 53.62901100306772,
+      "p99_ms": 53.62901100306772,
+      "gflops": 5.400572414239316,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          256,
+          10
+        ],
+        "batch_size": 128,
+        "optimizer": "Adam"
+      }
+    },
+    {
+      "name": "Train medium_mlp B=32",
+      "category": "training",
+      "device": "cpu",
+      "framework": "tenzor",
+      "mean_ms": 9.8585070023546,
+      "std_ms": 7.585235221669649,
+      "min_ms": 5.064116994617507,
+      "max_ms": 30.08216101443395,
+      "median_ms": 7.397916502668522,
+      "p95_ms": 30.08216101443395,
+      "p99_ms": 30.08216101443395,
+      "gflops": 10.420206627176364,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          512,
+          256,
+          10
+        ],
+        "batch_size": 32,
+        "optimizer": "Adam"
+      }
+    },
+    {
+      "name": "Train medium_mlp B=32",
+      "category": "training",
+      "device": "cpu",
+      "framework": "pytorch",
+      "mean_ms": 2.8004583989968523,
+      "std_ms": 0.3723521398922811,
+      "min_ms": 1.8520450103096664,
+      "max_ms": 3.1440250168088824,
+      "median_ms": 2.9062419926049188,
+      "p95_ms": 3.1440250168088824,
+      "p99_ms": 3.1440250168088824,
+      "gflops": 36.682451714618544,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          512,
+          256,
+          10
+        ],
+        "batch_size": 32,
+        "optimizer": "Adam"
+      }
+    },
+    {
+      "name": "Train medium_mlp B=64",
+      "category": "training",
+      "device": "cpu",
+      "framework": "tenzor",
+      "mean_ms": 6.268478496349417,
+      "std_ms": 0.7442529437637986,
+      "min_ms": 5.551287002163008,
+      "max_ms": 7.923441997263581,
+      "median_ms": 5.962067996733822,
+      "p95_ms": 7.923441997263581,
+      "p99_ms": 7.923441997263581,
+      "gflops": 32.775953545928466,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          512,
+          256,
+          10
+        ],
+        "batch_size": 64,
+        "optimizer": "Adam"
+      }
+    },
+    {
+      "name": "Train medium_mlp B=64",
+      "category": "training",
+      "device": "cpu",
+      "framework": "pytorch",
+      "mean_ms": 2.6202122011454776,
+      "std_ms": 0.7364121888631432,
+      "min_ms": 1.6060260240919888,
+      "max_ms": 3.529534995323047,
+      "median_ms": 2.784940501442179,
+      "p95_ms": 3.529534995323047,
+      "p99_ms": 3.529534995323047,
+      "gflops": 78.41172555038905,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          512,
+          256,
+          10
+        ],
+        "batch_size": 64,
+        "optimizer": "Adam"
+      }
+    },
+    {
+      "name": "Train medium_mlp B=128",
+      "category": "training",
+      "device": "cpu",
+      "framework": "tenzor",
+      "mean_ms": 7.628166195354424,
+      "std_ms": 0.6120854979420292,
+      "min_ms": 6.481511984020472,
+      "max_ms": 8.718555996892974,
+      "median_ms": 7.647742997505702,
+      "p95_ms": 8.718555996892974,
+      "p99_ms": 8.718555996892974,
+      "gflops": 53.86756259325418,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          512,
+          256,
+          10
+        ],
+        "batch_size": 128,
+        "optimizer": "Adam"
+      }
+    },
+    {
+      "name": "Train medium_mlp B=128",
+      "category": "training",
+      "device": "cpu",
+      "framework": "pytorch",
+      "mean_ms": 3.3031164028216153,
+      "std_ms": 0.7166420829300671,
+      "min_ms": 2.1807489974889904,
+      "max_ms": 4.221064999001101,
+      "median_ms": 3.4555715101305395,
+      "p95_ms": 4.221064999001101,
+      "p99_ms": 4.221064999001101,
+      "gflops": 124.40092018827687,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          512,
+          256,
+          10
+        ],
+        "batch_size": 128,
+        "optimizer": "Adam"
+      }
+    },
+    {
+      "name": "Train large_mlp B=32",
+      "category": "training",
+      "device": "cpu",
+      "framework": "tenzor",
+      "mean_ms": 12.259851000271738,
+      "std_ms": 0.574840579250609,
+      "min_ms": 11.313316004816443,
+      "max_ms": 12.976038007764146,
+      "median_ms": 12.405513494741172,
+      "p95_ms": 12.976038007764146,
+      "p99_ms": 12.976038007764146,
+      "gflops": 22.876404614850834,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          1024,
+          512,
+          256,
+          10
+        ],
+        "batch_size": 32,
+        "optimizer": "Adam"
+      }
+    },
+    {
+      "name": "Train large_mlp B=32",
+      "category": "training",
+      "device": "cpu",
+      "framework": "pytorch",
+      "mean_ms": 5.742186398128979,
+      "std_ms": 0.817089908770891,
+      "min_ms": 4.344304994447157,
+      "max_ms": 6.899121013702825,
+      "median_ms": 5.94457499391865,
+      "p95_ms": 6.899121013702825,
+      "p99_ms": 6.899121013702825,
+      "gflops": 48.842251462158195,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          1024,
+          512,
+          256,
+          10
+        ],
+        "batch_size": 32,
+        "optimizer": "Adam"
+      }
+    },
+    {
+      "name": "Train large_mlp B=64",
+      "category": "training",
+      "device": "cpu",
+      "framework": "tenzor",
+      "mean_ms": 14.329052396351472,
+      "std_ms": 1.1869984042107646,
+      "min_ms": 12.316577980527654,
+      "max_ms": 16.13544300198555,
+      "median_ms": 14.48144149617292,
+      "p95_ms": 16.13544300198555,
+      "p99_ms": 16.13544300198555,
+      "gflops": 39.14582824352186,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          1024,
+          512,
+          256,
+          10
+        ],
+        "batch_size": 64,
+        "optimizer": "Adam"
+      }
+    },
+    {
+      "name": "Train large_mlp B=64",
+      "category": "training",
+      "device": "cpu",
+      "framework": "pytorch",
+      "mean_ms": 6.033351900987327,
+      "std_ms": 0.7409051226536912,
+      "min_ms": 5.199379986152053,
+      "max_ms": 7.542923005530611,
+      "median_ms": 5.7578369887778535,
+      "p95_ms": 7.542923005530611,
+      "p99_ms": 7.542923005530611,
+      "gflops": 92.97031454575158,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          1024,
+          512,
+          256,
+          10
+        ],
+        "batch_size": 64,
+        "optimizer": "Adam"
+      }
+    },
+    {
+      "name": "Train large_mlp B=128",
+      "category": "training",
+      "device": "cpu",
+      "framework": "tenzor",
+      "mean_ms": 15.715873293811455,
+      "std_ms": 1.256190818300365,
+      "min_ms": 14.365679991897196,
+      "max_ms": 18.213978997664526,
+      "median_ms": 15.415704488987103,
+      "p95_ms": 18.213978997664526,
+      "p99_ms": 18.213978997664526,
+      "gflops": 71.3829404848763,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          1024,
+          512,
+          256,
+          10
+        ],
+        "batch_size": 128,
+        "optimizer": "Adam"
+      }
+    },
+    {
+      "name": "Train large_mlp B=128",
+      "category": "training",
+      "device": "cpu",
+      "framework": "pytorch",
+      "mean_ms": 7.445219895453192,
+      "std_ms": 1.0421051821038032,
+      "min_ms": 5.529124988242984,
+      "max_ms": 8.781552984146401,
+      "median_ms": 7.429285004036501,
+      "p95_ms": 8.781552984146401,
+      "p99_ms": 8.781552984146401,
+      "gflops": 150.67993474378275,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          1024,
+          512,
+          256,
+          10
+        ],
+        "batch_size": 128,
+        "optimizer": "Adam"
+      }
+    },
+    {
+      "name": "Train CNN (LeNet-style) B=16",
+      "category": "training",
+      "device": "cpu",
+      "framework": "tenzor",
+      "mean_ms": 20.56166270340327,
+      "std_ms": 3.4554287523201697,
+      "min_ms": 18.463635991793126,
+      "max_ms": 30.088672996498644,
+      "median_ms": 19.733705004910007,
+      "p95_ms": 30.088672996498644,
+      "p99_ms": 30.088672996498644,
+      "gflops": null,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "batch_size": 16,
+        "model": "cnn_lenet"
+      }
+    },
+    {
+      "name": "Train CNN (LeNet-style) B=16",
+      "category": "training",
+      "device": "cpu",
+      "framework": "pytorch",
+      "mean_ms": 5.209328501950949,
+      "std_ms": 0.9740048599987786,
+      "min_ms": 4.108816006919369,
+      "max_ms": 7.550695998361334,
+      "median_ms": 5.119921508594416,
+      "p95_ms": 7.550695998361334,
+      "p99_ms": 7.550695998361334,
+      "gflops": null,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "batch_size": 16,
+        "model": "cnn_lenet"
+      }
+    },
+    {
+      "name": "Train CNN (LeNet-style) B=32",
+      "category": "training",
+      "device": "cpu",
+      "framework": "tenzor",
+      "mean_ms": 36.69714019924868,
+      "std_ms": 3.338538754405809,
+      "min_ms": 33.459672005847096,
+      "max_ms": 42.52574598649517,
+      "median_ms": 35.461842504446395,
+      "p95_ms": 42.52574598649517,
+      "p99_ms": 42.52574598649517,
+      "gflops": null,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "batch_size": 32,
+        "model": "cnn_lenet"
+      }
+    },
+    {
+      "name": "Train CNN (LeNet-style) B=32",
+      "category": "training",
+      "device": "cpu",
+      "framework": "pytorch",
+      "mean_ms": 6.346759607549757,
+      "std_ms": 0.7032581201360605,
+      "min_ms": 4.622403008397669,
+      "max_ms": 7.239866012241691,
+      "median_ms": 6.503548502223566,
+      "p95_ms": 7.239866012241691,
+      "p99_ms": 7.239866012241691,
+      "gflops": null,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "batch_size": 32,
+        "model": "cnn_lenet"
+      }
+    },
+    {
+      "name": "Train CNN (LeNet-style) B=64",
+      "category": "training",
+      "device": "cpu",
+      "framework": "tenzor",
+      "mean_ms": 80.27316329535097,
+      "std_ms": 6.79705659552264,
+      "min_ms": 71.08374399831519,
+      "max_ms": 92.69015199970454,
+      "median_ms": 79.1807444911683,
+      "p95_ms": 92.69015199970454,
+      "p99_ms": 92.69015199970454,
+      "gflops": null,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "batch_size": 64,
+        "model": "cnn_lenet"
+      }
+    },
+    {
+      "name": "Train CNN (LeNet-style) B=64",
+      "category": "training",
+      "device": "cpu",
+      "framework": "pytorch",
+      "mean_ms": 8.154477798962034,
+      "std_ms": 0.7804934368765736,
+      "min_ms": 7.068787992466241,
+      "max_ms": 9.664359997259453,
+      "median_ms": 8.061389002250507,
+      "p95_ms": 9.664359997259453,
+      "p99_ms": 9.664359997259453,
+      "gflops": null,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "batch_size": 64,
+        "model": "cnn_lenet"
+      }
+    },
+    {
+      "name": "Optimizer: SGD",
+      "category": "optimizer",
+      "device": "cpu",
+      "framework": "tenzor",
+      "mean_ms": 4.788350095623173,
+      "std_ms": 0.4993931739824279,
+      "min_ms": 4.097274009836838,
+      "max_ms": 5.824074993142858,
+      "median_ms": 4.770509491208941,
+      "p95_ms": 5.824074993142858,
+      "p99_ms": 5.824074993142858,
+      "gflops": null,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "optimizer": "SGD",
+        "batch_size": 64
+      }
+    },
+    {
+      "name": "Optimizer: Adam",
+      "category": "optimizer",
+      "device": "cpu",
+      "framework": "tenzor",
+      "mean_ms": 6.020142100169323,
+      "std_ms": 0.37054206498573483,
+      "min_ms": 5.49645398859866,
+      "max_ms": 6.610703014302999,
+      "median_ms": 6.035454498487525,
+      "p95_ms": 6.610703014302999,
+      "p99_ms": 6.610703014302999,
+      "gflops": null,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "optimizer": "Adam",
+        "batch_size": 64
+      }
+    },
+    {
+      "name": "Optimizer: AdamW",
+      "category": "optimizer",
+      "device": "cpu",
+      "framework": "tenzor",
+      "mean_ms": 6.4634380978532135,
+      "std_ms": 0.36804905047752023,
+      "min_ms": 5.940633011050522,
+      "max_ms": 7.0825629809405655,
+      "median_ms": 6.440545505029149,
+      "p95_ms": 7.0825629809405655,
+      "p99_ms": 7.0825629809405655,
+      "gflops": null,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "optimizer": "AdamW",
+        "batch_size": 64
+      }
+    },
+    {
+      "name": "Train small_mlp B=32",
+      "category": "training",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 0.5124962015543133,
+      "std_ms": 0.022255791453314116,
+      "min_ms": 0.49673698958940804,
+      "max_ms": 0.5560769932344556,
+      "median_ms": 0.501350499689579,
+      "p95_ms": 0.5560769932344556,
+      "p99_ms": 0.5560769932344556,
+      "gflops": 76.150199516872,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          256,
+          10
+        ],
+        "batch_size": 32,
+        "optimizer": "Adam"
+      }
+    },
+    {
+      "name": "Train small_mlp B=32",
+      "category": "training",
+      "device": "cuda",
+      "framework": "pytorch",
+      "mean_ms": 0.3550060937413946,
+      "std_ms": 0.03594782600916527,
+      "min_ms": 0.32206097966991365,
+      "max_ms": 0.44853700092062354,
+      "median_ms": 0.3480889863567427,
+      "p95_ms": 0.44853700092062354,
+      "p99_ms": 0.44853700092062354,
+      "gflops": 109.93244535241449,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          256,
+          10
+        ],
+        "batch_size": 32,
+        "optimizer": "Adam"
+      }
+    },
+    {
+      "name": "Train small_mlp B=64",
+      "category": "training",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 0.6059576029656455,
+      "std_ms": 0.03496701594924443,
+      "min_ms": 0.5837290082126856,
+      "max_ms": 0.69223198806867,
+      "median_ms": 0.5896349903196096,
+      "p95_ms": 0.69223198806867,
+      "p99_ms": 0.69223198806867,
+      "gflops": 128.80996231088662,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          256,
+          10
+        ],
+        "batch_size": 64,
+        "optimizer": "Adam"
+      }
+    },
+    {
+      "name": "Train small_mlp B=64",
+      "category": "training",
+      "device": "cuda",
+      "framework": "pytorch",
+      "mean_ms": 0.3978202003054321,
+      "std_ms": 0.08030315091114619,
+      "min_ms": 0.3149079857394099,
+      "max_ms": 0.5628899962175637,
+      "median_ms": 0.36411950713954866,
+      "p95_ms": 0.5628899962175637,
+      "p99_ms": 0.5628899962175637,
+      "gflops": 196.2026461704896,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          256,
+          10
+        ],
+        "batch_size": 64,
+        "optimizer": "Adam"
+      }
+    },
+    {
+      "name": "Train small_mlp B=128",
+      "category": "training",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 0.7961561961565167,
+      "std_ms": 0.018296511116576427,
+      "min_ms": 0.7798739825375378,
+      "max_ms": 0.8423610124737024,
+      "median_ms": 0.7894825102994218,
+      "p95_ms": 0.8423610124737024,
+      "p99_ms": 0.8423610124737024,
+      "gflops": 196.07553486817415,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          256,
+          10
+        ],
+        "batch_size": 128,
+        "optimizer": "Adam"
+      }
+    },
+    {
+      "name": "Train small_mlp B=128",
+      "category": "training",
+      "device": "cuda",
+      "framework": "pytorch",
+      "mean_ms": 0.6437851960072294,
+      "std_ms": 0.07308869524645978,
+      "min_ms": 0.594819983234629,
+      "max_ms": 0.8488940075039864,
+      "median_ms": 0.6233830063138157,
+      "p95_ms": 0.8488940075039864,
+      "p99_ms": 0.8488940075039864,
+      "gflops": 242.48266808273578,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          256,
+          10
+        ],
+        "batch_size": 128,
+        "optimizer": "Adam"
+      }
+    },
+    {
+      "name": "Train medium_mlp B=32",
+      "category": "training",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 0.7125895033823326,
+      "std_ms": 0.010462066799726723,
+      "min_ms": 0.6992449925746769,
+      "max_ms": 0.7390690152533352,
+      "median_ms": 0.7116124907042831,
+      "p95_ms": 0.7390690152533352,
+      "p99_ms": 0.7390690152533352,
+      "gflops": 144.1610906593477,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          512,
+          256,
+          10
+        ],
+        "batch_size": 32,
+        "optimizer": "Adam"
+      }
+    },
+    {
+      "name": "Train medium_mlp B=32",
+      "category": "training",
+      "device": "cuda",
+      "framework": "pytorch",
+      "mean_ms": 0.33257649920415133,
+      "std_ms": 0.035861139121481325,
+      "min_ms": 0.3025539917871356,
+      "max_ms": 0.4081919905729592,
+      "median_ms": 0.3184440138284117,
+      "p95_ms": 0.4081919905729592,
+      "p99_ms": 0.4081919905729592,
+      "gflops": 308.88436268294726,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          512,
+          256,
+          10
+        ],
+        "batch_size": 32,
+        "optimizer": "Adam"
+      }
+    },
+    {
+      "name": "Train medium_mlp B=64",
+      "category": "training",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 0.8628055977169424,
+      "std_ms": 0.0149392650759702,
+      "min_ms": 0.845917995320633,
+      "max_ms": 0.8952900243457407,
+      "median_ms": 0.8572239894419909,
+      "p95_ms": 0.8952900243457407,
+      "p99_ms": 0.8952900243457407,
+      "gflops": 238.12474159144597,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          512,
+          256,
+          10
+        ],
+        "batch_size": 64,
+        "optimizer": "Adam"
+      }
+    },
+    {
+      "name": "Train medium_mlp B=64",
+      "category": "training",
+      "device": "cuda",
+      "framework": "pytorch",
+      "mean_ms": 0.4879541986156255,
+      "std_ms": 0.13661330052519277,
+      "min_ms": 0.3268799919169396,
+      "max_ms": 0.6674950127489865,
+      "median_ms": 0.4405364888953045,
+      "p95_ms": 0.6674950127489865,
+      "p99_ms": 0.6674950127489865,
+      "gflops": 421.0546001712809,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          512,
+          256,
+          10
+        ],
+        "batch_size": 64,
+        "optimizer": "Adam"
+      }
+    },
+    {
+      "name": "Train medium_mlp B=128",
+      "category": "training",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 1.1633684043772519,
+      "std_ms": 0.028431287624514467,
+      "min_ms": 1.1425619886722416,
+      "max_ms": 1.2346740113571286,
+      "median_ms": 1.1558965052245185,
+      "p95_ms": 1.2346740113571286,
+      "p99_ms": 1.2346740113571286,
+      "gflops": 353.20773579024564,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          512,
+          256,
+          10
+        ],
+        "batch_size": 128,
+        "optimizer": "Adam"
+      }
+    },
+    {
+      "name": "Train medium_mlp B=128",
+      "category": "training",
+      "device": "cuda",
+      "framework": "pytorch",
+      "mean_ms": 0.3475074947346002,
+      "std_ms": 0.04613657404755096,
+      "min_ms": 0.3043480101041496,
+      "max_ms": 0.4448200052138418,
+      "median_ms": 0.32987048325594515,
+      "p95_ms": 0.4448200052138418,
+      "p99_ms": 0.4448200052138418,
+      "gflops": 1182.4513894695203,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          512,
+          256,
+          10
+        ],
+        "batch_size": 128,
+        "optimizer": "Adam"
+      }
+    },
+    {
+      "name": "Train large_mlp B=32",
+      "category": "training",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 1.0935620055533946,
+      "std_ms": 0.020420417902897486,
+      "min_ms": 1.0373650002293289,
+      "max_ms": 1.107805990613997,
+      "median_ms": 1.0979935032082722,
+      "p95_ms": 1.107805990613997,
+      "p99_ms": 1.107805990613997,
+      "gflops": 256.465852485496,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          1024,
+          512,
+          256,
+          10
+        ],
+        "batch_size": 32,
+        "optimizer": "Adam"
+      }
+    },
+    {
+      "name": "Train large_mlp B=32",
+      "category": "training",
+      "device": "cuda",
+      "framework": "pytorch",
+      "mean_ms": 0.4346177011029795,
+      "std_ms": 0.05713659680674382,
+      "min_ms": 0.4005169903393835,
+      "max_ms": 0.5840290104970336,
+      "median_ms": 0.4110520094400272,
+      "p95_ms": 0.5840290104970336,
+      "p99_ms": 0.5840290104970336,
+      "gflops": 645.3057739899709,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          1024,
+          512,
+          256,
+          10
+        ],
+        "batch_size": 32,
+        "optimizer": "Adam"
+      }
+    },
+    {
+      "name": "Train large_mlp B=64",
+      "category": "training",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 1.3047861983068287,
+      "std_ms": 0.014069900498056264,
+      "min_ms": 1.283454999793321,
+      "max_ms": 1.334089000010863,
+      "median_ms": 1.3024944928474724,
+      "p95_ms": 1.334089000010863,
+      "p99_ms": 1.334089000010863,
+      "gflops": 429.89619657832674,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          1024,
+          512,
+          256,
+          10
+        ],
+        "batch_size": 64,
+        "optimizer": "Adam"
+      }
+    },
+    {
+      "name": "Train large_mlp B=64",
+      "category": "training",
+      "device": "cuda",
+      "framework": "pytorch",
+      "mean_ms": 0.4416218085680157,
+      "std_ms": 0.041291150208758745,
+      "min_ms": 0.4008870164398104,
+      "max_ms": 0.5403490213211626,
+      "median_ms": 0.4300120199332014,
+      "p95_ms": 0.5403490213211626,
+      "p99_ms": 0.5403490213211626,
+      "gflops": 1270.1424909671562,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          1024,
+          512,
+          256,
+          10
+        ],
+        "batch_size": 64,
+        "optimizer": "Adam"
+      }
+    },
+    {
+      "name": "Train large_mlp B=128",
+      "category": "training",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 1.6849633917445317,
+      "std_ms": 0.014296984833937128,
+      "min_ms": 1.671577978413552,
+      "max_ms": 1.7207799828611314,
+      "median_ms": 1.68007449246943,
+      "p95_ms": 1.7207799828611314,
+      "p99_ms": 1.7207799828611314,
+      "gflops": 665.7979950760202,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          1024,
+          512,
+          256,
+          10
+        ],
+        "batch_size": 128,
+        "optimizer": "Adam"
+      }
+    },
+    {
+      "name": "Train large_mlp B=128",
+      "category": "training",
+      "device": "cuda",
+      "framework": "pytorch",
+      "mean_ms": 0.5003823986044154,
+      "std_ms": 0.10020862415165153,
+      "min_ms": 0.389797001844272,
+      "max_ms": 0.6780549883842468,
+      "median_ms": 0.48870650061871856,
+      "p95_ms": 0.6780549883842468,
+      "p99_ms": 0.6780549883842468,
+      "gflops": 2241.975839135963,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          1024,
+          512,
+          256,
+          10
+        ],
+        "batch_size": 128,
+        "optimizer": "Adam"
+      }
+    },
+    {
+      "name": "Train CNN (LeNet-style) B=16",
+      "category": "training",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 1.0803271929034963,
+      "std_ms": 0.0701366027924036,
+      "min_ms": 1.0218969837296754,
+      "max_ms": 1.2334509810898453,
+      "median_ms": 1.0462764912517741,
+      "p95_ms": 1.2334509810898453,
+      "p99_ms": 1.2334509810898453,
+      "gflops": null,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "batch_size": 16,
+        "model": "cnn_lenet"
+      }
+    },
+    {
+      "name": "Train CNN (LeNet-style) B=16",
+      "category": "training",
+      "device": "cuda",
+      "framework": "pytorch",
+      "mean_ms": 0.5020729033276439,
+      "std_ms": 0.034810124390811145,
+      "min_ms": 0.473603984573856,
+      "max_ms": 0.589400005992502,
+      "median_ms": 0.4876199964201078,
+      "p95_ms": 0.589400005992502,
+      "p99_ms": 0.589400005992502,
+      "gflops": null,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "batch_size": 16,
+        "model": "cnn_lenet"
+      }
+    },
+    {
+      "name": "Train CNN (LeNet-style) B=32",
+      "category": "training",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 1.1369187996024266,
+      "std_ms": 0.029717182684560178,
+      "min_ms": 1.1126149911433458,
+      "max_ms": 1.2139040045440197,
+      "median_ms": 1.129211494117044,
+      "p95_ms": 1.2139040045440197,
+      "p99_ms": 1.2139040045440197,
+      "gflops": null,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "batch_size": 32,
+        "model": "cnn_lenet"
+      }
+    },
+    {
+      "name": "Train CNN (LeNet-style) B=32",
+      "category": "training",
+      "device": "cuda",
+      "framework": "pytorch",
+      "mean_ms": 0.6051909964298829,
+      "std_ms": 0.11185324624730307,
+      "min_ms": 0.5524299922399223,
+      "max_ms": 0.9160290064755827,
+      "median_ms": 0.5663614865625277,
+      "p95_ms": 0.9160290064755827,
+      "p99_ms": 0.9160290064755827,
+      "gflops": null,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "batch_size": 32,
+        "model": "cnn_lenet"
+      }
+    },
+    {
+      "name": "Train CNN (LeNet-style) B=64",
+      "category": "training",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 1.3749208970693871,
+      "std_ms": 0.03441092836208826,
+      "min_ms": 1.3397090078797191,
+      "max_ms": 1.447310991352424,
+      "median_ms": 1.3632429909193888,
+      "p95_ms": 1.447310991352424,
+      "p99_ms": 1.447310991352424,
+      "gflops": null,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "batch_size": 64,
+        "model": "cnn_lenet"
+      }
+    },
+    {
+      "name": "Train CNN (LeNet-style) B=64",
+      "category": "training",
+      "device": "cuda",
+      "framework": "pytorch",
+      "mean_ms": 0.8000953996088356,
+      "std_ms": 0.08964834446340614,
+      "min_ms": 0.7319750147871673,
+      "max_ms": 0.9755499777384102,
+      "median_ms": 0.7473940058844164,
+      "p95_ms": 0.9755499777384102,
+      "p99_ms": 0.9755499777384102,
+      "gflops": null,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "batch_size": 64,
+        "model": "cnn_lenet"
+      }
+    },
+    {
+      "name": "Optimizer: SGD",
+      "category": "optimizer",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 0.682481296826154,
+      "std_ms": 0.02257694342844379,
+      "min_ms": 0.6632080185227096,
+      "max_ms": 0.732355983927846,
+      "median_ms": 0.6742980040144175,
+      "p95_ms": 0.732355983927846,
+      "p99_ms": 0.732355983927846,
+      "gflops": null,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "optimizer": "SGD",
+        "batch_size": 64
+      }
+    },
+    {
+      "name": "Optimizer: Adam",
+      "category": "optimizer",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 0.8968432026449591,
+      "std_ms": 0.017709329285690995,
+      "min_ms": 0.8781079959589988,
+      "max_ms": 0.9378999820910394,
+      "median_ms": 0.8915284997783601,
+      "p95_ms": 0.9378999820910394,
+      "p99_ms": 0.9378999820910394,
+      "gflops": null,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "optimizer": "Adam",
+        "batch_size": 64
+      }
+    },
+    {
+      "name": "Optimizer: AdamW",
+      "category": "optimizer",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 0.935520400526002,
+      "std_ms": 0.02416002660638941,
+      "min_ms": 0.9083749901037663,
+      "max_ms": 0.9871920046862215,
+      "median_ms": 0.9297095093643293,
+      "p95_ms": 0.9871920046862215,
+      "p99_ms": 0.9871920046862215,
+      "gflops": null,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "optimizer": "AdamW",
+        "batch_size": 64
+      }
+    }
+  ]
+}

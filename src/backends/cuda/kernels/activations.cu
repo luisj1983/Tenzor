@@ -1092,7 +1092,7 @@ auto relu_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     Tensor result(shape, input.dtype(), input.device());
 
     if (n == 0) {
-        cudaStreamSynchronize(stream);
+        // NOTE: Removed sync - no operations for empty tensors
         return result;  // Handle empty tensors
     }
 
@@ -1128,7 +1128,7 @@ auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaSt
     Tensor result(shape, input.dtype(), input.device());
 
     if (n == 0) {
-        cudaStreamSynchronize(stream);
+        // NOTE: Removed sync - no operations for empty tensors
         return result;  // Handle empty tensors
     }
 
@@ -1165,7 +1165,7 @@ auto sigmoid_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     Tensor result(shape, input.dtype(), input.device());
 
     if (n == 0) {
-        cudaStreamSynchronize(stream);
+        // NOTE: Removed sync - no operations for empty tensors
         return result;
     }
 
@@ -1201,7 +1201,7 @@ auto sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& input, cud
     Tensor result(shape, input.dtype(), input.device());
 
     if (n == 0) {
-        cudaStreamSynchronize(stream);
+        // NOTE: Removed sync - no operations for empty tensors
         return result;
     }
 
@@ -1238,7 +1238,7 @@ auto swish_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     Tensor result(shape, input.dtype(), input.device());
 
     if (n == 0) {
-        cudaStreamSynchronize(stream);
+        // NOTE: Removed sync - no operations for empty tensors
         return result;
     }
 
@@ -1274,7 +1274,7 @@ auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaS
     Tensor result(shape, input.dtype(), input.device());
 
     if (n == 0) {
-        cudaStreamSynchronize(stream);
+        // NOTE: Removed sync - no operations for empty tensors
         return result;
     }
 
@@ -1311,7 +1311,7 @@ auto tanh_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     Tensor result(shape, input.dtype(), input.device());
 
     if (n == 0) {
-        cudaStreamSynchronize(stream);
+        // NOTE: Removed sync - no operations for empty tensors
         return result;
     }
 
@@ -1347,7 +1347,7 @@ auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaSt
     Tensor result(shape, input.dtype(), input.device());
 
     if (n == 0) {
-        cudaStreamSynchronize(stream);
+        // NOTE: Removed sync - no operations for empty tensors
         return result;
     }
 
@@ -1384,7 +1384,7 @@ auto gelu_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     Tensor result(shape, input.dtype(), input.device());
 
     if (n == 0) {
-        cudaStreamSynchronize(stream);
+        // NOTE: Removed sync - no operations for empty tensors
         return result;
     }
 
@@ -1420,7 +1420,7 @@ auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaSt
     Tensor result(shape, input.dtype(), input.device());
 
     if (n == 0) {
-        cudaStreamSynchronize(stream);
+        // NOTE: Removed sync - no operations for empty tensors
         return result;
     }
 
@@ -1457,7 +1457,7 @@ auto leaky_relu_kernel(const Tensor& input, float alpha, cudaStream_t stream) ->
     Tensor result(shape, input.dtype(), input.device());
 
     if (n == 0) {
-        cudaStreamSynchronize(stream);
+        // NOTE: Removed sync - no operations for empty tensors
         return result;
     }
 
@@ -1488,7 +1488,7 @@ auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, 
     Tensor result(shape, input.dtype(), input.device());
 
     if (n == 0) {
-        cudaStreamSynchronize(stream);
+        // NOTE: Removed sync - no operations for empty tensors
         return result;
     }
 
@@ -1519,7 +1519,7 @@ auto elu_kernel(const Tensor& input, float alpha, cudaStream_t stream) -> Tensor
     Tensor result(shape, input.dtype(), input.device());
 
     if (n == 0) {
-        cudaStreamSynchronize(stream);
+        // NOTE: Removed sync - no operations for empty tensors
         return result;
     }
 
@@ -1550,7 +1550,7 @@ auto elu_backward_kernel(const Tensor& grad_output, const Tensor& input, float a
     Tensor result(shape, input.dtype(), input.device());
 
     if (n == 0) {
-        cudaStreamSynchronize(stream);
+        // NOTE: Removed sync - no operations for empty tensors
         return result;
     }
 
@@ -1581,7 +1581,7 @@ auto selu_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     Tensor result(shape, input.dtype(), input.device());
 
     if (n == 0) {
-        cudaStreamSynchronize(stream);
+        // NOTE: Removed sync - no operations for empty tensors
         return result;
     }
 
@@ -1612,7 +1612,7 @@ auto selu_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaSt
     Tensor result(shape, input.dtype(), input.device());
 
     if (n == 0) {
-        cudaStreamSynchronize(stream);
+        // NOTE: Removed sync - no operations for empty tensors
         return result;
     }
 
@@ -1643,7 +1643,7 @@ auto mish_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     Tensor result(shape, input.dtype(), input.device());
 
     if (n == 0) {
-        cudaStreamSynchronize(stream);
+        // NOTE: Removed sync - no operations for empty tensors
         return result;
     }
 
@@ -1674,7 +1674,7 @@ auto mish_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaSt
     Tensor result(shape, input.dtype(), input.device());
 
     if (n == 0) {
-        cudaStreamSynchronize(stream);
+        // NOTE: Removed sync - no operations for empty tensors
         return result;
     }
 
@@ -1705,7 +1705,7 @@ auto softplus_kernel(const Tensor& input, float beta, float threshold, cudaStrea
     Tensor result(shape, input.dtype(), input.device());
 
     if (n == 0) {
-        cudaStreamSynchronize(stream);
+        // NOTE: Removed sync - no operations for empty tensors
         return result;
     }
 
@@ -1736,7 +1736,7 @@ auto softplus_backward_kernel(const Tensor& grad_output, const Tensor& input, fl
     Tensor result(shape, input.dtype(), input.device());
 
     if (n == 0) {
-        cudaStreamSynchronize(stream);
+        // NOTE: Removed sync - no operations for empty tensors
         return result;
     }
 
@@ -1775,7 +1775,7 @@ auto softmax_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Te
     }
 
     if (input.numel() == 0) {
-        cudaStreamSynchronize(stream);
+        // NOTE: Removed sync - no operations for empty tensors
         return result;
     }
 
@@ -1823,7 +1823,7 @@ auto softmax_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -> Te
         throw std::runtime_error(std::string("CUDA error in softmax_kernel: ") + cudaGetErrorString(err));
     }
 
-    cudaStreamSynchronize(stream);
+    // NOTE: Removed cudaStreamSynchronize - async execution for performance
     return result;
 }
 
@@ -1833,7 +1833,7 @@ auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, in
     Tensor result(shape, output.dtype(), output.device());
 
     if (output.numel() == 0) {
-        cudaStreamSynchronize(stream);
+        // NOTE: Removed sync - no operations for empty tensors
         return result;
     }
 
@@ -1885,7 +1885,7 @@ auto log_softmax_kernel(const Tensor& input, int64_t dim, cudaStream_t stream) -
     Tensor result(shape, input.dtype(), input.device());
 
     if (input.numel() == 0) {
-        cudaStreamSynchronize(stream);
+        // NOTE: Removed sync - no operations for empty tensors
         return result;
     }
 
@@ -1936,7 +1936,7 @@ auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output
     Tensor result(shape, output.dtype(), output.device());
 
     if (output.numel() == 0) {
-        cudaStreamSynchronize(stream);
+        // NOTE: Removed sync - no operations for empty tensors
         return result;
     }
 

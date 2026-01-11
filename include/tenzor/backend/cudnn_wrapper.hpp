@@ -86,6 +86,21 @@ public:
         return instance.size_;
     }
 
+    // Get maximum workspace size for algorithm search (based on available GPU memory)
+    static size_t max_workspace_size() {
+        size_t free_mem = 0, total_mem = 0;
+        cudaMemGetInfo(&free_mem, &total_mem);
+
+        // Use up to 50% of free memory for workspace, capped at 8GB
+        // This allows cuDNN to select optimal algorithms for large convolutions
+        constexpr size_t kMaxCap = 8ULL * 1024 * 1024 * 1024;  // 8 GB cap
+        size_t max_workspace = std::min(free_mem / 2, kMaxCap);
+
+        // Minimum 1GB to ensure good algorithm selection
+        constexpr size_t kMinWorkspace = 1024ULL * 1024 * 1024;  // 1 GB minimum
+        return std::max(max_workspace, kMinWorkspace);
+    }
+
     CuDNNWorkspace(const CuDNNWorkspace&) = delete;
     CuDNNWorkspace& operator=(const CuDNNWorkspace&) = delete;
 
@@ -387,11 +402,15 @@ public:
             dtype
         ));
 
-        // Enable Tensor Cores for FP16/FP32 on compatible GPUs
+        // Enable tensor core acceleration (TF32 for FP32, FP16 tensor cores for FP16)
+        // CUDNN_DEFAULT_MATH automatically uses TF32 on Ampere+ GPUs (like PyTorch)
+        // For FP16, explicitly request tensor core math
         #ifdef TENZOR_HAS_TENSOR_CORES
-        if (dtype == CUDNN_DATA_FLOAT || dtype == CUDNN_DATA_HALF) {
+        if (dtype == CUDNN_DATA_HALF) {
             CUDNN_CHECK(cudnnSetConvolutionMathType(desc_, CUDNN_TENSOR_OP_MATH));
         }
+        // For FP32, use default math which enables TF32 on compatible GPUs
+        // No need to set explicitly as CUDNN_DEFAULT_MATH is the default
         #endif
     }
 
@@ -649,6 +668,137 @@ auto cudnn_log_softmax_backward(
     int64_t dim,
     cudaStream_t stream
 ) -> Tensor;
+
+// ============================================================================
+// cuDNN BatchNorm Operations (Optimized)
+// ============================================================================
+
+/**
+ * @brief cuDNN-optimized BatchNorm inference forward
+ *
+ * @param input Input tensor (N, C, H, W)
+ * @param running_mean Running mean (C,)
+ * @param running_var Running variance (C,)
+ * @param gamma Scale parameter (C,)
+ * @param beta Bias parameter (C,)
+ * @param epsilon Epsilon for numerical stability
+ * @param stream CUDA stream
+ * @return Output tensor (N, C, H, W)
+ */
+auto cudnn_batchnorm2d_forward_inference(
+    const Tensor& input,
+    const Tensor& running_mean,
+    const Tensor& running_var,
+    const Tensor& gamma,
+    const Tensor& beta,
+    float epsilon,
+    cudaStream_t stream = nullptr
+) -> Tensor;
+
+/**
+ * @brief cuDNN-optimized BatchNorm training forward
+ *
+ * @param input Input tensor (N, C, H, W)
+ * @param running_mean Running mean to update (C,)
+ * @param running_var Running variance to update (C,)
+ * @param gamma Scale parameter (C,)
+ * @param beta Bias parameter (C,)
+ * @param momentum Momentum for running statistics
+ * @param epsilon Epsilon for numerical stability
+ * @param stream CUDA stream
+ * @return Tuple of (output, saved_mean, saved_inv_variance)
+ */
+auto cudnn_batchnorm2d_forward_training(
+    const Tensor& input,
+    Tensor& running_mean,
+    Tensor& running_var,
+    const Tensor& gamma,
+    const Tensor& beta,
+    float momentum,
+    float epsilon,
+    cudaStream_t stream = nullptr
+) -> std::tuple<Tensor, Tensor, Tensor>;
+
+/**
+ * @brief cuDNN-optimized BatchNorm backward
+ *
+ * @param grad_output Gradient from next layer (N, C, H, W)
+ * @param input Original input (N, C, H, W)
+ * @param gamma Scale parameter (C,)
+ * @param saved_mean Saved mean from forward (C,)
+ * @param saved_inv_var Saved inverse variance from forward (C,)
+ * @param epsilon Epsilon used in forward
+ * @param stream CUDA stream
+ * @return Tuple of (grad_input, grad_gamma, grad_beta)
+ */
+auto cudnn_batchnorm2d_backward(
+    const Tensor& grad_output,
+    const Tensor& input,
+    const Tensor& gamma,
+    const Tensor& saved_mean,
+    const Tensor& saved_inv_var,
+    float epsilon,
+    cudaStream_t stream = nullptr
+) -> std::tuple<Tensor, Tensor, Tensor>;
+
+/**
+ * @brief Wrapper matching existing batchnorm2d_forward_affine signature
+ */
+auto cudnn_batchnorm2d_forward_affine_wrapper(
+    const Tensor& input,
+    const Tensor& mean,
+    const Tensor& variance,
+    const Tensor& gamma,
+    const Tensor& beta,
+    float epsilon,
+    cudaStream_t stream = nullptr
+) -> Tensor;
+
+// ============================================================================
+// cuDNN LayerNorm Operations (Optimized with warp shuffles)
+// ============================================================================
+
+/**
+ * @brief Optimized LayerNorm forward using warp-level primitives
+ *
+ * @param input Input tensor
+ * @param normalized_shape Shape of normalized dimensions
+ * @param weight Gamma parameter
+ * @param bias Beta parameter
+ * @param eps Epsilon for numerical stability
+ * @param stream CUDA stream
+ * @return Tuple of (output, mean, inv_std)
+ */
+auto cudnn_layer_norm_forward(
+    const Tensor& input,
+    const std::vector<int64_t>& normalized_shape,
+    const Tensor& weight,
+    const Tensor& bias,
+    float eps,
+    cudaStream_t stream = nullptr
+) -> std::tuple<Tensor, Tensor, Tensor>;
+
+/**
+ * @brief Optimized LayerNorm backward using warp-level primitives
+ *
+ * @param grad_output Gradient from next layer
+ * @param input Original input
+ * @param weight Gamma parameter
+ * @param mean Saved mean from forward
+ * @param inv_std Saved inverse std from forward
+ * @param normalized_shape Shape of normalized dimensions
+ * @param stream CUDA stream
+ * @return Tuple of (grad_input, grad_weight, grad_bias)
+ */
+auto cudnn_layer_norm_backward(
+    const Tensor& grad_output,
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor& mean,
+    const Tensor& inv_std,
+    const std::vector<int64_t>& normalized_shape,
+    cudaStream_t stream = nullptr
+) -> std::tuple<Tensor, Tensor, Tensor>;
 
 } // namespace cuda
 } // namespace tenzor

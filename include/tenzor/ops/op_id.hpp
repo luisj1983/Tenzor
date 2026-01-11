@@ -172,6 +172,7 @@ enum class OpId : uint16_t {
     BatchNorm2dForwardAffine,
     BatchNorm2dUpdateRunningStats,
     BatchNorm2dBackward,
+    BatchNorm2dFusedTraining,  // cuDNN fused forward training
     LayerNorm,
     LayerNormBackward,
     GroupNorm,

@@ -32,7 +32,9 @@ set(CUDA_BACKEND_SOURCES
     kernels/roi_align.cu
     kernels/vision.cu
     kernels/fused_ops.cu
+    cublas_ops.cu
     cudnn_ops.cu
+    cudnn_batchnorm.cu
 )
 
 # Create CUDA backend shared library

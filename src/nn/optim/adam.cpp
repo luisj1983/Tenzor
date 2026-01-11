@@ -1,6 +1,10 @@
 #include "tenzor/nn/optim/adam.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/math.hpp"
+#include "tenzor/core/device.hpp"
+#ifdef TENZOR_CUDA_AVAILABLE
+#include "tenzor/backend/fused_ops.hpp"
+#endif
 #include <cmath>
 
 namespace tenzor::optim {
@@ -21,20 +25,47 @@ auto Adam::step() -> void {
         if (!param_ptr || !param_ptr->has_grad()) continue;
         auto& param = *param_ptr;
 
-        auto grad = param.grad()->clone();
+        const Tensor& grad = param.grad().value();
+
+#ifdef TENZOR_CUDA_AVAILABLE
+        // Use fused CUDA kernel for CUDA tensors (single kernel vs ~15 kernels)
+        if (param.tensor().device().type == Device::Type::CUDA &&
+            grad.device().type == Device::Type::CUDA &&
+            param.tensor().dtype() == DType::Float32) {
+
+            cuda::fused_adam_step_cuda(
+                param.tensor(),
+                grad,
+                exp_avg_[i],
+                exp_avg_sq_[i],
+                static_cast<float>(lr_),
+                static_cast<float>(beta1_),
+                static_cast<float>(beta2_),
+                static_cast<float>(eps_),
+                static_cast<float>(weight_decay_),
+                step_count_,
+                false,  // L2 regularization (not decoupled)
+                nullptr  // Default stream
+            );
+            continue;
+        }
+#endif
+
+        // CPU fallback path
+        auto grad_copy = grad.clone();
 
         // Weight decay
         if (weight_decay_ > 0.0) {
-            grad = grad + param.tensor() * static_cast<float>(weight_decay_);
+            grad_copy = grad_copy + param.tensor() * static_cast<float>(weight_decay_);
         }
 
         // Update biased first moment estimate
         exp_avg_[i] = exp_avg_[i] * static_cast<float>(beta1_) +
-                     grad * static_cast<float>(1.0 - beta1_);
+                     grad_copy * static_cast<float>(1.0 - beta1_);
 
         // Update biased second raw moment estimate
         exp_avg_sq_[i] = exp_avg_sq_[i] * static_cast<float>(beta2_) +
-                        grad * grad * static_cast<float>(1.0 - beta2_);
+                        grad_copy * grad_copy * static_cast<float>(1.0 - beta2_);
 
         // Bias correction
         double bias_correction1 = 1.0 - std::pow(beta1_, step_count_);
@@ -161,15 +192,42 @@ auto AdamW::step() -> void {
         if (!param_ptr || !param_ptr->has_grad()) continue;
         auto& param = *param_ptr;
 
-        auto grad = param.grad()->clone();
+        const Tensor& grad = param.grad().value();
+
+#ifdef TENZOR_CUDA_AVAILABLE
+        // Use fused CUDA kernel for CUDA tensors (single kernel vs ~15 kernels)
+        if (param.tensor().device().type == Device::Type::CUDA &&
+            grad.device().type == Device::Type::CUDA &&
+            param.tensor().dtype() == DType::Float32) {
+
+            cuda::fused_adam_step_cuda(
+                param.tensor(),
+                grad,
+                exp_avg_[i],
+                exp_avg_sq_[i],
+                static_cast<float>(lr_),
+                static_cast<float>(beta1_),
+                static_cast<float>(beta2_),
+                static_cast<float>(eps_),
+                static_cast<float>(weight_decay_),
+                step_count_,
+                true,    // Decoupled weight decay (AdamW style)
+                nullptr  // Default stream
+            );
+            continue;
+        }
+#endif
+
+        // CPU fallback path
+        auto grad_copy = grad.clone();
 
         // Update biased first moment estimate
         exp_avg_[i] = exp_avg_[i] * static_cast<float>(beta1_) +
-                     grad * static_cast<float>(1.0 - beta1_);
+                     grad_copy * static_cast<float>(1.0 - beta1_);
 
         // Update biased second raw moment estimate
         exp_avg_sq_[i] = exp_avg_sq_[i] * static_cast<float>(beta2_) +
-                        grad * grad * static_cast<float>(1.0 - beta2_);
+                        grad_copy * grad_copy * static_cast<float>(1.0 - beta2_);
 
         // Bias correction
         double bias_correction1 = 1.0 - std::pow(beta1_, step_count_);

@@ -1,0 +1,1062 @@
+{
+  "system_info": {
+    "timestamp": "2026-01-11T04:18:46.073349",
+    "platform": "Linux-6.18.3-arch1-1-x86_64-with-glibc2.42",
+    "python_version": "3.13.11",
+    "processor": "",
+    "cpu_count": 24,
+    "gpu_name": "NVIDIA GeForce RTX 5070 Laptop GPU",
+    "gpu_memory": "8151 MiB",
+    "gpu_driver": "590.48.01"
+  },
+  "results": [
+    {
+      "name": "Small MLP (eval)",
+      "category": "mlp",
+      "device": "cpu",
+      "framework": "tenzor",
+      "mean_ms": 0.1082958944607526,
+      "std_ms": 0.008057773525193794,
+      "min_ms": 0.10175901115871966,
+      "max_ms": 0.12333999620750546,
+      "median_ms": 0.10381398897152394,
+      "p95_ms": 0.12333999620750546,
+      "p99_ms": 0.12333999620750546,
+      "gflops": 277.4644057341412,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          256,
+          128,
+          10
+        ],
+        "batch": 64
+      }
+    },
+    {
+      "name": "Medium MLP (eval)",
+      "category": "mlp",
+      "device": "cpu",
+      "framework": "tenzor",
+      "mean_ms": 0.2304248046129942,
+      "std_ms": 0.004899321268296227,
+      "min_ms": 0.22585102124139667,
+      "max_ms": 0.24163100169971585,
+      "median_ms": 0.22882199846208096,
+      "p95_ms": 0.24163100169971585,
+      "p99_ms": 0.24163100169971585,
+      "gflops": 314.7038970990655,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          512,
+          256,
+          128,
+          10
+        ],
+        "batch": 64
+      }
+    },
+    {
+      "name": "Large MLP (eval)",
+      "category": "mlp",
+      "device": "cpu",
+      "framework": "tenzor",
+      "mean_ms": 0.8975914941402152,
+      "std_ms": 0.03859044847341022,
+      "min_ms": 0.8678589947521687,
+      "max_ms": 1.003962999675423,
+      "median_ms": 0.8884074923116714,
+      "p95_ms": 1.003962999675423,
+      "p99_ms": 1.003962999675423,
+      "gflops": 208.30657289048716,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          1024,
+          512,
+          256,
+          10
+        ],
+        "batch": 64
+      }
+    },
+    {
+      "name": "XLarge MLP (eval)",
+      "category": "mlp",
+      "device": "cpu",
+      "framework": "tenzor",
+      "mean_ms": 3.020242997445166,
+      "std_ms": 3.1471402596260103,
+      "min_ms": 1.2983219930902123,
+      "max_ms": 9.771097014890984,
+      "median_ms": 1.530174005893059,
+      "p95_ms": 9.771097014890984,
+      "p99_ms": 9.771097014890984,
+      "gflops": 89.68162105801476,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          2048,
+          1024,
+          512,
+          10
+        ],
+        "batch": 32
+      }
+    },
+    {
+      "name": "Small MLP (eval)",
+      "category": "mlp",
+      "device": "cpu",
+      "framework": "pytorch",
+      "mean_ms": 0.12343120179139078,
+      "std_ms": 0.030763391339146434,
+      "min_ms": 0.09884400060400367,
+      "max_ms": 0.17926402506418526,
+      "median_ms": 0.10250649938825518,
+      "p95_ms": 0.17926402506418526,
+      "p99_ms": 0.17926402506418526,
+      "gflops": 243.44133058660572,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          256,
+          128,
+          10
+        ],
+        "batch": 64
+      }
+    },
+    {
+      "name": "Medium MLP (eval)",
+      "category": "mlp",
+      "device": "cpu",
+      "framework": "pytorch",
+      "mean_ms": 0.5578432988841087,
+      "std_ms": 0.5394499502718363,
+      "min_ms": 0.31334400409832597,
+      "max_ms": 2.032090997090563,
+      "median_ms": 0.3540600009728223,
+      "p95_ms": 2.032090997090563,
+      "p99_ms": 2.032090997090563,
+      "gflops": 129.99274911979364,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          512,
+          256,
+          128,
+          10
+        ],
+        "batch": 64
+      }
+    },
+    {
+      "name": "Large MLP (eval)",
+      "category": "mlp",
+      "device": "cpu",
+      "framework": "pytorch",
+      "mean_ms": 0.5592842033365741,
+      "std_ms": 0.005476495464708235,
+      "min_ms": 0.5532419891096652,
+      "max_ms": 0.5666470096912235,
+      "median_ms": 0.5587975028902292,
+      "p95_ms": 0.5666470096912235,
+      "p99_ms": 0.5666470096912235,
+      "gflops": 334.3098318968254,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          1024,
+          512,
+          256,
+          10
+        ],
+        "batch": 64
+      }
+    },
+    {
+      "name": "XLarge MLP (eval)",
+      "category": "mlp",
+      "device": "cpu",
+      "framework": "pytorch",
+      "mean_ms": 1.7158416972961277,
+      "std_ms": 0.598131029647477,
+      "min_ms": 1.2632160214707255,
+      "max_ms": 3.195570985553786,
+      "median_ms": 1.5448319754796103,
+      "p95_ms": 3.195570985553786,
+      "p99_ms": 3.195570985553786,
+      "gflops": 157.85855328427405,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          2048,
+          1024,
+          512,
+          10
+        ],
+        "batch": 32
+      }
+    },
+    {
+      "name": "Small MLP (train)",
+      "category": "mlp",
+      "device": "cpu",
+      "framework": "tenzor",
+      "mean_ms": 11.798186704982072,
+      "std_ms": 15.15734256673179,
+      "min_ms": 1.0811870160978287,
+      "max_ms": 43.933153996476904,
+      "median_ms": 3.658149013062939,
+      "p95_ms": 43.933153996476904,
+      "p99_ms": 43.933153996476904,
+      "gflops": 7.640561236578344,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          256,
+          128,
+          10
+        ],
+        "batch": 64
+      }
+    },
+    {
+      "name": "Medium MLP (train)",
+      "category": "mlp",
+      "device": "cpu",
+      "framework": "tenzor",
+      "mean_ms": 2.8243867971468717,
+      "std_ms": 1.6029886028792966,
+      "min_ms": 1.8521849997341633,
+      "max_ms": 6.559146015206352,
+      "median_ms": 2.0066129945917055,
+      "p95_ms": 6.559146015206352,
+      "p99_ms": 6.559146015206352,
+      "gflops": 77.02441897114112,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          512,
+          256,
+          128,
+          10
+        ],
+        "batch": 64
+      }
+    },
+    {
+      "name": "Large MLP (train)",
+      "category": "mlp",
+      "device": "cpu",
+      "framework": "tenzor",
+      "mean_ms": 5.810533798648976,
+      "std_ms": 1.0479658746368574,
+      "min_ms": 4.956795979524031,
+      "max_ms": 7.807304005837068,
+      "median_ms": 5.329121006070636,
+      "p95_ms": 7.807304005837068,
+      "p99_ms": 7.807304005837068,
+      "gflops": 96.53547220229952,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          1024,
+          512,
+          256,
+          10
+        ],
+        "batch": 64
+      }
+    },
+    {
+      "name": "XLarge MLP (train)",
+      "category": "mlp",
+      "device": "cpu",
+      "framework": "tenzor",
+      "mean_ms": 18.72618789493572,
+      "std_ms": 4.048993168803771,
+      "min_ms": 13.86376199661754,
+      "max_ms": 24.969477992272004,
+      "median_ms": 18.24758898874279,
+      "p95_ms": 24.969477992272004,
+      "p99_ms": 24.969477992272004,
+      "gflops": 43.39275396354177,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          2048,
+          1024,
+          512,
+          10
+        ],
+        "batch": 32
+      }
+    },
+    {
+      "name": "Small MLP (train)",
+      "category": "mlp",
+      "device": "cpu",
+      "framework": "pytorch",
+      "mean_ms": 0.5117386899655685,
+      "std_ms": 0.03128289830456337,
+      "min_ms": 0.48467397573404014,
+      "max_ms": 0.5786789988633245,
+      "median_ms": 0.503534494782798,
+      "p95_ms": 0.5786789988633245,
+      "p99_ms": 0.5786789988633245,
+      "gflops": 176.1539038724339,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          256,
+          128,
+          10
+        ],
+        "batch": 64
+      }
+    },
+    {
+      "name": "Medium MLP (train)",
+      "category": "mlp",
+      "device": "cpu",
+      "framework": "pytorch",
+      "mean_ms": 1.2591458013048396,
+      "std_ms": 0.02999613993056606,
+      "min_ms": 1.2221689976286143,
+      "max_ms": 1.3033309951424599,
+      "median_ms": 1.2518299918156117,
+      "p95_ms": 1.3033309951424599,
+      "p99_ms": 1.3033309951424599,
+      "gflops": 172.77328151716713,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          512,
+          256,
+          128,
+          10
+        ],
+        "batch": 64
+      }
+    },
+    {
+      "name": "Large MLP (train)",
+      "category": "mlp",
+      "device": "cpu",
+      "framework": "pytorch",
+      "mean_ms": 3.1435582059202716,
+      "std_ms": 0.5165827965048515,
+      "min_ms": 2.8649449814110994,
+      "max_ms": 4.547513002762571,
+      "median_ms": 2.9421785147860646,
+      "p95_ms": 4.547513002762571,
+      "p99_ms": 4.547513002762571,
+      "gflops": 178.43557753873077,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          1024,
+          512,
+          256,
+          10
+        ],
+        "batch": 64
+      }
+    },
+    {
+      "name": "XLarge MLP (train)",
+      "category": "mlp",
+      "device": "cpu",
+      "framework": "pytorch",
+      "mean_ms": 6.371065694838762,
+      "std_ms": 0.4782248076578594,
+      "min_ms": 5.848579981829971,
+      "max_ms": 7.240475999424234,
+      "median_ms": 6.351989490212873,
+      "p95_ms": 7.240475999424234,
+      "p99_ms": 7.240475999424234,
+      "gflops": 127.54237719731512,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          2048,
+          1024,
+          512,
+          10
+        ],
+        "batch": 32
+      }
+    },
+    {
+      "name": "BERT-base 6L",
+      "category": "transformer",
+      "device": "cpu",
+      "framework": "tenzor",
+      "mean_ms": 1126.3419902999885,
+      "std_ms": 57.7828141550019,
+      "min_ms": 1079.9646910163574,
+      "max_ms": 1262.896483996883,
+      "median_ms": 1104.752829996869,
+      "p95_ms": 1262.896483996883,
+      "p99_ms": 1262.896483996883,
+      "gflops": 343.1880014852749,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "batch": 8,
+        "seq_len": 512,
+        "embed_dim": 768,
+        "num_heads": 12,
+        "num_layers": 6
+      }
+    },
+    {
+      "name": "BERT-base 12L",
+      "category": "transformer",
+      "device": "cpu",
+      "framework": "tenzor",
+      "mean_ms": 1125.9427925979253,
+      "std_ms": 81.7311126709195,
+      "min_ms": 1039.460896019591,
+      "max_ms": 1275.9001569938846,
+      "median_ms": 1100.5121005000547,
+      "p95_ms": 1275.9001569938846,
+      "p99_ms": 1275.9001569938846,
+      "gflops": 343.30967717117056,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "batch": 4,
+        "seq_len": 512,
+        "embed_dim": 768,
+        "num_heads": 12,
+        "num_layers": 12
+      }
+    },
+    {
+      "name": "BERT-base 6L",
+      "category": "transformer",
+      "device": "cpu",
+      "framework": "pytorch",
+      "mean_ms": 823.0319272028282,
+      "std_ms": 11.662256673896273,
+      "min_ms": 813.3449479937553,
+      "max_ms": 853.3400239830371,
+      "median_ms": 819.4387885159813,
+      "p95_ms": 853.3400239830371,
+      "p99_ms": 853.3400239830371,
+      "gflops": 469.66228631461,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "batch": 8,
+        "seq_len": 512,
+        "embed_dim": 768,
+        "num_heads": 12,
+        "num_layers": 6
+      }
+    },
+    {
+      "name": "BERT-base 12L",
+      "category": "transformer",
+      "device": "cpu",
+      "framework": "pytorch",
+      "mean_ms": 861.7576975986594,
+      "std_ms": 19.519371608752788,
+      "min_ms": 835.9714759862982,
+      "max_ms": 901.2681360181887,
+      "median_ms": 860.7159289967967,
+      "p95_ms": 901.2681360181887,
+      "p99_ms": 901.2681360181887,
+      "gflops": 448.5565463669626,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "batch": 4,
+        "seq_len": 512,
+        "embed_dim": 768,
+        "num_heads": 12,
+        "num_layers": 12
+      }
+    },
+    {
+      "name": "Small MLP (eval)",
+      "category": "mlp",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 0.07012579590082169,
+      "std_ms": 0.013085043894432442,
+      "min_ms": 0.03736998769454658,
+      "max_ms": 0.09000700083561242,
+      "median_ms": 0.07182398985605687,
+      "p95_ms": 0.09000700083561242,
+      "p99_ms": 0.09000700083561242,
+      "gflops": 428.4907659728667,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          256,
+          128,
+          10
+        ],
+        "batch": 64
+      }
+    },
+    {
+      "name": "Medium MLP (eval)",
+      "category": "mlp",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 0.0474945962196216,
+      "std_ms": 0.0020742533105044276,
+      "min_ms": 0.04511501174420118,
+      "max_ms": 0.0518469896633178,
+      "median_ms": 0.04753800749313086,
+      "p95_ms": 0.0518469896633178,
+      "p99_ms": 0.0518469896633178,
+      "gflops": 1526.8175702490003,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          512,
+          256,
+          128,
+          10
+        ],
+        "batch": 64
+      }
+    },
+    {
+      "name": "Large MLP (eval)",
+      "category": "mlp",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 0.05338960618246347,
+      "std_ms": 0.0012006814445296315,
+      "min_ms": 0.051817012717947364,
+      "max_ms": 0.05574399256147444,
+      "median_ms": 0.05365499237086624,
+      "p95_ms": 0.05574399256147444,
+      "p99_ms": 0.05574399256147444,
+      "gflops": 3502.0713088049374,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          1024,
+          512,
+          256,
+          10
+        ],
+        "batch": 64
+      }
+    },
+    {
+      "name": "XLarge MLP (eval)",
+      "category": "mlp",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 0.0638720957795158,
+      "std_ms": 0.0007883508169209948,
+      "min_ms": 0.06219599163159728,
+      "max_ms": 0.06489097722806036,
+      "median_ms": 0.06408999615814537,
+      "p95_ms": 0.06489097722806036,
+      "p99_ms": 0.06489097722806036,
+      "gflops": 4240.666987584063,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          2048,
+          1024,
+          512,
+          10
+        ],
+        "batch": 32
+      }
+    },
+    {
+      "name": "Small MLP (eval)",
+      "category": "mlp",
+      "device": "cuda",
+      "framework": "pytorch",
+      "mean_ms": 0.04670789639931172,
+      "std_ms": 0.0017525440509183793,
+      "min_ms": 0.0447329948656261,
+      "max_ms": 0.05054401117376983,
+      "median_ms": 0.04647199239116162,
+      "p95_ms": 0.05054401117376983,
+      "p99_ms": 0.05054401117376983,
+      "gflops": 643.3228279671097,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          256,
+          128,
+          10
+        ],
+        "batch": 64
+      }
+    },
+    {
+      "name": "Medium MLP (eval)",
+      "category": "mlp",
+      "device": "cuda",
+      "framework": "pytorch",
+      "mean_ms": 0.054914396605454385,
+      "std_ms": 0.001341915938203831,
+      "min_ms": 0.051897019147872925,
+      "max_ms": 0.056805991334840655,
+      "median_ms": 0.054932505008764565,
+      "p95_ms": 0.056805991334840655,
+      "p99_ms": 0.056805991334840655,
+      "gflops": 1320.520455155058,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          512,
+          256,
+          128,
+          10
+        ],
+        "batch": 64
+      }
+    },
+    {
+      "name": "Large MLP (eval)",
+      "category": "mlp",
+      "device": "cuda",
+      "framework": "pytorch",
+      "mean_ms": 0.08948779432103038,
+      "std_ms": 0.0016697218283570298,
+      "min_ms": 0.08766399696469307,
+      "max_ms": 0.09221202344633639,
+      "median_ms": 0.08928148599807173,
+      "p95_ms": 0.09221202344633639,
+      "p99_ms": 0.09221202344633639,
+      "gflops": 2089.3822383111246,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          1024,
+          512,
+          256,
+          10
+        ],
+        "batch": 64
+      }
+    },
+    {
+      "name": "XLarge MLP (eval)",
+      "category": "mlp",
+      "device": "cuda",
+      "framework": "pytorch",
+      "mean_ms": 0.11325109808240086,
+      "std_ms": 0.0015670624877021303,
+      "min_ms": 0.11172800441272557,
+      "max_ms": 0.11628700303845108,
+      "median_ms": 0.11246450594626367,
+      "p95_ms": 0.11628700303845108,
+      "p99_ms": 0.11628700303845108,
+      "gflops": 2391.679132355287,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          2048,
+          1024,
+          512,
+          10
+        ],
+        "batch": 32
+      }
+    },
+    {
+      "name": "Small MLP (train)",
+      "category": "mlp",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 0.5376597982831299,
+      "std_ms": 0.011534745680881421,
+      "min_ms": 0.5198900180403143,
+      "max_ms": 0.5516789969988167,
+      "median_ms": 0.5374174943426624,
+      "p95_ms": 0.5516789969988167,
+      "p99_ms": 0.5516789969988167,
+      "gflops": 167.66135070513502,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          256,
+          128,
+          10
+        ],
+        "batch": 64
+      }
+    },
+    {
+      "name": "Medium MLP (train)",
+      "category": "mlp",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 0.707671997952275,
+      "std_ms": 0.022761603492838206,
+      "min_ms": 0.6884739850647748,
+      "max_ms": 0.761511008022353,
+      "median_ms": 0.7002060010563582,
+      "p95_ms": 0.761511008022353,
+      "p99_ms": 0.761511008022353,
+      "gflops": 307.41184140321354,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          512,
+          256,
+          128,
+          10
+        ],
+        "batch": 64
+      }
+    },
+    {
+      "name": "Large MLP (train)",
+      "category": "mlp",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 0.7282813981873915,
+      "std_ms": 0.01919111788336619,
+      "min_ms": 0.7123289979062974,
+      "max_ms": 0.7681229908484966,
+      "median_ms": 0.7207394955912605,
+      "p95_ms": 0.7681229908484966,
+      "p99_ms": 0.7681229908484966,
+      "gflops": 770.200399730203,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          1024,
+          512,
+          256,
+          10
+        ],
+        "batch": 64
+      }
+    },
+    {
+      "name": "XLarge MLP (train)",
+      "category": "mlp",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 0.8293528051581234,
+      "std_ms": 0.013296196017352305,
+      "min_ms": 0.8146890031639487,
+      "max_ms": 0.8581810106988996,
+      "median_ms": 0.8282195194624364,
+      "p95_ms": 0.8581810106988996,
+      "p99_ms": 0.8581810106988996,
+      "gflops": 979.7770730938498,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          2048,
+          1024,
+          512,
+          10
+        ],
+        "batch": 32
+      }
+    },
+    {
+      "name": "Small MLP (train)",
+      "category": "mlp",
+      "device": "cuda",
+      "framework": "pytorch",
+      "mean_ms": 0.33558309951331466,
+      "std_ms": 0.1096321741223098,
+      "min_ms": 0.2639919985085726,
+      "max_ms": 0.5920350085943937,
+      "median_ms": 0.2719970070756972,
+      "p95_ms": 0.5920350085943937,
+      "p99_ms": 0.5920350085943937,
+      "gflops": 268.62129866114844,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          256,
+          128,
+          10
+        ],
+        "batch": 64
+      }
+    },
+    {
+      "name": "Medium MLP (train)",
+      "category": "mlp",
+      "device": "cuda",
+      "framework": "pytorch",
+      "mean_ms": 0.3956671978812665,
+      "std_ms": 0.14084925705761892,
+      "min_ms": 0.2612370008137077,
+      "max_ms": 0.6816819950472564,
+      "median_ms": 0.32713050313759595,
+      "p95_ms": 0.6816819950472564,
+      "p99_ms": 0.6816819950472564,
+      "gflops": 549.8225608918998,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          512,
+          256,
+          128,
+          10
+        ],
+        "batch": 64
+      }
+    },
+    {
+      "name": "Large MLP (train)",
+      "category": "mlp",
+      "device": "cuda",
+      "framework": "pytorch",
+      "mean_ms": 0.326026402763091,
+      "std_ms": 0.014789146709967409,
+      "min_ms": 0.30248501570895314,
+      "max_ms": 0.35706599010154605,
+      "median_ms": 0.3259229997638613,
+      "p95_ms": 0.35706599010154605,
+      "p99_ms": 0.35706599010154605,
+      "gflops": 1720.482204036701,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          1024,
+          512,
+          256,
+          10
+        ],
+        "batch": 64
+      }
+    },
+    {
+      "name": "XLarge MLP (train)",
+      "category": "mlp",
+      "device": "cuda",
+      "framework": "pytorch",
+      "mean_ms": 0.3764903056435287,
+      "std_ms": 0.033214914670627205,
+      "min_ms": 0.34598499769344926,
+      "max_ms": 0.45683200005441904,
+      "median_ms": 0.3663935058284551,
+      "p95_ms": 0.45683200005441904,
+      "p99_ms": 0.45683200005441904,
+      "gflops": 2158.304880151081,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "layers": [
+          784,
+          2048,
+          1024,
+          512,
+          10
+        ],
+        "batch": 32
+      }
+    },
+    {
+      "name": "BERT-base 6L",
+      "category": "transformer",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 231.46421789424494,
+      "std_ms": 1.704192156271354,
+      "min_ms": 229.27197598619387,
+      "max_ms": 234.60497398627922,
+      "median_ms": 231.43200449703727,
+      "p95_ms": 234.60497398627922,
+      "p99_ms": 234.60497398627922,
+      "gflops": 1670.0078316926367,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "batch": 8,
+        "seq_len": 512,
+        "embed_dim": 768,
+        "num_heads": 12,
+        "num_layers": 6
+      }
+    },
+    {
+      "name": "BERT-base 12L",
+      "category": "transformer",
+      "device": "cuda",
+      "framework": "tenzor",
+      "mean_ms": 227.45634189632256,
+      "std_ms": 3.194034783115251,
+      "min_ms": 224.8496249958407,
+      "max_ms": 233.61552698770538,
+      "median_ms": 226.17418649315368,
+      "p95_ms": 233.61552698770538,
+      "p99_ms": 233.61552698770538,
+      "gflops": 1699.4340690495803,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "batch": 4,
+        "seq_len": 512,
+        "embed_dim": 768,
+        "num_heads": 12,
+        "num_layers": 12
+      }
+    },
+    {
+      "name": "BERT-base 6L",
+      "category": "transformer",
+      "device": "cuda",
+      "framework": "pytorch",
+      "mean_ms": 42.946270198444836,
+      "std_ms": 0.15214243424387955,
+      "min_ms": 42.77541200281121,
+      "max_ms": 43.2471510139294,
+      "median_ms": 42.9262225079583,
+      "p95_ms": 43.2471510139294,
+      "p99_ms": 43.2471510139294,
+      "gflops": 9000.71309694311,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "batch": 8,
+        "seq_len": 512,
+        "embed_dim": 768,
+        "num_heads": 12,
+        "num_layers": 6
+      }
+    },
+    {
+      "name": "BERT-base 12L",
+      "category": "transformer",
+      "device": "cuda",
+      "framework": "pytorch",
+      "mean_ms": 44.06471450056415,
+      "std_ms": 1.4383876101458561,
+      "min_ms": 42.83798800315708,
+      "max_ms": 47.31949800043367,
+      "median_ms": 43.698989000404254,
+      "p95_ms": 47.31949800043367,
+      "p99_ms": 47.31949800043367,
+      "gflops": 8772.258280149554,
+      "bandwidth_gbps": null,
+      "iterations": 10,
+      "warmup_iterations": 2,
+      "parameters": {
+        "batch": 4,
+        "seq_len": 512,
+        "embed_dim": 768,
+        "num_heads": 12,
+        "num_layers": 12
+      }
+    }
+  ]
+}

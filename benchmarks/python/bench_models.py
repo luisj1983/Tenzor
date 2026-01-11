@@ -53,6 +53,11 @@ def benchmark_tenzor_mlp(
 
     results = []
     mode = "train" if training else "eval"
+    sync_fn = get_tenzor_sync_fn(device)
+
+    # Disable gradients for inference (like PyTorch's torch.no_grad())
+    if not training:
+        tz.set_grad_enabled(False)
 
     for layer_sizes, batch_size, name in configs:
         try:
@@ -66,6 +71,7 @@ def benchmark_tenzor_mlp(
             model = tz.nn.Sequential(*layers)
 
             if device == "cuda":
+                model.cuda()  # Move model to CUDA!
                 x = tz.randn([batch_size, layer_sizes[0]]).cuda()
             else:
                 x = tz.randn([batch_size, layer_sizes[0]])
@@ -73,10 +79,15 @@ def benchmark_tenzor_mlp(
             x_var = tz.Variable(x, training)
 
             if training:
+                # Use optimizer like PyTorch for fair comparison
+                optimizer = tz.optim.SGD(model.parameters(), lr=0.01)
+
                 def mlp_fn():
+                    optimizer.zero_grad()
                     output = model.forward(x_var)
                     loss = tz.sum(output)
                     loss.backward()
+                    optimizer.step()
                     return output
             else:
                 def mlp_fn():
@@ -86,6 +97,7 @@ def benchmark_tenzor_mlp(
                 mlp_fn,
                 warmup_iterations=config.warmup_iterations,
                 benchmark_iterations=config.benchmark_iterations,
+                sync_fn=sync_fn,
             )
 
             # Calculate FLOPs
@@ -111,6 +123,9 @@ def benchmark_tenzor_mlp(
         except Exception as e:
             print(f"  [SKIP] {name}: {e}")
 
+    # Restore gradient state
+    if not training:
+        tz.set_grad_enabled(True)
     return results
 
 
@@ -214,6 +229,10 @@ def benchmark_tenzor_transformer(
     tz.initialize()
 
     results = []
+    sync_fn = get_tenzor_sync_fn(device)
+
+    # Disable gradients for inference (like PyTorch's torch.no_grad())
+    tz.set_grad_enabled(False)
 
     for batch, seq_len, embed_dim, num_heads, num_layers, name in configs:
         try:
@@ -223,8 +242,10 @@ def benchmark_tenzor_transformer(
                 dim_feedforward=embed_dim * 4,
             )
             encoder = tz.nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+            encoder.eval()  # Set to eval mode
 
             if device == "cuda":
+                encoder.cuda()  # Move model to CUDA!
                 x = tz.randn([batch, seq_len, embed_dim]).cuda()
             else:
                 x = tz.randn([batch, seq_len, embed_dim])
@@ -238,6 +259,7 @@ def benchmark_tenzor_transformer(
                 transformer_fn,
                 warmup_iterations=config.warmup_iterations,
                 benchmark_iterations=config.benchmark_iterations,
+                sync_fn=sync_fn,
             )
 
             # Approximate FLOPs for transformer
@@ -269,6 +291,8 @@ def benchmark_tenzor_transformer(
         except Exception as e:
             print(f"  [SKIP] {name}: {e}")
 
+    # Restore gradient state
+    tz.set_grad_enabled(True)
     return results
 
 

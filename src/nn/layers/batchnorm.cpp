@@ -270,6 +270,104 @@ auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
     Tensor batch_mean, batch_var;
 
     if (training_) {
+        // Check if we can use fused cuDNN training path (CUDA + affine + track_running_stats)
+        bool use_fused_training = use_gpu && affine_ && track_running_stats_ &&
+                                  cached_weight_ && cached_bias_;
+
+        if (use_fused_training) {
+            // ================================================================
+            // FUSED CUDNN PATH: Single kernel for mean/var + normalize + update
+            // ================================================================
+            auto& rm_var_ptr = buffers_["running_mean"];
+            auto& rv_var_ptr = buffers_["running_var"];
+
+            Tensor running_mean = rm_var_ptr->tensor();
+            Tensor running_var = rv_var_ptr->tensor();
+            if (running_mean.device() != original_device) {
+                running_mean = running_mean.to(original_device);
+            }
+            if (running_var.device() != original_device) {
+                running_var = running_var.to(original_device);
+            }
+
+            Tensor weight = cached_weight_->tensor();
+            Tensor bias = cached_bias_->tensor();
+            if (weight.device() != original_device) {
+                weight = weight.to(original_device);
+            }
+            if (bias.device() != original_device) {
+                bias = bias.to(original_device);
+            }
+
+            OpAttributes fused_attrs;
+            std::ostringstream eps_ss, mom_ss;
+            eps_ss << std::scientific << std::setprecision(9) << static_cast<float>(eps_);
+            mom_ss << std::scientific << std::setprecision(9) << static_cast<float>(momentum_);
+            fused_attrs["epsilon"] = eps_ss.str();
+            fused_attrs["momentum"] = mom_ss.str();
+
+            std::vector<Tensor> fused_inputs = {input_work, running_mean, running_var, weight, bias};
+            std::vector<Tensor> fused_results = dispatch(OpId::BatchNorm2dFusedTraining, fused_inputs, fused_attrs);
+
+            // Update running stats from cuDNN
+            rm_var_ptr->tensor() = fused_results[1];
+            rv_var_ptr->tensor() = fused_results[2];
+            batch_mean = fused_results[3];  // saved_mean for backward
+            batch_var = fused_results[4];   // saved_inv_var for backward
+            num_batches_tracked_++;
+
+            // Return output directly (autograd handled below if needed)
+            Tensor output = fused_results[0];
+
+            // Handle autograd for fused path
+            bool requires_grad = input.requires_grad();
+            if (affine_ && cached_weight_) {
+                requires_grad = requires_grad || cached_weight_->requires_grad();
+            }
+            if (is_grad_enabled() && requires_grad) {
+                auto result = Variable(output, true);
+                // Note: For fused path, batch_var is actually saved_inv_var from cuDNN
+                std::vector<Tensor> tensors_to_save = {
+                    input.tensor().contiguous(),
+                    batch_mean.contiguous(),
+                    batch_var.contiguous(),  // This is inv_std from cuDNN
+                    weight.contiguous()
+                };
+                auto grad_fn = std::make_shared<BatchNorm2dBackward>(
+                    affine_, eps_, std::move(tensors_to_save)
+                );
+                result.set_grad_fn(grad_fn);
+
+                // Track input variables for gradient accumulation
+                std::vector<Variable> input_vars;
+                if (input.requires_grad()) {
+                    input_vars.push_back(input);
+                }
+                if (affine_ && cached_weight_ && cached_bias_) {
+                    if (cached_weight_->requires_grad()) {
+                        input_vars.push_back(*cached_weight_);
+                    }
+                    if (cached_bias_->requires_grad()) {
+                        input_vars.push_back(*cached_bias_);
+                    }
+                }
+                grad_fn->set_input_variables(input_vars);
+
+                // Connect to input's grad_fn to continue the backward chain
+                std::vector<std::shared_ptr<Function>> next_funcs;
+                if (input.grad_fn()) {
+                    next_funcs.push_back(input.grad_fn());
+                }
+                grad_fn->set_next_functions(next_funcs);
+
+                return result;
+            }
+            return Variable(output, false);
+        }
+
+        // ================================================================
+        // STANDARD TRAINING PATH: Separate kernels for backward compat
+        // ================================================================
         // Training mode: compute batch statistics using backend dispatch
         OpAttributes mean_var_attrs;
         std::vector<Tensor> mean_var_inputs = {input_work};

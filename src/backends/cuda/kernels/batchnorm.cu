@@ -303,6 +303,127 @@ __global__ void batchnorm_forward_affine_kernel(const T* input,
 }
 
 // ============================================================================
+// Optimized BatchNorm Inference Kernel (Single-pass with shared memory)
+// ============================================================================
+
+// Ultra-optimized single kernel for BatchNorm inference
+// Uses shared memory to cache per-channel scale/bias, avoids multiple kernel launches
+// Block processes one channel at a time for optimal memory access
+template<int BLOCK_SIZE_OPT = 256>
+__global__ void batchnorm_forward_affine_fast_kernel(
+    const float* __restrict__ input,
+    float* __restrict__ output,
+    const float* __restrict__ mean,
+    const float* __restrict__ variance,
+    const float* __restrict__ gamma,
+    const float* __restrict__ beta,
+    float epsilon,
+    int64_t N,
+    int64_t C,
+    int64_t H,
+    int64_t W) {
+
+    // Shared memory for this channel's parameters (computed once per block)
+    __shared__ float s_scale;
+    __shared__ float s_bias;
+
+    int64_t spatial_size = H * W;
+    int64_t elements_per_channel = N * spatial_size;
+
+    // Each block handles one channel
+    int64_t c = blockIdx.x;
+    if (c >= C) return;
+
+    // Thread 0 computes and stores the scale/bias for this channel
+    if (threadIdx.x == 0) {
+        float invstd = rsqrtf(variance[c] + epsilon);
+        s_scale = gamma[c] * invstd;
+        s_bias = beta[c] - mean[c] * s_scale;
+    }
+    __syncthreads();
+
+    // Load scale/bias into registers for fast access
+    float scale = s_scale;
+    float bias = s_bias;
+
+    // Process all elements for this channel with grid-stride loop
+    for (int64_t i = threadIdx.x; i < elements_per_channel; i += BLOCK_SIZE_OPT) {
+        // Compute actual tensor index: for NCHW, we need (n, c, h, w)
+        // where n = i / spatial_size, and hw_idx = i % spatial_size
+        int64_t n = i / spatial_size;
+        int64_t hw_idx = i % spatial_size;
+        int64_t idx = ((n * C + c) * H * W) + hw_idx;
+
+        output[idx] = __fmaf_rn(input[idx], scale, bias);  // fused multiply-add
+    }
+}
+
+// Alternative: process all elements in parallel (better for large tensors)
+__global__ void batchnorm_forward_affine_parallel_kernel(
+    const float* __restrict__ input,
+    float* __restrict__ output,
+    const float* __restrict__ mean,
+    const float* __restrict__ variance,
+    const float* __restrict__ gamma,
+    const float* __restrict__ beta,
+    float epsilon,
+    int64_t total_size,
+    int64_t C,
+    int64_t HW) {
+
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total_size) return;
+
+    // Decode channel from NCHW layout
+    int64_t c = (idx / HW) % C;
+
+    // Compute scale and bias inline (register pressure is fine, avoids shared memory sync)
+    float invstd = rsqrtf(variance[c] + epsilon);
+    float scale = gamma[c] * invstd;
+    float val = (input[idx] - mean[c]) * scale + beta[c];
+    output[idx] = val;
+}
+
+// Vectorized version: processes 4 elements per thread
+__global__ void batchnorm_forward_affine_vec4_inline_kernel(
+    const float4* __restrict__ input,
+    float4* __restrict__ output,
+    const float* __restrict__ mean,
+    const float* __restrict__ variance,
+    const float* __restrict__ gamma,
+    const float* __restrict__ beta,
+    float epsilon,
+    int64_t total_vec4,
+    int64_t C,
+    int64_t HW) {
+
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total_vec4) return;
+
+    // Decode channel from NCHW layout (for vec4, multiply by 4)
+    int64_t scalar_idx = idx * 4;
+    int64_t c = (scalar_idx / HW) % C;
+
+    // Load parameters for this channel
+    float m = mean[c];
+    float invstd = rsqrtf(variance[c] + epsilon);
+    float g = gamma[c];
+    float b = beta[c];
+
+    // Load 4 elements
+    float4 in = input[idx];
+
+    // Apply transformation: y = gamma * (x - mean) * invstd + beta
+    float4 out;
+    out.x = g * (in.x - m) * invstd + b;
+    out.y = g * (in.y - m) * invstd + b;
+    out.z = g * (in.z - m) * invstd + b;
+    out.w = g * (in.w - m) * invstd + b;
+
+    output[idx] = out;
+}
+
+// ============================================================================
 // BatchNorm2d Running Statistics Update Kernel
 // ============================================================================
 
@@ -593,6 +714,81 @@ auto batchnorm2d_forward_affine(const Tensor& input,
             epsilon, N, C, H, W);
         CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
+        int num_blocks = get_num_blocks(total_size);
+        batchnorm_forward_affine_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(output.data<Float16>()),
+            reinterpret_cast<const __half*>(mean.data<Float16>()),
+            reinterpret_cast<const __half*>(variance.data<Float16>()),
+            reinterpret_cast<const __half*>(gamma.data<Float16>()),
+            reinterpret_cast<const __half*>(beta.data<Float16>()),
+            __float2half(epsilon), N, C, H, W);
+        CUDA_CHECK(cudaGetLastError());
+    } else {
+        throw std::runtime_error("BatchNorm2D only supports Float32, Float64, and Float16 dtypes");
+    }
+
+    return output;
+}
+
+// Optimized forward pass with affine transform (single kernel, vectorized for large tensors)
+// Uses inline computation to avoid kernel launch overhead
+auto batchnorm2d_forward_affine_optimized(const Tensor& input,
+                                          const Tensor& mean,
+                                          const Tensor& variance,
+                                          const Tensor& gamma,
+                                          const Tensor& beta,
+                                          float epsilon,
+                                          cudaStream_t stream) -> Tensor {
+    auto shape = input.shape();
+    std::vector<int64_t> shape_vec(shape.begin(), shape.end());
+    Tensor output(shape_vec, input.dtype(), input.device());
+
+    int64_t N = shape[0];
+    int64_t C = shape[1];
+    int64_t H = shape[2];
+    int64_t W = shape[3];
+    int64_t HW = H * W;
+    int64_t total_size = N * C * HW;
+
+    if (input.dtype() == DType::Float32) {
+        // Check if we can use vectorized path (need alignment and multiple of 4)
+        bool can_vectorize = (total_size % 4 == 0) &&
+                             (reinterpret_cast<uintptr_t>(input.data<float>()) % 16 == 0) &&
+                             (reinterpret_cast<uintptr_t>(output.data<float>()) % 16 == 0);
+
+        if (can_vectorize && total_size >= 1024) {
+            // Use vectorized kernel for large tensors
+            int64_t total_vec4 = total_size / 4;
+            int vec_blocks = (total_vec4 + BLOCK_SIZE - 1) / BLOCK_SIZE;
+            batchnorm_forward_affine_vec4_inline_kernel<<<vec_blocks, BLOCK_SIZE, 0, stream>>>(
+                reinterpret_cast<const float4*>(input.data<float>()),
+                reinterpret_cast<float4*>(output.data<float>()),
+                mean.data<float>(), variance.data<float>(),
+                gamma.data<float>(), beta.data<float>(),
+                epsilon, total_vec4, C, HW);
+            CUDA_CHECK(cudaGetLastError());
+        } else {
+            // Use parallel kernel (single kernel launch, processes all elements)
+            int num_blocks = get_num_blocks(total_size);
+            batchnorm_forward_affine_parallel_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                input.data<float>(), output.data<float>(),
+                mean.data<float>(), variance.data<float>(),
+                gamma.data<float>(), beta.data<float>(),
+                epsilon, total_size, C, HW);
+            CUDA_CHECK(cudaGetLastError());
+        }
+    } else if (input.dtype() == DType::Float64) {
+        // For Float64, use the standard kernel
+        int num_blocks = get_num_blocks(total_size);
+        batchnorm_forward_affine_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            input.data<double>(), output.data<double>(),
+            mean.data<double>(), variance.data<double>(),
+            gamma.data<double>(), beta.data<double>(),
+            epsilon, N, C, H, W);
+        CUDA_CHECK(cudaGetLastError());
+    } else if (input.dtype() == DType::Float16) {
+        // For Float16, use the standard kernel
         int num_blocks = get_num_blocks(total_size);
         batchnorm_forward_affine_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __half*>(input.data<Float16>()),

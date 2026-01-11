@@ -654,13 +654,17 @@ auto LayerNorm::forward_impl(const Variable& input) -> Variable {
     // FAST INFERENCE PATH: Skip all autograd overhead when gradients not needed
     // ============================================================================
     // Use cached pointers to avoid hash map lookups (~2-3ms savings per call)
-    const bool needs_grad = is_grad_enabled() &&
-        (input.requires_grad() || (elementwise_affine_ && cached_weight_ && cached_weight_->requires_grad()));
+    // NOTE: For inference (input doesn't require grad), use fast path regardless of
+    // whether weights require grad - weight gradients only matter during training
+    const bool needs_input_grad = is_grad_enabled() && input.requires_grad();
+    const bool needs_grad = needs_input_grad ||
+        (is_grad_enabled() && elementwise_affine_ && cached_weight_ && cached_weight_->requires_grad());
 
     // ============================================================================
     // CUDA FAST PATH: Use fused LayerNorm kernel via dispatch (single kernel launch!)
+    // Use fast path when input doesn't need grad (inference) - even if weights require grad
     // ============================================================================
-    if (!needs_grad && input.tensor().device().type == Device::Type::CUDA && input.tensor().dtype() == DType::Float32) {
+    if (!needs_input_grad && input.tensor().device().type == Device::Type::CUDA && input.tensor().dtype() == DType::Float32) {
         const Tensor& x = input.tensor();
 
         // Get weight/bias tensors, ensure on CUDA
@@ -691,7 +695,7 @@ auto LayerNorm::forward_impl(const Variable& input) -> Variable {
         return Variable(results[0], false);  // results[0] is output, [1] is mean, [2] is inv_std
     }
 
-    if (!needs_grad && input.tensor().device().type == Device::Type::CPU && input.tensor().dtype() == DType::Float32) {
+    if (!needs_input_grad && input.tensor().device().type == Device::Type::CPU && input.tensor().dtype() == DType::Float32) {
         // Ultra-fast path: CPU Float32 inference with no gradient tracking
         const Tensor& input_tensor = input.tensor();
         const auto* input_data = input_tensor.data<float>();
@@ -1644,13 +1648,17 @@ auto RMSNorm::forward_impl(const Variable& input) -> Variable {
     // ============================================================================
     // FAST INFERENCE PATH: Skip all autograd overhead when gradients not needed
     // ============================================================================
-    const bool needs_grad = is_grad_enabled() &&
-        (input.requires_grad() || (cached_weight_ && cached_weight_->requires_grad()));
+    // NOTE: For inference (input doesn't require grad), use fast path regardless of
+    // whether weights require grad - weight gradients only matter during training
+    const bool needs_input_grad = is_grad_enabled() && input.requires_grad();
+    const bool needs_grad = needs_input_grad ||
+        (is_grad_enabled() && cached_weight_ && cached_weight_->requires_grad());
 
     // ============================================================================
     // CUDA FAST PATH: Use fused RMSNorm kernel via dispatch (single kernel launch!)
+    // Use fast path when input doesn't need grad (inference) - even if weights require grad
     // ============================================================================
-    if (!needs_grad && input.tensor().device().type == Device::Type::CUDA && input.tensor().dtype() == DType::Float32) {
+    if (!needs_input_grad && input.tensor().device().type == Device::Type::CUDA && input.tensor().dtype() == DType::Float32) {
         const Tensor& x = input.tensor();
 
         // Get weight tensor, ensure on CUDA
@@ -1668,7 +1676,7 @@ auto RMSNorm::forward_impl(const Variable& input) -> Variable {
         return Variable(results[0], false);  // results[0] is output, [1] is rrms
     }
 
-    if (!needs_grad && input.tensor().device().type == Device::Type::CPU && input.tensor().dtype() == DType::Float32) {
+    if (!needs_input_grad && input.tensor().device().type == Device::Type::CPU && input.tensor().dtype() == DType::Float32) {
         // Ultra-fast path: CPU Float32 inference with no gradient tracking
         const Tensor& input_tensor = input.tensor();
         const auto* input_data = input_tensor.data<float>();

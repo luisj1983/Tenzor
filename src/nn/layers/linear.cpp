@@ -27,7 +27,7 @@ Linear::Linear(int64_t in_features, int64_t out_features, bool bias)
     }
 }
 
-// Helper function to compute linear using matmul (works on all backends)
+// Helper function to compute linear using matmul (fallback for backends without fused linear)
 static auto linear_via_matmul(const Variable& input, const Variable& weight,
                                const Variable* bias) -> Variable {
     // Transpose weight: [out_features, in_features] -> [in_features, out_features]
@@ -44,6 +44,12 @@ static auto linear_via_matmul(const Variable& input, const Variable& weight,
     return output;
 }
 
+// Check if fused linear kernel is available for this backend
+static bool has_fused_linear_kernel(Device device) {
+    // CPU and CUDA backends have fused linear kernels
+    return device.type == Device::Type::CPU || device.type == Device::Type::CUDA;
+}
+
 auto Linear::forward_impl(const Variable& input) -> Variable {
     // input: [*, in_features] where * can be any number of dimensions
     // weight: [out_features, in_features]
@@ -55,9 +61,6 @@ auto Linear::forward_impl(const Variable& input) -> Variable {
     // Get weight and bias from parameters
     auto& weight_ptr = parameters_["weight"];
     auto& weight = *weight_ptr;
-
-    // Check if we're on CPU - use fused linear kernel for better performance
-    const bool is_cpu = (weight.tensor().device().type == Device::Type::CPU);
 
     // Fast path: 2D input - skip reshape operations entirely
     // This eliminates 2 ReshapeBackward allocations per forward pass
@@ -93,9 +96,9 @@ auto Linear::forward_impl(const Variable& input) -> Variable {
             bias_ptr = &bias_matched;
         }
 
-        // CPU: use fused linear kernel with MKL for optimal performance
-        // GPU: use matmul + add which works on all backends
-        if (is_cpu) {
+        // Use fused linear kernel if available (CPU with MKL, CUDA with cuBLAS)
+        // Falls back to matmul + add for other backends
+        if (has_fused_linear_kernel(weight.tensor().device())) {
             // Create zero bias if needed for fused kernel
             if (!bias_ptr) {
                 auto zero_bias = zeros({out_features_}, input_device.dtype(), input_device.tensor().device());
@@ -153,15 +156,15 @@ auto Linear::forward_impl(const Variable& input) -> Variable {
 
     // Compute linear operation
     Variable output_2d;
-    if (is_cpu) {
-        // CPU: use fused linear kernel with MKL
+    if (has_fused_linear_kernel(weight.tensor().device())) {
+        // Use fused linear kernel (CPU with MKL, CUDA with cuBLAS)
         if (!bias_ptr) {
             auto zero_bias = zeros({out_features_}, input_2d_device.dtype(), input_2d_device.tensor().device());
             bias_matched = Variable(zero_bias, false);
         }
         output_2d = autograd::linear(input_2d_device, weight_matched, bias_matched);
     } else {
-        // GPU: use matmul + add
+        // Fallback: use matmul + add for other backends
         output_2d = linear_via_matmul(input_2d_device, weight_matched, bias_ptr);
     }
 

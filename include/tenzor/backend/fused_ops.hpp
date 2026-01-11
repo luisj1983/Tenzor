@@ -117,5 +117,68 @@ auto fused_attention_cuda(
     float scale
 ) -> Tensor;
 
+/**
+ * @brief Fused Adam optimizer step CUDA kernel
+ *
+ * Performs the complete Adam update in a single kernel launch:
+ * - First moment update: m = beta1 * m + (1-beta1) * grad
+ * - Second moment update: v = beta2 * v + (1-beta2) * grad^2
+ * - Parameter update with bias correction
+ *
+ * @param param Parameter tensor (modified in-place)
+ * @param grad Gradient tensor
+ * @param exp_avg First moment buffer (modified in-place)
+ * @param exp_avg_sq Second moment buffer (modified in-place)
+ * @param lr Learning rate
+ * @param beta1 First moment decay rate (default 0.9)
+ * @param beta2 Second moment decay rate (default 0.999)
+ * @param eps Epsilon for numerical stability (default 1e-8)
+ * @param weight_decay Weight decay coefficient (default 0)
+ * @param step Current step count (for bias correction)
+ * @param decoupled_weight_decay True for AdamW, false for L2 regularization
+ * @param stream CUDA stream for async execution
+ */
+auto fused_adam_step_cuda(
+    Tensor& param,
+    const Tensor& grad,
+    Tensor& exp_avg,
+    Tensor& exp_avg_sq,
+    float lr,
+    float beta1,
+    float beta2,
+    float eps,
+    float weight_decay,
+    int64_t step,
+    bool decoupled_weight_decay,
+    cudaStream_t stream = nullptr
+) -> void;
+
+/**
+ * @brief Fused SGD optimizer step CUDA kernel
+ *
+ * Performs SGD with momentum in a single kernel launch.
+ *
+ * @param param Parameter tensor (modified in-place)
+ * @param grad Gradient tensor
+ * @param momentum_buffer Momentum buffer (optional, modified in-place)
+ * @param lr Learning rate
+ * @param momentum Momentum coefficient
+ * @param weight_decay Weight decay coefficient
+ * @param dampening Dampening for momentum
+ * @param nesterov Use Nesterov momentum
+ * @param stream CUDA stream for async execution
+ */
+auto fused_sgd_step_cuda(
+    Tensor& param,
+    const Tensor& grad,
+    Tensor* momentum_buffer,
+    float lr,
+    float momentum,
+    float weight_decay,
+    float dampening,
+    bool nesterov,
+    cudaStream_t stream = nullptr
+) -> void;
+
 } // namespace cuda
 } // namespace tenzor

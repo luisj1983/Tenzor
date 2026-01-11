@@ -1823,6 +1823,316 @@ auto fused_attention_cuda(
     return output;
 }
 
+// ==============================================================================
+// Fused Adam Optimizer CUDA Kernel
+// ==============================================================================
+
+/**
+ * @brief Fused Adam/AdamW optimizer kernel
+ *
+ * Performs the complete Adam update in a single kernel:
+ * - First moment update: m = beta1 * m + (1-beta1) * grad
+ * - Second moment update: v = beta2 * v + (1-beta2) * grad^2
+ * - Bias correction applied through step_size
+ * - Parameter update: param = param - step_size * m / (sqrt(v_hat) + eps)
+ *
+ * For AdamW (decoupled weight decay): param = param * (1 - lr * weight_decay) first
+ *
+ * This eliminates ~15-20 kernel launches per parameter in the naive implementation.
+ */
+__global__ void fused_adam_kernel(
+    float* __restrict__ param,         // Parameter tensor (modified in-place)
+    const float* __restrict__ grad,    // Gradient tensor
+    float* __restrict__ exp_avg,       // First moment (m) - modified in-place
+    float* __restrict__ exp_avg_sq,    // Second moment (v) - modified in-place
+    int64_t numel,
+    float lr,
+    float beta1,
+    float beta2,
+    float eps,
+    float weight_decay,
+    float bias_correction1,    // 1 - beta1^step
+    float bias_correction2,    // 1 - beta2^step
+    bool amsgrad,              // Not implemented yet
+    bool decoupled_weight_decay  // True for AdamW, false for L2 regularization
+) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= numel) return;
+
+    float g = grad[idx];
+    float p = param[idx];
+    float m = exp_avg[idx];
+    float v = exp_avg_sq[idx];
+
+    // Apply L2 regularization to gradient (Adam style) if not decoupled
+    if (weight_decay > 0.0f && !decoupled_weight_decay) {
+        g = g + weight_decay * p;
+    }
+
+    // Update biased first moment estimate
+    m = beta1 * m + (1.0f - beta1) * g;
+
+    // Update biased second raw moment estimate
+    v = beta2 * v + (1.0f - beta2) * g * g;
+
+    // Compute step size with bias correction
+    float step_size = lr / bias_correction1;
+
+    // Compute bias-corrected second moment and update parameter
+    // denom = sqrt(v / bias_correction2) + eps
+    float denom = sqrtf(v / bias_correction2) + eps;
+
+    // Apply decoupled weight decay (AdamW style) before update
+    if (weight_decay > 0.0f && decoupled_weight_decay) {
+        p = p * (1.0f - lr * weight_decay);
+    }
+
+    // Update parameter
+    p = p - step_size * m / denom;
+
+    // Store updated values
+    param[idx] = p;
+    exp_avg[idx] = m;
+    exp_avg_sq[idx] = v;
+}
+
+/**
+ * @brief Vectorized fused Adam kernel using float4
+ *
+ * Processes 4 elements per thread for better memory bandwidth utilization.
+ */
+__global__ void fused_adam_kernel_vec4(
+    float4* __restrict__ param,
+    const float4* __restrict__ grad,
+    float4* __restrict__ exp_avg,
+    float4* __restrict__ exp_avg_sq,
+    int64_t numel_vec4,
+    float lr,
+    float beta1,
+    float beta2,
+    float eps,
+    float weight_decay,
+    float bias_correction1,
+    float bias_correction2,
+    bool decoupled_weight_decay
+) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= numel_vec4) return;
+
+    float4 g = grad[idx];
+    float4 p = param[idx];
+    float4 m = exp_avg[idx];
+    float4 v = exp_avg_sq[idx];
+
+    float step_size = lr / bias_correction1;
+    float bc2_inv = 1.0f / bias_correction2;
+
+    // Process all 4 elements
+    #define ADAM_UPDATE(comp) \
+        if (weight_decay > 0.0f && !decoupled_weight_decay) { \
+            g.comp = g.comp + weight_decay * p.comp; \
+        } \
+        m.comp = beta1 * m.comp + (1.0f - beta1) * g.comp; \
+        v.comp = beta2 * v.comp + (1.0f - beta2) * g.comp * g.comp; \
+        if (weight_decay > 0.0f && decoupled_weight_decay) { \
+            p.comp = p.comp * (1.0f - lr * weight_decay); \
+        } \
+        p.comp = p.comp - step_size * m.comp / (sqrtf(v.comp * bc2_inv) + eps);
+
+    ADAM_UPDATE(x)
+    ADAM_UPDATE(y)
+    ADAM_UPDATE(z)
+    ADAM_UPDATE(w)
+
+    #undef ADAM_UPDATE
+
+    param[idx] = p;
+    exp_avg[idx] = m;
+    exp_avg_sq[idx] = v;
+}
+
+/**
+ * @brief Host function for fused Adam optimizer step
+ *
+ * @param param Parameter tensor (modified in-place)
+ * @param grad Gradient tensor
+ * @param exp_avg First moment buffer (modified in-place)
+ * @param exp_avg_sq Second moment buffer (modified in-place)
+ * @param lr Learning rate
+ * @param beta1 First moment decay rate
+ * @param beta2 Second moment decay rate
+ * @param eps Epsilon for numerical stability
+ * @param weight_decay Weight decay coefficient
+ * @param step Current step count (for bias correction)
+ * @param decoupled_weight_decay If true, use AdamW style decoupled weight decay
+ */
+auto fused_adam_step_cuda(
+    Tensor& param,
+    const Tensor& grad,
+    Tensor& exp_avg,
+    Tensor& exp_avg_sq,
+    float lr,
+    float beta1,
+    float beta2,
+    float eps,
+    float weight_decay,
+    int64_t step,
+    bool decoupled_weight_decay,
+    cudaStream_t stream
+) -> void {
+    if (param.dtype() != DType::Float32) {
+        throw std::runtime_error("fused_adam_step_cuda: Only Float32 supported");
+    }
+
+    int64_t numel = param.numel();
+
+    // Compute bias corrections
+    float bias_correction1 = 1.0f - std::pow(beta1, static_cast<float>(step));
+    float bias_correction2 = 1.0f - std::pow(beta2, static_cast<float>(step));
+
+    // Check if we can use vectorized kernel
+    bool can_vectorize = (numel % 4 == 0) &&
+                         (reinterpret_cast<uintptr_t>(param.data<float>()) % 16 == 0) &&
+                         (reinterpret_cast<uintptr_t>(grad.data<float>()) % 16 == 0) &&
+                         (reinterpret_cast<uintptr_t>(exp_avg.data<float>()) % 16 == 0) &&
+                         (reinterpret_cast<uintptr_t>(exp_avg_sq.data<float>()) % 16 == 0);
+
+    constexpr int BLOCK_SIZE = 256;
+
+    if (can_vectorize && numel >= 1024) {
+        int64_t numel_vec4 = numel / 4;
+        int blocks = (numel_vec4 + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        blocks = clamp_blocks(blocks);
+
+        fused_adam_kernel_vec4<<<blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<float4*>(param.data<float>()),
+            reinterpret_cast<const float4*>(grad.data<float>()),
+            reinterpret_cast<float4*>(exp_avg.data<float>()),
+            reinterpret_cast<float4*>(exp_avg_sq.data<float>()),
+            numel_vec4,
+            lr,
+            beta1,
+            beta2,
+            eps,
+            weight_decay,
+            bias_correction1,
+            bias_correction2,
+            decoupled_weight_decay
+        );
+    } else {
+        int blocks = (numel + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        blocks = clamp_blocks(blocks);
+
+        fused_adam_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(
+            param.data<float>(),
+            grad.data<float>(),
+            exp_avg.data<float>(),
+            exp_avg_sq.data<float>(),
+            numel,
+            lr,
+            beta1,
+            beta2,
+            eps,
+            weight_decay,
+            bias_correction1,
+            bias_correction2,
+            false,  // amsgrad not implemented
+            decoupled_weight_decay
+        );
+    }
+
+    CUDA_CHECK(cudaGetLastError());
+}
+
+// ==============================================================================
+// Fused SGD with Momentum CUDA Kernel
+// ==============================================================================
+
+/**
+ * @brief Fused SGD with momentum and weight decay
+ *
+ * Nesterov momentum: v = momentum * v + grad; param = param - lr * (grad + momentum * v)
+ * Standard momentum: v = momentum * v + grad; param = param - lr * v
+ */
+__global__ void fused_sgd_kernel(
+    float* __restrict__ param,
+    const float* __restrict__ grad,
+    float* __restrict__ momentum_buffer,
+    int64_t numel,
+    float lr,
+    float momentum,
+    float weight_decay,
+    float dampening,
+    bool nesterov,
+    bool has_momentum_buffer
+) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= numel) return;
+
+    float g = grad[idx];
+    float p = param[idx];
+
+    // Apply weight decay
+    if (weight_decay > 0.0f) {
+        g = g + weight_decay * p;
+    }
+
+    if (has_momentum_buffer && momentum > 0.0f) {
+        float v = momentum_buffer[idx];
+
+        // Update momentum buffer
+        v = momentum * v + (1.0f - dampening) * g;
+        momentum_buffer[idx] = v;
+
+        if (nesterov) {
+            g = g + momentum * v;
+        } else {
+            g = v;
+        }
+    }
+
+    // Update parameter
+    param[idx] = p - lr * g;
+}
+
+auto fused_sgd_step_cuda(
+    Tensor& param,
+    const Tensor& grad,
+    Tensor* momentum_buffer,
+    float lr,
+    float momentum,
+    float weight_decay,
+    float dampening,
+    bool nesterov,
+    cudaStream_t stream
+) -> void {
+    if (param.dtype() != DType::Float32) {
+        throw std::runtime_error("fused_sgd_step_cuda: Only Float32 supported");
+    }
+
+    int64_t numel = param.numel();
+    constexpr int BLOCK_SIZE = 256;
+    int blocks = (numel + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    blocks = clamp_blocks(blocks);
+
+    float* momentum_ptr = momentum_buffer ? momentum_buffer->data<float>() : nullptr;
+
+    fused_sgd_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(
+        param.data<float>(),
+        grad.data<float>(),
+        momentum_ptr,
+        numel,
+        lr,
+        momentum,
+        weight_decay,
+        dampening,
+        nesterov,
+        momentum_buffer != nullptr
+    );
+
+    CUDA_CHECK(cudaGetLastError());
+}
+
 } // namespace cuda
 } // namespace tenzor
 

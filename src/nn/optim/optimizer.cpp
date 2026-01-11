@@ -1,6 +1,8 @@
 #include "tenzor/nn/optim/optimizer.hpp"
 #include "tenzor/nn/serialize.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/core/device.hpp"
+#include <cstring>
 
 namespace tenzor::optim {
 
@@ -10,10 +12,16 @@ Optimizer::Optimizer(std::vector<std::shared_ptr<Variable>> params)
 auto Optimizer::zero_grad() -> void {
     for (auto& param : parameters_) {
         if (param && param->has_grad()) {
-            // Zero gradient in-place (keeps tensor allocated for performance)
-            // This is different from param->zero_grad() which resets the optional
             auto& grad = param->grad().value();
-            param->grad() = zeros_like(grad);
+
+            // CPU path: use direct memset for maximum performance
+            if (grad.device().type == Device::Type::CPU) {
+                std::memset(grad.data_ptr(), 0, grad.numel() * dtype_size(grad.dtype()));
+            } else {
+                // GPU path: create new zero tensor
+                // TODO: Add in-place zero via cudaMemsetAsync for better performance
+                param->grad() = zeros_like(grad);
+            }
         }
     }
 }

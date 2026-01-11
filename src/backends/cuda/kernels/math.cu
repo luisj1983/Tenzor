@@ -710,7 +710,7 @@ auto add_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
         }
 
         CUDA_CHECK(cudaGetLastError());
-        cudaStreamSynchronize(stream);
+        // NOTE: Removed cudaStreamSynchronize - async execution for performance
         return result;
     }
 
@@ -786,12 +786,12 @@ auto add_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
         throw std::runtime_error("Unsupported dtype for add operation");
     }
 
-    // Cleanup
+    // Cleanup - note: cudaFree is synchronous, so no explicit sync needed after it
     CUDA_CHECK(cudaFree(d_strides_a));
     CUDA_CHECK(cudaFree(d_strides_b));
     CUDA_CHECK(cudaFree(d_output_shape));
     CUDA_CHECK(cudaGetLastError());
-    cudaStreamSynchronize(stream);
+    // NOTE: Removed cudaStreamSynchronize - cudaFree already synchronizes
     return result;
 }
 
@@ -853,7 +853,7 @@ auto sub_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
         }
 
         CUDA_CHECK(cudaGetLastError());
-        cudaStreamSynchronize(stream);
+        // NOTE: Removed cudaStreamSynchronize - async execution for performance
         return result;
     }
 
@@ -939,7 +939,7 @@ auto sub_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
     CUDA_CHECK(cudaFree(d_strides_b));
     CUDA_CHECK(cudaFree(d_output_shape));
     CUDA_CHECK(cudaGetLastError());
-    cudaStreamSynchronize(stream);
+    // NOTE: Removed cudaStreamSynchronize - async execution for performance
     return result;
 }
 
@@ -991,7 +991,7 @@ auto mul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
         }
 
         CUDA_CHECK(cudaGetLastError());
-        cudaStreamSynchronize(stream);
+        // NOTE: Removed cudaStreamSynchronize - async execution for performance
         return result;
     }
 
@@ -1057,7 +1057,7 @@ auto mul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
     CUDA_CHECK(cudaFree(d_strides_b));
     CUDA_CHECK(cudaFree(d_output_shape));
     CUDA_CHECK(cudaGetLastError());
-    cudaStreamSynchronize(stream);
+    // NOTE: Removed cudaStreamSynchronize - async execution for performance
     return result;
 }
 
@@ -1107,7 +1107,7 @@ auto div_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
         }
 
         CUDA_CHECK(cudaGetLastError());
-        cudaStreamSynchronize(stream);
+        // NOTE: Removed cudaStreamSynchronize - async execution for performance
         return result;
     }
 
@@ -1169,7 +1169,7 @@ auto div_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
     CUDA_CHECK(cudaFree(d_strides_b));
     CUDA_CHECK(cudaFree(d_output_shape));
     CUDA_CHECK(cudaGetLastError());
-    cudaStreamSynchronize(stream);
+    // NOTE: Removed cudaStreamSynchronize - async execution for performance
     return result;
 }
 
@@ -1203,7 +1203,7 @@ auto neg_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     }
 
     CUDA_CHECK(cudaGetLastError());
-    cudaStreamSynchronize(stream);
+    // NOTE: Removed cudaStreamSynchronize - async execution for performance
     return result;
 }
 
@@ -1237,7 +1237,7 @@ auto abs_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     }
 
     CUDA_CHECK(cudaGetLastError());
-    cudaStreamSynchronize(stream);
+    // NOTE: Removed cudaStreamSynchronize - async execution for performance
     return result;
 }
 
@@ -1267,7 +1267,7 @@ auto sqrt_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     }
 
     CUDA_CHECK(cudaGetLastError());
-    cudaStreamSynchronize(stream);
+    // NOTE: Removed cudaStreamSynchronize - async execution for performance
     return result;
 }
 
@@ -1297,7 +1297,7 @@ auto exp_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     }
 
     CUDA_CHECK(cudaGetLastError());
-    cudaStreamSynchronize(stream);
+    // NOTE: Removed cudaStreamSynchronize - async execution for performance
     return result;
 }
 
@@ -1327,7 +1327,7 @@ auto log_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     }
 
     CUDA_CHECK(cudaGetLastError());
-    cudaStreamSynchronize(stream);
+    // NOTE: Removed cudaStreamSynchronize - async execution for performance
     return result;
 }
 
@@ -1360,7 +1360,7 @@ auto pow_kernel(const Tensor& input, float exponent, cudaStream_t stream) -> Ten
     }
 
     CUDA_CHECK(cudaGetLastError());
-    cudaStreamSynchronize(stream);
+    // NOTE: Removed cudaStreamSynchronize - async execution for performance
     return result;
 }
 
@@ -1396,7 +1396,7 @@ auto clamp_kernel(const Tensor& input, float min_val, float max_val, cudaStream_
     }
 
     CUDA_CHECK(cudaGetLastError());
-    cudaStreamSynchronize(stream);
+    // NOTE: Removed cudaStreamSynchronize - async execution for performance
     return result;
 }
 
@@ -1426,7 +1426,7 @@ auto sign_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     }
 
     CUDA_CHECK(cudaGetLastError());
-    cudaStreamSynchronize(stream);
+    // NOTE: Removed cudaStreamSynchronize - async execution for performance
     return result;
 }
 
@@ -1539,7 +1539,6 @@ auto name##_kernel(const Tensor& input, cudaStream_t stream) -> Tensor { \
         throw std::runtime_error(#name " operation only supports Float32 and Float64 dtypes"); \
     } \
     CUDA_CHECK(cudaGetLastError()); \
-    cudaStreamSynchronize(stream); \
     return result; \
 }
 
@@ -1589,7 +1588,7 @@ auto clamp_min_kernel(const Tensor& input, float min_val, cudaStream_t stream) -
     }
 
     CUDA_CHECK(cudaGetLastError());
-    cudaStreamSynchronize(stream);
+    // NOTE: Removed cudaStreamSynchronize - async execution for performance
     return result;
 }
 
@@ -1610,7 +1609,7 @@ auto clamp_max_kernel(const Tensor& input, float max_val, cudaStream_t stream) -
     }
 
     CUDA_CHECK(cudaGetLastError());
-    cudaStreamSynchronize(stream);
+    // NOTE: Removed cudaStreamSynchronize - async execution for performance
     return result;
 }
 
@@ -1658,7 +1657,7 @@ auto add_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream)
     }
 
     CUDA_CHECK(cudaGetLastError());
-    cudaStreamSynchronize(stream);
+    // NOTE: Removed cudaStreamSynchronize - async execution for performance
     return inout;
 }
 
@@ -1677,7 +1676,7 @@ auto sub_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream)
     }
 
     CUDA_CHECK(cudaGetLastError());
-    cudaStreamSynchronize(stream);
+    // NOTE: Removed cudaStreamSynchronize - async execution for performance
     return inout;
 }
 
@@ -1696,7 +1695,7 @@ auto mul_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream)
     }
 
     CUDA_CHECK(cudaGetLastError());
-    cudaStreamSynchronize(stream);
+    // NOTE: Removed cudaStreamSynchronize - async execution for performance
     return inout;
 }
 
@@ -1715,7 +1714,7 @@ auto div_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream)
     }
 
     CUDA_CHECK(cudaGetLastError());
-    cudaStreamSynchronize(stream);
+    // NOTE: Removed cudaStreamSynchronize - async execution for performance
     return inout;
 }
 
@@ -1857,7 +1856,7 @@ auto expand_kernel(const Tensor& input, const std::vector<int64_t>& shape, void*
     CUDA_CHECK(cudaFree(d_input_strides));
     CUDA_CHECK(cudaFree(d_output_shape));
     CUDA_CHECK(cudaGetLastError());
-    cudaStreamSynchronize(stream);
+    // NOTE: Removed cudaStreamSynchronize - async execution for performance
     return result;
 }
 
@@ -1912,7 +1911,7 @@ auto fill_kernel(const Tensor& tensor, float value, cudaStream_t stream) -> Tens
     }
 
     CUDA_CHECK(cudaGetLastError());
-    cudaStreamSynchronize(stream);
+    // NOTE: Removed cudaStreamSynchronize - async execution for performance
     return result;
 }
 
@@ -1975,7 +1974,7 @@ auto zeros_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
     }
 
     CUDA_CHECK(cudaGetLastError());
-    cudaStreamSynchronize(stream);
+    // NOTE: Removed cudaStreamSynchronize - async execution for performance
     return result;
 }
 
@@ -2037,7 +2036,7 @@ auto ones_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
     }
 
     CUDA_CHECK(cudaGetLastError());
-    cudaStreamSynchronize(stream);
+    // NOTE: Removed cudaStreamSynchronize - async execution for performance
     return result;
 }
 
@@ -2099,7 +2098,7 @@ auto full_kernel(const std::vector<int64_t>& shape, float value, DType dtype, De
     }
 
     CUDA_CHECK(cudaGetLastError());
-    cudaStreamSynchronize(stream);
+    // NOTE: Removed cudaStreamSynchronize - async execution for performance
     return result;
 }
 
@@ -2482,7 +2481,7 @@ auto compare_kernel_launcher(const Tensor& a, const Tensor& b, cudaStream_t stre
         }
 
         CUDA_CHECK(cudaGetLastError());
-        cudaStreamSynchronize(stream);
+        // NOTE: Removed cudaStreamSynchronize - async execution for performance
         return result;
     }
 
@@ -2540,12 +2539,12 @@ auto compare_kernel_launcher(const Tensor& a, const Tensor& b, cudaStream_t stre
         throw std::runtime_error("Unsupported dtype for comparison operation");
     }
 
-    // Cleanup
+    // Cleanup - note: cudaFree is synchronous, so no explicit sync needed after it
     CUDA_CHECK(cudaFree(d_strides_a));
     CUDA_CHECK(cudaFree(d_strides_b));
     CUDA_CHECK(cudaFree(d_output_shape));
     CUDA_CHECK(cudaGetLastError());
-    cudaStreamSynchronize(stream);
+    // NOTE: Removed cudaStreamSynchronize - cudaFree already synchronizes
     return result;
 }
 
@@ -2683,7 +2682,7 @@ auto dot_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
             throw std::runtime_error("dot: only Float32 and Float64 are supported");
     }
 
-    cudaStreamSynchronize(stream);
+    // NOTE: Removed cudaStreamSynchronize - cudaFree in the switch cases is already synchronous
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {

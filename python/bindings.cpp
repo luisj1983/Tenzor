@@ -48,6 +48,7 @@
 #include <tenzor/nn/layers/hrm.hpp>
 #include <tenzor/models/resnet.hpp>
 #include <tenzor/onnx/importer.hpp>
+#include <tenzor/autograd/ops.hpp>
 #include <tenzor/backend/cpu_caching_allocator.hpp>
 #include "numpy_interop.hpp"
 #include <thread>
@@ -1112,13 +1113,25 @@ PYBIND11_MODULE(tenzor_core, m) {
     // Reduction operations - using lambda wrappers for overloaded functions
     m.def("sum", [](const tenzor::Tensor& input, std::optional<int64_t> dim, bool keepdim) {
          return tenzor::sum(input, dim, keepdim);
-         }, "Sum reduction",
+         }, "Sum reduction (Tensor)",
+         py::arg("input"),
+         py::arg("dim") = py::none(),
+         py::arg("keepdim") = false);
+    m.def("sum", [](const tenzor::Variable& input, std::optional<int64_t> dim, bool keepdim) {
+         return tenzor::sum(input, dim, keepdim);
+         }, "Sum reduction with autograd (Variable)",
          py::arg("input"),
          py::arg("dim") = py::none(),
          py::arg("keepdim") = false);
     m.def("mean", [](const tenzor::Tensor& input, std::optional<int64_t> dim, bool keepdim) {
          return tenzor::mean(input, dim, keepdim);
-         }, "Mean reduction",
+         }, "Mean reduction (Tensor)",
+         py::arg("input"),
+         py::arg("dim") = py::none(),
+         py::arg("keepdim") = false);
+    m.def("mean", [](const tenzor::Variable& input, std::optional<int64_t> dim, bool keepdim) {
+         return tenzor::mean(input, dim, keepdim);
+         }, "Mean reduction with autograd (Variable)",
          py::arg("input"),
          py::arg("dim") = py::none(),
          py::arg("keepdim") = false);
