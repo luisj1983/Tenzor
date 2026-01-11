@@ -352,9 +352,126 @@ void cublas_batched_gemm_ex(
     ));
 }
 
+/**
+ * @brief Batched GEMM with scaling factor fused into computation
+ *
+ * Computes: C = scale * A @ B for each matrix in batch
+ * This avoids a separate scaling kernel, improving performance for attention.
+ *
+ * @param A Input batch of matrices A (batch_size x M x K)
+ * @param B Input batch of matrices B (batch_size x K x N)
+ * @param C Output batch of matrices C (batch_size x M x N)
+ * @param batch_size Number of matrices in batch
+ * @param M Rows in each A matrix
+ * @param N Columns in each B matrix
+ * @param K Columns in A / rows in B
+ * @param scale Scaling factor applied to result
+ * @param dtype Data type of matrices
+ * @param stream CUDA stream
+ */
+void cublas_batched_gemm_scaled(
+    const void* A,
+    const void* B,
+    void* C,
+    int64_t batch_size,
+    int64_t M,
+    int64_t N,
+    int64_t K,
+    float scale,
+    DType dtype,
+    cudaStream_t stream = nullptr
+) {
+    cublasHandle_t handle = CuBLASHandleManager::get_handle();
+    if (stream) {
+        CuBLASHandleManager::set_stream(stream);
+    }
+
+    cudaDataType_t cuda_dtype = dtype_to_cuda(dtype);
+    cudaDataType_t compute_type = select_compute_type(dtype);
+
+    // Apply scale as alpha parameter
+    const float alpha_f = scale;
+    const float beta_f = 0.0f;
+    const double alpha_d = static_cast<double>(scale);
+    const double beta_d = 0.0;
+
+    const void* alpha;
+    const void* beta;
+
+    if (dtype == DType::Float64) {
+        alpha = &alpha_d;
+        beta = &beta_d;
+    } else {
+        alpha = &alpha_f;
+        beta = &beta_f;
+    }
+
+    int64_t stride_a = M * K;
+    int64_t stride_b = K * N;
+    int64_t stride_c = M * N;
+
+    int64_t lda = K;
+    int64_t ldb = N;
+    int64_t ldc = N;
+
+    CUBLAS_CHECK(cublasGemmStridedBatchedEx(
+        handle,
+        CUBLAS_OP_N,
+        CUBLAS_OP_N,
+        N, M, K,
+        alpha,
+        B, cuda_dtype, ldb, stride_b,
+        A, cuda_dtype, lda, stride_a,
+        beta,
+        C, cuda_dtype, ldc, stride_c,
+        batch_size,
+        compute_type,
+        CUBLAS_GEMM_DEFAULT_TENSOR_OP
+    ));
+}
+
 // ============================================================================
 // High-Level Tensor API Wrappers
 // ============================================================================
+
+/**
+ * @brief Batched matmul with fused scaling: C = scale * A @ B
+ */
+auto cublas_batched_matmul_scaled(const Tensor& a, const Tensor& b, float scale) -> Tensor {
+    if (a.device().type != Device::Type::CUDA || b.device().type != Device::Type::CUDA) {
+        throw std::runtime_error("cublas_batched_matmul_scaled requires CUDA tensors");
+    }
+
+    if (a.ndim() != 3 || b.ndim() != 3) {
+        throw std::runtime_error("cublas_batched_matmul_scaled requires 3D tensors");
+    }
+
+    auto a_shape = a.shape();
+    auto b_shape = b.shape();
+
+    int64_t batch_size = a_shape[0];
+    int64_t M = a_shape[1];
+    int64_t K = a_shape[2];
+    int64_t K2 = b_shape[1];
+    int64_t N = b_shape[2];
+
+    if (batch_size != b_shape[0]) {
+        throw std::runtime_error("Batch size mismatch for batched matmul");
+    }
+
+    if (K != K2) {
+        throw std::runtime_error("Matrix dimension mismatch for batched matmul");
+    }
+
+    Tensor result({batch_size, M, N}, a.dtype(), a.device());
+
+    cublas_batched_gemm_scaled(
+        a.data_ptr(), b.data_ptr(), result.data_ptr(),
+        batch_size, M, N, K, scale, a.dtype()
+    );
+
+    return result;
+}
 
 /**
  * @brief Matrix multiplication for Tensor objects using optimized cuBLAS

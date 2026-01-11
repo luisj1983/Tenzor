@@ -125,6 +125,285 @@ __global__ void relu_backward_remainder_kernel(const float* grad_output, const f
     }
 }
 
+// ============================================================================
+// Vectorized Forward Kernels (float4 for 4x memory bandwidth)
+// ============================================================================
+// These kernels use float4 vectorized loads/stores for significantly improved
+// memory bandwidth utilization on large tensors.
+
+// Minimum tensor size to use vectorized kernels (threshold for overhead)
+constexpr int64_t VECTORIZED_THRESHOLD = 1024;
+
+// Vectorized ReLU forward using float4
+__global__ void relu_forward_vectorized_kernel(const float4* __restrict__ input,
+                                                float4* __restrict__ output, int64_t n4) {
+    CUDA_GRID_STRIDE_LOOP(idx, n4) {
+        float4 x = __ldg(&input[idx]);
+        float4 result;
+        result.x = fmaxf(0.0f, x.x);
+        result.y = fmaxf(0.0f, x.y);
+        result.z = fmaxf(0.0f, x.z);
+        result.w = fmaxf(0.0f, x.w);
+        output[idx] = result;
+    }
+}
+
+// Handle remainder elements for ReLU forward
+__global__ void relu_forward_remainder_kernel(const float* input, float* output,
+                                               int64_t start, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x + start;
+    if (idx < n) {
+        output[idx] = fmaxf(0.0f, input[idx]);
+    }
+}
+
+// Vectorized Sigmoid forward using float4
+__global__ void sigmoid_forward_vectorized_kernel(const float4* __restrict__ input,
+                                                   float4* __restrict__ output, int64_t n4) {
+    CUDA_GRID_STRIDE_LOOP(idx, n4) {
+        float4 x = __ldg(&input[idx]);
+        float4 result;
+        // Numerically stable sigmoid
+        result.x = (x.x >= 0.0f) ? (1.0f / (1.0f + expf(-x.x))) : (expf(x.x) / (1.0f + expf(x.x)));
+        result.y = (x.y >= 0.0f) ? (1.0f / (1.0f + expf(-x.y))) : (expf(x.y) / (1.0f + expf(x.y)));
+        result.z = (x.z >= 0.0f) ? (1.0f / (1.0f + expf(-x.z))) : (expf(x.z) / (1.0f + expf(x.z)));
+        result.w = (x.w >= 0.0f) ? (1.0f / (1.0f + expf(-x.w))) : (expf(x.w) / (1.0f + expf(x.w)));
+        output[idx] = result;
+    }
+}
+
+// Handle remainder elements for Sigmoid forward
+__global__ void sigmoid_forward_remainder_kernel(const float* input, float* output,
+                                                  int64_t start, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x + start;
+    if (idx < n) {
+        float x = input[idx];
+        output[idx] = (x >= 0.0f) ? (1.0f / (1.0f + expf(-x))) : (expf(x) / (1.0f + expf(x)));
+    }
+}
+
+// Vectorized Tanh forward using float4
+__global__ void tanh_forward_vectorized_kernel(const float4* __restrict__ input,
+                                                float4* __restrict__ output, int64_t n4) {
+    CUDA_GRID_STRIDE_LOOP(idx, n4) {
+        float4 x = __ldg(&input[idx]);
+        float4 result;
+        result.x = tanhf(x.x);
+        result.y = tanhf(x.y);
+        result.z = tanhf(x.z);
+        result.w = tanhf(x.w);
+        output[idx] = result;
+    }
+}
+
+// Handle remainder elements for Tanh forward
+__global__ void tanh_forward_remainder_kernel(const float* input, float* output,
+                                               int64_t start, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x + start;
+    if (idx < n) {
+        output[idx] = tanhf(input[idx]);
+    }
+}
+
+// Helper device function for GELU computation
+__device__ __forceinline__ float gelu_scalar(float x) {
+    constexpr float sqrt_2_over_pi = 0.7978845608f;
+    constexpr float coeff = 0.044715f;
+    float x_cubed = x * x * x;
+    float tanh_arg = sqrt_2_over_pi * (x + coeff * x_cubed);
+    return x * 0.5f * (1.0f + tanhf(tanh_arg));
+}
+
+// Vectorized GELU forward using float4
+__global__ void gelu_forward_vectorized_kernel(const float4* __restrict__ input,
+                                                float4* __restrict__ output, int64_t n4) {
+    CUDA_GRID_STRIDE_LOOP(idx, n4) {
+        float4 x = __ldg(&input[idx]);
+        float4 result;
+        result.x = gelu_scalar(x.x);
+        result.y = gelu_scalar(x.y);
+        result.z = gelu_scalar(x.z);
+        result.w = gelu_scalar(x.w);
+        output[idx] = result;
+    }
+}
+
+// Handle remainder elements for GELU forward
+__global__ void gelu_forward_remainder_kernel(const float* input, float* output,
+                                               int64_t start, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x + start;
+    if (idx < n) {
+        output[idx] = gelu_scalar(input[idx]);
+    }
+}
+
+// Helper device function for Swish computation
+__device__ __forceinline__ float swish_scalar(float x) {
+    float sigmoid_x = (x >= 0.0f) ? (1.0f / (1.0f + expf(-x))) : (expf(x) / (1.0f + expf(x)));
+    return x * sigmoid_x;
+}
+
+// Vectorized Swish forward using float4
+__global__ void swish_forward_vectorized_kernel(const float4* __restrict__ input,
+                                                 float4* __restrict__ output, int64_t n4) {
+    CUDA_GRID_STRIDE_LOOP(idx, n4) {
+        float4 x = __ldg(&input[idx]);
+        float4 result;
+        result.x = swish_scalar(x.x);
+        result.y = swish_scalar(x.y);
+        result.z = swish_scalar(x.z);
+        result.w = swish_scalar(x.w);
+        output[idx] = result;
+    }
+}
+
+// Handle remainder elements for Swish forward
+__global__ void swish_forward_remainder_kernel(const float* input, float* output,
+                                                int64_t start, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x + start;
+    if (idx < n) {
+        output[idx] = swish_scalar(input[idx]);
+    }
+}
+
+// Vectorized Leaky ReLU forward using float4
+__global__ void leaky_relu_forward_vectorized_kernel(const float4* __restrict__ input,
+                                                      float4* __restrict__ output,
+                                                      int64_t n4, float alpha) {
+    CUDA_GRID_STRIDE_LOOP(idx, n4) {
+        float4 x = __ldg(&input[idx]);
+        float4 result;
+        result.x = (x.x > 0.0f) ? x.x : alpha * x.x;
+        result.y = (x.y > 0.0f) ? x.y : alpha * x.y;
+        result.z = (x.z > 0.0f) ? x.z : alpha * x.z;
+        result.w = (x.w > 0.0f) ? x.w : alpha * x.w;
+        output[idx] = result;
+    }
+}
+
+// Handle remainder elements for Leaky ReLU forward
+__global__ void leaky_relu_forward_remainder_kernel(const float* input, float* output,
+                                                     int64_t start, int64_t n, float alpha) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x + start;
+    if (idx < n) {
+        float x = input[idx];
+        output[idx] = (x > 0.0f) ? x : alpha * x;
+    }
+}
+
+// ============================================================================
+// Vectorized Backward Kernels (float4 for 4x memory bandwidth)
+// ============================================================================
+
+// Vectorized Sigmoid backward using float4
+__global__ void sigmoid_backward_vectorized_kernel(const float4* __restrict__ grad_output,
+                                                    const float4* __restrict__ input,
+                                                    float4* __restrict__ grad_input, int64_t n4) {
+    CUDA_GRID_STRIDE_LOOP(idx, n4) {
+        float4 g = __ldg(&grad_output[idx]);
+        float4 x = __ldg(&input[idx]);
+        float4 result;
+
+        // sigmoid(x) * (1 - sigmoid(x)) * grad
+        #define SIGMOID_BACKWARD(comp) \
+            { \
+                float s = (x.comp >= 0.0f) ? (1.0f / (1.0f + expf(-x.comp))) : (expf(x.comp) / (1.0f + expf(x.comp))); \
+                result.comp = g.comp * s * (1.0f - s); \
+            }
+
+        SIGMOID_BACKWARD(x)
+        SIGMOID_BACKWARD(y)
+        SIGMOID_BACKWARD(z)
+        SIGMOID_BACKWARD(w)
+
+        #undef SIGMOID_BACKWARD
+
+        grad_input[idx] = result;
+    }
+}
+
+// Vectorized Tanh backward using float4
+__global__ void tanh_backward_vectorized_kernel(const float4* __restrict__ grad_output,
+                                                 const float4* __restrict__ input,
+                                                 float4* __restrict__ grad_input, int64_t n4) {
+    CUDA_GRID_STRIDE_LOOP(idx, n4) {
+        float4 g = __ldg(&grad_output[idx]);
+        float4 x = __ldg(&input[idx]);
+        float4 result;
+
+        float tanh_x = tanhf(x.x);
+        result.x = g.x * (1.0f - tanh_x * tanh_x);
+        tanh_x = tanhf(x.y);
+        result.y = g.y * (1.0f - tanh_x * tanh_x);
+        tanh_x = tanhf(x.z);
+        result.z = g.z * (1.0f - tanh_x * tanh_x);
+        tanh_x = tanhf(x.w);
+        result.w = g.w * (1.0f - tanh_x * tanh_x);
+
+        grad_input[idx] = result;
+    }
+}
+
+// Vectorized GELU backward using float4
+__global__ void gelu_backward_vectorized_kernel(const float4* __restrict__ grad_output,
+                                                 const float4* __restrict__ input,
+                                                 float4* __restrict__ grad_input, int64_t n4) {
+    constexpr float sqrt_2_over_pi = 0.7978845608f;
+    constexpr float coeff = 0.044715f;
+
+    CUDA_GRID_STRIDE_LOOP(idx, n4) {
+        float4 g = __ldg(&grad_output[idx]);
+        float4 x = __ldg(&input[idx]);
+        float4 result;
+
+        #define GELU_BACKWARD(comp) \
+            { \
+                float x_sq = x.comp * x.comp; \
+                float x_cubed = x_sq * x.comp; \
+                float z = sqrt_2_over_pi * (x.comp + coeff * x_cubed); \
+                float tanh_z = tanhf(z); \
+                float dz_dx = sqrt_2_over_pi * (1.0f + 3.0f * coeff * x_sq); \
+                float sech2_z = 1.0f - tanh_z * tanh_z; \
+                result.comp = g.comp * (0.5f * (1.0f + tanh_z) + 0.5f * x.comp * sech2_z * dz_dx); \
+            }
+
+        GELU_BACKWARD(x)
+        GELU_BACKWARD(y)
+        GELU_BACKWARD(z)
+        GELU_BACKWARD(w)
+
+        #undef GELU_BACKWARD
+
+        grad_input[idx] = result;
+    }
+}
+
+// Vectorized Swish backward using float4
+__global__ void swish_backward_vectorized_kernel(const float4* __restrict__ grad_output,
+                                                  const float4* __restrict__ input,
+                                                  float4* __restrict__ grad_input, int64_t n4) {
+    CUDA_GRID_STRIDE_LOOP(idx, n4) {
+        float4 g = __ldg(&grad_output[idx]);
+        float4 x = __ldg(&input[idx]);
+        float4 result;
+
+        #define SWISH_BACKWARD(comp) \
+            { \
+                float s = (x.comp >= 0.0f) ? (1.0f / (1.0f + expf(-x.comp))) : (expf(x.comp) / (1.0f + expf(x.comp))); \
+                result.comp = g.comp * s * (1.0f + x.comp * (1.0f - s)); \
+            }
+
+        SWISH_BACKWARD(x)
+        SWISH_BACKWARD(y)
+        SWISH_BACKWARD(z)
+        SWISH_BACKWARD(w)
+
+        #undef SWISH_BACKWARD
+
+        grad_input[idx] = result;
+    }
+}
+
 // Host functions
 extern "C" {
     void relu_forward_float(const float* input, float* output, int64_t n) {
@@ -1109,21 +1388,47 @@ extern "C" {
 // Tensor Wrapper Functions
 // ============================================================================
 
-// ReLU wrapper
+// ReLU wrapper - uses vectorized float4 for 4x memory throughput on Float32
 auto relu_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
 
     if (n == 0) {
-        // NOTE: Removed sync - no operations for empty tensors
         return result;  // Handle empty tensors
     }
 
     if (input.dtype() == DType::Float32) {
-        int num_blocks = get_num_blocks(n);
-        relu_forward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-            input.data<float>(), result.data<float>(), n);
+        const float* input_ptr = input.data<float>();
+        float* result_ptr = result.data<float>();
+
+        // Use vectorized kernel for large tensors with aligned pointers
+        if (n >= VECTORIZED_THRESHOLD &&
+            reinterpret_cast<uintptr_t>(input_ptr) % 16 == 0 &&
+            reinterpret_cast<uintptr_t>(result_ptr) % 16 == 0) {
+
+            int64_t n4 = n / 4;
+            int64_t remainder = n % 4;
+
+            if (n4 > 0) {
+                int num_blocks = get_num_blocks(n4);
+                relu_forward_vectorized_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const float4*>(input_ptr),
+                    reinterpret_cast<float4*>(result_ptr), n4);
+            }
+
+            if (remainder > 0) {
+                int64_t start = n4 * 4;
+                int num_blocks_rem = (remainder + BLOCK_SIZE - 1) / BLOCK_SIZE;
+                relu_forward_remainder_kernel<<<num_blocks_rem, BLOCK_SIZE, 0, stream>>>(
+                    input_ptr, result_ptr, start, n);
+            }
+        } else {
+            // Fallback to scalar kernel
+            int num_blocks = get_num_blocks(n);
+            relu_forward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                input_ptr, result_ptr, n);
+        }
     } else if (input.dtype() == DType::Float64) {
         int num_blocks = get_num_blocks(n);
         relu_forward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
@@ -1202,21 +1507,46 @@ auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaSt
     return result;
 }
 
-// Sigmoid wrapper
+// Sigmoid wrapper - uses vectorized float4 for 4x memory throughput on Float32
 auto sigmoid_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
 
     if (n == 0) {
-        // NOTE: Removed sync - no operations for empty tensors
         return result;
     }
 
     if (input.dtype() == DType::Float32) {
-        int num_blocks = get_num_blocks(n);
-        sigmoid_forward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-            input.data<float>(), result.data<float>(), n);
+        const float* input_ptr = input.data<float>();
+        float* result_ptr = result.data<float>();
+
+        // Use vectorized kernel for large tensors with aligned pointers
+        if (n >= VECTORIZED_THRESHOLD &&
+            reinterpret_cast<uintptr_t>(input_ptr) % 16 == 0 &&
+            reinterpret_cast<uintptr_t>(result_ptr) % 16 == 0) {
+
+            int64_t n4 = n / 4;
+            int64_t remainder = n % 4;
+
+            if (n4 > 0) {
+                int num_blocks = get_num_blocks(n4);
+                sigmoid_forward_vectorized_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const float4*>(input_ptr),
+                    reinterpret_cast<float4*>(result_ptr), n4);
+            }
+
+            if (remainder > 0) {
+                int64_t start = n4 * 4;
+                int num_blocks_rem = (remainder + BLOCK_SIZE - 1) / BLOCK_SIZE;
+                sigmoid_forward_remainder_kernel<<<num_blocks_rem, BLOCK_SIZE, 0, stream>>>(
+                    input_ptr, result_ptr, start, n);
+            }
+        } else {
+            int num_blocks = get_num_blocks(n);
+            sigmoid_forward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                input_ptr, result_ptr, n);
+        }
     } else if (input.dtype() == DType::Float64) {
         int num_blocks = get_num_blocks(n);
         sigmoid_forward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
@@ -1238,21 +1568,48 @@ auto sigmoid_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     return result;
 }
 
-// Sigmoid backward wrapper
+// Sigmoid backward wrapper - uses vectorized float4 for 4x memory throughput
 auto sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaStream_t stream) -> Tensor {
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
 
     if (n == 0) {
-        // NOTE: Removed sync - no operations for empty tensors
         return result;
     }
 
     if (input.dtype() == DType::Float32) {
-        int num_blocks = get_num_blocks(n);
-        sigmoid_backward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-            grad_output.data<float>(), input.data<float>(), result.data<float>(), n);
+        const float* grad_ptr = grad_output.data<float>();
+        const float* input_ptr = input.data<float>();
+        float* result_ptr = result.data<float>();
+
+        if (n >= VECTORIZED_THRESHOLD &&
+            reinterpret_cast<uintptr_t>(grad_ptr) % 16 == 0 &&
+            reinterpret_cast<uintptr_t>(input_ptr) % 16 == 0 &&
+            reinterpret_cast<uintptr_t>(result_ptr) % 16 == 0) {
+
+            int64_t n4 = n / 4;
+            int64_t remainder = n % 4;
+
+            if (n4 > 0) {
+                int num_blocks = get_num_blocks(n4);
+                sigmoid_backward_vectorized_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const float4*>(grad_ptr),
+                    reinterpret_cast<const float4*>(input_ptr),
+                    reinterpret_cast<float4*>(result_ptr), n4);
+            }
+
+            if (remainder > 0) {
+                int64_t start = n4 * 4;
+                int num_blocks_rem = (remainder + BLOCK_SIZE - 1) / BLOCK_SIZE;
+                sigmoid_backward_kernel<float><<<num_blocks_rem, BLOCK_SIZE, 0, stream>>>(
+                    grad_ptr + start, input_ptr + start, result_ptr + start, remainder);
+            }
+        } else {
+            int num_blocks = get_num_blocks(n);
+            sigmoid_backward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                grad_ptr, input_ptr, result_ptr, n);
+        }
     } else if (input.dtype() == DType::Float64) {
         int num_blocks = get_num_blocks(n);
         sigmoid_backward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
@@ -1275,21 +1632,45 @@ auto sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& input, cud
     return result;
 }
 
-// Swish wrapper
+// Swish wrapper - uses vectorized float4 for 4x memory throughput on Float32
 auto swish_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
 
     if (n == 0) {
-        // NOTE: Removed sync - no operations for empty tensors
         return result;
     }
 
     if (input.dtype() == DType::Float32) {
-        int num_blocks = get_num_blocks(n);
-        swish_forward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-            input.data<float>(), result.data<float>(), n);
+        const float* input_ptr = input.data<float>();
+        float* result_ptr = result.data<float>();
+
+        if (n >= VECTORIZED_THRESHOLD &&
+            reinterpret_cast<uintptr_t>(input_ptr) % 16 == 0 &&
+            reinterpret_cast<uintptr_t>(result_ptr) % 16 == 0) {
+
+            int64_t n4 = n / 4;
+            int64_t remainder = n % 4;
+
+            if (n4 > 0) {
+                int num_blocks = get_num_blocks(n4);
+                swish_forward_vectorized_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const float4*>(input_ptr),
+                    reinterpret_cast<float4*>(result_ptr), n4);
+            }
+
+            if (remainder > 0) {
+                int64_t start = n4 * 4;
+                int num_blocks_rem = (remainder + BLOCK_SIZE - 1) / BLOCK_SIZE;
+                swish_forward_remainder_kernel<<<num_blocks_rem, BLOCK_SIZE, 0, stream>>>(
+                    input_ptr, result_ptr, start, n);
+            }
+        } else {
+            int num_blocks = get_num_blocks(n);
+            swish_forward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                input_ptr, result_ptr, n);
+        }
     } else if (input.dtype() == DType::Float64) {
         int num_blocks = get_num_blocks(n);
         swish_forward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
@@ -1311,21 +1692,48 @@ auto swish_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     return result;
 }
 
-// Swish backward wrapper
+// Swish backward wrapper - uses vectorized float4 for 4x memory throughput
 auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaStream_t stream) -> Tensor {
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
 
     if (n == 0) {
-        // NOTE: Removed sync - no operations for empty tensors
         return result;
     }
 
     if (input.dtype() == DType::Float32) {
-        int num_blocks = get_num_blocks(n);
-        swish_backward_cuda_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-            grad_output.data<float>(), input.data<float>(), result.data<float>(), n);
+        const float* grad_ptr = grad_output.data<float>();
+        const float* input_ptr = input.data<float>();
+        float* result_ptr = result.data<float>();
+
+        if (n >= VECTORIZED_THRESHOLD &&
+            reinterpret_cast<uintptr_t>(grad_ptr) % 16 == 0 &&
+            reinterpret_cast<uintptr_t>(input_ptr) % 16 == 0 &&
+            reinterpret_cast<uintptr_t>(result_ptr) % 16 == 0) {
+
+            int64_t n4 = n / 4;
+            int64_t remainder = n % 4;
+
+            if (n4 > 0) {
+                int num_blocks = get_num_blocks(n4);
+                swish_backward_vectorized_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const float4*>(grad_ptr),
+                    reinterpret_cast<const float4*>(input_ptr),
+                    reinterpret_cast<float4*>(result_ptr), n4);
+            }
+
+            if (remainder > 0) {
+                int64_t start = n4 * 4;
+                int num_blocks_rem = (remainder + BLOCK_SIZE - 1) / BLOCK_SIZE;
+                swish_backward_cuda_kernel<float><<<num_blocks_rem, BLOCK_SIZE, 0, stream>>>(
+                    grad_ptr + start, input_ptr + start, result_ptr + start, remainder);
+            }
+        } else {
+            int num_blocks = get_num_blocks(n);
+            swish_backward_cuda_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                grad_ptr, input_ptr, result_ptr, n);
+        }
     } else if (input.dtype() == DType::Float64) {
         int num_blocks = get_num_blocks(n);
         swish_backward_cuda_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
@@ -1348,21 +1756,45 @@ auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaS
     return result;
 }
 
-// Tanh wrapper
+// Tanh wrapper - uses vectorized float4 for 4x memory throughput on Float32
 auto tanh_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
 
     if (n == 0) {
-        // NOTE: Removed sync - no operations for empty tensors
         return result;
     }
 
     if (input.dtype() == DType::Float32) {
-        int num_blocks = get_num_blocks(n);
-        tanh_forward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-            input.data<float>(), result.data<float>(), n);
+        const float* input_ptr = input.data<float>();
+        float* result_ptr = result.data<float>();
+
+        if (n >= VECTORIZED_THRESHOLD &&
+            reinterpret_cast<uintptr_t>(input_ptr) % 16 == 0 &&
+            reinterpret_cast<uintptr_t>(result_ptr) % 16 == 0) {
+
+            int64_t n4 = n / 4;
+            int64_t remainder = n % 4;
+
+            if (n4 > 0) {
+                int num_blocks = get_num_blocks(n4);
+                tanh_forward_vectorized_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const float4*>(input_ptr),
+                    reinterpret_cast<float4*>(result_ptr), n4);
+            }
+
+            if (remainder > 0) {
+                int64_t start = n4 * 4;
+                int num_blocks_rem = (remainder + BLOCK_SIZE - 1) / BLOCK_SIZE;
+                tanh_forward_remainder_kernel<<<num_blocks_rem, BLOCK_SIZE, 0, stream>>>(
+                    input_ptr, result_ptr, start, n);
+            }
+        } else {
+            int num_blocks = get_num_blocks(n);
+            tanh_forward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                input_ptr, result_ptr, n);
+        }
     } else if (input.dtype() == DType::Float64) {
         int num_blocks = get_num_blocks(n);
         tanh_forward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
@@ -1384,21 +1816,48 @@ auto tanh_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     return result;
 }
 
-// Tanh backward wrapper
+// Tanh backward wrapper - uses vectorized float4 for 4x memory throughput
 auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaStream_t stream) -> Tensor {
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
 
     if (n == 0) {
-        // NOTE: Removed sync - no operations for empty tensors
         return result;
     }
 
     if (input.dtype() == DType::Float32) {
-        int num_blocks = get_num_blocks(n);
-        tanh_backward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-            grad_output.data<float>(), input.data<float>(), result.data<float>(), n);
+        const float* grad_ptr = grad_output.data<float>();
+        const float* input_ptr = input.data<float>();
+        float* result_ptr = result.data<float>();
+
+        if (n >= VECTORIZED_THRESHOLD &&
+            reinterpret_cast<uintptr_t>(grad_ptr) % 16 == 0 &&
+            reinterpret_cast<uintptr_t>(input_ptr) % 16 == 0 &&
+            reinterpret_cast<uintptr_t>(result_ptr) % 16 == 0) {
+
+            int64_t n4 = n / 4;
+            int64_t remainder = n % 4;
+
+            if (n4 > 0) {
+                int num_blocks = get_num_blocks(n4);
+                tanh_backward_vectorized_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const float4*>(grad_ptr),
+                    reinterpret_cast<const float4*>(input_ptr),
+                    reinterpret_cast<float4*>(result_ptr), n4);
+            }
+
+            if (remainder > 0) {
+                int64_t start = n4 * 4;
+                int num_blocks_rem = (remainder + BLOCK_SIZE - 1) / BLOCK_SIZE;
+                tanh_backward_kernel<float><<<num_blocks_rem, BLOCK_SIZE, 0, stream>>>(
+                    grad_ptr + start, input_ptr + start, result_ptr + start, remainder);
+            }
+        } else {
+            int num_blocks = get_num_blocks(n);
+            tanh_backward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                grad_ptr, input_ptr, result_ptr, n);
+        }
     } else if (input.dtype() == DType::Float64) {
         int num_blocks = get_num_blocks(n);
         tanh_backward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
@@ -1421,21 +1880,45 @@ auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaSt
     return result;
 }
 
-// GELU wrapper
+// GELU wrapper - uses vectorized float4 for 4x memory throughput on Float32
 auto gelu_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
 
     if (n == 0) {
-        // NOTE: Removed sync - no operations for empty tensors
         return result;
     }
 
     if (input.dtype() == DType::Float32) {
-        int num_blocks = get_num_blocks(n);
-        gelu_forward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-            input.data<float>(), result.data<float>(), n);
+        const float* input_ptr = input.data<float>();
+        float* result_ptr = result.data<float>();
+
+        if (n >= VECTORIZED_THRESHOLD &&
+            reinterpret_cast<uintptr_t>(input_ptr) % 16 == 0 &&
+            reinterpret_cast<uintptr_t>(result_ptr) % 16 == 0) {
+
+            int64_t n4 = n / 4;
+            int64_t remainder = n % 4;
+
+            if (n4 > 0) {
+                int num_blocks = get_num_blocks(n4);
+                gelu_forward_vectorized_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const float4*>(input_ptr),
+                    reinterpret_cast<float4*>(result_ptr), n4);
+            }
+
+            if (remainder > 0) {
+                int64_t start = n4 * 4;
+                int num_blocks_rem = (remainder + BLOCK_SIZE - 1) / BLOCK_SIZE;
+                gelu_forward_remainder_kernel<<<num_blocks_rem, BLOCK_SIZE, 0, stream>>>(
+                    input_ptr, result_ptr, start, n);
+            }
+        } else {
+            int num_blocks = get_num_blocks(n);
+            gelu_forward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                input_ptr, result_ptr, n);
+        }
     } else if (input.dtype() == DType::Float64) {
         int num_blocks = get_num_blocks(n);
         gelu_forward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
@@ -1457,21 +1940,48 @@ auto gelu_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
     return result;
 }
 
-// GELU backward wrapper
+// GELU backward wrapper - uses vectorized float4 for 4x memory throughput
 auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaStream_t stream) -> Tensor {
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
 
     if (n == 0) {
-        // NOTE: Removed sync - no operations for empty tensors
         return result;
     }
 
     if (input.dtype() == DType::Float32) {
-        int num_blocks = get_num_blocks(n);
-        gelu_backward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-            grad_output.data<float>(), input.data<float>(), result.data<float>(), n);
+        const float* grad_ptr = grad_output.data<float>();
+        const float* input_ptr = input.data<float>();
+        float* result_ptr = result.data<float>();
+
+        if (n >= VECTORIZED_THRESHOLD &&
+            reinterpret_cast<uintptr_t>(grad_ptr) % 16 == 0 &&
+            reinterpret_cast<uintptr_t>(input_ptr) % 16 == 0 &&
+            reinterpret_cast<uintptr_t>(result_ptr) % 16 == 0) {
+
+            int64_t n4 = n / 4;
+            int64_t remainder = n % 4;
+
+            if (n4 > 0) {
+                int num_blocks = get_num_blocks(n4);
+                gelu_backward_vectorized_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const float4*>(grad_ptr),
+                    reinterpret_cast<const float4*>(input_ptr),
+                    reinterpret_cast<float4*>(result_ptr), n4);
+            }
+
+            if (remainder > 0) {
+                int64_t start = n4 * 4;
+                int num_blocks_rem = (remainder + BLOCK_SIZE - 1) / BLOCK_SIZE;
+                gelu_backward_kernel<float><<<num_blocks_rem, BLOCK_SIZE, 0, stream>>>(
+                    grad_ptr + start, input_ptr + start, result_ptr + start, remainder);
+            }
+        } else {
+            int num_blocks = get_num_blocks(n);
+            gelu_backward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                grad_ptr, input_ptr, result_ptr, n);
+        }
     } else if (input.dtype() == DType::Float64) {
         int num_blocks = get_num_blocks(n);
         gelu_backward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
@@ -1494,21 +2004,45 @@ auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input, cudaSt
     return result;
 }
 
-// Leaky ReLU wrapper
+// Leaky ReLU wrapper - uses vectorized float4 for 4x memory throughput on Float32
 auto leaky_relu_kernel(const Tensor& input, float alpha, cudaStream_t stream) -> Tensor {
     int64_t n = input.numel();
     std::vector<int64_t> shape(input.shape().begin(), input.shape().end());
     Tensor result(shape, input.dtype(), input.device());
 
     if (n == 0) {
-        // NOTE: Removed sync - no operations for empty tensors
         return result;
     }
 
     if (input.dtype() == DType::Float32) {
-        int num_blocks = get_num_blocks(n);
-        leaky_relu_forward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-            input.data<float>(), result.data<float>(), n, alpha);
+        const float* input_ptr = input.data<float>();
+        float* result_ptr = result.data<float>();
+
+        if (n >= VECTORIZED_THRESHOLD &&
+            reinterpret_cast<uintptr_t>(input_ptr) % 16 == 0 &&
+            reinterpret_cast<uintptr_t>(result_ptr) % 16 == 0) {
+
+            int64_t n4 = n / 4;
+            int64_t remainder = n % 4;
+
+            if (n4 > 0) {
+                int num_blocks = get_num_blocks(n4);
+                leaky_relu_forward_vectorized_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<const float4*>(input_ptr),
+                    reinterpret_cast<float4*>(result_ptr), n4, alpha);
+            }
+
+            if (remainder > 0) {
+                int64_t start = n4 * 4;
+                int num_blocks_rem = (remainder + BLOCK_SIZE - 1) / BLOCK_SIZE;
+                leaky_relu_forward_remainder_kernel<<<num_blocks_rem, BLOCK_SIZE, 0, stream>>>(
+                    input_ptr, result_ptr, start, n, alpha);
+            }
+        } else {
+            int num_blocks = get_num_blocks(n);
+            leaky_relu_forward_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                input_ptr, result_ptr, n, alpha);
+        }
     } else if (input.dtype() == DType::Float64) {
         int num_blocks = get_num_blocks(n);
         leaky_relu_forward_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(

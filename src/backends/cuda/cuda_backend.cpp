@@ -151,6 +151,12 @@ namespace cuda {
     auto conv2d_backward_kernel(const Tensor& grad_output, const Tensor& input, const Tensor& weight, int64_t stride, int64_t padding, int64_t dilation, int64_t groups, bool compute_grad_input, bool compute_grad_weight, bool compute_grad_bias, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
     auto conv_transpose2d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t output_padding, int64_t dilation, int64_t groups, cudaStream_t stream) -> Tensor;
 
+    // cuDNN Conv2d operations (NHWC optimized for Tensor Cores)
+    auto cudnn_conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t dilation, int64_t groups, cudaStream_t stream) -> Tensor;
+    auto cudnn_conv2d_forward_nhwc(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t dilation, int64_t groups, cudaStream_t stream) -> Tensor;
+    auto cudnn_conv2d_backward(const Tensor& grad_output, const Tensor& input, const Tensor& weight, int64_t stride, int64_t padding, int64_t dilation, int64_t groups, bool compute_grad_input, bool compute_grad_weight, bool compute_grad_bias, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
+    auto cudnn_conv2d_backward_nhwc(const Tensor& grad_output, const Tensor& input, const Tensor& weight, int64_t stride, int64_t padding, int64_t dilation, int64_t groups, bool compute_grad_input, bool compute_grad_weight, bool compute_grad_bias, cudaStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
+
     // LSTM operations (custom kernels - fallback)
     auto lstm_cell_forward_kernel(const Tensor& gates, const Tensor& c_prev, int64_t batch_size, int64_t hidden_size, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
     auto lstm_cell_backward_kernel(const Tensor& grad_h, const Tensor& grad_c, const Tensor& gates, const Tensor& c_prev, const Tensor& c_out, int64_t batch_size, int64_t hidden_size, cudaStream_t stream) -> std::pair<Tensor, Tensor>;
@@ -1443,7 +1449,16 @@ public:
                 }
 
                 #ifdef TENZOR_HAS_CUDNN
-                // Try cuDNN first (10-30% faster)
+                // NOTE: NHWC format can provide better Tensor Core utilization, but the
+                // NCHW<->NHWC conversion overhead per operation is too high. NHWC benefits
+                // only when tensors stay in NHWC format across multiple operations.
+                //
+                // For now, use NCHW (default) which still gets good performance through
+                // cuDNN's auto-tuning. The cudnn_conv2d_forward_nhwc function is available
+                // for future use when we implement memory_format support at the Tensor level.
+                //
+                // TODO: Add Tensor.to(memory_format=channels_last) support for persistent NHWC
+
                 try {
                     return {cuda::cudnn_conv2d_forward(inputs[0], inputs[1], bias_ptr, stride, padding, dilation, groups, stream)};
                 } catch (const std::exception& e) {
@@ -1473,7 +1488,7 @@ public:
                 }
 
                 #ifdef TENZOR_HAS_CUDNN
-                // Try cuDNN first (10-30% faster)
+                // Use NCHW format (see forward path comment for NHWC rationale)
                 try {
                     auto [grad_input, grad_weight, grad_bias] = cuda::cudnn_conv2d_backward(
                         inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups,

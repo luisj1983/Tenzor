@@ -1300,19 +1300,21 @@ __device__ __forceinline__ float warp_reduce_sum(float val) {
 }
 
 /**
- * @brief Optimized Flash Attention with warp-level parallelism
+ * @brief Optimized Flash Attention V2 kernel
  *
- * Key optimizations over naive implementation:
- * 1. Each warp processes one query row cooperatively
- * 2. Warp shuffle for fast max/sum reductions (no shared memory atomics)
- * 3. Register-based output accumulation (no shared memory bottleneck)
- * 4. Vectorized float4 loads for 4x memory bandwidth
- * 5. Coalesced memory access patterns
+ * This kernel implements the Flash Attention algorithm with online softmax,
+ * achieving O(N) memory complexity instead of O(N^2).
  *
- * Configuration: 4 warps per block, each warp handles one query row
- * Tile sizes: Br=4 (4 query rows per block), Bc=64 (keys per iteration)
+ * Key optimizations:
+ * 1. Each block processes one query row with 256 threads
+ * 2. KV tiles loaded cooperatively into shared memory
+ * 3. Online softmax with running max/sum for numerical stability
+ * 4. Warp shuffle for fast reductions
+ * 5. All threads participate in output accumulation
+ *
+ * Supports head_dim: 32, 64, 80, 96, 128
  */
-template<int HEAD_DIM>
+template<int HEAD_DIM, int BLOCK_SIZE = 256>
 __global__ void flash_attention_v2_kernel(
     const float* __restrict__ Q,     // [batch_heads, seq_len_q, head_dim]
     const float* __restrict__ K,     // [batch_heads, seq_len_k, head_dim]
@@ -1323,155 +1325,168 @@ __global__ void flash_attention_v2_kernel(
     const float scale
 ) {
     // Configuration
-    constexpr int WARPS_PER_BLOCK = 4;
-    constexpr int Bc = 32;  // Keys per tile (fits well in registers)
+    constexpr int Bc = 32;  // Keys per tile - small for register pressure
 
     const int batch_head = blockIdx.x;
-    const int q_block_start = blockIdx.y * WARPS_PER_BLOCK;
-    const int warp_id = threadIdx.x / 32;
-    const int lane_id = threadIdx.x % 32;
-    const int query_idx = q_block_start + warp_id;
+    const int query_idx = blockIdx.y;
 
     if (query_idx >= seq_len_q) return;
 
-    // Base pointers for this batch_head
-    const float* Q_ptr = Q + batch_head * seq_len_q * HEAD_DIM + query_idx * HEAD_DIM;
+    const int tid = threadIdx.x;
+    const int warp_id = tid / 32;
+    const int lane_id = tid % 32;
+    const int num_warps = BLOCK_SIZE / 32;
+
+    // Base pointers
+    const float* Q_row = Q + batch_head * seq_len_q * HEAD_DIM + query_idx * HEAD_DIM;
     const float* K_base = K + batch_head * seq_len_k * HEAD_DIM;
     const float* V_base = V + batch_head * seq_len_k * HEAD_DIM;
-    float* O_ptr = O + batch_head * seq_len_q * HEAD_DIM + query_idx * HEAD_DIM;
+    float* O_row = O + batch_head * seq_len_q * HEAD_DIM + query_idx * HEAD_DIM;
 
-    // Load query row into registers (each thread loads HEAD_DIM/32 elements)
-    // For HEAD_DIM=64: each thread loads 2 elements
-    float q_reg[HEAD_DIM / 32 + 1];
-    #pragma unroll
-    for (int i = 0; i < HEAD_DIM / 32; ++i) {
-        int idx = lane_id + i * 32;
-        q_reg[i] = (idx < HEAD_DIM) ? Q_ptr[idx] * scale : 0.0f;  // Pre-scale Q
-    }
-    if (HEAD_DIM % 32 != 0 && lane_id < HEAD_DIM % 32) {
-        q_reg[HEAD_DIM / 32] = Q_ptr[(HEAD_DIM / 32) * 32 + lane_id] * scale;
-    }
-
-    // Output accumulator in registers
-    float o_reg[HEAD_DIM / 32 + 1] = {0.0f};
-
-    // Online softmax state
-    float m_i = -INFINITY;  // Running max
-    float l_i = 0.0f;       // Running sum
-
-    // Shared memory for K/V tiles - each warp needs its own tile space
-    // Layout: [WARPS_PER_BLOCK][Bc][HEAD_DIM] with padding for bank conflicts
-    constexpr int SMEM_STRIDE = HEAD_DIM + 4;  // Padding to avoid bank conflicts
+    // Shared memory layout
+    constexpr int K_STRIDE = HEAD_DIM + 4;  // Padding for bank conflicts
     extern __shared__ float smem[];
-    float* K_tile = smem;                                    // [Bc][SMEM_STRIDE]
-    float* V_tile = smem + Bc * SMEM_STRIDE;                 // [Bc][SMEM_STRIDE]
-    float* S_partial = smem + 2 * Bc * SMEM_STRIDE;          // [WARPS_PER_BLOCK][Bc]
+    float* K_tile = smem;                          // [Bc][K_STRIDE]
+    float* V_tile = smem + Bc * K_STRIDE;          // [Bc][K_STRIDE]
+    float* Q_shared = smem + 2 * Bc * K_STRIDE;    // [HEAD_DIM]
+    float* scores_shared = Q_shared + HEAD_DIM;    // [Bc]
+    float* reduce_buf = scores_shared + Bc;        // [num_warps]
 
-    // Iterate over K/V blocks
+    // Load Q row into shared memory
+    for (int d = tid; d < HEAD_DIM; d += BLOCK_SIZE) {
+        Q_shared[d] = Q_row[d] * scale;
+    }
+    __syncthreads();
+
+    // Output accumulator - each thread handles a subset of output dimensions
+    float o_local[4] = {0.0f, 0.0f, 0.0f, 0.0f};  // Up to 4 elements per thread
+
+    // Online softmax state (shared across block via reduction)
+    float m_prev = -INFINITY;
+    float l_prev = 0.0f;
+
     const int num_kv_blocks = (seq_len_k + Bc - 1) / Bc;
 
     for (int kv_block = 0; kv_block < num_kv_blocks; ++kv_block) {
         const int k_start = kv_block * Bc;
         const int actual_Bc = min(Bc, seq_len_k - k_start);
 
-        // Cooperative K/V loading - all threads in block participate
-        // Each thread loads multiple elements
-        for (int i = threadIdx.x; i < actual_Bc * HEAD_DIM; i += blockDim.x) {
-            int row = i / HEAD_DIM;
-            int col = i % HEAD_DIM;
-            K_tile[row * SMEM_STRIDE + col] = K_base[(k_start + row) * HEAD_DIM + col];
-            V_tile[row * SMEM_STRIDE + col] = V_base[(k_start + row) * HEAD_DIM + col];
+        // Load K/V tile cooperatively
+        for (int idx = tid; idx < actual_Bc * HEAD_DIM; idx += BLOCK_SIZE) {
+            int row = idx / HEAD_DIM;
+            int col = idx % HEAD_DIM;
+            K_tile[row * K_STRIDE + col] = K_base[(k_start + row) * HEAD_DIM + col];
+            V_tile[row * K_STRIDE + col] = V_base[(k_start + row) * HEAD_DIM + col];
         }
         __syncthreads();
 
-        // Compute attention scores for this warp's query row
-        // Each thread computes partial dot products, then reduce within warp
-        float scores[Bc];
+        // Step 1: Compute all Q·K scores and find max
+        // Each thread computes one or more scores
+        float local_max = -INFINITY;
 
-        #pragma unroll 4
-        for (int j = 0; j < actual_Bc; ++j) {
+        for (int j = tid; j < actual_Bc; j += BLOCK_SIZE) {
             float score = 0.0f;
-
-            // Compute Q[query_idx] · K[k_start + j]
-            // Each thread handles a portion of the dot product
             #pragma unroll
-            for (int d = lane_id; d < HEAD_DIM; d += 32) {
-                int reg_idx = d / 32;
-                float k_val = K_tile[j * SMEM_STRIDE + d];
-                score += q_reg[reg_idx] * k_val;
+            for (int d = 0; d < HEAD_DIM; ++d) {
+                score += Q_shared[d] * K_tile[j * K_STRIDE + d];
             }
-
-            // Warp-level reduction of partial dot product
-            score = warp_reduce_sum(score);
-            scores[j] = score;
+            scores_shared[j] = score;
+            local_max = fmaxf(local_max, score);
         }
 
-        // Mask out-of-bounds scores
-        for (int j = actual_Bc; j < Bc; ++j) {
-            scores[j] = -INFINITY;
-        }
-
-        // Find row max (for numerical stability)
-        float row_max = -INFINITY;
-        #pragma unroll 4
-        for (int j = lane_id; j < Bc; j += 32) {
-            row_max = fmaxf(row_max, scores[j]);
-        }
-        row_max = warp_reduce_max(row_max);
-
-        // Compute exp(score - max) and sum
-        float row_sum = 0.0f;
-        float exp_scores[Bc];
-
-        #pragma unroll 4
-        for (int j = 0; j < actual_Bc; ++j) {
-            exp_scores[j] = expf(scores[j] - row_max);
-            row_sum += exp_scores[j];
-        }
-        row_sum = warp_reduce_sum(row_sum);
-
-        // Online softmax update
-        float m_new = fmaxf(m_i, row_max);
-        float scale_old = expf(m_i - m_new);
-        float scale_cur = expf(row_max - m_new);
-        float l_new = scale_old * l_i + scale_cur * row_sum;
-
-        // Rescale previous output accumulator
+        // Reduce max across block using warp shuffle + shared memory
         #pragma unroll
-        for (int i = 0; i < HEAD_DIM / 32; ++i) {
-            o_reg[i] *= scale_old;
+        for (int offset = 16; offset > 0; offset /= 2) {
+            local_max = fmaxf(local_max, __shfl_xor_sync(0xffffffff, local_max, offset));
         }
-        if (HEAD_DIM % 32 != 0) {
-            o_reg[HEAD_DIM / 32] *= scale_old;
+        if (lane_id == 0) {
+            reduce_buf[warp_id] = local_max;
         }
+        __syncthreads();
 
-        // Accumulate P @ V for this tile
-        // Each thread accumulates its portion of the output
-        #pragma unroll 4
-        for (int j = 0; j < actual_Bc; ++j) {
-            float p_scaled = exp_scores[j] * scale_cur;
-
+        if (warp_id == 0) {
+            float val = (lane_id < num_warps) ? reduce_buf[lane_id] : -INFINITY;
             #pragma unroll
-            for (int d = lane_id; d < HEAD_DIM; d += 32) {
-                int reg_idx = d / 32;
-                float v_val = V_tile[j * SMEM_STRIDE + d];
-                o_reg[reg_idx] += p_scaled * v_val;
+            for (int offset = 16; offset > 0; offset /= 2) {
+                val = fmaxf(val, __shfl_xor_sync(0xffffffff, val, offset));
+            }
+            if (lane_id == 0) {
+                reduce_buf[0] = val;
+            }
+        }
+        __syncthreads();
+        float block_max = reduce_buf[0];
+
+        // Step 2: Compute exp(score - max) and sum
+        float local_sum = 0.0f;
+
+        for (int j = tid; j < actual_Bc; j += BLOCK_SIZE) {
+            float exp_score = expf(scores_shared[j] - block_max);
+            scores_shared[j] = exp_score;  // Store exp for P @ V
+            local_sum += exp_score;
+        }
+        __syncthreads();
+
+        // Reduce sum
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset /= 2) {
+            local_sum += __shfl_xor_sync(0xffffffff, local_sum, offset);
+        }
+        if (lane_id == 0) {
+            reduce_buf[warp_id] = local_sum;
+        }
+        __syncthreads();
+
+        if (warp_id == 0) {
+            float val = (lane_id < num_warps) ? reduce_buf[lane_id] : 0.0f;
+            #pragma unroll
+            for (int offset = 16; offset > 0; offset /= 2) {
+                val += __shfl_xor_sync(0xffffffff, val, offset);
+            }
+            if (lane_id == 0) {
+                reduce_buf[0] = val;
+            }
+        }
+        __syncthreads();
+        float block_sum = reduce_buf[0];
+
+        // Step 3: Online softmax rescaling
+        float m_new = fmaxf(m_prev, block_max);
+        float exp_prev = expf(m_prev - m_new);
+        float exp_curr = expf(block_max - m_new);
+        float l_new = exp_prev * l_prev + exp_curr * block_sum;
+
+        // Step 4: Rescale previous output and accumulate P @ V
+        // Each thread handles HEAD_DIM / BLOCK_SIZE output elements
+        for (int i = 0; i < 4; ++i) {
+            int d = tid + i * BLOCK_SIZE;
+            if (d < HEAD_DIM) {
+                // Rescale previous accumulator
+                o_local[i] *= exp_prev;
+
+                // Add new contribution: sum over j of P[j] * V[j, d]
+                float pv_sum = 0.0f;
+                for (int j = 0; j < actual_Bc; ++j) {
+                    pv_sum += scores_shared[j] * V_tile[j * K_STRIDE + d];
+                }
+                o_local[i] += exp_curr * pv_sum;
             }
         }
 
-        m_i = m_new;
-        l_i = l_new;
+        m_prev = m_new;
+        l_prev = l_new;
 
         __syncthreads();
     }
 
-    // Final normalization and store
-    float l_inv = 1.0f / l_i;
+    // Final normalization and write output
+    float l_inv = (l_prev > 0.0f) ? (1.0f / l_prev) : 0.0f;
 
-    #pragma unroll
-    for (int d = lane_id; d < HEAD_DIM; d += 32) {
-        int reg_idx = d / 32;
-        O_ptr[d] = o_reg[reg_idx] * l_inv;
+    for (int i = 0; i < 4; ++i) {
+        int d = tid + i * BLOCK_SIZE;
+        if (d < HEAD_DIM) {
+            O_row[d] = o_local[i] * l_inv;
+        }
     }
 }
 
@@ -1767,42 +1782,50 @@ auto fused_attention_cuda(
 
     Tensor output = create_cuda_zeros({batch_heads, seq_len_q, head_dim}, Q.dtype(), Q.device());
 
-    // Optimized Flash Attention V2 with warp-level parallelism
-    constexpr int HEAD_DIM_64 = 64;    // Standard transformer head dimension
-    constexpr int WARPS_PER_BLOCK = 4;
-    constexpr int BLOCK_SIZE = WARPS_PER_BLOCK * 32;  // 128 threads
+    // Optimized Flash Attention V2 - supports multiple head dimensions
+    constexpr int BLOCK_SIZE = 256;
     constexpr int Bc = 32;  // Keys per tile
 
-    // Use optimized Flash Attention V2 for head_dim=64
-    if (head_dim == HEAD_DIM_64) {
-        // Grid: (batch_heads, num_q_blocks)
-        // Each block processes WARPS_PER_BLOCK query rows
-        int64_t num_q_blocks = (seq_len_q + WARPS_PER_BLOCK - 1) / WARPS_PER_BLOCK;
-        dim3 threads(BLOCK_SIZE);
-        dim3 blocks(batch_heads, num_q_blocks);
+    // Grid: one block per (batch_head, query_row) pair
+    dim3 threads(BLOCK_SIZE);
+    dim3 blocks(batch_heads, seq_len_q);
 
-        // Shared memory for K/V tiles with padding to avoid bank conflicts
-        constexpr int SMEM_STRIDE = HEAD_DIM_64 + 4;
-        size_t shared_mem_size = (
-            Bc * SMEM_STRIDE +     // K_tile
-            Bc * SMEM_STRIDE +     // V_tile
-            WARPS_PER_BLOCK * Bc   // S_partial (unused but reserved)
-        ) * sizeof(float);
+    // Compute shared memory size based on head_dim
+    // Layout: K_tile[Bc][HEAD_DIM+4] + V_tile[Bc][HEAD_DIM+4] + Q_shared[HEAD_DIM] + scores[Bc] + reduce[8]
+    auto compute_smem_size = [](int hd) {
+        int k_stride = hd + 4;
+        return (2 * Bc * k_stride + hd + Bc + 8) * sizeof(float);
+    };
 
-        flash_attention_v2_kernel<HEAD_DIM_64><<<blocks, threads, shared_mem_size>>>(
-            Q.data<float>(),
-            K.data<float>(),
-            V.data<float>(),
-            output.data<float>(),
-            static_cast<int>(seq_len_q),
-            static_cast<int>(seq_len_k),
-            scale
-        );
+    // Dispatch based on head_dim for optimal unrolling
+    if (head_dim == 64) {
+        size_t smem_size = compute_smem_size(64);
+        flash_attention_v2_kernel<64, BLOCK_SIZE><<<blocks, threads, smem_size>>>(
+            Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(),
+            static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale);
+    } else if (head_dim == 128) {
+        size_t smem_size = compute_smem_size(128);
+        flash_attention_v2_kernel<128, BLOCK_SIZE><<<blocks, threads, smem_size>>>(
+            Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(),
+            static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale);
+    } else if (head_dim == 32) {
+        size_t smem_size = compute_smem_size(32);
+        flash_attention_v2_kernel<32, BLOCK_SIZE><<<blocks, threads, smem_size>>>(
+            Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(),
+            static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale);
+    } else if (head_dim == 80) {
+        size_t smem_size = compute_smem_size(80);
+        flash_attention_v2_kernel<80, BLOCK_SIZE><<<blocks, threads, smem_size>>>(
+            Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(),
+            static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale);
+    } else if (head_dim == 96) {
+        size_t smem_size = compute_smem_size(96);
+        flash_attention_v2_kernel<96, BLOCK_SIZE><<<blocks, threads, smem_size>>>(
+            Q.data<float>(), K.data<float>(), V.data<float>(), output.data<float>(),
+            static_cast<int>(seq_len_q), static_cast<int>(seq_len_k), scale);
     } else {
         // Fallback to naive kernel for non-standard head_dim
         constexpr int NAIVE_BLOCK_SIZE = 256;
-        dim3 threads(NAIVE_BLOCK_SIZE);
-        dim3 blocks(batch_heads, seq_len_q);
         size_t shared_mem_size = (seq_len_k + 2 * NAIVE_BLOCK_SIZE) * sizeof(float);
 
         fused_attention_kernel_naive<float, NAIVE_BLOCK_SIZE><<<blocks, threads, shared_mem_size>>>(

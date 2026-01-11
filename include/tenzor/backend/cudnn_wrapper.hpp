@@ -133,6 +133,12 @@ private:
 // Algorithm Cache for Conv2d (avoids per-call algorithm selection)
 // ============================================================================
 
+// Tensor format enum for cache key
+enum class TensorFormat {
+    NCHW = 0,
+    NHWC = 1
+};
+
 // Key for conv2d algorithm cache
 struct Conv2dCacheKey {
     int64_t batch;
@@ -147,6 +153,7 @@ struct Conv2dCacheKey {
     int64_t dilation;
     int64_t groups;
     cudnnDataType_t dtype;
+    TensorFormat format;  // NCHW or NHWC
 
     bool operator==(const Conv2dCacheKey& other) const {
         return batch == other.batch &&
@@ -160,7 +167,8 @@ struct Conv2dCacheKey {
                padding == other.padding &&
                dilation == other.dilation &&
                groups == other.groups &&
-               dtype == other.dtype;
+               dtype == other.dtype &&
+               format == other.format;
     }
 };
 
@@ -184,6 +192,7 @@ struct Conv2dCacheKeyHash {
         hash_combine(k.dilation);
         hash_combine(k.groups);
         hash_combine(static_cast<int>(k.dtype));
+        hash_combine(static_cast<int>(k.format));
         return h;
     }
 };
@@ -310,10 +319,34 @@ public:
 
     cudnnTensorDescriptor_t get() const { return desc_; }
 
+    // Set tensor descriptor in NCHW format (default)
     void set(cudnnDataType_t dtype, int n, int c, int h, int w) {
         CUDNN_CHECK(cudnnSetTensor4dDescriptor(
             desc_,
             CUDNN_TENSOR_NCHW,
+            dtype,
+            n, c, h, w
+        ));
+    }
+
+    // Set tensor descriptor in NHWC format (optimized for Tensor Cores)
+    void set_nhwc(cudnnDataType_t dtype, int n, int c, int h, int w) {
+        CUDNN_CHECK(cudnnSetTensor4dDescriptor(
+            desc_,
+            CUDNN_TENSOR_NHWC,
+            dtype,
+            n, c, h, w
+        ));
+    }
+
+    // Set tensor descriptor with explicit format
+    void set_format(cudnnDataType_t dtype, int n, int c, int h, int w, TensorFormat format) {
+        cudnnTensorFormat_t cudnn_format = (format == TensorFormat::NHWC)
+            ? CUDNN_TENSOR_NHWC
+            : CUDNN_TENSOR_NCHW;
+        CUDNN_CHECK(cudnnSetTensor4dDescriptor(
+            desc_,
+            cudnn_format,
             dtype,
             n, c, h, w
         ));
@@ -332,9 +365,7 @@ public:
         }
     }
 
-private:
-    cudnnTensorDescriptor_t desc_ = nullptr;
-
+    // Helper to convert DType to cuDNN dtype
     static cudnnDataType_t dtype_to_cudnn(DType dtype) {
         switch (dtype) {
             case DType::Float32: return CUDNN_DATA_FLOAT;
@@ -345,6 +376,9 @@ private:
                 throw std::runtime_error("Unsupported dtype for cuDNN");
         }
     }
+
+private:
+    cudnnTensorDescriptor_t desc_ = nullptr;
 };
 
 class FilterDescriptor {
@@ -364,11 +398,35 @@ public:
 
     cudnnFilterDescriptor_t get() const { return desc_; }
 
+    // Set filter descriptor in NCHW format (default)
     void set(cudnnDataType_t dtype, int k, int c, int h, int w) {
         CUDNN_CHECK(cudnnSetFilter4dDescriptor(
             desc_,
             dtype,
             CUDNN_TENSOR_NCHW,
+            k, c, h, w
+        ));
+    }
+
+    // Set filter descriptor in NHWC format (optimized for Tensor Cores)
+    void set_nhwc(cudnnDataType_t dtype, int k, int c, int h, int w) {
+        CUDNN_CHECK(cudnnSetFilter4dDescriptor(
+            desc_,
+            dtype,
+            CUDNN_TENSOR_NHWC,
+            k, c, h, w
+        ));
+    }
+
+    // Set filter descriptor with explicit format
+    void set_format(cudnnDataType_t dtype, int k, int c, int h, int w, TensorFormat format) {
+        cudnnTensorFormat_t cudnn_format = (format == TensorFormat::NHWC)
+            ? CUDNN_TENSOR_NHWC
+            : CUDNN_TENSOR_NCHW;
+        CUDNN_CHECK(cudnnSetFilter4dDescriptor(
+            desc_,
+            dtype,
+            cudnn_format,
             k, c, h, w
         ));
     }
@@ -541,6 +599,26 @@ private:
 };
 
 // ============================================================================
+// NCHW <-> NHWC Format Conversion (GPU kernels)
+// ============================================================================
+
+/**
+ * @brief Convert tensor from NCHW to NHWC format
+ *
+ * NHWC format is optimized for Tensor Cores on modern NVIDIA GPUs.
+ * Memory layout: [batch, height, width, channels]
+ */
+auto nchw_to_nhwc(const Tensor& input, cudaStream_t stream = nullptr) -> Tensor;
+
+/**
+ * @brief Convert tensor from NHWC to NCHW format
+ *
+ * NCHW format is the standard PyTorch/Tenzor layout.
+ * Memory layout: [batch, channels, height, width]
+ */
+auto nhwc_to_nchw(const Tensor& input, int64_t channels, cudaStream_t stream = nullptr) -> Tensor;
+
+// ============================================================================
 // cuDNN Convolution Operations
 // ============================================================================
 
@@ -555,7 +633,56 @@ auto cudnn_conv2d_forward(
     cudaStream_t stream
 ) -> Tensor;
 
+/**
+ * @brief NHWC-optimized Conv2D forward using cuDNN
+ *
+ * Uses NHWC tensor format internally which enables:
+ * - Better Tensor Core utilization (2-3x faster on RTX 30xx/40xx/50xx)
+ * - Improved memory coalescing for channel dimension
+ * - Faster implicit GEMM algorithms in cuDNN
+ *
+ * Handles NCHW<->NHWC conversion internally so the API remains unchanged.
+ * For small convolutions, may fall back to NCHW if conversion overhead exceeds benefit.
+ *
+ * @param input Input tensor in NCHW format [N, C, H, W]
+ * @param weight Filter tensor in NCHW format [K, C/groups, kH, kW]
+ * @param bias Optional bias tensor [K]
+ * @param stride Convolution stride
+ * @param padding Convolution padding
+ * @param dilation Convolution dilation
+ * @param groups Number of groups for grouped convolution
+ * @param stream CUDA stream
+ * @return Output tensor in NCHW format [N, K, oH, oW]
+ */
+auto cudnn_conv2d_forward_nhwc(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias,
+    int64_t stride,
+    int64_t padding,
+    int64_t dilation,
+    int64_t groups,
+    cudaStream_t stream
+) -> Tensor;
+
 auto cudnn_conv2d_backward(
+    const Tensor& grad_output,
+    const Tensor& input,
+    const Tensor& weight,
+    int64_t stride,
+    int64_t padding,
+    int64_t dilation,
+    int64_t groups,
+    bool compute_grad_input,
+    bool compute_grad_weight,
+    bool compute_grad_bias,
+    cudaStream_t stream
+) -> std::tuple<Tensor, Tensor, Tensor>;
+
+/**
+ * @brief NHWC-optimized Conv2D backward
+ */
+auto cudnn_conv2d_backward_nhwc(
     const Tensor& grad_output,
     const Tensor& input,
     const Tensor& weight,
