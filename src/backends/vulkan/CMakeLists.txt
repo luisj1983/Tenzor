@@ -54,6 +54,8 @@ set(SHADERS
     comparison_i64
     matmul
     matmul_i32
+    bmm
+    bmm_f64
     activations
     activations_f64
     reduction
@@ -164,6 +166,7 @@ set(SHADERS
     reduction_f16
     # Float64 transformer operations
     matmul_f64
+    matmul_f64_optimized
     softmax_f64
     layer_norm_f64
     log_softmax_f64

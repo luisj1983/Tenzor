@@ -1,0 +1,147 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Optimized Matrix multiplication for Float64
+// Key optimizations:
+// 1. Register blocking: Each thread computes a 2x2 tile of output (4 elements)
+// 2. 32x32 tiles fit comfortably in shared memory (16KB total)
+// 3. Loop unrolling for better ILP
+// 4. Coalesced memory access patterns
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+layout(binding = 0) buffer MatrixA { double a[]; };
+layout(binding = 1) buffer MatrixB { double b[]; };
+layout(binding = 2) buffer MatrixC { double c[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint M;  // rows of A
+    uint N;  // cols of B
+    uint K;  // cols of A / rows of B
+} params;
+
+// Tile size: 32x32 = 8KB per tile, 16KB total for A and B
+// With 16x16 threads each computing 2x2, we cover 32x32 output
+#define TILE_K 32
+#define BLOCK_ROWS 2
+#define BLOCK_COLS 2
+
+// Shared memory tiles - transposed B for better access pattern
+shared double tileA[32][TILE_K + 1];  // +1 to avoid bank conflicts
+shared double tileB[TILE_K][32 + 1];
+
+void main() {
+    uint thread_row = gl_LocalInvocationID.y;
+    uint thread_col = gl_LocalInvocationID.x;
+    uint tid = thread_row * 16 + thread_col;  // Linear thread ID (0-255)
+
+    // Global output position (top-left of 2x2 block this thread computes)
+    uint row_base = gl_WorkGroupID.y * 32 + thread_row * BLOCK_ROWS;
+    uint col_base = gl_WorkGroupID.x * 32 + thread_col * BLOCK_COLS;
+
+    // Accumulators for 2x2 output block (in registers)
+    double acc00 = 0.0, acc01 = 0.0;
+    double acc10 = 0.0, acc11 = 0.0;
+
+    // Number of tiles along K dimension
+    uint num_tiles = (params.K + TILE_K - 1) / TILE_K;
+
+    for (uint t = 0; t < num_tiles; t++) {
+        uint tile_k_offset = t * TILE_K;
+
+        // Load tile A: 32 rows x 32 cols = 1024 elements, 256 threads = 4 elements each
+        // Thread tid loads elements tid*4, tid*4+1, tid*4+2, tid*4+3
+        for (uint i = 0; i < 4; i++) {
+            uint elem_idx = tid * 4 + i;
+            uint local_row = elem_idx / TILE_K;
+            uint local_col = elem_idx % TILE_K;
+            uint global_row = gl_WorkGroupID.y * 32 + local_row;
+            uint global_col = tile_k_offset + local_col;
+
+            if (global_row < params.M && global_col < params.K) {
+                tileA[local_row][local_col] = a[global_row * params.K + global_col];
+            } else {
+                tileA[local_row][local_col] = 0.0;
+            }
+        }
+
+        // Load tile B: 32 rows x 32 cols = 1024 elements
+        for (uint i = 0; i < 4; i++) {
+            uint elem_idx = tid * 4 + i;
+            uint local_row = elem_idx / 32;
+            uint local_col = elem_idx % 32;
+            uint global_row = tile_k_offset + local_row;
+            uint global_col = gl_WorkGroupID.x * 32 + local_col;
+
+            if (global_row < params.K && global_col < params.N) {
+                tileB[local_row][local_col] = b[global_row * params.N + global_col];
+            } else {
+                tileB[local_row][local_col] = 0.0;
+            }
+        }
+
+        barrier();
+
+        // Compute 2x2 output block - unrolled by 4 for ILP
+        uint k = 0;
+        for (; k + 3 < TILE_K; k += 4) {
+            // Iteration 0
+            double a0_0 = tileA[thread_row * 2][k];
+            double a1_0 = tileA[thread_row * 2 + 1][k];
+            double b0_0 = tileB[k][thread_col * 2];
+            double b1_0 = tileB[k][thread_col * 2 + 1];
+            acc00 += a0_0 * b0_0; acc01 += a0_0 * b1_0;
+            acc10 += a1_0 * b0_0; acc11 += a1_0 * b1_0;
+
+            // Iteration 1
+            double a0_1 = tileA[thread_row * 2][k + 1];
+            double a1_1 = tileA[thread_row * 2 + 1][k + 1];
+            double b0_1 = tileB[k + 1][thread_col * 2];
+            double b1_1 = tileB[k + 1][thread_col * 2 + 1];
+            acc00 += a0_1 * b0_1; acc01 += a0_1 * b1_1;
+            acc10 += a1_1 * b0_1; acc11 += a1_1 * b1_1;
+
+            // Iteration 2
+            double a0_2 = tileA[thread_row * 2][k + 2];
+            double a1_2 = tileA[thread_row * 2 + 1][k + 2];
+            double b0_2 = tileB[k + 2][thread_col * 2];
+            double b1_2 = tileB[k + 2][thread_col * 2 + 1];
+            acc00 += a0_2 * b0_2; acc01 += a0_2 * b1_2;
+            acc10 += a1_2 * b0_2; acc11 += a1_2 * b1_2;
+
+            // Iteration 3
+            double a0_3 = tileA[thread_row * 2][k + 3];
+            double a1_3 = tileA[thread_row * 2 + 1][k + 3];
+            double b0_3 = tileB[k + 3][thread_col * 2];
+            double b1_3 = tileB[k + 3][thread_col * 2 + 1];
+            acc00 += a0_3 * b0_3; acc01 += a0_3 * b1_3;
+            acc10 += a1_3 * b0_3; acc11 += a1_3 * b1_3;
+        }
+
+        // Handle remaining iterations
+        for (; k < TILE_K; k++) {
+            double a0 = tileA[thread_row * 2][k];
+            double a1 = tileA[thread_row * 2 + 1][k];
+            double b0 = tileB[k][thread_col * 2];
+            double b1 = tileB[k][thread_col * 2 + 1];
+            acc00 += a0 * b0; acc01 += a0 * b1;
+            acc10 += a1 * b0; acc11 += a1 * b1;
+        }
+
+        barrier();
+    }
+
+    // Write 2x2 output block to global memory
+    if (row_base < params.M && col_base < params.N) {
+        c[row_base * params.N + col_base] = acc00;
+    }
+    if (row_base < params.M && col_base + 1 < params.N) {
+        c[row_base * params.N + col_base + 1] = acc01;
+    }
+    if (row_base + 1 < params.M && col_base < params.N) {
+        c[(row_base + 1) * params.N + col_base] = acc10;
+    }
+    if (row_base + 1 < params.M && col_base + 1 < params.N) {
+        c[(row_base + 1) * params.N + col_base + 1] = acc11;
+    }
+}

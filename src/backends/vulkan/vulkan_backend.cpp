@@ -1552,6 +1552,49 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         return {dispatchConv2dBackwardBias(inputs[0])};
     }
 
+    // Unified conv2d backward: computes grad_input, grad_weight, and optionally grad_bias
+    // inputs: [grad_output, input, weight]
+    if (op_name == "conv2d_backward") {
+        if (inputs.size() != 3) {
+            throw std::invalid_argument("conv2d_backward operation requires exactly 3 inputs (grad_output, input, weight)");
+        }
+        const Tensor& grad_output = inputs[0];
+        const Tensor& input = inputs[1];
+        const Tensor& weight = inputs[2];
+
+        int64_t stride = 1, padding = 0, dilation = 1;
+        bool compute_grad_input = true, compute_grad_weight = true, compute_grad_bias = false;
+
+        if (attrs.contains("stride")) stride = std::stoll(attrs.at("stride"));
+        if (attrs.contains("padding")) padding = std::stoll(attrs.at("padding"));
+        if (attrs.contains("dilation")) dilation = std::stoll(attrs.at("dilation"));
+        if (attrs.contains("compute_grad_input")) compute_grad_input = (attrs.at("compute_grad_input") == "1");
+        if (attrs.contains("compute_grad_weight")) compute_grad_weight = (attrs.at("compute_grad_weight") == "1");
+        if (attrs.contains("compute_grad_bias")) compute_grad_bias = (attrs.at("compute_grad_bias") == "1");
+
+        std::vector<int64_t> input_shape(input.shape().begin(), input.shape().end());
+        std::vector<int64_t> weight_shape(weight.shape().begin(), weight.shape().end());
+
+        std::vector<Tensor> results;
+
+        // Compute grad_input
+        if (compute_grad_input) {
+            results.push_back(dispatchConv2dBackwardInput(grad_output, weight, stride, padding, dilation, input_shape));
+        }
+
+        // Compute grad_weight
+        if (compute_grad_weight) {
+            results.push_back(dispatchConv2dBackwardWeight(grad_output, input, stride, padding, dilation, weight_shape));
+        }
+
+        // Compute grad_bias
+        if (compute_grad_bias) {
+            results.push_back(dispatchConv2dBackwardBias(grad_output));
+        }
+
+        return results;
+    }
+
     // Reduction operations
     if (op_name == "sum" || op_name == "mean" || op_name == "max" || op_name == "min") {
         if (inputs.size() != 1) {
@@ -1576,6 +1619,14 @@ auto VulkanBackend::dispatch(const std::string& op_name,
             throw std::invalid_argument("matmul requires 2 inputs");
         }
         return {dispatchMatmul(inputs[0], inputs[1])};
+    }
+
+    // Batched matrix multiplication
+    if (op_name == "bmm") {
+        if (inputs.size() != 2) {
+            throw std::invalid_argument("bmm requires 2 inputs");
+        }
+        return {dispatchBmm(inputs[0], inputs[1])};
     }
 
     // Pooling operations
@@ -3310,9 +3361,14 @@ auto VulkanBackend::dispatchMatmul(const Tensor& a, const Tensor& b) -> Tensor {
     bool is_float64 = (a_contig.dtype() == DType::Float64);
     bool is_float16 = (a_contig.dtype() == DType::Float16);
     bool is_int32 = (a_contig.dtype() == DType::Int32);
+
+    // For Float64, use optimized shader for larger matrices (>= 64x64)
+    // The optimized shader uses 32x32 tiles with 2x2 register blocking
+    bool use_optimized_f64 = is_float64 && (a_shape[0] >= 64 && b_shape[1] >= 64);
+
     std::string shader_name;
     if (is_float64) {
-        shader_name = "matmul_f64";
+        shader_name = use_optimized_f64 ? "matmul_f64_optimized" : "matmul_f64";
     } else if (is_float16) {
         shader_name = "matmul_f16";
     } else if (is_int32) {
@@ -3368,16 +3424,134 @@ auto VulkanBackend::dispatchMatmul(const Tensor& a, const Tensor& b) -> Tensor {
                       VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(PushConstants), &push_constants);
 
-    // Tile-based dispatch (16x16 workgroups as defined in shader)
-    // For Float16: each thread processes 2 columns, so halve workgroups_x
-    uint32_t workgroups_x;
-    if (is_float16) {
+    // Tile-based dispatch
+    // - Standard shaders: 16x16 workgroups, 16x16 output tiles
+    // - Optimized Float64: 16x16 workgroups, 32x32 output tiles (2x2 per thread)
+    // - Float16: each thread processes 2 columns
+    uint32_t workgroups_x, workgroups_y;
+    if (use_optimized_f64) {
+        // Optimized F64: 32x32 output tiles
+        workgroups_x = (push_constants.N + 31) / 32;
+        workgroups_y = (push_constants.M + 31) / 32;
+    } else if (is_float16) {
         // Each thread handles 2 adjacent columns
         workgroups_x = ((push_constants.N + 1) / 2 + 15) / 16;
+        workgroups_y = (push_constants.M + 15) / 16;
     } else {
+        // Standard 16x16 tiles
         workgroups_x = (push_constants.N + 15) / 16;
+        workgroups_y = (push_constants.M + 15) / 16;
     }
-    uint32_t workgroups_y = (push_constants.M + 15) / 16;
+    vkCmdDispatch(cmdBuffer, workgroups_x, workgroups_y, 1);
+
+    insertComputeBarrier(cmdBuffer);
+    endSingleTimeCommands(cmdBuffer, device_id);
+
+    return output;
+}
+
+auto VulkanBackend::dispatchBmm(const Tensor& a, const Tensor& b) -> Tensor {
+    // Batched matrix multiplication: C[b, :, :] = A[b, :, :] @ B[b, :, :]
+    // A: (batch, M, K), B: (batch, K, N), C: (batch, M, N)
+    auto a_shape = a.shape();
+    auto b_shape = b.shape();
+
+    if (a_shape.size() != 3 || b_shape.size() != 3) {
+        throw std::invalid_argument("Bmm requires 3D tensors, got " +
+            std::to_string(a_shape.size()) + "D and " +
+            std::to_string(b_shape.size()) + "D");
+    }
+
+    int64_t batch = a_shape[0];
+    int64_t M = a_shape[1];
+    int64_t K = a_shape[2];
+    int64_t N = b_shape[2];
+
+    if (b_shape[0] != batch) {
+        throw std::invalid_argument("Bmm batch dimensions must match: " +
+            std::to_string(batch) + " vs " + std::to_string(b_shape[0]));
+    }
+    if (b_shape[1] != K) {
+        throw std::invalid_argument("Bmm inner dimensions must match: " +
+            std::to_string(K) + " vs " + std::to_string(b_shape[1]));
+    }
+
+    // Make inputs contiguous
+    Tensor a_contig = a.is_contiguous() ? a : a.contiguous();
+    Tensor b_contig = b.is_contiguous() ? b : b.contiguous();
+
+    int32_t device_id = a_contig.device().index;
+
+    // Select correct pipeline based on dtype
+    bool is_float64 = (a_contig.dtype() == DType::Float64);
+    bool is_float16 = (a_contig.dtype() == DType::Float16);
+    std::string shader_name;
+    if (is_float64) {
+        shader_name = "bmm_f64";
+    } else if (is_float16) {
+        // Float16: convert to Float32, compute, convert back
+        // (similar to CPU backend approach)
+        Tensor a_f32 = a_contig.to(DType::Float32);
+        Tensor b_f32 = b_contig.to(DType::Float32);
+        Tensor result_f32 = dispatchBmm(a_f32, b_f32);
+        return result_f32.to(DType::Float16);
+    } else {
+        shader_name = "bmm";
+    }
+    auto* pipeline = getPipeline(shader_name, device_id);
+
+    std::vector<int64_t> out_shape = {batch, M, N};
+    Tensor output(out_shape, a_contig.dtype(), a_contig.device());
+
+    // Get VkBuffer handles
+    VkBuffer buffer_a = getVulkanBuffer(a_contig.data_ptr());
+    VkBuffer buffer_b = getVulkanBuffer(b_contig.data_ptr());
+    VkBuffer buffer_c = getVulkanBuffer(output.data_ptr());
+
+    // Calculate buffer sizes
+    size_t buffer_size_a = a_contig.numel() * a_contig.dtype_size();
+    size_t buffer_size_b = b_contig.numel() * b_contig.dtype_size();
+    size_t buffer_size_c = output.numel() * output.dtype_size();
+
+    // Allocate and write descriptor set
+    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+        {0, buffer_a},
+        {1, buffer_b},
+        {2, buffer_c}
+    };
+    std::vector<size_t> sizes = {buffer_size_a, buffer_size_b, buffer_size_c};
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
+    VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+    vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+
+    // Bind descriptor sets
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+
+    // Set push constants for batched matrix dimensions
+    struct PushConstants {
+        uint32_t batch;  // batch size
+        uint32_t M;      // rows of A
+        uint32_t N;      // cols of B
+        uint32_t K;      // cols of A / rows of B
+    } push_constants;
+
+    push_constants.batch = static_cast<uint32_t>(batch);
+    push_constants.M = static_cast<uint32_t>(M);
+    push_constants.N = static_cast<uint32_t>(N);
+    push_constants.K = static_cast<uint32_t>(K);
+
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(PushConstants), &push_constants);
+
+    // Dispatch: each workgroup handles 16x16 output elements
+    // Y dimension covers batch * M rows
+    uint32_t workgroups_x = (push_constants.N + 15) / 16;
+    uint32_t workgroups_y = (push_constants.batch * push_constants.M + 15) / 16;
     vkCmdDispatch(cmdBuffer, workgroups_x, workgroups_y, 1);
 
     insertComputeBarrier(cmdBuffer);

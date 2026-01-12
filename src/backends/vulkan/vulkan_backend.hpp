@@ -155,6 +155,7 @@ private:
     auto dispatchReduction(const std::string& op_name, const Tensor& input,
                           int64_t dim, bool keepdim) -> Tensor;
     auto dispatchMatmul(const Tensor& a, const Tensor& b) -> Tensor;
+    auto dispatchBmm(const Tensor& a, const Tensor& b) -> Tensor;
     auto dispatchDot(const Tensor& a, const Tensor& b) -> Tensor;
     auto dispatchConv2d(const Tensor& input, const Tensor& weight,
                        const Tensor* bias, int64_t stride, int64_t padding,

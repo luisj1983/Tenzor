@@ -46,8 +46,10 @@ void main() {
     uint local_row = gl_LocalInvocationID.y;
     uint local_col = gl_LocalInvocationID.x;
 
-    float16_t sum0 = float16_t(0.0);
-    float16_t sum1 = float16_t(0.0);
+    // IMPORTANT: Accumulate in float32 for precision, convert to float16 only at the end
+    // This matches how CUDA tensor cores work (FP16 inputs, FP32 accumulator, FP16 output)
+    float sum0 = 0.0;
+    float sum1 = 0.0;
 
     // Tile-based computation
     uint num_tiles = (params.K + 15) / 16;
@@ -86,10 +88,11 @@ void main() {
         barrier();
 
         // Compute partial dot products for both columns
+        // Convert to float32 for multiply-accumulate to maintain precision
         for (uint k = 0; k < 16; k++) {
-            float16_t a_val = tileA[local_row][k];
-            sum0 += a_val * tileB[k][local_col * 2];
-            sum1 += a_val * tileB[k][local_col * 2 + 1];
+            float a_val = float(tileA[local_row][k]);
+            sum0 += a_val * float(tileB[k][local_col * 2]);
+            sum1 += a_val * float(tileB[k][local_col * 2 + 1]);
         }
 
         barrier();
@@ -100,9 +103,9 @@ void main() {
         uint out_idx = row * params.N + col0;
         uint word_idx = out_idx / 2;
 
-        // Pack both float16 values into one uint32
-        uint bits0 = packHalf2x16(vec2(float(sum0), 0.0)).x & 0xFFFFu;
-        uint bits1 = (col1 < params.N) ? (packHalf2x16(vec2(float(sum1), 0.0)).x & 0xFFFFu) : 0u;
+        // Pack both float16 values into one uint32 (convert from float32 accumulator)
+        uint bits0 = packHalf2x16(vec2(sum0, 0.0)).x & 0xFFFFu;
+        uint bits1 = (col1 < params.N) ? (packHalf2x16(vec2(sum1, 0.0)).x & 0xFFFFu) : 0u;
 
         c[word_idx] = bits0 | (bits1 << 16);
     }

@@ -92,6 +92,10 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return get_vulkan_backend()->dispatch("matmul", inputs, attrs);
     });
 
+    table.register_kernel(OpId::Bmm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return get_vulkan_backend()->dispatch("bmm", inputs, attrs);
+    });
+
     table.register_kernel(OpId::Dot, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         return get_vulkan_backend()->dispatch("dot", inputs, attrs);
     });
