@@ -5,8 +5,11 @@
 #include <cstdio>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "tenzor/backend/backend.hpp"  // For OpAttributes (dispatch wrappers)
 #include <stdexcept>
 #include <vector>
+#include <charconv>  // For std::from_chars (dispatch wrappers)
+#include <span>      // For std::span (dispatch wrappers)
 
 namespace tenzor {
 namespace cuda {
@@ -2558,6 +2561,87 @@ auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output
     }
 
     return result;
+}
+
+// ============================================================================
+// Dispatch-Conformant Wrappers (SingleOutputKernelFn signature)
+// ============================================================================
+// These wrappers match Tensor(*)(std::span<const Tensor>, const OpAttributes&)
+// for direct registration with register_single_output_kernel()
+
+namespace {
+// Helper to extract stream from attrs (inlined for performance)
+inline cudaStream_t get_stream(const OpAttributes& attrs) {
+    if (attrs.empty()) return nullptr;
+    auto it = attrs.find("stream");
+    if (it == attrs.end()) return nullptr;
+    uint64_t val = 0;
+    std::from_chars(it->second.data(), it->second.data() + it->second.size(), val);
+    return reinterpret_cast<cudaStream_t>(val);
+}
+} // anonymous namespace
+
+// ReLU dispatch wrappers
+Tensor relu_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    return relu_kernel(inputs[0], get_stream(attrs));
+}
+
+Tensor relu_backward_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    return relu_backward_kernel(inputs[0], inputs[1], get_stream(attrs));
+}
+
+// Sigmoid dispatch wrappers
+Tensor sigmoid_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    return sigmoid_kernel(inputs[0], get_stream(attrs));
+}
+
+Tensor sigmoid_backward_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    return sigmoid_backward_kernel(inputs[0], inputs[1], get_stream(attrs));
+}
+
+// Tanh dispatch wrappers
+Tensor tanh_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    return tanh_kernel(inputs[0], get_stream(attrs));
+}
+
+Tensor tanh_backward_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    return tanh_backward_kernel(inputs[0], inputs[1], get_stream(attrs));
+}
+
+// GELU dispatch wrappers
+Tensor gelu_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    return gelu_kernel(inputs[0], get_stream(attrs));
+}
+
+Tensor gelu_backward_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    return gelu_backward_kernel(inputs[0], inputs[1], get_stream(attrs));
+}
+
+// Swish dispatch wrappers
+Tensor swish_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    return swish_kernel(inputs[0], get_stream(attrs));
+}
+
+Tensor swish_backward_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    return swish_backward_kernel(inputs[0], inputs[1], get_stream(attrs));
+}
+
+// SELU dispatch wrappers
+Tensor selu_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    return selu_kernel(inputs[0], get_stream(attrs));
+}
+
+Tensor selu_backward_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    return selu_backward_kernel(inputs[0], inputs[1], get_stream(attrs));
+}
+
+// Mish dispatch wrappers
+Tensor mish_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    return mish_kernel(inputs[0], get_stream(attrs));
+}
+
+Tensor mish_backward_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    return mish_backward_kernel(inputs[0], inputs[1], get_stream(attrs));
 }
 
 } // namespace cuda

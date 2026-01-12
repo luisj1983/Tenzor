@@ -122,6 +122,43 @@ auto fused_attention_cuda(
 ) -> Tensor;
 
 /**
+ * @brief cuDNN SDPA (Scaled Dot-Product Attention) with Flash Attention
+ *
+ * Uses cuDNN Graph API for optimized fused attention with Tensor Core support.
+ * Provides up to 2x speedup over separate BMM operations.
+ *
+ * @param Q Query tensor [batch, num_heads, seq_len_q, head_dim]
+ * @param K Key tensor [batch, num_heads, seq_len_k, head_dim]
+ * @param V Value tensor [batch, num_heads, seq_len_k, head_dim]
+ * @param scale Scaling factor (typically 1/sqrt(head_dim))
+ * @return Output tensor with same shape as Q
+ */
+auto cudnn_sdpa_forward(
+    const Tensor& Q,
+    const Tensor& K,
+    const Tensor& V,
+    float scale
+) -> Tensor;
+
+/**
+ * @brief Check if cuDNN SDPA is supported for the given configuration
+ *
+ * @param batch Batch size
+ * @param num_heads Number of attention heads
+ * @param seq_len_q Query sequence length
+ * @param seq_len_k Key/Value sequence length
+ * @param head_dim Head dimension (must be 32, 64, 128, or 256)
+ * @return true if supported, false otherwise
+ */
+auto cudnn_sdpa_supported(
+    int64_t batch,
+    int64_t num_heads,
+    int64_t seq_len_q,
+    int64_t seq_len_k,
+    int64_t head_dim
+) -> bool;
+
+/**
  * @brief Fused Adam optimizer step CUDA kernel
  *
  * Performs the complete Adam update in a single kernel launch:

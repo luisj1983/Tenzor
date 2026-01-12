@@ -11,6 +11,7 @@
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/core/tensor.hpp"
+#include "tenzor/backend/fused_ops.hpp"
 #ifdef TENZOR_HAS_CUDNN
 #include "tenzor/backend/cudnn_wrapper.hpp"
 #endif
@@ -241,6 +242,73 @@ namespace cuda {
     // Fill operations
     auto fill_kernel(const Tensor& tensor, float value, cudaStream_t stream) -> Tensor;
 
+    // Runtime cuDNN availability check
+    bool is_cudnn_available() noexcept;
+    bool is_cudnn_frontend_available() noexcept;
+
+    // =========================================================================
+    // Dispatch-Conformant Wrappers (SingleOutputKernelFn signature)
+    // =========================================================================
+    // Binary operations
+    Tensor add_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor sub_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor mul_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor div_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    // matmul_dispatch and dot_dispatch use lambdas in registration since
+    // matmul_kernel/dot_kernel are defined in cublas_ops.cu
+
+    // Inplace operations (InplaceKernelFn signature)
+    Tensor& add_inplace_dispatch(Tensor& target, std::span<const Tensor> others, const OpAttributes& attrs);
+    Tensor& sub_inplace_dispatch(Tensor& target, std::span<const Tensor> others, const OpAttributes& attrs);
+    Tensor& mul_inplace_dispatch(Tensor& target, std::span<const Tensor> others, const OpAttributes& attrs);
+    Tensor& div_inplace_dispatch(Tensor& target, std::span<const Tensor> others, const OpAttributes& attrs);
+
+    // Unary operations
+    Tensor sqrt_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor neg_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor abs_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor sign_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor log_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor exp_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor reciprocal_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor floor_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor ceil_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor round_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+
+    // Trigonometric operations
+    Tensor sin_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor cos_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor tan_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor asin_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor acos_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor atan_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor sinh_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor cosh_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+
+    // Comparison operations
+    Tensor eq_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor ne_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor lt_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor le_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor gt_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor ge_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+
+    // Activation operations
+    Tensor relu_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor relu_backward_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor sigmoid_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor sigmoid_backward_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor tanh_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor tanh_backward_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor gelu_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor gelu_backward_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor swish_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor swish_backward_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor selu_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor selu_backward_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor mish_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+    Tensor mish_backward_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs);
+
 } // namespace cuda
 
 /**
@@ -248,49 +316,29 @@ namespace cuda {
  */
 void register_cuda_kernels(BackendDispatchTable& table) {
     // =========================================================================
-    // Arithmetic Operations
+    // Arithmetic Operations (using direct function pointers - no lambda overhead)
     // =========================================================================
-    table.register_kernel(OpId::Add, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::add_kernel(inputs[0], inputs[1], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::Sub, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::sub_kernel(inputs[0], inputs[1], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::Mul, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::mul_kernel(inputs[0], inputs[1], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::Div, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::div_kernel(inputs[0], inputs[1], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::MatMul, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::matmul_kernel(inputs[0], inputs[1], get_cuda_stream(attrs))};
+    table.register_single_output_kernel(OpId::Add, cuda::add_dispatch);
+    table.register_single_output_kernel(OpId::Sub, cuda::sub_dispatch);
+    table.register_single_output_kernel(OpId::Mul, cuda::mul_dispatch);
+    table.register_single_output_kernel(OpId::Div, cuda::div_dispatch);
+    table.register_single_output_kernel(OpId::MatMul, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        return cuda::matmul_kernel(inputs[0], inputs[1], get_cuda_stream(attrs));
     });
     // Bmm (batched matrix multiplication) uses the same kernel as MatMul
     // The CUDA matmul kernel already handles batched inputs via cublasSgemmStridedBatched
-    table.register_kernel(OpId::Bmm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::matmul_kernel(inputs[0], inputs[1], get_cuda_stream(attrs))};
+    table.register_single_output_kernel(OpId::Bmm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        return cuda::matmul_kernel(inputs[0], inputs[1], get_cuda_stream(attrs));
     });
-    table.register_kernel(OpId::Dot, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::dot_kernel(inputs[0], inputs[1], get_cuda_stream(attrs))};
+    table.register_single_output_kernel(OpId::Dot, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        return cuda::dot_kernel(inputs[0], inputs[1], get_cuda_stream(attrs));
     });
 
-    // Inplace operations
-    table.register_kernel(OpId::AddInplace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        Tensor result = inputs[0];
-        return std::vector<Tensor>{cuda::add_inplace_kernel(result, inputs[1], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::SubInplace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        Tensor result = inputs[0];
-        return std::vector<Tensor>{cuda::sub_inplace_kernel(result, inputs[1], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::MulInplace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        Tensor result = inputs[0];
-        return std::vector<Tensor>{cuda::mul_inplace_kernel(result, inputs[1], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::DivInplace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        Tensor result = inputs[0];
-        return std::vector<Tensor>{cuda::div_inplace_kernel(result, inputs[1], get_cuda_stream(attrs))};
-    });
+    // Inplace operations (using InplaceKernelFn - no tensor copy)
+    table.register_inplace_kernel(OpId::AddInplace, cuda::add_inplace_dispatch);
+    table.register_inplace_kernel(OpId::SubInplace, cuda::sub_inplace_dispatch);
+    table.register_inplace_kernel(OpId::MulInplace, cuda::mul_inplace_dispatch);
+    table.register_inplace_kernel(OpId::DivInplace, cuda::div_inplace_dispatch);
 
     // =========================================================================
     // Reduction Operations
@@ -350,38 +398,18 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     });
 
     // =========================================================================
-    // Element-wise Math Operations
+    // Element-wise Math Operations (using direct function pointers)
     // =========================================================================
-    table.register_kernel(OpId::Sqrt, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::sqrt_kernel(inputs[0], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::Neg, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::neg_kernel(inputs[0], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::Abs, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::abs_kernel(inputs[0], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::Sign, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::sign_kernel(inputs[0], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::Log, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::log_kernel(inputs[0], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::Exp, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::exp_kernel(inputs[0], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::Reciprocal, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::reciprocal_kernel(inputs[0], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::Floor, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::floor_kernel(inputs[0], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::Ceil, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::ceil_kernel(inputs[0], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::Round, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::round_kernel(inputs[0], get_cuda_stream(attrs))};
-    });
+    table.register_single_output_kernel(OpId::Sqrt, cuda::sqrt_dispatch);
+    table.register_single_output_kernel(OpId::Neg, cuda::neg_dispatch);
+    table.register_single_output_kernel(OpId::Abs, cuda::abs_dispatch);
+    table.register_single_output_kernel(OpId::Sign, cuda::sign_dispatch);
+    table.register_single_output_kernel(OpId::Log, cuda::log_dispatch);
+    table.register_single_output_kernel(OpId::Exp, cuda::exp_dispatch);
+    table.register_single_output_kernel(OpId::Reciprocal, cuda::reciprocal_dispatch);
+    table.register_single_output_kernel(OpId::Floor, cuda::floor_dispatch);
+    table.register_single_output_kernel(OpId::Ceil, cuda::ceil_dispatch);
+    table.register_single_output_kernel(OpId::Round, cuda::round_dispatch);
     table.register_kernel(OpId::Pow, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         float exponent = parse_attr<float>(attrs, "exponent", 2.0f);
         return std::vector<Tensor>{cuda::pow_kernel(inputs[0], exponent, get_cuda_stream(attrs))};
@@ -401,247 +429,193 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     });
 
     // =========================================================================
-    // Trigonometric Operations
+    // Trigonometric Operations (using direct function pointers)
     // =========================================================================
-    table.register_kernel(OpId::Sin, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::sin_kernel(inputs[0], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::Cos, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::cos_kernel(inputs[0], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::Tan, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::tan_kernel(inputs[0], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::Asin, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::asin_kernel(inputs[0], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::Acos, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::acos_kernel(inputs[0], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::Atan, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::atan_kernel(inputs[0], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::Sinh, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::sinh_kernel(inputs[0], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::Cosh, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::cosh_kernel(inputs[0], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::Tanh, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::tanh_kernel(inputs[0], get_cuda_stream(attrs))};
-    });
+    table.register_single_output_kernel(OpId::Sin, cuda::sin_dispatch);
+    table.register_single_output_kernel(OpId::Cos, cuda::cos_dispatch);
+    table.register_single_output_kernel(OpId::Tan, cuda::tan_dispatch);
+    table.register_single_output_kernel(OpId::Asin, cuda::asin_dispatch);
+    table.register_single_output_kernel(OpId::Acos, cuda::acos_dispatch);
+    table.register_single_output_kernel(OpId::Atan, cuda::atan_dispatch);
+    table.register_single_output_kernel(OpId::Sinh, cuda::sinh_dispatch);
+    table.register_single_output_kernel(OpId::Cosh, cuda::cosh_dispatch);
+    table.register_single_output_kernel(OpId::Tanh, cuda::tanh_dispatch);
 
     // =========================================================================
-    // Comparison Operations
+    // Comparison Operations (using direct function pointers)
     // =========================================================================
-    table.register_kernel(OpId::Eq, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::eq_kernel(inputs[0], inputs[1], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::Ne, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::ne_kernel(inputs[0], inputs[1], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::Lt, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::lt_kernel(inputs[0], inputs[1], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::Le, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::le_kernel(inputs[0], inputs[1], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::Gt, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::gt_kernel(inputs[0], inputs[1], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::Ge, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::ge_kernel(inputs[0], inputs[1], get_cuda_stream(attrs))};
-    });
+    table.register_single_output_kernel(OpId::Eq, cuda::eq_dispatch);
+    table.register_single_output_kernel(OpId::Ne, cuda::ne_dispatch);
+    table.register_single_output_kernel(OpId::Lt, cuda::lt_dispatch);
+    table.register_single_output_kernel(OpId::Le, cuda::le_dispatch);
+    table.register_single_output_kernel(OpId::Gt, cuda::gt_dispatch);
+    table.register_single_output_kernel(OpId::Ge, cuda::ge_dispatch);
 
     // =========================================================================
-    // Activation Functions
+    // Activation Functions (simple activations use direct function pointers)
     // =========================================================================
-    table.register_kernel(OpId::ReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::relu_kernel(inputs[0], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::ReLUBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::relu_backward_kernel(inputs[0], inputs[1], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::Sigmoid, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::sigmoid_kernel(inputs[0], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::SigmoidBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::sigmoid_backward_kernel(inputs[0], inputs[1], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::TanhActivation, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::tanh_kernel(inputs[0], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::TanhBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::tanh_backward_kernel(inputs[0], inputs[1], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::Gelu, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::gelu_kernel(inputs[0], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::GeluBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::gelu_backward_kernel(inputs[0], inputs[1], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::Swish, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::swish_kernel(inputs[0], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::SwishBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::swish_backward_kernel(inputs[0], inputs[1], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::LeakyReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_single_output_kernel(OpId::ReLU, cuda::relu_dispatch);
+    table.register_single_output_kernel(OpId::ReLUBackward, cuda::relu_backward_dispatch);
+    table.register_single_output_kernel(OpId::Sigmoid, cuda::sigmoid_dispatch);
+    table.register_single_output_kernel(OpId::SigmoidBackward, cuda::sigmoid_backward_dispatch);
+    table.register_single_output_kernel(OpId::TanhActivation, cuda::tanh_dispatch);
+    table.register_single_output_kernel(OpId::TanhBackward, cuda::tanh_backward_dispatch);
+    table.register_single_output_kernel(OpId::Gelu, cuda::gelu_dispatch);
+    table.register_single_output_kernel(OpId::GeluBackward, cuda::gelu_backward_dispatch);
+    table.register_single_output_kernel(OpId::Swish, cuda::swish_dispatch);
+    table.register_single_output_kernel(OpId::SwishBackward, cuda::swish_backward_dispatch);
+    table.register_single_output_kernel(OpId::Selu, cuda::selu_dispatch);
+    table.register_single_output_kernel(OpId::SeluBackward, cuda::selu_backward_dispatch);
+    table.register_single_output_kernel(OpId::Mish, cuda::mish_dispatch);
+    table.register_single_output_kernel(OpId::MishBackward, cuda::mish_backward_dispatch);
+
+    // Parameterized activations (keep lambdas for attribute parsing)
+    table.register_single_output_kernel(OpId::LeakyReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         float alpha = parse_attr<float>(attrs, "alpha", 0.01f);
-        return std::vector<Tensor>{cuda::leaky_relu_kernel(inputs[0], alpha, get_cuda_stream(attrs))};
+        return cuda::leaky_relu_kernel(inputs[0], alpha, get_cuda_stream(attrs));
     });
-    table.register_kernel(OpId::LeakyReLUBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_single_output_kernel(OpId::LeakyReLUBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         float alpha = parse_attr<float>(attrs, "alpha", 0.01f);
-        return std::vector<Tensor>{cuda::leaky_relu_backward_kernel(inputs[0], inputs[1], alpha, get_cuda_stream(attrs))};
+        return cuda::leaky_relu_backward_kernel(inputs[0], inputs[1], alpha, get_cuda_stream(attrs));
     });
-    table.register_kernel(OpId::Elu, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_single_output_kernel(OpId::Elu, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         float alpha = parse_attr<float>(attrs, "alpha", 1.0f);
-        return std::vector<Tensor>{cuda::elu_kernel(inputs[0], alpha, get_cuda_stream(attrs))};
+        return cuda::elu_kernel(inputs[0], alpha, get_cuda_stream(attrs));
     });
-    table.register_kernel(OpId::EluBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_single_output_kernel(OpId::EluBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         float alpha = parse_attr<float>(attrs, "alpha", 1.0f);
-        return std::vector<Tensor>{cuda::elu_backward_kernel(inputs[0], inputs[1], alpha, get_cuda_stream(attrs))};
+        return cuda::elu_backward_kernel(inputs[0], inputs[1], alpha, get_cuda_stream(attrs));
     });
-    table.register_kernel(OpId::Selu, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::selu_kernel(inputs[0], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::SeluBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::selu_backward_kernel(inputs[0], inputs[1], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::Mish, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::mish_kernel(inputs[0], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::MishBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::mish_backward_kernel(inputs[0], inputs[1], get_cuda_stream(attrs))};
-    });
-    table.register_kernel(OpId::Softplus, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_single_output_kernel(OpId::Softplus, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         float beta = parse_attr<float>(attrs, "beta", 1.0f);
         float threshold = parse_attr<float>(attrs, "threshold", 20.0f);
-        return std::vector<Tensor>{cuda::softplus_kernel(inputs[0], beta, threshold, get_cuda_stream(attrs))};
+        return cuda::softplus_kernel(inputs[0], beta, threshold, get_cuda_stream(attrs));
     });
-    table.register_kernel(OpId::SoftplusBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_single_output_kernel(OpId::SoftplusBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         float beta = parse_attr<float>(attrs, "beta", 1.0f);
         float threshold = parse_attr<float>(attrs, "threshold", 20.0f);
-        return std::vector<Tensor>{cuda::softplus_backward_kernel(inputs[0], inputs[1], beta, threshold, get_cuda_stream(attrs))};
+        return cuda::softplus_backward_kernel(inputs[0], inputs[1], beta, threshold, get_cuda_stream(attrs));
     });
 
     // Softmax operations (use cuDNN when available for better performance)
+    // Uses single-output registration for efficiency
 #ifdef TENZOR_HAS_CUDNN
-    table.register_kernel(OpId::Softmax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_single_output_kernel(OpId::Softmax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
-        return std::vector<Tensor>{cuda::cudnn_softmax_forward(inputs[0], dim, get_cuda_stream(attrs))};
+        return cuda::cudnn_softmax_forward(inputs[0], dim, get_cuda_stream(attrs));
     });
-    table.register_kernel(OpId::SoftmaxBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_single_output_kernel(OpId::SoftmaxBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
-        return std::vector<Tensor>{cuda::cudnn_softmax_backward(inputs[0], inputs[1], dim, get_cuda_stream(attrs))};
+        return cuda::cudnn_softmax_backward(inputs[0], inputs[1], dim, get_cuda_stream(attrs));
     });
-    table.register_kernel(OpId::LogSoftmax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_single_output_kernel(OpId::LogSoftmax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
-        return std::vector<Tensor>{cuda::cudnn_log_softmax_forward(inputs[0], dim, get_cuda_stream(attrs))};
+        return cuda::cudnn_log_softmax_forward(inputs[0], dim, get_cuda_stream(attrs));
     });
-    table.register_kernel(OpId::LogSoftmaxBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_single_output_kernel(OpId::LogSoftmaxBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
-        return std::vector<Tensor>{cuda::cudnn_log_softmax_backward(inputs[0], inputs[1], dim, get_cuda_stream(attrs))};
+        return cuda::cudnn_log_softmax_backward(inputs[0], inputs[1], dim, get_cuda_stream(attrs));
     });
 #else
-    table.register_kernel(OpId::Softmax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_single_output_kernel(OpId::Softmax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
-        return std::vector<Tensor>{cuda::softmax_kernel(inputs[0], dim, get_cuda_stream(attrs))};
+        return cuda::softmax_kernel(inputs[0], dim, get_cuda_stream(attrs));
     });
-    table.register_kernel(OpId::SoftmaxBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_single_output_kernel(OpId::SoftmaxBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
-        return std::vector<Tensor>{cuda::softmax_backward_kernel(inputs[0], inputs[1], dim, get_cuda_stream(attrs))};
+        return cuda::softmax_backward_kernel(inputs[0], inputs[1], dim, get_cuda_stream(attrs));
     });
-    table.register_kernel(OpId::LogSoftmax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_single_output_kernel(OpId::LogSoftmax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
-        return std::vector<Tensor>{cuda::log_softmax_kernel(inputs[0], dim, get_cuda_stream(attrs))};
+        return cuda::log_softmax_kernel(inputs[0], dim, get_cuda_stream(attrs));
     });
-    table.register_kernel(OpId::LogSoftmaxBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_single_output_kernel(OpId::LogSoftmaxBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
-        return std::vector<Tensor>{cuda::log_softmax_backward_kernel(inputs[0], inputs[1], dim, get_cuda_stream(attrs))};
+        return cuda::log_softmax_backward_kernel(inputs[0], inputs[1], dim, get_cuda_stream(attrs));
     });
 #endif
 
     // =========================================================================
-    // Transform Operations
+    // Transform Operations (single-output registration for efficiency)
     // =========================================================================
-    table.register_kernel(OpId::Contiguous, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::contiguous_kernel(inputs[0], get_cuda_stream(attrs))};
+    table.register_single_output_kernel(OpId::Contiguous, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        return cuda::contiguous_kernel(inputs[0], get_cuda_stream(attrs));
     });
-    table.register_kernel(OpId::Clone, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::clone_kernel(inputs[0], get_cuda_stream(attrs))};
+    table.register_single_output_kernel(OpId::Clone, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        return cuda::clone_kernel(inputs[0], get_cuda_stream(attrs));
     });
-    table.register_kernel(OpId::Fill, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_single_output_kernel(OpId::Fill, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         float value = parse_attr<float>(attrs, "value", 0.0f);
-        return std::vector<Tensor>{cuda::fill_kernel(inputs[0], value, get_cuda_stream(attrs))};
+        return cuda::fill_kernel(inputs[0], value, get_cuda_stream(attrs));
     });
-    table.register_kernel(OpId::Reshape, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_single_output_kernel(OpId::Reshape, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         auto shape = parse_int_list(attrs, "shape");
-        return std::vector<Tensor>{cuda::reshape_kernel(inputs[0], shape, get_cuda_stream(attrs))};
+        return cuda::reshape_kernel(inputs[0], shape, get_cuda_stream(attrs));
     });
-    table.register_kernel(OpId::Expand, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_single_output_kernel(OpId::Expand, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         auto shape = parse_int_list(attrs, "shape");
-        return std::vector<Tensor>{cuda::expand_kernel(inputs[0], shape, static_cast<void*>(get_cuda_stream(attrs)))};
+        return cuda::expand_kernel(inputs[0], shape, static_cast<void*>(get_cuda_stream(attrs)));
     });
-    table.register_kernel(OpId::Transpose, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_single_output_kernel(OpId::Transpose, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t dim0 = parse_attr<int64_t>(attrs, "dim0", 0);
         int64_t dim1 = parse_attr<int64_t>(attrs, "dim1", 1);
-        return std::vector<Tensor>{cuda::transpose_kernel(inputs[0], dim0, dim1, get_cuda_stream(attrs))};
+        return cuda::transpose_kernel(inputs[0], dim0, dim1, get_cuda_stream(attrs));
     });
-    table.register_kernel(OpId::Permute, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_single_output_kernel(OpId::Permute, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         auto dims = parse_int_list(attrs, "dims");
-        return std::vector<Tensor>{cuda::permute_kernel(inputs[0], dims, get_cuda_stream(attrs))};
+        return cuda::permute_kernel(inputs[0], dims, get_cuda_stream(attrs));
     });
-    table.register_kernel(OpId::Squeeze, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_single_output_kernel(OpId::Squeeze, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t dim = parse_attr<int64_t>(attrs, "dim", -1);
-        return std::vector<Tensor>{cuda::squeeze_kernel(inputs[0], dim, get_cuda_stream(attrs))};
+        return cuda::squeeze_kernel(inputs[0], dim, get_cuda_stream(attrs));
     });
-    table.register_kernel(OpId::Unsqueeze, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_single_output_kernel(OpId::Unsqueeze, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t dim = parse_attr<int64_t>(attrs, "dim", 0);
-        return std::vector<Tensor>{cuda::unsqueeze_kernel(inputs[0], dim, get_cuda_stream(attrs))};
+        return cuda::unsqueeze_kernel(inputs[0], dim, get_cuda_stream(attrs));
     });
-    table.register_kernel(OpId::Cat, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_single_output_kernel(OpId::Cat, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t dim = parse_attr<int64_t>(attrs, "dim", 0);
-        return std::vector<Tensor>{cuda::cat_kernel(inputs, dim, get_cuda_stream(attrs))};
+        return cuda::cat_kernel(inputs, dim, get_cuda_stream(attrs));
     });
-    table.register_kernel(OpId::Repeat, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_single_output_kernel(OpId::Repeat, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         auto repeats = parse_int_list(attrs, "repeats");
-        return std::vector<Tensor>{cuda::repeat_kernel(inputs[0], repeats, get_cuda_stream(attrs))};
+        return cuda::repeat_kernel(inputs[0], repeats, get_cuda_stream(attrs));
     });
-    table.register_kernel(OpId::ToMemoryFormat, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_single_output_kernel(OpId::ToMemoryFormat, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int format_int = parse_attr<int>(attrs, "memory_format", 0);
         MemoryFormat format = static_cast<MemoryFormat>(format_int);
-        return std::vector<Tensor>{cuda::to_memory_format_kernel(inputs[0], format, get_cuda_stream(attrs))};
+        return cuda::to_memory_format_kernel(inputs[0], format, get_cuda_stream(attrs));
     });
 
     // =========================================================================
-    // Indexing Operations
+    // Indexing Operations (single-output registration for efficiency)
     // =========================================================================
-    table.register_kernel(OpId::IndexSelect, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_single_output_kernel(OpId::IndexSelect, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t dim = parse_attr<int64_t>(attrs, "dim", 0);
-        return std::vector<Tensor>{cuda::index_select_kernel(inputs[0], dim, inputs[1], get_cuda_stream(attrs))};
+        return cuda::index_select_kernel(inputs[0], dim, inputs[1], get_cuda_stream(attrs));
     });
-    table.register_kernel(OpId::Gather, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_single_output_kernel(OpId::Gather, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t dim = parse_attr<int64_t>(attrs, "dim", 0);
-        return std::vector<Tensor>{cuda::gather_kernel(inputs[0], dim, inputs[1], get_cuda_stream(attrs))};
+        return cuda::gather_kernel(inputs[0], dim, inputs[1], get_cuda_stream(attrs));
     });
-    table.register_kernel(OpId::Scatter, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_single_output_kernel(OpId::Scatter, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t dim = parse_attr<int64_t>(attrs, "dim", 0);
-        return std::vector<Tensor>{cuda::scatter_kernel(inputs[0], dim, inputs[1], inputs[2], get_cuda_stream(attrs))};
+        return cuda::scatter_kernel(inputs[0], dim, inputs[1], inputs[2], get_cuda_stream(attrs));
     });
-    table.register_kernel(OpId::MaskedSelect, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::masked_select_kernel(inputs[0], inputs[1], get_cuda_stream(attrs))};
+    table.register_single_output_kernel(OpId::MaskedSelect, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        return cuda::masked_select_kernel(inputs[0], inputs[1], get_cuda_stream(attrs));
     });
-    table.register_kernel(OpId::MaskedFill, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_single_output_kernel(OpId::MaskedFill, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         double value = parse_attr<double>(attrs, "value", 0.0);
-        return std::vector<Tensor>{cuda::masked_fill_kernel(inputs[0], inputs[1], value, get_cuda_stream(attrs))};
+        return cuda::masked_fill_kernel(inputs[0], inputs[1], value, get_cuda_stream(attrs));
     });
-    table.register_kernel(OpId::Where, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        return std::vector<Tensor>{cuda::where_kernel(inputs[0], inputs[1], inputs[2], get_cuda_stream(attrs))};
+    table.register_single_output_kernel(OpId::Where, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        return cuda::where_kernel(inputs[0], inputs[1], inputs[2], get_cuda_stream(attrs));
     });
 
     // =========================================================================
     // Pooling Operations (use cuDNN when available for better performance)
+    // Note: MaxPool2dForward returns 2 tensors (output + indices) so uses register_kernel
     // =========================================================================
 #ifdef TENZOR_HAS_CUDNN
     table.register_kernel(OpId::MaxPool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -651,11 +625,11 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         auto [output, indices] = cuda::cudnn_maxpool2d_forward(inputs[0], kernel_size, stride, padding, get_cuda_stream(attrs));
         return std::vector<Tensor>{output, indices};
     });
-    table.register_kernel(OpId::AvgPool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_single_output_kernel(OpId::AvgPool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t kernel_size = parse_attr<int64_t>(attrs, "kernel_size", 2);
         int64_t stride = parse_attr<int64_t>(attrs, "stride", kernel_size);
         int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
-        return std::vector<Tensor>{cuda::cudnn_avgpool2d_forward(inputs[0], kernel_size, stride, padding, get_cuda_stream(attrs))};
+        return cuda::cudnn_avgpool2d_forward(inputs[0], kernel_size, stride, padding, get_cuda_stream(attrs));
     });
 #else
     table.register_kernel(OpId::MaxPool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -666,11 +640,11 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         auto [output, indices] = cuda::maxpool2d_forward_kernel(inputs[0], kernel_size, stride, padding, dilation, get_cuda_stream(attrs));
         return std::vector<Tensor>{output, indices};
     });
-    table.register_kernel(OpId::AvgPool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    table.register_single_output_kernel(OpId::AvgPool2dForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         int64_t kernel_size = parse_attr<int64_t>(attrs, "kernel_size", 2);
         int64_t stride = parse_attr<int64_t>(attrs, "stride", kernel_size);
         int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
-        return std::vector<Tensor>{cuda::avgpool2d_forward_kernel(inputs[0], kernel_size, stride, padding, get_cuda_stream(attrs))};
+        return cuda::avgpool2d_forward_kernel(inputs[0], kernel_size, stride, padding, get_cuda_stream(attrs));
     });
 #endif
 
@@ -779,9 +753,23 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     // Fused Attention (single kernel launch for maximum performance)
     // =========================================================================
     table.register_kernel(OpId::FusedAttention, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        // inputs: [Q, K, V] - all (batch_heads, seq_len, head_dim)
-        // attrs: scale
+        // inputs: [Q, K, V]
+        //   - 4D: (batch, num_heads, seq_len, head_dim) for cuDNN SDPA
+        //   - 3D: (batch_heads, seq_len, head_dim) for custom kernel
+        // attrs: scale, use_cudnn_sdpa (optional)
         float scale = parse_attr<float>(attrs, "scale", 1.0f);
+
+#ifdef TENZOR_HAS_CUDNN_FRONTEND
+        // Check if cuDNN SDPA is requested and input is 4D
+        bool use_cudnn_sdpa = parse_attr<bool>(attrs, "use_cudnn_sdpa", false);
+        if (use_cudnn_sdpa && inputs[0].shape().size() == 4) {
+            // 4D input: use cuDNN SDPA directly
+            auto output = cuda::cudnn_sdpa_forward(inputs[0], inputs[1], inputs[2], scale);
+            return std::vector<Tensor>{output};
+        }
+#endif
+
+        // 3D input or cuDNN not available: use custom flash attention kernel
         auto output = cuda::fused_attention_cuda(inputs[0], inputs[1], inputs[2], scale);
         return std::vector<Tensor>{output};
     });

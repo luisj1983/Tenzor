@@ -1,6 +1,8 @@
 # CUDA Backend
 # Requires CUDA Toolkit 12.0 or higher
 
+include(FetchContent)
+
 # Enable CUDA language
 enable_language(CUDA)
 
@@ -35,6 +37,7 @@ set(CUDA_BACKEND_SOURCES
     cublas_ops.cu
     cudnn_ops.cu
     cudnn_batchnorm.cu
+    cudnn_sdpa.cpp
 )
 
 # Create CUDA backend shared library
@@ -124,6 +127,26 @@ if(CUDNN_FOUND)
     message(STATUS "CUDA Backend: cuDNN support enabled (${CUDNN_VERSION})")
     message(STATUS "  cuDNN Include: ${CUDNN_INCLUDE_DIRS}")
     message(STATUS "  cuDNN Library: ${CUDNN_LIBRARIES}")
+
+    # Fetch cuDNN Frontend for SDPA support (requires cuDNN 9.0+)
+    if(CUDNN_MAJOR_VERSION GREATER_EQUAL 9)
+        FetchContent_Declare(
+            cudnn_frontend
+            GIT_REPOSITORY https://github.com/NVIDIA/cudnn-frontend.git
+            GIT_TAG v1.17.0
+            GIT_SHALLOW TRUE
+        )
+        # Disable samples and tests to avoid Catch2 C++23 compatibility issues
+        set(CUDNN_FRONTEND_BUILD_SAMPLES OFF CACHE BOOL "" FORCE)
+        set(CUDNN_FRONTEND_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+        FetchContent_MakeAvailable(cudnn_frontend)
+
+        target_link_libraries(tenzor_backend_cuda PRIVATE cudnn_frontend)
+        target_compile_definitions(tenzor_backend_cuda PRIVATE TENZOR_HAS_CUDNN_FRONTEND)
+        message(STATUS "CUDA Backend: cuDNN Frontend enabled for SDPA support")
+    else()
+        message(STATUS "CUDA Backend: cuDNN Frontend requires cuDNN 9.0+, SDPA disabled")
+    endif()
 else()
     message(STATUS "CUDA Backend: cuDNN not found, using built-in convolution kernels")
 endif()

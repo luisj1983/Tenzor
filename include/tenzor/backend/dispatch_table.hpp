@@ -55,6 +55,20 @@ using KernelFn = std::vector<Tensor>(*)(std::span<const Tensor>, const OpAttribu
 using SingleOutputKernelFn = Tensor(*)(std::span<const Tensor>, const OpAttributes&);
 
 /**
+ * @brief Inplace kernel function pointer type for operations that modify tensors in-place.
+ *
+ * For operations like add_inplace, sub_inplace, etc. that modify the first tensor
+ * in-place rather than creating a new output. This avoids the unnecessary tensor
+ * copy that occurs when passing through std::span<const Tensor>.
+ *
+ * @param target The tensor to modify in-place (first input)
+ * @param others Additional input tensors (remaining inputs)
+ * @param attrs Operation-specific attributes
+ * @return Reference to the modified target tensor
+ */
+using InplaceKernelFn = Tensor&(*)(Tensor&, std::span<const Tensor>, const OpAttributes&);
+
+/**
  * @brief Number of device types in the dispatch system.
  *
  * Must match Device::Type enum count.
@@ -84,6 +98,9 @@ struct alignas(64) BackendDispatchTable {
 
     /// Single-output kernel array for optimized dispatch (no vector allocation)
     std::array<SingleOutputKernelFn, OP_COUNT> single_output_kernels{};
+
+    /// Inplace kernel array for operations that modify tensors in-place
+    std::array<InplaceKernelFn, OP_COUNT> inplace_kernels{};
 
     /// Device type this table serves
     Device::Type device_type{Device::Type::CPU};
@@ -115,6 +132,19 @@ struct alignas(64) BackendDispatchTable {
     }
 
     /**
+     * @brief Register an inplace kernel for operations that modify tensors in-place.
+     *
+     * Use this for operations like add_inplace, sub_inplace, etc. that modify
+     * the first input tensor rather than creating a new output.
+     *
+     * @param op Operation identifier (should be an inplace op like OpId::AddInplace)
+     * @param fn Inplace kernel function pointer
+     */
+    void register_inplace_kernel(OpId op, InplaceKernelFn fn) noexcept {
+        inplace_kernels[static_cast<size_t>(op)] = fn;
+    }
+
+    /**
      * @brief Check if a kernel is registered for an operation.
      *
      * @param op Operation identifier
@@ -122,7 +152,8 @@ struct alignas(64) BackendDispatchTable {
      */
     [[nodiscard]] bool has_kernel(OpId op) const noexcept {
         return kernels[static_cast<size_t>(op)] != nullptr ||
-               single_output_kernels[static_cast<size_t>(op)] != nullptr;
+               single_output_kernels[static_cast<size_t>(op)] != nullptr ||
+               inplace_kernels[static_cast<size_t>(op)] != nullptr;
     }
 
     /**
@@ -133,6 +164,16 @@ struct alignas(64) BackendDispatchTable {
      */
     [[nodiscard]] bool has_single_output_kernel(OpId op) const noexcept {
         return single_output_kernels[static_cast<size_t>(op)] != nullptr;
+    }
+
+    /**
+     * @brief Check if an inplace kernel is registered.
+     *
+     * @param op Operation identifier
+     * @return true if inplace kernel exists
+     */
+    [[nodiscard]] bool has_inplace_kernel(OpId op) const noexcept {
+        return inplace_kernels[static_cast<size_t>(op)] != nullptr;
     }
 
     /**
@@ -156,6 +197,16 @@ struct alignas(64) BackendDispatchTable {
     }
 
     /**
+     * @brief Get inplace kernel function pointer.
+     *
+     * @param op Operation identifier
+     * @return Inplace kernel function pointer (nullptr if not registered)
+     */
+    [[nodiscard]] InplaceKernelFn get_inplace_kernel(OpId op) const noexcept {
+        return inplace_kernels[static_cast<size_t>(op)];
+    }
+
+    /**
      * @brief Dispatch operation to kernel.
      *
      * Single O(1) lookup: array[op_id] -> direct function call.
@@ -172,10 +223,23 @@ struct alignas(64) BackendDispatchTable {
         const OpAttributes& attrs) const
     {
         auto fn = kernels[static_cast<size_t>(op)];
-        if (!fn) [[unlikely]] {
-            throw_unsupported(op);
+        if (fn) [[likely]] {
+            return fn(inputs, attrs);
         }
-        return fn(inputs, attrs);
+        // Fallback to single-output kernel (wrap result in vector)
+        auto single_fn = single_output_kernels[static_cast<size_t>(op)];
+        if (single_fn) {
+            return {single_fn(inputs, attrs)};
+        }
+        // Fallback to inplace kernel (for AddInplace, SubInplace, etc.)
+        auto inplace_fn = inplace_kernels[static_cast<size_t>(op)];
+        if (inplace_fn && !inputs.empty()) {
+            // Cast away const since inplace ops are expected to modify first input
+            Tensor& target = const_cast<Tensor&>(inputs[0]);
+            auto others = inputs.subspan(1);
+            return {inplace_fn(target, others, attrs)};
+        }
+        throw_unsupported(op);
     }
 
     /**
@@ -205,6 +269,31 @@ struct alignas(64) BackendDispatchTable {
             throw_unsupported(op);
         }
         return multi_fn(inputs, attrs)[0];
+    }
+
+    /**
+     * @brief Dispatch for inplace operations.
+     *
+     * Modifies the target tensor in-place without unnecessary copies.
+     *
+     * @param op Operation identifier (should be an inplace op)
+     * @param target The tensor to modify in-place
+     * @param others Additional input tensors
+     * @param attrs Operation attributes
+     * @return Reference to the modified target tensor
+     * @throws std::runtime_error if operation not supported
+     */
+    Tensor& dispatch_inplace(
+        OpId op,
+        Tensor& target,
+        std::span<const Tensor> others,
+        const OpAttributes& attrs = {}) const
+    {
+        auto fn = inplace_kernels[static_cast<size_t>(op)];
+        if (!fn) [[unlikely]] {
+            throw_unsupported(op);
+        }
+        return fn(target, others, attrs);
     }
 
 private:

@@ -1,5 +1,6 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
+#include "tenzor/backend/backend.hpp"  // For OpAttributes (dispatch wrappers)
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
@@ -13,6 +14,8 @@
 #include <thread>
 #include <atomic>
 #include <random>
+#include <charconv>  // For std::from_chars (dispatch wrappers)
+#include <span>      // For std::span (dispatch wrappers)
 
 namespace tenzor {
 namespace cuda {
@@ -3353,6 +3356,439 @@ auto create_shifted_window_mask_cuda(int64_t H, int64_t W,
         return attn_mask.to(dtype);
     }
     return attn_mask;
+}
+
+// ============================================================================
+// Dispatch-Conformant Wrappers (SingleOutputKernelFn signature)
+// ============================================================================
+// These wrappers match Tensor(*)(std::span<const Tensor>, const OpAttributes&)
+// for direct registration with register_single_output_kernel()
+
+Tensor add_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    cudaStream_t stream = nullptr;
+    if (!attrs.empty()) {
+        auto it = attrs.find("stream");
+        if (it != attrs.end()) {
+            uint64_t val = 0;
+            std::from_chars(it->second.data(), it->second.data() + it->second.size(), val);
+            stream = reinterpret_cast<cudaStream_t>(val);
+        }
+    }
+    return add_kernel(inputs[0], inputs[1], stream);
+}
+
+Tensor sub_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    cudaStream_t stream = nullptr;
+    if (!attrs.empty()) {
+        auto it = attrs.find("stream");
+        if (it != attrs.end()) {
+            uint64_t val = 0;
+            std::from_chars(it->second.data(), it->second.data() + it->second.size(), val);
+            stream = reinterpret_cast<cudaStream_t>(val);
+        }
+    }
+    return sub_kernel(inputs[0], inputs[1], stream);
+}
+
+Tensor mul_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    cudaStream_t stream = nullptr;
+    if (!attrs.empty()) {
+        auto it = attrs.find("stream");
+        if (it != attrs.end()) {
+            uint64_t val = 0;
+            std::from_chars(it->second.data(), it->second.data() + it->second.size(), val);
+            stream = reinterpret_cast<cudaStream_t>(val);
+        }
+    }
+    return mul_kernel(inputs[0], inputs[1], stream);
+}
+
+Tensor div_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    cudaStream_t stream = nullptr;
+    if (!attrs.empty()) {
+        auto it = attrs.find("stream");
+        if (it != attrs.end()) {
+            uint64_t val = 0;
+            std::from_chars(it->second.data(), it->second.data() + it->second.size(), val);
+            stream = reinterpret_cast<cudaStream_t>(val);
+        }
+    }
+    return div_kernel(inputs[0], inputs[1], stream);
+}
+
+// Note: matmul_dispatch and dot_dispatch are defined in cublas_ops.cu
+// since matmul_kernel and dot_kernel are implemented there
+
+// Inplace dispatch wrappers (InplaceKernelFn signature)
+Tensor& add_inplace_dispatch(Tensor& target, std::span<const Tensor> others, const OpAttributes& attrs) {
+    cudaStream_t stream = nullptr;
+    if (!attrs.empty()) {
+        auto it = attrs.find("stream");
+        if (it != attrs.end()) {
+            uint64_t val = 0;
+            std::from_chars(it->second.data(), it->second.data() + it->second.size(), val);
+            stream = reinterpret_cast<cudaStream_t>(val);
+        }
+    }
+    add_inplace_kernel(target, others[0], stream);
+    return target;
+}
+
+Tensor& sub_inplace_dispatch(Tensor& target, std::span<const Tensor> others, const OpAttributes& attrs) {
+    cudaStream_t stream = nullptr;
+    if (!attrs.empty()) {
+        auto it = attrs.find("stream");
+        if (it != attrs.end()) {
+            uint64_t val = 0;
+            std::from_chars(it->second.data(), it->second.data() + it->second.size(), val);
+            stream = reinterpret_cast<cudaStream_t>(val);
+        }
+    }
+    sub_inplace_kernel(target, others[0], stream);
+    return target;
+}
+
+Tensor& mul_inplace_dispatch(Tensor& target, std::span<const Tensor> others, const OpAttributes& attrs) {
+    cudaStream_t stream = nullptr;
+    if (!attrs.empty()) {
+        auto it = attrs.find("stream");
+        if (it != attrs.end()) {
+            uint64_t val = 0;
+            std::from_chars(it->second.data(), it->second.data() + it->second.size(), val);
+            stream = reinterpret_cast<cudaStream_t>(val);
+        }
+    }
+    mul_inplace_kernel(target, others[0], stream);
+    return target;
+}
+
+Tensor& div_inplace_dispatch(Tensor& target, std::span<const Tensor> others, const OpAttributes& attrs) {
+    cudaStream_t stream = nullptr;
+    if (!attrs.empty()) {
+        auto it = attrs.find("stream");
+        if (it != attrs.end()) {
+            uint64_t val = 0;
+            std::from_chars(it->second.data(), it->second.data() + it->second.size(), val);
+            stream = reinterpret_cast<cudaStream_t>(val);
+        }
+    }
+    div_inplace_kernel(target, others[0], stream);
+    return target;
+}
+
+// Unary operation dispatch wrappers
+Tensor sqrt_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    cudaStream_t stream = nullptr;
+    if (!attrs.empty()) {
+        auto it = attrs.find("stream");
+        if (it != attrs.end()) {
+            uint64_t val = 0;
+            std::from_chars(it->second.data(), it->second.data() + it->second.size(), val);
+            stream = reinterpret_cast<cudaStream_t>(val);
+        }
+    }
+    return sqrt_kernel(inputs[0], stream);
+}
+
+Tensor neg_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    cudaStream_t stream = nullptr;
+    if (!attrs.empty()) {
+        auto it = attrs.find("stream");
+        if (it != attrs.end()) {
+            uint64_t val = 0;
+            std::from_chars(it->second.data(), it->second.data() + it->second.size(), val);
+            stream = reinterpret_cast<cudaStream_t>(val);
+        }
+    }
+    return neg_kernel(inputs[0], stream);
+}
+
+Tensor abs_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    cudaStream_t stream = nullptr;
+    if (!attrs.empty()) {
+        auto it = attrs.find("stream");
+        if (it != attrs.end()) {
+            uint64_t val = 0;
+            std::from_chars(it->second.data(), it->second.data() + it->second.size(), val);
+            stream = reinterpret_cast<cudaStream_t>(val);
+        }
+    }
+    return abs_kernel(inputs[0], stream);
+}
+
+Tensor sign_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    cudaStream_t stream = nullptr;
+    if (!attrs.empty()) {
+        auto it = attrs.find("stream");
+        if (it != attrs.end()) {
+            uint64_t val = 0;
+            std::from_chars(it->second.data(), it->second.data() + it->second.size(), val);
+            stream = reinterpret_cast<cudaStream_t>(val);
+        }
+    }
+    return sign_kernel(inputs[0], stream);
+}
+
+Tensor log_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    cudaStream_t stream = nullptr;
+    if (!attrs.empty()) {
+        auto it = attrs.find("stream");
+        if (it != attrs.end()) {
+            uint64_t val = 0;
+            std::from_chars(it->second.data(), it->second.data() + it->second.size(), val);
+            stream = reinterpret_cast<cudaStream_t>(val);
+        }
+    }
+    return log_kernel(inputs[0], stream);
+}
+
+Tensor exp_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    cudaStream_t stream = nullptr;
+    if (!attrs.empty()) {
+        auto it = attrs.find("stream");
+        if (it != attrs.end()) {
+            uint64_t val = 0;
+            std::from_chars(it->second.data(), it->second.data() + it->second.size(), val);
+            stream = reinterpret_cast<cudaStream_t>(val);
+        }
+    }
+    return exp_kernel(inputs[0], stream);
+}
+
+Tensor reciprocal_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    cudaStream_t stream = nullptr;
+    if (!attrs.empty()) {
+        auto it = attrs.find("stream");
+        if (it != attrs.end()) {
+            uint64_t val = 0;
+            std::from_chars(it->second.data(), it->second.data() + it->second.size(), val);
+            stream = reinterpret_cast<cudaStream_t>(val);
+        }
+    }
+    return reciprocal_kernel(inputs[0], stream);
+}
+
+Tensor floor_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    cudaStream_t stream = nullptr;
+    if (!attrs.empty()) {
+        auto it = attrs.find("stream");
+        if (it != attrs.end()) {
+            uint64_t val = 0;
+            std::from_chars(it->second.data(), it->second.data() + it->second.size(), val);
+            stream = reinterpret_cast<cudaStream_t>(val);
+        }
+    }
+    return floor_kernel(inputs[0], stream);
+}
+
+Tensor ceil_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    cudaStream_t stream = nullptr;
+    if (!attrs.empty()) {
+        auto it = attrs.find("stream");
+        if (it != attrs.end()) {
+            uint64_t val = 0;
+            std::from_chars(it->second.data(), it->second.data() + it->second.size(), val);
+            stream = reinterpret_cast<cudaStream_t>(val);
+        }
+    }
+    return ceil_kernel(inputs[0], stream);
+}
+
+Tensor round_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    cudaStream_t stream = nullptr;
+    if (!attrs.empty()) {
+        auto it = attrs.find("stream");
+        if (it != attrs.end()) {
+            uint64_t val = 0;
+            std::from_chars(it->second.data(), it->second.data() + it->second.size(), val);
+            stream = reinterpret_cast<cudaStream_t>(val);
+        }
+    }
+    return round_kernel(inputs[0], stream);
+}
+
+// Trigonometric dispatch wrappers
+Tensor sin_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    cudaStream_t stream = nullptr;
+    if (!attrs.empty()) {
+        auto it = attrs.find("stream");
+        if (it != attrs.end()) {
+            uint64_t val = 0;
+            std::from_chars(it->second.data(), it->second.data() + it->second.size(), val);
+            stream = reinterpret_cast<cudaStream_t>(val);
+        }
+    }
+    return sin_kernel(inputs[0], stream);
+}
+
+Tensor cos_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    cudaStream_t stream = nullptr;
+    if (!attrs.empty()) {
+        auto it = attrs.find("stream");
+        if (it != attrs.end()) {
+            uint64_t val = 0;
+            std::from_chars(it->second.data(), it->second.data() + it->second.size(), val);
+            stream = reinterpret_cast<cudaStream_t>(val);
+        }
+    }
+    return cos_kernel(inputs[0], stream);
+}
+
+Tensor tan_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    cudaStream_t stream = nullptr;
+    if (!attrs.empty()) {
+        auto it = attrs.find("stream");
+        if (it != attrs.end()) {
+            uint64_t val = 0;
+            std::from_chars(it->second.data(), it->second.data() + it->second.size(), val);
+            stream = reinterpret_cast<cudaStream_t>(val);
+        }
+    }
+    return tan_kernel(inputs[0], stream);
+}
+
+Tensor asin_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    cudaStream_t stream = nullptr;
+    if (!attrs.empty()) {
+        auto it = attrs.find("stream");
+        if (it != attrs.end()) {
+            uint64_t val = 0;
+            std::from_chars(it->second.data(), it->second.data() + it->second.size(), val);
+            stream = reinterpret_cast<cudaStream_t>(val);
+        }
+    }
+    return asin_kernel(inputs[0], stream);
+}
+
+Tensor acos_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    cudaStream_t stream = nullptr;
+    if (!attrs.empty()) {
+        auto it = attrs.find("stream");
+        if (it != attrs.end()) {
+            uint64_t val = 0;
+            std::from_chars(it->second.data(), it->second.data() + it->second.size(), val);
+            stream = reinterpret_cast<cudaStream_t>(val);
+        }
+    }
+    return acos_kernel(inputs[0], stream);
+}
+
+Tensor atan_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    cudaStream_t stream = nullptr;
+    if (!attrs.empty()) {
+        auto it = attrs.find("stream");
+        if (it != attrs.end()) {
+            uint64_t val = 0;
+            std::from_chars(it->second.data(), it->second.data() + it->second.size(), val);
+            stream = reinterpret_cast<cudaStream_t>(val);
+        }
+    }
+    return atan_kernel(inputs[0], stream);
+}
+
+Tensor sinh_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    cudaStream_t stream = nullptr;
+    if (!attrs.empty()) {
+        auto it = attrs.find("stream");
+        if (it != attrs.end()) {
+            uint64_t val = 0;
+            std::from_chars(it->second.data(), it->second.data() + it->second.size(), val);
+            stream = reinterpret_cast<cudaStream_t>(val);
+        }
+    }
+    return sinh_kernel(inputs[0], stream);
+}
+
+Tensor cosh_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    cudaStream_t stream = nullptr;
+    if (!attrs.empty()) {
+        auto it = attrs.find("stream");
+        if (it != attrs.end()) {
+            uint64_t val = 0;
+            std::from_chars(it->second.data(), it->second.data() + it->second.size(), val);
+            stream = reinterpret_cast<cudaStream_t>(val);
+        }
+    }
+    return cosh_kernel(inputs[0], stream);
+}
+
+// Comparison dispatch wrappers
+Tensor eq_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    cudaStream_t stream = nullptr;
+    if (!attrs.empty()) {
+        auto it = attrs.find("stream");
+        if (it != attrs.end()) {
+            uint64_t val = 0;
+            std::from_chars(it->second.data(), it->second.data() + it->second.size(), val);
+            stream = reinterpret_cast<cudaStream_t>(val);
+        }
+    }
+    return eq_kernel(inputs[0], inputs[1], stream);
+}
+
+Tensor ne_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    cudaStream_t stream = nullptr;
+    if (!attrs.empty()) {
+        auto it = attrs.find("stream");
+        if (it != attrs.end()) {
+            uint64_t val = 0;
+            std::from_chars(it->second.data(), it->second.data() + it->second.size(), val);
+            stream = reinterpret_cast<cudaStream_t>(val);
+        }
+    }
+    return ne_kernel(inputs[0], inputs[1], stream);
+}
+
+Tensor lt_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    cudaStream_t stream = nullptr;
+    if (!attrs.empty()) {
+        auto it = attrs.find("stream");
+        if (it != attrs.end()) {
+            uint64_t val = 0;
+            std::from_chars(it->second.data(), it->second.data() + it->second.size(), val);
+            stream = reinterpret_cast<cudaStream_t>(val);
+        }
+    }
+    return lt_kernel(inputs[0], inputs[1], stream);
+}
+
+Tensor le_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    cudaStream_t stream = nullptr;
+    if (!attrs.empty()) {
+        auto it = attrs.find("stream");
+        if (it != attrs.end()) {
+            uint64_t val = 0;
+            std::from_chars(it->second.data(), it->second.data() + it->second.size(), val);
+            stream = reinterpret_cast<cudaStream_t>(val);
+        }
+    }
+    return le_kernel(inputs[0], inputs[1], stream);
+}
+
+Tensor gt_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    cudaStream_t stream = nullptr;
+    if (!attrs.empty()) {
+        auto it = attrs.find("stream");
+        if (it != attrs.end()) {
+            uint64_t val = 0;
+            std::from_chars(it->second.data(), it->second.data() + it->second.size(), val);
+            stream = reinterpret_cast<cudaStream_t>(val);
+        }
+    }
+    return gt_kernel(inputs[0], inputs[1], stream);
+}
+
+Tensor ge_dispatch(std::span<const Tensor> inputs, const OpAttributes& attrs) {
+    cudaStream_t stream = nullptr;
+    if (!attrs.empty()) {
+        auto it = attrs.find("stream");
+        if (it != attrs.end()) {
+            uint64_t val = 0;
+            std::from_chars(it->second.data(), it->second.data() + it->second.size(), val);
+            stream = reinterpret_cast<cudaStream_t>(val);
+        }
+    }
+    return ge_kernel(inputs[0], inputs[1], stream);
 }
 
 } // namespace cuda

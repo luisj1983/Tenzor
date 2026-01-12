@@ -19,6 +19,9 @@
 // Include dispatch for fused attention
 #include "tenzor/backend/fast_dispatch.hpp"
 
+// Include cuDNN SDPA for optimized CUDA attention
+#include "tenzor/backend/fused_ops.hpp"
+
 namespace tenzor {
 namespace nn {
 
@@ -180,15 +183,43 @@ auto MultiheadAttention::scaled_dot_product_attention(
         return {attended, attn_weights};
     }
 
-    // CUDA Fast path: Flash Attention kernel
-    // NOTE: Currently disabled because cuBLAS BMM with Tensor Cores is faster
-    // than our custom Flash Attention kernel on modern GPUs (Ampere+).
-    // For Flash Attention to be faster, we need to use CUTLASS or wmma intrinsics
-    // to leverage Tensor Cores for the Q@K and attn@V matmuls.
-    // The cuBLAS path below achieves reasonable performance through:
-    // 1. Tensor Core acceleration for matmuls
-    // 2. Efficient batched operations
-    // 3. Optimized softmax kernel
+    // CUDA Fast path: cuDNN SDPA with Flash Attention and Tensor Cores
+    // Uses cuDNN Graph API for fused attention via dispatch - up to 2x faster than separate BMM ops
+    // Requirements: cuDNN 9.0+, Ampere+ GPU, head_dim in {32, 64, 128, 256}, FP16 input
+    // Note: Only enabled for FP16 inputs - FP32→FP16 conversion overhead makes BMM faster for FP32
+    bool is_fp16 = query.dtype() == DType::Float16 || query.dtype() == DType::BFloat16;
+    bool can_use_cudnn_sdpa = is_fp16 &&
+        (query.device().type == Device::Type::CUDA) &&
+        (head_dim == 32 || head_dim == 64 || head_dim == 128 || head_dim == 256);
+
+    if (can_use_cudnn_sdpa) {
+        try {
+            float scale_f = 1.0f / std::sqrt(static_cast<float>(head_dim));
+
+            // Make tensors contiguous for cuDNN
+            Tensor q_contig = query.tensor().is_contiguous() ? query.tensor() : query.tensor().contiguous();
+            Tensor k_contig = key.tensor().is_contiguous() ? key.tensor() : key.tensor().contiguous();
+            Tensor v_contig = value.tensor().is_contiguous() ? value.tensor() : value.tensor().contiguous();
+
+            // Use dispatch to call cuDNN SDPA - pass 4D tensors directly
+            OpAttributes attrs;
+            attrs["scale"] = std::to_string(scale_f);
+            attrs["use_cudnn_sdpa"] = "true";  // Signal to use cuDNN SDPA
+            std::vector<Tensor> fused_inputs = {q_contig, k_contig, v_contig};
+            Tensor output = dispatch<OpId::FusedAttention>(fused_inputs, attrs)[0];
+
+            Variable attended(output, false);
+            Tensor empty_weights;
+            Variable attn_weights_empty(empty_weights, false);
+
+            return {attended, attn_weights_empty};
+        } catch (const std::exception& e) {
+            // Fall through to BMM path if cuDNN SDPA fails
+            // This can happen if GPU doesn't support SDPA or other issues
+        }
+    }
+
+    // Fallback: Custom Flash Attention kernel (disabled - doesn't use Tensor Cores)
     bool can_use_cuda_fused = false;
 
     if (can_use_cuda_fused) {

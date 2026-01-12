@@ -11,8 +11,50 @@
 #include <cstdlib>
 #include <sstream>
 #include <iostream>
+#include <atomic>
 
 namespace tenzor {
+
+// ============================================================================
+// Runtime cuDNN Availability Detection
+// ============================================================================
+namespace cuda {
+
+// Cached cuDNN availability (computed once on first call)
+static std::atomic<int> g_cudnn_available{-1};       // -1 = unknown, 0 = no, 1 = yes
+static std::atomic<int> g_cudnn_frontend_available{-1};
+
+bool is_cudnn_available() noexcept {
+    int cached = g_cudnn_available.load(std::memory_order_acquire);
+    if (cached >= 0) return cached == 1;
+
+#ifdef TENZOR_HAS_CUDNN
+    // cuDNN is linked at compile time
+    g_cudnn_available.store(1, std::memory_order_release);
+    return true;
+#else
+    // cuDNN not available
+    g_cudnn_available.store(0, std::memory_order_release);
+    return false;
+#endif
+}
+
+bool is_cudnn_frontend_available() noexcept {
+    int cached = g_cudnn_frontend_available.load(std::memory_order_acquire);
+    if (cached >= 0) return cached == 1;
+
+#ifdef TENZOR_HAS_CUDNN_FRONTEND
+    // cuDNN Frontend is available
+    g_cudnn_frontend_available.store(1, std::memory_order_release);
+    return true;
+#else
+    // cuDNN Frontend not available
+    g_cudnn_frontend_available.store(0, std::memory_order_release);
+    return false;
+#endif
+}
+
+} // namespace cuda
 
 // Forward declarations for CUDA kernels
 // These will be implemented by kernel developers in separate .cu files
