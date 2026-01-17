@@ -564,8 +564,27 @@ auto arange(float start, float end, float step, DType dtype, Device device) -> T
             }
             break;
         }
+        case DType::Float16: {
+            Float16* ptr = static_cast<Float16*>(data);
+            float value = start;
+            for (int64_t i = 0; i < numel; ++i) {
+                ptr[i] = Float16(value);
+                value += step;
+            }
+            break;
+        }
+        case DType::Int8: {
+            int8_t* ptr = static_cast<int8_t*>(data);
+            int8_t value = static_cast<int8_t>(start);
+            int8_t step_int = static_cast<int8_t>(step);
+            for (int64_t i = 0; i < numel; ++i) {
+                ptr[i] = value;
+                value += step_int;
+            }
+            break;
+        }
         default:
-            throw std::runtime_error("Unsupported dtype for arange() - only Float32, Float64, Int32, Int64 are supported");
+            throw std::runtime_error("Unsupported dtype for arange() - only Float32, Float64, Int32, Int64, Float16, Int8 are supported");
     }
     return tensor;
 }
@@ -681,6 +700,21 @@ auto eye(int64_t n, std::optional<int64_t> m, DType dtype, Device device) -> Ten
             bool* ptr = static_cast<bool*>(data);
             for (int64_t i = 0; i < min_dim; ++i) {
                 ptr[i * cols + i] = true;
+            }
+            break;
+        }
+        case DType::Float16: {
+            Float16* ptr = static_cast<Float16*>(data);
+            Float16 one(1.0f);
+            for (int64_t i = 0; i < min_dim; ++i) {
+                ptr[i * cols + i] = one;
+            }
+            break;
+        }
+        case DType::Int8: {
+            int8_t* ptr = static_cast<int8_t*>(data);
+            for (int64_t i = 0; i < min_dim; ++i) {
+                ptr[i * cols + i] = 1;
             }
             break;
         }

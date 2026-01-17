@@ -244,6 +244,189 @@ __global__ void gru_cell_backward_fused(
 }
 
 // ============================================================================
+// Float16 GRU Cell Kernels
+// ============================================================================
+
+/**
+ * @brief Float16 GRU cell forward kernel
+ *
+ * Uses float computation internally for numerical accuracy.
+ */
+__global__ void gru_cell_forward_fused_fp16(
+    const __half* __restrict__ reset_gates,
+    const __half* __restrict__ update_gates,
+    const __half* __restrict__ new_gates_input,
+    const __half* __restrict__ new_gates_hidden,
+    const __half* __restrict__ h_prev,
+    __half* __restrict__ h_out,
+    int64_t batch_size,
+    int64_t hidden_size) {
+
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total_elements = batch_size * hidden_size;
+
+    if (idx < total_elements) {
+        // Load and convert to float for computation
+        float r_gate = __half2float(reset_gates[idx]);
+        float z_gate = __half2float(update_gates[idx]);
+        float n_input = __half2float(new_gates_input[idx]);
+        float n_hidden = __half2float(new_gates_hidden[idx]);
+        float h_prev_val = __half2float(h_prev[idx]);
+
+        // Apply sigmoid activation to reset and update gates
+        float r_t = 1.0f / (1.0f + expf(-r_gate));
+        float z_t = 1.0f / (1.0f + expf(-z_gate));
+
+        // Apply reset gate to hidden part and compute new gate
+        float n_combined = n_input + r_t * n_hidden;
+        float n_t = tanhf(n_combined);
+
+        // Compute new hidden state: h_t = (1 - z_t) * n_t + z_t * h_{t-1}
+        float h_t = (1.0f - z_t) * n_t + z_t * h_prev_val;
+
+        // Store output
+        h_out[idx] = __float2half(h_t);
+    }
+}
+
+/**
+ * @brief Float16 GRU cell backward kernel
+ *
+ * Uses float computation internally for numerical accuracy.
+ */
+__global__ void gru_cell_backward_fused_fp16(
+    const __half* __restrict__ grad_h,
+    const __half* __restrict__ reset_gates,
+    const __half* __restrict__ update_gates,
+    const __half* __restrict__ new_gates_input,
+    const __half* __restrict__ new_gates_hidden,
+    const __half* __restrict__ h_prev,
+    __half* __restrict__ grad_reset,
+    __half* __restrict__ grad_update,
+    __half* __restrict__ grad_new_input,
+    __half* __restrict__ grad_new_hidden,
+    __half* __restrict__ grad_h_prev,
+    int64_t batch_size,
+    int64_t hidden_size) {
+
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total_elements = batch_size * hidden_size;
+
+    if (idx < total_elements) {
+        // Recompute forward pass values (in float)
+        float r_gate = __half2float(reset_gates[idx]);
+        float z_gate = __half2float(update_gates[idx]);
+        float n_input = __half2float(new_gates_input[idx]);
+        float n_hidden = __half2float(new_gates_hidden[idx]);
+        float h_prev_val = __half2float(h_prev[idx]);
+
+        float r_t = 1.0f / (1.0f + expf(-r_gate));
+        float z_t = 1.0f / (1.0f + expf(-z_gate));
+
+        float n_combined = n_input + r_t * n_hidden;
+        float n_t = tanhf(n_combined);
+
+        // Load incoming gradient
+        float dh = __half2float(grad_h[idx]);
+
+        // Gradient through h_t = (1 - z_t) * n_t + z_t * h_prev
+        float dn_t = dh * (1.0f - z_t);
+        float dz_t = dh * (h_prev_val - n_t);
+        float dh_prev_val = dh * z_t;
+
+        // Gradient through n_t = tanh(n_combined)
+        // tanh'(x) = 1 - tanh^2(x)
+        float dn_combined = dn_t * (1.0f - n_t * n_t);
+
+        // Gradient through n_combined = n_input + r_t * n_hidden
+        float dn_input = dn_combined;
+        float dr_t = dn_combined * n_hidden;
+        float dn_hidden_val = dn_combined * r_t;
+
+        // Gradient through sigmoid activations
+        // σ'(x) = σ(x) * (1 - σ(x))
+        float dr_gate = dr_t * r_t * (1.0f - r_t);
+        float dz_gate = dz_t * z_t * (1.0f - z_t);
+
+        // Store gradients
+        grad_reset[idx] = __float2half(dr_gate);
+        grad_update[idx] = __float2half(dz_gate);
+        grad_new_input[idx] = __float2half(dn_input);
+        grad_new_hidden[idx] = __float2half(dn_hidden_val);
+
+        // Gradient for previous hidden also comes from new gate hidden part
+        dh_prev_val += dn_hidden_val;
+        grad_h_prev[idx] = __float2half(dh_prev_val);
+    }
+}
+
+/**
+ * @brief Float16 GRU sequence step kernel
+ */
+__global__ void gru_sequence_step_kernel_fp16(
+    const __half* __restrict__ rz_gates,
+    const __half* __restrict__ n_ih_gates,
+    const __half* __restrict__ n_hh_gates,
+    const __half* __restrict__ h_prev,
+    __half* __restrict__ h_out,
+    int64_t batch,
+    int64_t hidden) {
+
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < batch * hidden) {
+        int64_t b = idx / hidden;
+        int64_t h = idx % hidden;
+
+        // Load gate values and convert to float
+        float r_gate = __half2float(rz_gates[b * 2 * hidden + h]);
+        float z_gate = __half2float(rz_gates[b * 2 * hidden + hidden + h]);
+        float n_ih = __half2float(n_ih_gates[idx]);
+        float n_hh = __half2float(n_hh_gates[idx]);
+        float h_prev_val = __half2float(h_prev[idx]);
+
+        // Apply sigmoid to r and z
+        float r_t = 1.0f / (1.0f + expf(-r_gate));
+        float z_t = 1.0f / (1.0f + expf(-z_gate));
+
+        // Compute new gate: n_t = tanh(n_ih + r_t * n_hh)
+        float n_t = tanhf(n_ih + r_t * n_hh);
+
+        // Compute new hidden state: h_t = (1 - z_t) * n_t + z_t * h_prev
+        h_out[idx] = __float2half((1.0f - z_t) * n_t + z_t * h_prev_val);
+    }
+}
+
+/**
+ * @brief Float16 kernel to add bias (broadcasted across batch dimension)
+ */
+__global__ void add_bias_kernel_fp16(const __half* __restrict__ bias, __half* __restrict__ gates,
+                                      int64_t batch, int64_t gate_size) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < batch * gate_size) {
+        int64_t g = idx % gate_size;
+        float gate_val = __half2float(gates[idx]);
+        float bias_val = __half2float(bias[g]);
+        gates[idx] = __float2half(gate_val + bias_val);
+    }
+}
+
+/**
+ * @brief Float16 kernel to combine r and z gates from ih and hh parts
+ */
+__global__ void combine_rz_gates_kernel_fp16(const __half* __restrict__ gates_ih,
+                                              const __half* __restrict__ gates_hh,
+                                              __half* __restrict__ rz_gates,
+                                              int64_t batch,
+                                              int64_t hidden) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < batch * 2 * hidden) {
+        float ih_val = __half2float(gates_ih[idx]);
+        float hh_val = __half2float(gates_hh[idx]);
+        rz_gates[idx] = __float2half(ih_val + hh_val);
+    }
+}
+
+// ============================================================================
 // Host Interface Functions
 // ============================================================================
 
@@ -405,8 +588,18 @@ auto gru_cell_forward_kernel(
                           h_out.data<double>(),
                           batch_size,
                           hidden_size);
+    } else if (reset_gates.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(gru_cell_forward_fused_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          reinterpret_cast<const __half*>(reset_gates.data<Float16>()),
+                          reinterpret_cast<const __half*>(update_gates.data<Float16>()),
+                          reinterpret_cast<const __half*>(new_gates_input.data<Float16>()),
+                          reinterpret_cast<const __half*>(new_gates_hidden.data<Float16>()),
+                          reinterpret_cast<const __half*>(h_prev.data<Float16>()),
+                          reinterpret_cast<__half*>(h_out.data<Float16>()),
+                          batch_size,
+                          hidden_size);
     } else {
-        throw std::runtime_error("GRU only supports Float32 and Float64");
+        throw std::runtime_error("GRU only supports Float32, Float64, and Float16");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -478,8 +671,23 @@ auto gru_cell_backward_kernel(
                           outputs.grad_h_prev.data<double>(),
                           batch_size,
                           hidden_size);
+    } else if (grad_h.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(gru_cell_backward_fused_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          reinterpret_cast<const __half*>(grad_h.data<Float16>()),
+                          reinterpret_cast<const __half*>(reset_gates.data<Float16>()),
+                          reinterpret_cast<const __half*>(update_gates.data<Float16>()),
+                          reinterpret_cast<const __half*>(new_gates_input.data<Float16>()),
+                          reinterpret_cast<const __half*>(new_gates_hidden.data<Float16>()),
+                          reinterpret_cast<const __half*>(h_prev.data<Float16>()),
+                          reinterpret_cast<__half*>(outputs.grad_reset.data<Float16>()),
+                          reinterpret_cast<__half*>(outputs.grad_update.data<Float16>()),
+                          reinterpret_cast<__half*>(outputs.grad_new_input.data<Float16>()),
+                          reinterpret_cast<__half*>(outputs.grad_new_hidden.data<Float16>()),
+                          reinterpret_cast<__half*>(outputs.grad_h_prev.data<Float16>()),
+                          batch_size,
+                          hidden_size);
     } else {
-        throw std::runtime_error("GRU backward only supports Float32 and Float64");
+        throw std::runtime_error("GRU backward only supports Float32, Float64, and Float16");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -702,8 +910,86 @@ auto gru_forward_kernel(
         hipMemcpyAsync(h_n.data<double>(), h_t_ptr,
                       batch * hidden * sizeof(double),
                       hipMemcpyDeviceToDevice, stream);
+    } else if (input.dtype() == DType::Float16) {
+        rocblas_handle handle;
+        rocblas_create_handle(&handle);
+        rocblas_set_stream(handle, stream);
+
+        const rocblas_half alpha = rocblas_half(1.0f);
+        const rocblas_half beta_zero = rocblas_half(0.0f);
+
+        const __half* W_ih_ptr = reinterpret_cast<const __half*>(W_ih.data<Float16>());
+        const __half* W_hh_ptr = reinterpret_cast<const __half*>(W_hh.data<Float16>());
+        const __half* input_ptr = reinterpret_cast<const __half*>(input.data<Float16>());
+        const __half* bias_ptr = bias.numel() > 0 ? reinterpret_cast<const __half*>(bias.data<Float16>()) : nullptr;
+        __half* gates_ih_ptr = reinterpret_cast<__half*>(gates_ih.data<Float16>());
+        __half* gates_hh_ptr = reinterpret_cast<__half*>(gates_hh.data<Float16>());
+        __half* rz_gates_ptr = reinterpret_cast<__half*>(rz_gates.data<Float16>());
+        __half* h_t_ptr = reinterpret_cast<__half*>(h_t.data<Float16>());
+        __half* output_ptr = reinterpret_cast<__half*>(output.data<Float16>());
+
+        // Process each timestep
+        for (int64_t t = 0; t < seq_len; ++t) {
+            const __half* x_t = input_ptr + t * batch * input_size;
+
+            // Compute input contribution: gates_ih = x_t @ W_ih^T
+            rocblas_hgemm(handle, rocblas_operation_transpose, rocblas_operation_none,
+                         3 * hidden, batch, input_size,
+                         &alpha,
+                         reinterpret_cast<const rocblas_half*>(W_ih_ptr), input_size,
+                         reinterpret_cast<const rocblas_half*>(x_t), input_size,
+                         &beta_zero,
+                         reinterpret_cast<rocblas_half*>(gates_ih_ptr), 3 * hidden);
+
+            // Compute hidden contribution: gates_hh = h_t @ W_hh^T
+            rocblas_hgemm(handle, rocblas_operation_transpose, rocblas_operation_none,
+                         3 * hidden, batch, hidden,
+                         &alpha,
+                         reinterpret_cast<const rocblas_half*>(W_hh_ptr), hidden,
+                         reinterpret_cast<const rocblas_half*>(h_t_ptr), hidden,
+                         &beta_zero,
+                         reinterpret_cast<rocblas_half*>(gates_hh_ptr), 3 * hidden);
+
+            // Add bias if present
+            if (bias_ptr != nullptr) {
+                int64_t total = batch * 3 * hidden;
+                int num_blocks = get_num_blocks(total);
+                hipLaunchKernelGGL(add_bias_kernel_fp16,
+                    dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                    bias_ptr, gates_ih_ptr, batch, 3 * hidden);
+            }
+
+            // Combine rz gates and apply GRU step
+            int64_t total = batch * hidden;
+            int num_blocks = get_num_blocks(total);
+
+            hipLaunchKernelGGL(combine_rz_gates_kernel_fp16,
+                dim3(get_num_blocks(batch * 2 * hidden)), dim3(BLOCK_SIZE), 0, stream,
+                gates_ih_ptr, gates_hh_ptr, rz_gates_ptr, batch, hidden);
+
+            hipLaunchKernelGGL(gru_sequence_step_kernel_fp16,
+                              dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                              rz_gates_ptr,
+                              gates_ih_ptr + 2 * hidden,
+                              gates_hh_ptr + 2 * hidden,
+                              h_t_ptr,
+                              h_t_ptr,
+                              batch, hidden);
+
+            // Copy h_t to output[t]
+            hipMemcpyAsync(output_ptr + t * batch * hidden, h_t_ptr,
+                          batch * hidden * sizeof(__half),
+                          hipMemcpyDeviceToDevice, stream);
+        }
+
+        rocblas_destroy_handle(handle);
+
+        // Copy final state
+        hipMemcpyAsync(reinterpret_cast<__half*>(h_n.data<Float16>()), h_t_ptr,
+                      batch * hidden * sizeof(__half),
+                      hipMemcpyDeviceToDevice, stream);
     } else {
-        throw std::runtime_error("GRU forward only supports Float32 and Float64");
+        throw std::runtime_error("GRU forward only supports Float32, Float64, and Float16");
     }
 
     HIP_CHECK(hipGetLastError());

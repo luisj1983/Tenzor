@@ -83,6 +83,12 @@ protected:
             }
             device_ = Device::oneapi(0);
         }
+        else if (param.backend_name == "rocm") {
+            if (!isBackendAvailable(Device::Type::ROCm)) {
+                GTEST_SKIP() << "ROCm not available";
+            }
+            device_ = Device::rocm(0);
+        }
 
         // Set tolerance based on data type
         if (dtype_ == DType::Float16) {

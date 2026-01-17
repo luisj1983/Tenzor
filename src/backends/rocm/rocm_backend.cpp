@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <limits>
 #include <cstdlib>
+#include <cstdint>
 #include <sstream>
 
 namespace tenzor {
@@ -267,8 +268,8 @@ auto ROCmBackend::dispatch(const std::string& op_name,
             if (inputs.size() != 1) {
                 throw std::invalid_argument("sum operation requires exactly 1 input");
             }
-            // Parse attributes
-            int64_t dim = -1;
+            // Parse attributes - use INT64_MIN as sentinel for full reduction (when no dim specified)
+            int64_t dim = INT64_MIN;
             bool keepdim = false;
             if (attrs.contains("dim")) {
                 dim = std::stoll(attrs.at("dim"));
@@ -282,7 +283,8 @@ auto ROCmBackend::dispatch(const std::string& op_name,
             if (inputs.size() != 1) {
                 throw std::invalid_argument("mean operation requires exactly 1 input");
             }
-            int64_t dim = -1;
+            // Use INT64_MIN as sentinel for full reduction (when no dim specified)
+            int64_t dim = INT64_MIN;
             bool keepdim = false;
             if (attrs.contains("dim")) {
                 dim = std::stoll(attrs.at("dim"));
@@ -296,7 +298,8 @@ auto ROCmBackend::dispatch(const std::string& op_name,
             if (inputs.size() != 1) {
                 throw std::invalid_argument("max operation requires exactly 1 input");
             }
-            int64_t dim = -1;
+            // Use INT64_MIN as sentinel for full reduction (when no dim specified)
+            int64_t dim = INT64_MIN;
             bool keepdim = false;
             if (attrs.contains("dim")) {
                 dim = std::stoll(attrs.at("dim"));
@@ -310,7 +313,8 @@ auto ROCmBackend::dispatch(const std::string& op_name,
             if (inputs.size() != 1) {
                 throw std::invalid_argument("min operation requires exactly 1 input");
             }
-            int64_t dim = -1;
+            // Use INT64_MIN as sentinel for full reduction (when no dim specified)
+            int64_t dim = INT64_MIN;
             bool keepdim = false;
             if (attrs.contains("dim")) {
                 dim = std::stoll(attrs.at("dim"));
@@ -502,6 +506,10 @@ auto ROCmBackend::dispatch(const std::string& op_name,
                 else if (dtype_str == "float64") dtype = DType::Float64;
                 else if (dtype_str == "int32") dtype = DType::Int32;
                 else if (dtype_str == "int64") dtype = DType::Int64;
+                else if (dtype_str == "bool") dtype = DType::Bool;
+                else if (dtype_str == "uint8") dtype = DType::UInt8;
+                else if (dtype_str == "int8") dtype = DType::Int8;
+                else if (dtype_str == "float16") dtype = DType::Float16;
             }
 
             Device device = inputs.empty() ? Device::rocm(device_id) : inputs[0].device();
@@ -529,6 +537,10 @@ auto ROCmBackend::dispatch(const std::string& op_name,
                 else if (dtype_str == "float64") dtype = DType::Float64;
                 else if (dtype_str == "int32") dtype = DType::Int32;
                 else if (dtype_str == "int64") dtype = DType::Int64;
+                else if (dtype_str == "bool") dtype = DType::Bool;
+                else if (dtype_str == "uint8") dtype = DType::UInt8;
+                else if (dtype_str == "int8") dtype = DType::Int8;
+                else if (dtype_str == "float16") dtype = DType::Float16;
             }
 
             Device device = inputs.empty() ? Device::rocm(device_id) : inputs[0].device();
@@ -562,6 +574,10 @@ auto ROCmBackend::dispatch(const std::string& op_name,
                 else if (dtype_str == "float64") dtype = DType::Float64;
                 else if (dtype_str == "int32") dtype = DType::Int32;
                 else if (dtype_str == "int64") dtype = DType::Int64;
+                else if (dtype_str == "bool") dtype = DType::Bool;
+                else if (dtype_str == "uint8") dtype = DType::UInt8;
+                else if (dtype_str == "int8") dtype = DType::Int8;
+                else if (dtype_str == "float16") dtype = DType::Float16;
             }
 
             Device device = inputs.empty() ? Device::rocm(device_id) : inputs[0].device();
@@ -621,6 +637,7 @@ auto ROCmBackend::dispatch(const std::string& op_name,
                 else if (dtype_str == "float64") dtype = DType::Float64;
                 else if (dtype_str == "int32") dtype = DType::Int32;
                 else if (dtype_str == "int64") dtype = DType::Int64;
+                else if (dtype_str == "float16") dtype = DType::Float16;
             }
 
             Device device = inputs.empty() ? Device::rocm(device_id) : inputs[0].device();
@@ -649,6 +666,7 @@ auto ROCmBackend::dispatch(const std::string& op_name,
                 else if (dtype_str == "float64") dtype = DType::Float64;
                 else if (dtype_str == "int32") dtype = DType::Int32;
                 else if (dtype_str == "int64") dtype = DType::Int64;
+                else if (dtype_str == "float16") dtype = DType::Float16;
             }
 
             Device device = inputs.empty() ? Device::rocm(device_id) : inputs[0].device();
@@ -801,6 +819,187 @@ auto ROCmBackend::dispatch(const std::string& op_name,
             }
             auto [grad_input, grad_gamma, grad_beta] = rocm::batchnorm2d_backward(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], epsilon, stream);
             return {grad_input, grad_gamma, grad_beta};
+        }
+        else if (op_name == "conv2d_forward") {
+            // Parse conv2d parameters
+            int64_t stride = attrs.contains("stride") ? std::stoll(attrs.at("stride")) : 1;
+            int64_t padding = attrs.contains("padding") ? std::stoll(attrs.at("padding")) : 0;
+            int64_t dilation = attrs.contains("dilation") ? std::stoll(attrs.at("dilation")) : 1;
+            int64_t groups = attrs.contains("groups") ? std::stoll(attrs.at("groups")) : 1;
+
+            if (inputs.size() < 2 || inputs.size() > 3) {
+                throw std::invalid_argument("conv2d_forward requires 2 or 3 inputs (input, weight, optional bias)");
+            }
+
+            const Tensor* bias_ptr = (inputs.size() == 3) ? &inputs[2] : nullptr;
+            return {rocm::conv2d_forward_kernel(inputs[0], inputs[1], bias_ptr, stride, padding, dilation, groups, stream)};
+        }
+        else if (op_name == "conv2d_backward") {
+            // Parse conv2d parameters
+            int64_t stride = attrs.contains("stride") ? std::stoll(attrs.at("stride")) : 1;
+            int64_t padding = attrs.contains("padding") ? std::stoll(attrs.at("padding")) : 0;
+            int64_t dilation = attrs.contains("dilation") ? std::stoll(attrs.at("dilation")) : 1;
+            int64_t groups = attrs.contains("groups") ? std::stoll(attrs.at("groups")) : 1;
+            // Handle both "true" and "1" as truthy values for boolean attributes
+            auto parse_bool = [](const std::string& val) { return val == "true" || val == "1"; };
+            bool compute_grad_input = attrs.contains("compute_grad_input") ? parse_bool(attrs.at("compute_grad_input")) : true;
+            bool compute_grad_weight = attrs.contains("compute_grad_weight") ? parse_bool(attrs.at("compute_grad_weight")) : true;
+            bool compute_grad_bias = attrs.contains("compute_grad_bias") ? parse_bool(attrs.at("compute_grad_bias")) : true;
+
+            if (inputs.size() != 3) {
+                throw std::invalid_argument("conv2d_backward requires 3 inputs (grad_output, input, weight)");
+            }
+
+            auto [grad_input, grad_weight, grad_bias] = rocm::conv2d_backward_kernel(
+                inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups,
+                compute_grad_input, compute_grad_weight, compute_grad_bias, stream);
+            return {grad_input, grad_weight, grad_bias};
+        }
+        else if (op_name == "conv2d_backward_input") {
+            // Parse conv2d parameters
+            int64_t stride = attrs.contains("stride") ? std::stoll(attrs.at("stride")) : 1;
+            int64_t padding = attrs.contains("padding") ? std::stoll(attrs.at("padding")) : 0;
+            int64_t dilation = attrs.contains("dilation") ? std::stoll(attrs.at("dilation")) : 1;
+            int64_t groups = attrs.contains("groups") ? std::stoll(attrs.at("groups")) : 1;
+
+            if (inputs.size() != 2) {
+                throw std::invalid_argument("conv2d_backward_input requires 2 inputs (grad_output, weight)");
+            }
+
+            // Create a dummy input tensor for shape inference - we need the input shape from attrs
+            std::vector<int64_t> input_shape;
+            if (attrs.contains("input_shape")) {
+                std::string shape_str = attrs.at("input_shape");
+                std::stringstream ss(shape_str);
+                std::string item;
+                while (std::getline(ss, item, ',')) {
+                    input_shape.push_back(std::stoll(item));
+                }
+            }
+
+            auto [grad_input, grad_weight, grad_bias] = rocm::conv2d_backward_kernel(
+                inputs[0], Tensor(input_shape, inputs[0].dtype(), inputs[0].device()), inputs[1],
+                stride, padding, dilation, groups,
+                true, false, false, stream);
+            return {grad_input};
+        }
+        else if (op_name == "conv2d_backward_weight") {
+            // Parse conv2d parameters
+            int64_t stride = attrs.contains("stride") ? std::stoll(attrs.at("stride")) : 1;
+            int64_t padding = attrs.contains("padding") ? std::stoll(attrs.at("padding")) : 0;
+            int64_t dilation = attrs.contains("dilation") ? std::stoll(attrs.at("dilation")) : 1;
+            int64_t groups = attrs.contains("groups") ? std::stoll(attrs.at("groups")) : 1;
+
+            if (inputs.size() != 2) {
+                throw std::invalid_argument("conv2d_backward_weight requires 2 inputs (grad_output, input)");
+            }
+
+            // Create a dummy weight tensor for shape inference - we need the weight shape from attrs
+            std::vector<int64_t> weight_shape;
+            if (attrs.contains("weight_shape")) {
+                std::string shape_str = attrs.at("weight_shape");
+                std::stringstream ss(shape_str);
+                std::string item;
+                while (std::getline(ss, item, ',')) {
+                    weight_shape.push_back(std::stoll(item));
+                }
+            }
+
+            auto [grad_input, grad_weight, grad_bias] = rocm::conv2d_backward_kernel(
+                inputs[0], inputs[1], Tensor(weight_shape, inputs[0].dtype(), inputs[0].device()),
+                stride, padding, dilation, groups,
+                false, true, false, stream);
+            return {grad_weight};
+        }
+        else if (op_name == "conv2d_backward_bias") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("conv2d_backward_bias requires 1 input (grad_output)");
+            }
+
+            // Compute bias gradient by summing over batch, height, width dimensions
+            // grad_bias[c] = sum(grad_output[:, c, :, :])
+            auto grad_shape = inputs[0].shape();
+            int64_t out_channels = grad_shape[1];
+
+            // Create dummy tensors for the backward call
+            std::vector<int64_t> dummy_input_shape = {grad_shape[0], out_channels, 1, 1};
+            std::vector<int64_t> dummy_weight_shape = {out_channels, out_channels, 1, 1};
+
+            auto [grad_input, grad_weight, grad_bias] = rocm::conv2d_backward_kernel(
+                inputs[0],
+                Tensor(dummy_input_shape, inputs[0].dtype(), inputs[0].device()),
+                Tensor(dummy_weight_shape, inputs[0].dtype(), inputs[0].device()),
+                1, 0, 1, 1,
+                false, false, true, stream);
+            return {grad_bias};
+        }
+        else if (op_name == "max_pool2d") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("max_pool2d operation requires exactly 1 input");
+            }
+
+            int64_t kernel_size = attrs.contains("kernel_size") ? std::stoll(attrs.at("kernel_size")) : 2;
+            int64_t stride = attrs.contains("stride") ? std::stoll(attrs.at("stride")) : kernel_size;
+            int64_t padding = attrs.contains("padding") ? std::stoll(attrs.at("padding")) : 0;
+
+            auto [output, indices] = rocm::maxpool2d_forward_hip(inputs[0], kernel_size, kernel_size, stride, stride, padding, padding, true);
+            return {output, indices};
+        }
+        else if (op_name == "max_pool2d_backward") {
+            if (inputs.size() != 2) {
+                throw std::invalid_argument("max_pool2d_backward operation requires exactly 2 inputs (grad_output, indices)");
+            }
+
+            int64_t H_in = attrs.contains("H_in") ? std::stoll(attrs.at("H_in")) : 0;
+            int64_t W_in = attrs.contains("W_in") ? std::stoll(attrs.at("W_in")) : 0;
+
+            // Reconstruct input shape from grad_output shape and H_in/W_in
+            auto grad_shape = inputs[0].shape();
+            std::vector<int64_t> input_shape = {grad_shape[0], grad_shape[1], H_in, W_in};
+
+            return {rocm::maxpool2d_backward_hip(inputs[0], inputs[1], input_shape)};
+        }
+        else if (op_name == "avg_pool2d") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("avg_pool2d operation requires exactly 1 input");
+            }
+
+            int64_t kernel_size = attrs.contains("kernel_size") ? std::stoll(attrs.at("kernel_size")) : 2;
+            int64_t stride = attrs.contains("stride") ? std::stoll(attrs.at("stride")) : kernel_size;
+            int64_t padding = attrs.contains("padding") ? std::stoll(attrs.at("padding")) : 0;
+            bool count_include_pad = attrs.contains("count_include_pad") ? (attrs.at("count_include_pad") == "true") : true;
+
+            return {rocm::avgpool2d_forward_hip(inputs[0], kernel_size, kernel_size, stride, stride, padding, padding, count_include_pad)};
+        }
+        else if (op_name == "gather_relative_position_bias") {
+            if (inputs.size() != 2) {
+                throw std::invalid_argument("gather_relative_position_bias operation requires exactly 2 inputs");
+            }
+
+            int64_t num_positions = attrs.contains("num_positions") ? std::stoll(attrs.at("num_positions")) : 0;
+            int64_t num_heads = attrs.contains("num_heads") ? std::stoll(attrs.at("num_heads")) : 0;
+
+            return {rocm::gather_relative_position_bias_kernel(inputs[0], inputs[1], num_positions, num_heads, stream)};
+        }
+        else if (op_name == "adaptive_avg_pool2d") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("adaptive_avg_pool2d operation requires exactly 1 input");
+            }
+
+            int64_t output_h = attrs.contains("output_h") ? std::stoll(attrs.at("output_h")) : 1;
+            int64_t output_w = attrs.contains("output_w") ? std::stoll(attrs.at("output_w")) : 1;
+
+            return {rocm::adaptive_avgpool2d_forward(inputs[0], output_h, output_w, stream)};
+        }
+        else if (op_name == "adaptive_avg_pool2d_backward") {
+            if (inputs.size() != 1) {
+                throw std::invalid_argument("adaptive_avg_pool2d_backward operation requires exactly 1 input");
+            }
+
+            int64_t H_in = attrs.contains("H_in") ? std::stoll(attrs.at("H_in")) : 0;
+            int64_t W_in = attrs.contains("W_in") ? std::stoll(attrs.at("W_in")) : 0;
+
+            return {rocm::adaptive_avgpool2d_backward(inputs[0], H_in, W_in, stream)};
         }
         else {
             throw std::runtime_error("ROCmBackend: Unknown operation '" + op_name + "'");

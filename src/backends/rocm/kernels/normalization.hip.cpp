@@ -6,6 +6,7 @@
  */
 
 #include <hip/hip_runtime.h>
+#include <hip/hip_fp16.h>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include <stdexcept>
@@ -134,6 +135,70 @@ __global__ void layer_norm_forward_kernel(
     }
 }
 
+// Float16 Layer Norm Forward - uses float computation internally
+__global__ void layer_norm_forward_kernel_fp16(
+    const __half* input,
+    const __half* weight,
+    const __half* bias,
+    __half* output,
+    __half* mean_out,
+    __half* rstd_out,
+    int64_t batch_size,
+    int64_t normalized_size,
+    float eps
+) {
+    extern __shared__ unsigned char shared_mem[];
+    float* shared = reinterpret_cast<float*>(shared_mem);
+
+    int64_t batch_idx = blockIdx.x;
+    if (batch_idx >= batch_size) return;
+
+    const __half* input_row = input + batch_idx * normalized_size;
+    __half* output_row = output + batch_idx * normalized_size;
+
+    // Compute mean in float
+    float sum = 0.0f;
+    for (int64_t i = threadIdx.x; i < normalized_size; i += blockDim.x) {
+        sum += __half2float(input_row[i]);
+    }
+    sum = block_reduce_sum(sum, shared);
+    __syncthreads();
+
+    float mean = sum / static_cast<float>(normalized_size);
+    if (threadIdx.x == 0 && mean_out) {
+        mean_out[batch_idx] = __float2half(mean);
+    }
+
+    // Compute variance in float
+    float var_sum = 0.0f;
+    for (int64_t i = threadIdx.x; i < normalized_size; i += blockDim.x) {
+        float diff = __half2float(input_row[i]) - mean;
+        var_sum += diff * diff;
+    }
+    var_sum = block_reduce_sum(var_sum, shared);
+    __syncthreads();
+
+    float variance = var_sum / static_cast<float>(normalized_size);
+    float rstd = rsqrtf(variance + eps);
+    if (threadIdx.x == 0 && rstd_out) {
+        rstd_out[batch_idx] = __float2half(rstd);
+    }
+
+    // Normalize and apply affine transform
+    for (int64_t i = threadIdx.x; i < normalized_size; i += blockDim.x) {
+        float normalized = (__half2float(input_row[i]) - mean) * rstd;
+        if (weight && bias) {
+            output_row[i] = __float2half(normalized * __half2float(weight[i]) + __half2float(bias[i]));
+        } else if (weight) {
+            output_row[i] = __float2half(normalized * __half2float(weight[i]));
+        } else if (bias) {
+            output_row[i] = __float2half(normalized + __half2float(bias[i]));
+        } else {
+            output_row[i] = __float2half(normalized);
+        }
+    }
+}
+
 auto layer_norm_kernel(
     const Tensor& input,
     const std::vector<int64_t>& normalized_shape,
@@ -181,6 +246,15 @@ auto layer_norm_kernel(
             output.data<double>(),
             nullptr, nullptr,
             batch_size, normalized_size, static_cast<float>(eps));
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(layer_norm_forward_kernel_fp16,
+            dim3(batch_size), dim3(threads), shared_mem_size, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            weight ? reinterpret_cast<const __half*>(weight->data<Float16>()) : nullptr,
+            bias ? reinterpret_cast<const __half*>(bias->data<Float16>()) : nullptr,
+            reinterpret_cast<__half*>(output.data<Float16>()),
+            nullptr, nullptr,
+            batch_size, normalized_size, eps);
     } else {
         throw std::runtime_error("layer_norm_kernel: unsupported dtype");
     }
@@ -251,6 +325,74 @@ __global__ void layer_norm_backward_kernel(
     }
 }
 
+// Float16 Layer Norm Backward - uses float computation and accumulation
+__global__ void layer_norm_backward_kernel_fp16(
+    const __half* grad_output,
+    const __half* input,
+    const __half* weight,
+    const __half* mean,
+    const __half* rstd,
+    __half* grad_input,
+    float* grad_weight_f32,  // accumulate in float
+    float* grad_bias_f32,    // accumulate in float
+    int64_t batch_size,
+    int64_t normalized_size
+) {
+    extern __shared__ unsigned char shared_mem[];
+    float* shared = reinterpret_cast<float*>(shared_mem);
+
+    int64_t batch_idx = blockIdx.x;
+    if (batch_idx >= batch_size) return;
+
+    const __half* grad_out_row = grad_output + batch_idx * normalized_size;
+    const __half* input_row = input + batch_idx * normalized_size;
+    __half* grad_in_row = grad_input + batch_idx * normalized_size;
+
+    float m = __half2float(mean[batch_idx]);
+    float rs = __half2float(rstd[batch_idx]);
+
+    // Compute ds and db (dot products) in float
+    float ds = 0.0f;
+    float db = 0.0f;
+    for (int64_t i = threadIdx.x; i < normalized_size; i += blockDim.x) {
+        float x_hat = (__half2float(input_row[i]) - m) * rs;
+        float w = weight ? __half2float(weight[i]) : 1.0f;
+        float go = __half2float(grad_out_row[i]);
+        ds += go * w * x_hat;
+        db += go * w;
+    }
+
+    ds = block_reduce_sum(ds, shared);
+    __syncthreads();
+    db = block_reduce_sum(db, shared);
+    __syncthreads();
+
+    // Compute gradient for input
+    float scale = 1.0f / static_cast<float>(normalized_size);
+    for (int64_t i = threadIdx.x; i < normalized_size; i += blockDim.x) {
+        float x_hat = (__half2float(input_row[i]) - m) * rs;
+        float w = weight ? __half2float(weight[i]) : 1.0f;
+        float go = __half2float(grad_out_row[i]);
+        grad_in_row[i] = __float2half(rs * w * (go - scale * (db + x_hat * ds)));
+
+        // Accumulate gradients for weight and bias in float
+        if (grad_weight_f32) {
+            atomicAdd(&grad_weight_f32[i], go * x_hat);
+        }
+        if (grad_bias_f32) {
+            atomicAdd(&grad_bias_f32[i], go);
+        }
+    }
+}
+
+// Kernel to convert float gradients to half
+__global__ void convert_grad_f32_to_f16(const float* src, __half* dst, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        dst[idx] = __float2half(src[idx]);
+    }
+}
+
 auto layer_norm_backward_kernel(
     const Tensor& grad_output,
     const Tensor& input,
@@ -305,6 +447,44 @@ auto layer_norm_backward_kernel(
             weight ? grad_weight.data<double>() : nullptr,
             weight ? grad_bias.data<double>() : nullptr,
             batch_size, normalized_size);
+    } else if (input.dtype() == DType::Float16) {
+        // For Float16, we accumulate gradients in float then convert
+        Tensor grad_weight_f32, grad_bias_f32;
+        if (weight) {
+            grad_weight_f32 = Tensor({normalized_size}, DType::Float32, input.device());
+            grad_bias_f32 = Tensor({normalized_size}, DType::Float32, input.device());
+            HIP_CHECK(hipMemsetAsync(grad_weight_f32.data<uint8_t>(), 0,
+                grad_weight_f32.numel() * sizeof(float), stream));
+            HIP_CHECK(hipMemsetAsync(grad_bias_f32.data<uint8_t>(), 0,
+                grad_bias_f32.numel() * sizeof(float), stream));
+        }
+
+        hipLaunchKernelGGL(layer_norm_backward_kernel_fp16,
+            dim3(batch_size), dim3(threads), shared_mem_size, stream,
+            reinterpret_cast<const __half*>(grad_output.data<Float16>()),
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            weight ? reinterpret_cast<const __half*>(weight->data<Float16>()) : nullptr,
+            reinterpret_cast<const __half*>(mean.data<Float16>()),
+            reinterpret_cast<const __half*>(rstd.data<Float16>()),
+            reinterpret_cast<__half*>(grad_input.data<Float16>()),
+            weight ? grad_weight_f32.data<float>() : nullptr,
+            weight ? grad_bias_f32.data<float>() : nullptr,
+            batch_size, normalized_size);
+
+        // Convert float gradients back to Float16
+        if (weight) {
+            int convert_blocks = (normalized_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
+            hipLaunchKernelGGL(convert_grad_f32_to_f16,
+                dim3(convert_blocks), dim3(BLOCK_SIZE), 0, stream,
+                grad_weight_f32.data<float>(),
+                reinterpret_cast<__half*>(grad_weight.data<Float16>()),
+                normalized_size);
+            hipLaunchKernelGGL(convert_grad_f32_to_f16,
+                dim3(convert_blocks), dim3(BLOCK_SIZE), 0, stream,
+                grad_bias_f32.data<float>(),
+                reinterpret_cast<__half*>(grad_bias.data<Float16>()),
+                normalized_size);
+        }
     } else {
         throw std::runtime_error("layer_norm_backward_kernel: unsupported dtype");
     }
@@ -391,6 +571,78 @@ __global__ void group_norm_forward_kernel(
     }
 }
 
+// Float16 Group Norm Forward - uses float computation internally
+__global__ void group_norm_forward_kernel_fp16(
+    const __half* input,
+    const __half* weight,
+    const __half* bias,
+    __half* output,
+    int64_t N,
+    int64_t C,
+    int64_t HW,
+    int64_t num_groups,
+    int64_t channels_per_group,
+    float eps
+) {
+    extern __shared__ unsigned char shared_mem[];
+    float* shared = reinterpret_cast<float*>(shared_mem);
+
+    int64_t idx = blockIdx.x;
+    int64_t n = idx / num_groups;
+    int64_t g = idx % num_groups;
+
+    if (n >= N) return;
+
+    int64_t group_size = channels_per_group * HW;
+
+    // Compute mean in float
+    float sum = 0.0f;
+    for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
+        int64_t c_local = i / HW;
+        int64_t hw = i % HW;
+        int64_t c = g * channels_per_group + c_local;
+        sum += __half2float(input[n * C * HW + c * HW + hw]);
+    }
+    sum = block_reduce_sum(sum, shared);
+    __syncthreads();
+
+    float mean = sum / static_cast<float>(group_size);
+
+    // Compute variance in float
+    float var_sum = 0.0f;
+    for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
+        int64_t c_local = i / HW;
+        int64_t hw = i % HW;
+        int64_t c = g * channels_per_group + c_local;
+        float diff = __half2float(input[n * C * HW + c * HW + hw]) - mean;
+        var_sum += diff * diff;
+    }
+    var_sum = block_reduce_sum(var_sum, shared);
+    __syncthreads();
+
+    float variance = var_sum / static_cast<float>(group_size);
+    float rstd = rsqrtf(variance + eps);
+
+    // Normalize and apply affine
+    for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
+        int64_t c_local = i / HW;
+        int64_t hw = i % HW;
+        int64_t c = g * channels_per_group + c_local;
+        int64_t in_idx = n * C * HW + c * HW + hw;
+
+        float normalized = (__half2float(input[in_idx]) - mean) * rstd;
+        if (weight && bias) {
+            output[in_idx] = __float2half(normalized * __half2float(weight[c]) + __half2float(bias[c]));
+        } else if (weight) {
+            output[in_idx] = __float2half(normalized * __half2float(weight[c]));
+        } else if (bias) {
+            output[in_idx] = __float2half(normalized + __half2float(bias[c]));
+        } else {
+            output[in_idx] = __float2half(normalized);
+        }
+    }
+}
+
 auto group_norm_kernel(
     const Tensor& input,
     int64_t num_groups,
@@ -441,6 +693,14 @@ auto group_norm_kernel(
             bias ? bias->data<double>() : nullptr,
             output.data<double>(),
             N, C, HW, num_groups, channels_per_group, static_cast<float>(eps));
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(group_norm_forward_kernel_fp16,
+            dim3(blocks), dim3(threads), shared_mem_size, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            weight ? reinterpret_cast<const __half*>(weight->data<Float16>()) : nullptr,
+            bias ? reinterpret_cast<const __half*>(bias->data<Float16>()) : nullptr,
+            reinterpret_cast<__half*>(output.data<Float16>()),
+            N, C, HW, num_groups, channels_per_group, eps);
     } else {
         throw std::runtime_error("group_norm_kernel: unsupported dtype");
     }
@@ -510,6 +770,62 @@ __global__ void instance_norm_forward_kernel(
     }
 }
 
+// Float16 Instance Norm Forward - uses float computation internally
+__global__ void instance_norm_forward_kernel_fp16(
+    const __half* input,
+    const __half* weight,
+    const __half* bias,
+    __half* output,
+    int64_t N,
+    int64_t C,
+    int64_t HW,
+    float eps
+) {
+    extern __shared__ unsigned char shared_mem[];
+    float* shared = reinterpret_cast<float*>(shared_mem);
+
+    int64_t idx = blockIdx.x;
+    int64_t n = idx / C;
+    int64_t c = idx % C;
+
+    if (n >= N) return;
+
+    int64_t offset = n * C * HW + c * HW;
+    const __half* input_ptr = input + offset;
+    __half* output_ptr = output + offset;
+
+    // Compute mean in float
+    float sum = 0.0f;
+    for (int64_t i = threadIdx.x; i < HW; i += blockDim.x) {
+        sum += __half2float(input_ptr[i]);
+    }
+    sum = block_reduce_sum(sum, shared);
+    __syncthreads();
+
+    float mean = sum / static_cast<float>(HW);
+
+    // Compute variance in float
+    float var_sum = 0.0f;
+    for (int64_t i = threadIdx.x; i < HW; i += blockDim.x) {
+        float diff = __half2float(input_ptr[i]) - mean;
+        var_sum += diff * diff;
+    }
+    var_sum = block_reduce_sum(var_sum, shared);
+    __syncthreads();
+
+    float variance = var_sum / static_cast<float>(HW);
+    float rstd = rsqrtf(variance + eps);
+
+    // Normalize and apply affine
+    float w = weight ? __half2float(weight[c]) : 1.0f;
+    float b = bias ? __half2float(bias[c]) : 0.0f;
+
+    for (int64_t i = threadIdx.x; i < HW; i += blockDim.x) {
+        float normalized = (__half2float(input_ptr[i]) - mean) * rstd;
+        output_ptr[i] = __float2half(normalized * w + b);
+    }
+}
+
 auto instance_norm_kernel(
     const Tensor& input,
     const Tensor* weight,
@@ -552,6 +868,14 @@ auto instance_norm_kernel(
             bias ? bias->data<double>() : nullptr,
             output.data<double>(),
             N, C, HW, static_cast<float>(eps));
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(instance_norm_forward_kernel_fp16,
+            dim3(blocks), dim3(threads), shared_mem_size, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            weight ? reinterpret_cast<const __half*>(weight->data<Float16>()) : nullptr,
+            bias ? reinterpret_cast<const __half*>(bias->data<Float16>()) : nullptr,
+            reinterpret_cast<__half*>(output.data<Float16>()),
+            N, C, HW, eps);
     } else {
         throw std::runtime_error("instance_norm_kernel: unsupported dtype");
     }

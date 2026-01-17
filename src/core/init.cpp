@@ -1298,7 +1298,31 @@ auto initialize() -> void {
 
                 auto* rocm_backend = rocm_backend_ptr;
 
-                // Register all ROCm operations
+                // =========================================================================
+                // O(1) DISPATCH TABLE REGISTRATION FOR ROCm
+                // =========================================================================
+                DispatchTableRegistry::register_backend(Device::Type::ROCm, rocm_backend);
+                auto& rocm_table = DispatchTableRegistry::get_table(Device::Type::ROCm);
+
+                // Load the register_kernels function from the ROCm backend shared library
+                void* rocm_handle = dlopen(rocm_backend_path.c_str(), RTLD_NOW | RTLD_NOLOAD);
+                if (rocm_handle) {
+                    using RegisterFn = void(*)(BackendDispatchTable*);
+                    auto register_fn = reinterpret_cast<RegisterFn>(dlsym(rocm_handle, "register_kernels"));
+                    if (register_fn) {
+                        register_fn(&rocm_table);
+                        std::cout << "ROCm dispatch table initialized with O(1) lookup" << std::endl;
+                    } else {
+                        std::cerr << "Warning: Could not find register_kernels in ROCm backend" << std::endl;
+                    }
+                    dlclose(rocm_handle);
+                } else {
+                    std::cerr << "Warning: Could not reopen ROCm backend for kernel registration" << std::endl;
+                }
+
+                // =========================================================================
+                // LEGACY DISPATCH REGISTRATION (for backwards compatibility)
+                // =========================================================================
                 std::cout << "Registering ROCm kernels with operation registry" << std::endl;
 
                 // Basic math operations
@@ -1557,6 +1581,23 @@ auto initialize() -> void {
                         return rocm_backend->dispatch("batchnorm2d_backward", inputs, attrs);
                     });
 
+                // Vision operations
+                registry.register_kernel("gather_relative_position_bias", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("gather_relative_position_bias", inputs, attrs);
+                    });
+
+                // Adaptive pooling operations
+                registry.register_kernel("adaptive_avg_pool2d", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("adaptive_avg_pool2d", inputs, attrs);
+                    });
+
+                registry.register_kernel("adaptive_avg_pool2d_backward", Device::Type::ROCm,
+                    [rocm_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return rocm_backend->dispatch("adaptive_avg_pool2d_backward", inputs, attrs);
+                    });
+
                 std::cout << "ROCm operations registered successfully" << std::endl;
             } else {
                 std::cout << "ROCm backend loaded but no ROCm devices available" << std::endl;
@@ -1587,6 +1628,175 @@ auto initialize() -> void {
 
                 auto* oneapi_backend = oneapi_backend_ptr;
 
+                // =========================================================================
+                // O(1) DISPATCH TABLE REGISTRATION FOR ONEAPI
+                // =========================================================================
+                DispatchTableRegistry::register_backend(Device::Type::OneAPI, oneapi_backend);
+                auto& oneapi_table = DispatchTableRegistry::get_table(Device::Type::OneAPI);
+
+                // Helper macro to register OneAPI kernels with non-capturing lambdas
+                #define ONEAPI_REGISTER(op_id, op_name) \
+                    oneapi_table.register_kernel(OpId::op_id, \
+                        [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> { \
+                            return DispatchTableRegistry::get_backend(Device::Type::OneAPI)->dispatch(op_name, inputs, attrs); \
+                        })
+
+                // Arithmetic operations
+                ONEAPI_REGISTER(Add, "add");
+                ONEAPI_REGISTER(Sub, "sub");
+                ONEAPI_REGISTER(Mul, "mul");
+                ONEAPI_REGISTER(Div, "div");
+                ONEAPI_REGISTER(MatMul, "matmul");
+                ONEAPI_REGISTER(Bmm, "bmm");
+                ONEAPI_REGISTER(Dot, "dot");
+                ONEAPI_REGISTER(Pow, "pow");
+
+                // Inplace operations
+                ONEAPI_REGISTER(AddInplace, "add_inplace");
+                ONEAPI_REGISTER(SubInplace, "sub_inplace");
+                ONEAPI_REGISTER(MulInplace, "mul_inplace");
+                ONEAPI_REGISTER(DivInplace, "div_inplace");
+
+                // Unary math operations
+                ONEAPI_REGISTER(Sqrt, "sqrt");
+                ONEAPI_REGISTER(Neg, "neg");
+                ONEAPI_REGISTER(Abs, "abs");
+                ONEAPI_REGISTER(Sign, "sign");
+                ONEAPI_REGISTER(Log, "log");
+                ONEAPI_REGISTER(Exp, "exp");
+                ONEAPI_REGISTER(Reciprocal, "reciprocal");
+                ONEAPI_REGISTER(Floor, "floor");
+                ONEAPI_REGISTER(Ceil, "ceil");
+                ONEAPI_REGISTER(Round, "round");
+
+                // Trigonometric operations
+                ONEAPI_REGISTER(Sin, "sin");
+                ONEAPI_REGISTER(Cos, "cos");
+                ONEAPI_REGISTER(Tan, "tan");
+                ONEAPI_REGISTER(Asin, "asin");
+                ONEAPI_REGISTER(Acos, "acos");
+                ONEAPI_REGISTER(Atan, "atan");
+                ONEAPI_REGISTER(Sinh, "sinh");
+                ONEAPI_REGISTER(Cosh, "cosh");
+                ONEAPI_REGISTER(Tanh, "tanh");
+
+                // Clamp operations
+                ONEAPI_REGISTER(Clamp, "clamp");
+                ONEAPI_REGISTER(ClampMin, "clamp_min");
+                ONEAPI_REGISTER(ClampMax, "clamp_max");
+
+                // Comparison operations
+                ONEAPI_REGISTER(Eq, "eq");
+                ONEAPI_REGISTER(Ne, "ne");
+                ONEAPI_REGISTER(Lt, "lt");
+                ONEAPI_REGISTER(Le, "le");
+                ONEAPI_REGISTER(Gt, "gt");
+                ONEAPI_REGISTER(Ge, "ge");
+
+                // Reduction operations
+                ONEAPI_REGISTER(Sum, "sum");
+                ONEAPI_REGISTER(Mean, "mean");
+                ONEAPI_REGISTER(Max, "max");
+                ONEAPI_REGISTER(Min, "min");
+                ONEAPI_REGISTER(ArgMax, "argmax");
+                ONEAPI_REGISTER(ArgMin, "argmin");
+                ONEAPI_REGISTER(Prod, "prod");
+                ONEAPI_REGISTER(Var, "var");
+                ONEAPI_REGISTER(Std, "std");
+                ONEAPI_REGISTER(Norm, "norm");
+
+                // Activation functions
+                ONEAPI_REGISTER(ReLU, "relu");
+                ONEAPI_REGISTER(ReLUBackward, "relu_backward");
+                ONEAPI_REGISTER(Sigmoid, "sigmoid");
+                ONEAPI_REGISTER(SigmoidBackward, "sigmoid_backward");
+                ONEAPI_REGISTER(TanhBackward, "tanh_backward");
+                ONEAPI_REGISTER(Gelu, "gelu");
+                ONEAPI_REGISTER(GeluBackward, "gelu_backward");
+                ONEAPI_REGISTER(Swish, "swish");
+                ONEAPI_REGISTER(SwishBackward, "swish_backward");
+                ONEAPI_REGISTER(LeakyReLU, "leaky_relu");
+                ONEAPI_REGISTER(LeakyReLUBackward, "leaky_relu_backward");
+                ONEAPI_REGISTER(Softmax, "softmax");
+                ONEAPI_REGISTER(SoftmaxBackward, "softmax_backward");
+                ONEAPI_REGISTER(LogSoftmax, "log_softmax");
+                ONEAPI_REGISTER(LogSoftmaxBackward, "log_softmax_backward");
+
+                // Shape operations
+                ONEAPI_REGISTER(Reshape, "reshape");
+                ONEAPI_REGISTER(Transpose, "transpose");
+                ONEAPI_REGISTER(Permute, "permute");
+                ONEAPI_REGISTER(Squeeze, "squeeze");
+                ONEAPI_REGISTER(Unsqueeze, "unsqueeze");
+                ONEAPI_REGISTER(Contiguous, "contiguous");
+                ONEAPI_REGISTER(Clone, "clone");
+                ONEAPI_REGISTER(Fill, "fill");
+                ONEAPI_REGISTER(Repeat, "repeat");
+                ONEAPI_REGISTER(Expand, "expand");
+                ONEAPI_REGISTER(Cat, "cat");
+
+                // Indexing operations
+                ONEAPI_REGISTER(IndexSelect, "index_select");
+                ONEAPI_REGISTER(Gather, "gather");
+                ONEAPI_REGISTER(Scatter, "scatter");
+                ONEAPI_REGISTER(MaskedSelect, "masked_select");
+                ONEAPI_REGISTER(MaskedFill, "masked_fill");
+                ONEAPI_REGISTER(Where, "where");
+
+                // Convolution operations
+                ONEAPI_REGISTER(Conv2dForward, "conv2d_forward");
+                ONEAPI_REGISTER(Conv2dBackwardInput, "conv2d_backward_input");
+                ONEAPI_REGISTER(Conv2dBackwardWeight, "conv2d_backward_weight");
+                ONEAPI_REGISTER(Conv2dBackwardBias, "conv2d_backward_bias");
+
+                // Pooling operations
+                ONEAPI_REGISTER(AvgPool2dForward, "avg_pool2d");
+                ONEAPI_REGISTER(AvgPool2dBackward, "avg_pool2d_backward");
+                ONEAPI_REGISTER(MaxPool2dForward, "max_pool2d");
+                ONEAPI_REGISTER(MaxPool2dBackward, "max_pool2d_backward");
+                ONEAPI_REGISTER(AdaptiveAvgPool2d, "adaptive_avg_pool2d");
+                ONEAPI_REGISTER(AdaptiveAvgPool2dBackward, "adaptive_avg_pool2d_backward");
+                ONEAPI_REGISTER(AdaptiveMaxPool2d, "adaptive_max_pool2d");
+
+                // Batch normalization operations
+                ONEAPI_REGISTER(BatchNorm2dMeanVar, "batchnorm2d_mean_var");
+                ONEAPI_REGISTER(BatchNorm2dForward, "batchnorm2d_forward");
+                ONEAPI_REGISTER(BatchNorm2dForwardAffine, "batchnorm2d_forward_affine");
+                ONEAPI_REGISTER(BatchNorm2dUpdateRunningStats, "batchnorm2d_update_running_stats");
+                ONEAPI_REGISTER(BatchNorm2dBackward, "batchnorm2d_backward");
+
+                // Creation operations
+                ONEAPI_REGISTER(Zeros, "zeros");
+                ONEAPI_REGISTER(Ones, "ones");
+                ONEAPI_REGISTER(Full, "full");
+                ONEAPI_REGISTER(Rand, "rand");
+                ONEAPI_REGISTER(Randn, "randn");
+
+                // Embedding operations
+                ONEAPI_REGISTER(Embedding, "embedding_lookup");
+                ONEAPI_REGISTER(EmbeddingBackward, "embedding_backward");
+
+                // RNN operations
+                ONEAPI_REGISTER(LSTMCellForward, "lstm_cell_forward");
+                ONEAPI_REGISTER(LSTMCellBackward, "lstm_cell_backward");
+                ONEAPI_REGISTER(GRUCellForward, "gru_cell_forward");
+                ONEAPI_REGISTER(GRUCellBackward, "gru_cell_backward");
+
+                // Fused operations
+                ONEAPI_REGISTER(FusedAddReLU, "fused_add_relu");
+                ONEAPI_REGISTER(FusedGelu, "fused_gelu");
+                ONEAPI_REGISTER(FusedLayerNorm, "fused_layer_norm");
+                ONEAPI_REGISTER(FusedLinearReLU, "fused_linear_relu");
+                ONEAPI_REGISTER(FusedBatchNormReLU, "fused_batchnorm_relu");
+                ONEAPI_REGISTER(FusedSoftmaxCrossEntropy, "fused_softmax_cross_entropy");
+
+                #undef ONEAPI_REGISTER
+
+                std::cout << "OneAPI dispatch table initialized with O(1) lookup" << std::endl;
+
+                // =========================================================================
+                // LEGACY DISPATCH REGISTRATION (for backwards compatibility)
+                // =========================================================================
                 // Register essential OneAPI operations
                 std::cout << "Registering OneAPI kernels with operation registry" << std::endl;
 
@@ -1615,6 +1825,11 @@ auto initialize() -> void {
                 registry.register_kernel("matmul", Device::Type::OneAPI,
                     [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
                         return oneapi_backend->dispatch("matmul", inputs, attrs);
+                    });
+
+                registry.register_kernel("bmm", Device::Type::OneAPI,
+                    [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return oneapi_backend->dispatch("bmm", inputs, attrs);
                     });
 
                 registry.register_kernel("conv2d_forward", Device::Type::OneAPI,

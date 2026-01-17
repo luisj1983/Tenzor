@@ -1,4 +1,5 @@
 #include <hip/hip_runtime.h>
+#include <hip/hip_fp16.h>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include "tenzor/core/shape.hpp"
@@ -114,10 +115,16 @@ auto contiguous_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
             input.data<int64_t>(), result.data<int64_t>(),
             d_strides, d_shape, ndim, total_elements);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(contiguous_kernel_impl<__half>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(result.data<Float16>()),
+            d_strides, d_shape, ndim, total_elements);
     } else {
         hipFree(d_strides);
         hipFree(d_shape);
-        throw std::runtime_error("Contiguous only supports Float32, Float64, Int32, and Int64 dtypes");
+        throw std::runtime_error("Contiguous only supports Float32, Float64, Float16, Int32, and Int64 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -848,6 +855,12 @@ auto expand_kernel(const Tensor& input, const std::vector<int64_t>& new_shape, v
         hipLaunchKernelGGL(expand_kernel_impl<int64_t>,
             dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
             input.data<int64_t>(), output.data<int64_t>(),
+            d_input_shape, d_input_strides, d_output_shape, ndim, total_elements);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(expand_kernel_impl<__half>,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(output.data<Float16>()),
             d_input_shape, d_input_strides, d_output_shape, ndim, total_elements);
     } else {
         HIP_CHECK(hipFree(d_input_shape));

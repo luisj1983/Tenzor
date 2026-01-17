@@ -9,8 +9,11 @@
 
 #include "tenzor/core/tensor.hpp"
 #include <hip/hip_runtime.h>
+#include <hip/hip_fp16.h>
 #include <cfloat>
 #include <cmath>
+#include <cstdint>
+#include <climits>
 #include <algorithm>
 #include <stdexcept>
 
@@ -21,7 +24,7 @@ namespace rocm {
 // Constants
 // ============================================================================
 
-constexpr int WAVEFRONT_SIZE = 64;  // AMD GPU wavefront size
+constexpr int WAVEFRONT_SIZE = 32;  // AMD GPU wavefront size (32 for RDNA/wave32, compatible with wave64)
 constexpr int MAX_BLOCK_SIZE = 1024;
 constexpr int REDUCTION_BLOCK_SIZE = 256;
 
@@ -431,6 +434,169 @@ __global__ void min_along_dim_kernel(
     output[out_idx] = min_val;
 }
 
+/**
+ * @brief Argmax reduction along a specific dimension
+ * @tparam T Data type
+ */
+template<typename T>
+__global__ void argmax_along_dim_kernel(
+    const T* input,
+    int64_t* output,
+    const int64_t* input_shape,
+    const int64_t* input_strides,
+    int64_t ndim,
+    int64_t dim,
+    int64_t output_size,
+    int64_t dim_size
+) {
+    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (out_idx >= output_size) return;
+
+    // Compute multi-dimensional indices
+    int64_t indices[8];
+    int64_t tmp = out_idx;
+
+    for (int64_t d = 0; d < ndim; d++) {
+        if (d == dim) {
+            indices[d] = 0;
+            continue;
+        }
+        indices[d] = tmp % input_shape[d];
+        tmp /= input_shape[d];
+    }
+
+    // Find argmax along the reduction dimension
+    indices[dim] = 0;
+    int64_t in_idx = 0;
+    for (int64_t d = 0; d < ndim; d++) {
+        in_idx += indices[d] * input_strides[d];
+    }
+    T max_val = input[in_idx];
+    int64_t max_idx = 0;
+
+    for (int64_t i = 1; i < dim_size; i++) {
+        indices[dim] = i;
+        in_idx = 0;
+        for (int64_t d = 0; d < ndim; d++) {
+            in_idx += indices[d] * input_strides[d];
+        }
+        T val = input[in_idx];
+        if (val > max_val) {
+            max_val = val;
+            max_idx = i;
+        }
+    }
+
+    output[out_idx] = max_idx;
+}
+
+/**
+ * @brief Argmin reduction along a specific dimension
+ * @tparam T Data type
+ */
+template<typename T>
+__global__ void argmin_along_dim_kernel(
+    const T* input,
+    int64_t* output,
+    const int64_t* input_shape,
+    const int64_t* input_strides,
+    int64_t ndim,
+    int64_t dim,
+    int64_t output_size,
+    int64_t dim_size
+) {
+    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (out_idx >= output_size) return;
+
+    // Compute multi-dimensional indices
+    int64_t indices[8];
+    int64_t tmp = out_idx;
+
+    for (int64_t d = 0; d < ndim; d++) {
+        if (d == dim) {
+            indices[d] = 0;
+            continue;
+        }
+        indices[d] = tmp % input_shape[d];
+        tmp /= input_shape[d];
+    }
+
+    // Find argmin along the reduction dimension
+    indices[dim] = 0;
+    int64_t in_idx = 0;
+    for (int64_t d = 0; d < ndim; d++) {
+        in_idx += indices[d] * input_strides[d];
+    }
+    T min_val = input[in_idx];
+    int64_t min_idx = 0;
+
+    for (int64_t i = 1; i < dim_size; i++) {
+        indices[dim] = i;
+        in_idx = 0;
+        for (int64_t d = 0; d < ndim; d++) {
+            in_idx += indices[d] * input_strides[d];
+        }
+        T val = input[in_idx];
+        if (val < min_val) {
+            min_val = val;
+            min_idx = i;
+        }
+    }
+
+    output[out_idx] = min_idx;
+}
+
+/**
+ * @brief Product reduction along a specific dimension
+ * @tparam T Data type
+ */
+template<typename T>
+__global__ void prod_along_dim_kernel(
+    const T* input,
+    T* output,
+    const int64_t* input_shape,
+    const int64_t* input_strides,
+    int64_t ndim,
+    int64_t dim,
+    int64_t output_size,
+    int64_t dim_size
+) {
+    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (out_idx >= output_size) return;
+
+    // Compute multi-dimensional indices
+    int64_t indices[8];
+    int64_t tmp = out_idx;
+
+    for (int64_t d = 0; d < ndim; d++) {
+        if (d == dim) {
+            indices[d] = 0;
+            continue;
+        }
+        indices[d] = tmp % input_shape[d];
+        tmp /= input_shape[d];
+    }
+
+    // Product along the reduction dimension
+    T prod_val = T(1);
+    for (int64_t i = 0; i < dim_size; i++) {
+        indices[dim] = i;
+
+        // Compute flat index
+        int64_t in_idx = 0;
+        for (int64_t d = 0; d < ndim; d++) {
+            in_idx += indices[d] * input_strides[d];
+        }
+
+        prod_val *= input[in_idx];
+    }
+
+    output[out_idx] = prod_val;
+}
+
 // ============================================================================
 // Scaling kernel for mean computation
 // ============================================================================
@@ -447,6 +613,15 @@ __global__ void scale_kernel(T* data, T scale, int64_t n) {
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx < n) {
         data[idx] *= scale;
+    }
+}
+
+// Specialized scale kernel for Float16 - compute in float for precision
+__global__ void scale_kernel_fp16(__half* data, float scale, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float val = __half2float(data[idx]);
+        data[idx] = __float2half(val * scale);
     }
 }
 
@@ -637,6 +812,8 @@ static void launch_dim_reduction_sum(
     hipLaunchKernelGGL(sum_along_dim_kernel<T>, dim3(num_blocks), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
         d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size);
 
+    // Must wait for kernel to complete before freeing device memory it uses
+    HIP_CHECK(hipStreamSynchronize(stream));
     HIP_CHECK(hipFree(d_shape));
     HIP_CHECK(hipFree(d_strides));
 }
@@ -679,6 +856,8 @@ static void launch_dim_reduction_max(
     hipLaunchKernelGGL(max_along_dim_kernel<T>, dim3(num_blocks), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
         d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size);
 
+    // Must wait for kernel to complete before freeing device memory it uses
+    HIP_CHECK(hipStreamSynchronize(stream));
     HIP_CHECK(hipFree(d_shape));
     HIP_CHECK(hipFree(d_strides));
 }
@@ -721,6 +900,137 @@ static void launch_dim_reduction_min(
     hipLaunchKernelGGL(min_along_dim_kernel<T>, dim3(num_blocks), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
         d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size);
 
+    // Must wait for kernel to complete before freeing device memory it uses
+    HIP_CHECK(hipStreamSynchronize(stream));
+    HIP_CHECK(hipFree(d_shape));
+    HIP_CHECK(hipFree(d_strides));
+}
+
+/**
+ * @brief Launch dimensional argmax
+ * @tparam T Data type
+ */
+template<typename T>
+static void launch_dim_argmax(
+    const T* d_input,
+    int64_t* d_output,
+    const std::vector<int64_t>& input_shape,
+    const std::vector<int64_t>& input_strides,
+    int64_t dim,
+    hipStream_t stream
+) {
+    const int64_t ndim = input_shape.size();
+    const int64_t dim_size = input_shape[dim];
+
+    int64_t output_size = 1;
+    for (int64_t i = 0; i < ndim; i++) {
+        if (i != dim) {
+            output_size *= input_shape[i];
+        }
+    }
+
+    if (output_size == 0 || dim_size == 0) {
+        return;
+    }
+
+    int64_t* d_shape;
+    int64_t* d_strides;
+    HIP_CHECK(hipMalloc(&d_shape, ndim * sizeof(int64_t)));
+    HIP_CHECK(hipMalloc(&d_strides, ndim * sizeof(int64_t)));
+    HIP_CHECK(hipMemcpy(d_shape, input_shape.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(d_strides, input_strides.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
+
+    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+    hipLaunchKernelGGL(argmax_along_dim_kernel<T>, dim3(num_blocks), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+        d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size);
+
+    HIP_CHECK(hipStreamSynchronize(stream));
+    HIP_CHECK(hipFree(d_shape));
+    HIP_CHECK(hipFree(d_strides));
+}
+
+/**
+ * @brief Launch dimensional argmin
+ * @tparam T Data type
+ */
+template<typename T>
+static void launch_dim_argmin(
+    const T* d_input,
+    int64_t* d_output,
+    const std::vector<int64_t>& input_shape,
+    const std::vector<int64_t>& input_strides,
+    int64_t dim,
+    hipStream_t stream
+) {
+    const int64_t ndim = input_shape.size();
+    const int64_t dim_size = input_shape[dim];
+
+    int64_t output_size = 1;
+    for (int64_t i = 0; i < ndim; i++) {
+        if (i != dim) {
+            output_size *= input_shape[i];
+        }
+    }
+
+    if (output_size == 0 || dim_size == 0) {
+        return;
+    }
+
+    int64_t* d_shape;
+    int64_t* d_strides;
+    HIP_CHECK(hipMalloc(&d_shape, ndim * sizeof(int64_t)));
+    HIP_CHECK(hipMalloc(&d_strides, ndim * sizeof(int64_t)));
+    HIP_CHECK(hipMemcpy(d_shape, input_shape.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(d_strides, input_strides.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
+
+    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+    hipLaunchKernelGGL(argmin_along_dim_kernel<T>, dim3(num_blocks), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+        d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size);
+
+    HIP_CHECK(hipStreamSynchronize(stream));
+    HIP_CHECK(hipFree(d_shape));
+    HIP_CHECK(hipFree(d_strides));
+}
+
+/**
+ * @brief Launch dimensional product
+ * @tparam T Data type
+ */
+template<typename T>
+static void launch_dim_prod(
+    const T* d_input,
+    T* d_output,
+    const std::vector<int64_t>& input_shape,
+    const std::vector<int64_t>& input_strides,
+    int64_t dim,
+    hipStream_t stream
+) {
+    const int64_t ndim = input_shape.size();
+    const int64_t dim_size = input_shape[dim];
+
+    int64_t output_size = 1;
+    for (int64_t i = 0; i < ndim; i++) {
+        if (i != dim) {
+            output_size *= input_shape[i];
+        }
+    }
+
+    if (output_size == 0 || dim_size == 0) {
+        return;
+    }
+
+    int64_t* d_shape;
+    int64_t* d_strides;
+    HIP_CHECK(hipMalloc(&d_shape, ndim * sizeof(int64_t)));
+    HIP_CHECK(hipMalloc(&d_strides, ndim * sizeof(int64_t)));
+    HIP_CHECK(hipMemcpy(d_shape, input_shape.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(d_strides, input_strides.data(), ndim * sizeof(int64_t), hipMemcpyHostToDevice));
+
+    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+    hipLaunchKernelGGL(prod_along_dim_kernel<T>, dim3(num_blocks), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+        d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size);
+
+    HIP_CHECK(hipStreamSynchronize(stream));
     HIP_CHECK(hipFree(d_shape));
     HIP_CHECK(hipFree(d_strides));
 }
@@ -742,10 +1052,17 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stre
     const auto& device = input.device();
     const auto& input_shape = input.shape();
     const auto& input_strides = input.strides();
+    const int64_t ndim = static_cast<int64_t>(input_shape.size());
+
+    // Normalize negative dimension (but preserve special value INT64_MIN for full reduction)
+    bool full_reduction = (dim == INT64_MIN);
+    if (dim < 0 && dim != INT64_MIN) {
+        dim += ndim;
+    }
 
     auto output_shape = compute_reduction_shape(
         std::vector<int64_t>(input_shape.begin(), input_shape.end()),
-        dim, keepdim
+        full_reduction ? -1 : dim, keepdim
     );
 
     Tensor output(output_shape, dtype, device);
@@ -755,7 +1072,7 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stre
             auto* input_data = input.data<float>();
             auto* output_data = output.data<float>();
 
-            if (dim < 0) {
+            if (full_reduction) {
                 launch_full_reduction_sum(input_data, output_data, input.numel(), stream);
             } else {
                 launch_dim_reduction_sum(
@@ -771,7 +1088,7 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stre
             auto* input_data = input.data<double>();
             auto* output_data = output.data<double>();
 
-            if (dim < 0) {
+            if (full_reduction) {
                 launch_full_reduction_sum(input_data, output_data, input.numel(), stream);
             } else {
                 launch_dim_reduction_sum(
@@ -787,7 +1104,7 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stre
             auto* input_data = input.data<int32_t>();
             auto* output_data = output.data<int32_t>();
 
-            if (dim < 0) {
+            if (full_reduction) {
                 launch_full_reduction_sum(input_data, output_data, input.numel(), stream);
             } else {
                 launch_dim_reduction_sum(
@@ -803,7 +1120,23 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stre
             auto* input_data = input.data<int64_t>();
             auto* output_data = output.data<int64_t>();
 
-            if (dim < 0) {
+            if (full_reduction) {
+                launch_full_reduction_sum(input_data, output_data, input.numel(), stream);
+            } else {
+                launch_dim_reduction_sum(
+                    input_data, output_data,
+                    std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                    std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                    dim, stream
+                );
+            }
+            break;
+        }
+        case DType::Float16: {
+            auto* input_data = reinterpret_cast<const __half*>(input.data<Float16>());
+            auto* output_data = reinterpret_cast<__half*>(output.data<Float16>());
+
+            if (full_reduction) {
                 launch_full_reduction_sum(input_data, output_data, input.numel(), stream);
             } else {
                 launch_dim_reduction_sum(
@@ -837,17 +1170,24 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stre
  */
 auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stream) -> Tensor {
     const auto dtype = input.dtype();
+    const int64_t ndim = input.ndim();
 
-    if (dtype != DType::Float32 && dtype != DType::Float64) {
-        throw std::runtime_error("mean: only Float32 and Float64 are supported");
+    if (dtype != DType::Float32 && dtype != DType::Float64 && dtype != DType::Float16) {
+        throw std::runtime_error("mean: only Float32, Float64, and Float16 are supported");
+    }
+
+    // Normalize negative dimension (but preserve special value INT64_MIN for full reduction)
+    bool full_reduction = (dim == INT64_MIN);
+    if (dim < 0 && dim != INT64_MIN) {
+        dim += ndim;
     }
 
     // Compute sum first
-    auto sum_result = sum_kernel(input, dim, keepdim, stream);
+    auto sum_result = sum_kernel(input, full_reduction ? INT64_MIN : dim, keepdim, stream);
 
     // Compute count
     int64_t count;
-    if (dim < 0) {
+    if (full_reduction) {
         count = input.numel();
     } else {
         count = input.shape()[dim];
@@ -867,12 +1207,19 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t str
         int num_blocks = (n + 255) / 256;
         hipLaunchKernelGGL(scale_kernel<float>, dim3(num_blocks), dim3(256), 0, stream,
             data, scale, n);
-    } else {  // Float64
+    } else if (dtype == DType::Float64) {
         auto* data = sum_result.data<double>();
         const double scale = 1.0 / static_cast<double>(count);
 
         int num_blocks = (n + 255) / 256;
         hipLaunchKernelGGL(scale_kernel<double>, dim3(num_blocks), dim3(256), 0, stream,
+            data, scale, n);
+    } else {  // Float16
+        auto* data = reinterpret_cast<__half*>(sum_result.data<Float16>());
+        const float scale = 1.0f / static_cast<float>(count);
+
+        int num_blocks = (n + 255) / 256;
+        hipLaunchKernelGGL(scale_kernel_fp16, dim3(num_blocks), dim3(256), 0, stream,
             data, scale, n);
     }
 
@@ -893,10 +1240,17 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stre
     const auto& device = input.device();
     const auto& input_shape = input.shape();
     const auto& input_strides = input.strides();
+    const int64_t ndim = static_cast<int64_t>(input_shape.size());
+
+    // Normalize negative dimension (but preserve special value INT64_MIN for full reduction)
+    bool full_reduction = (dim == INT64_MIN);
+    if (dim < 0 && dim != INT64_MIN) {
+        dim += ndim;
+    }
 
     auto output_shape = compute_reduction_shape(
         std::vector<int64_t>(input_shape.begin(), input_shape.end()),
-        dim, keepdim
+        full_reduction ? -1 : dim, keepdim
     );
 
     Tensor output(output_shape, dtype, device);
@@ -906,7 +1260,7 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stre
             auto* input_data = input.data<float>();
             auto* output_data = output.data<float>();
 
-            if (dim < 0) {
+            if (full_reduction) {
                 launch_full_reduction_max(input_data, output_data, input.numel(), stream);
             } else {
                 launch_dim_reduction_max(
@@ -922,7 +1276,7 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stre
             auto* input_data = input.data<double>();
             auto* output_data = output.data<double>();
 
-            if (dim < 0) {
+            if (full_reduction) {
                 launch_full_reduction_max(input_data, output_data, input.numel(), stream);
             } else {
                 launch_dim_reduction_max(
@@ -938,7 +1292,7 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stre
             auto* input_data = input.data<int32_t>();
             auto* output_data = output.data<int32_t>();
 
-            if (dim < 0) {
+            if (full_reduction) {
                 launch_full_reduction_max(input_data, output_data, input.numel(), stream);
             } else {
                 launch_dim_reduction_max(
@@ -954,7 +1308,7 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t stre
             auto* input_data = input.data<int64_t>();
             auto* output_data = output.data<int64_t>();
 
-            if (dim < 0) {
+            if (full_reduction) {
                 launch_full_reduction_max(input_data, output_data, input.numel(), stream);
             } else {
                 launch_dim_reduction_max(
@@ -1335,7 +1689,45 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t s
             throw std::runtime_error("argmax: unsupported dtype");
         }
     } else {
-        throw std::runtime_error("argmax along specific dimension not yet implemented");
+        // Dimensional argmax
+        const auto& input_strides = input.strides();
+
+        switch (dtype) {
+            case DType::Float32:
+                launch_dim_argmax(
+                    input.data<float>(), output.data<int64_t>(),
+                    std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                    std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                    dim, stream
+                );
+                break;
+            case DType::Float64:
+                launch_dim_argmax(
+                    input.data<double>(), output.data<int64_t>(),
+                    std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                    std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                    dim, stream
+                );
+                break;
+            case DType::Int32:
+                launch_dim_argmax(
+                    input.data<int32_t>(), output.data<int64_t>(),
+                    std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                    std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                    dim, stream
+                );
+                break;
+            case DType::Int64:
+                launch_dim_argmax(
+                    input.data<int64_t>(), output.data<int64_t>(),
+                    std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                    std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                    dim, stream
+                );
+                break;
+            default:
+                throw std::runtime_error("argmax: unsupported dtype for dimensional reduction");
+        }
     }
 
     HIP_CHECK(hipGetLastError());
@@ -1425,7 +1817,45 @@ auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t s
             throw std::runtime_error("argmin: unsupported dtype");
         }
     } else {
-        throw std::runtime_error("argmin along specific dimension not yet implemented");
+        // Dimensional argmin
+        const auto& input_strides = input.strides();
+
+        switch (dtype) {
+            case DType::Float32:
+                launch_dim_argmin(
+                    input.data<float>(), output.data<int64_t>(),
+                    std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                    std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                    dim, stream
+                );
+                break;
+            case DType::Float64:
+                launch_dim_argmin(
+                    input.data<double>(), output.data<int64_t>(),
+                    std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                    std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                    dim, stream
+                );
+                break;
+            case DType::Int32:
+                launch_dim_argmin(
+                    input.data<int32_t>(), output.data<int64_t>(),
+                    std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                    std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                    dim, stream
+                );
+                break;
+            case DType::Int64:
+                launch_dim_argmin(
+                    input.data<int64_t>(), output.data<int64_t>(),
+                    std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                    std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                    dim, stream
+                );
+                break;
+            default:
+                throw std::runtime_error("argmin: unsupported dtype for dimensional reduction");
+        }
     }
 
     HIP_CHECK(hipGetLastError());
@@ -1493,11 +1923,91 @@ auto prod_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t str
             }
 
             HIP_CHECK(hipFree(d_partial));
+        } else if (dtype == DType::Int32) {
+            int32_t* d_partial;
+            HIP_CHECK(hipMalloc(&d_partial, num_blocks * sizeof(int32_t)));
+
+            hipLaunchKernelGGL(prod_kernel<int32_t>, dim3(num_blocks), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+                input.data<int32_t>(), d_partial, n);
+
+            if (num_blocks > 1) {
+                std::vector<int32_t> h_partial(num_blocks);
+                HIP_CHECK(hipMemcpy(h_partial.data(), d_partial, num_blocks * sizeof(int32_t), hipMemcpyDeviceToHost));
+
+                int32_t prod = 1;
+                for (int i = 0; i < num_blocks; ++i) {
+                    prod *= h_partial[i];
+                }
+                HIP_CHECK(hipMemcpy(output.data<int32_t>(), &prod, sizeof(int32_t), hipMemcpyHostToDevice));
+            } else {
+                HIP_CHECK(hipMemcpy(output.data<int32_t>(), d_partial, sizeof(int32_t), hipMemcpyDeviceToDevice));
+            }
+
+            HIP_CHECK(hipFree(d_partial));
+        } else if (dtype == DType::Int64) {
+            int64_t* d_partial;
+            HIP_CHECK(hipMalloc(&d_partial, num_blocks * sizeof(int64_t)));
+
+            hipLaunchKernelGGL(prod_kernel<int64_t>, dim3(num_blocks), dim3(REDUCTION_BLOCK_SIZE), 0, stream,
+                input.data<int64_t>(), d_partial, n);
+
+            if (num_blocks > 1) {
+                std::vector<int64_t> h_partial(num_blocks);
+                HIP_CHECK(hipMemcpy(h_partial.data(), d_partial, num_blocks * sizeof(int64_t), hipMemcpyDeviceToHost));
+
+                int64_t prod = 1;
+                for (int i = 0; i < num_blocks; ++i) {
+                    prod *= h_partial[i];
+                }
+                HIP_CHECK(hipMemcpy(output.data<int64_t>(), &prod, sizeof(int64_t), hipMemcpyHostToDevice));
+            } else {
+                HIP_CHECK(hipMemcpy(output.data<int64_t>(), d_partial, sizeof(int64_t), hipMemcpyDeviceToDevice));
+            }
+
+            HIP_CHECK(hipFree(d_partial));
         } else {
             throw std::runtime_error("prod: unsupported dtype");
         }
     } else {
-        throw std::runtime_error("prod along specific dimension not yet implemented");
+        // Dimensional product
+        const auto& input_strides = input.strides();
+
+        switch (dtype) {
+            case DType::Float32:
+                launch_dim_prod(
+                    input.data<float>(), output.data<float>(),
+                    std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                    std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                    dim, stream
+                );
+                break;
+            case DType::Float64:
+                launch_dim_prod(
+                    input.data<double>(), output.data<double>(),
+                    std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                    std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                    dim, stream
+                );
+                break;
+            case DType::Int32:
+                launch_dim_prod(
+                    input.data<int32_t>(), output.data<int32_t>(),
+                    std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                    std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                    dim, stream
+                );
+                break;
+            case DType::Int64:
+                launch_dim_prod(
+                    input.data<int64_t>(), output.data<int64_t>(),
+                    std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                    std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                    dim, stream
+                );
+                break;
+            default:
+                throw std::runtime_error("prod: unsupported dtype for dimensional reduction");
+        }
     }
 
     HIP_CHECK(hipGetLastError());

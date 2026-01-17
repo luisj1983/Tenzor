@@ -793,6 +793,237 @@ __global__ void groupnorm_forward_kernel(const T* input,
     }
 }
 
+// Float16 specialized layernorm backward with float accumulation
+__global__ void layernorm_backward_kernel_fp16(const __half* grad_output,
+                                         const __half* input,
+                                         const __half* gamma,
+                                         __half* grad_input,
+                                         float* grad_gamma_f32,
+                                         float* grad_beta_f32,
+                                         float epsilon,
+                                         int64_t outer_size,
+                                         int64_t normalized_size) {
+    HIP_DYNAMIC_SHARED(unsigned char, shared_mem);
+    float* shared = reinterpret_cast<float*>(shared_mem);
+
+    int64_t instance = blockIdx.x;
+    if (instance >= outer_size) return;
+
+    int64_t offset = instance * normalized_size;
+
+    // Compute mean in float
+    float sum = 0.0f;
+    for (int64_t i = threadIdx.x; i < normalized_size; i += blockDim.x) {
+        sum += __half2float(input[offset + i]);
+    }
+    sum = block_reduce_sum(sum, shared);
+    __syncthreads();
+    float mean = sum / static_cast<float>(normalized_size);
+
+    // Compute variance in float
+    float var_sum = 0.0f;
+    for (int64_t i = threadIdx.x; i < normalized_size; i += blockDim.x) {
+        float diff = __half2float(input[offset + i]) - mean;
+        var_sum += diff * diff;
+    }
+    var_sum = block_reduce_sum(var_sum, shared);
+    __syncthreads();
+    float variance = var_sum / static_cast<float>(normalized_size);
+    float invstd = rsqrtf(variance + epsilon);
+
+    // Compute gradient statistics
+    float grad_output_sum = 0.0f;
+    float grad_output_norm_sum = 0.0f;
+    for (int64_t i = threadIdx.x; i < normalized_size; i += blockDim.x) {
+        float normalized = (__half2float(input[offset + i]) - mean) * invstd;
+        float grad_out = __half2float(grad_output[offset + i]);
+        grad_output_sum += grad_out;
+        grad_output_norm_sum += grad_out * normalized;
+    }
+    grad_output_sum = block_reduce_sum(grad_output_sum, shared);
+    __syncthreads();
+    grad_output_norm_sum = block_reduce_sum(grad_output_norm_sum, shared);
+    __syncthreads();
+
+    float mean_grad = grad_output_sum / static_cast<float>(normalized_size);
+    float mean_grad_norm = grad_output_norm_sum / static_cast<float>(normalized_size);
+
+    // Compute input gradient
+    for (int64_t i = threadIdx.x; i < normalized_size; i += blockDim.x) {
+        float normalized = (__half2float(input[offset + i]) - mean) * invstd;
+        float grad_out = __half2float(grad_output[offset + i]);
+        float g = __half2float(gamma[i]);
+        float grad_normalized = grad_out - mean_grad - normalized * mean_grad_norm;
+        grad_input[offset + i] = __float2half(g * invstd * grad_normalized);
+
+        // Accumulate gradients in float
+        atomicAdd(&grad_gamma_f32[i], grad_out * normalized);
+        atomicAdd(&grad_beta_f32[i], grad_out);
+    }
+}
+
+// Float16 specialized instancenorm backward with float accumulation
+__global__ void instancenorm_backward_kernel_fp16(const __half* grad_output,
+                                            const __half* input,
+                                            const __half* gamma,
+                                            __half* grad_input,
+                                            float* grad_gamma_f32,
+                                            float* grad_beta_f32,
+                                            float epsilon,
+                                            int64_t N,
+                                            int64_t C,
+                                            int64_t H,
+                                            int64_t W) {
+    HIP_DYNAMIC_SHARED(unsigned char, shared_mem);
+    float* shared = reinterpret_cast<float*>(shared_mem);
+
+    int64_t spatial_size = H * W;
+
+    int64_t nc = blockIdx.x;
+    if (nc >= N * C) return;
+
+    int64_t n = nc / C;
+    int64_t c = nc % C;
+    int64_t offset = (n * C + c) * spatial_size;
+
+    // Compute mean and variance in float
+    float sum = 0.0f;
+    for (int64_t i = threadIdx.x; i < spatial_size; i += blockDim.x) {
+        sum += __half2float(input[offset + i]);
+    }
+    sum = block_reduce_sum(sum, shared);
+    __syncthreads();
+    float mean = sum / static_cast<float>(spatial_size);
+
+    float var_sum = 0.0f;
+    for (int64_t i = threadIdx.x; i < spatial_size; i += blockDim.x) {
+        float diff = __half2float(input[offset + i]) - mean;
+        var_sum += diff * diff;
+    }
+    var_sum = block_reduce_sum(var_sum, shared);
+    __syncthreads();
+    float variance = var_sum / static_cast<float>(spatial_size);
+    float invstd = rsqrtf(variance + epsilon);
+
+    // Compute gradient statistics
+    float grad_output_sum = 0.0f;
+    float grad_output_norm_sum = 0.0f;
+    for (int64_t i = threadIdx.x; i < spatial_size; i += blockDim.x) {
+        float normalized = (__half2float(input[offset + i]) - mean) * invstd;
+        float grad_out = __half2float(grad_output[offset + i]);
+        grad_output_sum += grad_out;
+        grad_output_norm_sum += grad_out * normalized;
+    }
+    grad_output_sum = block_reduce_sum(grad_output_sum, shared);
+    __syncthreads();
+    grad_output_norm_sum = block_reduce_sum(grad_output_norm_sum, shared);
+    __syncthreads();
+
+    float mean_grad = grad_output_sum / static_cast<float>(spatial_size);
+    float mean_grad_norm = grad_output_norm_sum / static_cast<float>(spatial_size);
+
+    float g = __half2float(gamma[c]);
+
+    // Compute gradients
+    for (int64_t i = threadIdx.x; i < spatial_size; i += blockDim.x) {
+        float normalized = (__half2float(input[offset + i]) - mean) * invstd;
+        float grad_out = __half2float(grad_output[offset + i]);
+        float grad_normalized = grad_out - mean_grad - normalized * mean_grad_norm;
+        grad_input[offset + i] = __float2half(g * invstd * grad_normalized);
+
+        // Accumulate gradients in float
+        atomicAdd(&grad_gamma_f32[c], grad_out * normalized);
+        atomicAdd(&grad_beta_f32[c], grad_out);
+    }
+}
+
+// Float16 specialized groupnorm backward with float accumulation
+__global__ void groupnorm_backward_kernel_fp16(const __half* grad_output,
+                                         const __half* input,
+                                         const __half* gamma,
+                                         __half* grad_input,
+                                         float* grad_gamma_f32,
+                                         float* grad_beta_f32,
+                                         float epsilon,
+                                         int64_t N,
+                                         int64_t C,
+                                         int64_t H,
+                                         int64_t W,
+                                         int64_t groups) {
+    HIP_DYNAMIC_SHARED(unsigned char, shared_mem);
+    float* shared = reinterpret_cast<float*>(shared_mem);
+
+    int64_t channels_per_group = C / groups;
+    int64_t spatial_size = H * W;
+    int64_t group_size = channels_per_group * spatial_size;
+
+    int64_t ng = blockIdx.x;
+    if (ng >= N * groups) return;
+
+    int64_t n = ng / groups;
+    int64_t g_idx = ng % groups;
+    int64_t offset = (n * C + g_idx * channels_per_group) * spatial_size;
+
+    // Compute mean and variance in float
+    float sum = 0.0f;
+    for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
+        sum += __half2float(input[offset + i]);
+    }
+    sum = block_reduce_sum(sum, shared);
+    __syncthreads();
+    float mean = sum / static_cast<float>(group_size);
+
+    float var_sum = 0.0f;
+    for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
+        float diff = __half2float(input[offset + i]) - mean;
+        var_sum += diff * diff;
+    }
+    var_sum = block_reduce_sum(var_sum, shared);
+    __syncthreads();
+    float variance = var_sum / static_cast<float>(group_size);
+    float invstd = rsqrtf(variance + epsilon);
+
+    // Compute gradient statistics
+    float grad_output_sum = 0.0f;
+    float grad_output_norm_sum = 0.0f;
+    for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
+        float normalized = (__half2float(input[offset + i]) - mean) * invstd;
+        float grad_out = __half2float(grad_output[offset + i]);
+        grad_output_sum += grad_out;
+        grad_output_norm_sum += grad_out * normalized;
+    }
+    grad_output_sum = block_reduce_sum(grad_output_sum, shared);
+    __syncthreads();
+    grad_output_norm_sum = block_reduce_sum(grad_output_norm_sum, shared);
+    __syncthreads();
+
+    float mean_grad = grad_output_sum / static_cast<float>(group_size);
+    float mean_grad_norm = grad_output_norm_sum / static_cast<float>(group_size);
+
+    // Compute gradients
+    for (int64_t i = threadIdx.x; i < group_size; i += blockDim.x) {
+        float normalized = (__half2float(input[offset + i]) - mean) * invstd;
+        int64_t c_local = i / spatial_size;
+        int64_t c_global = g_idx * channels_per_group + c_local;
+        float grad_out = __half2float(grad_output[offset + i]);
+        float g = __half2float(gamma[c_global]);
+        float grad_normalized = grad_out - mean_grad - normalized * mean_grad_norm;
+        grad_input[offset + i] = __float2half(g * invstd * grad_normalized);
+
+        // Accumulate gradients in float
+        atomicAdd(&grad_gamma_f32[c_global], grad_out * normalized);
+        atomicAdd(&grad_beta_f32[c_global], grad_out);
+    }
+}
+
+// Kernel to convert float gradients to half
+__global__ void batchnorm_convert_f32_to_f16_kernel(const float* src, __half* dst, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        dst[idx] = __float2half(src[idx]);
+    }
+}
+
 template<typename T>
 __global__ void groupnorm_backward_kernel(const T* grad_output,
                                          const T* input,
@@ -917,8 +1148,23 @@ auto batchnorm2d_mean_var(const Tensor& input,
                           shared_mem_size, stream,
                           input.data<double>(), mean.data<double>(), variance.data<double>(), N, C, H, W);
         HIP_CHECK(hipGetLastError());
+    } else if (input.dtype() == DType::Float16) {
+        // For Float16, use __half type
+        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / 32) * sizeof(__half);
+        hipLaunchKernelGGL(batchnorm_mean_kernel<__half>, dim3(C), dim3(BATCHNORM_BLOCK_SIZE),
+                          shared_mem_size, stream,
+                          reinterpret_cast<const __half*>(input.data<Float16>()),
+                          reinterpret_cast<__half*>(mean.data<Float16>()), N, C, H, W);
+        HIP_CHECK(hipGetLastError());
+
+        hipLaunchKernelGGL(batchnorm_variance_kernel<__half>, dim3(C), dim3(BATCHNORM_BLOCK_SIZE),
+                          shared_mem_size, stream,
+                          reinterpret_cast<const __half*>(input.data<Float16>()),
+                          reinterpret_cast<__half*>(mean.data<Float16>()),
+                          reinterpret_cast<__half*>(variance.data<Float16>()), N, C, H, W);
+        HIP_CHECK(hipGetLastError());
     } else {
-        throw std::runtime_error("BatchNorm2D only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("BatchNorm2D only supports Float32, Float64, and Float16 dtypes");
     }
 }
 
@@ -954,8 +1200,18 @@ auto batchnorm2d_forward(const Tensor& input,
                           mean.data<double>(), variance.data<double>(),
                           epsilon, N, C, H, W);
         HIP_CHECK(hipGetLastError());
+    } else if (input.dtype() == DType::Float16) {
+        int num_blocks = get_num_blocks(total_size);
+        hipLaunchKernelGGL(batchnorm_normalize_kernel<__half>, dim3(num_blocks), dim3(BLOCK_SIZE),
+                          0, stream,
+                          reinterpret_cast<const __half*>(input.data<Float16>()),
+                          reinterpret_cast<__half*>(output.data<Float16>()),
+                          reinterpret_cast<const __half*>(mean.data<Float16>()),
+                          reinterpret_cast<const __half*>(variance.data<Float16>()),
+                          epsilon, N, C, H, W);
+        HIP_CHECK(hipGetLastError());
     } else {
-        throw std::runtime_error("BatchNorm2D only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("BatchNorm2D only supports Float32, Float64, and Float16 dtypes");
     }
 
     return output;
@@ -997,8 +1253,20 @@ auto batchnorm2d_forward_affine(const Tensor& input,
                           gamma.data<double>(), beta.data<double>(),
                           epsilon, N, C, H, W);
         HIP_CHECK(hipGetLastError());
+    } else if (input.dtype() == DType::Float16) {
+        int num_blocks = get_num_blocks(total_size);
+        hipLaunchKernelGGL(batchnorm_forward_affine_kernel<__half>, dim3(num_blocks), dim3(BLOCK_SIZE),
+                          0, stream,
+                          reinterpret_cast<const __half*>(input.data<Float16>()),
+                          reinterpret_cast<__half*>(output.data<Float16>()),
+                          reinterpret_cast<const __half*>(mean.data<Float16>()),
+                          reinterpret_cast<const __half*>(variance.data<Float16>()),
+                          reinterpret_cast<const __half*>(gamma.data<Float16>()),
+                          reinterpret_cast<const __half*>(beta.data<Float16>()),
+                          epsilon, N, C, H, W);
+        HIP_CHECK(hipGetLastError());
     } else {
-        throw std::runtime_error("BatchNorm2D only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("BatchNorm2D only supports Float32, Float64, and Float16 dtypes");
     }
 
     return output;
@@ -1029,8 +1297,18 @@ auto batchnorm2d_update_running_stats(Tensor& running_mean,
                           batch_mean.data<double>(), batch_var.data<double>(),
                           momentum, C);
         HIP_CHECK(hipGetLastError());
+    } else if (running_mean.dtype() == DType::Float16) {
+        int num_blocks = get_num_blocks(C);
+        hipLaunchKernelGGL(batchnorm_update_running_stats_kernel<__half>, dim3(num_blocks), dim3(BLOCK_SIZE),
+                          0, stream,
+                          reinterpret_cast<__half*>(running_mean.data<Float16>()),
+                          reinterpret_cast<__half*>(running_var.data<Float16>()),
+                          reinterpret_cast<const __half*>(batch_mean.data<Float16>()),
+                          reinterpret_cast<const __half*>(batch_var.data<Float16>()),
+                          momentum, C);
+        HIP_CHECK(hipGetLastError());
     } else {
-        throw std::runtime_error("BatchNorm2D only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("BatchNorm2D only supports Float32, Float64, and Float16 dtypes");
     }
 }
 
@@ -1099,8 +1377,32 @@ auto batchnorm2d_backward(const Tensor& grad_output,
                           mean.data<double>(), variance.data<double>(), gamma.data<double>(),
                           epsilon, N, C, H, W);
         HIP_CHECK(hipGetLastError());
+    } else if (input.dtype() == DType::Float16) {
+        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / 32) * sizeof(__half);
+
+        // Compute grad_gamma and grad_beta
+        hipLaunchKernelGGL(batchnorm_backward_gamma_beta_kernel<__half>, dim3(C), dim3(BATCHNORM_BLOCK_SIZE),
+                          shared_mem_size, stream,
+                          reinterpret_cast<const __half*>(grad_output.data<Float16>()),
+                          reinterpret_cast<const __half*>(normalized.data<Float16>()),
+                          reinterpret_cast<__half*>(grad_gamma.data<Float16>()),
+                          reinterpret_cast<__half*>(grad_beta.data<Float16>()),
+                          N, C, H, W);
+        HIP_CHECK(hipGetLastError());
+
+        // Compute grad_input
+        hipLaunchKernelGGL(batchnorm_backward_input_kernel<__half>, dim3(C), dim3(BATCHNORM_BLOCK_SIZE),
+                          shared_mem_size, stream,
+                          reinterpret_cast<const __half*>(grad_output.data<Float16>()),
+                          reinterpret_cast<const __half*>(input.data<Float16>()),
+                          reinterpret_cast<__half*>(grad_input.data<Float16>()),
+                          reinterpret_cast<const __half*>(mean.data<Float16>()),
+                          reinterpret_cast<const __half*>(variance.data<Float16>()),
+                          reinterpret_cast<const __half*>(gamma.data<Float16>()),
+                          epsilon, N, C, H, W);
+        HIP_CHECK(hipGetLastError());
     } else {
-        throw std::runtime_error("BatchNorm2D only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("BatchNorm2D only supports Float32, Float64, and Float16 dtypes");
     }
 
     return std::make_tuple(grad_input, grad_gamma, grad_beta);
@@ -1137,8 +1439,18 @@ auto layernorm_forward(const Tensor& input,
                           gamma.data<double>(), beta.data<double>(),
                           epsilon, outer_size, normalized_size);
         HIP_CHECK(hipGetLastError());
+    } else if (input.dtype() == DType::Float16) {
+        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / 32) * sizeof(__half);
+        hipLaunchKernelGGL(layernorm_forward_kernel<__half>, dim3(outer_size), dim3(BATCHNORM_BLOCK_SIZE),
+                          shared_mem_size, stream,
+                          reinterpret_cast<const __half*>(input.data<Float16>()),
+                          reinterpret_cast<__half*>(output.data<Float16>()),
+                          reinterpret_cast<const __half*>(gamma.data<Float16>()),
+                          reinterpret_cast<const __half*>(beta.data<Float16>()),
+                          epsilon, outer_size, normalized_size);
+        HIP_CHECK(hipGetLastError());
     } else {
-        throw std::runtime_error("LayerNorm only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("LayerNorm only supports Float32, Float64, and Float16 dtypes");
     }
 
     return output;
@@ -1180,8 +1492,38 @@ auto layernorm_backward(const Tensor& grad_output,
                           grad_input.data<double>(), grad_gamma.data<double>(), grad_beta.data<double>(),
                           epsilon, outer_size, normalized_size);
         HIP_CHECK(hipGetLastError());
+    } else if (input.dtype() == DType::Float16) {
+        // Allocate float accumulators for gradients
+        Tensor grad_gamma_f32({normalized_size}, DType::Float32, input.device());
+        Tensor grad_beta_f32({normalized_size}, DType::Float32, input.device());
+        hipMemsetAsync(grad_gamma_f32.data<float>(), 0, normalized_size * sizeof(float), stream);
+        hipMemsetAsync(grad_beta_f32.data<float>(), 0, normalized_size * sizeof(float), stream);
+
+        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / 32) * sizeof(float);
+        hipLaunchKernelGGL(layernorm_backward_kernel_fp16, dim3(outer_size), dim3(BATCHNORM_BLOCK_SIZE),
+                          shared_mem_size, stream,
+                          reinterpret_cast<const __half*>(grad_output.data<Float16>()),
+                          reinterpret_cast<const __half*>(input.data<Float16>()),
+                          reinterpret_cast<const __half*>(gamma.data<Float16>()),
+                          reinterpret_cast<__half*>(grad_input.data<Float16>()),
+                          grad_gamma_f32.data<float>(),
+                          grad_beta_f32.data<float>(),
+                          epsilon, outer_size, normalized_size);
+        HIP_CHECK(hipGetLastError());
+
+        // Convert float gradients to half
+        int convert_blocks = (normalized_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        hipLaunchKernelGGL(batchnorm_convert_f32_to_f16_kernel, dim3(convert_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          grad_gamma_f32.data<float>(),
+                          reinterpret_cast<__half*>(grad_gamma.data<Float16>()),
+                          normalized_size);
+        hipLaunchKernelGGL(batchnorm_convert_f32_to_f16_kernel, dim3(convert_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          grad_beta_f32.data<float>(),
+                          reinterpret_cast<__half*>(grad_beta.data<Float16>()),
+                          normalized_size);
+        HIP_CHECK(hipGetLastError());
     } else {
-        throw std::runtime_error("LayerNorm only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("LayerNorm only supports Float32, Float64, and Float16 dtypes");
     }
 
     return std::make_tuple(grad_input, grad_gamma, grad_beta);
@@ -1218,8 +1560,18 @@ auto instancenorm_forward(const Tensor& input,
                           gamma.data<double>(), beta.data<double>(),
                           epsilon, N, C, H, W);
         HIP_CHECK(hipGetLastError());
+    } else if (input.dtype() == DType::Float16) {
+        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / 32) * sizeof(__half);
+        hipLaunchKernelGGL(instancenorm_forward_kernel<__half>, dim3(N * C), dim3(BATCHNORM_BLOCK_SIZE),
+                          shared_mem_size, stream,
+                          reinterpret_cast<const __half*>(input.data<Float16>()),
+                          reinterpret_cast<__half*>(output.data<Float16>()),
+                          reinterpret_cast<const __half*>(gamma.data<Float16>()),
+                          reinterpret_cast<const __half*>(beta.data<Float16>()),
+                          epsilon, N, C, H, W);
+        HIP_CHECK(hipGetLastError());
     } else {
-        throw std::runtime_error("InstanceNorm only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("InstanceNorm only supports Float32, Float64, and Float16 dtypes");
     }
 
     return output;
@@ -1261,8 +1613,38 @@ auto instancenorm_backward(const Tensor& grad_output,
                           grad_input.data<double>(), grad_gamma.data<double>(), grad_beta.data<double>(),
                           epsilon, N, C, H, W);
         HIP_CHECK(hipGetLastError());
+    } else if (input.dtype() == DType::Float16) {
+        // Allocate float accumulators for gradients
+        Tensor grad_gamma_f32({C}, DType::Float32, input.device());
+        Tensor grad_beta_f32({C}, DType::Float32, input.device());
+        hipMemsetAsync(grad_gamma_f32.data<float>(), 0, C * sizeof(float), stream);
+        hipMemsetAsync(grad_beta_f32.data<float>(), 0, C * sizeof(float), stream);
+
+        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / 32) * sizeof(float);
+        hipLaunchKernelGGL(instancenorm_backward_kernel_fp16, dim3(N * C), dim3(BATCHNORM_BLOCK_SIZE),
+                          shared_mem_size, stream,
+                          reinterpret_cast<const __half*>(grad_output.data<Float16>()),
+                          reinterpret_cast<const __half*>(input.data<Float16>()),
+                          reinterpret_cast<const __half*>(gamma.data<Float16>()),
+                          reinterpret_cast<__half*>(grad_input.data<Float16>()),
+                          grad_gamma_f32.data<float>(),
+                          grad_beta_f32.data<float>(),
+                          epsilon, N, C, H, W);
+        HIP_CHECK(hipGetLastError());
+
+        // Convert float gradients to half
+        int convert_blocks = (C + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        hipLaunchKernelGGL(batchnorm_convert_f32_to_f16_kernel, dim3(convert_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          grad_gamma_f32.data<float>(),
+                          reinterpret_cast<__half*>(grad_gamma.data<Float16>()),
+                          C);
+        hipLaunchKernelGGL(batchnorm_convert_f32_to_f16_kernel, dim3(convert_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          grad_beta_f32.data<float>(),
+                          reinterpret_cast<__half*>(grad_beta.data<Float16>()),
+                          C);
+        HIP_CHECK(hipGetLastError());
     } else {
-        throw std::runtime_error("InstanceNorm only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("InstanceNorm only supports Float32, Float64, and Float16 dtypes");
     }
 
     return std::make_tuple(grad_input, grad_gamma, grad_beta);
@@ -1304,8 +1686,18 @@ auto groupnorm_forward(const Tensor& input,
                           gamma.data<double>(), beta.data<double>(),
                           epsilon, N, C, H, W, groups);
         HIP_CHECK(hipGetLastError());
+    } else if (input.dtype() == DType::Float16) {
+        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / 32) * sizeof(__half);
+        hipLaunchKernelGGL(groupnorm_forward_kernel<__half>, dim3(N * groups), dim3(BATCHNORM_BLOCK_SIZE),
+                          shared_mem_size, stream,
+                          reinterpret_cast<const __half*>(input.data<Float16>()),
+                          reinterpret_cast<__half*>(output.data<Float16>()),
+                          reinterpret_cast<const __half*>(gamma.data<Float16>()),
+                          reinterpret_cast<const __half*>(beta.data<Float16>()),
+                          epsilon, N, C, H, W, groups);
+        HIP_CHECK(hipGetLastError());
     } else {
-        throw std::runtime_error("GroupNorm only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("GroupNorm only supports Float32, Float64, and Float16 dtypes");
     }
 
     return output;
@@ -1348,8 +1740,38 @@ auto groupnorm_backward(const Tensor& grad_output,
                           grad_input.data<double>(), grad_gamma.data<double>(), grad_beta.data<double>(),
                           epsilon, N, C, H, W, groups);
         HIP_CHECK(hipGetLastError());
+    } else if (input.dtype() == DType::Float16) {
+        // Allocate float accumulators for gradients
+        Tensor grad_gamma_f32({C}, DType::Float32, input.device());
+        Tensor grad_beta_f32({C}, DType::Float32, input.device());
+        hipMemsetAsync(grad_gamma_f32.data<float>(), 0, C * sizeof(float), stream);
+        hipMemsetAsync(grad_beta_f32.data<float>(), 0, C * sizeof(float), stream);
+
+        int shared_mem_size = (BATCHNORM_BLOCK_SIZE / 32) * sizeof(float);
+        hipLaunchKernelGGL(groupnorm_backward_kernel_fp16, dim3(N * groups), dim3(BATCHNORM_BLOCK_SIZE),
+                          shared_mem_size, stream,
+                          reinterpret_cast<const __half*>(grad_output.data<Float16>()),
+                          reinterpret_cast<const __half*>(input.data<Float16>()),
+                          reinterpret_cast<const __half*>(gamma.data<Float16>()),
+                          reinterpret_cast<__half*>(grad_input.data<Float16>()),
+                          grad_gamma_f32.data<float>(),
+                          grad_beta_f32.data<float>(),
+                          epsilon, N, C, H, W, groups);
+        HIP_CHECK(hipGetLastError());
+
+        // Convert float gradients to half
+        int convert_blocks = (C + BLOCK_SIZE - 1) / BLOCK_SIZE;
+        hipLaunchKernelGGL(batchnorm_convert_f32_to_f16_kernel, dim3(convert_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          grad_gamma_f32.data<float>(),
+                          reinterpret_cast<__half*>(grad_gamma.data<Float16>()),
+                          C);
+        hipLaunchKernelGGL(batchnorm_convert_f32_to_f16_kernel, dim3(convert_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          grad_beta_f32.data<float>(),
+                          reinterpret_cast<__half*>(grad_beta.data<Float16>()),
+                          C);
+        HIP_CHECK(hipGetLastError());
     } else {
-        throw std::runtime_error("GroupNorm only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("GroupNorm only supports Float32, Float64, and Float16 dtypes");
     }
 
     return std::make_tuple(grad_input, grad_gamma, grad_beta);

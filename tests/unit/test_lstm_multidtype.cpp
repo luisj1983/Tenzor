@@ -68,6 +68,12 @@ protected:
             }
             device = Device::oneapi(0);
         }
+        else if (param.backend_name == "rocm") {
+            if (!isBackendAvailable(Device::Type::ROCm)) {
+                GTEST_SKIP() << "ROCm not available";
+            }
+            device = Device::rocm(0);
+        }
     }
 
     static bool isBackendAvailable(Device::Type type) {
@@ -566,6 +572,16 @@ TEST_P(LSTMMultiDTypeTest, LSTMCellStateMemory) {
             }
             break;
         }
+        case DType::Float16: {
+            auto c_data = c_cpu.data<Float16>();
+            for (int64_t i = 0; i < c_cpu.numel(); ++i) {
+                if (std::abs(static_cast<float>(c_data[i])) > get_relaxed_tolerance()) {
+                    has_nonzero = true;
+                    break;
+                }
+            }
+            break;
+        }
         default:
             FAIL() << "Unsupported dtype for cell state memory test";
     }
@@ -603,7 +619,7 @@ std::vector<BackendDTypeParam> GenerateLSTMBackendDTypeCombinations() {
     std::vector<std::pair<DType, std::string>> dtypes = {
         {DType::Float32, "float32"},
         // {DType::Float64, "float64"},  // TODO: Enable when LSTM supports dtype parameter
-        // {DType::Float16, "float16"},  // TODO: Enable when backends support it
+        {DType::Float16, "float16"},
     };
 
     std::vector<BackendDTypeParam> combinations;

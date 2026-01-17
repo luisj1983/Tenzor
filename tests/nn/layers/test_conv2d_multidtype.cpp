@@ -128,6 +128,12 @@ protected:
             }
             device = Device::oneapi(0);
         }
+        else if (param.backend_name == "rocm") {
+            if (!isBackendAvailable(Device::Type::ROCm)) {
+                GTEST_SKIP() << "ROCm not available";
+            }
+            device = Device::rocm(0);
+        }
 
         // Skip Float16 tests if backend doesn't support it
         if (dtype == DType::Float16 && !SupportsFloat16(param.backend_name)) {
@@ -244,6 +250,7 @@ private:
         if (backend_name == "cuda") return true;  // CUDA supports Float16
         if (backend_name == "vulkan") return true;  // Vulkan supports Float16
         if (backend_name == "oneapi") return true;  // OneAPI supports Float16
+        if (backend_name == "rocm") return true;  // ROCm supports Float16
         return false;
     }
 };

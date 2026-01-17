@@ -54,6 +54,25 @@ __global__ void sum_over_batch_kernel(const T* __restrict__ grad, T* __restrict_
     }
 }
 
+// Float16 bias kernel
+__global__ void add_bias_to_output_kernel_fp16(const __half* __restrict__ bias, __half* __restrict__ output,
+                                                int64_t batch, int64_t features) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < batch * features) {
+        int64_t f = idx % features;
+        output[idx] = __float2half(__half2float(output[idx]) + __half2float(bias[f]));
+    }
+}
+
+// Float16 sum over batch kernel (accumulate in float)
+__global__ void sum_over_batch_kernel_fp16(const __half* __restrict__ grad, float* __restrict__ grad_bias_f32,
+                                            int64_t batch_offset, int64_t features) {
+    int64_t f = blockIdx.x * blockDim.x + threadIdx.x;
+    if (f < features) {
+        atomicAdd(&grad_bias_f32[f], __half2float(grad[batch_offset + f]));
+    }
+}
+
 // ============================================================================
 // Embedding Kernels
 // ============================================================================
@@ -97,6 +116,52 @@ __global__ void embedding_backward_kernel_hip(
     }
 }
 
+// Float16 embedding forward kernel
+__global__ void embedding_kernel_hip_fp16(
+    const __half* __restrict__ weight,
+    const int64_t* __restrict__ indices,
+    __half* __restrict__ output,
+    int64_t num_indices,
+    int64_t embedding_dim) {
+
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total_elements = num_indices * embedding_dim;
+
+    if (tid < total_elements) {
+        int64_t idx = tid / embedding_dim;
+        int64_t dim = tid % embedding_dim;
+        int64_t embedding_idx = indices[idx];
+        output[tid] = weight[embedding_idx * embedding_dim + dim];
+    }
+}
+
+// Float16 embedding backward kernel (uses float accumulation for atomicAdd)
+__global__ void embedding_backward_kernel_hip_fp16(
+    const __half* __restrict__ grad_output,
+    const int64_t* __restrict__ indices,
+    float* __restrict__ grad_weight_f32,  // accumulate in float
+    int64_t num_indices,
+    int64_t embedding_dim) {
+
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total_elements = num_indices * embedding_dim;
+
+    if (tid < total_elements) {
+        int64_t idx = tid / embedding_dim;
+        int64_t dim = tid % embedding_dim;
+        int64_t embedding_idx = indices[idx];
+        atomicAdd(&grad_weight_f32[embedding_idx * embedding_dim + dim], __half2float(grad_output[tid]));
+    }
+}
+
+// Convert float gradients to Float16
+__global__ void convert_f32_to_f16_kernel(const float* __restrict__ src, __half* __restrict__ dst, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        dst[idx] = __float2half(src[idx]);
+    }
+}
+
 auto embedding_kernel(const Tensor& weight, const Tensor& indices, hipStream_t stream) -> Tensor {
     // weight: [num_embeddings, embedding_dim]
     // indices: [*] (any shape of int64 indices)
@@ -132,8 +197,16 @@ auto embedding_kernel(const Tensor& weight, const Tensor& indices, hipStream_t s
             output.data<double>(),
             num_indices,
             embedding_dim);
+    } else if (weight.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(embedding_kernel_hip_fp16,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            reinterpret_cast<const __half*>(weight.data<Float16>()),
+            indices.data<int64_t>(),
+            reinterpret_cast<__half*>(output.data<Float16>()),
+            num_indices,
+            embedding_dim);
     } else {
-        throw std::runtime_error("Embedding only supports Float32 and Float64");
+        throw std::runtime_error("Embedding only supports Float32, Float64, and Float16");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -170,8 +243,29 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
             grad_weight.data<double>(),
             num_indices,
             embedding_dim);
+    } else if (grad_output.dtype() == DType::Float16) {
+        // For Float16, accumulate gradients in float, then convert back
+        int64_t grad_weight_size = num_embeddings * embedding_dim;
+        Tensor grad_weight_f32({num_embeddings, embedding_dim}, DType::Float32, grad_output.device());
+        HIP_CHECK(hipMemsetAsync(grad_weight_f32.data<float>(), 0, grad_weight_size * sizeof(float), stream));
+
+        hipLaunchKernelGGL(embedding_backward_kernel_hip_fp16,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            reinterpret_cast<const __half*>(grad_output.data<Float16>()),
+            indices.data<int64_t>(),
+            grad_weight_f32.data<float>(),
+            num_indices,
+            embedding_dim);
+
+        // Convert float gradients to Float16
+        int convert_blocks = get_num_blocks(grad_weight_size);
+        hipLaunchKernelGGL(convert_f32_to_f16_kernel,
+            dim3(convert_blocks), dim3(BLOCK_SIZE), 0, stream,
+            grad_weight_f32.data<float>(),
+            reinterpret_cast<__half*>(grad_weight.data<Float16>()),
+            grad_weight_size);
     } else {
-        throw std::runtime_error("Embedding backward only supports Float32 and Float64");
+        throw std::runtime_error("Embedding backward only supports Float32, Float64, and Float16");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -254,9 +348,32 @@ auto linear_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias
                 dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                 bias->data<double>(), output.data<double>(), batch_size, out_features);
         }
+    } else if (input.dtype() == DType::Float16) {
+        const rocblas_half alpha = rocblas_half(1.0f);
+        const rocblas_half beta = rocblas_half(0.0f);
+
+        // Use rocblas_hgemm for half-precision
+        rocblas_hgemm(handle,
+            rocblas_operation_transpose, rocblas_operation_none,
+            out_features, batch_size, in_features,
+            &alpha,
+            reinterpret_cast<const rocblas_half*>(weight.data<Float16>()), in_features,
+            reinterpret_cast<const rocblas_half*>(input.data<Float16>()), in_features,
+            &beta,
+            reinterpret_cast<rocblas_half*>(output.data<Float16>()), out_features);
+
+        // Add bias if present
+        if (bias != nullptr) {
+            int64_t total = batch_size * out_features;
+            int num_blocks = get_num_blocks(total);
+            hipLaunchKernelGGL(add_bias_to_output_kernel_fp16,
+                dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                reinterpret_cast<const __half*>(bias->data<Float16>()),
+                reinterpret_cast<__half*>(output.data<Float16>()), batch_size, out_features);
+        }
     } else {
         rocblas_destroy_handle(handle);
-        throw std::runtime_error("Linear only supports Float32 and Float64");
+        throw std::runtime_error("Linear only supports Float32, Float64, and Float16");
     }
 
     rocblas_destroy_handle(handle);
@@ -285,8 +402,8 @@ auto linear_backward_kernel(const Tensor& grad_output, const Tensor& input, cons
     // grad_weight = grad_output.T @ input
     // grad_bias = grad_output.sum(dim=0)
 
-    Tensor grad_input(in_shape, input.dtype(), input.device());
-    Tensor grad_weight(w_shape, weight.dtype(), weight.device());
+    Tensor grad_input(std::vector<int64_t>(in_shape.begin(), in_shape.end()), input.dtype(), input.device());
+    Tensor grad_weight(std::vector<int64_t>(w_shape.begin(), w_shape.end()), weight.dtype(), weight.device());
     Tensor grad_bias({out_features}, input.dtype(), input.device());
 
     rocblas_handle handle;
@@ -355,9 +472,48 @@ auto linear_backward_kernel(const Tensor& grad_output, const Tensor& input, cons
                 dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                 grad_output.data<double>(), grad_bias.data<double>(), b * out_features, out_features);
         }
+    } else if (input.dtype() == DType::Float16) {
+        const rocblas_half alpha = rocblas_half(1.0f);
+        const rocblas_half beta = rocblas_half(0.0f);
+
+        // grad_input = grad_output @ weight
+        rocblas_hgemm(handle,
+            rocblas_operation_none, rocblas_operation_none,
+            in_features, batch_size, out_features,
+            &alpha,
+            reinterpret_cast<const rocblas_half*>(weight.data<Float16>()), in_features,
+            reinterpret_cast<const rocblas_half*>(grad_output.data<Float16>()), out_features,
+            &beta,
+            reinterpret_cast<rocblas_half*>(grad_input.data<Float16>()), in_features);
+
+        // grad_weight = grad_output.T @ input
+        rocblas_hgemm(handle,
+            rocblas_operation_none, rocblas_operation_transpose,
+            in_features, out_features, batch_size,
+            &alpha,
+            reinterpret_cast<const rocblas_half*>(input.data<Float16>()), in_features,
+            reinterpret_cast<const rocblas_half*>(grad_output.data<Float16>()), out_features,
+            &beta,
+            reinterpret_cast<rocblas_half*>(grad_weight.data<Float16>()), in_features);
+
+        // grad_bias = sum over batch dimension (accumulate in float, then convert)
+        Tensor grad_bias_f32({out_features}, DType::Float32, input.device());
+        HIP_CHECK(hipMemsetAsync(grad_bias_f32.data<float>(), 0, out_features * sizeof(float), stream));
+        int num_blocks = get_num_blocks(out_features);
+        for (int64_t b = 0; b < batch_size; ++b) {
+            hipLaunchKernelGGL(sum_over_batch_kernel_fp16,
+                dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                reinterpret_cast<const __half*>(grad_output.data<Float16>()), grad_bias_f32.data<float>(), b * out_features, out_features);
+        }
+        // Convert float grad_bias to Float16
+        hipLaunchKernelGGL(convert_f32_to_f16_kernel,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            grad_bias_f32.data<float>(),
+            reinterpret_cast<__half*>(grad_bias.data<Float16>()),
+            out_features);
     } else {
         rocblas_destroy_handle(handle);
-        throw std::runtime_error("Linear backward only supports Float32 and Float64");
+        throw std::runtime_error("Linear backward only supports Float32, Float64, and Float16");
     }
 
     rocblas_destroy_handle(handle);
@@ -406,6 +562,43 @@ __global__ void dropout_backward_kernel_hip(
     }
 }
 
+// Float16 dropout forward kernel
+__global__ void dropout_forward_kernel_fp16(
+    const __half* __restrict__ input,
+    const float* __restrict__ random_values,
+    __half* __restrict__ output,
+    float* __restrict__ mask,
+    int64_t n,
+    float p,
+    float scale) {
+
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        float r = random_values[idx];
+        if (r < p) {
+            mask[idx] = 0.0f;
+            output[idx] = __float2half(0.0f);
+        } else {
+            mask[idx] = 1.0f;
+            output[idx] = __float2half(__half2float(input[idx]) * scale);
+        }
+    }
+}
+
+// Float16 dropout backward kernel
+__global__ void dropout_backward_kernel_hip_fp16(
+    const __half* __restrict__ grad_output,
+    const float* __restrict__ mask,
+    __half* __restrict__ grad_input,
+    int64_t n,
+    float scale) {
+
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx < n) {
+        grad_input[idx] = __float2half(__half2float(grad_output[idx]) * mask[idx] * scale);
+    }
+}
+
 auto dropout_kernel(const Tensor& input, float p, bool training, hipStream_t stream)
     -> std::pair<Tensor, Tensor> {
 
@@ -447,9 +640,17 @@ auto dropout_kernel(const Tensor& input, float p, bool training, hipStream_t str
             output.data<double>(),
             mask.data<float>(),
             n, p, scale);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(dropout_forward_kernel_fp16,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            random_values.data<float>(),
+            reinterpret_cast<__half*>(output.data<Float16>()),
+            mask.data<float>(),
+            n, p, scale);
     } else {
         hiprandDestroyGenerator(gen);
-        throw std::runtime_error("Dropout only supports Float32 and Float64");
+        throw std::runtime_error("Dropout only supports Float32, Float64, and Float16");
     }
 
     hiprandDestroyGenerator(gen);
@@ -481,8 +682,15 @@ auto dropout_backward_kernel(const Tensor& grad_output, const Tensor& mask, floa
             mask.data<float>(),
             grad_input.data<double>(),
             n, scale);
+    } else if (grad_output.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(dropout_backward_kernel_hip_fp16,
+            dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+            reinterpret_cast<const __half*>(grad_output.data<Float16>()),
+            mask.data<float>(),
+            reinterpret_cast<__half*>(grad_input.data<Float16>()),
+            n, scale);
     } else {
-        throw std::runtime_error("Dropout backward only supports Float32 and Float64");
+        throw std::runtime_error("Dropout backward only supports Float32, Float64, and Float16");
     }
 
     HIP_CHECK(hipGetLastError());

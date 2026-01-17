@@ -54,6 +54,9 @@ struct MatMulKernelFloat32 {};
 struct MatMulKernelFloat64 {};
 struct MatMulKernelFloat16 {};
 struct MatMulKernelInt32 {};
+struct BmmKernelFloat32 {};
+struct BmmKernelFloat64 {};
+struct BmmKernelFloat16 {};
 struct SqrtKernelFloat32 {};
 struct SqrtKernelFloat64 {};
 struct NegKernelFloat32 {};
@@ -766,6 +769,124 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
         throw std::runtime_error("Unsupported dtype for matmul");
     }
 #endif
+
+    return output;
+}
+
+// Batched matrix multiplication kernel
+// For 3D tensors [batch, M, K] x [batch, K, N] -> [batch, M, N]
+auto bmm_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
+    // Ensure inputs are contiguous
+    Tensor a_cont = a.is_contiguous() ? a : contiguous_kernel(a, queue);
+    Tensor b_cont = b.is_contiguous() ? b : contiguous_kernel(b, queue);
+
+    auto a_shape = a_cont.shape();
+    auto b_shape = b_cont.shape();
+
+    // Validate inputs are 3D
+    if (a_shape.size() != 3 || b_shape.size() != 3) {
+        throw std::runtime_error(
+            "bmm_kernel requires 3D tensors, got shapes: [" +
+            std::to_string(a_shape.size()) + "D] and [" +
+            std::to_string(b_shape.size()) + "D]");
+    }
+
+    const int64_t batch_size = a_shape[0];
+    const int64_t M = a_shape[1];  // rows of A
+    const int64_t K = a_shape[2];  // cols of A = rows of B
+    const int64_t N = b_shape[2];  // cols of B
+
+    // Validate dimensions
+    if (b_shape[0] != batch_size || b_shape[1] != K) {
+        throw std::runtime_error(
+            "bmm_kernel dimension mismatch: expected b.shape=[" +
+            std::to_string(batch_size) + ", " + std::to_string(K) + ", *], got [" +
+            std::to_string(b_shape[0]) + ", " + std::to_string(b_shape[1]) + ", " +
+            std::to_string(b_shape[2]) + "]");
+    }
+
+    // Output shape: [batch_size, M, N]
+    Tensor output({batch_size, M, N}, a_cont.dtype(), a_cont.device());
+
+    if (a_cont.dtype() == DType::Float32) {
+        const float* a_ptr = get_data_ptr<const float>(a_cont);
+        const float* b_ptr = get_data_ptr<const float>(b_cont);
+        float* out_ptr = get_data_ptr<float>(output);
+
+        // Parallelize over batch and output elements
+        // Each work item computes one element of the output
+        queue.parallel_for<BmmKernelFloat32>(
+            sycl::range<3>(batch_size, M, N),
+            [=](sycl::id<3> idx) {
+                const int64_t batch = idx[0];
+                const int64_t i = idx[1];
+                const int64_t j = idx[2];
+
+                const int64_t a_batch_offset = batch * M * K;
+                const int64_t b_batch_offset = batch * K * N;
+                const int64_t out_batch_offset = batch * M * N;
+
+                float sum = 0.0f;
+                for (int64_t p = 0; p < K; ++p) {
+                    sum += a_ptr[a_batch_offset + i * K + p] *
+                           b_ptr[b_batch_offset + p * N + j];
+                }
+                out_ptr[out_batch_offset + i * N + j] = sum;
+            }).wait();
+    }
+    else if (a_cont.dtype() == DType::Float64) {
+        const double* a_ptr = get_data_ptr<const double>(a_cont);
+        const double* b_ptr = get_data_ptr<const double>(b_cont);
+        double* out_ptr = get_data_ptr<double>(output);
+
+        queue.parallel_for<BmmKernelFloat64>(
+            sycl::range<3>(batch_size, M, N),
+            [=](sycl::id<3> idx) {
+                const int64_t batch = idx[0];
+                const int64_t i = idx[1];
+                const int64_t j = idx[2];
+
+                const int64_t a_batch_offset = batch * M * K;
+                const int64_t b_batch_offset = batch * K * N;
+                const int64_t out_batch_offset = batch * M * N;
+
+                double sum = 0.0;
+                for (int64_t p = 0; p < K; ++p) {
+                    sum += a_ptr[a_batch_offset + i * K + p] *
+                           b_ptr[b_batch_offset + p * N + j];
+                }
+                out_ptr[out_batch_offset + i * N + j] = sum;
+            }).wait();
+    }
+    else if (a_cont.dtype() == DType::Float16) {
+        const sycl::half* a_ptr = get_data_ptr<const sycl::half>(a_cont);
+        const sycl::half* b_ptr = get_data_ptr<const sycl::half>(b_cont);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+
+        // Use float accumulation for precision
+        queue.parallel_for<BmmKernelFloat16>(
+            sycl::range<3>(batch_size, M, N),
+            [=](sycl::id<3> idx) {
+                const int64_t batch = idx[0];
+                const int64_t i = idx[1];
+                const int64_t j = idx[2];
+
+                const int64_t a_batch_offset = batch * M * K;
+                const int64_t b_batch_offset = batch * K * N;
+                const int64_t out_batch_offset = batch * M * N;
+
+                float sum = 0.0f;
+                for (int64_t p = 0; p < K; ++p) {
+                    sum += static_cast<float>(a_ptr[a_batch_offset + i * K + p]) *
+                           static_cast<float>(b_ptr[b_batch_offset + p * N + j]);
+                }
+                out_ptr[out_batch_offset + i * N + j] = sycl::half(sum);
+            }).wait();
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for bmm: " +
+            std::string(dtype_name(a_cont.dtype())));
+    }
 
     return output;
 }

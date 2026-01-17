@@ -9,9 +9,15 @@
 #include "tenzor/core/tensor.hpp"
 #include <hip/hip_runtime.h>
 #include <stdexcept>
+#include <algorithm>
 
 namespace tenzor {
 namespace rocm {
+
+// Helper to compare tensor shapes (spans)
+inline bool shapes_equal(std::span<const int64_t> a, std::span<const int64_t> b) {
+    return std::equal(a.begin(), a.end(), b.begin(), b.end());
+}
 
 // HIP Error checking macro
 #define HIP_CHECK(call) \
@@ -152,7 +158,7 @@ __global__ void eq_broadcast_kernel(
 // ==============================================================================
 
 auto eq_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
-    if (a.shape() != b.shape()) {
+    if (!shapes_equal(a.shape(), b.shape())) {
         throw std::runtime_error("eq_kernel: tensor shapes must match");
     }
     if (a.dtype() != b.dtype()) {
@@ -197,7 +203,7 @@ auto eq_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
 }
 
 auto ne_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
-    if (a.shape() != b.shape()) {
+    if (!shapes_equal(a.shape(), b.shape())) {
         throw std::runtime_error("ne_kernel: tensor shapes must match");
     }
     if (a.dtype() != b.dtype()) {
@@ -242,7 +248,7 @@ auto ne_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
 }
 
 auto lt_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
-    if (a.shape() != b.shape()) {
+    if (!shapes_equal(a.shape(), b.shape())) {
         throw std::runtime_error("lt_kernel: tensor shapes must match");
     }
     if (a.dtype() != b.dtype()) {
@@ -283,7 +289,7 @@ auto lt_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
 }
 
 auto le_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
-    if (a.shape() != b.shape()) {
+    if (!shapes_equal(a.shape(), b.shape())) {
         throw std::runtime_error("le_kernel: tensor shapes must match");
     }
     if (a.dtype() != b.dtype()) {
@@ -324,7 +330,7 @@ auto le_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
 }
 
 auto gt_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
-    if (a.shape() != b.shape()) {
+    if (!shapes_equal(a.shape(), b.shape())) {
         throw std::runtime_error("gt_kernel: tensor shapes must match");
     }
     if (a.dtype() != b.dtype()) {
@@ -365,7 +371,7 @@ auto gt_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
 }
 
 auto ge_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
-    if (a.shape() != b.shape()) {
+    if (!shapes_equal(a.shape(), b.shape())) {
         throw std::runtime_error("ge_kernel: tensor shapes must match");
     }
     if (a.dtype() != b.dtype()) {

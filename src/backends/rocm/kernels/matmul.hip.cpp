@@ -212,6 +212,111 @@ __global__ void matmul_tiled_f64_kernel(
     }
 }
 
+/**
+ * @brief Tiled matrix multiplication kernel for Int32
+ *
+ * Uses shared memory tiling for efficient integer matrix multiplication.
+ * Note: rocBLAS doesn't support integer GEMM, so this native kernel is the primary path.
+ */
+template<int TILE_SIZE = 16>
+__global__ void matmul_tiled_i32_kernel(
+    const int32_t* __restrict__ A,
+    const int32_t* __restrict__ B,
+    int32_t* __restrict__ C,
+    int M, int N, int K
+) {
+    __shared__ int32_t As[TILE_SIZE][TILE_SIZE];
+    __shared__ int32_t Bs[TILE_SIZE][TILE_SIZE];
+
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    int row = blockIdx.y * TILE_SIZE + ty;
+    int col = blockIdx.x * TILE_SIZE + tx;
+
+    int64_t sum = 0;  // Use int64 for accumulation to avoid overflow
+
+    int num_tiles = (K + TILE_SIZE - 1) / TILE_SIZE;
+    for (int t = 0; t < num_tiles; ++t) {
+        int a_col = t * TILE_SIZE + tx;
+        if (row < M && a_col < K) {
+            As[ty][tx] = A[row * K + a_col];
+        } else {
+            As[ty][tx] = 0;
+        }
+
+        int b_row = t * TILE_SIZE + ty;
+        if (b_row < K && col < N) {
+            Bs[ty][tx] = B[b_row * N + col];
+        } else {
+            Bs[ty][tx] = 0;
+        }
+
+        __syncthreads();
+
+        #pragma unroll
+        for (int k = 0; k < TILE_SIZE; ++k) {
+            sum += static_cast<int64_t>(As[ty][k]) * static_cast<int64_t>(Bs[k][tx]);
+        }
+
+        __syncthreads();
+    }
+
+    if (row < M && col < N) {
+        C[row * N + col] = static_cast<int32_t>(sum);
+    }
+}
+
+/**
+ * @brief Tiled matrix multiplication kernel for Int64
+ */
+template<int TILE_SIZE = 16>
+__global__ void matmul_tiled_i64_kernel(
+    const int64_t* __restrict__ A,
+    const int64_t* __restrict__ B,
+    int64_t* __restrict__ C,
+    int M, int N, int K
+) {
+    __shared__ int64_t As[TILE_SIZE][TILE_SIZE];
+    __shared__ int64_t Bs[TILE_SIZE][TILE_SIZE];
+
+    int tx = threadIdx.x;
+    int ty = threadIdx.y;
+    int row = blockIdx.y * TILE_SIZE + ty;
+    int col = blockIdx.x * TILE_SIZE + tx;
+
+    int64_t sum = 0;
+
+    int num_tiles = (K + TILE_SIZE - 1) / TILE_SIZE;
+    for (int t = 0; t < num_tiles; ++t) {
+        int a_col = t * TILE_SIZE + tx;
+        if (row < M && a_col < K) {
+            As[ty][tx] = A[row * K + a_col];
+        } else {
+            As[ty][tx] = 0;
+        }
+
+        int b_row = t * TILE_SIZE + ty;
+        if (b_row < K && col < N) {
+            Bs[ty][tx] = B[b_row * N + col];
+        } else {
+            Bs[ty][tx] = 0;
+        }
+
+        __syncthreads();
+
+        #pragma unroll
+        for (int k = 0; k < TILE_SIZE; ++k) {
+            sum += As[ty][k] * Bs[k][tx];
+        }
+
+        __syncthreads();
+    }
+
+    if (row < M && col < N) {
+        C[row * N + col] = sum;
+    }
+}
+
 // ============================================================================
 // FP16/BF16 Matrix Multiplication with WMMA (AMD Matrix Cores)
 // ============================================================================
@@ -432,6 +537,40 @@ static Tensor matmul_native_hip(const Tensor& a, const Tensor& b, hipStream_t st
                 M, N, K
             );
         }
+    } else if (a.dtype() == DType::Int32) {
+        const int32_t* a_data = a.data<int32_t>();
+        const int32_t* b_data = b.data<int32_t>();
+        int32_t* c_data = result.data<int32_t>();
+
+        for (int64_t batch = 0; batch < batch_size; ++batch) {
+            int64_t a_offset = (batch_size_a == 1) ? 0 : batch * stride_a;
+            int64_t b_offset = (batch_size_b == 1) ? 0 : batch * stride_b;
+            int64_t c_offset = batch * stride_c;
+
+            matmul_tiled_i32_kernel<TILE_SIZE><<<grid, block, 0, stream>>>(
+                a_data + a_offset,
+                b_data + b_offset,
+                c_data + c_offset,
+                M, N, K
+            );
+        }
+    } else if (a.dtype() == DType::Int64) {
+        const int64_t* a_data = a.data<int64_t>();
+        const int64_t* b_data = b.data<int64_t>();
+        int64_t* c_data = result.data<int64_t>();
+
+        for (int64_t batch = 0; batch < batch_size; ++batch) {
+            int64_t a_offset = (batch_size_a == 1) ? 0 : batch * stride_a;
+            int64_t b_offset = (batch_size_b == 1) ? 0 : batch * stride_b;
+            int64_t c_offset = batch * stride_c;
+
+            matmul_tiled_i64_kernel<TILE_SIZE><<<grid, block, 0, stream>>>(
+                a_data + a_offset,
+                b_data + b_offset,
+                c_data + c_offset,
+                M, N, K
+            );
+        }
     }
 
     HIP_CHECK(hipGetLastError());
@@ -465,19 +604,263 @@ static Tensor matmul_native_hip(const Tensor& a, const Tensor& b, hipStream_t st
  * We handle this by transposing the operation: C^T = B^T * A^T
  */
 auto matmul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor {
+    // Make tensors contiguous if needed (does not break autograd chain)
+    Tensor a_contig = a.is_contiguous() ? a : a.contiguous();
+    Tensor b_contig = b.is_contiguous() ? b : b.contiguous();
+
     // Validate input dtypes match
-    if (a.dtype() != b.dtype()) {
+    if (a_contig.dtype() != b_contig.dtype()) {
         throw std::runtime_error("matmul: input tensors must have the same dtype");
     }
 
-    // Only support float and double precision
-    if (a.dtype() != DType::Float32 && a.dtype() != DType::Float64) {
-        throw std::runtime_error("matmul: only Float32 and Float64 dtypes are supported");
+    // Support Float32, Float64, Float16, Int32, and Int64
+    // Integer types use native HIP kernels since rocBLAS doesn't support integer GEMM
+    if (a_contig.dtype() != DType::Float32 && a_contig.dtype() != DType::Float64 &&
+        a_contig.dtype() != DType::Float16 && a_contig.dtype() != DType::Int32 &&
+        a_contig.dtype() != DType::Int64) {
+        throw std::runtime_error("matmul: only Float32, Float64, Float16, Int32, and Int64 dtypes are supported");
+    }
+
+    // For integer types, use native HIP kernel directly (rocBLAS doesn't support integer GEMM)
+    if (a_contig.dtype() == DType::Int32 || a_contig.dtype() == DType::Int64) {
+        return matmul_native_hip(a_contig, b_contig, stream);
     }
 
     // Get tensor shapes
-    auto a_shape = a.shape();
-    auto b_shape = b.shape();
+    auto a_shape = a_contig.shape();
+    auto b_shape = b_contig.shape();
+
+    // Handle 1D vector × 2D matrix (vector-matrix multiplication)
+    if (a_shape.size() == 1 && b_shape.size() == 2) {
+        int64_t vec_size = a_shape[0];  // Vector size
+        int64_t mat_rows = b_shape[0];  // Matrix rows
+        int64_t mat_cols = b_shape[1];  // Matrix cols
+
+        if (vec_size != mat_rows) {
+            throw std::runtime_error(
+                "matmul dimension mismatch: vector(" + std::to_string(vec_size) +
+                ") @ matrix(" + std::to_string(mat_rows) + "×" + std::to_string(mat_cols) + ")"
+            );
+        }
+
+        // Treat 1D vector as row vector (1, vec_size) and perform matmul to get (1, mat_cols)
+        // Then return result with 1D shape (mat_cols,)
+        int64_t M = 1;
+        int64_t K = vec_size;
+        int64_t N = mat_cols;
+
+        // Create output tensor with 1D shape
+        Tensor result({N}, a_contig.dtype(), a_contig.device());
+
+        // Handle empty matrices
+        if (N == 0 || K == 0) {
+            return result;
+        }
+
+        // Use rocBLAS GEMM with M=1
+        try {
+            RocblasHandle handle;
+            handle.set_stream(stream);
+
+            // rocBLAS uses column-major, we use row-major
+            // C = A * B in row-major => C^T = B^T * A^T in column-major
+            rocblas_operation trans_a = rocblas_operation_none;
+            rocblas_operation trans_b = rocblas_operation_none;
+
+            rocblas_int lda = static_cast<rocblas_int>(K);  // A is 1 x K
+            rocblas_int ldb = static_cast<rocblas_int>(N);  // B is K x N
+            rocblas_int ldc = static_cast<rocblas_int>(N);  // C is 1 x N
+
+            rocblas_int m = static_cast<rocblas_int>(N);  // Swapped for transpose
+            rocblas_int n = static_cast<rocblas_int>(M);  // Swapped for transpose
+            rocblas_int k = static_cast<rocblas_int>(K);
+
+            if (a_contig.dtype() == DType::Float32) {
+                const float* a_data = a_contig.data<float>();
+                const float* b_data = b_contig.data<float>();
+                float* c_data = result.data<float>();
+
+                float alpha = 1.0f;
+                float beta = 0.0f;
+
+                ROCBLAS_CHECK(rocblas_sgemm(
+                    handle.get(),
+                    trans_a, trans_b,
+                    m, n, k,
+                    &alpha,
+                    b_data, ldb,
+                    a_data, lda,
+                    &beta,
+                    c_data, ldc
+                ));
+            } else if (a_contig.dtype() == DType::Float64) {
+                const double* a_data = a_contig.data<double>();
+                const double* b_data = b_contig.data<double>();
+                double* c_data = result.data<double>();
+
+                double alpha = 1.0;
+                double beta = 0.0;
+
+                ROCBLAS_CHECK(rocblas_dgemm(
+                    handle.get(),
+                    trans_a, trans_b,
+                    m, n, k,
+                    &alpha,
+                    b_data, ldb,
+                    a_data, lda,
+                    &beta,
+                    c_data, ldc
+                ));
+            } else if (a_contig.dtype() == DType::Float16) {
+                const Float16* a_data = a_contig.data<Float16>();
+                const Float16* b_data = b_contig.data<Float16>();
+                Float16* c_data = result.data<Float16>();
+
+                float alpha = 1.0f;
+                float beta = 0.0f;
+
+                ROCBLAS_CHECK(rocblas_gemm_ex(
+                    handle.get(),
+                    trans_a, trans_b,
+                    m, n, k,
+                    &alpha,
+                    b_data, rocblas_datatype_f16_r, ldb,
+                    a_data, rocblas_datatype_f16_r, lda,
+                    &beta,
+                    c_data, rocblas_datatype_f16_r, ldc,
+                    c_data, rocblas_datatype_f16_r, ldc,
+                    rocblas_datatype_f32_r,  // compute type
+                    rocblas_gemm_algo_standard,
+                    0, 0  // solution index, flags
+                ));
+            }
+
+            return result;
+        } catch (const std::runtime_error&) {
+            // rocBLAS failed, use fallback native kernel
+            // For simplicity, use the 2D path by reshaping
+            // This is a rare fallback path for unsupported architectures
+        }
+
+        // Fallback: reshape to 2D, compute, and squeeze
+        Tensor a_2d = a_contig.reshape({1, K});
+        Tensor result_2d = matmul_kernel(a_2d, b_contig, stream);
+        return result_2d.reshape({N});
+    }
+
+    // Handle 2D matrix × 1D vector (matrix-vector multiplication)
+    if (a_shape.size() == 2 && b_shape.size() == 1) {
+        int64_t mat_rows = a_shape[0];  // Matrix rows
+        int64_t mat_cols = a_shape[1];  // Matrix cols
+        int64_t vec_size = b_shape[0];  // Vector size
+
+        if (mat_cols != vec_size) {
+            throw std::runtime_error(
+                "matmul dimension mismatch: matrix(" + std::to_string(mat_rows) +
+                "×" + std::to_string(mat_cols) + ") @ vector(" + std::to_string(vec_size) + ")"
+            );
+        }
+
+        // Treat 1D vector as column vector (vec_size, 1) and perform matmul to get (mat_rows, 1)
+        // Then return result with 1D shape (mat_rows,)
+        int64_t M = mat_rows;
+        int64_t K = mat_cols;
+        int64_t N = 1;
+
+        // Create output tensor with 1D shape
+        Tensor result({M}, a_contig.dtype(), a_contig.device());
+
+        // Handle empty matrices
+        if (M == 0 || K == 0) {
+            return result;
+        }
+
+        // Use rocBLAS GEMM with N=1
+        try {
+            RocblasHandle handle;
+            handle.set_stream(stream);
+
+            rocblas_operation trans_a = rocblas_operation_none;
+            rocblas_operation trans_b = rocblas_operation_none;
+
+            rocblas_int lda = static_cast<rocblas_int>(K);  // A is M x K
+            rocblas_int ldb = static_cast<rocblas_int>(N);  // B is K x 1
+            rocblas_int ldc = static_cast<rocblas_int>(N);  // C is M x 1
+
+            rocblas_int m = static_cast<rocblas_int>(N);  // Swapped for transpose
+            rocblas_int n = static_cast<rocblas_int>(M);  // Swapped for transpose
+            rocblas_int k = static_cast<rocblas_int>(K);
+
+            if (a_contig.dtype() == DType::Float32) {
+                const float* a_data = a_contig.data<float>();
+                const float* b_data = b_contig.data<float>();
+                float* c_data = result.data<float>();
+
+                float alpha = 1.0f;
+                float beta = 0.0f;
+
+                ROCBLAS_CHECK(rocblas_sgemm(
+                    handle.get(),
+                    trans_a, trans_b,
+                    m, n, k,
+                    &alpha,
+                    b_data, ldb,
+                    a_data, lda,
+                    &beta,
+                    c_data, ldc
+                ));
+            } else if (a_contig.dtype() == DType::Float64) {
+                const double* a_data = a_contig.data<double>();
+                const double* b_data = b_contig.data<double>();
+                double* c_data = result.data<double>();
+
+                double alpha = 1.0;
+                double beta = 0.0;
+
+                ROCBLAS_CHECK(rocblas_dgemm(
+                    handle.get(),
+                    trans_a, trans_b,
+                    m, n, k,
+                    &alpha,
+                    b_data, ldb,
+                    a_data, lda,
+                    &beta,
+                    c_data, ldc
+                ));
+            } else if (a_contig.dtype() == DType::Float16) {
+                const Float16* a_data = a_contig.data<Float16>();
+                const Float16* b_data = b_contig.data<Float16>();
+                Float16* c_data = result.data<Float16>();
+
+                float alpha = 1.0f;
+                float beta = 0.0f;
+
+                ROCBLAS_CHECK(rocblas_gemm_ex(
+                    handle.get(),
+                    trans_a, trans_b,
+                    m, n, k,
+                    &alpha,
+                    b_data, rocblas_datatype_f16_r, ldb,
+                    a_data, rocblas_datatype_f16_r, lda,
+                    &beta,
+                    c_data, rocblas_datatype_f16_r, ldc,
+                    c_data, rocblas_datatype_f16_r, ldc,
+                    rocblas_datatype_f32_r,
+                    rocblas_gemm_algo_standard,
+                    0, 0
+                ));
+            }
+
+            return result;
+        } catch (const std::runtime_error&) {
+            // rocBLAS failed, use fallback
+        }
+
+        // Fallback: reshape to 2D, compute, and squeeze
+        Tensor b_2d = b_contig.reshape({K, 1});
+        Tensor result_2d = matmul_kernel(a_contig, b_2d, stream);
+        return result_2d.reshape({M});
+    }
 
     // Validate dimensions (at least 2D)
     if (a_shape.size() < 2 || b_shape.size() < 2) {
@@ -532,7 +915,7 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tens
     out_shape.push_back(N);
 
     // Create output tensor
-    Tensor result(out_shape, a.dtype(), a.device());
+    Tensor result(out_shape, a_contig.dtype(), a_contig.device());
 
     // Handle empty matrices
     if (M == 0 || N == 0 || K == 0) {
@@ -573,9 +956,9 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tens
         // GEMM coefficients: C = alpha * A * B + beta * C
         // We want C = A * B, so alpha = 1.0, beta = 0.0
 
-        if (a.dtype() == DType::Float32) {
-            const float* a_data = a.data<float>();
-            const float* b_data = b.data<float>();
+        if (a_contig.dtype() == DType::Float32) {
+            const float* a_data = a_contig.data<float>();
+            const float* b_data = b_contig.data<float>();
             float* c_data = result.data<float>();
 
             float alpha = 1.0f;
@@ -614,9 +997,9 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tens
                     batch_count
                 ));
             }
-        } else if (a.dtype() == DType::Float64) {
-            const double* a_data = a.data<double>();
-            const double* b_data = b.data<double>();
+        } else if (a_contig.dtype() == DType::Float64) {
+            const double* a_data = a_contig.data<double>();
+            const double* b_data = b_contig.data<double>();
             double* c_data = result.data<double>();
 
             double alpha = 1.0;
@@ -653,6 +1036,57 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tens
                     batch_count
                 ));
             }
+        } else if (a_contig.dtype() == DType::Float16) {
+            // Float16 (half precision) GEMM using rocBLAS
+            // Cast tenzor::Float16* to rocblas_half* (binary compatible)
+            const rocblas_half* a_data = reinterpret_cast<const rocblas_half*>(a_contig.data<Float16>());
+            const rocblas_half* b_data = reinterpret_cast<const rocblas_half*>(b_contig.data<Float16>());
+            rocblas_half* c_data = reinterpret_cast<rocblas_half*>(result.data<Float16>());
+
+            // Use float for alpha/beta to maintain precision in accumulation
+            float alpha = 1.0f;
+            float beta = 0.0f;
+
+            if (batch_size == 1) {
+                // Single matrix multiplication using mixed-precision HGEMM
+                // rocblas_hgemm computes in half but can use float for alpha/beta
+                ROCBLAS_CHECK(rocblas_gemm_ex(
+                    handle.get(),
+                    trans_a, trans_b,
+                    m, n, k,
+                    &alpha,
+                    b_data, rocblas_datatype_f16_r, ldb,
+                    a_data, rocblas_datatype_f16_r, lda,
+                    &beta,
+                    c_data, rocblas_datatype_f16_r, ldc,
+                    c_data, rocblas_datatype_f16_r, ldc,
+                    rocblas_datatype_f32_r,  // Compute type: use FP32 for accuracy
+                    rocblas_gemm_algo_standard,
+                    0, 0
+                ));
+            } else {
+                // Batched matrix multiplication
+                rocblas_int batch_count = static_cast<rocblas_int>(batch_size);
+
+                rocblas_stride actual_stride_a = (batch_size_a == 1) ? 0 : stride_a;
+                rocblas_stride actual_stride_b = (batch_size_b == 1) ? 0 : stride_b;
+
+                ROCBLAS_CHECK(rocblas_gemm_strided_batched_ex(
+                    handle.get(),
+                    trans_a, trans_b,
+                    m, n, k,
+                    &alpha,
+                    b_data, rocblas_datatype_f16_r, ldb, actual_stride_b,
+                    a_data, rocblas_datatype_f16_r, lda, actual_stride_a,
+                    &beta,
+                    c_data, rocblas_datatype_f16_r, ldc, stride_c,
+                    c_data, rocblas_datatype_f16_r, ldc, stride_c,
+                    batch_count,
+                    rocblas_datatype_f32_r,  // Compute type: use FP32 for accuracy
+                    rocblas_gemm_algo_standard,
+                    0, 0
+                ));
+            }
         }
     } catch (const std::exception& e) {
         // rocBLAS failed (e.g., unsupported architecture like gfx90c)
@@ -666,7 +1100,7 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tens
             warning_printed = true;
         }
 
-        return matmul_native_hip(a, b, stream);
+        return matmul_native_hip(a_contig, b_contig, stream);
     }
 
     return result;

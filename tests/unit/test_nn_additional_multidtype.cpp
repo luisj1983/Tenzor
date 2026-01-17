@@ -98,6 +98,12 @@ protected:
             }
             device = Device::oneapi(0);
         }
+        else if (param.backend_name == "rocm") {
+            if (!isBackendAvailable(Device::Type::ROCm)) {
+                GTEST_SKIP() << "ROCm not available";
+            }
+            device = Device::rocm(0);
+        }
     }
 
     static bool isBackendAvailable(Device::Type type) {
@@ -713,8 +719,7 @@ std::vector<BackendDTypeParam> GenerateNNBackendDTypeCombinations() {
     std::vector<std::pair<DType, std::string>> dtypes = {
         {DType::Float32, "float32"},
         {DType::Float64, "float64"},
-        // Float16 can be enabled when fully supported
-        // {DType::Float16, "float16"},
+        {DType::Float16, "float16"},
     };
 
     std::vector<BackendDTypeParam> combinations;

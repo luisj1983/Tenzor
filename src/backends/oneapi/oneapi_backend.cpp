@@ -23,6 +23,7 @@ namespace oneapi {
     auto mul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
     auto div_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
     auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
+    auto bmm_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor;
 
     // In-place operations
     auto add_inplace_kernel(Tensor& inout, const Tensor& other, sycl::queue& queue) -> Tensor;
@@ -288,12 +289,10 @@ public:
             for (const auto& platform : platforms) {
                 auto devices = platform.get_devices();
                 for (const auto& device : devices) {
-                    // IMPORTANT: Only include devices our kernels were compiled for (spir64 target)
-                    // Skip NVIDIA GPUs since kernels are compiled for CPU/Intel GPU only
+                    // Skip NVIDIA GPUs - kernels are compiled for spir64 (Intel CPU/GPU)
                     std::string vendor = device.get_info<sycl::info::device::vendor>();
                     if (vendor.find("NVIDIA") != std::string::npos ||
                         vendor.find("nvidia") != std::string::npos) {
-                        // Skip NVIDIA devices - kernels compiled for spir64, not nvptx64
                         continue;
                     }
 
@@ -593,6 +592,10 @@ public:
             else if (op_name == "matmul") {
                 if (inputs.size() != 2) throw std::invalid_argument("matmul requires 2 inputs");
                 return {oneapi::matmul_kernel(inputs[0], inputs[1], queue)};
+            }
+            else if (op_name == "bmm") {
+                if (inputs.size() != 2) throw std::invalid_argument("bmm requires 2 inputs");
+                return {oneapi::bmm_kernel(inputs[0], inputs[1], queue)};
             }
 
             // In-place operations
@@ -904,8 +907,34 @@ public:
                 bool compute_grad_weight = !attrs.contains("compute_grad_weight") || attrs.at("compute_grad_weight") == "1";
                 bool compute_grad_bias = !attrs.contains("compute_grad_bias") || attrs.at("compute_grad_bias") == "1";
 
+                const Tensor& grad_output = inputs[0];
+                const Tensor& input = inputs[1];
+                const Tensor& weight = inputs[2];
+
+                // For Float64/Float16, use the separate backward functions which have dtype support
+                if (grad_output.dtype() == DType::Float64 || grad_output.dtype() == DType::Float16) {
+                    Tensor grad_input, grad_weight, grad_bias;
+
+                    if (compute_grad_input) {
+                        std::vector<int64_t> input_shape(input.shape().begin(), input.shape().end());
+                        grad_input = oneapi::conv2d_backward_input(grad_output, weight, input_shape,
+                                                                   stride, padding, dilation, groups, queue);
+                    }
+                    if (compute_grad_weight) {
+                        std::vector<int64_t> weight_shape(weight.shape().begin(), weight.shape().end());
+                        grad_weight = oneapi::conv2d_backward_weight(grad_output, input, weight_shape,
+                                                                     stride, padding, dilation, groups, queue);
+                    }
+                    if (compute_grad_bias) {
+                        grad_bias = oneapi::conv2d_backward_bias(grad_output, queue);
+                    }
+
+                    return {grad_input, grad_weight, grad_bias};
+                }
+
+                // For Float32, use the combined function
                 auto [grad_input, grad_weight, grad_bias] = oneapi::conv2d_backward(
-                    inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups,
+                    grad_output, input, weight, stride, padding, dilation, groups,
                     compute_grad_input, compute_grad_weight, compute_grad_bias, queue);
                 return {grad_input, grad_weight, grad_bias};
             }

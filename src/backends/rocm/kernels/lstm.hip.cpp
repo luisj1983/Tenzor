@@ -210,6 +210,120 @@ __global__ void lstm_cell_backward_fused(
     }
 }
 
+// Float16 LSTM cell forward kernel
+__global__ void lstm_cell_forward_fused_fp16(
+    const __half* __restrict__ gates,
+    const __half* __restrict__ c_prev,
+    __half* __restrict__ h_out,
+    __half* __restrict__ c_out,
+    int64_t batch_size,
+    int64_t hidden_size) {
+
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total_elements = batch_size * hidden_size;
+
+    if (idx < total_elements) {
+        int64_t batch_idx = idx / hidden_size;
+        int64_t hidden_idx = idx % hidden_size;
+
+        int64_t gate_offset = batch_idx * (4 * hidden_size) + hidden_idx;
+        int64_t i_offset = gate_offset;
+        int64_t f_offset = gate_offset + hidden_size;
+        int64_t g_offset = gate_offset + 2 * hidden_size;
+        int64_t o_offset = gate_offset + 3 * hidden_size;
+
+        // Load and convert to float for computation
+        float i_gate = __half2float(gates[i_offset]);
+        float f_gate = __half2float(gates[f_offset]);
+        float g_gate = __half2float(gates[g_offset]);
+        float o_gate = __half2float(gates[o_offset]);
+
+        // Apply activations
+        float i_t = 1.0f / (1.0f + expf(-i_gate));
+        float f_t = 1.0f / (1.0f + expf(-f_gate));
+        float o_t = 1.0f / (1.0f + expf(-o_gate));
+        float g_t = tanhf(g_gate);
+
+        float c_prev_val = __half2float(c_prev[idx]);
+
+        // Update cell state
+        float c_t = f_t * c_prev_val + i_t * g_t;
+
+        // Update hidden state
+        float h_t = o_t * tanhf(c_t);
+
+        // Store outputs
+        c_out[idx] = __float2half(c_t);
+        h_out[idx] = __float2half(h_t);
+    }
+}
+
+// Float16 LSTM cell backward kernel
+__global__ void lstm_cell_backward_fused_fp16(
+    const __half* __restrict__ grad_h,
+    const __half* __restrict__ grad_c,
+    const __half* __restrict__ gates,
+    const __half* __restrict__ c_prev,
+    const __half* __restrict__ c_out,
+    __half* __restrict__ grad_gates,
+    __half* __restrict__ grad_c_prev,
+    int64_t batch_size,
+    int64_t hidden_size) {
+
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total_elements = batch_size * hidden_size;
+
+    if (idx < total_elements) {
+        int64_t batch_idx = idx / hidden_size;
+        int64_t hidden_idx = idx % hidden_size;
+
+        int64_t gate_offset = batch_idx * (4 * hidden_size) + hidden_idx;
+        int64_t i_offset = gate_offset;
+        int64_t f_offset = gate_offset + hidden_size;
+        int64_t g_offset = gate_offset + 2 * hidden_size;
+        int64_t o_offset = gate_offset + 3 * hidden_size;
+
+        // Load and convert to float
+        float i_gate = __half2float(gates[i_offset]);
+        float f_gate = __half2float(gates[f_offset]);
+        float g_gate = __half2float(gates[g_offset]);
+        float o_gate = __half2float(gates[o_offset]);
+
+        float i_t = 1.0f / (1.0f + expf(-i_gate));
+        float f_t = 1.0f / (1.0f + expf(-f_gate));
+        float g_t = tanhf(g_gate);
+        float o_t = 1.0f / (1.0f + expf(-o_gate));
+
+        float c_prev_val = __half2float(c_prev[idx]);
+        float c_t = __half2float(c_out[idx]);
+        float tanh_c_t = tanhf(c_t);
+
+        float dh = __half2float(grad_h[idx]);
+        float dc = __half2float(grad_c[idx]);
+
+        // Gradients
+        dc += dh * o_t * (1.0f - tanh_c_t * tanh_c_t);
+        float do_t = dh * tanh_c_t;
+
+        float df_t = dc * c_prev_val;
+        float di_t = dc * g_t;
+        float dg_t = dc * i_t;
+        float dc_prev = dc * f_t;
+
+        float di_gate = di_t * i_t * (1.0f - i_t);
+        float df_gate = df_t * f_t * (1.0f - f_t);
+        float do_gate = do_t * o_t * (1.0f - o_t);
+        float dg_gate = dg_t * (1.0f - g_t * g_t);
+
+        // Store gradients
+        grad_gates[i_offset] = __float2half(di_gate);
+        grad_gates[f_offset] = __float2half(df_gate);
+        grad_gates[g_offset] = __float2half(dg_gate);
+        grad_gates[o_offset] = __float2half(do_gate);
+        grad_c_prev[idx] = __float2half(dc_prev);
+    }
+}
+
 // ============================================================================
 // Host Interface Functions
 // ============================================================================
@@ -347,8 +461,16 @@ auto lstm_cell_forward_kernel(
                           c_out.data<double>(),
                           batch_size,
                           hidden_size);
+    } else if (gates.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(lstm_cell_forward_fused_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          reinterpret_cast<const __half*>(gates.data<Float16>()),
+                          reinterpret_cast<const __half*>(c_prev.data<Float16>()),
+                          reinterpret_cast<__half*>(h_out.data<Float16>()),
+                          reinterpret_cast<__half*>(c_out.data<Float16>()),
+                          batch_size,
+                          hidden_size);
     } else {
-        throw std::runtime_error("LSTM only supports Float32 and Float64");
+        throw std::runtime_error("LSTM only supports Float32, Float64, and Float16");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -400,8 +522,19 @@ auto lstm_cell_backward_kernel(
                           grad_c_prev.data<double>(),
                           batch_size,
                           hidden_size);
+    } else if (gates.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(lstm_cell_backward_fused_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          reinterpret_cast<const __half*>(grad_h.data<Float16>()),
+                          reinterpret_cast<const __half*>(grad_c.data<Float16>()),
+                          reinterpret_cast<const __half*>(gates.data<Float16>()),
+                          reinterpret_cast<const __half*>(c_prev.data<Float16>()),
+                          reinterpret_cast<const __half*>(c_out.data<Float16>()),
+                          reinterpret_cast<__half*>(grad_gates.data<Float16>()),
+                          reinterpret_cast<__half*>(grad_c_prev.data<Float16>()),
+                          batch_size,
+                          hidden_size);
     } else {
-        throw std::runtime_error("LSTM backward only supports Float32 and Float64");
+        throw std::runtime_error("LSTM backward only supports Float32, Float64, and Float16");
     }
 
     HIP_CHECK(hipGetLastError());

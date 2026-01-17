@@ -1,6 +1,7 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include <hip/hip_runtime.h>
+#include <hip/hip_fp16.h>
 #include <rocblas/rocblas.h>
 #ifdef USE_MIOPEN
 #include <miopen/miopen.h>
@@ -451,9 +452,10 @@ __global__ void sum_bias_grad_kernel(
 }
 
 // Optimized version using wave-level reduction
+template<typename T>
 __global__ void sum_bias_grad_kernel_wave_reduce(
-    const float* __restrict__ grad_output,
-    float* __restrict__ grad_bias,
+    const T* __restrict__ grad_output,
+    T* __restrict__ grad_bias,
     int64_t batch,
     int64_t channels,
     int64_t spatial_size
@@ -465,13 +467,13 @@ __global__ void sum_bias_grad_kernel_wave_reduce(
         int64_t tid = threadIdx.x;
         int64_t block_size = blockDim.x;
 
-        // Each thread accumulates multiple values
+        // Each thread accumulates multiple values (accumulate in float for precision)
         float local_sum = 0.0f;
         for (int64_t idx = tid; idx < batch * spatial_size; idx += block_size) {
             int64_t b = idx / spatial_size;
             int64_t s = idx % spatial_size;
             int64_t grad_idx = b * (channels * spatial_size) + c * spatial_size + s;
-            local_sum += grad_output[grad_idx];
+            local_sum += static_cast<float>(grad_output[grad_idx]);
         }
 
         // Store in shared memory
@@ -486,9 +488,9 @@ __global__ void sum_bias_grad_kernel_wave_reduce(
             __syncthreads();
         }
 
-        // Write result
+        // Write result (convert back to T from float accumulator)
         if (tid == 0) {
-            grad_bias[c] = shared_data[0];
+            grad_bias[c] = static_cast<T>(shared_data[0]);
         }
     }
 }
@@ -692,6 +694,68 @@ auto conv2d_forward_miopen(
 }
 #endif
 
+// Bias addition kernel for double precision
+__global__ void add_bias_kernel_double(
+    double* __restrict__ output,
+    const double* __restrict__ bias,
+    int64_t batch,
+    int64_t channels,
+    int64_t spatial_size,
+    int64_t n
+) {
+    HIP_KERNEL_LOOP(idx, n) {
+        int64_t c = (idx / spatial_size) % channels;
+        output[idx] += bias[c];
+    }
+}
+
+// Bias addition for NHWC layout (double precision)
+__global__ void add_bias_kernel_nhwc_double(
+    double* __restrict__ output,
+    const double* __restrict__ bias,
+    int64_t batch,
+    int64_t height,
+    int64_t width,
+    int64_t channels,
+    int64_t n
+) {
+    HIP_KERNEL_LOOP(idx, n) {
+        int64_t c = idx % channels;
+        output[idx] += bias[c];
+    }
+}
+
+// Bias addition kernel for half precision (Float16)
+__global__ void add_bias_kernel_half(
+    __half* __restrict__ output,
+    const __half* __restrict__ bias,
+    int64_t batch,
+    int64_t channels,
+    int64_t spatial_size,
+    int64_t n
+) {
+    HIP_KERNEL_LOOP(idx, n) {
+        int64_t c = (idx / spatial_size) % channels;
+        output[idx] = __hadd(output[idx], bias[c]);
+    }
+}
+
+// Bias addition for NHWC layout (half precision)
+__global__ void add_bias_kernel_nhwc_half(
+    __half* __restrict__ output,
+    const __half* __restrict__ bias,
+    int64_t batch,
+    int64_t height,
+    int64_t width,
+    int64_t channels,
+    int64_t n
+) {
+    HIP_KERNEL_LOOP(idx, n) {
+        int64_t c = idx % channels;
+        output[idx] = __hadd(output[idx], bias[c]);
+    }
+}
+
 // rocBLAS-based implementation using im2col + GEMM
 auto conv2d_forward_kernel(
     const Tensor& input,         // (batch, in_channels, height, width)
@@ -707,6 +771,7 @@ auto conv2d_forward_kernel(
     // Extract dimensions
     auto input_shape = input.shape();
     auto weight_shape = weight.shape();
+    const DType dtype = input.dtype();
 
     int64_t batch, in_channels, height, width;
 
@@ -746,10 +811,12 @@ auto conv2d_forward_kernel(
     } else {
         output_shape = {batch, out_h, out_w, out_channels};
     }
-    Tensor output(output_shape, input.dtype(), input.device());
+    Tensor output(output_shape, dtype, input.device());
 
     // Initialize output to zeros
-    HIP_CHECK(hipMemsetAsync(output.data<float>(), 0, output.numel() * sizeof(float), stream));
+    size_t elem_size = (dtype == DType::Float64) ? sizeof(double) :
+                       (dtype == DType::Float16) ? sizeof(__half) : sizeof(float);
+    HIP_CHECK(hipMemsetAsync(output.data_ptr(), 0, output.numel() * elem_size, stream));
 
     // Create rocBLAS handle
     rocblas_handle rocblas_handle;
@@ -767,29 +834,11 @@ auto conv2d_forward_kernel(
         // Allocate im2col buffer for this group
         int64_t col_rows = batch * out_h * out_w;
         int64_t col_cols = in_channels_per_group * kernel_h * kernel_w;
-        float* col_buffer;
-        HIP_CHECK(hipMalloc(&col_buffer, col_rows * col_cols * sizeof(float)));
 
         // Apply im2col transformation
         dim3 grid, block;
         int64_t total_elements = batch * out_h * out_w * in_channels_per_group * kernel_h * kernel_w;
         compute_launch_config_1d(total_elements, grid, block);
-
-        if (layout == DataLayout::NCHW) {
-            const float* input_ptr = input.data<float>() + in_start * height * width;
-            im2col_kernel_nchw<<<grid, block, 0, stream>>>(
-                input_ptr, col_buffer, batch, in_channels_per_group,
-                height, width, kernel_h, kernel_w,
-                stride, padding, dilation, out_h, out_w
-            );
-        } else {  // NHWC
-            const float* input_ptr = input.data<float>() + in_start;
-            im2col_kernel_nhwc<<<grid, block, 0, stream>>>(
-                input_ptr, col_buffer, batch, height, width, in_channels_per_group,
-                kernel_h, kernel_w, stride, padding, dilation, out_h, out_w
-            );
-        }
-        HIP_CHECK(hipGetLastError());
 
         // Matrix multiplication using rocBLAS
         // weight_group: (out_channels_per_group, in_channels_per_group * kernel_h * kernel_w)
@@ -802,58 +851,218 @@ auto conv2d_forward_kernel(
         int64_t K = col_cols;
         int64_t N = out_channels_per_group;
 
-        float alpha = 1.0f;
-        float beta = 0.0f;
+        if (dtype == DType::Float32) {
+            float* col_buffer;
+            HIP_CHECK(hipMalloc(&col_buffer, col_rows * col_cols * sizeof(float)));
 
-        const float* weight_ptr = weight.data<float>() + out_start * in_channels_per_group * kernel_h * kernel_w;
-        float* output_ptr;
+            if (layout == DataLayout::NCHW) {
+                const float* input_ptr = input.data<float>() + in_start * height * width;
+                im2col_kernel_nchw<<<grid, block, 0, stream>>>(
+                    input_ptr, col_buffer, batch, in_channels_per_group,
+                    height, width, kernel_h, kernel_w,
+                    stride, padding, dilation, out_h, out_w
+                );
+            } else {  // NHWC
+                const float* input_ptr = input.data<float>() + in_start;
+                im2col_kernel_nhwc<<<grid, block, 0, stream>>>(
+                    input_ptr, col_buffer, batch, height, width, in_channels_per_group,
+                    kernel_h, kernel_w, stride, padding, dilation, out_h, out_w
+                );
+            }
+            HIP_CHECK(hipGetLastError());
 
-        if (layout == DataLayout::NCHW) {
-            output_ptr = output.data<float>() + out_start * out_h * out_w;
-        } else {  // NHWC
-            output_ptr = output.data<float>() + out_start;
+            float alpha = 1.0f;
+            float beta = 0.0f;
+
+            const float* weight_ptr = weight.data<float>() + out_start * in_channels_per_group * kernel_h * kernel_w;
+            float* output_ptr;
+
+            if (layout == DataLayout::NCHW) {
+                output_ptr = output.data<float>() + out_start * out_h * out_w;
+            } else {  // NHWC
+                output_ptr = output.data<float>() + out_start;
+            }
+
+            // rocBLAS uses column-major ordering (same as cuBLAS)
+            ROCBLAS_CHECK(rocblas_sgemm(
+                rocblas_handle,
+                rocblas_operation_transpose,  // transpose weight
+                rocblas_operation_none,       // don't transpose col_buffer
+                N,                           // rows of weight^T
+                M,                           // rows of col_buffer
+                K,                           // cols of col_buffer, rows of weight
+                &alpha,
+                weight_ptr,                  // weight matrix
+                K,                           // leading dimension
+                col_buffer,                  // col matrix
+                K,                           // leading dimension
+                &beta,
+                output_ptr,                  // output matrix
+                N                            // leading dimension
+            ));
+
+            // Free col buffer
+            HIP_CHECK(hipFree(col_buffer));
+        } else if (dtype == DType::Float64) {
+            double* col_buffer;
+            HIP_CHECK(hipMalloc(&col_buffer, col_rows * col_cols * sizeof(double)));
+
+            if (layout == DataLayout::NCHW) {
+                const double* input_ptr = input.data<double>() + in_start * height * width;
+                im2col_kernel_nchw<<<grid, block, 0, stream>>>(
+                    input_ptr, col_buffer, batch, in_channels_per_group,
+                    height, width, kernel_h, kernel_w,
+                    stride, padding, dilation, out_h, out_w
+                );
+            } else {  // NHWC
+                const double* input_ptr = input.data<double>() + in_start;
+                im2col_kernel_nhwc<<<grid, block, 0, stream>>>(
+                    input_ptr, col_buffer, batch, height, width, in_channels_per_group,
+                    kernel_h, kernel_w, stride, padding, dilation, out_h, out_w
+                );
+            }
+            HIP_CHECK(hipGetLastError());
+
+            double alpha = 1.0;
+            double beta = 0.0;
+
+            const double* weight_ptr = weight.data<double>() + out_start * in_channels_per_group * kernel_h * kernel_w;
+            double* output_ptr;
+
+            if (layout == DataLayout::NCHW) {
+                output_ptr = output.data<double>() + out_start * out_h * out_w;
+            } else {  // NHWC
+                output_ptr = output.data<double>() + out_start;
+            }
+
+            // rocBLAS dgemm for double precision
+            ROCBLAS_CHECK(rocblas_dgemm(
+                rocblas_handle,
+                rocblas_operation_transpose,  // transpose weight
+                rocblas_operation_none,       // don't transpose col_buffer
+                N,                           // rows of weight^T
+                M,                           // rows of col_buffer
+                K,                           // cols of col_buffer, rows of weight
+                &alpha,
+                weight_ptr,                  // weight matrix
+                K,                           // leading dimension
+                col_buffer,                  // col matrix
+                K,                           // leading dimension
+                &beta,
+                output_ptr,                  // output matrix
+                N                            // leading dimension
+            ));
+
+            // Free col buffer
+            HIP_CHECK(hipFree(col_buffer));
+        } else if (dtype == DType::Float16) {
+            __half* col_buffer;
+            HIP_CHECK(hipMalloc(&col_buffer, col_rows * col_cols * sizeof(__half)));
+
+            if (layout == DataLayout::NCHW) {
+                const __half* input_ptr = reinterpret_cast<const __half*>(input.data<Float16>()) + in_start * height * width;
+                im2col_kernel_nchw<<<grid, block, 0, stream>>>(
+                    input_ptr, col_buffer, batch, in_channels_per_group,
+                    height, width, kernel_h, kernel_w,
+                    stride, padding, dilation, out_h, out_w
+                );
+            } else {  // NHWC
+                const __half* input_ptr = reinterpret_cast<const __half*>(input.data<Float16>()) + in_start;
+                im2col_kernel_nhwc<<<grid, block, 0, stream>>>(
+                    input_ptr, col_buffer, batch, height, width, in_channels_per_group,
+                    kernel_h, kernel_w, stride, padding, dilation, out_h, out_w
+                );
+            }
+            HIP_CHECK(hipGetLastError());
+
+            // rocblas_half is compatible with __half
+            rocblas_half alpha_h, beta_h;
+            // Initialize alpha=1.0, beta=0.0 for half precision
+            alpha_h = rocblas_half{static_cast<uint16_t>(0x3C00)};  // 1.0 in FP16
+            beta_h = rocblas_half{static_cast<uint16_t>(0x0000)};   // 0.0 in FP16
+
+            const rocblas_half* weight_ptr = reinterpret_cast<const rocblas_half*>(weight.data<Float16>()) + out_start * in_channels_per_group * kernel_h * kernel_w;
+            rocblas_half* output_ptr;
+
+            if (layout == DataLayout::NCHW) {
+                output_ptr = reinterpret_cast<rocblas_half*>(output.data<Float16>()) + out_start * out_h * out_w;
+            } else {  // NHWC
+                output_ptr = reinterpret_cast<rocblas_half*>(output.data<Float16>()) + out_start;
+            }
+
+            // rocBLAS hgemm for half precision
+            ROCBLAS_CHECK(rocblas_hgemm(
+                rocblas_handle,
+                rocblas_operation_transpose,  // transpose weight
+                rocblas_operation_none,       // don't transpose col_buffer
+                N,                           // rows of weight^T
+                M,                           // rows of col_buffer
+                K,                           // cols of col_buffer, rows of weight
+                &alpha_h,
+                weight_ptr,                  // weight matrix
+                K,                           // leading dimension
+                reinterpret_cast<const rocblas_half*>(col_buffer),  // col matrix
+                K,                           // leading dimension
+                &beta_h,
+                output_ptr,                  // output matrix
+                N                            // leading dimension
+            ));
+
+            // Free col buffer
+            HIP_CHECK(hipFree(col_buffer));
+        } else {
+            ROCBLAS_CHECK(rocblas_destroy_handle(rocblas_handle));
+            throw std::runtime_error("Conv2d: unsupported dtype (only Float32, Float64, and Float16 supported)");
         }
-
-        // rocBLAS uses column-major ordering (same as cuBLAS)
-        ROCBLAS_CHECK(rocblas_sgemm(
-            rocblas_handle,
-            rocblas_operation_transpose,  // transpose weight
-            rocblas_operation_none,       // don't transpose col_buffer
-            N,                           // rows of weight^T
-            M,                           // rows of col_buffer
-            K,                           // cols of col_buffer, rows of weight
-            &alpha,
-            weight_ptr,                  // weight matrix
-            K,                           // leading dimension
-            col_buffer,                  // col matrix
-            K,                           // leading dimension
-            &beta,
-            output_ptr,                  // output matrix
-            N                            // leading dimension
-        ));
-
-        // Free col buffer
-        HIP_CHECK(hipFree(col_buffer));
     }
 
     // Add bias if present
     if (bias != nullptr) {
         int64_t spatial_size = out_h * out_w;
-        const float* bias_data = bias->data<float>();
-        float* output_data = output.data<float>();
 
         dim3 grid, block;
         int64_t total = batch * out_channels * out_h * out_w;
         compute_launch_config_1d(total, grid, block);
 
-        if (layout == DataLayout::NCHW) {
-            add_bias_kernel<<<grid, block, 0, stream>>>(
-                output_data, bias_data, batch, out_channels, spatial_size, total
-            );
-        } else {  // NHWC
-            add_bias_kernel_nhwc<<<grid, block, 0, stream>>>(
-                output_data, bias_data, batch, out_h, out_w, out_channels, total
-            );
+        if (dtype == DType::Float32) {
+            const float* bias_data = bias->data<float>();
+            float* output_data = output.data<float>();
+
+            if (layout == DataLayout::NCHW) {
+                add_bias_kernel<<<grid, block, 0, stream>>>(
+                    output_data, bias_data, batch, out_channels, spatial_size, total
+                );
+            } else {  // NHWC
+                add_bias_kernel_nhwc<<<grid, block, 0, stream>>>(
+                    output_data, bias_data, batch, out_h, out_w, out_channels, total
+                );
+            }
+        } else if (dtype == DType::Float64) {
+            const double* bias_data = bias->data<double>();
+            double* output_data = output.data<double>();
+
+            if (layout == DataLayout::NCHW) {
+                add_bias_kernel_double<<<grid, block, 0, stream>>>(
+                    output_data, bias_data, batch, out_channels, spatial_size, total
+                );
+            } else {  // NHWC
+                add_bias_kernel_nhwc_double<<<grid, block, 0, stream>>>(
+                    output_data, bias_data, batch, out_h, out_w, out_channels, total
+                );
+            }
+        } else if (dtype == DType::Float16) {
+            const __half* bias_data = reinterpret_cast<const __half*>(bias->data<Float16>());
+            __half* output_data = reinterpret_cast<__half*>(output.data<Float16>());
+
+            if (layout == DataLayout::NCHW) {
+                add_bias_kernel_half<<<grid, block, 0, stream>>>(
+                    output_data, bias_data, batch, out_channels, spatial_size, total
+                );
+            } else {  // NHWC
+                add_bias_kernel_nhwc_half<<<grid, block, 0, stream>>>(
+                    output_data, bias_data, batch, out_h, out_w, out_channels, total
+                );
+            }
         }
         HIP_CHECK(hipGetLastError());
     }
@@ -929,14 +1138,18 @@ auto conv2d_backward_kernel(
     Tensor grad_weight({out_channels, in_channels_per_group, kernel_h, kernel_w}, weight.dtype(), weight.device());
     Tensor grad_bias({out_channels}, weight.dtype(), weight.device());
 
+    DType dtype = input.dtype();
+    size_t elem_size = (dtype == DType::Float64) ? sizeof(double) :
+                       (dtype == DType::Float16) ? sizeof(__half) : sizeof(float);
+
     if (compute_grad_input) {
-        HIP_CHECK(hipMemsetAsync(grad_input.data<float>(), 0, grad_input.numel() * sizeof(float), stream));
+        HIP_CHECK(hipMemsetAsync(grad_input.data_ptr(), 0, grad_input.numel() * elem_size, stream));
     }
     if (compute_grad_weight) {
-        HIP_CHECK(hipMemsetAsync(grad_weight.data<float>(), 0, grad_weight.numel() * sizeof(float), stream));
+        HIP_CHECK(hipMemsetAsync(grad_weight.data_ptr(), 0, grad_weight.numel() * elem_size, stream));
     }
     if (compute_grad_bias) {
-        HIP_CHECK(hipMemsetAsync(grad_bias.data<float>(), 0, grad_bias.numel() * sizeof(float), stream));
+        HIP_CHECK(hipMemsetAsync(grad_bias.data_ptr(), 0, grad_bias.numel() * elem_size, stream));
     }
 
     // Create rocBLAS handle
@@ -954,143 +1167,253 @@ auto conv2d_backward_kernel(
 
         // Gradient w.r.t input
         if (compute_grad_input) {
-            float* grad_col;
-            HIP_CHECK(hipMalloc(&grad_col, col_rows * col_cols * sizeof(float)));
-
             // Compute grad_col = grad_output @ weight
             int64_t M = col_rows;
             int64_t K = out_channels_per_group;
             int64_t N = col_cols;
 
-            float alpha = 1.0f;
-            float beta = 0.0f;
+            if (dtype == DType::Float16) {
+                // Float16 path using rocblas_hgemm
+                rocblas_half* grad_col;
+                HIP_CHECK(hipMalloc(&grad_col, col_rows * col_cols * sizeof(rocblas_half)));
 
-            const float* grad_out_ptr;
-            if (layout == DataLayout::NCHW) {
-                grad_out_ptr = grad_output.data<float>() + out_start * out_h * out_w;
+                rocblas_half alpha_h{static_cast<uint16_t>(0x3C00)};  // 1.0 in FP16
+                rocblas_half beta_h{static_cast<uint16_t>(0x0000)};   // 0.0 in FP16
+
+                const rocblas_half* grad_out_ptr;
+                if (layout == DataLayout::NCHW) {
+                    grad_out_ptr = reinterpret_cast<const rocblas_half*>(grad_output.data<Float16>()) + out_start * out_h * out_w;
+                } else {
+                    grad_out_ptr = reinterpret_cast<const rocblas_half*>(grad_output.data<Float16>()) + out_start;
+                }
+                const rocblas_half* weight_ptr = reinterpret_cast<const rocblas_half*>(weight.data<Float16>()) + out_start * in_channels_per_group * kernel_h * kernel_w;
+
+                ROCBLAS_CHECK(rocblas_hgemm(
+                    rocblas_handle,
+                    rocblas_operation_none,
+                    rocblas_operation_none,
+                    N, M, K,
+                    &alpha_h,
+                    weight_ptr, N,
+                    grad_out_ptr, K,
+                    &beta_h,
+                    grad_col, N
+                ));
+
+                // Apply col2im
+                dim3 grid, block;
+                int64_t total_output = batch * in_channels_per_group * height * width;
+                compute_launch_config_1d(total_output, grid, block);
+
+                __half* grad_input_ptr;
+                if (layout == DataLayout::NCHW) {
+                    grad_input_ptr = reinterpret_cast<__half*>(grad_input.data<Float16>()) + in_start * height * width;
+                    col2im_kernel_nchw<<<grid, block, 0, stream>>>(
+                        reinterpret_cast<__half*>(grad_col), grad_input_ptr, batch, in_channels_per_group,
+                        height, width, kernel_h, kernel_w,
+                        stride, padding, dilation, out_h, out_w
+                    );
+                } else {
+                    grad_input_ptr = reinterpret_cast<__half*>(grad_input.data<Float16>()) + in_start;
+                    col2im_kernel_nhwc<<<grid, block, 0, stream>>>(
+                        reinterpret_cast<__half*>(grad_col), grad_input_ptr, batch, height, width, in_channels_per_group,
+                        kernel_h, kernel_w, stride, padding, dilation, out_h, out_w
+                    );
+                }
+                HIP_CHECK(hipGetLastError());
+                HIP_CHECK(hipFree(grad_col));
             } else {
-                grad_out_ptr = grad_output.data<float>() + out_start;
+                // Float32 path (original code)
+                float* grad_col;
+                HIP_CHECK(hipMalloc(&grad_col, col_rows * col_cols * sizeof(float)));
+
+                float alpha = 1.0f;
+                float beta = 0.0f;
+
+                const float* grad_out_ptr;
+                if (layout == DataLayout::NCHW) {
+                    grad_out_ptr = grad_output.data<float>() + out_start * out_h * out_w;
+                } else {
+                    grad_out_ptr = grad_output.data<float>() + out_start;
+                }
+                const float* weight_ptr = weight.data<float>() + out_start * in_channels_per_group * kernel_h * kernel_w;
+
+                ROCBLAS_CHECK(rocblas_sgemm(
+                    rocblas_handle,
+                    rocblas_operation_none,      // don't transpose weight
+                    rocblas_operation_none,      // don't transpose grad_output
+                    N,                          // cols of result
+                    M,                          // rows of result
+                    K,                          // inner dimension
+                    &alpha,
+                    weight_ptr,                 // weight matrix
+                    N,                          // leading dim
+                    grad_out_ptr,               // grad_output matrix
+                    K,                          // leading dim
+                    &beta,
+                    grad_col,                   // output matrix
+                    N                           // leading dim
+                ));
+
+                // Apply col2im
+                dim3 grid, block;
+                int64_t total_output = batch * in_channels_per_group * height * width;
+                compute_launch_config_1d(total_output, grid, block);
+
+                float* grad_input_ptr;
+                if (layout == DataLayout::NCHW) {
+                    grad_input_ptr = grad_input.data<float>() + in_start * height * width;
+                    col2im_kernel_nchw<<<grid, block, 0, stream>>>(
+                        grad_col, grad_input_ptr, batch, in_channels_per_group,
+                        height, width, kernel_h, kernel_w,
+                        stride, padding, dilation, out_h, out_w
+                    );
+                } else {  // NHWC
+                    grad_input_ptr = grad_input.data<float>() + in_start;
+                    col2im_kernel_nhwc<<<grid, block, 0, stream>>>(
+                        grad_col, grad_input_ptr, batch, height, width, in_channels_per_group,
+                        kernel_h, kernel_w, stride, padding, dilation, out_h, out_w
+                    );
+                }
+                HIP_CHECK(hipGetLastError());
+                HIP_CHECK(hipFree(grad_col));
             }
-            const float* weight_ptr = weight.data<float>() + out_start * in_channels_per_group * kernel_h * kernel_w;
-
-            ROCBLAS_CHECK(rocblas_sgemm(
-                rocblas_handle,
-                rocblas_operation_none,      // don't transpose weight
-                rocblas_operation_none,      // don't transpose grad_output
-                N,                          // cols of result
-                M,                          // rows of result
-                K,                          // inner dimension
-                &alpha,
-                weight_ptr,                 // weight matrix
-                N,                          // leading dim
-                grad_out_ptr,               // grad_output matrix
-                K,                          // leading dim
-                &beta,
-                grad_col,                   // output matrix
-                N                           // leading dim
-            ));
-
-            // Apply col2im
-            dim3 grid, block;
-            int64_t total_output = batch * in_channels_per_group * height * width;
-            compute_launch_config_1d(total_output, grid, block);
-
-            float* grad_input_ptr;
-            if (layout == DataLayout::NCHW) {
-                grad_input_ptr = grad_input.data<float>() + in_start * height * width;
-                col2im_kernel_nchw<<<grid, block, 0, stream>>>(
-                    grad_col, grad_input_ptr, batch, in_channels_per_group,
-                    height, width, kernel_h, kernel_w,
-                    stride, padding, dilation, out_h, out_w
-                );
-            } else {  // NHWC
-                grad_input_ptr = grad_input.data<float>() + in_start;
-                col2im_kernel_nhwc<<<grid, block, 0, stream>>>(
-                    grad_col, grad_input_ptr, batch, height, width, in_channels_per_group,
-                    kernel_h, kernel_w, stride, padding, dilation, out_h, out_w
-                );
-            }
-            HIP_CHECK(hipGetLastError());
-
-            HIP_CHECK(hipFree(grad_col));
         }
 
         // Gradient w.r.t weight
         if (compute_grad_weight) {
-            float* input_col;
-            HIP_CHECK(hipMalloc(&input_col, col_rows * col_cols * sizeof(float)));
+            if (dtype == DType::Float16) {
+                // Float16 path
+                rocblas_half* input_col;
+                HIP_CHECK(hipMalloc(&input_col, col_rows * col_cols * sizeof(rocblas_half)));
 
-            // Apply im2col to input
-            dim3 grid, block;
-            int64_t total_elements = batch * out_h * out_w * in_channels_per_group * kernel_h * kernel_w;
-            compute_launch_config_1d(total_elements, grid, block);
+                dim3 grid, block;
+                int64_t total_elements = batch * out_h * out_w * in_channels_per_group * kernel_h * kernel_w;
+                compute_launch_config_1d(total_elements, grid, block);
 
-            if (layout == DataLayout::NCHW) {
-                const float* input_ptr = input.data<float>() + in_start * height * width;
-                im2col_kernel_nchw<<<grid, block, 0, stream>>>(
-                    input_ptr, input_col, batch, in_channels_per_group,
-                    height, width, kernel_h, kernel_w,
-                    stride, padding, dilation, out_h, out_w
-                );
-            } else {  // NHWC
-                const float* input_ptr = input.data<float>() + in_start;
-                im2col_kernel_nhwc<<<grid, block, 0, stream>>>(
-                    input_ptr, input_col, batch, height, width, in_channels_per_group,
-                    kernel_h, kernel_w, stride, padding, dilation, out_h, out_w
-                );
-            }
-            HIP_CHECK(hipGetLastError());
+                if (layout == DataLayout::NCHW) {
+                    const __half* input_ptr = reinterpret_cast<const __half*>(input.data<Float16>()) + in_start * height * width;
+                    im2col_kernel_nchw<<<grid, block, 0, stream>>>(
+                        input_ptr, reinterpret_cast<__half*>(input_col), batch, in_channels_per_group,
+                        height, width, kernel_h, kernel_w,
+                        stride, padding, dilation, out_h, out_w
+                    );
+                } else {
+                    const __half* input_ptr = reinterpret_cast<const __half*>(input.data<Float16>()) + in_start;
+                    im2col_kernel_nhwc<<<grid, block, 0, stream>>>(
+                        input_ptr, reinterpret_cast<__half*>(input_col), batch, height, width, in_channels_per_group,
+                        kernel_h, kernel_w, stride, padding, dilation, out_h, out_w
+                    );
+                }
+                HIP_CHECK(hipGetLastError());
 
-            // Compute grad_weight = grad_output^T @ input_col
-            int64_t M = out_channels_per_group;
-            int64_t K = col_rows;
-            int64_t N = col_cols;
+                int64_t M = out_channels_per_group;
+                int64_t K = col_rows;
+                int64_t N = col_cols;
 
-            float alpha = 1.0f;
-            float beta = 0.0f;
+                rocblas_half alpha_h{static_cast<uint16_t>(0x3C00)};
+                rocblas_half beta_h{static_cast<uint16_t>(0x0000)};
 
-            const float* grad_out_ptr;
-            if (layout == DataLayout::NCHW) {
-                grad_out_ptr = grad_output.data<float>() + out_start * out_h * out_w;
+                const rocblas_half* grad_out_ptr;
+                if (layout == DataLayout::NCHW) {
+                    grad_out_ptr = reinterpret_cast<const rocblas_half*>(grad_output.data<Float16>()) + out_start * out_h * out_w;
+                } else {
+                    grad_out_ptr = reinterpret_cast<const rocblas_half*>(grad_output.data<Float16>()) + out_start;
+                }
+                rocblas_half* grad_weight_ptr = reinterpret_cast<rocblas_half*>(grad_weight.data<Float16>()) + out_start * in_channels_per_group * kernel_h * kernel_w;
+
+                ROCBLAS_CHECK(rocblas_hgemm(
+                    rocblas_handle,
+                    rocblas_operation_none,
+                    rocblas_operation_transpose,
+                    N, M, K,
+                    &alpha_h,
+                    input_col, N,
+                    grad_out_ptr, out_channels_per_group,
+                    &beta_h,
+                    grad_weight_ptr, N
+                ));
+
+                HIP_CHECK(hipFree(input_col));
             } else {
-                grad_out_ptr = grad_output.data<float>() + out_start;
+                // Float32 path
+                float* input_col;
+                HIP_CHECK(hipMalloc(&input_col, col_rows * col_cols * sizeof(float)));
+
+                dim3 grid, block;
+                int64_t total_elements = batch * out_h * out_w * in_channels_per_group * kernel_h * kernel_w;
+                compute_launch_config_1d(total_elements, grid, block);
+
+                if (layout == DataLayout::NCHW) {
+                    const float* input_ptr = input.data<float>() + in_start * height * width;
+                    im2col_kernel_nchw<<<grid, block, 0, stream>>>(
+                        input_ptr, input_col, batch, in_channels_per_group,
+                        height, width, kernel_h, kernel_w,
+                        stride, padding, dilation, out_h, out_w
+                    );
+                } else {
+                    const float* input_ptr = input.data<float>() + in_start;
+                    im2col_kernel_nhwc<<<grid, block, 0, stream>>>(
+                        input_ptr, input_col, batch, height, width, in_channels_per_group,
+                        kernel_h, kernel_w, stride, padding, dilation, out_h, out_w
+                    );
+                }
+                HIP_CHECK(hipGetLastError());
+
+                int64_t M = out_channels_per_group;
+                int64_t K = col_rows;
+                int64_t N = col_cols;
+
+                float alpha = 1.0f;
+                float beta = 0.0f;
+
+                const float* grad_out_ptr;
+                if (layout == DataLayout::NCHW) {
+                    grad_out_ptr = grad_output.data<float>() + out_start * out_h * out_w;
+                } else {
+                    grad_out_ptr = grad_output.data<float>() + out_start;
+                }
+                float* grad_weight_ptr = grad_weight.data<float>() + out_start * in_channels_per_group * kernel_h * kernel_w;
+
+                ROCBLAS_CHECK(rocblas_sgemm(
+                    rocblas_handle,
+                    rocblas_operation_none,
+                    rocblas_operation_transpose,
+                    N, M, K,
+                    &alpha,
+                    input_col, N,
+                    grad_out_ptr, out_channels_per_group,
+                    &beta,
+                    grad_weight_ptr, N
+                ));
+
+                HIP_CHECK(hipFree(input_col));
             }
-            float* grad_weight_ptr = grad_weight.data<float>() + out_start * in_channels_per_group * kernel_h * kernel_w;
-
-            ROCBLAS_CHECK(rocblas_sgemm(
-                rocblas_handle,
-                rocblas_operation_none,         // don't transpose input_col
-                rocblas_operation_transpose,    // transpose grad_output
-                N,                             // cols of result
-                M,                             // rows of result
-                K,                             // inner dimension
-                &alpha,
-                input_col,                     // input_col matrix
-                N,                             // leading dim
-                grad_out_ptr,                  // grad_output matrix (transposed)
-                out_channels_per_group,        // leading dim
-                &beta,
-                grad_weight_ptr,               // output matrix
-                N                              // leading dim
-            ));
-
-            HIP_CHECK(hipFree(input_col));
         }
     }
 
     // Gradient w.r.t bias
     if (compute_grad_bias) {
         int64_t spatial_size = out_h * out_w;
-        const float* grad_out_data = grad_output.data<float>();
-        float* grad_bias_data = grad_bias.data<float>();
 
         dim3 grid, block;
         compute_launch_config_1d(out_channels, grid, block);
 
-        // Use wave-optimized version for better performance
-        sum_bias_grad_kernel_wave_reduce<<<out_channels, 256, 0, stream>>>(
-            grad_out_data, grad_bias_data, batch, out_channels, spatial_size
-        );
+        if (dtype == DType::Float16) {
+            const __half* grad_out_data = reinterpret_cast<const __half*>(grad_output.data<Float16>());
+            __half* grad_bias_data = reinterpret_cast<__half*>(grad_bias.data<Float16>());
+
+            sum_bias_grad_kernel_wave_reduce<<<out_channels, 256, 0, stream>>>(
+                grad_out_data, grad_bias_data, batch, out_channels, spatial_size
+            );
+        } else {
+            const float* grad_out_data = grad_output.data<float>();
+            float* grad_bias_data = grad_bias.data<float>();
+
+            sum_bias_grad_kernel_wave_reduce<<<out_channels, 256, 0, stream>>>(
+                grad_out_data, grad_bias_data, batch, out_channels, spatial_size
+            );
+        }
         HIP_CHECK(hipGetLastError());
     }
 
@@ -1156,9 +1479,12 @@ auto conv2d_backward_bias(
 ) -> Tensor {
     auto grad_shape = grad_output.shape();
     int64_t out_channels = grad_shape[1];  // Assumes NCHW
+    DType dtype = grad_output.dtype();
 
-    Tensor grad_bias({out_channels}, grad_output.dtype(), grad_output.device());
-    HIP_CHECK(hipMemsetAsync(grad_bias.data<float>(), 0, out_channels * sizeof(float), stream));
+    Tensor grad_bias({out_channels}, dtype, grad_output.device());
+    size_t elem_size = (dtype == DType::Float64) ? sizeof(double) :
+                       (dtype == DType::Float16) ? sizeof(__half) : sizeof(float);
+    HIP_CHECK(hipMemsetAsync(grad_bias.data_ptr(), 0, out_channels * elem_size, stream));
 
     int64_t batch = grad_shape[0];
     int64_t out_h = grad_shape[2];
@@ -1168,10 +1494,18 @@ auto conv2d_backward_bias(
     dim3 grid, block;
     compute_launch_config_1d(out_channels, grid, block);
 
-    sum_bias_grad_kernel_wave_reduce<<<out_channels, 256, 0, stream>>>(
-        grad_output.data<float>(), grad_bias.data<float>(),
-        batch, out_channels, spatial_size
-    );
+    if (dtype == DType::Float16) {
+        sum_bias_grad_kernel_wave_reduce<<<out_channels, 256, 0, stream>>>(
+            reinterpret_cast<const __half*>(grad_output.data<Float16>()),
+            reinterpret_cast<__half*>(grad_bias.data<Float16>()),
+            batch, out_channels, spatial_size
+        );
+    } else {
+        sum_bias_grad_kernel_wave_reduce<<<out_channels, 256, 0, stream>>>(
+            grad_output.data<float>(), grad_bias.data<float>(),
+            batch, out_channels, spatial_size
+        );
+    }
     HIP_CHECK(hipGetLastError());
 
     return grad_bias;

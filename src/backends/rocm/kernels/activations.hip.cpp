@@ -52,12 +52,29 @@ __global__ void relu_forward_kernel(const T* input, T* output, int64_t n) {
     }
 }
 
+// Forward: max(0, x) for Float16
+__global__ void relu_forward_kernel_fp16(const __half* input, __half* output, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) {
+        float val = __half2float(input[idx]);
+        output[idx] = val > 0.0f ? input[idx] : __float2half(0.0f);
+    }
+}
+
 // Backward: grad_out * (x > 0)
 template<typename T>
 __global__ void relu_backward_kernel(const T* grad_output, const T* input,
                                      T* grad_input, int64_t n) {
     HIP_GRID_STRIDE_LOOP(idx, n) {
         grad_input[idx] = grad_output[idx] * (input[idx] > T(0) ? T(1) : T(0));
+    }
+}
+
+// Backward: relu for Float16
+__global__ void relu_backward_kernel_fp16(const __half* grad_output, const __half* input,
+                                          __half* grad_input, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) {
+        float val = __half2float(input[idx]);
+        grad_input[idx] = val > 0.0f ? grad_output[idx] : __float2half(0.0f);
     }
 }
 
@@ -127,6 +144,38 @@ __global__ void sigmoid_backward_kernel(const T* grad_output, const T* input,
     }
 }
 
+// Float16 sigmoid forward - compute in float for precision
+__global__ void sigmoid_forward_kernel_fp16(const __half* input, __half* output, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) {
+        float x = __half2float(input[idx]);
+        float sigmoid_x;
+        if (x >= 0.0f) {
+            sigmoid_x = 1.0f / (1.0f + expf(-x));
+        } else {
+            float exp_x = expf(x);
+            sigmoid_x = exp_x / (1.0f + exp_x);
+        }
+        output[idx] = __float2half(sigmoid_x);
+    }
+}
+
+// Float16 sigmoid backward
+__global__ void sigmoid_backward_kernel_fp16(const __half* grad_output, const __half* input,
+                                             __half* grad_input, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) {
+        float x = __half2float(input[idx]);
+        float sigmoid_x;
+        if (x >= 0.0f) {
+            sigmoid_x = 1.0f / (1.0f + expf(-x));
+        } else {
+            float exp_x = expf(x);
+            sigmoid_x = exp_x / (1.0f + exp_x);
+        }
+        float grad = __half2float(grad_output[idx]) * sigmoid_x * (1.0f - sigmoid_x);
+        grad_input[idx] = __float2half(grad);
+    }
+}
+
 // Host functions
 extern "C" {
     void sigmoid_forward_float(const float* input, float* output, int64_t n) {
@@ -172,6 +221,14 @@ __global__ void tanh_forward_kernel(const T* input, T* output, int64_t n) {
     }
 }
 
+// Forward: tanh(x) for Float16 - compute in float for precision
+__global__ void tanh_forward_kernel_fp16(const __half* input, __half* output, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) {
+        float val = __half2float(input[idx]);
+        output[idx] = __float2half(tanhf(val));
+    }
+}
+
 // Backward: grad_out * (1 - tanh(x)^2)
 template<typename T>
 __global__ void tanh_backward_kernel(const T* grad_output, const T* input,
@@ -179,6 +236,17 @@ __global__ void tanh_backward_kernel(const T* grad_output, const T* input,
     HIP_GRID_STRIDE_LOOP(idx, n) {
         T tanh_x = tanh(input[idx]);
         grad_input[idx] = grad_output[idx] * (T(1) - tanh_x * tanh_x);
+    }
+}
+
+// Backward: tanh for Float16 - compute in float for precision
+__global__ void tanh_backward_kernel_fp16(const __half* grad_output, const __half* input,
+                                          __half* grad_input, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) {
+        float val = __half2float(input[idx]);
+        float tanh_x = tanhf(val);
+        float grad = __half2float(grad_output[idx]) * (1.0f - tanh_x * tanh_x);
+        grad_input[idx] = __float2half(grad);
     }
 }
 
@@ -260,6 +328,24 @@ __global__ void gelu_backward_kernel(const T* grad_output, const T* input,
     }
 }
 
+// GELU forward for Float16 - compute in float32 for precision
+__global__ void gelu_forward_kernel_fp16(const __half* input, __half* output, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) {
+        float val = __half2float(input[idx]);
+        output[idx] = __float2half(gelu_forward_impl(val));
+    }
+}
+
+// GELU backward for Float16 - compute in float32 for precision
+__global__ void gelu_backward_kernel_fp16(const __half* grad_output, const __half* input,
+                                          __half* grad_input, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) {
+        float grad = __half2float(grad_output[idx]);
+        float val = __half2float(input[idx]);
+        grad_input[idx] = __float2half(grad * gelu_backward_impl(val));
+    }
+}
+
 // Host functions
 extern "C" {
     void gelu_forward_float(const float* input, float* output, int64_t n) {
@@ -312,6 +398,25 @@ __global__ void leaky_relu_backward_kernel(const T* grad_output, const T* input,
                                           T* grad_input, int64_t n, T alpha) {
     HIP_GRID_STRIDE_LOOP(idx, n) {
         grad_input[idx] = grad_output[idx] * (input[idx] > T(0) ? T(1) : alpha);
+    }
+}
+
+// Float16 Leaky ReLU forward
+__global__ void leaky_relu_forward_kernel_fp16(const __half* input, __half* output,
+                                               int64_t n, float alpha) {
+    HIP_GRID_STRIDE_LOOP(idx, n) {
+        float val = __half2float(input[idx]);
+        output[idx] = __float2half(val > 0.0f ? val : alpha * val);
+    }
+}
+
+// Float16 Leaky ReLU backward
+__global__ void leaky_relu_backward_kernel_fp16(const __half* grad_output, const __half* input,
+                                                __half* grad_input, int64_t n, float alpha) {
+    HIP_GRID_STRIDE_LOOP(idx, n) {
+        float val = __half2float(input[idx]);
+        float grad = __half2float(grad_output[idx]) * (val > 0.0f ? 1.0f : alpha);
+        grad_input[idx] = __float2half(grad);
     }
 }
 
@@ -370,6 +475,24 @@ __global__ void elu_backward_kernel(const T* grad_output, const T* input,
     HIP_GRID_STRIDE_LOOP(idx, n) {
         T x = input[idx];
         grad_input[idx] = grad_output[idx] * (x > T(0) ? T(1) : alpha * exp(x));
+    }
+}
+
+// Float16 ELU forward
+__global__ void elu_forward_kernel_fp16(const __half* input, __half* output, int64_t n, float alpha) {
+    HIP_GRID_STRIDE_LOOP(idx, n) {
+        float x = __half2float(input[idx]);
+        output[idx] = __float2half(x > 0.0f ? x : alpha * (expf(x) - 1.0f));
+    }
+}
+
+// Float16 ELU backward
+__global__ void elu_backward_kernel_fp16(const __half* grad_output, const __half* input,
+                                         __half* grad_input, int64_t n, float alpha) {
+    HIP_GRID_STRIDE_LOOP(idx, n) {
+        float x = __half2float(input[idx]);
+        float grad = __half2float(grad_output[idx]) * (x > 0.0f ? 1.0f : alpha * expf(x));
+        grad_input[idx] = __float2half(grad);
     }
 }
 
@@ -436,6 +559,30 @@ __global__ void selu_backward_kernel(const T* grad_output, const T* input,
     }
 }
 
+// Float16 SELU forward
+__global__ void selu_forward_kernel_fp16(const __half* input, __half* output, int64_t n) {
+    const float alpha = 1.6732632423543772848170429916717f;
+    const float scale = 1.0507009873554804934193349852946f;
+
+    HIP_GRID_STRIDE_LOOP(idx, n) {
+        float x = __half2float(input[idx]);
+        output[idx] = __float2half(scale * (x > 0.0f ? x : alpha * (expf(x) - 1.0f)));
+    }
+}
+
+// Float16 SELU backward
+__global__ void selu_backward_kernel_fp16(const __half* grad_output, const __half* input,
+                                          __half* grad_input, int64_t n) {
+    const float alpha = 1.6732632423543772848170429916717f;
+    const float scale = 1.0507009873554804934193349852946f;
+
+    HIP_GRID_STRIDE_LOOP(idx, n) {
+        float x = __half2float(input[idx]);
+        float grad = __half2float(grad_output[idx]) * scale * (x > 0.0f ? 1.0f : alpha * expf(x));
+        grad_input[idx] = __float2half(grad);
+    }
+}
+
 // Host functions
 extern "C" {
     void selu_forward_float(const float* input, float* output, int64_t n) {
@@ -491,6 +638,26 @@ __global__ void swish_backward_kernel(const T* grad_output, const T* input,
         T x = input[idx];
         T sigmoid_x = sigmoid_stable(x);
         grad_input[idx] = grad_output[idx] * (sigmoid_x + x * sigmoid_x * (T(1) - sigmoid_x));
+    }
+}
+
+// Float16 Swish forward
+__global__ void swish_forward_kernel_fp16(const __half* input, __half* output, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) {
+        float x = __half2float(input[idx]);
+        float sigmoid_x = x >= 0.0f ? 1.0f / (1.0f + expf(-x)) : expf(x) / (1.0f + expf(x));
+        output[idx] = __float2half(x * sigmoid_x);
+    }
+}
+
+// Float16 Swish backward
+__global__ void swish_backward_kernel_fp16(const __half* grad_output, const __half* input,
+                                           __half* grad_input, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) {
+        float x = __half2float(input[idx]);
+        float sigmoid_x = x >= 0.0f ? 1.0f / (1.0f + expf(-x)) : expf(x) / (1.0f + expf(x));
+        float grad = __half2float(grad_output[idx]) * (sigmoid_x + x * sigmoid_x * (1.0f - sigmoid_x));
+        grad_input[idx] = __float2half(grad);
     }
 }
 
@@ -568,6 +735,29 @@ __global__ void mish_backward_kernel(const T* grad_output, const T* input,
     }
 }
 
+// Float16 Mish forward
+__global__ void mish_forward_kernel_fp16(const __half* input, __half* output, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) {
+        float x = __half2float(input[idx]);
+        float softplus_x = x > 20.0f ? x : logf(1.0f + expf(x));
+        output[idx] = __float2half(x * tanhf(softplus_x));
+    }
+}
+
+// Float16 Mish backward
+__global__ void mish_backward_kernel_fp16(const __half* grad_output, const __half* input,
+                                          __half* grad_input, int64_t n) {
+    HIP_GRID_STRIDE_LOOP(idx, n) {
+        float x = __half2float(input[idx]);
+        float softplus_x = x > 20.0f ? x : logf(1.0f + expf(x));
+        float tanh_softplus = tanhf(softplus_x);
+        float sech_squared = 1.0f - tanh_softplus * tanh_softplus;
+        float sigmoid_x = x >= 0.0f ? 1.0f / (1.0f + expf(-x)) : expf(x) / (1.0f + expf(x));
+        float grad = __half2float(grad_output[idx]) * (tanh_softplus + x * sech_squared * sigmoid_x);
+        grad_input[idx] = __float2half(grad);
+    }
+}
+
 // Host functions
 extern "C" {
     void mish_forward_float(const float* input, float* output, int64_t n) {
@@ -640,6 +830,42 @@ __global__ void softplus_backward_kernel(const T* grad_output, const T* input,
     }
 }
 
+// Float16 Softplus forward
+__global__ void softplus_forward_kernel_fp16(const __half* input, __half* output, int64_t n, float beta, float threshold) {
+    HIP_GRID_STRIDE_LOOP(idx, n) {
+        float x = __half2float(input[idx]);
+        float bx = beta * x;
+        float result;
+        if (bx > threshold) {
+            result = x;
+        } else if (bx < -threshold) {
+            result = expf(bx) / beta;
+        } else {
+            result = logf(1.0f + expf(bx)) / beta;
+        }
+        output[idx] = __float2half(result);
+    }
+}
+
+// Float16 Softplus backward
+__global__ void softplus_backward_kernel_fp16(const __half* grad_output, const __half* input,
+                                              __half* grad_input, int64_t n, float beta, float threshold) {
+    HIP_GRID_STRIDE_LOOP(idx, n) {
+        float x = __half2float(input[idx]);
+        float bx = beta * x;
+        float grad;
+        if (bx > threshold) {
+            grad = __half2float(grad_output[idx]);
+        } else if (bx < -threshold) {
+            grad = __half2float(grad_output[idx]) * expf(bx);
+        } else {
+            float sig = 1.0f / (1.0f + expf(-bx));
+            grad = __half2float(grad_output[idx]) * sig;
+        }
+        grad_input[idx] = __float2half(grad);
+    }
+}
+
 // Host functions
 extern "C" {
     void softplus_forward_float(const float* input, float* output, int64_t n, float beta, float threshold) {
@@ -680,12 +906,13 @@ extern "C" {
 // Shared memory size for reductions
 constexpr int SOFTMAX_BLOCK_SIZE = 256;
 
+// Use wavefront size 32 for RDNA (wave32) compatibility, also works on GCN/CDNA (wave64)
+constexpr int SOFTMAX_WAVEFRONT_SIZE = 32;
+
 // Warp-level reduction using shuffle instructions
-// AMD GPUs have 64-wide wavefronts (vs NVIDIA's 32-wide warps)
 template<typename T>
 __device__ __forceinline__ T warp_reduce_max(T val) {
-    // AMD wavefront size is 64
-    for (int offset = 32; offset > 0; offset /= 2) {
+    for (int offset = SOFTMAX_WAVEFRONT_SIZE / 2; offset > 0; offset /= 2) {
         val = max(val, __shfl_down(val, offset));
     }
     return val;
@@ -693,8 +920,7 @@ __device__ __forceinline__ T warp_reduce_max(T val) {
 
 template<typename T>
 __device__ __forceinline__ T warp_reduce_sum(T val) {
-    // AMD wavefront size is 64
-    for (int offset = 32; offset > 0; offset /= 2) {
+    for (int offset = SOFTMAX_WAVEFRONT_SIZE / 2; offset > 0; offset /= 2) {
         val += __shfl_down(val, offset);
     }
     return val;
@@ -704,8 +930,8 @@ __device__ __forceinline__ T warp_reduce_sum(T val) {
 // Optimized for AMD GPU memory hierarchy (LDS - Local Data Share)
 template<typename T>
 __device__ T block_reduce_max(T val, T* shared) {
-    int lane = threadIdx.x % 64;  // AMD wavefront size
-    int wid = threadIdx.x / 64;
+    int lane = threadIdx.x % SOFTMAX_WAVEFRONT_SIZE;
+    int wid = threadIdx.x / SOFTMAX_WAVEFRONT_SIZE;
 
     val = warp_reduce_max(val);
 
@@ -714,7 +940,7 @@ __device__ T block_reduce_max(T val, T* shared) {
     }
     __syncthreads();
 
-    val = (threadIdx.x < blockDim.x / 64) ? shared[lane] : -FLT_MAX;
+    val = (threadIdx.x < blockDim.x / SOFTMAX_WAVEFRONT_SIZE) ? shared[lane] : -FLT_MAX;
     if (wid == 0) {
         val = warp_reduce_max(val);
     }
@@ -724,8 +950,8 @@ __device__ T block_reduce_max(T val, T* shared) {
 
 template<typename T>
 __device__ T block_reduce_sum(T val, T* shared) {
-    int lane = threadIdx.x % 64;  // AMD wavefront size
-    int wid = threadIdx.x / 64;
+    int lane = threadIdx.x % SOFTMAX_WAVEFRONT_SIZE;
+    int wid = threadIdx.x / SOFTMAX_WAVEFRONT_SIZE;
 
     val = warp_reduce_sum(val);
 
@@ -734,7 +960,7 @@ __device__ T block_reduce_sum(T val, T* shared) {
     }
     __syncthreads();
 
-    val = (threadIdx.x < blockDim.x / 64) ? shared[lane] : T(0);
+    val = (threadIdx.x < blockDim.x / SOFTMAX_WAVEFRONT_SIZE) ? shared[lane] : T(0);
     if (wid == 0) {
         val = warp_reduce_sum(val);
     }
@@ -829,6 +1055,98 @@ __global__ void softmax_backward_kernel(const T* grad_output, const T* output,
     // Compute gradient: softmax[i] * (grad_output[i] - sum)
     for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
         grad_in_row[i] = out_row[i] * (grad_out_row[i] - sum);
+    }
+}
+
+// Softmax forward for Float16 - compute in float32 for numerical stability
+__global__ void softmax_forward_kernel_fp16(const __half* input, __half* output,
+                                            int64_t batch_size, int64_t dim_size,
+                                            float temperature) {
+    extern __shared__ __align__(sizeof(float)) unsigned char shared_mem[];
+    float* shared = reinterpret_cast<float*>(shared_mem);
+
+    int64_t row = blockIdx.x;
+    if (row >= batch_size) return;
+
+    const __half* input_row = input + row * dim_size;
+    __half* output_row = output + row * dim_size;
+
+    // Step 1: Find max value for numerical stability
+    float max_val = -FLT_MAX;
+    for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
+        max_val = fmaxf(max_val, __half2float(input_row[i]));
+    }
+    max_val = block_reduce_max(max_val, shared);
+    __syncthreads();
+
+    // Broadcast max to all threads
+    if (threadIdx.x == 0) {
+        shared[0] = max_val;
+    }
+    __syncthreads();
+    max_val = shared[0];
+
+    // Step 2: Compute exp((x - max) / temperature) and sum
+    float sum_exp = 0.0f;
+    float inv_temp = 1.0f / temperature;
+    for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
+        float val = __half2float(input_row[i]);
+        float exp_val = expf((val - max_val) * inv_temp);
+        // Temporarily store in output (as float bits, will overwrite)
+        output_row[i] = __float2half(exp_val);
+        sum_exp += exp_val;
+    }
+    sum_exp = block_reduce_sum(sum_exp, shared);
+    __syncthreads();
+
+    // Broadcast sum to all threads
+    if (threadIdx.x == 0) {
+        shared[0] = sum_exp;
+    }
+    __syncthreads();
+    sum_exp = shared[0];
+
+    // Step 3: Normalize
+    for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
+        float exp_val = __half2float(output_row[i]);
+        output_row[i] = __float2half(exp_val / sum_exp);
+    }
+}
+
+// Softmax backward for Float16 - compute in float32 for numerical stability
+__global__ void softmax_backward_kernel_fp16(const __half* grad_output, const __half* output,
+                                             __half* grad_input,
+                                             int64_t batch_size, int64_t dim_size) {
+    extern __shared__ __align__(sizeof(float)) unsigned char shared_mem[];
+    float* shared = reinterpret_cast<float*>(shared_mem);
+
+    int64_t row = blockIdx.x;
+    if (row >= batch_size) return;
+
+    const __half* grad_out_row = grad_output + row * dim_size;
+    const __half* out_row = output + row * dim_size;
+    __half* grad_in_row = grad_input + row * dim_size;
+
+    // Compute sum(grad_output * softmax)
+    float sum = 0.0f;
+    for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
+        sum += __half2float(grad_out_row[i]) * __half2float(out_row[i]);
+    }
+    sum = block_reduce_sum(sum, shared);
+    __syncthreads();
+
+    // Broadcast sum to all threads
+    if (threadIdx.x == 0) {
+        shared[0] = sum;
+    }
+    __syncthreads();
+    sum = shared[0];
+
+    // Compute gradient: softmax[i] * (grad_output[i] - sum)
+    for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
+        float out_val = __half2float(out_row[i]);
+        float grad_val = __half2float(grad_out_row[i]);
+        grad_in_row[i] = __float2half(out_val * (grad_val - sum));
     }
 }
 
@@ -981,6 +1299,92 @@ __global__ void log_softmax_backward_kernel(const T* grad_output, const T* outpu
     }
 }
 
+// LogSoftmax forward for Float16 - compute in float32 for numerical stability
+__global__ void log_softmax_forward_kernel_fp16(const __half* input, __half* output,
+                                                int64_t batch_size, int64_t dim_size) {
+    extern __shared__ __align__(sizeof(float)) unsigned char shared_mem[];
+    float* shared = reinterpret_cast<float*>(shared_mem);
+
+    int64_t row = blockIdx.x;
+    if (row >= batch_size) return;
+
+    const __half* input_row = input + row * dim_size;
+    __half* output_row = output + row * dim_size;
+
+    // Step 1: Find max value for numerical stability
+    float max_val = -FLT_MAX;
+    for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
+        max_val = fmaxf(max_val, __half2float(input_row[i]));
+    }
+    max_val = block_reduce_max(max_val, shared);
+    __syncthreads();
+
+    // Broadcast max to all threads
+    if (threadIdx.x == 0) {
+        shared[0] = max_val;
+    }
+    __syncthreads();
+    max_val = shared[0];
+
+    // Step 2: Compute sum(exp(x - max))
+    float sum_exp = 0.0f;
+    for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
+        sum_exp += expf(__half2float(input_row[i]) - max_val);
+    }
+    sum_exp = block_reduce_sum(sum_exp, shared);
+    __syncthreads();
+
+    // Broadcast log_sum_exp to all threads
+    if (threadIdx.x == 0) {
+        shared[0] = logf(sum_exp);
+    }
+    __syncthreads();
+    float log_sum_exp = shared[0];
+
+    // Step 3: Compute log_softmax = x - max - log_sum_exp
+    for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
+        float val = __half2float(input_row[i]);
+        output_row[i] = __float2half(val - max_val - log_sum_exp);
+    }
+}
+
+// LogSoftmax backward for Float16 - compute in float32 for numerical stability
+__global__ void log_softmax_backward_kernel_fp16(const __half* grad_output, const __half* output,
+                                                 __half* grad_input,
+                                                 int64_t batch_size, int64_t dim_size) {
+    extern __shared__ __align__(sizeof(float)) unsigned char shared_mem[];
+    float* shared = reinterpret_cast<float*>(shared_mem);
+
+    int64_t row = blockIdx.x;
+    if (row >= batch_size) return;
+
+    const __half* grad_out_row = grad_output + row * dim_size;
+    const __half* out_row = output + row * dim_size;
+    __half* grad_in_row = grad_input + row * dim_size;
+
+    // Compute sum(grad_output)
+    float sum_grad = 0.0f;
+    for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
+        sum_grad += __half2float(grad_out_row[i]);
+    }
+    sum_grad = block_reduce_sum(sum_grad, shared);
+    __syncthreads();
+
+    // Broadcast sum to all threads
+    if (threadIdx.x == 0) {
+        shared[0] = sum_grad;
+    }
+    __syncthreads();
+    sum_grad = shared[0];
+
+    // Compute gradient: grad_output - exp(log_softmax) * sum_grad
+    for (int64_t i = threadIdx.x; i < dim_size; i += blockDim.x) {
+        float grad_val = __half2float(grad_out_row[i]);
+        float out_val = __half2float(out_row[i]);
+        grad_in_row[i] = __float2half(grad_val - expf(out_val) * sum_grad);
+    }
+}
+
 // Host functions
 extern "C" {
     void log_softmax_forward_float(const float* input, float* output,
@@ -1044,8 +1448,13 @@ auto relu_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         int num_blocks = get_num_blocks(n);
         hipLaunchKernelGGL(relu_forward_kernel<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        int num_blocks = get_num_blocks(n);
+        hipLaunchKernelGGL(relu_forward_kernel_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          reinterpret_cast<const __half*>(input.data<Float16>()),
+                          reinterpret_cast<__half*>(result.data<Float16>()), n);
     } else {
-        throw std::runtime_error("ReLU only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("ReLU only supports Float32, Float64, and Float16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -1074,8 +1483,14 @@ auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input, hipStr
         int num_blocks = get_num_blocks(n);
         hipLaunchKernelGGL(relu_backward_kernel<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           grad_output.data<double>(), input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        int num_blocks = get_num_blocks(n);
+        hipLaunchKernelGGL(relu_backward_kernel_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          reinterpret_cast<const __half*>(grad_output.data<Float16>()),
+                          reinterpret_cast<const __half*>(input.data<Float16>()),
+                          reinterpret_cast<__half*>(result.data<Float16>()), n);
     } else {
-        throw std::runtime_error("ReLU backward only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("ReLU backward only supports Float32, Float64, and Float16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -1104,8 +1519,13 @@ auto sigmoid_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         int num_blocks = get_num_blocks(n);
         hipLaunchKernelGGL(sigmoid_forward_kernel<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        int num_blocks = get_num_blocks(n);
+        hipLaunchKernelGGL(sigmoid_forward_kernel_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          reinterpret_cast<const __half*>(input.data<Float16>()),
+                          reinterpret_cast<__half*>(result.data<Float16>()), n);
     } else {
-        throw std::runtime_error("Sigmoid only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("Sigmoid only supports Float32, Float64, and Float16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -1134,8 +1554,14 @@ auto sigmoid_backward_kernel(const Tensor& grad_output, const Tensor& input, hip
         int num_blocks = get_num_blocks(n);
         hipLaunchKernelGGL(sigmoid_backward_kernel<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           grad_output.data<double>(), input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        int num_blocks = get_num_blocks(n);
+        hipLaunchKernelGGL(sigmoid_backward_kernel_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          reinterpret_cast<const __half*>(grad_output.data<Float16>()),
+                          reinterpret_cast<const __half*>(input.data<Float16>()),
+                          reinterpret_cast<__half*>(result.data<Float16>()), n);
     } else {
-        throw std::runtime_error("Sigmoid backward only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("Sigmoid backward only supports Float32, Float64, and Float16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -1164,8 +1590,13 @@ auto tanh_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         int num_blocks = get_num_blocks(n);
         hipLaunchKernelGGL(tanh_forward_kernel<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        int num_blocks = get_num_blocks(n);
+        hipLaunchKernelGGL(tanh_forward_kernel_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          reinterpret_cast<const __half*>(input.data<Float16>()),
+                          reinterpret_cast<__half*>(result.data<Float16>()), n);
     } else {
-        throw std::runtime_error("Tanh only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("Tanh only supports Float32, Float64, and Float16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -1194,8 +1625,14 @@ auto tanh_backward_kernel(const Tensor& grad_output, const Tensor& input, hipStr
         int num_blocks = get_num_blocks(n);
         hipLaunchKernelGGL(tanh_backward_kernel<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           grad_output.data<double>(), input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        int num_blocks = get_num_blocks(n);
+        hipLaunchKernelGGL(tanh_backward_kernel_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          reinterpret_cast<const __half*>(grad_output.data<Float16>()),
+                          reinterpret_cast<const __half*>(input.data<Float16>()),
+                          reinterpret_cast<__half*>(result.data<Float16>()), n);
     } else {
-        throw std::runtime_error("Tanh backward only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("Tanh backward only supports Float32, Float64, and Float16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -1224,8 +1661,13 @@ auto gelu_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
         int num_blocks = get_num_blocks(n);
         hipLaunchKernelGGL(gelu_forward_kernel<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        int num_blocks = get_num_blocks(n);
+        hipLaunchKernelGGL(gelu_forward_kernel_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          reinterpret_cast<const __half*>(input.data<Float16>()),
+                          reinterpret_cast<__half*>(result.data<Float16>()), n);
     } else {
-        throw std::runtime_error("GELU only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("GELU only supports Float32, Float64, and Float16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -1254,8 +1696,14 @@ auto gelu_backward_kernel(const Tensor& grad_output, const Tensor& input, hipStr
         int num_blocks = get_num_blocks(n);
         hipLaunchKernelGGL(gelu_backward_kernel<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           grad_output.data<double>(), input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        int num_blocks = get_num_blocks(n);
+        hipLaunchKernelGGL(gelu_backward_kernel_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          reinterpret_cast<const __half*>(grad_output.data<Float16>()),
+                          reinterpret_cast<const __half*>(input.data<Float16>()),
+                          reinterpret_cast<__half*>(result.data<Float16>()), n);
     } else {
-        throw std::runtime_error("GELU backward only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("GELU backward only supports Float32, Float64, and Float16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -1284,8 +1732,12 @@ auto leaky_relu_kernel(const Tensor& input, float alpha, hipStream_t stream) -> 
         int num_blocks = get_num_blocks(n);
         hipLaunchKernelGGL(leaky_relu_forward_kernel<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           input.data<double>(), result.data<double>(), n, static_cast<double>(alpha));
+    } else if (input.dtype() == DType::Float16) {
+        int num_blocks = get_num_blocks(n);
+        hipLaunchKernelGGL(leaky_relu_forward_kernel_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          reinterpret_cast<const __half*>(input.data<Float16>()), reinterpret_cast<__half*>(result.data<Float16>()), n, alpha);
     } else {
-        throw std::runtime_error("Leaky ReLU only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("Leaky ReLU only supports Float32, Float64, and Float16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -1314,8 +1766,12 @@ auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, 
         int num_blocks = get_num_blocks(n);
         hipLaunchKernelGGL(leaky_relu_backward_kernel<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           grad_output.data<double>(), input.data<double>(), result.data<double>(), n, static_cast<double>(alpha));
+    } else if (input.dtype() == DType::Float16) {
+        int num_blocks = get_num_blocks(n);
+        hipLaunchKernelGGL(leaky_relu_backward_kernel_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          reinterpret_cast<const __half*>(grad_output.data<Float16>()), reinterpret_cast<const __half*>(input.data<Float16>()), reinterpret_cast<__half*>(result.data<Float16>()), n, alpha);
     } else {
-        throw std::runtime_error("Leaky ReLU backward only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("Leaky ReLU backward only supports Float32, Float64, and Float16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -1365,8 +1821,16 @@ auto softmax_kernel(const Tensor& input, int64_t dim, hipStream_t stream, float 
         hipLaunchKernelGGL(softmax_forward_kernel<double>, dim3(num_blocks), dim3(SOFTMAX_BLOCK_SIZE),
                           shared_mem_size, stream, input.data<double>(), result.data<double>(),
                           batch_size, dim_size, static_cast<double>(temperature));
+    } else if (input.dtype() == DType::Float16) {
+        int num_blocks = batch_size;
+        int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(float);  // Compute in float for stability
+        hipLaunchKernelGGL(softmax_forward_kernel_fp16, dim3(num_blocks), dim3(SOFTMAX_BLOCK_SIZE),
+                          shared_mem_size, stream,
+                          reinterpret_cast<const __half*>(input.data<Float16>()),
+                          reinterpret_cast<__half*>(result.data<Float16>()),
+                          batch_size, dim_size, temperature);
     } else {
-        throw std::runtime_error("Softmax only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("Softmax only supports Float32, Float64, and Float16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -1410,8 +1874,17 @@ auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, in
         hipLaunchKernelGGL(softmax_backward_kernel<double>, dim3(num_blocks), dim3(SOFTMAX_BLOCK_SIZE),
                           shared_mem_size, stream, grad_output.data<double>(), output.data<double>(),
                           result.data<double>(), batch_size, dim_size);
+    } else if (output.dtype() == DType::Float16) {
+        int num_blocks = batch_size;
+        int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(float);  // Compute in float for stability
+        hipLaunchKernelGGL(softmax_backward_kernel_fp16, dim3(num_blocks), dim3(SOFTMAX_BLOCK_SIZE),
+                          shared_mem_size, stream,
+                          reinterpret_cast<const __half*>(grad_output.data<Float16>()),
+                          reinterpret_cast<const __half*>(output.data<Float16>()),
+                          reinterpret_cast<__half*>(result.data<Float16>()),
+                          batch_size, dim_size);
     } else {
-        throw std::runtime_error("Softmax backward only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("Softmax backward only supports Float32, Float64, and Float16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -1455,8 +1928,16 @@ auto log_softmax_kernel(const Tensor& input, int64_t dim, hipStream_t stream) ->
         hipLaunchKernelGGL(log_softmax_forward_kernel<double>, dim3(num_blocks), dim3(SOFTMAX_BLOCK_SIZE),
                           shared_mem_size, stream, input.data<double>(), result.data<double>(),
                           batch_size, dim_size);
+    } else if (input.dtype() == DType::Float16) {
+        int num_blocks = batch_size;
+        int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(float);  // Compute in float for stability
+        hipLaunchKernelGGL(log_softmax_forward_kernel_fp16, dim3(num_blocks), dim3(SOFTMAX_BLOCK_SIZE),
+                          shared_mem_size, stream,
+                          reinterpret_cast<const __half*>(input.data<Float16>()),
+                          reinterpret_cast<__half*>(result.data<Float16>()),
+                          batch_size, dim_size);
     } else {
-        throw std::runtime_error("Log Softmax only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("Log Softmax only supports Float32, Float64, and Float16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -1500,8 +1981,17 @@ auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output
         hipLaunchKernelGGL(log_softmax_backward_kernel<double>, dim3(num_blocks), dim3(SOFTMAX_BLOCK_SIZE),
                           shared_mem_size, stream, grad_output.data<double>(), output.data<double>(),
                           result.data<double>(), batch_size, dim_size);
+    } else if (output.dtype() == DType::Float16) {
+        int num_blocks = batch_size;
+        int shared_mem_size = SOFTMAX_BLOCK_SIZE * sizeof(float);  // Compute in float for stability
+        hipLaunchKernelGGL(log_softmax_backward_kernel_fp16, dim3(num_blocks), dim3(SOFTMAX_BLOCK_SIZE),
+                          shared_mem_size, stream,
+                          reinterpret_cast<const __half*>(grad_output.data<Float16>()),
+                          reinterpret_cast<const __half*>(output.data<Float16>()),
+                          reinterpret_cast<__half*>(result.data<Float16>()),
+                          batch_size, dim_size);
     } else {
-        throw std::runtime_error("Log Softmax backward only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("Log Softmax backward only supports Float32, Float64, and Float16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -1530,8 +2020,11 @@ auto elu_kernel(const Tensor& input, float alpha, hipStream_t stream) -> Tensor 
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(elu_forward_kernel<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           input.data<double>(), result.data<double>(), n, static_cast<double>(alpha));
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(elu_forward_kernel_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          reinterpret_cast<const __half*>(input.data<Float16>()), reinterpret_cast<__half*>(result.data<Float16>()), n, alpha);
     } else {
-        throw std::runtime_error("ELU only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("ELU only supports Float32, Float64, and Float16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -1558,8 +2051,11 @@ auto elu_backward_kernel(const Tensor& grad_output, const Tensor& input, float a
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(elu_backward_kernel<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           grad_output.data<double>(), input.data<double>(), result.data<double>(), n, static_cast<double>(alpha));
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(elu_backward_kernel_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          reinterpret_cast<const __half*>(grad_output.data<Float16>()), reinterpret_cast<const __half*>(input.data<Float16>()), reinterpret_cast<__half*>(result.data<Float16>()), n, alpha);
     } else {
-        throw std::runtime_error("ELU backward only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("ELU backward only supports Float32, Float64, and Float16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -1588,8 +2084,11 @@ auto selu_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(selu_forward_kernel<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(selu_forward_kernel_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          reinterpret_cast<const __half*>(input.data<Float16>()), reinterpret_cast<__half*>(result.data<Float16>()), n);
     } else {
-        throw std::runtime_error("SELU only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("SELU only supports Float32, Float64, and Float16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -1616,8 +2115,11 @@ auto selu_backward_kernel(const Tensor& grad_output, const Tensor& input, hipStr
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(selu_backward_kernel<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           grad_output.data<double>(), input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(selu_backward_kernel_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          reinterpret_cast<const __half*>(grad_output.data<Float16>()), reinterpret_cast<const __half*>(input.data<Float16>()), reinterpret_cast<__half*>(result.data<Float16>()), n);
     } else {
-        throw std::runtime_error("SELU backward only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("SELU backward only supports Float32, Float64, and Float16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -1646,8 +2148,11 @@ auto swish_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(swish_forward_kernel<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(swish_forward_kernel_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          reinterpret_cast<const __half*>(input.data<Float16>()), reinterpret_cast<__half*>(result.data<Float16>()), n);
     } else {
-        throw std::runtime_error("Swish only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("Swish only supports Float32, Float64, and Float16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -1674,8 +2179,11 @@ auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input, hipSt
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(swish_backward_kernel<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           grad_output.data<double>(), input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(swish_backward_kernel_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          reinterpret_cast<const __half*>(grad_output.data<Float16>()), reinterpret_cast<const __half*>(input.data<Float16>()), reinterpret_cast<__half*>(result.data<Float16>()), n);
     } else {
-        throw std::runtime_error("Swish backward only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("Swish backward only supports Float32, Float64, and Float16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -1704,8 +2212,11 @@ auto mish_kernel(const Tensor& input, hipStream_t stream) -> Tensor {
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(mish_forward_kernel<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(mish_forward_kernel_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          reinterpret_cast<const __half*>(input.data<Float16>()), reinterpret_cast<__half*>(result.data<Float16>()), n);
     } else {
-        throw std::runtime_error("Mish only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("Mish only supports Float32, Float64, and Float16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -1732,8 +2243,11 @@ auto mish_backward_kernel(const Tensor& grad_output, const Tensor& input, hipStr
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(mish_backward_kernel<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           grad_output.data<double>(), input.data<double>(), result.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(mish_backward_kernel_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          reinterpret_cast<const __half*>(grad_output.data<Float16>()), reinterpret_cast<const __half*>(input.data<Float16>()), reinterpret_cast<__half*>(result.data<Float16>()), n);
     } else {
-        throw std::runtime_error("Mish backward only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("Mish backward only supports Float32, Float64, and Float16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -1762,8 +2276,11 @@ auto softplus_kernel(const Tensor& input, float beta, float threshold, hipStream
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(softplus_forward_kernel<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           input.data<double>(), result.data<double>(), n, static_cast<double>(beta), static_cast<double>(threshold));
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(softplus_forward_kernel_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          reinterpret_cast<const __half*>(input.data<Float16>()), reinterpret_cast<__half*>(result.data<Float16>()), n, beta, threshold);
     } else {
-        throw std::runtime_error("Softplus only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("Softplus only supports Float32, Float64, and Float16 dtypes");
     }
 
     hipError_t err = hipGetLastError();
@@ -1790,8 +2307,11 @@ auto softplus_backward_kernel(const Tensor& grad_output, const Tensor& input, fl
     } else if (input.dtype() == DType::Float64) {
         hipLaunchKernelGGL(softplus_backward_kernel<double>, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
                           grad_output.data<double>(), input.data<double>(), result.data<double>(), n, static_cast<double>(beta), static_cast<double>(threshold));
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(softplus_backward_kernel_fp16, dim3(num_blocks), dim3(BLOCK_SIZE), 0, stream,
+                          reinterpret_cast<const __half*>(grad_output.data<Float16>()), reinterpret_cast<const __half*>(input.data<Float16>()), reinterpret_cast<__half*>(result.data<Float16>()), n, beta, threshold);
     } else {
-        throw std::runtime_error("Softplus backward only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("Softplus backward only supports Float32, Float64, and Float16 dtypes");
     }
 
     hipError_t err = hipGetLastError();

@@ -1588,9 +1588,25 @@ if(TENZOR_BUILD_ROCM)
         ${ROCM_PATH}/include
     )
 
+    # ROCm gradient debug test (CPU vs ROCm comparison)
+    add_executable(test_rocm_gradient_debug
+        unit/test_rocm_gradient_debug.cpp
+    )
+
+    target_link_libraries(test_rocm_gradient_debug PRIVATE
+        tenzor_core
+        GTest::gtest_main
+        hip::host
+    )
+
+    target_include_directories(test_rocm_gradient_debug PRIVATE
+        ${ROCM_PATH}/include
+    )
+
     # ROCm initialization can be slow, use 60 second timeout
     tenzor_discover_tests(test_rocm_backend DISCOVERY_TIMEOUT 60)
     tenzor_discover_tests(test_rocm_kernels DISCOVERY_TIMEOUT 60)
+    tenzor_discover_tests(test_rocm_gradient_debug DISCOVERY_TIMEOUT 60)
 endif()
 # Debug tests commented out - tmp files not tracked in git
 # add_executable(debug_multi_linear ../tests/tmp/debug_multi_linear.cpp)

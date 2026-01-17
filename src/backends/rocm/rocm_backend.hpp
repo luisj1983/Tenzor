@@ -27,6 +27,12 @@ namespace tenzor {
  * All operations mirror the CUDA backend but use HIP API.
  */
 namespace rocm {
+    // Data layout for convolution operations
+    enum class DataLayout {
+        NCHW,  // Batch, Channels, Height, Width (default)
+        NHWC   // Batch, Height, Width, Channels (TensorFlow style)
+    };
+
     // Binary operations
     auto add_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor;
     auto sub_kernel(const Tensor& a, const Tensor& b, hipStream_t stream) -> Tensor;
@@ -94,6 +100,22 @@ namespace rocm {
     auto batchnorm2d_forward_affine(const Tensor& input, const Tensor& mean, const Tensor& variance, const Tensor& gamma, const Tensor& beta, float epsilon, hipStream_t stream) -> Tensor;
     auto batchnorm2d_update_running_stats(Tensor& running_mean, Tensor& running_var, const Tensor& batch_mean, const Tensor& batch_var, float momentum, hipStream_t stream) -> void;
     auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const Tensor& mean, const Tensor& variance, const Tensor& gamma, float epsilon, hipStream_t stream) -> std::tuple<Tensor, Tensor, Tensor>;
+
+    // Conv2d operations
+    auto conv2d_forward_kernel(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t dilation, int64_t groups, hipStream_t stream, DataLayout layout = DataLayout::NCHW) -> Tensor;
+    auto conv2d_backward_kernel(const Tensor& grad_output, const Tensor& input, const Tensor& weight, int64_t stride, int64_t padding, int64_t dilation, int64_t groups, bool compute_grad_input, bool compute_grad_weight, bool compute_grad_bias, hipStream_t stream, DataLayout layout = DataLayout::NCHW) -> std::tuple<Tensor, Tensor, Tensor>;
+
+    // Pooling operations
+    auto maxpool2d_forward_hip(const Tensor& input, int64_t kernel_h, int64_t kernel_w, int64_t stride_h, int64_t stride_w, int64_t pad_h, int64_t pad_w, bool return_indices) -> std::pair<Tensor, Tensor>;
+    auto maxpool2d_backward_hip(const Tensor& grad_output, const Tensor& indices, const std::vector<int64_t>& input_shape) -> Tensor;
+    auto avgpool2d_forward_hip(const Tensor& input, int64_t kernel_h, int64_t kernel_w, int64_t stride_h, int64_t stride_w, int64_t pad_h, int64_t pad_w, bool count_include_pad) -> Tensor;
+
+    // Swin Transformer operations
+    auto gather_relative_position_bias_kernel(const Tensor& table, const Tensor& indices, int64_t num_positions, int64_t num_heads, hipStream_t stream) -> Tensor;
+
+    // Adaptive Average Pooling operations
+    auto adaptive_avgpool2d_forward(const Tensor& input, int64_t output_h, int64_t output_w, hipStream_t stream) -> Tensor;
+    auto adaptive_avgpool2d_backward(const Tensor& grad_output, int64_t H_in, int64_t W_in, hipStream_t stream) -> Tensor;
 } // namespace rocm
 
 /**

@@ -68,6 +68,12 @@ protected:
             }
             device = Device::oneapi(0);
         }
+        else if (param.backend_name == "rocm") {
+            if (!isBackendAvailable(Device::Type::ROCm)) {
+                GTEST_SKIP() << "ROCm not available";
+            }
+            device = Device::rocm(0);
+        }
     }
 
     static bool isBackendAvailable(Device::Type type) {
@@ -126,6 +132,23 @@ protected:
                 break;
             case DType::Bool:
                 VerifyData<bool>(t, static_cast<bool>(expected_value), count);
+                break;
+            case DType::Float16: {
+                // Convert Float16 to float for verification
+                auto t_cpu = t.to(Device::cpu());
+                const Float16* data = t_cpu.data<Float16>();
+                float expected_f = static_cast<float>(expected_value);
+                for (size_t i = 0; i < count; i++) {
+                    float actual = static_cast<float>(data[i]);
+                    EXPECT_NEAR(actual, expected_f, 0.01f) << "Failed at index " << i << " on " << device.to_string();
+                }
+                break;
+            }
+            case DType::Int8:
+                VerifyData<int8_t>(t, static_cast<int8_t>(expected_value), count);
+                break;
+            case DType::UInt8:
+                VerifyData<uint8_t>(t, static_cast<uint8_t>(expected_value), count);
                 break;
             default:
                 FAIL() << "Unsupported dtype for verification";
@@ -214,6 +237,20 @@ TEST_P(OpsMultiDTypeTest, Arange) {
             }
             break;
         }
+        case DType::Float16: {
+            const Float16* data = t_cpu.data<Float16>();
+            for (int i = 0; i < 5; i++) {
+                EXPECT_NEAR(static_cast<float>(data[i]), static_cast<float>(i), 0.01f) << "Failed on " << device.to_string();
+            }
+            break;
+        }
+        case DType::Int8: {
+            const int8_t* data = t_cpu.data<int8_t>();
+            for (int i = 0; i < 5; i++) {
+                EXPECT_EQ(data[i], static_cast<int8_t>(i)) << "Failed on " << device.to_string();
+            }
+            break;
+        }
         default:
             FAIL() << "Unsupported dtype";
     }
@@ -258,6 +295,20 @@ TEST_P(OpsMultiDTypeTest, ArangeStep) {
             const int64_t* data = t_cpu.data<int64_t>();
             for (int i = 0; i < 5; i++) {
                 EXPECT_EQ(data[i], static_cast<int64_t>(expected[i])) << "Failed on " << device.to_string();
+            }
+            break;
+        }
+        case DType::Float16: {
+            const Float16* data = t_cpu.data<Float16>();
+            for (int i = 0; i < 5; i++) {
+                EXPECT_NEAR(static_cast<float>(data[i]), static_cast<float>(expected[i]), 0.01f) << "Failed on " << device.to_string();
+            }
+            break;
+        }
+        case DType::Int8: {
+            const int8_t* data = t_cpu.data<int8_t>();
+            for (int i = 0; i < 5; i++) {
+                EXPECT_EQ(data[i], static_cast<int8_t>(expected[i])) << "Failed on " << device.to_string();
             }
             break;
         }
@@ -403,6 +454,26 @@ TEST_P(OpsMultiDTypeTest, Eye) {
             EXPECT_EQ(data[3], 0) << "Failed on " << device.to_string();
             break;
         }
+        case DType::Float16: {
+            auto* data = t_cpu.data<Float16>();
+            EXPECT_NEAR(static_cast<float>(data[0]), 1.0f, 0.01f) << "Failed on " << device.to_string();
+            EXPECT_NEAR(static_cast<float>(data[4]), 1.0f, 0.01f) << "Failed on " << device.to_string();
+            EXPECT_NEAR(static_cast<float>(data[8]), 1.0f, 0.01f) << "Failed on " << device.to_string();
+            EXPECT_NEAR(static_cast<float>(data[1]), 0.0f, 0.01f) << "Failed on " << device.to_string();
+            EXPECT_NEAR(static_cast<float>(data[2]), 0.0f, 0.01f) << "Failed on " << device.to_string();
+            EXPECT_NEAR(static_cast<float>(data[3]), 0.0f, 0.01f) << "Failed on " << device.to_string();
+            break;
+        }
+        case DType::Int8: {
+            auto* data = t_cpu.data<int8_t>();
+            EXPECT_EQ(data[0], 1) << "Failed on " << device.to_string();
+            EXPECT_EQ(data[4], 1) << "Failed on " << device.to_string();
+            EXPECT_EQ(data[8], 1) << "Failed on " << device.to_string();
+            EXPECT_EQ(data[1], 0) << "Failed on " << device.to_string();
+            EXPECT_EQ(data[2], 0) << "Failed on " << device.to_string();
+            EXPECT_EQ(data[3], 0) << "Failed on " << device.to_string();
+            break;
+        }
         default:
             FAIL() << "Unsupported dtype";
     }
@@ -448,6 +519,22 @@ TEST_P(OpsMultiDTypeTest, EyeRectangular) {
         }
         case DType::Int64: {
             auto* data = t_cpu.data<int64_t>();
+            EXPECT_EQ(data[0], 1) << "Failed on " << device.to_string();
+            EXPECT_EQ(data[5], 1) << "Failed on " << device.to_string();
+            EXPECT_EQ(data[1], 0) << "Failed on " << device.to_string();
+            EXPECT_EQ(data[2], 0) << "Failed on " << device.to_string();
+            break;
+        }
+        case DType::Float16: {
+            auto* data = t_cpu.data<Float16>();
+            EXPECT_NEAR(static_cast<float>(data[0]), 1.0f, 0.01f) << "Failed on " << device.to_string();
+            EXPECT_NEAR(static_cast<float>(data[5]), 1.0f, 0.01f) << "Failed on " << device.to_string();
+            EXPECT_NEAR(static_cast<float>(data[1]), 0.0f, 0.01f) << "Failed on " << device.to_string();
+            EXPECT_NEAR(static_cast<float>(data[2]), 0.0f, 0.01f) << "Failed on " << device.to_string();
+            break;
+        }
+        case DType::Int8: {
+            auto* data = t_cpu.data<int8_t>();
             EXPECT_EQ(data[0], 1) << "Failed on " << device.to_string();
             EXPECT_EQ(data[5], 1) << "Failed on " << device.to_string();
             EXPECT_EQ(data[1], 0) << "Failed on " << device.to_string();
@@ -554,8 +641,7 @@ std::vector<BackendDTypeParam> GenerateBackendDTypeCombinations() {
         {DType::Int32, "int32"},
         {DType::Int64, "int64"},
         {DType::Bool, "bool"},
-        // Float16 can be added if more backends support it
-        // {DType::Float16, "float16"},
+        {DType::Float16, "float16"},
     };
 
     std::vector<BackendDTypeParam> combinations;

@@ -1,4 +1,5 @@
 #include <hip/hip_runtime.h>
+#include <hip/hip_fp16.h>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include <stdexcept>
@@ -41,6 +42,22 @@ __device__ __forceinline__ int64_t atomicAddHelper<int64_t>(int64_t* address, in
         old = atomicCAS(address_as_ull, assumed, assumed + val);
     } while (assumed != old);
     return old;
+}
+
+// Specialization for __half (half precision float)
+template<>
+__device__ __forceinline__ __half atomicAddHelper<__half>(__half* address, __half val) {
+    // Use CAS-based atomic add for half precision
+    unsigned short int* address_as_ushort = (unsigned short int*)address;
+    unsigned short int old = *address_as_ushort, assumed;
+    do {
+        assumed = old;
+        __half assumed_half = *reinterpret_cast<__half*>(&assumed);
+        __half new_val = __hadd(assumed_half, val);
+        unsigned short int new_bits = *reinterpret_cast<unsigned short int*>(&new_val);
+        old = atomicCAS(address_as_ushort, assumed, new_bits);
+    } while (assumed != old);
+    return *reinterpret_cast<__half*>(&old);
 }
 
 // ==============================================================================
@@ -182,33 +199,40 @@ __global__ void scatter_kernel(
     T* output,
     const int64_t* indices,
     const T* src,
-    int64_t indices_size,
-    int64_t inner_size,
+    int64_t outer_size,
     int64_t dim_size,
+    int64_t inner_size,
+    int64_t index_dim_size,
+    int64_t total_scatter,
     bool reduce_add
 ) {
-    int64_t total_elements = indices_size * inner_size;
-
-    HIP_KERNEL_LOOP(idx, total_elements) {
+    HIP_KERNEL_LOOP(idx, total_scatter) {
         int64_t inner_idx = idx % inner_size;
-        int64_t indices_idx = idx / inner_size;
+        int64_t temp = idx / inner_size;
+        int64_t index_pos = temp % index_dim_size;
+        int64_t outer_idx = temp / index_dim_size;
 
-        int64_t index = indices[indices_idx];
+        // Get the index value at this position
+        int64_t index_offset = outer_idx * index_dim_size * inner_size +
+                               index_pos * inner_size + inner_idx;
+        int64_t scatter_idx = indices[index_offset];
 
         // Handle negative indices
-        if (index < 0) {
-            index += dim_size;
+        if (scatter_idx < 0) {
+            scatter_idx += dim_size;
         }
 
         // Bounds checking
-        if (index >= 0 && index < dim_size) {
-            int64_t output_idx = indices_idx / indices_size * dim_size * inner_size +
-                                index * inner_size + inner_idx;
+        if (scatter_idx >= 0 && scatter_idx < dim_size) {
+            // Compute output offset
+            int64_t output_offset = outer_idx * dim_size * inner_size +
+                                    scatter_idx * inner_size +
+                                    inner_idx;
 
             if (reduce_add) {
-                atomicAddHelper(&output[output_idx], src[idx]);
+                atomicAddHelper(&output[output_offset], src[idx]);
             } else {
-                output[output_idx] = src[idx];
+                output[output_offset] = src[idx];
             }
         }
     }
@@ -225,6 +249,10 @@ auto scatter_hip(
     auto output_shape = output.shape();
     auto indices_shape = indices.shape();
 
+    // Normalize dimension
+    int64_t ndim = output.ndim();
+    if (dim < 0) dim += ndim;
+
     // Calculate dimensions
     int64_t outer_size = 1;
     for (int64_t i = 0; i < dim; ++i) {
@@ -232,19 +260,19 @@ auto scatter_hip(
     }
 
     int64_t dim_size = output_shape[dim];
+    int64_t index_dim_size = indices_shape[dim];
 
     int64_t inner_size = 1;
     for (size_t i = dim + 1; i < output_shape.size(); ++i) {
         inner_size *= output_shape[i];
     }
 
-    int64_t indices_size = indices.numel();
-    int64_t total_elements = indices_size * inner_size;
+    int64_t total_scatter = indices.numel();
 
     bool reduce_add = (reduce == "add");
 
     int threads = 256;
-    int blocks = (total_elements + threads - 1) / threads;
+    int blocks = (total_scatter + threads - 1) / threads;
 
     if (output.dtype() == DType::Float32) {
         hipLaunchKernelGGL(scatter_kernel<float>,
@@ -252,9 +280,11 @@ auto scatter_hip(
             output.data<float>(),
             indices.data<int64_t>(),
             src.data<float>(),
-            indices_size,
-            inner_size,
+            outer_size,
             dim_size,
+            inner_size,
+            index_dim_size,
+            total_scatter,
             reduce_add
         );
     } else if (output.dtype() == DType::Float64) {
@@ -263,9 +293,24 @@ auto scatter_hip(
             output.data<double>(),
             indices.data<int64_t>(),
             src.data<double>(),
-            indices_size,
-            inner_size,
+            outer_size,
             dim_size,
+            inner_size,
+            index_dim_size,
+            total_scatter,
+            reduce_add
+        );
+    } else if (output.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(scatter_kernel<__half>,
+            dim3(blocks), dim3(threads), 0, 0,
+            reinterpret_cast<__half*>(output.data<Float16>()),
+            indices.data<int64_t>(),
+            reinterpret_cast<const __half*>(src.data<Float16>()),
+            outer_size,
+            dim_size,
+            inner_size,
+            index_dim_size,
+            total_scatter,
             reduce_add
         );
     } else if (output.dtype() == DType::Int32) {
@@ -274,9 +319,11 @@ auto scatter_hip(
             output.data<int32_t>(),
             indices.data<int64_t>(),
             src.data<int32_t>(),
-            indices_size,
-            inner_size,
+            outer_size,
             dim_size,
+            inner_size,
+            index_dim_size,
+            total_scatter,
             reduce_add
         );
     } else if (output.dtype() == DType::Int64) {
@@ -285,9 +332,11 @@ auto scatter_hip(
             output.data<int64_t>(),
             indices.data<int64_t>(),
             src.data<int64_t>(),
-            indices_size,
-            inner_size,
+            outer_size,
             dim_size,
+            inner_size,
+            index_dim_size,
+            total_scatter,
             reduce_add
         );
     } else {
@@ -968,7 +1017,16 @@ auto cat_hip(
         throw std::runtime_error("cat_hip: tensors list cannot be empty");
     }
 
-    auto& first = tensors[0];
+    // Ensure all tensors are contiguous - the kernel assumes contiguous memory layout
+    // This is critical for sliced tensors (e.g., from roll operation) which may have
+    // non-unit strides or non-zero offsets
+    std::vector<Tensor> cont_tensors;
+    cont_tensors.reserve(tensors.size());
+    for (const auto& t : tensors) {
+        cont_tensors.push_back(t.is_contiguous() ? t : t.contiguous());
+    }
+
+    auto& first = cont_tensors[0];
     auto first_shape = first.shape();
     int64_t ndim = first_shape.size();
 
@@ -979,8 +1037,8 @@ auto cat_hip(
     int64_t total_dim_size = 0;
     std::vector<int64_t> dim_sizes;
 
-    for (size_t i = 0; i < tensors.size(); ++i) {
-        auto shape = tensors[i].shape();
+    for (size_t i = 0; i < cont_tensors.size(); ++i) {
+        auto shape = cont_tensors[i].shape();
         if (shape.size() != first_shape.size()) {
             throw std::runtime_error("cat_hip: all tensors must have the same number of dimensions");
         }
@@ -1013,21 +1071,21 @@ auto cat_hip(
     }
 
     // Copy input pointers and dim sizes to device
-    std::vector<const void*> h_input_ptrs(tensors.size());
-    for (size_t i = 0; i < tensors.size(); ++i) {
-        h_input_ptrs[i] = tensors[i].data_ptr();
+    std::vector<const void*> h_input_ptrs(cont_tensors.size());
+    for (size_t i = 0; i < cont_tensors.size(); ++i) {
+        h_input_ptrs[i] = cont_tensors[i].data_ptr();
     }
 
     void** d_input_ptrs;
     int64_t* d_dim_sizes;
     int64_t* d_input_offsets;
 
-    HIP_CHECK(hipMalloc(&d_input_ptrs, tensors.size() * sizeof(void*)));
-    HIP_CHECK(hipMalloc(&d_dim_sizes, tensors.size() * sizeof(int64_t)));
-    HIP_CHECK(hipMalloc(&d_input_offsets, tensors.size() * sizeof(int64_t)));
+    HIP_CHECK(hipMalloc(&d_input_ptrs, cont_tensors.size() * sizeof(void*)));
+    HIP_CHECK(hipMalloc(&d_dim_sizes, cont_tensors.size() * sizeof(int64_t)));
+    HIP_CHECK(hipMalloc(&d_input_offsets, cont_tensors.size() * sizeof(int64_t)));
 
-    HIP_CHECK(hipMemcpy(d_input_ptrs, h_input_ptrs.data(), tensors.size() * sizeof(void*), hipMemcpyHostToDevice));
-    HIP_CHECK(hipMemcpy(d_dim_sizes, dim_sizes.data(), tensors.size() * sizeof(int64_t), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(d_input_ptrs, h_input_ptrs.data(), cont_tensors.size() * sizeof(void*), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(d_dim_sizes, dim_sizes.data(), cont_tensors.size() * sizeof(int64_t), hipMemcpyHostToDevice));
 
     int64_t total_elements = outer_size * total_dim_size * inner_size;
     int threads = 256;
@@ -1039,7 +1097,7 @@ auto cat_hip(
             (const float* const*)d_input_ptrs,
             d_input_offsets,
             output.data<float>(),
-            static_cast<int64_t>(tensors.size()),
+            static_cast<int64_t>(cont_tensors.size()),
             outer_size,
             total_dim_size,
             inner_size,
@@ -1051,7 +1109,7 @@ auto cat_hip(
             (const double* const*)d_input_ptrs,
             d_input_offsets,
             output.data<double>(),
-            static_cast<int64_t>(tensors.size()),
+            static_cast<int64_t>(cont_tensors.size()),
             outer_size,
             total_dim_size,
             inner_size,
@@ -1063,7 +1121,7 @@ auto cat_hip(
             (const int32_t* const*)d_input_ptrs,
             d_input_offsets,
             output.data<int32_t>(),
-            static_cast<int64_t>(tensors.size()),
+            static_cast<int64_t>(cont_tensors.size()),
             outer_size,
             total_dim_size,
             inner_size,
@@ -1075,7 +1133,19 @@ auto cat_hip(
             (const int64_t* const*)d_input_ptrs,
             d_input_offsets,
             output.data<int64_t>(),
-            static_cast<int64_t>(tensors.size()),
+            static_cast<int64_t>(cont_tensors.size()),
+            outer_size,
+            total_dim_size,
+            inner_size,
+            d_dim_sizes
+        );
+    } else if (first.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(cat_kernel<__half>,
+            dim3(blocks), dim3(threads), 0, stream,
+            (const __half* const*)d_input_ptrs,
+            d_input_offsets,
+            reinterpret_cast<__half*>(output.data<Float16>()),
+            static_cast<int64_t>(cont_tensors.size()),
             outer_size,
             total_dim_size,
             inner_size,
@@ -1297,6 +1367,11 @@ auto scatter_hip(
 ) -> Tensor {
     Tensor output = input.clone();
     auto output_shape = output.shape();
+    auto indices_shape = indices.shape();
+
+    // Normalize dimension
+    int64_t ndim = output.ndim();
+    if (dim < 0) dim += ndim;
 
     int64_t outer_size = 1;
     for (int64_t i = 0; i < dim; ++i) {
@@ -1304,17 +1379,17 @@ auto scatter_hip(
     }
 
     int64_t dim_size = output_shape[dim];
+    int64_t index_dim_size = indices_shape[dim];
 
     int64_t inner_size = 1;
     for (size_t i = dim + 1; i < output_shape.size(); ++i) {
         inner_size *= output_shape[i];
     }
 
-    int64_t indices_size = indices.numel();
-    int64_t total_elements = indices_size * inner_size;
+    int64_t total_scatter = indices.numel();
 
     int threads = 256;
-    int blocks = (total_elements + threads - 1) / threads;
+    int blocks = (total_scatter + threads - 1) / threads;
 
     if (output.dtype() == DType::Float32) {
         hipLaunchKernelGGL(scatter_kernel<float>,
@@ -1322,9 +1397,11 @@ auto scatter_hip(
             output.data<float>(),
             indices.data<int64_t>(),
             src.data<float>(),
-            indices_size,
-            inner_size,
+            outer_size,
             dim_size,
+            inner_size,
+            index_dim_size,
+            total_scatter,
             false
         );
     } else if (output.dtype() == DType::Float64) {
@@ -1333,9 +1410,24 @@ auto scatter_hip(
             output.data<double>(),
             indices.data<int64_t>(),
             src.data<double>(),
-            indices_size,
-            inner_size,
+            outer_size,
             dim_size,
+            inner_size,
+            index_dim_size,
+            total_scatter,
+            false
+        );
+    } else if (output.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(scatter_kernel<__half>,
+            dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<__half*>(output.data<Float16>()),
+            indices.data<int64_t>(),
+            reinterpret_cast<const __half*>(src.data<Float16>()),
+            outer_size,
+            dim_size,
+            inner_size,
+            index_dim_size,
+            total_scatter,
             false
         );
     } else if (output.dtype() == DType::Int32) {
@@ -1344,9 +1436,11 @@ auto scatter_hip(
             output.data<int32_t>(),
             indices.data<int64_t>(),
             src.data<int32_t>(),
-            indices_size,
-            inner_size,
+            outer_size,
             dim_size,
+            inner_size,
+            index_dim_size,
+            total_scatter,
             false
         );
     } else if (output.dtype() == DType::Int64) {
@@ -1355,9 +1449,11 @@ auto scatter_hip(
             output.data<int64_t>(),
             indices.data<int64_t>(),
             src.data<int64_t>(),
-            indices_size,
-            inner_size,
+            outer_size,
             dim_size,
+            inner_size,
+            index_dim_size,
+            total_scatter,
             false
         );
     } else {
@@ -1625,6 +1721,69 @@ auto take_hip(
         );
     } else {
         throw std::runtime_error("take_hip: Unsupported dtype");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return output;
+}
+
+// ==============================================================================
+// Gather Relative Position Bias (for Swin Transformer)
+// ==============================================================================
+
+template<typename T>
+__global__ void gather_2d_kernel(
+    const T* table, const int64_t* indices, T* output,
+    int64_t num_positions, int64_t num_heads, int64_t table_stride) {
+
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t total = num_positions * num_positions * num_heads;
+
+    if (idx >= total) return;
+
+    int64_t h = idx % num_heads;
+    int64_t j = (idx / num_heads) % num_positions;
+    int64_t i = idx / (num_heads * num_positions);
+
+    int64_t table_idx = indices[i * num_positions + j];
+    output[idx] = table[table_idx * num_heads + h];
+}
+
+auto gather_relative_position_bias_kernel(const Tensor& table, const Tensor& indices,
+                                          int64_t num_positions, int64_t num_heads,
+                                          hipStream_t stream) -> Tensor {
+    // table: [table_size*table_size, num_heads]
+    // indices: [num_positions, num_positions]
+    // output: [num_positions, num_positions, num_heads]
+
+    Tensor output({num_positions, num_positions, num_heads}, table.dtype(), table.device());
+
+    int64_t total = num_positions * num_positions * num_heads;
+    int threads = 256;
+    int blocks = (total + threads - 1) / threads;
+
+    // Ensure indices are on the same device
+    Tensor indices_device = indices.device() == table.device() ? indices : indices.to(table.device());
+
+    if (table.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(gather_2d_kernel<float>,
+            dim3(blocks), dim3(threads), 0, stream,
+            table.data<float>(), indices_device.data<int64_t>(), output.data<float>(),
+            num_positions, num_heads, num_heads);
+    } else if (table.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(gather_2d_kernel<double>,
+            dim3(blocks), dim3(threads), 0, stream,
+            table.data<double>(), indices_device.data<int64_t>(), output.data<double>(),
+            num_positions, num_heads, num_heads);
+    } else if (table.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(gather_2d_kernel<__half>,
+            dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<const __half*>(table.data<Float16>()),
+            indices_device.data<int64_t>(),
+            reinterpret_cast<__half*>(output.data<Float16>()),
+            num_positions, num_heads, num_heads);
+    } else {
+        throw std::runtime_error("gather_relative_position_bias: unsupported dtype");
     }
 
     HIP_CHECK(hipGetLastError());

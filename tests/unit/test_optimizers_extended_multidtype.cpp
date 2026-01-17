@@ -91,6 +91,12 @@ protected:
             }
             device = Device::oneapi(0);
         }
+        else if (param.backend_name == "rocm") {
+            if (!isBackendAvailable(Device::Type::ROCm)) {
+                GTEST_SKIP() << "ROCm not available";
+            }
+            device = Device::rocm(0);
+        }
 
         // Create test parameters
         param1_ = std::make_shared<Variable>(ones({2, 3}, dtype, device), true);

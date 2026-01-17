@@ -1,4 +1,5 @@
 #include <hip/hip_runtime.h>
+#include <hip/hip_fp16.h>
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/dtype.hpp"
 #include <stdexcept>
@@ -85,6 +86,61 @@ __global__ void maxpool2d_forward_kernel(
     }
 }
 
+// Float16 MaxPool2D Forward
+__global__ void maxpool2d_forward_kernel_fp16(
+    const __half* input,
+    __half* output,
+    int64_t* indices,
+    int64_t batch_size,
+    int64_t channels,
+    int64_t input_h,
+    int64_t input_w,
+    int64_t output_h,
+    int64_t output_w,
+    int64_t kernel_h,
+    int64_t kernel_w,
+    int64_t stride_h,
+    int64_t stride_w,
+    int64_t pad_h,
+    int64_t pad_w,
+    bool return_indices
+) {
+    int64_t total_elements = batch_size * channels * output_h * output_w;
+
+    HIP_KERNEL_LOOP(idx, total_elements) {
+        int64_t ow = idx % output_w;
+        int64_t oh = (idx / output_w) % output_h;
+        int64_t c = (idx / (output_w * output_h)) % channels;
+        int64_t n = idx / (output_w * output_h * channels);
+
+        int64_t h_start = oh * stride_h - pad_h;
+        int64_t w_start = ow * stride_w - pad_w;
+        int64_t h_end = min(h_start + kernel_h, input_h);
+        int64_t w_end = min(w_start + kernel_w, input_w);
+        h_start = max(h_start, (int64_t)0);
+        w_start = max(w_start, (int64_t)0);
+
+        float max_val = -INFINITY;
+        int64_t max_idx = -1;
+
+        for (int64_t h = h_start; h < h_end; ++h) {
+            for (int64_t w = w_start; w < w_end; ++w) {
+                int64_t input_idx = ((n * channels + c) * input_h + h) * input_w + w;
+                float val = __half2float(input[input_idx]);
+                if (val > max_val) {
+                    max_val = val;
+                    max_idx = input_idx;
+                }
+            }
+        }
+
+        output[idx] = __float2half(max_val);
+        if (return_indices && indices != nullptr) {
+            indices[idx] = max_idx;
+        }
+    }
+}
+
 auto maxpool2d_forward_hip(
     const Tensor& input,
     int64_t kernel_h, int64_t kernel_w,
@@ -134,8 +190,18 @@ auto maxpool2d_forward_hip(
             output_h, output_w, kernel_h, kernel_w,
             stride_h, stride_w, pad_h, pad_w, return_indices
         );
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(maxpool2d_forward_kernel_fp16,
+            dim3(blocks), dim3(threads), 0, 0,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(output.data<Float16>()),
+            return_indices ? indices.data<int64_t>() : nullptr,
+            batch_size, channels, input_h, input_w,
+            output_h, output_w, kernel_h, kernel_w,
+            stride_h, stride_w, pad_h, pad_w, return_indices
+        );
     } else {
-        throw std::runtime_error("maxpool2d_forward_hip: Only Float32 and Float64 supported");
+        throw std::runtime_error("maxpool2d_forward_hip: Only Float32, Float64, and Float16 supported");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -158,6 +224,26 @@ __global__ void maxpool2d_backward_kernel(
     HIP_KERNEL_LOOP(idx, total_elements) {
         int64_t input_idx = indices[idx];
         atomicAdd(&grad_input[input_idx], grad_output[idx]);
+    }
+}
+
+// Float16 maxpool2d backward (accumulate in float)
+__global__ void maxpool2d_backward_kernel_fp16(
+    const __half* grad_output,
+    const int64_t* indices,
+    float* grad_input_f32,
+    int64_t total_elements
+) {
+    HIP_KERNEL_LOOP(idx, total_elements) {
+        int64_t input_idx = indices[idx];
+        atomicAdd(&grad_input_f32[input_idx], __half2float(grad_output[idx]));
+    }
+}
+
+// Convert float to half kernel
+__global__ void convert_f32_to_f16_pool(const float* src, __half* dst, int64_t n) {
+    HIP_KERNEL_LOOP(idx, n) {
+        dst[idx] = __float2half(src[idx]);
     }
 }
 
@@ -189,8 +275,30 @@ auto maxpool2d_backward_hip(
             grad_input.data<double>(),
             total_elements
         );
+    } else if (grad_output.dtype() == DType::Float16) {
+        // Accumulate in float, then convert back
+        int64_t input_numel = 1;
+        for (auto s : input_shape) input_numel *= s;
+        Tensor grad_input_f32 = Tensor(input_shape, DType::Float32, grad_output.device());
+        HIP_CHECK(hipMemset(grad_input_f32.data<float>(), 0, input_numel * sizeof(float)));
+
+        hipLaunchKernelGGL(maxpool2d_backward_kernel_fp16,
+            dim3(blocks), dim3(threads), 0, 0,
+            reinterpret_cast<const __half*>(grad_output.data<Float16>()),
+            indices.data<int64_t>(),
+            grad_input_f32.data<float>(),
+            total_elements
+        );
+
+        int convert_blocks = (input_numel + threads - 1) / threads;
+        hipLaunchKernelGGL(convert_f32_to_f16_pool,
+            dim3(convert_blocks), dim3(threads), 0, 0,
+            grad_input_f32.data<float>(),
+            reinterpret_cast<__half*>(grad_input.data<Float16>()),
+            input_numel
+        );
     } else {
-        throw std::runtime_error("maxpool2d_backward_hip: Only Float32 and Float64 supported");
+        throw std::runtime_error("maxpool2d_backward_hip: Only Float32, Float64, and Float16 supported");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -255,6 +363,58 @@ __global__ void avgpool2d_forward_kernel(
     }
 }
 
+// Float16 AvgPool2D Forward
+__global__ void avgpool2d_forward_kernel_fp16(
+    const __half* input,
+    __half* output,
+    int64_t batch_size,
+    int64_t channels,
+    int64_t input_h,
+    int64_t input_w,
+    int64_t output_h,
+    int64_t output_w,
+    int64_t kernel_h,
+    int64_t kernel_w,
+    int64_t stride_h,
+    int64_t stride_w,
+    int64_t pad_h,
+    int64_t pad_w,
+    bool count_include_pad
+) {
+    int64_t total_elements = batch_size * channels * output_h * output_w;
+
+    HIP_KERNEL_LOOP(idx, total_elements) {
+        int64_t ow = idx % output_w;
+        int64_t oh = (idx / output_w) % output_h;
+        int64_t c = (idx / (output_w * output_h)) % channels;
+        int64_t n = idx / (output_w * output_h * channels);
+
+        int64_t h_start = oh * stride_h - pad_h;
+        int64_t w_start = ow * stride_w - pad_w;
+        int64_t h_end = min(h_start + kernel_h, input_h);
+        int64_t w_end = min(w_start + kernel_w, input_w);
+        h_start = max(h_start, (int64_t)0);
+        w_start = max(w_start, (int64_t)0);
+
+        float sum = 0.0f;
+        int64_t count = 0;
+
+        for (int64_t h = h_start; h < h_end; ++h) {
+            for (int64_t w = w_start; w < w_end; ++w) {
+                int64_t input_idx = ((n * channels + c) * input_h + h) * input_w + w;
+                sum += __half2float(input[input_idx]);
+                count++;
+            }
+        }
+
+        if (count_include_pad) {
+            count = kernel_h * kernel_w;
+        }
+
+        output[idx] = __float2half(sum / static_cast<float>(count));
+    }
+}
+
 auto avgpool2d_forward_hip(
     const Tensor& input,
     int64_t kernel_h, int64_t kernel_w,
@@ -297,8 +457,17 @@ auto avgpool2d_forward_hip(
             output_h, output_w, kernel_h, kernel_w,
             stride_h, stride_w, pad_h, pad_w, count_include_pad
         );
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(avgpool2d_forward_kernel_fp16,
+            dim3(blocks), dim3(threads), 0, 0,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(output.data<Float16>()),
+            batch_size, channels, input_h, input_w,
+            output_h, output_w, kernel_h, kernel_w,
+            stride_h, stride_w, pad_h, pad_w, count_include_pad
+        );
     } else {
-        throw std::runtime_error("avgpool2d_forward_hip: Only Float32 and Float64 supported");
+        throw std::runtime_error("avgpool2d_forward_hip: Only Float32, Float64, and Float16 supported");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -360,6 +529,55 @@ __global__ void avgpool2d_backward_kernel(
     }
 }
 
+// Float16 AvgPool2D Backward (accumulate in float)
+__global__ void avgpool2d_backward_kernel_fp16(
+    const __half* grad_output,
+    float* grad_input_f32,
+    int64_t batch_size,
+    int64_t channels,
+    int64_t input_h,
+    int64_t input_w,
+    int64_t output_h,
+    int64_t output_w,
+    int64_t kernel_h,
+    int64_t kernel_w,
+    int64_t stride_h,
+    int64_t stride_w,
+    int64_t pad_h,
+    int64_t pad_w,
+    bool count_include_pad
+) {
+    int64_t total_output_elements = batch_size * channels * output_h * output_w;
+
+    HIP_KERNEL_LOOP(idx, total_output_elements) {
+        int64_t ow = idx % output_w;
+        int64_t oh = (idx / output_w) % output_h;
+        int64_t c = (idx / (output_w * output_h)) % channels;
+        int64_t n = idx / (output_w * output_h * channels);
+
+        int64_t h_start = oh * stride_h - pad_h;
+        int64_t w_start = ow * stride_w - pad_w;
+        int64_t h_end = min(h_start + kernel_h, input_h);
+        int64_t w_end = min(w_start + kernel_w, input_w);
+        h_start = max(h_start, (int64_t)0);
+        w_start = max(w_start, (int64_t)0);
+
+        int64_t count = (h_end - h_start) * (w_end - w_start);
+        if (count_include_pad) {
+            count = kernel_h * kernel_w;
+        }
+
+        float grad_val = __half2float(grad_output[idx]) / static_cast<float>(count);
+
+        for (int64_t h = h_start; h < h_end; ++h) {
+            for (int64_t w = w_start; w < w_end; ++w) {
+                int64_t input_idx = ((n * channels + c) * input_h + h) * input_w + w;
+                atomicAdd(&grad_input_f32[input_idx], grad_val);
+            }
+        }
+    }
+}
+
 auto avgpool2d_backward_hip(
     const Tensor& grad_output,
     const std::vector<int64_t>& input_shape,
@@ -401,8 +619,31 @@ auto avgpool2d_backward_hip(
             output_h, output_w, kernel_h, kernel_w,
             stride_h, stride_w, pad_h, pad_w, count_include_pad
         );
+    } else if (grad_output.dtype() == DType::Float16) {
+        // Accumulate in float, then convert back
+        int64_t input_numel = 1;
+        for (auto s : input_shape) input_numel *= s;
+        Tensor grad_input_f32 = Tensor(input_shape, DType::Float32, grad_output.device());
+        HIP_CHECK(hipMemset(grad_input_f32.data<float>(), 0, input_numel * sizeof(float)));
+
+        hipLaunchKernelGGL(avgpool2d_backward_kernel_fp16,
+            dim3(blocks), dim3(threads), 0, 0,
+            reinterpret_cast<const __half*>(grad_output.data<Float16>()),
+            grad_input_f32.data<float>(),
+            batch_size, channels, input_h, input_w,
+            output_h, output_w, kernel_h, kernel_w,
+            stride_h, stride_w, pad_h, pad_w, count_include_pad
+        );
+
+        int convert_blocks = (input_numel + threads - 1) / threads;
+        hipLaunchKernelGGL(convert_f32_to_f16_pool,
+            dim3(convert_blocks), dim3(threads), 0, 0,
+            grad_input_f32.data<float>(),
+            reinterpret_cast<__half*>(grad_input.data<Float16>()),
+            input_numel
+        );
     } else {
-        throw std::runtime_error("avgpool2d_backward_hip: Only Float32 and Float64 supported");
+        throw std::runtime_error("avgpool2d_backward_hip: Only Float32, Float64, and Float16 supported");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -489,8 +730,16 @@ auto adaptive_avgpool2d_hip(
             batch_size, channels, input_h, input_w,
             output_h, output_w
         );
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(adaptive_avgpool2d_kernel<__half>,
+            dim3(blocks), dim3(threads), 0, 0,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(output.data<Float16>()),
+            batch_size, channels, input_h, input_w,
+            output_h, output_w
+        );
     } else {
-        throw std::runtime_error("adaptive_avgpool2d_hip: Only Float32 and Float64 supported");
+        throw std::runtime_error("adaptive_avgpool2d_hip: unsupported dtype");
     }
 
     HIP_CHECK(hipGetLastError());
@@ -695,6 +944,12 @@ auto adaptive_avgpool2d_backward_hip(
             grad_output.data<double>(),
             grad_input.data<double>(),
             N, C, in_H, in_W, out_H, out_W);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(adaptive_avgpool2d_backward_kernel<__half>,
+            dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<const __half*>(grad_output.data<Float16>()),
+            reinterpret_cast<__half*>(grad_input.data<Float16>()),
+            N, C, in_H, in_W, out_H, out_W);
     } else {
         throw std::runtime_error("adaptive_avgpool2d_backward: unsupported dtype");
     }
@@ -776,6 +1031,95 @@ auto adaptive_maxpool2d_backward_hip(
             N, C, in_H, in_W, out_H, out_W);
     } else {
         throw std::runtime_error("adaptive_maxpool2d_backward: unsupported dtype");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return grad_input;
+}
+
+// ==============================================================================
+// Adaptive Average Pooling 2D (with stream parameter)
+// ==============================================================================
+
+auto adaptive_avgpool2d_forward(
+    const Tensor& input,
+    int64_t output_h,
+    int64_t output_w,
+    hipStream_t stream
+) -> Tensor {
+    auto shape = input.shape();
+    int64_t N = shape[0];
+    int64_t C = shape[1];
+    int64_t H_in = shape[2];
+    int64_t W_in = shape[3];
+
+    Tensor output({N, C, output_h, output_w}, input.dtype(), input.device());
+
+    int64_t total = N * C * output_h * output_w;
+    int threads = 256;
+    int blocks = (total + threads - 1) / threads;
+
+    if (input.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(adaptive_avgpool2d_kernel<float>,
+            dim3(blocks), dim3(threads), 0, stream,
+            input.data<float>(), output.data<float>(),
+            N, C, H_in, W_in, output_h, output_w);
+    } else if (input.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(adaptive_avgpool2d_kernel<double>,
+            dim3(blocks), dim3(threads), 0, stream,
+            input.data<double>(), output.data<double>(),
+            N, C, H_in, W_in, output_h, output_w);
+    } else if (input.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(adaptive_avgpool2d_kernel<__half>,
+            dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<const __half*>(input.data<Float16>()),
+            reinterpret_cast<__half*>(output.data<Float16>()),
+            N, C, H_in, W_in, output_h, output_w);
+    } else {
+        throw std::runtime_error("adaptive_avgpool2d_forward: unsupported dtype");
+    }
+
+    HIP_CHECK(hipGetLastError());
+    return output;
+}
+
+auto adaptive_avgpool2d_backward(
+    const Tensor& grad_output,
+    int64_t H_in,
+    int64_t W_in,
+    hipStream_t stream
+) -> Tensor {
+    auto shape = grad_output.shape();
+    int64_t N = shape[0];
+    int64_t C = shape[1];
+    int64_t H_out = shape[2];
+    int64_t W_out = shape[3];
+
+    Tensor grad_input({N, C, H_in, W_in}, grad_output.dtype(), grad_output.device());
+
+    // The kernel iterates over input elements, so use input size for launch config
+    int64_t total = N * C * H_in * W_in;
+    int threads = 256;
+    int blocks = (total + threads - 1) / threads;
+
+    if (grad_output.dtype() == DType::Float32) {
+        hipLaunchKernelGGL(adaptive_avgpool2d_backward_kernel<float>,
+            dim3(blocks), dim3(threads), 0, stream,
+            grad_output.data<float>(), grad_input.data<float>(),
+            N, C, H_in, W_in, H_out, W_out);
+    } else if (grad_output.dtype() == DType::Float64) {
+        hipLaunchKernelGGL(adaptive_avgpool2d_backward_kernel<double>,
+            dim3(blocks), dim3(threads), 0, stream,
+            grad_output.data<double>(), grad_input.data<double>(),
+            N, C, H_in, W_in, H_out, W_out);
+    } else if (grad_output.dtype() == DType::Float16) {
+        hipLaunchKernelGGL(adaptive_avgpool2d_backward_kernel<__half>,
+            dim3(blocks), dim3(threads), 0, stream,
+            reinterpret_cast<const __half*>(grad_output.data<Float16>()),
+            reinterpret_cast<__half*>(grad_input.data<Float16>()),
+            N, C, H_in, W_in, H_out, W_out);
+    } else {
+        throw std::runtime_error("adaptive_avgpool2d_backward: unsupported dtype");
     }
 
     HIP_CHECK(hipGetLastError());

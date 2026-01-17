@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <charconv>
 #include <limits>
+#include <climits>
 #include <tuple>
 
 namespace tenzor {
@@ -198,7 +199,7 @@ namespace rocm {
     auto softplus_backward_kernel(const Tensor& grad_output, const Tensor& input, float beta, float threshold, hipStream_t stream) -> Tensor;
 
     // Softmax operations
-    auto softmax_kernel(const Tensor& input, int64_t dim, hipStream_t stream) -> Tensor;
+    auto softmax_kernel(const Tensor& input, int64_t dim, hipStream_t stream, float temperature = 1.0f) -> Tensor;
     auto softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, int64_t dim, hipStream_t stream) -> Tensor;
     auto log_softmax_kernel(const Tensor& input, int64_t dim, hipStream_t stream) -> Tensor;
     auto log_softmax_backward_kernel(const Tensor& grad_output, const Tensor& output, int64_t dim, hipStream_t stream) -> Tensor;
@@ -568,57 +569,59 @@ void register_rocm_kernels(BackendDispatchTable& table) {
     // ========================================================================
     // Reduction Operations
     // ========================================================================
+    // Note: Use INT64_MIN as default to signal "full reduction" (no dim specified)
+    // This is distinct from dim=-1 which means "last dimension" in PyTorch convention
     table.register_kernel(OpId::Sum, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_int64(attrs, "dim", -1);
+        int64_t dim = parse_int64(attrs, "dim", INT64_MIN);
         bool keepdim = parse_bool(attrs, "keepdim", false);
         return std::vector<Tensor>{rocm::sum_kernel(inputs[0], dim, keepdim, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Mean, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_int64(attrs, "dim", -1);
+        int64_t dim = parse_int64(attrs, "dim", INT64_MIN);
         bool keepdim = parse_bool(attrs, "keepdim", false);
         return std::vector<Tensor>{rocm::mean_kernel(inputs[0], dim, keepdim, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Max, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_int64(attrs, "dim", -1);
+        int64_t dim = parse_int64(attrs, "dim", INT64_MIN);
         bool keepdim = parse_bool(attrs, "keepdim", false);
         return std::vector<Tensor>{rocm::max_kernel(inputs[0], dim, keepdim, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Min, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_int64(attrs, "dim", -1);
+        int64_t dim = parse_int64(attrs, "dim", INT64_MIN);
         bool keepdim = parse_bool(attrs, "keepdim", false);
         return std::vector<Tensor>{rocm::min_kernel(inputs[0], dim, keepdim, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::ArgMax, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_int64(attrs, "dim", -1);
+        int64_t dim = parse_int64(attrs, "dim", INT64_MIN);
         bool keepdim = parse_bool(attrs, "keepdim", false);
         return std::vector<Tensor>{rocm::argmax_kernel(inputs[0], dim, keepdim, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::ArgMin, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_int64(attrs, "dim", -1);
+        int64_t dim = parse_int64(attrs, "dim", INT64_MIN);
         bool keepdim = parse_bool(attrs, "keepdim", false);
         return std::vector<Tensor>{rocm::argmin_kernel(inputs[0], dim, keepdim, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Prod, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_int64(attrs, "dim", -1);
+        int64_t dim = parse_int64(attrs, "dim", INT64_MIN);
         bool keepdim = parse_bool(attrs, "keepdim", false);
         return std::vector<Tensor>{rocm::prod_kernel(inputs[0], dim, keepdim, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Var, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_int64(attrs, "dim", -1);
+        int64_t dim = parse_int64(attrs, "dim", INT64_MIN);
         bool keepdim = parse_bool(attrs, "keepdim", false);
         bool unbiased = parse_bool(attrs, "unbiased", true);
         return std::vector<Tensor>{rocm::var_kernel(inputs[0], dim, keepdim, unbiased, get_hip_stream(attrs))};
     });
 
     table.register_kernel(OpId::Std, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
-        int64_t dim = parse_int64(attrs, "dim", -1);
+        int64_t dim = parse_int64(attrs, "dim", INT64_MIN);
         bool keepdim = parse_bool(attrs, "keepdim", false);
         bool unbiased = parse_bool(attrs, "unbiased", true);
         return std::vector<Tensor>{rocm::std_kernel(inputs[0], dim, keepdim, unbiased, get_hip_stream(attrs))};
@@ -626,7 +629,7 @@ void register_rocm_kernels(BackendDispatchTable& table) {
 
     table.register_kernel(OpId::Norm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         float p = parse_float(attrs, "p", 2.0f);
-        int64_t dim = parse_int64(attrs, "dim", -1);
+        int64_t dim = parse_int64(attrs, "dim", INT64_MIN);
         bool keepdim = parse_bool(attrs, "keepdim", false);
         return std::vector<Tensor>{rocm::norm_kernel(inputs[0], p, dim, keepdim, get_hip_stream(attrs))};
     });

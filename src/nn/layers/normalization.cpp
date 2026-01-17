@@ -1331,19 +1331,38 @@ auto GroupNorm::forward_impl(const Variable& input) -> Variable {
 
     int64_t group_size = num_channels_ / num_groups_;
 
-    // Save original device and move to CPU for computation
+    // Save original device and dtype, move to CPU for computation
     auto original_device = input.tensor().device();
-    Variable input_cpu = (original_device.type == Device::Type::CPU) ?
-                         input : Variable(input.tensor().cpu(), input.requires_grad());
+    auto original_dtype = input.tensor().dtype();
+
+    // For Float16, convert to Float32 for CPU computation
+    Tensor input_tensor_cpu = input.tensor();
+    if (original_device.type != Device::Type::CPU) {
+        input_tensor_cpu = input_tensor_cpu.cpu();
+    }
+    if (original_dtype == DType::Float16) {
+        input_tensor_cpu = input_tensor_cpu.to(DType::Float32);
+    }
+    Variable input_cpu = Variable(input_tensor_cpu, input.requires_grad());
     // Get weight/bias from parameters_ to respect offload hooks
     Tensor weight_tensor = affine_ ? parameters_["weight"]->tensor() : weight_.tensor();
     Tensor bias_tensor = affine_ ? parameters_["bias"]->tensor() : bias_.tensor();
     bool weight_requires_grad = affine_ ? parameters_["weight"]->requires_grad() : weight_.requires_grad();
     bool bias_requires_grad = affine_ ? parameters_["bias"]->requires_grad() : bias_.requires_grad();
-    Variable weight_cpu = (weight_tensor.device().type == Device::Type::CPU) ?
-                          Variable(weight_tensor, weight_requires_grad) : Variable(weight_tensor.cpu(), weight_requires_grad);
-    Variable bias_cpu = (bias_tensor.device().type == Device::Type::CPU) ?
-                        Variable(bias_tensor, bias_requires_grad) : Variable(bias_tensor.cpu(), bias_requires_grad);
+
+    // Move to CPU and convert Float16 to Float32 for computation
+    Tensor weight_tensor_cpu = weight_tensor;
+    Tensor bias_tensor_cpu = bias_tensor;
+    if (weight_tensor.device().type != Device::Type::CPU) {
+        weight_tensor_cpu = weight_tensor_cpu.cpu();
+        bias_tensor_cpu = bias_tensor_cpu.cpu();
+    }
+    if (weight_tensor_cpu.dtype() == DType::Float16) {
+        weight_tensor_cpu = weight_tensor_cpu.to(DType::Float32);
+        bias_tensor_cpu = bias_tensor_cpu.to(DType::Float32);
+    }
+    Variable weight_cpu = Variable(weight_tensor_cpu, weight_requires_grad);
+    Variable bias_cpu = Variable(bias_tensor_cpu, bias_requires_grad);
 
     // Compute mean and variance for each group
     // Shape: [N, num_groups]
@@ -1435,9 +1454,14 @@ auto GroupNorm::forward_impl(const Variable& input) -> Variable {
         }
     }
 
-    // Move output back to original device if needed
-    Tensor output_final = (original_device.type == Device::Type::CPU) ?
-                          output : output.to(original_device);
+    // Convert back to original dtype and move to original device if needed
+    Tensor output_final = output;
+    if (original_dtype == DType::Float16) {
+        output_final = output_final.to(DType::Float16);
+    }
+    if (original_device.type != Device::Type::CPU) {
+        output_final = output_final.to(original_device);
+    }
 
     // Set up autograd if needed
     if (input.requires_grad() || (affine_ && parameters_["weight"]->requires_grad())) {

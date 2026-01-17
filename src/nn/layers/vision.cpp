@@ -291,11 +291,10 @@ auto WindowAttention::forward(const Variable& input, const Tensor& mask) -> Vari
     // Permute to (3, B, num_heads, N, head_dim)
     qkv = qkv.permute({2, 0, 3, 1, 4});
 
-    // Split into Q, K, V
-    auto qkv_data = qkv.tensor();
-    auto q = qkv_data.slice(0, 0, 1).squeeze(0);  // (B, num_heads, N, head_dim)
-    auto k = qkv_data.slice(0, 1, 2).squeeze(0);
-    auto v = qkv_data.slice(0, 2, 3).squeeze(0);
+    // Split into Q, K, V using autograd-aware slice to preserve gradient flow
+    auto q = tenzor::slice(qkv, 0, 0, 1).squeeze(0);  // (B, num_heads, N, head_dim)
+    auto k = tenzor::slice(qkv, 0, 1, 2).squeeze(0);
+    auto v = tenzor::slice(qkv, 0, 2, 3).squeeze(0);
 
     // Scale Q and reshape for bmm: (B, num_heads, N, head_dim) -> (B*num_heads, N, head_dim)
     auto q_scaled = q * scale_;
@@ -303,11 +302,11 @@ auto WindowAttention::forward(const Variable& input, const Tensor& mask) -> Vari
     auto k_3d = k.reshape({B * num_heads_, N, head_dim_});
     auto v_3d = v.reshape({B * num_heads_, N, head_dim_});
 
-    // Attention scores: Q @ K^T -> (B*num_heads, N, N)
+    // Attention scores: Q @ K^T -> (B*num_heads, N, N) using autograd bmm
     auto attn_3d = tenzor::bmm(q_3d, k_3d.transpose(-2, -1));
 
-    // Reshape back to 4D: (B*num_heads, N, N) -> (B, num_heads, N, N) and wrap in Variable
-    auto attn = Variable(attn_3d.reshape({B, num_heads_, N, N}), input.requires_grad());
+    // Reshape back to 4D: (B*num_heads, N, N) -> (B, num_heads, N, N)
+    auto attn = attn_3d.reshape({B, num_heads_, N, N});
 
     // Add relative position bias
     auto bias = get_relative_position_bias();  // (num_heads, N, N)
@@ -333,16 +332,14 @@ auto WindowAttention::forward(const Variable& input, const Tensor& mask) -> Vari
     // Dropout
     attn = attn_drop_->forward(attn);
 
-    // Extract tensor, reshape for bmm: (B, num_heads, N, N) -> (B*num_heads, N, N)
-    auto attn_tensor = attn.tensor();
-    auto attn_3d_for_v = attn_tensor.reshape({B * num_heads_, N, N});
+    // Reshape for bmm: (B, num_heads, N, N) -> (B*num_heads, N, N)
+    auto attn_3d_for_v = attn.reshape({B * num_heads_, N, N});
 
-    // Attention output: attn @ V -> (B*num_heads, N, head_dim)
+    // Attention output: attn @ V -> (B*num_heads, N, head_dim) using autograd bmm
     auto x_3d = tenzor::bmm(attn_3d_for_v, v_3d);
 
     // Reshape to 4D then transpose and reshape: (B*num_heads, N, head_dim) -> (B, num_heads, N, head_dim) -> (B, N, C)
-    auto x_tensor = x_3d.reshape({B, num_heads_, N, head_dim_}).transpose(1, 2).reshape({B, N, C});
-    auto x = Variable(x_tensor, input.requires_grad());
+    auto x = x_3d.reshape({B, num_heads_, N, head_dim_}).transpose(1, 2).reshape({B, N, C});
 
     // Output projection
     x = proj_->forward(x);

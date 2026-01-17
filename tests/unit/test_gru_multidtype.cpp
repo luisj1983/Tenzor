@@ -70,6 +70,12 @@ protected:
             }
             device = Device::oneapi(0);
         }
+        else if (param.backend_name == "rocm") {
+            if (!isBackendAvailable(Device::Type::ROCm)) {
+                GTEST_SKIP() << "ROCm not available";
+            }
+            device = Device::rocm(0);
+        }
     }
 
     static bool isBackendAvailable(Device::Type type) {
@@ -230,6 +236,12 @@ protected:
                 GTEST_SKIP() << "OneAPI not available";
             }
             device = Device::oneapi(0);
+        }
+        else if (param.backend_name == "rocm") {
+            if (!isBackendAvailable(Device::Type::ROCm)) {
+                GTEST_SKIP() << "ROCm not available";
+            }
+            device = Device::rocm(0);
         }
     }
 
@@ -750,6 +762,7 @@ std::vector<BackendDTypeParam> GenerateBackendDTypeCombinations() {
     std::vector<std::pair<DType, std::string>> dtypes = {
         {DType::Float32, "float32"},
         {DType::Float64, "float64"},
+        {DType::Float16, "float16"},
     };
 
     std::vector<BackendDTypeParam> combinations;

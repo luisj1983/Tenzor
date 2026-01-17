@@ -34,6 +34,7 @@ set(ROCM_HIP_SOURCES
     kernels/math.hip.cpp
     kernels/activations.hip.cpp
     kernels/batchnorm.hip.cpp
+    kernels/comparison.hip.cpp
     kernels/conv2d.hip.cpp
     kernels/pooling.hip.cpp
     kernels/indexing.hip.cpp
@@ -41,10 +42,13 @@ set(ROCM_HIP_SOURCES
     kernels/fused_ops.hip.cpp
     kernels/reduction.hip.cpp
     kernels/matmul.hip.cpp
+    kernels/normalization.hip.cpp
+    kernels/nn_ops.hip.cpp
     kernels/lstm.hip.cpp
     kernels/gru.hip.cpp
     kernels/nms.hip.cpp
     kernels/roi_align.hip.cpp
+    kernels/vision.hip.cpp
 )
 
 # Mark .hip.cpp files to be compiled as HIP language

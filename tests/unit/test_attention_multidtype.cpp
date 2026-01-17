@@ -69,6 +69,12 @@ protected:
             }
             device = Device::oneapi(0);
         }
+        else if (param.backend_name == "rocm") {
+            if (!isBackendAvailable(Device::Type::ROCm)) {
+                GTEST_SKIP() << "ROCm not available";
+            }
+            device = Device::rocm(0);
+        }
     }
 
     static bool isBackendAvailable(Device::Type type) {
@@ -413,6 +419,12 @@ protected:
             }
             device = Device::oneapi(0);
         }
+        else if (param.backend_name == "rocm") {
+            if (!isBackendAvailable(Device::Type::ROCm)) {
+                GTEST_SKIP() << "ROCm not available";
+            }
+            device = Device::rocm(0);
+        }
     }
 
     static bool isBackendAvailable(Device::Type type) {
@@ -561,6 +573,12 @@ protected:
                 GTEST_SKIP() << "OneAPI not available";
             }
             device = Device::oneapi(0);
+        }
+        else if (param.backend_name == "rocm") {
+            if (!isBackendAvailable(Device::Type::ROCm)) {
+                GTEST_SKIP() << "ROCm not available";
+            }
+            device = Device::rocm(0);
         }
     }
 
