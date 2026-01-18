@@ -1188,8 +1188,17 @@ auto leaky_relu_kernel(const Tensor& input, float alpha) -> Tensor {
         for (size_t i = 0; i < n; ++i) {
             out_data[i] = in_data[i] > 0.0 ? in_data[i] : alpha_d * in_data[i];
         }
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* in_data = input.data<Float16>();
+        Float16* out_data = output.data<Float16>();
+        size_t n = input.numel();
+
+        for (size_t i = 0; i < n; ++i) {
+            float val = static_cast<float>(in_data[i]);
+            out_data[i] = Float16(val > 0.0f ? val : alpha * val);
+        }
     } else {
-        throw std::runtime_error("Leaky ReLU only supports Float32 and Float64");
+        throw std::runtime_error("Leaky ReLU only supports Float32, Float64, and Float16");
     }
 
     return output;
@@ -1218,8 +1227,19 @@ auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, 
         for (size_t i = 0; i < n; ++i) {
             grad_in_data[i] = grad_out_data[i] * (in_data[i] > 0.0 ? 1.0 : alpha_d);
         }
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* grad_out_data = grad_output.data<Float16>();
+        const Float16* in_data = input.data<Float16>();
+        Float16* grad_in_data = grad_input.data<Float16>();
+        size_t n = input.numel();
+
+        for (size_t i = 0; i < n; ++i) {
+            float in_val = static_cast<float>(in_data[i]);
+            float grad_out_val = static_cast<float>(grad_out_data[i]);
+            grad_in_data[i] = Float16(grad_out_val * (in_val > 0.0f ? 1.0f : alpha));
+        }
     } else {
-        throw std::runtime_error("Leaky ReLU backward only supports Float32 and Float64");
+        throw std::runtime_error("Leaky ReLU backward only supports Float32, Float64, and Float16");
     }
 
     return grad_input;

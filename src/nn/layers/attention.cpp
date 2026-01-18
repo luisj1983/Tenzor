@@ -187,10 +187,12 @@ auto MultiheadAttention::scaled_dot_product_attention(
     // Uses cuDNN Graph API for fused attention via dispatch - up to 2x faster than separate BMM ops
     // Requirements: cuDNN 9.0+, Ampere+ GPU, head_dim in {32, 64, 128, 256}, FP16 input
     // Note: Only enabled for FP16 inputs - FP32→FP16 conversion overhead makes BMM faster for FP32
+    // Note: Only enabled in inference mode - cuDNN SDPA doesn't build autograd graph
     bool is_fp16 = query.dtype() == DType::Float16 || query.dtype() == DType::BFloat16;
     bool can_use_cudnn_sdpa = is_fp16 &&
         (query.device().type == Device::Type::CUDA) &&
-        (head_dim == 32 || head_dim == 64 || head_dim == 128 || head_dim == 256);
+        (head_dim == 32 || head_dim == 64 || head_dim == 128 || head_dim == 256) &&
+        !is_training();  // Only use cuDNN SDPA in inference mode
 
     if (can_use_cudnn_sdpa) {
         try {
