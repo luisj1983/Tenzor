@@ -3,7 +3,23 @@
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/transform.hpp"
 
+// Forward declare tenzor::initialize
+namespace tenzor {
+    void initialize();
+}
+
 using namespace tenzor;
+
+// Global test environment to initialize Tenzor library
+class TenzorTestEnvironment : public ::testing::Environment {
+public:
+    void SetUp() override {
+        tenzor::initialize();
+    }
+};
+
+static ::testing::Environment* const tenzor_env =
+    ::testing::AddGlobalTestEnvironment(new TenzorTestEnvironment);
 
 TEST(ChunkTest, BasicChunkEvenDivision) {
     // Test case: Shape (12, 20), split into 4 chunks along dim=0

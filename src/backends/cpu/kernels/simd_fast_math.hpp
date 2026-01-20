@@ -13,6 +13,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cmath>
+#include <limits>
 
 #if defined(__x86_64__) || defined(_M_X64) || defined(__i386__) || defined(_M_IX86)
     #include <immintrin.h>
@@ -146,8 +147,18 @@ inline __m256 exp_avx2(__m256 x) {
 
 /**
  * @brief AVX2 vectorized natural log using polynomial approximation
+ * Handles edge cases: log(x<0) = NaN, log(0) = -inf
  */
 inline __m256 log_avx2(__m256 x) {
+    // Handle edge cases: negative -> NaN, zero -> -inf
+    __m256 zero = _mm256_setzero_ps();
+    __m256 neg_mask = _mm256_cmp_ps(x, zero, _CMP_LT_OQ);  // x < 0
+    __m256 zero_mask = _mm256_cmp_ps(x, zero, _CMP_EQ_OQ); // x == 0
+
+    // Create NaN and -inf constants
+    __m256 nan_val = _mm256_set1_ps(std::numeric_limits<float>::quiet_NaN());
+    __m256 neg_inf = _mm256_set1_ps(-std::numeric_limits<float>::infinity());
+
     // Extract exponent and mantissa
     __m256i xi = _mm256_castps_si256(x);
     __m256i exponent = _mm256_srli_epi32(xi, 23);
@@ -185,11 +196,18 @@ inline __m256 log_avx2(__m256 x) {
 
     // log(x) = e * ln(2) + log(m)
     __m256 ln2 = _mm256_set1_ps(0.693147180559945f);
+    __m256 result;
 #ifdef TENZOR_FAST_MATH_FMA
-    return _mm256_fmadd_ps(e, ln2, log_m);
+    result = _mm256_fmadd_ps(e, ln2, log_m);
 #else
-    return _mm256_add_ps(_mm256_mul_ps(e, ln2), log_m);
+    result = _mm256_add_ps(_mm256_mul_ps(e, ln2), log_m);
 #endif
+
+    // Apply edge case handling: negative -> NaN, zero -> -inf
+    result = _mm256_blendv_ps(result, neg_inf, zero_mask);
+    result = _mm256_blendv_ps(result, nan_val, neg_mask);
+
+    return result;
 }
 
 /**
@@ -417,8 +435,18 @@ inline __m512 exp_avx512(__m512 x) {
 
 /**
  * @brief AVX-512 vectorized log
+ * Handles edge cases: log(x<0) = NaN, log(0) = -inf
  */
 inline __m512 log_avx512(__m512 x) {
+    // Handle edge cases: negative -> NaN, zero -> -inf
+    __m512 zero = _mm512_setzero_ps();
+    __mmask16 neg_mask = _mm512_cmp_ps_mask(x, zero, _CMP_LT_OQ);  // x < 0
+    __mmask16 zero_mask = _mm512_cmp_ps_mask(x, zero, _CMP_EQ_OQ); // x == 0
+
+    // Create NaN and -inf constants
+    __m512 nan_val = _mm512_set1_ps(std::numeric_limits<float>::quiet_NaN());
+    __m512 neg_inf = _mm512_set1_ps(-std::numeric_limits<float>::infinity());
+
     __m512i xi = _mm512_castps_si512(x);
     __m512i exponent = _mm512_srli_epi32(xi, 23);
     exponent = _mm512_sub_epi32(exponent, _mm512_set1_epi32(127));
@@ -444,7 +472,13 @@ inline __m512 log_avx512(__m512 x) {
     __m512 log_m = _mm512_mul_ps(_mm512_mul_ps(_mm512_set1_ps(2.0f), u), p);
 
     __m512 ln2 = _mm512_set1_ps(0.693147180559945f);
-    return _mm512_fmadd_ps(e, ln2, log_m);
+    __m512 result = _mm512_fmadd_ps(e, ln2, log_m);
+
+    // Apply edge case handling: negative -> NaN, zero -> -inf
+    result = _mm512_mask_blend_ps(zero_mask, result, neg_inf);
+    result = _mm512_mask_blend_ps(neg_mask, result, nan_val);
+
+    return result;
 }
 
 /**

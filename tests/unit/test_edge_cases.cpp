@@ -792,13 +792,14 @@ TEST_P(EdgeCaseTest, CatWithMismatchedDimensions) {
     auto a = ones({2, 3}, DType::Float32, device_);
     auto b = ones({2, 4}, DType::Float32, device_);
 
-    // Can concat along dim 0 (same size 2)
-    auto result1 = cat({a, b}, 0);
-    EXPECT_EQ(result1.shape()[0], 4);
+    // Can concat along dim 1 (dim 0 matches: both have size 2)
+    auto result1 = cat({a, b}, 1);
+    EXPECT_EQ(result1.shape()[0], 2);
+    EXPECT_EQ(result1.shape()[1], 7);  // 3 + 4 = 7
 
-    // Cannot concat along dim 1 (different sizes 3 vs 4)
+    // Cannot concat along dim 0 (dim 1 mismatch: 3 vs 4)
     EXPECT_THROW({
-        auto result2 = cat({a, b}, 1);
+        auto result2 = cat({a, b}, 0);
     }, std::runtime_error);
 }
 

@@ -417,6 +417,14 @@ auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
             if (running_var_on_device.device() != original_device) {
                 running_var_on_device = running_var_on_device.to(original_device);
             }
+            // Convert running stats to input dtype for kernel compatibility
+            DType input_dtype = input_work.dtype();
+            if (running_mean_on_device.dtype() != input_dtype) {
+                running_mean_on_device = running_mean_on_device.to(input_dtype);
+            }
+            if (running_var_on_device.dtype() != input_dtype) {
+                running_var_on_device = running_var_on_device.to(input_dtype);
+            }
 
             // Use backend kernel for running stats update
             OpAttributes update_attrs;
@@ -426,9 +434,9 @@ auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
             std::vector<Tensor> update_inputs = {running_mean_on_device, running_var_on_device, batch_mean, unbiased_var};
             std::vector<Tensor> updated_stats = dispatch(OpId::BatchNorm2dUpdateRunningStats, update_inputs, update_attrs);
 
-            // Store updated stats (keep on compute device for future use)
-            rm_var_ptr->tensor() = updated_stats[0];
-            rv_var_ptr->tensor() = updated_stats[1];
+            // Store updated stats back in Float32 for storage efficiency
+            rm_var_ptr->tensor() = updated_stats[0].to(DType::Float32);
+            rv_var_ptr->tensor() = updated_stats[1].to(DType::Float32);
 
             num_batches_tracked_++;
         }
@@ -443,6 +451,14 @@ auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
             }
             if (batch_var.device() != original_device) {
                 batch_var = batch_var.to(original_device);
+            }
+            // Convert to input dtype for kernel compatibility
+            DType input_dtype = input_work.dtype();
+            if (batch_mean.dtype() != input_dtype) {
+                batch_mean = batch_mean.to(input_dtype);
+            }
+            if (batch_var.dtype() != input_dtype) {
+                batch_var = batch_var.to(input_dtype);
             }
         } else {
             throw std::runtime_error("BatchNorm2d in eval mode requires track_running_stats=true");
@@ -466,6 +482,14 @@ auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
         }
         if (bias_on_device.device() != original_device) {
             bias_on_device = bias_on_device.to(original_device);
+        }
+        // Convert weight and bias to input dtype for kernel compatibility
+        DType input_dtype = input_work.dtype();
+        if (weight_on_device.dtype() != input_dtype) {
+            weight_on_device = weight_on_device.to(input_dtype);
+        }
+        if (bias_on_device.dtype() != input_dtype) {
+            bias_on_device = bias_on_device.to(input_dtype);
         }
         std::vector<Tensor> forward_inputs = {input_work, batch_mean, batch_var, weight_on_device, bias_on_device};
         std::vector<Tensor> forward_results = dispatch(OpId::BatchNorm2dForwardAffine, forward_inputs, forward_attrs);
@@ -496,15 +520,19 @@ auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
         Tensor batch_mean_final = batch_mean.contiguous();
         Tensor invstd_final = invstd.contiguous();
 
-        // Use cached weight pointer for efficiency, transfer to input device if needed
+        // Use cached weight pointer for efficiency, transfer to input device and dtype if needed
         Tensor weight_tensor;
+        DType input_dtype = input.tensor().dtype();
         if (affine_ && cached_weight_) {
             weight_tensor = cached_weight_->tensor();
             if (weight_tensor.device() != original_device) {
                 weight_tensor = weight_tensor.to(original_device);
             }
+            if (weight_tensor.dtype() != input_dtype) {
+                weight_tensor = weight_tensor.to(input_dtype);
+            }
         } else {
-            weight_tensor = ones({C}, input.tensor().dtype(), original_device);
+            weight_tensor = ones({C}, input_dtype, original_device);
         }
         // Ensure all tensors are contiguous before saving
         std::vector<Tensor> tensors_to_save = {

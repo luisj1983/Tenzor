@@ -826,14 +826,16 @@ public:
             }
             else if (op_name == "full") {
                 std::vector<int64_t> shape = parse_shape(attrs.at("shape"));
-                float value = std::stof(attrs.at("value"));
+                // Use stod for better precision with very small values like denormalized floats
+                float value = static_cast<float>(std::stod(attrs.at("value")));
                 DType dtype = parse_dtype(attrs);
                 Device device = inputs.empty() ? Device::oneapi(device_id) : inputs[0].device();
                 return {oneapi::full_kernel(shape, value, dtype, device, queue)};
             }
             else if (op_name == "fill") {
                 if (inputs.size() != 1) throw std::invalid_argument("fill requires 1 input");
-                float value = std::stof(attrs.at("value"));
+                // Use stod for better precision with very small values like denormalized floats
+                float value = static_cast<float>(std::stod(attrs.at("value")));
                 return {oneapi::fill_kernel(inputs[0], value, queue)};
             }
 

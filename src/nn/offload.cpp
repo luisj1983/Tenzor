@@ -341,8 +341,9 @@ auto OffloadContext::initialize_tensor_info(Tensor* tensor, Module* layer) -> vo
 auto OffloadContext::offload_layer(Module* layer) -> void {
     if (!is_enabled()) return;
 
-    // Get all parameters for this layer
-    auto params = layer->parameters();
+    // Get only this layer's own parameters (not submodules')
+    // Each submodule's hooks handle their own parameters
+    auto params = layer->own_parameters();
 
     for (auto& param_ptr : params) {
         if (param_ptr) {
@@ -355,8 +356,9 @@ auto OffloadContext::offload_layer(Module* layer) -> void {
 auto OffloadContext::prefetch_layer(Module* layer) -> void {
     if (!is_enabled()) return;
 
-    // Get all parameters for this layer
-    auto params = layer->parameters();
+    // Get only this layer's own parameters (not submodules')
+    // Each submodule's hooks handle their own parameters
+    auto params = layer->own_parameters();
 
     for (auto& param_ptr : params) {
         if (param_ptr) {
@@ -568,7 +570,7 @@ auto OffloadContext::backward_pre_hook(Module* layer) -> void {
 
     // Also prefetch any offloaded gradients for this layer
     if (config_.offload_gradients) {
-        auto params = layer->parameters();
+        auto params = layer->own_parameters();
 
         // Collect gradients that need prefetching (check under lock)
         std::vector<Tensor*> gradients_to_prefetch;
@@ -593,41 +595,47 @@ auto OffloadContext::backward_pre_hook(Module* layer) -> void {
 }
 
 auto OffloadContext::backward_post_hook(Module* layer) -> void {
-    if (!is_enabled() || !config_.offload_gradients) return;
+    if (!is_enabled()) return;
 
-    // Get all parameters for this layer and offload their gradients
-    auto params = layer->parameters();
+    // Get all parameters for this layer
+    auto params = layer->own_parameters();
 
     for (auto& param_ptr : params) {
         if (!param_ptr) continue;
 
-        // Check if gradient exists
-        if (!param_ptr->grad().has_value()) continue;
-
-        Tensor* grad_tensor_ptr = &(param_ptr->grad().value());
-
-        // Skip if not on GPU
-        if (grad_tensor_ptr->device().type != Device::Type::CUDA) continue;
-
-        // Track gradient if not already tracked
-        {
-            std::lock_guard<std::mutex> lock(tensor_map_mutex_);
-            if (tensor_map_.find(grad_tensor_ptr) == tensor_map_.end()) {
-                TensorInfo info;
-                info.tensor = grad_tensor_ptr;
-                info.is_offloaded = false;
-                info.is_pinned = false;
-                info.is_gradient = true;
-                info.use_count = 0;
-                info.priority = OffloadPriority::LOW;  // Gradients are low priority
-                info.size_bytes = grad_tensor_ptr->numel() * grad_tensor_ptr->dtype_size();
-                info.owning_layer = layer;
-                tensor_map_[grad_tensor_ptr] = std::move(info);
-            }
+        // Offload parameter to CPU after backward pass (same as forward_post_hook)
+        if (config_.offload_parameters) {
+            Tensor* tensor_ptr = &(param_ptr->tensor());
+            offload_tensor(tensor_ptr);
         }
 
-        // Offload gradient to CPU
-        offload_tensor(grad_tensor_ptr);
+        // Offload gradient to CPU if configured
+        if (config_.offload_gradients && param_ptr->grad().has_value()) {
+            Tensor* grad_tensor_ptr = &(param_ptr->grad().value());
+
+            // Skip if not on GPU
+            if (grad_tensor_ptr->device().type != Device::Type::CUDA) continue;
+
+            // Track gradient if not already tracked
+            {
+                std::lock_guard<std::mutex> lock(tensor_map_mutex_);
+                if (tensor_map_.find(grad_tensor_ptr) == tensor_map_.end()) {
+                    TensorInfo info;
+                    info.tensor = grad_tensor_ptr;
+                    info.is_offloaded = false;
+                    info.is_pinned = false;
+                    info.is_gradient = true;
+                    info.use_count = 0;
+                    info.priority = OffloadPriority::LOW;  // Gradients are low priority
+                    info.size_bytes = grad_tensor_ptr->numel() * grad_tensor_ptr->dtype_size();
+                    info.owning_layer = layer;
+                    tensor_map_[grad_tensor_ptr] = std::move(info);
+                }
+            }
+
+            // Offload gradient to CPU
+            offload_tensor(grad_tensor_ptr);
+        }
     }
 }
 

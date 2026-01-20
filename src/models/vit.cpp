@@ -145,6 +145,7 @@ auto ViTEmbeddings::initialize_parameters() -> void {
 auto ViTEmbeddings::forward_impl(const Variable& pixel_values) -> Variable {
     auto shape = pixel_values.shape();
     int64_t batch_size = shape[0];
+    DType dtype = pixel_values.tensor().dtype();
 
     // Get patch embeddings: [batch, num_patches, hidden_size]
     auto embeddings = patch_embeddings_->forward(pixel_values);
@@ -153,14 +154,26 @@ auto ViTEmbeddings::forward_impl(const Variable& pixel_values) -> Variable {
     // We need to repeat the [CLS] token for each sample in the batch
     auto cls_shape = cls_token_.shape();
     Tensor cls_expanded({batch_size, 1, config_.hidden_size},
-                        DType::Float32, pixel_values.tensor().device());
+                        dtype, pixel_values.tensor().device());
 
-    // Copy [CLS] token data for each batch
-    const float* cls_data = cls_token_.tensor().data<float>();
-    float* expanded_data = cls_expanded.data<float>();
-    for (int64_t b = 0; b < batch_size; ++b) {
-        std::copy(cls_data, cls_data + config_.hidden_size,
-                  expanded_data + b * config_.hidden_size);
+    // Copy [CLS] token data for each batch (using template lambda for multi-dtype)
+    auto copy_cls_data = [&]<typename T>() {
+        const T* cls_data = cls_token_.tensor().data<T>();
+        T* expanded_data = cls_expanded.data<T>();
+        for (int64_t b = 0; b < batch_size; ++b) {
+            std::copy(cls_data, cls_data + config_.hidden_size,
+                      expanded_data + b * config_.hidden_size);
+        }
+    };
+
+    if (dtype == DType::Float32) {
+        copy_cls_data.template operator()<float>();
+    } else if (dtype == DType::Float64) {
+        copy_cls_data.template operator()<double>();
+    } else if (dtype == DType::Float16) {
+        copy_cls_data.template operator()<Float16>();
+    } else {
+        throw std::runtime_error("Unsupported dtype for ViTEmbeddings");
     }
 
     Variable cls_tokens(cls_expanded, true);
@@ -261,17 +274,30 @@ auto ViT::forward_vit(const Variable& pixel_values) -> ViTOutput {
         int64_t batch_size = shape[0];
         int64_t seq_len = shape[1];
         int64_t hidden_size = shape[2];
+        DType dtype = sequence_output.tensor().dtype();
 
         // Reshape and extract first token using matrix multiplication trick
         auto reshaped = tenzor::reshape(sequence_output, {batch_size * seq_len, hidden_size});
 
         // Create selection matrix to extract first tokens
         Tensor selection_matrix({batch_size, batch_size * seq_len},
-                               DType::Float32, sequence_output.tensor().device());
+                               dtype, sequence_output.tensor().device());
         selection_matrix.zero_();
-        float* sel_data = selection_matrix.data<float>();
-        for (int64_t b = 0; b < batch_size; ++b) {
-            sel_data[b * (batch_size * seq_len) + b * seq_len] = 1.0f;
+
+        // Set selection values using template lambda for multi-dtype
+        auto set_selection = [&]<typename T>(T one_val) {
+            T* sel_data = selection_matrix.data<T>();
+            for (int64_t b = 0; b < batch_size; ++b) {
+                sel_data[b * (batch_size * seq_len) + b * seq_len] = one_val;
+            }
+        };
+
+        if (dtype == DType::Float32) {
+            set_selection.template operator()<float>(1.0f);
+        } else if (dtype == DType::Float64) {
+            set_selection.template operator()<double>(1.0);
+        } else if (dtype == DType::Float16) {
+            set_selection.template operator()<Float16>(Float16(1.0f));
         }
 
         Variable selection_var(selection_matrix, false);
@@ -316,16 +342,29 @@ auto ViTForImageClassification::forward_impl(const Variable& pixel_values) -> Va
     int64_t batch_size = shape[0];
     int64_t seq_len = shape[1];
     int64_t hidden_size = shape[2];
+    DType dtype = sequence_output.tensor().dtype();
 
     // Use matrix multiplication to extract first token
     auto reshaped = tenzor::reshape(sequence_output, {batch_size * seq_len, hidden_size});
 
     Tensor selection_matrix({batch_size, batch_size * seq_len},
-                           DType::Float32, sequence_output.tensor().device());
+                           dtype, sequence_output.tensor().device());
     selection_matrix.zero_();
-    float* sel_data = selection_matrix.data<float>();
-    for (int64_t b = 0; b < batch_size; ++b) {
-        sel_data[b * (batch_size * seq_len) + b * seq_len] = 1.0f;
+
+    // Set selection values using template lambda for multi-dtype
+    auto set_selection = [&]<typename T>(T one_val) {
+        T* sel_data = selection_matrix.data<T>();
+        for (int64_t b = 0; b < batch_size; ++b) {
+            sel_data[b * (batch_size * seq_len) + b * seq_len] = one_val;
+        }
+    };
+
+    if (dtype == DType::Float32) {
+        set_selection.template operator()<float>(1.0f);
+    } else if (dtype == DType::Float64) {
+        set_selection.template operator()<double>(1.0);
+    } else if (dtype == DType::Float16) {
+        set_selection.template operator()<Float16>(Float16(1.0f));
     }
 
     Variable selection_var(selection_matrix, false);

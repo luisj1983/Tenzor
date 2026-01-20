@@ -1,9 +1,9 @@
 /**
  * @file test_gpt_multidtype.cpp
- * @brief Multi-dtype comprehensive unit tests for GPT models
+ * @brief Multi-backend and multi-dtype comprehensive unit tests for GPT models
  *
- * Tests GPT-2 and GPT-3 models with Float32, Float64, and Float16 support.
- * Critical for text generation across different precision requirements.
+ * Tests GPT-2 and GPT-3 models with Float32, Float64, and Float16 support
+ * across CPU, CUDA, and OneAPI backends.
  *
  * Coverage:
  * - GPT model construction (embeddings, decoder layers, LM head)
@@ -16,53 +16,27 @@
  */
 
 #include <gtest/gtest.h>
-#include <tenzor/tenzor.hpp>
+#include "../multi_backend_dtype_fixture.hpp"
 #include "../../include/tenzor/models/gpt.hpp"
-#include "../../include/tenzor/autograd/variable.hpp"
-#include "../../include/tenzor/core/tensor.hpp"
 #include "../../include/tenzor/ops/reduction.hpp"
 #include <cmath>
 
 using namespace tenzor;
 using namespace tenzor::models;
+using namespace tenzor::testing;
 
 // ============================================================================
-// Multi-DType Parameterization
+// GPT Multi-Backend Multi-DType Test Fixture
 // ============================================================================
 
-struct DTypeParam {
-    DType dtype;
-    std::string dtype_name;
-    float tolerance;
-    float gradient_tol;
-
-    std::string ToString() const {
-        return dtype_name;
-    }
-};
-
-// Required for gtest_discover_tests to show human-readable test names
-void PrintTo(const DTypeParam& param, std::ostream* os) {
-    *os << param.ToString();
-}
-
-class GPTMultiDTypeTest : public ::testing::TestWithParam<DTypeParam> {
+class GPTMultiDTypeTest : public MultiBackendDTypeTest {
 protected:
-    DType dtype;
-    float tol;
-    float grad_tol;
-    Device device;
     GPT2Config config_;
     int64_t batch_size_;
     int64_t seq_len_;
 
     void SetUp() override {
-        tenzor::initialize();
-        auto param = GetParam();
-        dtype = param.dtype;
-        tol = param.tolerance;
-        grad_tol = param.gradient_tol;
-        device = Device::cpu();
+        MultiBackendDTypeTest::SetUp();
 
         // Use small configs for testing
         config_ = GPT2Config{};
@@ -94,7 +68,7 @@ protected:
 
     // Helper to create input IDs tensor
     Tensor create_input_ids(int64_t batch, int64_t seq_len) {
-        Tensor input_ids({batch, seq_len}, DType::Int64, device);
+        Tensor input_ids({batch, seq_len}, DType::Int64, device());
         auto data = input_ids.data<int64_t>();
         for (int64_t i = 0; i < input_ids.numel(); ++i) {
             data[i] = i % config_.vocab_size;
@@ -104,7 +78,7 @@ protected:
 
     // Helper to create position IDs tensor
     Tensor create_position_ids(int64_t batch, int64_t seq_len) {
-        Tensor position_ids({batch, seq_len}, DType::Int64, device);
+        Tensor position_ids({batch, seq_len}, DType::Int64, device());
         auto pos_data = position_ids.data<int64_t>();
         for (int64_t b = 0; b < batch; ++b) {
             for (int64_t s = 0; s < seq_len; ++s) {
@@ -116,8 +90,8 @@ protected:
 
     // Helper to convert tensor to target dtype
     Tensor to_dtype(Tensor tensor) {
-        if (tensor.dtype() != dtype) {
-            return tensor.to(dtype);
+        if (tensor.dtype() != dtype()) {
+            return tensor.to(dtype());
         }
         return tensor;
     }
@@ -129,6 +103,7 @@ protected:
 
 TEST_P(GPTMultiDTypeTest, EmbeddingsForwardShape) {
     GPTEmbeddings embeddings(config_);
+    convert_model(embeddings);
     embeddings.train(false);
 
     Tensor input_ids = create_input_ids(batch_size_, seq_len_);
@@ -147,6 +122,7 @@ TEST_P(GPTMultiDTypeTest, EmbeddingsForwardShape) {
 
 TEST_P(GPTMultiDTypeTest, EmbeddingsWithPositionIds) {
     GPTEmbeddings embeddings(config_);
+    convert_model(embeddings);
     embeddings.train(false);
 
     Tensor input_ids = create_input_ids(batch_size_, seq_len_);
@@ -165,6 +141,7 @@ TEST_P(GPTMultiDTypeTest, EmbeddingsWithPositionIds) {
 
 TEST_P(GPTMultiDTypeTest, EmbeddingsGradientFlow) {
     GPTEmbeddings embeddings(config_);
+    convert_model(embeddings);
     embeddings.train();
 
     Tensor input_ids = create_input_ids(batch_size_, seq_len_);
@@ -197,6 +174,7 @@ TEST_P(GPTMultiDTypeTest, EmbeddingsGradientFlow) {
 
 TEST_P(GPTMultiDTypeTest, EmbeddingsDifferentSequenceLengths) {
     GPTEmbeddings embeddings(config_);
+    convert_model(embeddings);
     embeddings.train(false);
 
     // Test with various sequence lengths
@@ -222,9 +200,10 @@ TEST_P(GPTMultiDTypeTest, EmbeddingsDifferentSequenceLengths) {
 
 TEST_P(GPTMultiDTypeTest, DecoderLayerForwardShape) {
     GPTDecoderLayer layer(config_);
+    convert_model(layer);
     layer.train(false);
 
-    Tensor hidden_states({batch_size_, seq_len_, config_.n_embd}, DType::Float32, device);
+    Tensor hidden_states({batch_size_, seq_len_, config_.n_embd}, DType::Float32, device());
     hidden_states.fill_(0.1f);
     hidden_states = to_dtype(hidden_states);
 
@@ -240,14 +219,15 @@ TEST_P(GPTMultiDTypeTest, DecoderLayerForwardShape) {
 
 TEST_P(GPTMultiDTypeTest, DecoderLayerWithCausalMask) {
     GPTDecoderLayer layer(config_);
+    convert_model(layer);
     layer.train(false);
 
-    Tensor hidden_states({batch_size_, seq_len_, config_.n_embd}, DType::Float32, device);
+    Tensor hidden_states({batch_size_, seq_len_, config_.n_embd}, DType::Float32, device());
     hidden_states.fill_(0.1f);
     hidden_states = to_dtype(hidden_states);
 
     // Create causal mask
-    Tensor causal_mask = nn::create_causal_mask(seq_len_, device);
+    Tensor causal_mask = nn::create_causal_mask(seq_len_, device());
 
     Variable input_var(hidden_states, false);
     auto output = layer.forward(input_var, causal_mask);
@@ -260,9 +240,10 @@ TEST_P(GPTMultiDTypeTest, DecoderLayerWithCausalMask) {
 
 TEST_P(GPTMultiDTypeTest, DecoderLayerGradientFlow) {
     GPTDecoderLayer layer(config_);
+    convert_model(layer);
     layer.train();
 
-    Tensor hidden_states({batch_size_, seq_len_, config_.n_embd}, DType::Float32, device);
+    Tensor hidden_states({batch_size_, seq_len_, config_.n_embd}, DType::Float32, device());
     hidden_states.fill_(0.1f);
     hidden_states = to_dtype(hidden_states);
 
@@ -291,12 +272,13 @@ TEST_P(GPTMultiDTypeTest, DecoderLayerGradientFlow) {
 
 TEST_P(GPTMultiDTypeTest, DecoderLayerDifferentSequenceLengths) {
     GPTDecoderLayer layer(config_);
+    convert_model(layer);
     layer.train(false);
 
     std::vector<int64_t> seq_lengths = {4, 8, 16, 32};
 
     for (auto seq_len : seq_lengths) {
-        Tensor hidden_states({1, seq_len, config_.n_embd}, DType::Float32, device);
+        Tensor hidden_states({1, seq_len, config_.n_embd}, DType::Float32, device());
         hidden_states.fill_(0.1f);
         hidden_states = to_dtype(hidden_states);
 
@@ -316,6 +298,7 @@ TEST_P(GPTMultiDTypeTest, DecoderLayerDifferentSequenceLengths) {
 
 TEST_P(GPTMultiDTypeTest, GPT2ModelForwardShape) {
     GPT2Model model(config_);
+    convert_model(model);
     model.train(false);
 
     Tensor input_ids = create_input_ids(batch_size_, seq_len_);
@@ -331,6 +314,7 @@ TEST_P(GPTMultiDTypeTest, GPT2ModelForwardShape) {
 
 TEST_P(GPTMultiDTypeTest, GPT2ModelParameterCount) {
     GPT2Model model(config_);
+    convert_model(model);
 
     auto params = model.parameters();
     EXPECT_GT(params.size(), 0);
@@ -353,6 +337,7 @@ TEST_P(GPTMultiDTypeTest, GPT2ModelParameterCount) {
 
 TEST_P(GPTMultiDTypeTest, GPT2ModelGradientFlow) {
     GPT2Model model(config_);
+    convert_model(model);
     model.train();
 
     Tensor input_ids = create_input_ids(batch_size_, seq_len_);
@@ -379,6 +364,7 @@ TEST_P(GPTMultiDTypeTest, GPT2ModelGradientFlow) {
 
 TEST_P(GPTMultiDTypeTest, GPT2ModelWithPositionIds) {
     GPT2Model model(config_);
+    convert_model(model);
     model.train(false);
 
     Tensor input_ids = create_input_ids(batch_size_, seq_len_);
@@ -397,10 +383,11 @@ TEST_P(GPTMultiDTypeTest, GPT2ModelWithPositionIds) {
 
 TEST_P(GPTMultiDTypeTest, GPT2ModelWithCausalMask) {
     GPT2Model model(config_);
+    convert_model(model);
     model.train(false);
 
     Tensor input_ids = create_input_ids(batch_size_, seq_len_);
-    Tensor causal_mask = nn::create_causal_mask(seq_len_, device);
+    Tensor causal_mask = nn::create_causal_mask(seq_len_, device());
 
     Variable input_var(input_ids, false);
     auto output = model.forward(input_var, Variable{}, causal_mask);
@@ -417,6 +404,7 @@ TEST_P(GPTMultiDTypeTest, GPT2ModelWithCausalMask) {
 
 TEST_P(GPTMultiDTypeTest, GPT2LMHeadForwardShape) {
     GPT2LMHeadModel model(config_);
+    convert_model(model);
     model.train(false);
 
     Tensor input_ids = create_input_ids(batch_size_, seq_len_);
@@ -432,9 +420,10 @@ TEST_P(GPTMultiDTypeTest, GPT2LMHeadForwardShape) {
 
 TEST_P(GPTMultiDTypeTest, GPT2LMHeadLogitsRange) {
     GPT2LMHeadModel model(config_);
+    convert_model(model);
     model.train(false);
 
-    Tensor input_ids({1, 4}, DType::Int64, device);
+    Tensor input_ids({1, 4}, DType::Int64, device());
     auto data = input_ids.data<int64_t>();
     data[0] = 10; data[1] = 20; data[2] = 30; data[3] = 40;
 
@@ -447,6 +436,7 @@ TEST_P(GPTMultiDTypeTest, GPT2LMHeadLogitsRange) {
 
 TEST_P(GPTMultiDTypeTest, GPT2LMHeadGradientFlow) {
     GPT2LMHeadModel model(config_);
+    convert_model(model);
     model.train();
 
     Tensor input_ids = create_input_ids(batch_size_, seq_len_);
@@ -473,6 +463,7 @@ TEST_P(GPTMultiDTypeTest, GPT2LMHeadGradientFlow) {
 
 TEST_P(GPTMultiDTypeTest, GPT2LMHeadDifferentSequenceLengths) {
     GPT2LMHeadModel model(config_);
+    convert_model(model);
     model.train(false);
 
     std::vector<int64_t> seq_lengths = {4, 8, 16, 32, 64};
@@ -502,6 +493,7 @@ TEST_P(GPTMultiDTypeTest, GPT3ModelConstruction) {
     gpt3_config.n_layer = 2;
 
     GPT3Model model(gpt3_config);
+    convert_model(model);
 
     auto params = model.parameters();
     EXPECT_GT(params.size(), 0);
@@ -514,9 +506,10 @@ TEST_P(GPTMultiDTypeTest, GPT3LMHeadModelForward) {
     gpt3_config.n_layer = 2;
 
     GPT3LMHeadModel model(gpt3_config);
+    convert_model(model);
     model.train(false);
 
-    Tensor input_ids({1, 8}, DType::Int64, device);
+    Tensor input_ids({1, 8}, DType::Int64, device());
     auto data = input_ids.data<int64_t>();
     for (int64_t i = 0; i < 8; ++i) {
         data[i] = i * 10;
@@ -538,9 +531,10 @@ TEST_P(GPTMultiDTypeTest, GPT3LMHeadModelGradientFlow) {
     gpt3_config.n_layer = 1;  // Single layer for faster test
 
     GPT3LMHeadModel model(gpt3_config);
+    convert_model(model);
     model.train();
 
-    Tensor input_ids({1, 8}, DType::Int64, device);
+    Tensor input_ids({1, 8}, DType::Int64, device());
     auto data = input_ids.data<int64_t>();
     for (int64_t i = 0; i < 8; ++i) {
         data[i] = i * 10;
@@ -573,6 +567,7 @@ TEST_P(GPTMultiDTypeTest, GPT3LMHeadModelGradientFlow) {
 
 TEST_P(GPTMultiDTypeTest, GeneratorGreedySearch) {
     GPT2LMHeadModel model(config_);
+    convert_model(model);
     model.train(false);
 
     GenerationConfig gen_config;
@@ -581,7 +576,7 @@ TEST_P(GPTMultiDTypeTest, GeneratorGreedySearch) {
 
     TextGenerator generator(model, gen_config);
 
-    Tensor input_ids({1, 4}, DType::Int64, device);
+    Tensor input_ids({1, 4}, DType::Int64, device());
     auto data = input_ids.data<int64_t>();
     data[0] = 10; data[1] = 20; data[2] = 30; data[3] = 40;
 
@@ -606,6 +601,7 @@ TEST_P(GPTMultiDTypeTest, GeneratorGreedySearch) {
 
 TEST_P(GPTMultiDTypeTest, GeneratorTopKSampling) {
     GPT2LMHeadModel model(config_);
+    convert_model(model);
     model.train(false);
 
     GenerationConfig gen_config;
@@ -617,7 +613,7 @@ TEST_P(GPTMultiDTypeTest, GeneratorTopKSampling) {
 
     TextGenerator generator(model, gen_config);
 
-    Tensor input_ids({1, 3}, DType::Int64, device);
+    Tensor input_ids({1, 3}, DType::Int64, device());
     auto data = input_ids.data<int64_t>();
     data[0] = 5; data[1] = 15; data[2] = 25;
 
@@ -641,6 +637,7 @@ TEST_P(GPTMultiDTypeTest, GeneratorTopKSampling) {
 
 TEST_P(GPTMultiDTypeTest, GeneratorTopPSampling) {
     GPT2LMHeadModel model(config_);
+    convert_model(model);
     model.train(false);
 
     GenerationConfig gen_config;
@@ -652,7 +649,7 @@ TEST_P(GPTMultiDTypeTest, GeneratorTopPSampling) {
 
     TextGenerator generator(model, gen_config);
 
-    Tensor input_ids({1, 3}, DType::Int64, device);
+    Tensor input_ids({1, 3}, DType::Int64, device());
     auto data = input_ids.data<int64_t>();
     data[0] = 7; data[1] = 17; data[2] = 27;
 
@@ -671,6 +668,7 @@ TEST_P(GPTMultiDTypeTest, GeneratorTopPSampling) {
 
 TEST_P(GPTMultiDTypeTest, GeneratorBeamSearch) {
     GPT2LMHeadModel model(config_);
+    convert_model(model);
     model.train(false);
 
     GenerationConfig gen_config;
@@ -680,7 +678,7 @@ TEST_P(GPTMultiDTypeTest, GeneratorBeamSearch) {
 
     TextGenerator generator(model, gen_config);
 
-    Tensor input_ids({1, 2}, DType::Int64, device);
+    Tensor input_ids({1, 2}, DType::Int64, device());
     auto data = input_ids.data<int64_t>();
     data[0] = 100; data[1] = 200;
 
@@ -703,6 +701,7 @@ TEST_P(GPTMultiDTypeTest, GeneratorBeamSearch) {
 
 TEST_P(GPTMultiDTypeTest, GeneratorGenericGenerate) {
     GPT2LMHeadModel model(config_);
+    convert_model(model);
     model.train(false);
 
     GenerationConfig gen_config;
@@ -711,7 +710,7 @@ TEST_P(GPTMultiDTypeTest, GeneratorGenericGenerate) {
 
     TextGenerator generator(model, gen_config);
 
-    Tensor input_ids({1, 2}, DType::Int64, device);
+    Tensor input_ids({1, 2}, DType::Int64, device());
     auto data = input_ids.data<int64_t>();
     data[0] = 50; data[1] = 60;
 
@@ -786,6 +785,7 @@ TEST_P(GPTMultiDTypeTest, EndToEndTextGeneration) {
     config_.n_layer = 1;
 
     GPT2LMHeadModel model(config_);
+    convert_model(model);
     model.train(false);
 
     GenerationConfig gen_config;
@@ -795,7 +795,7 @@ TEST_P(GPTMultiDTypeTest, EndToEndTextGeneration) {
     TextGenerator generator(model, gen_config);
 
     // Create input
-    Tensor input_ids({1, 3}, DType::Int64, device);
+    Tensor input_ids({1, 3}, DType::Int64, device());
     auto data = input_ids.data<int64_t>();
     data[0] = 1; data[1] = 2; data[2] = 3;
 
@@ -822,8 +822,9 @@ TEST_P(GPTMultiDTypeTest, EndToEndTextGeneration) {
 
 TEST_P(GPTMultiDTypeTest, TrainingModeVsEvalMode) {
     GPT2LMHeadModel model(config_);
+    convert_model(model);
 
-    Tensor input_ids({1, 4}, DType::Int64, device);
+    Tensor input_ids({1, 4}, DType::Int64, device());
     auto data = input_ids.data<int64_t>();
     data[0] = 10; data[1] = 20; data[2] = 30; data[3] = 40;
     Variable input_var(input_ids, false);
@@ -850,6 +851,7 @@ TEST_P(GPTMultiDTypeTest, LongSequenceHandling) {
     config_.n_layer = 1;  // Single layer for speed
 
     GPT2LMHeadModel model(config_);
+    convert_model(model);
     model.train(false);
 
     int64_t long_seq_len = 128;
@@ -867,6 +869,7 @@ TEST_P(GPTMultiDTypeTest, LongSequenceHandling) {
 TEST_P(GPTMultiDTypeTest, BatchedGeneration) {
     config_.n_layer = 1;
     GPT2LMHeadModel model(config_);
+    convert_model(model);
     model.train(false);
 
     GenerationConfig gen_config;
@@ -876,7 +879,7 @@ TEST_P(GPTMultiDTypeTest, BatchedGeneration) {
     TextGenerator generator(model, gen_config);
 
     // Test with batch size 3
-    Tensor input_ids({3, 4}, DType::Int64, device);
+    Tensor input_ids({3, 4}, DType::Int64, device());
     auto data = input_ids.data<int64_t>();
     for (int64_t i = 0; i < input_ids.numel(); ++i) {
         data[i] = (i * 10) % config_.vocab_size;
@@ -899,18 +902,7 @@ TEST_P(GPTMultiDTypeTest, BatchedGeneration) {
 // Test Instantiation
 // ============================================================================
 
-INSTANTIATE_TEST_SUITE_P(
-    MultiDType,
-    GPTMultiDTypeTest,
-    ::testing::Values(
-        DTypeParam{DType::Float32, "Float32", 1e-5f, 1e-4f},
-        DTypeParam{DType::Float64, "Float64", 1e-9f, 1e-8f},
-        DTypeParam{DType::Float16, "Float16", 1e-2f, 1e-1f}
-    ),
-    [](const ::testing::TestParamInfo<DTypeParam>& info) {
-        return info.param.ToString();
-    }
-);
+INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(GPTMultiDTypeTest);
 
 int main(int argc, char** argv) {
     tenzor::initialize();

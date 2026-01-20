@@ -10,7 +10,23 @@
 #include <vector>
 #include <cmath>
 
+// Forward declare tenzor::initialize
+namespace tenzor {
+    void initialize();
+}
+
 using namespace tenzor;
+
+// Global test environment to initialize Tenzor library
+class TenzorTestEnvironment : public ::testing::Environment {
+public:
+    void SetUp() override {
+        tenzor::initialize();
+    }
+};
+
+static ::testing::Environment* const tenzor_env =
+    ::testing::AddGlobalTestEnvironment(new TenzorTestEnvironment);
 
 class SplitOperationTest : public ::testing::Test {
 protected:

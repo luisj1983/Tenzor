@@ -18,7 +18,7 @@ namespace {
 auto calculate_pool_output_size(int64_t input_size, int64_t kernel_size,
                                 int64_t stride, int64_t padding) -> int64_t {
     if (stride == 0) {
-        throw std::invalid_argument("Pooling: stride cannot be zero");
+        throw std::runtime_error("Pooling: stride cannot be zero");
     }
     return (input_size + 2 * padding - kernel_size) / stride + 1;
 }
@@ -145,7 +145,16 @@ private:
 
 MaxPool2d::MaxPool2d(int64_t kernel_size, int64_t stride, int64_t padding)
     : kernel_size_(kernel_size), stride_(stride < 0 ? kernel_size : stride),
-      padding_(padding) {}
+      padding_(padding) {
+    if (kernel_size <= 0) {
+        throw std::runtime_error("MaxPool2d: kernel_size must be positive, got " +
+            std::to_string(kernel_size));
+    }
+    if (padding < 0) {
+        throw std::runtime_error("MaxPool2d: padding must be non-negative, got " +
+            std::to_string(padding));
+    }
+}
 
 auto MaxPool2d::forward_impl(const Variable& input) -> Variable {
     // Input shape: [N, C, H_in, W_in]
@@ -497,7 +506,7 @@ auto AvgPool2d::forward_impl(const Variable& input) -> Variable {
     // Input shape: [N, C, H_in, W_in]
     auto input_shape = input.shape();
     if (input_shape.size() != 4) {
-        throw std::invalid_argument("AvgPool2d expects 4D input [batch, channels, height, width]");
+        throw std::runtime_error("AvgPool2d expects 4D input [batch, channels, height, width]");
     }
 
     Device original_device = input.tensor().device();
@@ -810,7 +819,7 @@ auto AdaptiveAvgPool2d::forward_impl(const Variable& input) -> Variable {
     // Input shape: [N, C, H_in, W_in]
     auto input_shape = input.shape();
     if (input_shape.size() != 4) {
-        throw std::invalid_argument("AdaptiveAvgPool2d expects 4D input [batch, channels, height, width]");
+        throw std::runtime_error("AdaptiveAvgPool2d expects 4D input [batch, channels, height, width]");
     }
 
     int64_t N = input_shape[0];

@@ -1,93 +1,73 @@
 /**
  * @file test_quantization_multidtype.cpp
- * @brief Comprehensive multi-dtype quantization tests (Float32/Float64 to Int8)
+ * @brief Multi-dtype multi-backend tests for quantization functionality
  *
- * Tests critical quantization scenarios for deployment:
+ * Tests quantization with Float32, Float64, and Float16 dtypes across
+ * CPU, CUDA, OneAPI, Vulkan, and ROCm backends:
  * - Dynamic quantization (runtime calibration)
  * - Static quantization (pre-calibrated parameters)
  * - Quantization-aware training (QAT) simulation
  * - Per-channel vs per-tensor quantization
- * - Quantized operations (matmul, conv, etc.)
  * - Dequantization and error metrics
- *
- * Covers Float32 and Float64 input dtypes quantizing to Int8.
  */
 
 #include <gtest/gtest.h>
-#include "tenzor/nn/quantization/quantize.hpp"
-#include "tenzor/nn/quantization/observer.hpp"
-#include "tenzor/nn/quantization/fake_quantize.hpp"
-#include "tenzor/nn/quantization/qconfig.hpp"
-#include "tenzor/nn/quantization/quantized_layers.hpp"
-#include "tenzor/core/tensor.hpp"
+#include <tenzor/tenzor.hpp>
+#include <tenzor/nn/quantization/quantize.hpp>
+#include <tenzor/nn/quantization/observer.hpp>
+#include <tenzor/nn/quantization/fake_quantize.hpp>
+#include <tenzor/nn/quantization/qconfig.hpp>
+#include "../multi_backend_dtype_fixture.hpp"
 #include <cmath>
 #include <vector>
-#include <memory>
 
 using namespace tenzor;
 using namespace tenzor::nn::quantization;
+using namespace tenzor::testing;
 
 // ============================================================================
-// Multi-dtype Test Fixture
+// Quantization Multi-Backend Multi-DType Test Fixture
 // ============================================================================
 
-template <typename T>
-class QuantizationMultiDTypeTest : public ::testing::Test {
+class QuantizationMultiDTypeTest : public MultiBackendDTypeTest {
 protected:
-    using DataType = T;
-
-    void SetUp() override {
-        dtype_ = std::is_same<T, float>::value ? DType::Float32 : DType::Float64;
-    }
-
-    DType dtype_;
-
-    // Helper: Check if values are close (with dtype-specific tolerance)
-    bool isClose(T a, T b, T rtol = 1e-5, T atol = 1e-6) {
-        if (std::is_same<T, double>::value) {
-            rtol = 1e-9;
-            atol = 1e-10;
-        }
-        return std::abs(a - b) <= (atol + rtol * std::abs(b));
-    }
-
     // Helper: Create test tensor with specific pattern
     Tensor createTestTensor(const std::vector<int64_t>& shape,
-                           const std::vector<T>& values) {
-        Tensor tensor(shape, dtype_, Device::cpu());
-        T* data = tensor.data<T>();
+                           const std::vector<float>& values) {
+        Tensor tensor = tenzor::zeros(shape, DType::Float32, Device::cpu());
+        float* data = tensor.data<float>();
         for (size_t i = 0; i < values.size(); ++i) {
             data[i] = values[i];
+        }
+        if (dtype() != DType::Float32) {
+            tensor = tensor.to(dtype());
+        }
+        if (device() != Device::cpu()) {
+            tensor = tensor.to(device());
         }
         return tensor;
     }
 
     // Helper: Fill tensor with range values
-    Tensor createRangeTensor(const std::vector<int64_t>& shape, T start, T step) {
+    Tensor createRangeTensor(const std::vector<int64_t>& shape, float start, float step) {
         int64_t numel = 1;
         for (auto dim : shape) numel *= dim;
 
-        std::vector<T> values(numel);
+        std::vector<float> values(numel);
         for (int64_t i = 0; i < numel; ++i) {
-            values[i] = start + static_cast<T>(i) * step;
+            values[i] = start + static_cast<float>(i) * step;
         }
         return createTestTensor(shape, values);
     }
 };
 
-// Type definitions for parameterized tests
-using FloatTypes = ::testing::Types<float, double>;
-TYPED_TEST_SUITE(QuantizationMultiDTypeTest, FloatTypes);
-
 // ============================================================================
 // Dynamic Quantization Tests
 // ============================================================================
 
-TYPED_TEST(QuantizationMultiDTypeTest, DynamicQuantization_PerTensorSymmetric) {
-    using T = typename TestFixture::DataType;
-
+TEST_P(QuantizationMultiDTypeTest, DynamicQuantization_PerTensorSymmetric) {
     // Create input tensor with known range
-    auto input = this->createTestTensor({4}, {T(-2.0), T(-1.0), T(1.0), T(2.0)});
+    auto input = createTestTensor({4}, {-2.0f, -1.0f, 1.0f, 2.0f});
 
     // Dynamic quantization: compute params and quantize in one go
     auto q_tensor = quantize_per_tensor_symmetric(input, QuantDType::INT8);
@@ -98,41 +78,37 @@ TYPED_TEST(QuantizationMultiDTypeTest, DynamicQuantization_PerTensorSymmetric) {
     EXPECT_EQ(q_tensor.data().dtype(), DType::Int8);
 
     // Scale should be max_abs / 127
-    T expected_scale = T(2.0) / T(127.0);
-    T actual_scale = q_tensor.params().scale.template data<const float>()[0];
-    EXPECT_TRUE(this->isClose(actual_scale, static_cast<float>(expected_scale), T(1e-4)));
+    float expected_scale = 2.0f / 127.0f;
+    float actual_scale = q_tensor.params().scale.template data<const float>()[0];
+    EXPECT_NEAR(actual_scale, expected_scale, 1e-4f);
 
     // Zero point should be 0 for symmetric
     EXPECT_EQ(q_tensor.params().zero_point.template data<int32_t>()[0], 0);
 
     // Dequantize and check reconstruction error
     Tensor deq = q_tensor.dequantize();
-    EXPECT_EQ(deq.dtype(), this->dtype_);
+    auto deq_cpu = deq.to(Device::cpu()).to(DType::Float32);
+    auto input_cpu = input.to(Device::cpu()).to(DType::Float32);
 
-    const T* input_data = input.template data<T>();
-    const T* deq_data = deq.template data<T>();
+    const float* input_data = input_cpu.data<float>();
+    const float* deq_data = deq_cpu.data<float>();
 
     for (int i = 0; i < 4; ++i) {
         // Allow ~1% relative error due to quantization
-        EXPECT_NEAR(input_data[i], deq_data[i], T(0.1))
-            << "Dtype: " << (std::is_same<T, float>::value ? "Float32" : "Float64")
-            << ", Index: " << i;
+        EXPECT_NEAR(input_data[i], deq_data[i], 0.1f)
+            << "Index: " << i;
     }
 }
 
-TYPED_TEST(QuantizationMultiDTypeTest, DynamicQuantization_PerTensorAsymmetric) {
-    using T = typename TestFixture::DataType;
-
+TEST_P(QuantizationMultiDTypeTest, DynamicQuantization_PerTensorAsymmetric) {
     // Asymmetric range: [0, 3]
-    auto input = this->createTestTensor({4}, {T(0.0), T(1.0), T(2.0), T(3.0)});
+    auto input = createTestTensor({4}, {0.0f, 1.0f, 2.0f, 3.0f});
 
-    Tensor min({1}, this->dtype_, Device::cpu());
-    Tensor max({1}, this->dtype_, Device::cpu());
-    min.fill_(T(0.0));
-    max.fill_(T(3.0));
+    Tensor min_tensor = tenzor::zeros({1}, dtype(), device());
+    Tensor max_tensor = tenzor::ones({1}, dtype(), device()) * 3.0f;
 
     auto params = compute_quantization_params(
-        min, max, QuantDType::INT8, QuantizationScheme::PerTensorAsymmetric
+        min_tensor, max_tensor, QuantDType::INT8, QuantizationScheme::PerTensorAsymmetric
     );
 
     auto q_tensor = quantize_tensor(input, params);
@@ -147,35 +123,35 @@ TYPED_TEST(QuantizationMultiDTypeTest, DynamicQuantization_PerTensorAsymmetric) 
 
     // Dequantize
     Tensor deq = q_tensor.dequantize();
-    const T* input_data = input.template data<T>();
-    const T* deq_data = deq.template data<T>();
+    auto deq_cpu = deq.to(Device::cpu()).to(DType::Float32);
+    auto input_cpu = input.to(Device::cpu()).to(DType::Float32);
+    const float* input_data = input_cpu.data<float>();
+    const float* deq_data = deq_cpu.data<float>();
 
     for (int i = 0; i < 4; ++i) {
-        EXPECT_NEAR(input_data[i], deq_data[i], T(0.1))
-            << "Dtype: " << (std::is_same<T, float>::value ? "Float32" : "Float64");
+        EXPECT_NEAR(input_data[i], deq_data[i], 0.1f);
     }
 }
 
-TYPED_TEST(QuantizationMultiDTypeTest, DynamicQuantization_LargeRange) {
-    using T = typename TestFixture::DataType;
-
+TEST_P(QuantizationMultiDTypeTest, DynamicQuantization_LargeRange) {
     // Test with large dynamic range
-    auto input = this->createTestTensor({6},
-        {T(-100.0), T(-50.0), T(-1.0), T(1.0), T(50.0), T(100.0)});
+    auto input = createTestTensor({6},
+        {-100.0f, -50.0f, -1.0f, 1.0f, 50.0f, 100.0f});
 
     auto q_tensor = quantize_per_tensor_symmetric(input, QuantDType::INT8);
     Tensor deq = q_tensor.dequantize();
 
-    const T* input_data = input.template data<T>();
-    const T* deq_data = deq.template data<T>();
+    auto deq_cpu = deq.to(Device::cpu()).to(DType::Float32);
+    auto input_cpu = input.to(Device::cpu()).to(DType::Float32);
+    const float* input_data = input_cpu.data<float>();
+    const float* deq_data = deq_cpu.data<float>();
 
     // Check reconstruction with larger tolerance for large range
     for (int i = 0; i < 6; ++i) {
-        T rel_error = std::abs(input_data[i] - deq_data[i]) /
-                      (std::abs(input_data[i]) + T(1e-8));
-        EXPECT_LT(rel_error, T(0.02))  // <2% relative error
-            << "Dtype: " << (std::is_same<T, float>::value ? "Float32" : "Float64")
-            << ", Value: " << input_data[i];
+        float rel_error = std::abs(input_data[i] - deq_data[i]) /
+                          (std::abs(input_data[i]) + 1e-8f);
+        EXPECT_LT(rel_error, 0.02f)  // <2% relative error
+            << "Value: " << input_data[i];
     }
 }
 
@@ -183,14 +159,11 @@ TYPED_TEST(QuantizationMultiDTypeTest, DynamicQuantization_LargeRange) {
 // Static Quantization Tests
 // ============================================================================
 
-TYPED_TEST(QuantizationMultiDTypeTest, StaticQuantization_PrecomputedParams) {
-    using T = typename TestFixture::DataType;
-
+TEST_P(QuantizationMultiDTypeTest, StaticQuantization_PrecomputedParams) {
     // Pre-computed quantization parameters (e.g., from calibration)
-    Tensor scale({1}, DType::Float32, Device::cpu());
-    Tensor zero_point({1}, DType::Int32, Device::cpu());
+    Tensor scale = tenzor::ones({1}, DType::Float32, Device::cpu());
     scale.fill_(0.5f);  // Fixed scale
-    zero_point.fill_(0);  // Symmetric
+    Tensor zero_point = tenzor::zeros({1}, DType::Int32, Device::cpu());
 
     QuantizationParams params(
         scale,
@@ -201,13 +174,13 @@ TYPED_TEST(QuantizationMultiDTypeTest, StaticQuantization_PrecomputedParams) {
     );
 
     // Apply static quantization
-    auto input = this->createTestTensor({5},
-        {T(-60.0), T(-30.0), T(0.0), T(30.0), T(60.0)});
+    auto input = createTestTensor({5}, {-60.0f, -30.0f, 0.0f, 30.0f, 60.0f});
 
     auto q_tensor = quantize_tensor(input, params);
 
     // Verify quantized values use pre-computed params
-    const int8_t* q_data = q_tensor.data().template data<const int8_t>();
+    auto q_data_cpu = q_tensor.data().to(Device::cpu());
+    const int8_t* q_data = static_cast<const int8_t*>(q_data_cpu.data_ptr());
 
     // Expected quantized values: input / scale
     // -60/0.5=-120, -30/0.5=-60, 0/0.5=0, 30/0.5=60, 60/0.5=120
@@ -218,15 +191,13 @@ TYPED_TEST(QuantizationMultiDTypeTest, StaticQuantization_PrecomputedParams) {
     EXPECT_EQ(q_data[4], 120);
 }
 
-TYPED_TEST(QuantizationMultiDTypeTest, StaticQuantization_Calibration) {
-    using T = typename TestFixture::DataType;
-
+TEST_P(QuantizationMultiDTypeTest, StaticQuantization_Calibration) {
     // Simulate calibration phase
     MinMaxObserver observer;
 
     // Collect statistics from calibration dataset
     for (int i = 0; i < 3; ++i) {
-        auto calib_data = this->createRangeTensor({10}, T(-5.0 + i), T(0.5));
+        auto calib_data = createRangeTensor({10}, -5.0f + i, 0.5f);
         observer.observe(calib_data);
     }
 
@@ -237,7 +208,7 @@ TYPED_TEST(QuantizationMultiDTypeTest, StaticQuantization_Calibration) {
     );
 
     // Apply to inference data
-    auto test_input = this->createRangeTensor({5}, T(-2.0), T(1.0));
+    auto test_input = createRangeTensor({5}, -2.0f, 1.0f);
     auto q_tensor = quantize_tensor(test_input, params);
 
     // Verify parameters are computed from observed statistics
@@ -246,11 +217,13 @@ TYPED_TEST(QuantizationMultiDTypeTest, StaticQuantization_Calibration) {
 
     // Check dequantization error
     Tensor deq = q_tensor.dequantize();
-    const T* input_data = test_input.template data<T>();
-    const T* deq_data = deq.template data<T>();
+    auto deq_cpu = deq.to(Device::cpu()).to(DType::Float32);
+    auto input_cpu = test_input.to(Device::cpu()).to(DType::Float32);
+    const float* input_data = input_cpu.data<float>();
+    const float* deq_data = deq_cpu.data<float>();
 
     for (int i = 0; i < 5; ++i) {
-        EXPECT_NEAR(input_data[i], deq_data[i], T(0.2));
+        EXPECT_NEAR(input_data[i], deq_data[i], 0.2f);
     }
 }
 
@@ -258,9 +231,7 @@ TYPED_TEST(QuantizationMultiDTypeTest, StaticQuantization_Calibration) {
 // Quantization-Aware Training (QAT) Tests
 // ============================================================================
 
-TYPED_TEST(QuantizationMultiDTypeTest, QAT_FakeQuantizeForward) {
-    using T = typename TestFixture::DataType;
-
+TEST_P(QuantizationMultiDTypeTest, QAT_FakeQuantizeForward) {
     auto fake_quant = std::make_shared<FakeQuantize>(
         QuantDType::INT8,
         QuantizationScheme::PerTensorSymmetric,
@@ -268,8 +239,7 @@ TYPED_TEST(QuantizationMultiDTypeTest, QAT_FakeQuantizeForward) {
         true    // Observer enabled
     );
 
-    auto input_tensor = this->createTestTensor({4},
-        {T(-2.0), T(-1.0), T(1.0), T(2.0)});
+    auto input_tensor = createTestTensor({4}, {-2.0f, -1.0f, 1.0f, 2.0f});
     Variable input(input_tensor, true);
 
     // Training mode: observe statistics
@@ -278,23 +248,22 @@ TYPED_TEST(QuantizationMultiDTypeTest, QAT_FakeQuantizeForward) {
     // Forward pass simulates quantization
     Variable output = fake_quant->forward(input);
 
-    EXPECT_EQ(output.tensor().dtype(), this->dtype_);
+    EXPECT_EQ(output.tensor().dtype(), dtype());
     EXPECT_EQ(output.tensor().shape()[0], 4);
 
-    const T* input_data = input_tensor.template data<T>();
-    const T* output_data = output.tensor().template data<T>();
+    auto input_cpu = input_tensor.to(Device::cpu()).to(DType::Float32);
+    auto output_cpu = output.tensor().to(Device::cpu()).to(DType::Float32);
+    const float* input_data = input_cpu.data<float>();
+    const float* output_data = output_cpu.data<float>();
 
     // Output should be quantized then dequantized (fake quantization)
     for (int i = 0; i < 4; ++i) {
-        EXPECT_NEAR(input_data[i], output_data[i], T(0.2))
-            << "QAT simulation dtype: "
-            << (std::is_same<T, float>::value ? "Float32" : "Float64");
+        EXPECT_NEAR(input_data[i], output_data[i], 0.2f)
+            << "QAT simulation failed at index " << i;
     }
 }
 
-TYPED_TEST(QuantizationMultiDTypeTest, QAT_LearnableScaleZeroPoint) {
-    using T = typename TestFixture::DataType;
-
+TEST_P(QuantizationMultiDTypeTest, QAT_LearnableScaleZeroPoint) {
     auto fake_quant = std::make_shared<FakeQuantize>(
         QuantDType::INT8,
         QuantizationScheme::PerTensorSymmetric,
@@ -302,7 +271,7 @@ TYPED_TEST(QuantizationMultiDTypeTest, QAT_LearnableScaleZeroPoint) {
         true    // Observer enabled
     );
 
-    auto input_tensor = this->createRangeTensor({10}, T(-5.0), T(1.0));
+    auto input_tensor = createRangeTensor({10}, -5.0f, 1.0f);
     Variable input(input_tensor, true);
 
     fake_quant->train();
@@ -320,16 +289,13 @@ TYPED_TEST(QuantizationMultiDTypeTest, QAT_LearnableScaleZeroPoint) {
     EXPECT_EQ(last_output.tensor().shape()[0], 10);
 }
 
-TYPED_TEST(QuantizationMultiDTypeTest, QAT_InferenceMode) {
-    using T = typename TestFixture::DataType;
-
+TEST_P(QuantizationMultiDTypeTest, QAT_InferenceMode) {
     auto fake_quant = std::make_shared<FakeQuantize>(
         QuantDType::INT8,
         QuantizationScheme::PerTensorSymmetric
     );
 
-    auto input_tensor = this->createTestTensor({4},
-        {T(1.0), T(2.0), T(3.0), T(4.0)});
+    auto input_tensor = createTestTensor({4}, {1.0f, 2.0f, 3.0f, 4.0f});
     Variable input(input_tensor, false);
 
     // Training mode first
@@ -343,11 +309,13 @@ TYPED_TEST(QuantizationMultiDTypeTest, QAT_InferenceMode) {
     Variable output = fake_quant->forward(input);
 
     // In inference, should use frozen parameters
-    const T* input_data = input_tensor.template data<T>();
-    const T* output_data = output.tensor().template data<T>();
+    auto input_cpu = input_tensor.to(Device::cpu()).to(DType::Float32);
+    auto output_cpu = output.tensor().to(Device::cpu()).to(DType::Float32);
+    const float* input_data = input_cpu.data<float>();
+    const float* output_data = output_cpu.data<float>();
 
     for (int i = 0; i < 4; ++i) {
-        EXPECT_NEAR(input_data[i], output_data[i], T(0.2));
+        EXPECT_NEAR(input_data[i], output_data[i], 0.2f);
     }
 }
 
@@ -355,13 +323,11 @@ TYPED_TEST(QuantizationMultiDTypeTest, QAT_InferenceMode) {
 // Per-Channel vs Per-Tensor Quantization
 // ============================================================================
 
-TYPED_TEST(QuantizationMultiDTypeTest, PerChannelSymmetric_2D) {
-    using T = typename TestFixture::DataType;
-
+TEST_P(QuantizationMultiDTypeTest, PerChannelSymmetric_2D) {
     // 2 channels, 4 elements each
-    auto input = this->createTestTensor({2, 4}, {
-        T(-2.0), T(-1.0), T(1.0), T(2.0),   // Channel 0: range [-2, 2]
-        T(-1.0), T(0.0), T(1.0), T(2.0)     // Channel 1: range [-1, 2]
+    auto input = createTestTensor({2, 4}, {
+        -2.0f, -1.0f, 1.0f, 2.0f,   // Channel 0: range [-2, 2]
+        -1.0f, 0.0f, 1.0f, 2.0f     // Channel 1: range [-1, 2]
     });
 
     // Per-channel quantization along axis 0
@@ -373,32 +339,31 @@ TYPED_TEST(QuantizationMultiDTypeTest, PerChannelSymmetric_2D) {
 
     // Each channel should have different scales
     const float* scales = q_tensor.params().scale.template data<const float>();
-    T scale0 = T(2.0) / T(127.0);  // Channel 0 scale
-    T scale1 = T(2.0) / T(127.0);  // Channel 1 scale
+    float scale0 = 2.0f / 127.0f;  // Channel 0 scale
+    float scale1 = 2.0f / 127.0f;  // Channel 1 scale
 
-    EXPECT_NEAR(scales[0], static_cast<float>(scale0), 1e-4f);
-    EXPECT_NEAR(scales[1], static_cast<float>(scale1), 1e-4f);
+    EXPECT_NEAR(scales[0], scale0, 1e-4f);
+    EXPECT_NEAR(scales[1], scale1, 1e-4f);
 
     // Dequantize and verify
     Tensor deq = q_tensor.dequantize();
-    const T* input_data = input.template data<T>();
-    const T* deq_data = deq.template data<T>();
+    auto input_cpu = input.to(Device::cpu()).to(DType::Float32);
+    auto deq_cpu = deq.to(Device::cpu()).to(DType::Float32);
+    const float* input_data = input_cpu.data<float>();
+    const float* deq_data = deq_cpu.data<float>();
 
     for (int i = 0; i < 8; ++i) {
-        EXPECT_NEAR(input_data[i], deq_data[i], T(0.1))
-            << "Per-channel quantization, dtype: "
-            << (std::is_same<T, float>::value ? "Float32" : "Float64");
+        EXPECT_NEAR(input_data[i], deq_data[i], 0.1f)
+            << "Per-channel quantization failed at index " << i;
     }
 }
 
-TYPED_TEST(QuantizationMultiDTypeTest, PerChannelVsPerTensor_Accuracy) {
-    using T = typename TestFixture::DataType;
-
+TEST_P(QuantizationMultiDTypeTest, PerChannelVsPerTensor_Accuracy) {
     // Create tensor with varying channel magnitudes
-    auto input = this->createTestTensor({3, 4}, {
-        T(-10.0), T(-5.0), T(5.0), T(10.0),    // Channel 0: large range
-        T(-1.0), T(-0.5), T(0.5), T(1.0),      // Channel 1: small range
-        T(-5.0), T(-2.5), T(2.5), T(5.0)       // Channel 2: medium range
+    auto input = createTestTensor({3, 4}, {
+        -10.0f, -5.0f, 5.0f, 10.0f,    // Channel 0: large range
+        -1.0f, -0.5f, 0.5f, 1.0f,      // Channel 1: small range
+        -5.0f, -2.5f, 2.5f, 5.0f       // Channel 2: medium range
     });
 
     // Per-tensor quantization
@@ -409,23 +374,27 @@ TYPED_TEST(QuantizationMultiDTypeTest, PerChannelVsPerTensor_Accuracy) {
     auto q_per_channel = quantize_per_channel_symmetric(input, 0, QuantDType::INT8);
     Tensor deq_per_channel = q_per_channel.dequantize();
 
-    const T* input_data = input.template data<T>();
-    const T* deq_per_tensor_data = deq_per_tensor.template data<T>();
-    const T* deq_per_channel_data = deq_per_channel.template data<T>();
+    auto input_cpu = input.to(Device::cpu()).to(DType::Float32);
+    auto deq_per_tensor_cpu = deq_per_tensor.to(Device::cpu()).to(DType::Float32);
+    auto deq_per_channel_cpu = deq_per_channel.to(Device::cpu()).to(DType::Float32);
+
+    const float* input_data = input_cpu.data<float>();
+    const float* deq_per_tensor_data = deq_per_tensor_cpu.data<float>();
+    const float* deq_per_channel_data = deq_per_channel_cpu.data<float>();
 
     // Calculate MSE for both methods
-    T mse_per_tensor = T(0.0);
-    T mse_per_channel = T(0.0);
+    float mse_per_tensor = 0.0f;
+    float mse_per_channel = 0.0f;
 
     for (int i = 0; i < 12; ++i) {
-        T error_tensor = input_data[i] - deq_per_tensor_data[i];
-        T error_channel = input_data[i] - deq_per_channel_data[i];
+        float error_tensor = input_data[i] - deq_per_tensor_data[i];
+        float error_channel = input_data[i] - deq_per_channel_data[i];
         mse_per_tensor += error_tensor * error_tensor;
         mse_per_channel += error_channel * error_channel;
     }
 
-    mse_per_tensor /= T(12.0);
-    mse_per_channel /= T(12.0);
+    mse_per_tensor /= 12.0f;
+    mse_per_channel /= 12.0f;
 
     // Per-channel should have lower error for varied ranges
     EXPECT_LT(mse_per_channel, mse_per_tensor)
@@ -433,74 +402,11 @@ TYPED_TEST(QuantizationMultiDTypeTest, PerChannelVsPerTensor_Accuracy) {
 }
 
 // ============================================================================
-// Quantized Operations Tests
-// ============================================================================
-// Note: quantized_matmul and quantized_conv2d are not yet implemented
-// These tests are commented out until the operations are available
-
-// TYPED_TEST(QuantizationMultiDTypeTest, QuantizedMatMul) {
-//     using T = typename TestFixture::DataType;
-//
-//     // Create two matrices for multiplication
-//     auto A = this->createTestTensor({2, 3}, {
-//         T(1.0), T(2.0), T(3.0),
-//         T(4.0), T(5.0), T(6.0)
-//     });
-//
-//     auto B = this->createTestTensor({3, 2}, {
-//         T(1.0), T(2.0),
-//         T(3.0), T(4.0),
-//         T(5.0), T(6.0)
-//     });
-//
-//     // Quantize both matrices
-//     auto qA = quantize_per_tensor_symmetric(A, QuantDType::INT8);
-//     auto qB = quantize_per_tensor_symmetric(B, QuantDType::INT8);
-//
-//     // TODO: Implement quantized_matmul
-//     // auto qC = quantized_matmul(qA, qB);
-//     // Tensor C_quant = qC.dequantize();
-//
-//     // For now, just verify quantization works
-//     EXPECT_EQ(qA.data().dtype(), DType::Int8);
-//     EXPECT_EQ(qB.data().dtype(), DType::Int8);
-// }
-
-// TYPED_TEST(QuantizationMultiDTypeTest, QuantizedConvolution) {
-//     using T = typename TestFixture::DataType;
-//
-//     // Create input tensor (batch=1, channels=1, height=4, width=4)
-//     auto input = this->createRangeTensor({1, 1, 4, 4}, T(0.0), T(0.5));
-//
-//     // Create conv kernel (out_channels=1, in_channels=1, height=3, width=3)
-//     auto weight = this->createTestTensor({1, 1, 3, 3}, {
-//         T(1.0), T(0.0), T(-1.0),
-//         T(1.0), T(0.0), T(-1.0),
-//         T(1.0), T(0.0), T(-1.0)
-//     });
-//
-//     // Quantize input and weight
-//     auto q_input = quantize_per_tensor_symmetric(input, QuantDType::INT8);
-//     auto q_weight = quantize_per_channel_symmetric(weight, 0, QuantDType::INT8);
-//
-//     // TODO: Implement quantized_conv2d
-//     // auto q_output = quantized_conv2d(q_input, q_weight,
-//     //                                  /*stride=*/1, /*padding=*/0);
-//
-//     // For now, verify quantization works
-//     EXPECT_EQ(q_input.data().dtype(), DType::Int8);
-//     EXPECT_EQ(q_weight.data().dtype(), DType::Int8);
-// }
-
-// ============================================================================
 // Dequantization Tests
 // ============================================================================
 
-TYPED_TEST(QuantizationMultiDTypeTest, Dequantization_PreserveDtype) {
-    using T = typename TestFixture::DataType;
-
-    auto input = this->createTestTensor({5},
-        {T(-2.5), T(-1.0), T(0.0), T(1.0), T(2.5)});
+TEST_P(QuantizationMultiDTypeTest, Dequantization_PreserveDtype) {
+    auto input = createTestTensor({5}, {-2.5f, -1.0f, 0.0f, 1.0f, 2.5f});
 
     // Quantize
     auto q_tensor = quantize_per_tensor_symmetric(input, QuantDType::INT8);
@@ -509,24 +415,24 @@ TYPED_TEST(QuantizationMultiDTypeTest, Dequantization_PreserveDtype) {
     Tensor deq = q_tensor.dequantize();
 
     // Verify dtype is preserved
-    EXPECT_EQ(deq.dtype(), this->dtype_)
+    EXPECT_EQ(deq.dtype(), dtype())
         << "Dequantization should preserve original dtype";
 
-    const T* input_data = input.template data<T>();
-    const T* deq_data = deq.template data<T>();
+    auto input_cpu = input.to(Device::cpu()).to(DType::Float32);
+    auto deq_cpu = deq.to(Device::cpu()).to(DType::Float32);
+    const float* input_data = input_cpu.data<float>();
+    const float* deq_data = deq_cpu.data<float>();
 
     for (int i = 0; i < 5; ++i) {
-        EXPECT_NEAR(input_data[i], deq_data[i], T(0.1));
+        EXPECT_NEAR(input_data[i], deq_data[i], 0.1f);
     }
 }
 
-TYPED_TEST(QuantizationMultiDTypeTest, Dequantization_PerChannelReconstruction) {
-    using T = typename TestFixture::DataType;
-
+TEST_P(QuantizationMultiDTypeTest, Dequantization_PerChannelReconstruction) {
     // Multi-channel tensor
-    auto input = this->createTestTensor({2, 6}, {
-        T(-3.0), T(-2.0), T(-1.0), T(1.0), T(2.0), T(3.0),
-        T(-1.5), T(-1.0), T(-0.5), T(0.5), T(1.0), T(1.5)
+    auto input = createTestTensor({2, 6}, {
+        -3.0f, -2.0f, -1.0f, 1.0f, 2.0f, 3.0f,
+        -1.5f, -1.0f, -0.5f, 0.5f, 1.0f, 1.5f
     });
 
     // Per-channel quantization
@@ -535,13 +441,15 @@ TYPED_TEST(QuantizationMultiDTypeTest, Dequantization_PerChannelReconstruction) 
     // Dequantize
     Tensor deq = q_tensor.dequantize();
 
-    const T* input_data = input.template data<T>();
-    const T* deq_data = deq.template data<T>();
+    auto input_cpu = input.to(Device::cpu()).to(DType::Float32);
+    auto deq_cpu = deq.to(Device::cpu()).to(DType::Float32);
+    const float* input_data = input_cpu.data<float>();
+    const float* deq_data = deq_cpu.data<float>();
 
     // Each channel should be reconstructed accurately
     for (int i = 0; i < 12; ++i) {
-        EXPECT_NEAR(input_data[i], deq_data[i], T(0.15))
-            << "Per-channel dequantization, index: " << i;
+        EXPECT_NEAR(input_data[i], deq_data[i], 0.15f)
+            << "Per-channel dequantization failed at index " << i;
     }
 }
 
@@ -549,11 +457,9 @@ TYPED_TEST(QuantizationMultiDTypeTest, Dequantization_PerChannelReconstruction) 
 // Quantization Error Metrics
 // ============================================================================
 
-TYPED_TEST(QuantizationMultiDTypeTest, ErrorMetrics_MAE_MSE_SNR) {
-    using T = typename TestFixture::DataType;
-
+TEST_P(QuantizationMultiDTypeTest, ErrorMetrics_MAE_MSE_SNR) {
     // Create test signal
-    auto original = this->createRangeTensor({20}, T(-10.0), T(1.0));
+    auto original = createRangeTensor({20}, -10.0f, 1.0f);
 
     // Quantize and dequantize
     auto q_tensor = quantize_per_tensor_symmetric(original, QuantDType::INT8);
@@ -569,32 +475,22 @@ TYPED_TEST(QuantizationMultiDTypeTest, ErrorMetrics_MAE_MSE_SNR) {
     EXPECT_LT(mse, 1.0f) << "MSE should be small for good quantization";
 
     EXPECT_GT(snr, 15.0f) << "SNR should be at least 15 dB for INT8 quantization";
-
-    std::cout << "Quantization Error Metrics ("
-              << (std::is_same<T, float>::value ? "Float32" : "Float64") << "):\n"
-              << "  MAE: " << mae << "\n"
-              << "  MSE: " << mse << "\n"
-              << "  SNR: " << snr << " dB\n";
 }
 
-TYPED_TEST(QuantizationMultiDTypeTest, ErrorMetrics_CompareQuantizationSchemes) {
-    using T = typename TestFixture::DataType;
-
+TEST_P(QuantizationMultiDTypeTest, ErrorMetrics_CompareQuantizationSchemes) {
     // Test signal with bias (not centered at 0)
-    auto original = this->createRangeTensor({15}, T(5.0), T(0.5));
+    auto original = createRangeTensor({15}, 5.0f, 0.5f);
 
     // Symmetric quantization
     auto q_symmetric = quantize_per_tensor_symmetric(original, QuantDType::INT8);
     auto [mae_sym, mse_sym, snr_sym] = compute_quantization_error(original, q_symmetric);
 
     // Asymmetric quantization
-    Tensor min({1}, this->dtype_, Device::cpu());
-    Tensor max({1}, this->dtype_, Device::cpu());
-    min.fill_(T(5.0));
-    max.fill_(T(12.0));
+    Tensor min_tensor = tenzor::ones({1}, dtype(), device()) * 5.0f;
+    Tensor max_tensor = tenzor::ones({1}, dtype(), device()) * 12.0f;
 
     auto params_asym = compute_quantization_params(
-        min, max, QuantDType::INT8, QuantizationScheme::PerTensorAsymmetric
+        min_tensor, max_tensor, QuantDType::INT8, QuantizationScheme::PerTensorAsymmetric
     );
     auto q_asymmetric = quantize_tensor(original, params_asym);
     auto [mae_asym, mse_asym, snr_asym] = compute_quantization_error(original, q_asymmetric);
@@ -602,26 +498,18 @@ TYPED_TEST(QuantizationMultiDTypeTest, ErrorMetrics_CompareQuantizationSchemes) 
     // For biased data, asymmetric should have lower error
     EXPECT_LT(mae_asym, mae_sym * 1.5f)  // At least not much worse
         << "Asymmetric quantization should be better for biased data";
-
-    std::cout << "Symmetric vs Asymmetric Error ("
-              << (std::is_same<T, float>::value ? "Float32" : "Float64") << "):\n"
-              << "  Symmetric MAE: " << mae_sym << ", SNR: " << snr_sym << " dB\n"
-              << "  Asymmetric MAE: " << mae_asym << ", SNR: " << snr_asym << " dB\n";
 }
 
 // ============================================================================
 // Observer Calibration Tests
 // ============================================================================
 
-TYPED_TEST(QuantizationMultiDTypeTest, Observer_MinMaxCalibration) {
-    using T = typename TestFixture::DataType;
-
+TEST_P(QuantizationMultiDTypeTest, Observer_MinMaxCalibration) {
     MinMaxObserver observer;
 
     // Simulate multiple calibration batches
     for (int batch = 0; batch < 4; ++batch) {
-        auto calib_data = this->createRangeTensor({10},
-            T(-5.0 + batch * 0.5), T(0.5));
+        auto calib_data = createRangeTensor({10}, -5.0f + batch * 0.5f, 0.5f);
         observer.observe(calib_data);
     }
 
@@ -642,14 +530,11 @@ TYPED_TEST(QuantizationMultiDTypeTest, Observer_MinMaxCalibration) {
     EXPECT_GT(params.scale.template data<const float>()[0], 0.0f);
 }
 
-TYPED_TEST(QuantizationMultiDTypeTest, Observer_MovingAverage) {
-    using T = typename TestFixture::DataType;
-
+TEST_P(QuantizationMultiDTypeTest, Observer_MovingAverage) {
     MovingAverageMinMaxObserver observer(0.9f);  // High momentum
 
     // First observation
-    auto data1 = this->createTestTensor({5},
-        {T(-10.0), T(-5.0), T(0.0), T(5.0), T(10.0)});
+    auto data1 = createTestTensor({5}, {-10.0f, -5.0f, 0.0f, 5.0f, 10.0f});
     observer.observe(data1);
 
     auto params1 = observer.calculate_qparams(
@@ -657,8 +542,7 @@ TYPED_TEST(QuantizationMultiDTypeTest, Observer_MovingAverage) {
     float scale1 = params1.scale.template data<const float>()[0];
 
     // Second observation with different range
-    auto data2 = this->createTestTensor({5},
-        {T(-8.0), T(-4.0), T(0.0), T(4.0), T(8.0)});
+    auto data2 = createTestTensor({5}, {-8.0f, -4.0f, 0.0f, 4.0f, 8.0f});
     observer.observe(data2);
 
     auto params2 = observer.calculate_qparams(
@@ -671,21 +555,19 @@ TYPED_TEST(QuantizationMultiDTypeTest, Observer_MovingAverage) {
         << "Moving average should smooth scale changes";
 }
 
-TYPED_TEST(QuantizationMultiDTypeTest, Observer_HistogramCalibration) {
-    using T = typename TestFixture::DataType;
-
+TEST_P(QuantizationMultiDTypeTest, Observer_HistogramCalibration) {
     HistogramObserver observer(256, 0.001f, 0.999f);  // Use 99.8% percentiles
 
     // Generate data with outliers
-    std::vector<T> values;
+    std::vector<float> values;
     for (int i = 0; i < 90; ++i) {
-        values.push_back(T(i) / T(45.0) - T(1.0));  // [-1, 1]
+        values.push_back(static_cast<float>(i) / 45.0f - 1.0f);  // [-1, 1]
     }
     // Add outliers
-    values.push_back(T(-10.0));
-    values.push_back(T(10.0));
+    values.push_back(-10.0f);
+    values.push_back(10.0f);
 
-    auto data = this->createTestTensor({92}, values);
+    auto data = createTestTensor({92}, values);
     observer.observe(data);
 
     EXPECT_TRUE(observer.has_data());
@@ -704,31 +586,26 @@ TYPED_TEST(QuantizationMultiDTypeTest, Observer_HistogramCalibration) {
 // Edge Cases and Robustness Tests
 // ============================================================================
 
-TYPED_TEST(QuantizationMultiDTypeTest, EdgeCase_ZeroRange) {
-    using T = typename TestFixture::DataType;
-
+TEST_P(QuantizationMultiDTypeTest, EdgeCase_ZeroRange) {
     // All values the same (zero range)
-    auto input = this->createTestTensor({5},
-        {T(5.0), T(5.0), T(5.0), T(5.0), T(5.0)});
+    auto input = createTestTensor({5}, {5.0f, 5.0f, 5.0f, 5.0f, 5.0f});
 
     auto q_tensor = quantize_per_tensor_symmetric(input, QuantDType::INT8);
     Tensor deq = q_tensor.dequantize();
 
-    const T* deq_data = deq.template data<T>();
+    auto deq_cpu = deq.to(Device::cpu()).to(DType::Float32);
+    const float* deq_data = deq_cpu.data<float>();
 
     // Should handle zero range gracefully
     for (int i = 0; i < 5; ++i) {
-        EXPECT_NEAR(T(5.0), deq_data[i], T(0.1))
+        EXPECT_NEAR(5.0f, deq_data[i], 0.1f)
             << "Zero range quantization should preserve constant value";
     }
 }
 
-TYPED_TEST(QuantizationMultiDTypeTest, EdgeCase_VerySmallValues) {
-    using T = typename TestFixture::DataType;
-
+TEST_P(QuantizationMultiDTypeTest, EdgeCase_VerySmallValues) {
     // Very small values near machine epsilon
-    auto input = this->createTestTensor({4},
-        {T(1e-6), T(2e-6), T(3e-6), T(4e-6)});
+    auto input = createTestTensor({4}, {1e-6f, 2e-6f, 3e-6f, 4e-6f});
 
     auto q_tensor = quantize_per_tensor_symmetric(input, QuantDType::INT8);
     Tensor deq = q_tensor.dequantize();
@@ -736,44 +613,43 @@ TYPED_TEST(QuantizationMultiDTypeTest, EdgeCase_VerySmallValues) {
     // Should handle small values without underflow
     EXPECT_EQ(deq.shape()[0], 4);
 
-    const T* deq_data = deq.template data<T>();
+    auto deq_cpu = deq.to(Device::cpu()).to(DType::Float32);
+    const float* deq_data = deq_cpu.data<float>();
     for (int i = 0; i < 4; ++i) {
         EXPECT_TRUE(std::isfinite(deq_data[i]))
             << "Small value quantization should not produce NaN/Inf";
     }
 }
 
-TYPED_TEST(QuantizationMultiDTypeTest, EdgeCase_MixedSignLargeRange) {
-    using T = typename TestFixture::DataType;
-
+TEST_P(QuantizationMultiDTypeTest, EdgeCase_MixedSignLargeRange) {
     // Very large range with mixed signs
-    auto input = this->createTestTensor({6},
-        {T(-1000.0), T(-0.001), T(0.0), T(0.001), T(1000.0), T(2000.0)});
+    auto input = createTestTensor({6},
+        {-1000.0f, -0.001f, 0.0f, 0.001f, 1000.0f, 2000.0f});
 
     auto q_tensor = quantize_per_tensor_symmetric(input, QuantDType::INT8);
     Tensor deq = q_tensor.dequantize();
 
-    const T* input_data = input.template data<T>();
-    const T* deq_data = deq.template data<T>();
+    auto input_cpu = input.to(Device::cpu()).to(DType::Float32);
+    auto deq_cpu = deq.to(Device::cpu()).to(DType::Float32);
+    const float* input_data = input_cpu.data<float>();
+    const float* deq_data = deq_cpu.data<float>();
 
     // Large values should dominate the scale, small values will have high error
     // But large values should be accurate
-    EXPECT_NEAR(input_data[0], deq_data[0], T(50.0));  // -1000
-    EXPECT_NEAR(input_data[4], deq_data[4], T(50.0));  // 1000
-    EXPECT_NEAR(input_data[5], deq_data[5], T(50.0));  // 2000
+    EXPECT_NEAR(input_data[0], deq_data[0], 50.0f);  // -1000
+    EXPECT_NEAR(input_data[4], deq_data[4], 50.0f);  // 1000
+    EXPECT_NEAR(input_data[5], deq_data[5], 50.0f);  // 2000
 }
 
 // ============================================================================
 // Integration Test: Full Quantization Workflow
 // ============================================================================
 
-TYPED_TEST(QuantizationMultiDTypeTest, Integration_FullQuantizationPipeline) {
-    using T = typename TestFixture::DataType;
-
+TEST_P(QuantizationMultiDTypeTest, Integration_FullQuantizationPipeline) {
     // Step 1: Create calibration dataset
     std::vector<Tensor> calib_dataset;
     for (int i = 0; i < 5; ++i) {
-        auto batch = this->createRangeTensor({20}, T(-10.0 + i), T(0.5));
+        auto batch = createRangeTensor({20}, -10.0f + i, 0.5f);
         calib_dataset.push_back(batch);
     }
 
@@ -790,21 +666,18 @@ TYPED_TEST(QuantizationMultiDTypeTest, Integration_FullQuantizationPipeline) {
     );
 
     // Step 4: Quantize model weights (simulated)
-    auto weights = this->createRangeTensor({50}, T(-5.0), T(0.2));
+    auto weights = createRangeTensor({50}, -5.0f, 0.2f);
     auto q_weights = quantize_tensor(weights, params);
 
     // Step 5: Quantize activations (simulated inference)
-    auto activations = this->createRangeTensor({20}, T(-8.0), T(0.8));
+    auto activations = createRangeTensor({20}, -8.0f, 0.8f);
     auto q_activations = quantize_tensor(activations, params);
 
-    // Step 6: Perform quantized inference (simulated matmul)
-    // In real scenario: q_output = quantized_matmul(q_activations, q_weights)
-
-    // Step 7: Dequantize for comparison
+    // Step 6: Dequantize for comparison
     Tensor deq_weights = q_weights.dequantize();
     Tensor deq_activations = q_activations.dequantize();
 
-    // Step 8: Compute error metrics
+    // Step 7: Compute error metrics
     auto [mae_w, mse_w, snr_w] = compute_quantization_error(weights, q_weights);
     auto [mae_a, mse_a, snr_a] = compute_quantization_error(activations, q_activations);
 
@@ -813,49 +686,30 @@ TYPED_TEST(QuantizationMultiDTypeTest, Integration_FullQuantizationPipeline) {
     EXPECT_LT(mae_a, 0.5f) << "Activations MAE should be small";
     EXPECT_GT(snr_w, 15.0f) << "Weights SNR should be >15dB";
     EXPECT_GT(snr_a, 15.0f) << "Activations SNR should be >15dB";
-
-    std::cout << "\n=== Full Quantization Pipeline ("
-              << (std::is_same<T, float>::value ? "Float32" : "Float64") << ") ===\n"
-              << "Weights: MAE=" << mae_w << ", MSE=" << mse_w << ", SNR=" << snr_w << "dB\n"
-              << "Activations: MAE=" << mae_a << ", MSE=" << mse_a << ", SNR=" << snr_a << "dB\n";
 }
 
 // ============================================================================
-// Summary
+// Test Instantiation
 // ============================================================================
 
-// Test count by category:
-// - Dynamic Quantization: 3 tests
-// - Static Quantization: 2 tests
-// - Quantization-Aware Training: 3 tests
-// - Per-Channel vs Per-Tensor: 2 tests
-// - Quantized Operations: 0 tests (commented out - awaiting implementation)
-// - Dequantization: 2 tests
-// - Error Metrics: 2 tests
-// - Observer Calibration: 3 tests
-// - Edge Cases: 3 tests
-// - Integration: 1 test
-//
-// Total: 21 tests × 2 dtypes = 42 test cases
+INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(QuantizationMultiDTypeTest);
 
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-
-    std::cout << "\n";
-    std::cout << "========================================\n";
-    std::cout << "  Quantization Multi-Dtype Test Suite  \n";
-    std::cout << "========================================\n";
-    std::cout << "Testing Float32/Float64 → Int8 quantization\n";
-    std::cout << "Critical deployment scenarios covered:\n";
-    std::cout << "  ✓ Dynamic quantization (runtime calibration)\n";
-    std::cout << "  ✓ Static quantization (pre-computed params)\n";
-    std::cout << "  ✓ Quantization-aware training (QAT)\n";
-    std::cout << "  ✓ Per-channel vs per-tensor quantization\n";
-    std::cout << "  ✓ Quantized operations (matmul, conv)\n";
-    std::cout << "  ✓ Dequantization and error metrics\n";
-    std::cout << "  ✓ Observer calibration methods\n";
-    std::cout << "  ✓ Edge cases and robustness\n";
-    std::cout << "========================================\n\n";
-
-    return RUN_ALL_TESTS();
-}
+/*
+ * COVERAGE SUMMARY:
+ *
+ * Test Cases: 21
+ * DTypes Tested: Float32, Float64, Float16
+ * Backends Tested: CPU, CUDA, OneAPI
+ * Total Scenarios: 21 tests × 3 dtypes × 3 backends = 189 test scenarios
+ *
+ * Coverage:
+ * - Dynamic quantization: per-tensor symmetric/asymmetric, large range
+ * - Static quantization: pre-computed params, calibration
+ * - Quantization-aware training: fake quantize, learnable params, inference mode
+ * - Per-channel vs per-tensor: 2D quantization, accuracy comparison
+ * - Dequantization: dtype preservation, per-channel reconstruction
+ * - Error metrics: MAE/MSE/SNR, scheme comparison
+ * - Observer calibration: min-max, moving average, histogram
+ * - Edge cases: zero range, very small values, mixed sign large range
+ * - Integration: full quantization pipeline
+ */

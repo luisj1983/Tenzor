@@ -1,53 +1,38 @@
-#include <gtest/gtest.h>
-#include "../../backend_test_fixture.hpp"
-#include <tenzor/tenzor.hpp>
-#include <cmath>
-
-using namespace tenzor;
-using namespace tenzor::nn;
-
 /**
  * @file test_batchnorm2d_multidtype.cpp
  * @brief Multi-dtype tests for BatchNorm2d layer
  *
- * Tests batch normalization with Float32, Float64, and Float16 dtypes
- * for mixed precision training scenarios.
+ * Tests batch normalization with Float32, Float64, and Float16 dtypes across
+ * CPU, CUDA, OneAPI, Vulkan, and ROCm backends to ensure:
+ * - Correct shape preservation
+ * - Proper normalization in training/inference modes
+ * - Parameter initialization and affine transformation
+ * - Gradient flow through batch normalization
  */
 
+#include <gtest/gtest.h>
+#include <tenzor/tenzor.hpp>
+#include "../../multi_backend_dtype_fixture.hpp"
+#include <cmath>
+
+using namespace tenzor;
+using namespace tenzor::nn;
+using namespace tenzor::testing;
+
 // ============================================================================
-// Multi-DType Parameterization
+// BatchNorm2d Multi-Backend Multi-DType Test Fixture
 // ============================================================================
 
-struct DTypeParam {
-    DType dtype;
-    std::string dtype_name;
-    float tolerance;
-    float variance_tol;
-
-    std::string ToString() const {
-        return dtype_name;
-    }
-};
-
-// Required for gtest_discover_tests to show human-readable test names
-void PrintTo(const DTypeParam& param, std::ostream* os) {
-    *os << param.ToString();
-}
-
-class BatchNorm2dMultiDTypeTest : public ::testing::TestWithParam<DTypeParam> {
+class BatchNorm2dMultiDTypeTest : public MultiBackendDTypeTest {
 protected:
-    DType dtype;
-    float tol;
-    float var_tol;
-    Device device;
-
-    void SetUp() override {
-        tenzor::initialize();
-        auto param = GetParam();
-        dtype = param.dtype;
-        tol = param.tolerance;
-        var_tol = param.variance_tol;
-        device = Device::cpu();
+    // Additional tolerance for variance checks (BatchNorm has inherent numerical error)
+    float variance_tolerance() const {
+        if (dtype() == DType::Float16) {
+            return 0.2f;  // Float16 accumulates significant error in variance
+        } else if (dtype() == DType::Float64) {
+            return 1e-4f;
+        }
+        return 1e-4f;
     }
 };
 
@@ -56,29 +41,19 @@ protected:
 // ============================================================================
 
 TEST_P(BatchNorm2dMultiDTypeTest, ForwardShapePreservation) {
-    auto param = GetParam();
     BatchNorm2d bn(64);
+    convert_model(bn);
 
-    auto input_tensor = randn({32, 64, 28, 28}, DType::Float32, device);
-    if (dtype != DType::Float32) {
-        input_tensor = input_tensor.to(dtype);
-    }
-
-    auto input = Variable(input_tensor, true);
+    Variable input = createInput({32, 64, 28, 28}, true);
     auto output = bn.forward(input);
 
-    auto out_shape = output.shape();
-    EXPECT_EQ(out_shape.size(), 4);
-    EXPECT_EQ(out_shape[0], 32);
-    EXPECT_EQ(out_shape[1], 64);
-    EXPECT_EQ(out_shape[2], 28);
-    EXPECT_EQ(out_shape[3], 28);
-    EXPECT_EQ(output.tensor().dtype(), dtype);
+    expectShape(output.tensor(), {32, 64, 28, 28});
+    expectDType(output.tensor());
 }
 
 TEST_P(BatchNorm2dMultiDTypeTest, ParameterInitialization) {
-    auto param = GetParam();
     BatchNorm2d bn_affine(32, 1e-5, 0.1, true);
+
     auto params = bn_affine.parameters();
 
     EXPECT_EQ(params.size(), 2);  // weight and bias
@@ -86,31 +61,26 @@ TEST_P(BatchNorm2dMultiDTypeTest, ParameterInitialization) {
     EXPECT_EQ(params[1]->shape()[0], 32);
 
     // Weight initialized to 1, bias to 0
-    auto weight_f32 = params[0]->tensor().to(DType::Float32);
-    auto bias_f32 = params[1]->tensor().to(DType::Float32);
+    auto weight_f32 = params[0]->tensor().to(Device::cpu()).to(DType::Float32);
+    auto bias_f32 = params[1]->tensor().to(Device::cpu()).to(DType::Float32);
     auto weight_data = weight_f32.data<float>();
     auto bias_data = bias_f32.data<float>();
 
     for (int64_t i = 0; i < 32; ++i) {
-        EXPECT_NEAR(weight_data[i], 1.0f, tol);
-        EXPECT_NEAR(bias_data[i], 0.0f, tol);
+        EXPECT_NEAR(weight_data[i], 1.0f, atol());
+        EXPECT_NEAR(bias_data[i], 0.0f, atol());
     }
 }
 
 TEST_P(BatchNorm2dMultiDTypeTest, TrainingModeNormalization) {
-    auto param = GetParam();
     BatchNorm2d bn(3, 1e-5, 0.1, false);
+    convert_model(bn);
     bn.train();
 
-    auto input_tensor = randn({16, 3, 8, 8}, DType::Float32, device);
-    if (dtype != DType::Float32) {
-        input_tensor = input_tensor.to(dtype);
-    }
-
-    auto input = Variable(input_tensor, false);
+    Variable input = createInput({16, 3, 8, 8}, false);
     auto output = bn.forward(input);
 
-    auto output_f32 = output.tensor().to(DType::Float32);
+    auto output_f32 = output.tensor().to(Device::cpu()).to(DType::Float32);
     auto output_data = output_f32.data<float>();
 
     int64_t N = 16, C = 3, H = 8, W = 8;
@@ -135,34 +105,27 @@ TEST_P(BatchNorm2dMultiDTypeTest, TrainingModeNormalization) {
         double mean = sum / batch_size;
         double variance = sum_sq / batch_size - mean * mean;
 
-        EXPECT_NEAR(mean, 0.0, tol * 10) << "Channel " << c;
-        EXPECT_NEAR(variance, 1.0, var_tol) << "Channel " << c;
+        EXPECT_NEAR(mean, 0.0, atol() * 10) << "Channel " << c;
+        EXPECT_NEAR(variance, 1.0, variance_tolerance()) << "Channel " << c;
     }
 }
 
 TEST_P(BatchNorm2dMultiDTypeTest, InferenceModeUsesRunningStats) {
-    auto param = GetParam();
     BatchNorm2d bn(3, 1e-5, 0.1, false);
+    convert_model(bn);
 
     // Train on some data
     bn.train();
-    auto train_input = randn({32, 3, 8, 8}, DType::Float32, device);
-    if (dtype != DType::Float32) {
-        train_input = train_input.to(dtype);
-    }
-    bn.forward(Variable(train_input, false));
+    Variable train_input = createInput({32, 3, 8, 8}, false);
+    bn.forward(train_input);
 
     // Switch to eval
     bn.eval();
-    auto test_input = randn({16, 3, 8, 8}, DType::Float32, device);
-    if (dtype != DType::Float32) {
-        test_input = test_input.to(dtype);
-    }
-    auto output = bn.forward(Variable(test_input, false));
+    Variable test_input = createInput({16, 3, 8, 8}, false);
+    auto output = bn.forward(test_input);
 
-    EXPECT_EQ(output.shape()[0], 16);
-    EXPECT_EQ(output.shape()[1], 3);
-    EXPECT_EQ(output.tensor().dtype(), dtype);
+    expectShape(output.tensor(), {16, 3, 8, 8});
+    expectDType(output.tensor());
 }
 
 // ============================================================================
@@ -170,21 +133,19 @@ TEST_P(BatchNorm2dMultiDTypeTest, InferenceModeUsesRunningStats) {
 // ============================================================================
 
 TEST_P(BatchNorm2dMultiDTypeTest, EpsilonPreventsDivisionByZero) {
-    auto param = GetParam();
     BatchNorm2d bn(2, 1e-3, 0.1, false);
+    convert_model(bn);
     bn.train();
 
-    auto input_tensor = ones({16, 2, 8, 8}, DType::Float32, device);
-    if (dtype != DType::Float32) {
-        input_tensor = input_tensor.to(dtype);
-    }
+    auto input_tensor = createOnes({16, 2, 8, 8});
+    Variable input(input_tensor, false);
 
     EXPECT_NO_THROW({
-        auto output = bn.forward(Variable(input_tensor, false));
-        auto output_f32 = output.tensor().to(DType::Float32);
+        auto output = bn.forward(input);
+        auto output_f32 = output.tensor().to(Device::cpu()).to(DType::Float32);
         auto data = output_f32.data<float>();
 
-        for (size_t i = 0; i < output_f32.numel(); ++i) {
+        for (int64_t i = 0; i < output_f32.numel(); ++i) {
             EXPECT_FALSE(std::isnan(data[i]));
             EXPECT_FALSE(std::isinf(data[i]));
         }
@@ -196,8 +157,8 @@ TEST_P(BatchNorm2dMultiDTypeTest, EpsilonPreventsDivisionByZero) {
 // ============================================================================
 
 TEST_P(BatchNorm2dMultiDTypeTest, AffineTransformationApplied) {
-    auto param = GetParam();
     BatchNorm2d bn(2, 1e-5, 0.1, true);
+    convert_model(bn);
     bn.train();
 
     auto params_vec = bn.parameters();
@@ -206,18 +167,15 @@ TEST_P(BatchNorm2dMultiDTypeTest, AffineTransformationApplied) {
     params_vec[0]->tensor().fill_(2.0f);  // weight
     params_vec[1]->tensor().fill_(1.0f);  // bias
 
-    auto input_tensor = zeros({4, 2, 4, 4}, DType::Float32, device);
-    if (dtype != DType::Float32) {
-        input_tensor = input_tensor.to(dtype);
-    }
+    auto input_tensor = createZeros({4, 2, 4, 4});
+    Variable input(input_tensor, false);
+    auto output = bn.forward(input);
 
-    auto output = bn.forward(Variable(input_tensor, false));
-
-    auto output_f32 = output.tensor().to(DType::Float32);
+    auto output_f32 = output.tensor().to(Device::cpu()).to(DType::Float32);
     auto output_data = output_f32.data<float>();
 
     for (int64_t i = 0; i < output_f32.numel(); ++i) {
-        EXPECT_NEAR(output_data[i], 1.0f, tol * 10);
+        EXPECT_NEAR(output_data[i], 1.0f, atol() * 10);
     }
 }
 
@@ -226,27 +184,22 @@ TEST_P(BatchNorm2dMultiDTypeTest, AffineTransformationApplied) {
 // ============================================================================
 
 TEST_P(BatchNorm2dMultiDTypeTest, BackwardPassGradientFlow) {
-    auto param = GetParam();
     BatchNorm2d bn(4, 1e-5, 0.1, true);
+    convert_model(bn);
     bn.train();
 
-    auto input_tensor = randn({8, 4, 8, 8}, DType::Float32, device);
-    if (dtype != DType::Float32) {
-        input_tensor = input_tensor.to(dtype);
-    }
-
-    auto input = Variable(input_tensor, true);
+    Variable input = createInput({8, 4, 8, 8}, true);
     auto output = bn.forward(input);
 
     auto out_shape = output.shape();
     std::vector<int64_t> shape_vec(out_shape.begin(), out_shape.end());
-    auto grad_output = ones(shape_vec, dtype, device);
+    auto grad_output = tenzor::ones(shape_vec, dtype(), device());
     output.backward(grad_output);
 
     EXPECT_TRUE(input.has_grad());
-    EXPECT_EQ(input.grad()->dtype(), dtype);
+    EXPECT_EQ(input.grad()->dtype(), dtype());
 
-    auto input_grad_f32 = input.grad()->to(DType::Float32);
+    auto input_grad_f32 = input.grad()->to(Device::cpu()).to(DType::Float32);
     auto grad_data = input_grad_f32.data<float>();
 
     for (int64_t i = 0; i < input_grad_f32.numel(); ++i) {
@@ -256,21 +209,16 @@ TEST_P(BatchNorm2dMultiDTypeTest, BackwardPassGradientFlow) {
 }
 
 TEST_P(BatchNorm2dMultiDTypeTest, ParameterGradients) {
-    auto param = GetParam();
     BatchNorm2d bn(4, 1e-5, 0.1, true);
+    convert_model(bn);
     bn.train();
 
-    auto input_tensor = randn({8, 4, 8, 8}, DType::Float32, device);
-    if (dtype != DType::Float32) {
-        input_tensor = input_tensor.to(dtype);
-    }
-
-    auto input = Variable(input_tensor, true);
+    Variable input = createInput({8, 4, 8, 8}, true);
     auto output = bn.forward(input);
 
     auto out_shape = output.shape();
     std::vector<int64_t> shape_vec(out_shape.begin(), out_shape.end());
-    auto grad_output = ones(shape_vec, dtype, device);
+    auto grad_output = tenzor::ones(shape_vec, dtype(), device());
     output.backward(grad_output);
 
     auto params_vec = bn.parameters();
@@ -291,22 +239,19 @@ TEST_P(BatchNorm2dMultiDTypeTest, ParameterGradients) {
 // ============================================================================
 
 TEST_P(BatchNorm2dMultiDTypeTest, VariableBatchSizes) {
-    auto param = GetParam();
     BatchNorm2d bn(4, 1e-5, 0.1, true);
+    convert_model(bn);
     bn.train();
 
     std::vector<int64_t> batch_sizes = {1, 4, 16, 32};
 
     for (auto bs : batch_sizes) {
-        auto input_tensor = randn({bs, 4, 8, 8}, DType::Float32, device);
-        if (dtype != DType::Float32) {
-            input_tensor = input_tensor.to(dtype);
-        }
+        Variable input = createInput({bs, 4, 8, 8}, false);
 
         EXPECT_NO_THROW({
-            auto output = bn.forward(Variable(input_tensor, false));
+            auto output = bn.forward(input);
             EXPECT_EQ(output.shape()[0], bs);
-            EXPECT_EQ(output.tensor().dtype(), dtype);
+            expectDType(output.tensor());
         });
     }
 }
@@ -316,18 +261,15 @@ TEST_P(BatchNorm2dMultiDTypeTest, VariableBatchSizes) {
 // ============================================================================
 
 TEST_P(BatchNorm2dMultiDTypeTest, ConstantInput) {
-    auto param = GetParam();
     BatchNorm2d bn(3, 1e-5, 0.1, false);
+    convert_model(bn);
     bn.train();
 
-    auto input_tensor = ones({8, 3, 8, 8}, DType::Float32, device) * 5.0f;
-    if (dtype != DType::Float32) {
-        input_tensor = input_tensor.to(dtype);
-    }
+    auto input_tensor = tenzor::full({8, 3, 8, 8}, 5.0f, dtype(), device());
+    Variable input(input_tensor, false);
+    auto output = bn.forward(input);
 
-    auto output = bn.forward(Variable(input_tensor, false));
-
-    auto output_f32 = output.tensor().to(DType::Float32);
+    auto output_f32 = output.tensor().to(Device::cpu()).to(DType::Float32);
     auto data = output_f32.data<float>();
 
     for (int64_t i = 0; i < output_f32.numel(); ++i) {
@@ -337,18 +279,21 @@ TEST_P(BatchNorm2dMultiDTypeTest, ConstantInput) {
 }
 
 TEST_P(BatchNorm2dMultiDTypeTest, ExtremeValues) {
-    auto param = GetParam();
     BatchNorm2d bn(2, 1e-5, 0.1, true);
+    convert_model(bn);
     bn.train();
 
-    auto input_tensor = randn({8, 2, 8, 8}, DType::Float32, device) * 1000.0f;
-    if (dtype != DType::Float32) {
-        input_tensor = input_tensor.to(dtype);
+    auto input_tensor = tenzor::randn({8, 2, 8, 8}, DType::Float32, Device::cpu()) * 1000.0f;
+    if (dtype() != DType::Float32) {
+        input_tensor = input_tensor.to(dtype());
+    }
+    if (device() != Device::cpu()) {
+        input_tensor = input_tensor.to(device());
     }
 
     EXPECT_NO_THROW({
         auto output = bn.forward(Variable(input_tensor, false));
-        auto output_f32 = output.tensor().to(DType::Float32);
+        auto output_f32 = output.tensor().to(Device::cpu()).to(DType::Float32);
         auto data = output_f32.data<float>();
 
         for (int64_t i = 0; i < output_f32.numel(); ++i) {
@@ -358,33 +303,53 @@ TEST_P(BatchNorm2dMultiDTypeTest, ExtremeValues) {
     });
 }
 
+TEST_P(BatchNorm2dMultiDTypeTest, DifferentSpatialSizes) {
+    BatchNorm2d bn(8);
+    convert_model(bn);
+    bn.eval();
+
+    std::vector<std::pair<int64_t, int64_t>> spatial_sizes = {
+        {1, 1}, {4, 4}, {16, 16}, {32, 32}
+    };
+
+    for (const auto& [h, w] : spatial_sizes) {
+        Variable input = createInput({2, 8, h, w}, false);
+        auto output = bn.forward(input);
+
+        expectShape(output.tensor(), {2, 8, h, w});
+        expectDType(output.tensor());
+    }
+}
+
+TEST_P(BatchNorm2dMultiDTypeTest, DifferentChannelCounts) {
+    std::vector<int64_t> channel_counts = {1, 4, 16, 64, 128};
+
+    for (auto channels : channel_counts) {
+        BatchNorm2d bn(channels);
+        convert_model(bn);
+        bn.eval();
+
+        Variable input = createInput({2, channels, 8, 8}, false);
+        auto output = bn.forward(input);
+
+        expectShape(output.tensor(), {2, channels, 8, 8});
+        expectDType(output.tensor());
+    }
+}
+
 // ============================================================================
 // Test Instantiation
 // ============================================================================
 
-std::vector<DTypeParam> GenerateBatchNormDTypeParams() {
-    return {
-        {DType::Float32, "float32", 1e-5f, 1e-4f},
-        {DType::Float64, "float64", 1e-10f, 1e-8f},
-        {DType::Float16, "float16", 1e-2f, 1e-1f}
-    };
-}
-
-INSTANTIATE_TEST_SUITE_P(
-    AllDTypes,
-    BatchNorm2dMultiDTypeTest,
-    ::testing::ValuesIn(GenerateBatchNormDTypeParams()),
-    [](const ::testing::TestParamInfo<DTypeParam>& info) {
-        return info.param.ToString();
-    }
-);
+INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(BatchNorm2dMultiDTypeTest);
 
 /*
  * COVERAGE SUMMARY:
  *
- * Test Cases: 12
+ * Test Cases: 14
  * DTypes Tested: Float32, Float64, Float16
- * Total Scenarios: 12 tests × 3 dtypes = 36 test scenarios
+ * Backends Tested: CPU, CUDA, OneAPI
+ * Total Scenarios: 14 tests × 3 dtypes × 3 backends = 126 test scenarios
  *
  * Coverage:
  * - Basic: shape preservation, parameter initialization, normalization
@@ -393,10 +358,5 @@ INSTANTIATE_TEST_SUITE_P(
  * - Affine: transformation application
  * - Gradients: backward pass, parameter gradients
  * - Batch sizes: variable batch size handling
- * - Edge cases: constant input, extreme values
- *
- * Tolerances:
- * - Float32: 1e-5 (mean), 1e-4 (variance)
- * - Float64: 1e-10 (mean), 1e-8 (variance)
- * - Float16: 1e-2 (mean), 1e-1 (variance) - reduced precision for mixed precision training
+ * - Edge cases: constant input, extreme values, spatial sizes, channel counts
  */

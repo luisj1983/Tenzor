@@ -10,6 +10,7 @@
 #include "tenzor/nn/serialize.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/transform.hpp"
 #include <stdexcept>
 #include <algorithm>
 #include <cmath>
@@ -188,40 +189,43 @@ auto ZeROStage1Optimizer::zero_grad() -> void {
     base_optimizer_->zero_grad();
 }
 
-auto ZeROStage1Optimizer::state_dict() const -> std::unordered_map<std::string, Tensor> {
-    std::lock_guard<std::mutex> lock(mutex_);
-    
-    // Return only local partition state
+auto ZeROStage1Optimizer::state_dict_unlocked() const -> std::unordered_map<std::string, Tensor> {
+    // Return only local partition state (caller must hold mutex_)
     std::unordered_map<std::string, Tensor> state;
-    
+
     const auto& partition = local_partition();
-    
+
     // Add partition metadata
     state["rank"] = Tensor({1}, DType::Int32, Device::cpu());
     state["rank"].fill_(config_.rank);
-    
+
     state["world_size"] = Tensor({1}, DType::Int32, Device::cpu());
     state["world_size"].fill_(config_.world_size);
-    
+
     // Add optimizer states
     for (size_t i = 0; i < partition.momentum.size(); ++i) {
         std::string key = "momentum_" + std::to_string(i);
         state[key] = partition.momentum[i];
     }
-    
+
     for (size_t i = 0; i < partition.variance.size(); ++i) {
         std::string key = "variance_" + std::to_string(i);
         state[key] = partition.variance[i];
     }
-    
+
     return state;
 }
 
-auto ZeROStage1Optimizer::load_state_dict(
+auto ZeROStage1Optimizer::state_dict() const -> std::unordered_map<std::string, Tensor> {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return state_dict_unlocked();
+}
+
+auto ZeROStage1Optimizer::load_state_dict_unlocked(
     const std::unordered_map<std::string, Tensor>& state
 ) -> void {
-    std::lock_guard<std::mutex> lock(mutex_);
-    
+    // Caller must hold mutex_
+
     // Verify rank and world_size match
     if (state.count("rank")) {
         int saved_rank = state.at("rank").data<int32_t>()[0];
@@ -232,7 +236,7 @@ auto ZeROStage1Optimizer::load_state_dict(
             );
         }
     }
-    
+
     if (state.count("world_size")) {
         int saved_world_size = state.at("world_size").data<int32_t>()[0];
         if (saved_world_size != config_.world_size) {
@@ -242,23 +246,30 @@ auto ZeROStage1Optimizer::load_state_dict(
             );
         }
     }
-    
+
     // Load optimizer states
     auto& partition = local_partition();
-    
+
     for (size_t i = 0; i < partition.momentum.size(); ++i) {
         std::string key = "momentum_" + std::to_string(i);
         if (state.count(key)) {
             partition.momentum[i] = state.at(key).to(partition.device);
         }
     }
-    
+
     for (size_t i = 0; i < partition.variance.size(); ++i) {
         std::string key = "variance_" + std::to_string(i);
         if (state.count(key)) {
             partition.variance[i] = state.at(key).to(partition.device);
         }
     }
+}
+
+auto ZeROStage1Optimizer::load_state_dict(
+    const std::unordered_map<std::string, Tensor>& state
+) -> void {
+    std::lock_guard<std::mutex> lock(mutex_);
+    load_state_dict_unlocked(state);
 }
 
 auto ZeROStage1Optimizer::save_checkpoint(const std::string& path_prefix) const -> void {
@@ -268,8 +279,8 @@ auto ZeROStage1Optimizer::save_checkpoint(const std::string& path_prefix) const 
     std::string rank_path = path_prefix + "_rank_" + std::to_string(config_.rank) + ".pt";
 
     try {
-        // Get state dictionary for this rank's partition
-        auto state = state_dict();
+        // Get state dictionary for this rank's partition (use unlocked version since we hold mutex_)
+        auto state = state_dict_unlocked();
 
         // Use Serializer to save state tensors
         nn::Serializer::save(state, rank_path);
@@ -409,8 +420,8 @@ auto ZeROStage1Optimizer::load_checkpoint(const std::string& path_prefix) -> voi
             );
         }
 
-        // Load state into optimizer
-        load_state_dict(loaded_state);
+        // Load state into optimizer (use unlocked version since we hold mutex_)
+        load_state_dict_unlocked(loaded_state);
 
         // Synchronize ranks after loading
         if (config_.process_group && config_.world_size > 1) {
@@ -1691,6 +1702,35 @@ auto ZeROStage3Optimizer::partition_model_parameters(Module& model) -> void {
         return;
     }
 
+    // For single-rank mode, just track parameters without modifying them
+    // This allows Stage 3 optimizer to work in single-process testing mode
+    if (config_.world_size == 1) {
+        for (const auto& param_ptr : params) {
+            Tensor& param_tensor = param_ptr->tensor();
+            size_t param_size = param_tensor.numel();
+
+            ParameterInfo state;
+            state.param = &param_tensor;
+            state.name = "param_" + std::to_string(param_states_.size());
+            state.size_bytes = param_size * dtype_size(param_tensor.dtype());
+            state.owner_rank = 0;
+            state.partition_offset = 0;
+            state.partition_size = param_size;
+
+            // Store original shape
+            auto shape_span = param_tensor.shape();
+            state.original_shape = std::vector<int64_t>(shape_span.begin(), shape_span.end());
+
+            // In single-rank mode, local partition is the full parameter (no flattening)
+            state.local_partition = param_tensor;
+
+            // Store state (don't modify param_tensor)
+            param_states_[&param_tensor] = std::move(state);
+        }
+        return;
+    }
+
+    // Multi-rank mode: actually partition parameters
     // Calculate total parameter count
     size_t total_params = 0;
     for (const auto& param_ptr : params) {
@@ -1729,12 +1769,19 @@ auto ZeROStage3Optimizer::partition_model_parameters(Module& model) -> void {
         state.partition_offset = overlap_start - param_start;
         state.partition_size = overlap_end - overlap_start;
 
+        // Store original shape for reshaping after gather
+        auto shape_span = param_tensor.shape();
+        state.original_shape = std::vector<int64_t>(shape_span.begin(), shape_span.end());
+
         if (overlap_end > overlap_start) {
             // This rank owns part of this parameter
-            // Extract local partition
-            state.local_partition = param_tensor.slice(0, overlap_start - param_start, overlap_end - param_start);
+            // Flatten tensor to 1D for element-wise partitioning
+            Tensor flat_param = param_tensor.flatten();
 
-            // Replace full parameter with partition
+            // Extract local partition using element indices
+            state.local_partition = flat_param.slice(0, overlap_start - param_start, overlap_end - param_start);
+
+            // Replace full parameter with partition (kept flat)
             param_tensor = state.local_partition;
         } else {
             // This rank owns no part of this parameter
@@ -1797,28 +1844,25 @@ auto ZeROStage3Optimizer::gather_parameter_impl(ParameterInfo& state) -> void {
 
     auto start_time = std::chrono::steady_clock::now();
 
-    // Allocate buffer for full parameter
-    auto shape_span = state.param->shape();
-    std::vector<int64_t> full_shape(shape_span.begin(), shape_span.end());
-    state.full_param = zeros(full_shape, state.param->dtype(), state.param->device());
+    // Use original shape for full parameter (stored before flattening)
+    const auto& full_shape = state.original_shape;
 
     // All-gather: collect partitions from all ranks
     if (config_.world_size > 1) {
         std::vector<Tensor> gathered_parts(config_.world_size);
         config_.process_group->all_gather(
-            state.local_partition,  // input: local partition
+            state.local_partition,  // input: local partition (flattened)
             gathered_parts          // output: gathered partitions from all ranks
         );
 
-        // Concatenate gathered parts into full parameter
-        // For simplicity, assume the first gathered part is the full parameter
-        // In a full implementation, this would concatenate all partitions
-        if (!gathered_parts.empty()) {
-            state.full_param = gathered_parts[config_.rank];
-        }
+        // Concatenate all gathered parts into full 1D tensor
+        state.full_param = cat(gathered_parts, 0);
+
+        // Reshape to original shape
+        state.full_param = state.full_param.reshape(full_shape);
     } else {
-        // Single rank: just copy
-        state.full_param = state.local_partition.clone();
+        // Single rank: reshape local partition to original shape
+        state.full_param = state.local_partition.clone().reshape(full_shape);
     }
 
     // Update state

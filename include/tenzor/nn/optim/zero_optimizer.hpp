@@ -462,6 +462,11 @@ protected:
     auto local_partition() const -> const StatePartition& {
         return partitions_[config_.rank];
     }
+
+private:
+    // Internal helpers that don't acquire mutex_ (caller must hold lock)
+    auto state_dict_unlocked() const -> std::unordered_map<std::string, Tensor>;
+    auto load_state_dict_unlocked(const std::unordered_map<std::string, Tensor>& state) -> void;
 };
 
 /**
@@ -1274,7 +1279,8 @@ private:
         int owner_rank;                     ///< Rank that owns this partition
         Tensor local_partition;             ///< Local partition (1/N of full parameter)
         size_t partition_offset;            ///< Offset in full parameter
-        size_t partition_size;              ///< Size of local partition
+        size_t partition_size;              ///< Size of local partition (in elements)
+        std::vector<int64_t> original_shape; ///< Original shape before flattening
 
         // Gathered state
         Tensor full_param;                  ///< Full parameter (temporarily gathered)

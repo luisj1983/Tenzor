@@ -57,7 +57,7 @@ auto contiguous(const Tensor& input) -> Tensor {
 // Additional transform operations
 auto cat(std::span<const Tensor> tensors, int64_t dim) -> Tensor {
     if (tensors.empty()) {
-        throw std::invalid_argument("Cannot concatenate empty tensor list");
+        throw std::runtime_error("Cannot concatenate empty tensor list");
     }
 
     if (tensors.size() == 1) {
@@ -73,7 +73,7 @@ auto cat(std::span<const Tensor> tensors, int64_t dim) -> Tensor {
         dim += ndim;
     }
     if (dim < 0 || dim >= ndim) {
-        throw std::invalid_argument("Dimension out of range for concatenation");
+        throw std::runtime_error("Dimension out of range for concatenation");
     }
 
     // Check all tensors have same ndim and same shape except at dim
@@ -81,11 +81,11 @@ auto cat(std::span<const Tensor> tensors, int64_t dim) -> Tensor {
     for (const auto& t : tensors) {
         auto shape = t.shape();
         if (shape.size() != static_cast<size_t>(ndim)) {
-            throw std::invalid_argument("All tensors must have the same number of dimensions");
+            throw std::runtime_error("All tensors must have the same number of dimensions");
         }
         for (int64_t i = 0; i < ndim; ++i) {
             if (i != dim && shape[i] != first_shape[i]) {
-                throw std::invalid_argument("All tensors must have the same shape except in the concatenation dimension");
+                throw std::runtime_error("All tensors must have the same shape except in the concatenation dimension");
             }
         }
         total_size_at_dim += shape[dim];
@@ -171,7 +171,7 @@ auto cat(std::span<const Tensor> tensors, int64_t dim) -> Tensor {
 
 auto stack(std::span<const Tensor> tensors, int64_t dim) -> Tensor {
     if (tensors.empty()) {
-        throw std::invalid_argument("Cannot stack empty tensor list");
+        throw std::runtime_error("Cannot stack empty tensor list");
     }
 
     // All tensors must have the same shape
@@ -179,11 +179,11 @@ auto stack(std::span<const Tensor> tensors, int64_t dim) -> Tensor {
     for (size_t i = 1; i < tensors.size(); ++i) {
         auto shape = tensors[i].shape();
         if (shape.size() != first_shape.size()) {
-            throw std::invalid_argument("All tensors must have the same number of dimensions for stacking");
+            throw std::runtime_error("All tensors must have the same number of dimensions for stacking");
         }
         for (size_t j = 0; j < shape.size(); ++j) {
             if (shape[j] != first_shape[j]) {
-                throw std::invalid_argument("All tensors must have the same shape for stacking");
+                throw std::runtime_error("All tensors must have the same shape for stacking");
             }
         }
     }
@@ -194,7 +194,7 @@ auto stack(std::span<const Tensor> tensors, int64_t dim) -> Tensor {
         dim += ndim + 1;
     }
     if (dim < 0 || dim > ndim) {
-        throw std::invalid_argument("Dimension out of range for stack");
+        throw std::runtime_error("Dimension out of range for stack");
     }
 
     // Stack is equivalent to: unsqueeze each tensor at dim, then concatenate
@@ -294,7 +294,7 @@ auto repeat(const Tensor& input, std::vector<int64_t> repeats) -> Tensor {
 
     // Validate repeats size
     if (repeats.size() > static_cast<size_t>(ndim)) {
-        throw std::invalid_argument("Number of repeat dimensions cannot exceed input dimensions");
+        throw std::runtime_error("Number of repeat dimensions cannot exceed input dimensions");
     }
 
     // Pad repeats with 1s at the front if needed
@@ -368,7 +368,7 @@ auto tile(const Tensor& input, std::vector<int64_t> reps) -> Tensor {
 
     // Validate reps
     if (reps.empty()) {
-        throw std::invalid_argument("Tile repetitions cannot be empty");
+        throw std::runtime_error("Tile repetitions cannot be empty");
     }
 
     // Determine output dimensions
@@ -455,7 +455,7 @@ auto expand(const Tensor& input, std::vector<int64_t> shape) -> Tensor {
 
     // Validate expansion is possible
     if (shape.size() < input_shape.size()) {
-        throw std::invalid_argument("Expanded shape must have at least as many dimensions as input");
+        throw std::runtime_error("Expanded shape must have at least as many dimensions as input");
     }
 
     // Check if already the right shape
@@ -522,7 +522,7 @@ auto expand(const Tensor& input, std::vector<int64_t> shape) -> Tensor {
                     if (input_shape_vec[input_dim] == 1) {
                         coord = 0;
                     } else if (input_shape_vec[input_dim] != shape[i]) {
-                        throw std::invalid_argument("Cannot expand dimension from non-1 size to different size");
+                        throw std::runtime_error("Cannot expand dimension from non-1 size to different size");
                     }
                     in_idx += coord * input_strides[input_dim];
                 }
@@ -550,7 +550,7 @@ auto expand(const Tensor& input, std::vector<int64_t> shape) -> Tensor {
                     if (input_shape_vec[input_dim] == 1) {
                         coord = 0;
                     } else if (input_shape_vec[input_dim] != shape[i]) {
-                        throw std::invalid_argument("Cannot expand dimension from non-1 size to different size");
+                        throw std::runtime_error("Cannot expand dimension from non-1 size to different size");
                     }
                     in_idx += coord * input_strides[input_dim];
                 }
@@ -559,33 +559,50 @@ auto expand(const Tensor& input, std::vector<int64_t> shape) -> Tensor {
             output_data[out_idx] = input_data[in_idx];
         }
     } else {
-        // Float32 or other types
-        const float* input_data = input.data<float>();
-        float* output_data = output.data<float>();
+        // Helper lambda for expand logic
+        auto expand_impl = [&]<typename T>(T*) {
+            const T* input_data = input.data<T>();
+            T* output_data = output.data<T>();
 
-        for (int64_t out_idx = 0; out_idx < total_elements; ++out_idx) {
-            int64_t temp = out_idx;
-            int64_t in_idx = 0;
+            for (int64_t out_idx = 0; out_idx < total_elements; ++out_idx) {
+                int64_t temp = out_idx;
+                int64_t in_idx = 0;
 
-            int input_dim_offset = shape.size() - input_shape_vec.size();
+                int input_dim_offset = shape.size() - input_shape_vec.size();
 
-            for (int i = shape.size() - 1; i >= 0; --i) {
-                int64_t coord = temp % shape[i];
-                temp /= shape[i];
+                for (int i = shape.size() - 1; i >= 0; --i) {
+                    int64_t coord = temp % shape[i];
+                    temp /= shape[i];
 
-                int input_dim = i - input_dim_offset;
-                if (input_dim >= 0 && input_dim < static_cast<int>(input_shape_vec.size())) {
-                    // Map to input dimension (handle size-1 dimensions)
-                    if (input_shape_vec[input_dim] == 1) {
-                        coord = 0;
-                    } else if (input_shape_vec[input_dim] != shape[i]) {
-                        throw std::invalid_argument("Cannot expand dimension from non-1 size to different size");
+                    int input_dim = i - input_dim_offset;
+                    if (input_dim >= 0 && input_dim < static_cast<int>(input_shape_vec.size())) {
+                        // Map to input dimension (handle size-1 dimensions)
+                        if (input_shape_vec[input_dim] == 1) {
+                            coord = 0;
+                        } else if (input_shape_vec[input_dim] != shape[i]) {
+                            throw std::runtime_error("Cannot expand dimension from non-1 size to different size");
+                        }
+                        in_idx += coord * input_strides[input_dim];
                     }
-                    in_idx += coord * input_strides[input_dim];
                 }
-            }
 
-            output_data[out_idx] = input_data[in_idx];
+                output_data[out_idx] = input_data[in_idx];
+            }
+        };
+
+        // Dispatch based on dtype
+        switch (input.dtype()) {
+            case DType::Float32:
+                expand_impl(static_cast<float*>(nullptr));
+                break;
+            case DType::Int32:
+                expand_impl(static_cast<int32_t*>(nullptr));
+                break;
+            case DType::Int64:
+                expand_impl(static_cast<int64_t*>(nullptr));
+                break;
+            default:
+                throw std::runtime_error("Unsupported dtype for expand");
         }
     }
 
@@ -599,7 +616,7 @@ auto roll(const Tensor& input, int64_t shifts, int64_t dim) -> Tensor {
         dim += ndim;
     }
     if (dim < 0 || dim >= ndim) {
-        throw std::invalid_argument("Dimension out of range for roll");
+        throw std::runtime_error("Dimension out of range for roll");
     }
 
     int64_t dim_size = input.shape()[dim];

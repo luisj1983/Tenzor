@@ -52,8 +52,8 @@ private:
 
 // Element-wise Dropout
 Dropout::Dropout(double p) : p_(p) {
-    if (p < 0.0 || p >= 1.0) {
-        throw std::invalid_argument("Dropout probability must be in [0, 1)");
+    if (p < 0.0 || p > 1.0) {
+        throw std::invalid_argument("Dropout probability must be in [0, 1]");
     }
 }
 
@@ -70,6 +70,12 @@ auto Dropout::forward_impl(const Variable& input) -> Variable {
     // Generate uniform random values [0, 1) or all ones if p==0
     auto shape_span = input.tensor().shape();
     std::vector<int64_t> shape_vec(shape_span.begin(), shape_span.end());
+
+    // Special case: p=1.0 means drop everything, return zeros
+    if (p_ == 1.0) {
+        auto output_tensor = zeros(shape_vec, input.tensor().dtype(), input.tensor().device());
+        return Variable(output_tensor, input.requires_grad());
+    }
 
     Tensor mask_data;
     if (p_ == 0.0) {
@@ -154,8 +160,8 @@ auto Dropout::forward_impl(const Variable& input) -> Variable {
 
 // Channel-wise Dropout (Dropout2d)
 Dropout2d::Dropout2d(double p) : p_(p) {
-    if (p < 0.0 || p >= 1.0) {
-        throw std::invalid_argument("Dropout2d probability must be in [0, 1)");
+    if (p < 0.0 || p > 1.0) {
+        throw std::invalid_argument("Dropout2d probability must be in [0, 1]");
     }
 }
 
@@ -167,6 +173,14 @@ auto Dropout2d::forward_impl(const Variable& input) -> Variable {
 
     if (p_ == 0.0) {
         return input;  // No dropout
+    }
+
+    // Special case: p=1.0 means drop all channels, return zeros
+    if (p_ == 1.0) {
+        auto shape = input.tensor().shape();
+        std::vector<int64_t> shape_vec(shape.begin(), shape.end());
+        auto output_tensor = zeros(shape_vec, input.tensor().dtype(), input.tensor().device());
+        return Variable(output_tensor, input.requires_grad());
     }
 
     // Input shape: [N, C, H, W] or [C, H, W]
@@ -234,42 +248,59 @@ auto Dropout2d::forward_impl(const Variable& input) -> Variable {
     auto expanded_mask = zeros(shape_vec, input.tensor().dtype(), Device::cpu());
 
     // Copy mask values to all spatial positions within each channel
-    const float* mask_ptr_data = mask_data.data<float>();
-    float* expanded_ptr = expanded_mask.data<float>();
+    // Use template lambda to support multiple dtypes
+    auto expand_mask = [&]<typename T>(T*) {
+        const T* mask_ptr_data = static_cast<const T*>(mask_data.impl()->storage->data());
+        T* expanded_ptr = static_cast<T*>(expanded_mask.impl()->storage->data());
 
-    if (shape.size() == 4) {
-        // [N, C, H, W]
-        int64_t N = shape[0], C = shape[1], H = shape[2], W = shape[3];
-        for (int64_t n = 0; n < N; ++n) {
-            for (int64_t c = 0; c < C; ++c) {
-                float mask_val = mask_ptr_data[n * C + c];
-                for (int64_t h = 0; h < H; ++h) {
-                    for (int64_t w = 0; w < W; ++w) {
-                        expanded_ptr[n * (C * H * W) + c * (H * W) + h * W + w] = mask_val;
+        if (shape.size() == 4) {
+            // [N, C, H, W]
+            int64_t N = shape[0], C = shape[1], H = shape[2], W = shape[3];
+            for (int64_t n = 0; n < N; ++n) {
+                for (int64_t c = 0; c < C; ++c) {
+                    T mask_val = mask_ptr_data[n * C + c];
+                    for (int64_t h = 0; h < H; ++h) {
+                        for (int64_t w = 0; w < W; ++w) {
+                            expanded_ptr[n * (C * H * W) + c * (H * W) + h * W + w] = mask_val;
+                        }
                     }
                 }
             }
-        }
-    } else if (shape.size() == 3) {
-        // [C, H, W]
-        int64_t C = shape[0], H = shape[1], W = shape[2];
-        for (int64_t c = 0; c < C; ++c) {
-            float mask_val = mask_ptr_data[c];
-            for (int64_t h = 0; h < H; ++h) {
-                for (int64_t w = 0; w < W; ++w) {
-                    expanded_ptr[c * (H * W) + h * W + w] = mask_val;
+        } else if (shape.size() == 3) {
+            // [C, H, W]
+            int64_t C = shape[0], H = shape[1], W = shape[2];
+            for (int64_t c = 0; c < C; ++c) {
+                T mask_val = mask_ptr_data[c];
+                for (int64_t h = 0; h < H; ++h) {
+                    for (int64_t w = 0; w < W; ++w) {
+                        expanded_ptr[c * (H * W) + h * W + w] = mask_val;
+                    }
+                }
+            }
+        } else if (shape.size() == 2) {
+            // [C, H]
+            int64_t C = shape[0], H = shape[1];
+            for (int64_t c = 0; c < C; ++c) {
+                T mask_val = mask_ptr_data[c];
+                for (int64_t h = 0; h < H; ++h) {
+                    expanded_ptr[c * H + h] = mask_val;
                 }
             }
         }
-    } else if (shape.size() == 2) {
-        // [C, H]
-        int64_t C = shape[0], H = shape[1];
-        for (int64_t c = 0; c < C; ++c) {
-            float mask_val = mask_ptr_data[c];
-            for (int64_t h = 0; h < H; ++h) {
-                expanded_ptr[c * H + h] = mask_val;
-            }
-        }
+    };
+
+    switch (input.tensor().dtype()) {
+        case DType::Float32:
+            expand_mask(static_cast<float*>(nullptr));
+            break;
+        case DType::Float64:
+            expand_mask(static_cast<double*>(nullptr));
+            break;
+        case DType::Float16:
+            expand_mask(static_cast<Float16*>(nullptr));
+            break;
+        default:
+            throw std::runtime_error("Dropout2d only supports Float16, Float32 and Float64 dtypes");
     }
 
     // Transfer expanded mask to target device if needed

@@ -14,8 +14,24 @@
 #include <fstream>
 #include <cmath>
 
+// Forward declare tenzor::initialize
+namespace tenzor {
+    void initialize();
+}
+
 using namespace tenzor;
 using namespace tenzor::nn;
+
+// Global test environment to initialize Tenzor library
+class TenzorTestEnvironment : public ::testing::Environment {
+public:
+    void SetUp() override {
+        tenzor::initialize();
+    }
+};
+
+static ::testing::Environment* const tenzor_env =
+    ::testing::AddGlobalTestEnvironment(new TenzorTestEnvironment);
 
 // ============================================================================
 // Test Fixtures

@@ -4,6 +4,7 @@
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/autograd/ops.hpp"
+#include "tenzor/autograd/function.hpp"
 #include <cmath>
 #include <iostream>
 
@@ -12,8 +13,63 @@ namespace tenzor::nn {
 // Namespace alias for autograd operations
 namespace autograd = tenzor;
 
+// TypeCast autograd function for dtype conversion with gradient flow
+// Gradients are passed through without dtype conversion - this allows gradients
+// to be stored in the computation dtype for mixed precision training compatibility
+class TypeCastBackward : public Function {
+public:
+    TypeCastBackward() = default;
+
+    auto forward(std::vector<Variable> inputs) -> std::vector<Variable> override {
+        throw std::runtime_error("TypeCastBackward::forward should not be called");
+    }
+
+    auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
+        // Pass gradient through as-is (in computation dtype)
+        return {grad_outputs[0]};
+    }
+};
+
+// Helper function to cast a Variable to a new dtype with autograd support
+static auto variable_cast(const Variable& input, DType target_dtype) -> Variable {
+    if (input.dtype() == target_dtype) {
+        return input;
+    }
+
+    auto converted_tensor = input.tensor().to(target_dtype);
+    Variable result(converted_tensor, input.requires_grad());
+
+    if (input.requires_grad() && is_grad_enabled()) {
+        auto grad_fn = std::make_shared<TypeCastBackward>();
+
+        // Track input variable for gradient accumulation
+        std::vector<Variable> input_vars = {input};
+        grad_fn->set_input_variables(input_vars);
+
+        // Connect to input's grad_fn
+        std::vector<std::shared_ptr<Function>> next_funcs;
+        if (input.grad_fn()) {
+            next_funcs.push_back(input.grad_fn());
+        }
+        grad_fn->set_next_functions(next_funcs);
+
+        result.set_grad_fn(grad_fn);
+    }
+
+    return result;
+}
+
 Linear::Linear(int64_t in_features, int64_t out_features, bool bias)
     : in_features_(in_features), out_features_(out_features), has_bias_(bias) {
+
+    if (in_features <= 0) {
+        throw std::runtime_error("Linear: in_features must be positive, got " +
+            std::to_string(in_features));
+    }
+    if (out_features <= 0) {
+        throw std::runtime_error("Linear: out_features must be positive, got " +
+            std::to_string(out_features));
+    }
 
     // Initialize weight with Xavier/Glorot initialization
     float std = std::sqrt(2.0f / (in_features + out_features));
@@ -65,7 +121,9 @@ auto Linear::forward_impl(const Variable& input) -> Variable {
     // Fast path: 2D input - skip reshape operations entirely
     // This eliminates 2 ReshapeBackward allocations per forward pass
     if (is_2d) {
-        // Handle device mismatch
+        DType compute_dtype = input.dtype();
+
+        // Handle device mismatch - transfer input to weight's device
         Variable input_device = input;
         if (input.tensor().device() != weight.tensor().device()) {
             auto input_transferred = input.tensor().to(weight.tensor().device());
@@ -73,26 +131,16 @@ auto Linear::forward_impl(const Variable& input) -> Variable {
             input_device.set_grad_fn(input.grad_fn());
         }
 
-        // Handle dtype mismatch
-        Variable weight_matched = weight;
-        if (input_device.dtype() != weight.dtype()) {
-            auto weight_converted = weight.tensor().to(input_device.dtype());
-            weight_matched = Variable(weight_converted, weight.requires_grad());
-            weight_matched.set_grad_fn(weight.grad_fn());
-        }
+        // Handle dtype mismatch - convert weight/bias to input's dtype using gradient-aware cast
+        // This ensures gradients flow back to weight with proper dtype conversion
+        Variable weight_matched = variable_cast(weight, compute_dtype);
 
-        // Get bias
+        // Get bias and convert if needed
         Variable bias_matched;
         Variable* bias_ptr = nullptr;
         auto bias_it = parameters_.find("bias");
         if (bias_it != parameters_.end()) {
-            auto& bias = *bias_it->second;
-            bias_matched = bias;
-            if (input_device.dtype() != bias.dtype()) {
-                auto bias_converted = bias.tensor().to(input_device.dtype());
-                bias_matched = Variable(bias_converted, bias.requires_grad());
-                bias_matched.set_grad_fn(bias.grad_fn());
-            }
+            bias_matched = variable_cast(*bias_it->second, compute_dtype);
             bias_ptr = &bias_matched;
         }
 
@@ -100,11 +148,14 @@ auto Linear::forward_impl(const Variable& input) -> Variable {
         // Falls back to matmul + add for other backends
         if (has_fused_linear_kernel(weight.tensor().device())) {
             // Create zero bias if needed for fused kernel
+            Variable zero_bias_var;
             if (!bias_ptr) {
-                auto zero_bias = zeros({out_features_}, input_device.dtype(), input_device.tensor().device());
-                bias_matched = Variable(zero_bias, false);
+                auto zero_bias = zeros({out_features_}, compute_dtype, input_device.tensor().device());
+                zero_bias_var = Variable(zero_bias, false);
+                return autograd::linear(input_device, weight_matched, zero_bias_var);
+            } else {
+                return autograd::linear(input_device, weight_matched, *bias_ptr);
             }
-            return autograd::linear(input_device, weight_matched, bias_matched);
         } else {
             return linear_via_matmul(input_device, weight_matched, bias_ptr);
         }
@@ -112,6 +163,7 @@ auto Linear::forward_impl(const Variable& input) -> Variable {
 
     // General path: N-D input requires reshape
     std::vector<int64_t> original_shape(input_shape.begin(), input_shape.end());
+    DType compute_dtype = input.dtype();
 
     // Calculate total batch size
     int64_t batch_total = 1;
@@ -123,7 +175,7 @@ auto Linear::forward_impl(const Variable& input) -> Variable {
     std::vector<int64_t> flat_shape = {batch_total, in_features_};
     auto input_2d = autograd::reshape(input, flat_shape);
 
-    // Handle device mismatch
+    // Handle device mismatch - transfer input to weight's device
     Variable input_2d_device = input_2d;
     if (input_2d.tensor().device() != weight.tensor().device()) {
         auto input_transferred = input_2d.tensor().to(weight.tensor().device());
@@ -131,26 +183,15 @@ auto Linear::forward_impl(const Variable& input) -> Variable {
         input_2d_device.set_grad_fn(input_2d.grad_fn());
     }
 
-    // Handle dtype mismatch
-    Variable weight_matched = weight;
-    if (input_2d_device.dtype() != weight.dtype()) {
-        auto weight_converted = weight.tensor().to(input_2d_device.dtype());
-        weight_matched = Variable(weight_converted, weight.requires_grad());
-        weight_matched.set_grad_fn(weight.grad_fn());
-    }
+    // Handle dtype mismatch - convert weight/bias to input's dtype using gradient-aware cast
+    Variable weight_matched = variable_cast(weight, compute_dtype);
 
-    // Get bias
+    // Get bias and convert if needed
     Variable bias_matched;
     Variable* bias_ptr = nullptr;
     auto bias_it = parameters_.find("bias");
     if (bias_it != parameters_.end()) {
-        auto& bias = *bias_it->second;
-        bias_matched = bias;
-        if (input_2d_device.dtype() != bias.dtype()) {
-            auto bias_converted = bias.tensor().to(input_2d_device.dtype());
-            bias_matched = Variable(bias_converted, bias.requires_grad());
-            bias_matched.set_grad_fn(bias.grad_fn());
-        }
+        bias_matched = variable_cast(*bias_it->second, compute_dtype);
         bias_ptr = &bias_matched;
     }
 
@@ -158,11 +199,14 @@ auto Linear::forward_impl(const Variable& input) -> Variable {
     Variable output_2d;
     if (has_fused_linear_kernel(weight.tensor().device())) {
         // Use fused linear kernel (CPU with MKL, CUDA with cuBLAS)
+        Variable zero_bias_var;
         if (!bias_ptr) {
-            auto zero_bias = zeros({out_features_}, input_2d_device.dtype(), input_2d_device.tensor().device());
-            bias_matched = Variable(zero_bias, false);
+            auto zero_bias = zeros({out_features_}, compute_dtype, input_2d_device.tensor().device());
+            zero_bias_var = Variable(zero_bias, false);
+            output_2d = autograd::linear(input_2d_device, weight_matched, zero_bias_var);
+        } else {
+            output_2d = autograd::linear(input_2d_device, weight_matched, *bias_ptr);
         }
-        output_2d = autograd::linear(input_2d_device, weight_matched, bias_matched);
     } else {
         // Fallback: use matmul + add for other backends
         output_2d = linear_via_matmul(input_2d_device, weight_matched, bias_ptr);

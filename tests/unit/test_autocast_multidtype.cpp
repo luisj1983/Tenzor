@@ -460,16 +460,20 @@ TEST_F(AutocastMultiDTypeTest, AlternatingDtypes) {
     }
 }
 
-// Test casting with no device type specified
+// Test default device type behavior
 TEST_F(AutocastMultiDTypeTest, NoDeviceTypeSpecified) {
+    // When device_type is not explicitly specified, CUDA is the default
     Autocast autocast(true, DType::Float16);
 
     EXPECT_TRUE(Autocast::is_enabled());
-    EXPECT_FALSE(Autocast::get_device_type().has_value());
+    // Default device type is CUDA
+    EXPECT_TRUE(Autocast::get_device_type().has_value());
+    EXPECT_EQ(Autocast::get_device_type().value(), Device::Type::CUDA);
 
-    // Should autocast on any device when no device type specified
+    // Should autocast on CUDA (the default device type)
     EXPECT_TRUE(Autocast::should_autocast("matmul", Device::cuda(0)));
-    EXPECT_TRUE(Autocast::should_autocast("matmul", Device::cpu()));
+    // CPU autocast is not enabled when device_type is CUDA
+    EXPECT_FALSE(Autocast::should_autocast("matmul", Device::cpu()));
 }
 
 // Test edge case: empty operation name

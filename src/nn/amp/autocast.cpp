@@ -143,8 +143,9 @@ auto Autocast::get_autocast_dtype(const std::string& op_name, DType input_dtype)
         return input_dtype;
     }
 
-    // If input is Float32 or Float64, autocast to target dtype
-    if (input_dtype == DType::Float32 || input_dtype == DType::Float64) {
+    // Float64 is preserved - if user is using Float64, they need the higher precision
+    // Only Float32 gets autocast to the target dtype (Float16/BFloat16)
+    if (input_dtype == DType::Float32) {
         if (should_autocast(op_name, Device::cuda(0))) {
             return dtype_.value();
         }

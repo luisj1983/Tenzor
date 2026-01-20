@@ -533,24 +533,32 @@ protected:
     }
 };
 
+// Force runtime evaluation by preventing inlining
+[[gnu::noinline]] static float float16_roundtrip(float val) {
+    Float16 f16(val);
+    return static_cast<float>(f16);
+}
+
 TEST_F(PrecisionComparisonTest, Float16VsFloat32Precision) {
+    // Test values that are NOT exactly representable in Float16
+    // (values with mantissa that doesn't fit in 10 bits)
     std::vector<float> test_values = {
-        1.234f, 12.34f, 123.4f, 1234.0f,
+        1.234f, 12.34f, 123.4f,
         0.001234f, 0.01234f, 0.1234f
     };
+    // Note: 1234.0f is exactly representable (integer that fits in 10-bit mantissa)
 
     for (float val : test_values) {
-        Float16 f16(val);
-        float f16_recovered = static_cast<float>(f16);
-
-        // Float32 maintains full precision
-        float f32_value = val;
+        // Use noinline function to ensure conversion happens at runtime
+        float f16_recovered = float16_roundtrip(val);
 
         float f16_error = std::abs(f16_recovered - val);
-        float f32_error = 0.0f; // Exact for these values
+        float f32_error = 0.0f; // Float32 is exact for these values
 
-        // Float16 error should be noticeable but bounded
-        EXPECT_GT(f16_error, f32_error);
+        // Float16 error should be noticeable (precision loss expected) but bounded
+        EXPECT_GT(f16_error, f32_error)
+            << "Expected precision loss for val=" << val
+            << " (f16_recovered=" << f16_recovered << ")";
         EXPECT_LT(f16_error, std::abs(val * 0.01f))
             << "Float16 error too large for: " << val;
     }

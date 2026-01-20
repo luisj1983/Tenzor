@@ -86,20 +86,20 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
 
     auto shape = in_cont.shape();
     std::vector<int64_t> shape_vec(shape.begin(), shape.end());
+    const int64_t ndim = static_cast<int64_t>(shape.size());
 
-    // Normalize negative dimensions first (e.g., -1 means last dimension)
-    // A special value like INT64_MIN or std::nullopt would indicate full reduction
-    // For now, treat dim values in valid range after normalization as partial reduction
-    if (dim < 0 && dim >= -static_cast<int64_t>(shape.size())) {
-        dim += shape.size();
-    }
-
-    // Check if this is a full reduction (dim still negative after normalization means full reduction)
-    bool is_full_reduction = (dim < 0 || dim >= static_cast<int64_t>(shape.size()));
+    // INT64_MIN indicates full reduction (sum all elements)
+    bool is_full_reduction = (dim == INT64_MIN);
 
     if (!is_full_reduction) {
-        if (dim < 0 || dim >= static_cast<int64_t>(shape.size())) {
-            throw std::invalid_argument("Invalid dimension for sum reduction");
+        // Normalize negative dimensions (e.g., -1 means last dimension)
+        if (dim < 0) {
+            dim += ndim;
+        }
+        // Validate dimension is within bounds
+        if (dim < 0 || dim >= ndim) {
+            throw std::runtime_error("Dimension " + std::to_string(dim) +
+                " out of range for tensor with " + std::to_string(ndim) + " dimensions");
         }
     }
 

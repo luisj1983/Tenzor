@@ -1089,7 +1089,8 @@ public:
                     shape.push_back(std::stoll(shape_str));
                 }
 
-                float value = std::stof(attrs.at("value"));
+                // Use stod for better precision with very small values like denormalized floats
+                float value = static_cast<float>(std::stod(attrs.at("value")));
 
                 DType dtype = DType::Float32;
                 if (attrs.contains("dtype")) {

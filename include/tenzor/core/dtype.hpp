@@ -129,6 +129,36 @@ template<> struct dtype_traits<DType::Complex128> { using type = std::complex<do
 template<DType dt>
 using dtype_t = typename dtype_traits<dt>::type;
 
+/**
+ * @brief Type trait to map C++ types to DType values (reverse of dtype_traits).
+ *
+ * @tparam T C++ type
+ *
+ * @code
+ * constexpr DType dt = type_to_dtype<float>::value;  // dt is DType::Float32
+ * @endcode
+ */
+template<typename T>
+struct type_to_dtype;
+
+template<> struct type_to_dtype<float> { static constexpr DType value = DType::Float32; };
+template<> struct type_to_dtype<double> { static constexpr DType value = DType::Float64; };
+template<> struct type_to_dtype<int8_t> { static constexpr DType value = DType::Int8; };
+template<> struct type_to_dtype<int16_t> { static constexpr DType value = DType::Int16; };
+template<> struct type_to_dtype<int32_t> { static constexpr DType value = DType::Int32; };
+template<> struct type_to_dtype<int64_t> { static constexpr DType value = DType::Int64; };
+template<> struct type_to_dtype<uint8_t> { static constexpr DType value = DType::UInt8; };
+template<> struct type_to_dtype<uint16_t> { static constexpr DType value = DType::UInt16; };
+template<> struct type_to_dtype<uint32_t> { static constexpr DType value = DType::UInt32; };
+template<> struct type_to_dtype<uint64_t> { static constexpr DType value = DType::UInt64; };
+template<> struct type_to_dtype<bool> { static constexpr DType value = DType::Bool; };
+template<> struct type_to_dtype<std::complex<float>> { static constexpr DType value = DType::Complex64; };
+template<> struct type_to_dtype<std::complex<double>> { static constexpr DType value = DType::Complex128; };
+
+/// @brief Helper variable template for type_to_dtype
+template<typename T>
+inline constexpr DType type_to_dtype_v = type_to_dtype<T>::value;
+
 // ============================================================================
 // Half-Precision Types
 // ============================================================================
@@ -183,6 +213,11 @@ struct BFloat16 {
 template<> struct dtype_traits<DType::Float16> { using type = Float16; };
 /// @brief Specialization for BFloat16
 template<> struct dtype_traits<DType::BFloat16> { using type = BFloat16; };
+
+/// @brief Reverse mapping for Float16
+template<> struct type_to_dtype<Float16> { static constexpr DType value = DType::Float16; };
+/// @brief Reverse mapping for BFloat16
+template<> struct type_to_dtype<BFloat16> { static constexpr DType value = DType::BFloat16; };
 
 /**
  * @brief Get the size in bytes of a data type.

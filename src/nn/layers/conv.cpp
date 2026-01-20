@@ -19,6 +19,22 @@ auto calculate_output_size(int64_t input_size, int64_t kernel_size,
     return (input_size + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1;
 }
 
+// Pad a 3D tensor [N, C, L] in the last dimension
+auto pad_1d(const Tensor& input, int64_t padding) -> Tensor {
+    if (padding <= 0) return input;
+
+    auto shape = input.shape();
+    int64_t batch = shape[0];
+    int64_t channels = shape[1];
+
+    // Create zero padding tensors
+    auto left_pad = zeros({batch, channels, padding}, input.dtype(), input.device());
+    auto right_pad = zeros({batch, channels, padding}, input.dtype(), input.device());
+
+    // Concatenate: [left_pad, input, right_pad]
+    return cat({left_pad, input, right_pad}, 2);
+}
+
 // CPU fallback for im2col - only used when CUDA is not available
 auto im2col_cpu(const Tensor& input, int64_t kernel_h, int64_t kernel_w,
                 int64_t stride_h, int64_t stride_w, int64_t padding_h, int64_t padding_w,
@@ -344,7 +360,7 @@ auto Conv2d::forward_impl(const Variable& input) -> Variable {
     int64_t out_w = calculate_output_size(width, kernel_size_, stride_, padding_, dilation_);
 
     if (out_h <= 0 || out_w <= 0) {
-        throw std::invalid_argument(
+        throw std::runtime_error(
             "Invalid Conv2d configuration: output dimensions are non-positive (out_h=" +
             std::to_string(out_h) + ", out_w=" + std::to_string(out_w) + ")"
         );
@@ -487,23 +503,60 @@ public:
     }
 
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
-        // Implement Conv1d backward (similar to Conv2d but for 1D)
-        // This would involve adding a dimension to use Conv2d operations
-        // or implementing specific 1D im2col/col2im operations
-
         const Tensor& grad_output = grad_outputs[0];
         const Tensor& input = saved_tensors_[0];
         const Tensor& weight = saved_tensors_[1];
 
-        // Add height dimension of 1 to convert to 2D
-        auto grad_2d = grad_output.unsqueeze(2);
-        auto input_2d = input.unsqueeze(2);
-        auto weight_2d = weight.unsqueeze(2);
+        // Manually pad the input in the length dimension (same as forward)
+        Tensor input_padded = input;
+        if (padding_ > 0) {
+            input_padded = pad_1d(input, padding_);
+        }
 
-        // Use Conv2d backward
-        // (Implementation continues with similar pattern to Conv2d)
+        // Add height dimension of 1 to convert to 4D for Conv2d operations
+        auto grad_4d = grad_output.unsqueeze(2);
+        auto input_4d = input_padded.unsqueeze(2);
+        auto weight_4d = weight.unsqueeze(2);
 
-        throw std::runtime_error("Conv1d backward not yet fully implemented");
+        // Use backend dispatcher for Conv2d backward with padding=0
+        std::vector<Tensor> tensors_for_dispatch = {grad_4d};
+        auto* backend = Dispatcher::get_backend(tensors_for_dispatch);
+
+        bool has_bias = saved_tensors_.size() > 2;
+
+        OpAttributes backward_attrs = {
+            {"stride", std::to_string(stride_)},
+            {"padding", "0"},
+            {"dilation", std::to_string(dilation_)},
+            {"groups", std::to_string(groups_)},
+            {"compute_grad_input", "1"},
+            {"compute_grad_weight", "1"},
+            {"compute_grad_bias", has_bias ? "1" : "0"}
+        };
+
+        std::vector<Tensor> backward_inputs = {grad_4d, input_4d, weight_4d};
+        auto backward_result = backend->dispatch(
+            "conv2d_backward",
+            backward_inputs,
+            backward_attrs
+        );
+
+        // Squeeze height dimension: [N,C,1,L] -> [N,C,L]
+        Tensor grad_input_padded = backward_result[0].squeeze(2);
+        Tensor grad_weight = backward_result[1].squeeze(2);
+
+        // Remove padding from grad_input to match original input shape
+        Tensor grad_input = grad_input_padded;
+        if (padding_ > 0) {
+            int64_t length = input.shape()[2];
+            // Slice to remove padding: [N, C, L + 2*padding] -> [N, C, L]
+            grad_input = grad_input_padded.slice(2, padding_, padding_ + length);
+        }
+
+        if (has_bias) {
+            return {grad_input, grad_weight, backward_result[2]};
+        }
+        return {grad_input, grad_weight};
     }
 
 private:
@@ -549,15 +602,127 @@ auto Conv1d::forward_impl(const Variable& input) -> Variable {
         throw std::invalid_argument("Conv1d expects 3D input [batch, channels, length]");
     }
 
-    // Add height dimension and use Conv2d
-    auto input_4d = input.tensor().unsqueeze(2);
+    int64_t batch = input_shape[0];
+    int64_t in_channels = input_shape[1];
+    int64_t length = input_shape[2];
+
+    if (in_channels != in_channels_) {
+        throw std::invalid_argument("Input channels mismatch");
+    }
+
+    int64_t out_len = calculate_output_size(length, kernel_size_, stride_, padding_, dilation_);
+    if (out_len <= 0) {
+        throw std::runtime_error(
+            "Invalid Conv1d configuration: output length is non-positive (out_len=" +
+            std::to_string(out_len) + ")"
+        );
+    }
+
     auto& weight = *parameters_["weight"];
-    auto weight_4d = weight.tensor().unsqueeze(2);
+    auto bias_it = parameters_.find("bias");
+    Device original_device = input.tensor().device();
 
-    // Use Conv2d forward with adapted parameters
-    // (Implementation continues with Conv2d-based approach)
+    // Handle dtype and device mismatch for weight
+    Tensor weight_matched = weight.tensor();
+    bool weight_needs_conversion = (input.dtype() != weight.dtype()) ||
+                                   (input.tensor().device().type != weight.tensor().device().type);
+    if (weight_needs_conversion) {
+        if (input.tensor().device().type != weight.tensor().device().type) {
+            weight_matched = weight_matched.to(original_device);
+        }
+        if (input.dtype() != weight_matched.dtype()) {
+            weight_matched = weight_matched.to(input.dtype());
+        }
+    }
 
-    throw std::runtime_error("Conv1d forward not yet fully implemented");
+    const Tensor* bias_ptr = nullptr;
+    Tensor bias_matched;
+    if (bias_it != parameters_.end()) {
+        auto& bias = *bias_it->second;
+        bool bias_needs_conversion = (input.dtype() != bias.dtype()) ||
+                                     (input.tensor().device().type != bias.tensor().device().type);
+        if (bias_needs_conversion) {
+            bias_matched = bias.tensor();
+            if (input.tensor().device().type != bias.tensor().device().type) {
+                bias_matched = bias_matched.to(original_device);
+            }
+            if (input.dtype() != bias_matched.dtype()) {
+                bias_matched = bias_matched.to(input.dtype());
+            }
+            bias_ptr = &bias_matched;
+        } else {
+            bias_ptr = &bias.tensor();
+        }
+    }
+
+    // Manually pad in the length dimension, then use padding=0 for conv2d
+    // This avoids the symmetric padding issue where padding also affects height
+    Tensor input_tensor = input.tensor();
+    if (padding_ > 0) {
+        input_tensor = pad_1d(input_tensor, padding_);
+    }
+
+    // Add height dimension of 1: [N, C, L] -> [N, C, 1, L]
+    auto input_4d = input_tensor.unsqueeze(2);
+    auto weight_4d = weight_matched.unsqueeze(2);
+
+    // Use backend dispatcher for Conv2d with padding=0 (we already padded manually)
+    std::vector<Tensor> tensors_for_dispatch = {input_4d};
+    auto* backend = Dispatcher::get_backend(tensors_for_dispatch);
+
+    std::vector<Tensor> inputs_vec = {input_4d, weight_4d};
+    if (bias_ptr != nullptr) {
+        inputs_vec.push_back(*bias_ptr);
+    }
+
+    // Use padding=0 since we already padded the input manually
+    OpAttributes forward_attrs = {
+        {"stride", std::to_string(stride_)},
+        {"padding", "0"},
+        {"dilation", std::to_string(dilation_)},
+        {"groups", std::to_string(groups_)}
+    };
+
+    auto output_result = backend->dispatch(
+        "conv2d_forward",
+        std::span<const Tensor>(inputs_vec),
+        forward_attrs
+    );
+    Tensor output_4d = output_result[0];
+
+    // Remove height dimension: [N, C_out, 1, L_out] -> [N, C_out, L_out]
+    Tensor output = output_4d.squeeze(2);
+
+    auto result = Variable(output, input.requires_grad() || weight.requires_grad());
+
+    if (input.requires_grad() || weight.requires_grad()) {
+        std::vector<Tensor> tensors_to_save;
+        if (bias_ptr != nullptr) {
+            tensors_to_save = {input.tensor(), weight.tensor(), *bias_ptr};
+        } else {
+            tensors_to_save = {input.tensor(), weight.tensor()};
+        }
+
+        auto backward_fn = std::make_shared<Conv1dBackward>(
+            stride_, padding_, dilation_, groups_, std::move(tensors_to_save)
+        );
+
+        result.set_grad_fn(backward_fn);
+
+        std::vector<Variable> input_vars = {input, *parameters_["weight"]};
+        if (bias_it != parameters_.end()) {
+            input_vars.push_back(*bias_it->second);
+        }
+        backward_fn->set_input_variables(input_vars);
+
+        std::vector<std::shared_ptr<Function>> next_funcs;
+        if (input.grad_fn()) {
+            next_funcs.push_back(input.grad_fn());
+        }
+        backward_fn->set_next_functions(next_funcs);
+    }
+
+    return result;
 }
 
 // ============================================================================

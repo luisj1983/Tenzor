@@ -1,8 +1,9 @@
 /**
  * @file test_faster_rcnn_multidtype.cpp
- * @brief Multi-dtype tests for Faster R-CNN object detection model
+ * @brief Multi-backend multi-dtype tests for Faster R-CNN object detection model
  *
- * Tests Faster R-CNN components across Float32, Float64, and Float16:
+ * Tests Faster R-CNN components across multiple backends (CPU, CUDA, OneAPI) and
+ * data types (Float32, Float64, Float16):
  * - RPN (Region Proposal Network)
  * - ROI pooling/align
  * - Detection head
@@ -14,54 +15,62 @@
 #include <gtest/gtest.h>
 #include <tenzor/tenzor.hpp>
 #include "../../include/tenzor/models/faster_rcnn.hpp"
+#include "../multi_backend_dtype_fixture.hpp"
 #include <cmath>
 #include <vector>
 #include <unordered_map>
 
 using namespace tenzor;
 using namespace tenzor::models;
+using namespace tenzor::testing;
 
-// Helper to get tolerance based on dtype
-template<typename T>
-T get_tolerance() {
-    if constexpr (std::is_same_v<T, float>) {
-        return static_cast<T>(1e-4);
-    } else if constexpr (std::is_same_v<T, double>) {
-        return static_cast<T>(1e-6);
-    } else {  // Float16
-        return static_cast<T>(1e-2);
-    }
-}
+// ============================================================================
+// Test Fixture with Multi-Backend Multi-DType Support
+// ============================================================================
 
-// Test fixture for multi-dtype Faster R-CNN tests
-template<typename T>
-class FasterRCNNMultiDTypeTest : public ::testing::Test {
+class FasterRCNNMultiDTypeTest : public MultiBackendDTypeTest {
 protected:
-    void SetUp() override {
-        device_ = Device::cpu();
-        if constexpr (std::is_same_v<T, float>) {
-            dtype_ = DType::Float32;
-        } else if constexpr (std::is_same_v<T, double>) {
-            dtype_ = DType::Float64;
-        } else {
-            dtype_ = DType::Float16;
+    // Helper to create target with boxes at specific positions
+    std::vector<std::unordered_map<std::string, Tensor>> createTargets(
+            int num_boxes, const std::vector<std::array<float, 4>>& box_coords) {
+        std::vector<std::unordered_map<std::string, Tensor>> targets(1);
+
+        auto boxes = Tensor({num_boxes, 4}, dtype(), device());
+        auto boxes_f32 = boxes.to(DType::Float32).to(Device::cpu());
+        auto boxes_ptr = boxes_f32.data<float>();
+
+        for (int i = 0; i < num_boxes && i < static_cast<int>(box_coords.size()); ++i) {
+            boxes_ptr[i * 4 + 0] = box_coords[i][0];
+            boxes_ptr[i * 4 + 1] = box_coords[i][1];
+            boxes_ptr[i * 4 + 2] = box_coords[i][2];
+            boxes_ptr[i * 4 + 3] = box_coords[i][3];
         }
+        boxes = boxes_f32.to(dtype()).to(device());
+
+        auto labels = Tensor({num_boxes}, DType::Int64, device());
+        auto labels_cpu = labels.to(Device::cpu());
+        auto labels_data = labels_cpu.data<int64_t>();
+        for (int i = 0; i < num_boxes; ++i) {
+            labels_data[i] = (i % 5) + 1;
+        }
+        labels = labels_cpu.to(device());
+
+        targets[0]["boxes"] = boxes;
+        targets[0]["labels"] = labels;
+
+        return targets;
     }
-
-    Device device_;
-    DType dtype_;
 };
-
-using TestTypes = ::testing::Types<float, double>;
-TYPED_TEST_SUITE(FasterRCNNMultiDTypeTest, TestTypes);
 
 // ============================================================================
 // Backbone Tests
 // ============================================================================
 
-TYPED_TEST(FasterRCNNMultiDTypeTest, ResNet50BackboneForward) {
+TEST_P(FasterRCNNMultiDTypeTest, ResNet50BackboneForward) {
     auto model = faster_rcnn_resnet50(91, false);
-    Variable images(Tensor({1, 3, 800, 800}, this->dtype_, this->device_), true);
+    convert_model(model);
+
+    auto images = createInput({1, 3, 800, 800});
 
     model->eval();
     auto detections = model->forward_inference(images);
@@ -70,9 +79,11 @@ TYPED_TEST(FasterRCNNMultiDTypeTest, ResNet50BackboneForward) {
     EXPECT_EQ(detections.size(), 1);
 }
 
-TYPED_TEST(FasterRCNNMultiDTypeTest, ResNet101BackboneForward) {
+TEST_P(FasterRCNNMultiDTypeTest, ResNet101BackboneForward) {
     auto model = faster_rcnn_resnet101(91, false);
-    Variable images(Tensor({1, 3, 800, 800}, this->dtype_, this->device_), true);
+    convert_model(model);
+
+    auto images = createInput({1, 3, 800, 800});
 
     model->eval();
     auto detections = model->forward_inference(images);
@@ -81,9 +92,11 @@ TYPED_TEST(FasterRCNNMultiDTypeTest, ResNet101BackboneForward) {
     EXPECT_EQ(detections.size(), 1);
 }
 
-TYPED_TEST(FasterRCNNMultiDTypeTest, BackboneBatchProcessing) {
+TEST_P(FasterRCNNMultiDTypeTest, BackboneBatchProcessing) {
     auto model = faster_rcnn_resnet50(91, false);
-    Variable images(Tensor({4, 3, 800, 800}, this->dtype_, this->device_), true);
+    convert_model(model);
+
+    auto images = createInput({4, 3, 800, 800});
 
     model->eval();
     auto detections = model->forward_inference(images);
@@ -96,9 +109,11 @@ TYPED_TEST(FasterRCNNMultiDTypeTest, BackboneBatchProcessing) {
 // RPN (Region Proposal Network) Tests
 // ============================================================================
 
-TYPED_TEST(FasterRCNNMultiDTypeTest, RPNProposalGeneration) {
+TEST_P(FasterRCNNMultiDTypeTest, RPNProposalGeneration) {
     auto model = faster_rcnn_resnet50(91, false);
-    Variable images(Tensor({1, 3, 800, 800}, this->dtype_, this->device_), true);
+    convert_model(model);
+
+    auto images = createInput({1, 3, 800, 800});
 
     model->eval();
     auto detections = model->forward_inference(images);
@@ -109,12 +124,13 @@ TYPED_TEST(FasterRCNNMultiDTypeTest, RPNProposalGeneration) {
     EXPECT_TRUE(detections[0].find("boxes") != detections[0].end());
 }
 
-TYPED_TEST(FasterRCNNMultiDTypeTest, RPNMultiScaleAnchors) {
+TEST_P(FasterRCNNMultiDTypeTest, RPNMultiScaleAnchors) {
     auto model = faster_rcnn_resnet50(91, false);
+    convert_model(model);
 
     // Test RPN with different image scales
-    Variable images_small(Tensor({1, 3, 600, 600}, this->dtype_, this->device_), true);
-    Variable images_large(Tensor({1, 3, 1024, 1024}, this->dtype_, this->device_), true);
+    auto images_small = createInput({1, 3, 600, 600});
+    auto images_large = createInput({1, 3, 1024, 1024});
 
     model->eval();
     auto detections_small = model->forward_inference(images_small);
@@ -125,29 +141,18 @@ TYPED_TEST(FasterRCNNMultiDTypeTest, RPNMultiScaleAnchors) {
     EXPECT_EQ(detections_large.size(), 1);
 }
 
-TYPED_TEST(FasterRCNNMultiDTypeTest, RPNObjectnessScores) {
+TEST_P(FasterRCNNMultiDTypeTest, RPNObjectnessScores) {
     auto model = faster_rcnn_resnet50(91, false);
+    convert_model(model);
     model->train();
 
-    Variable images(Tensor({1, 3, 800, 800}, this->dtype_, this->device_), true);
+    auto images = createInput({1, 3, 800, 800});
 
     // Create dummy targets
-    std::vector<std::unordered_map<std::string, Tensor>> targets(1);
-    auto boxes = Tensor({2, 4}, this->dtype_, this->device_);
-    auto labels = Tensor({2}, DType::Int64, this->device_);
-
-    auto boxes_ptr = reinterpret_cast<TypeParam*>(boxes.data_ptr());
-    boxes_ptr[0] = static_cast<TypeParam>(100); boxes_ptr[1] = static_cast<TypeParam>(100);
-    boxes_ptr[2] = static_cast<TypeParam>(200); boxes_ptr[3] = static_cast<TypeParam>(200);
-    boxes_ptr[4] = static_cast<TypeParam>(300); boxes_ptr[5] = static_cast<TypeParam>(300);
-    boxes_ptr[6] = static_cast<TypeParam>(400); boxes_ptr[7] = static_cast<TypeParam>(400);
-
-    auto labels_data = labels.data<int64_t>();
-    labels_data[0] = 1;
-    labels_data[1] = 2;
-
-    targets[0]["boxes"] = boxes;
-    targets[0]["labels"] = labels;
+    auto targets = createTargets(2, {
+        {100.0f, 100.0f, 200.0f, 200.0f},
+        {300.0f, 300.0f, 400.0f, 400.0f}
+    });
 
     auto losses = model->forward_train(images, targets);
 
@@ -159,9 +164,11 @@ TYPED_TEST(FasterRCNNMultiDTypeTest, RPNObjectnessScores) {
 // ROI Pooling/Align Tests
 // ============================================================================
 
-TYPED_TEST(FasterRCNNMultiDTypeTest, ROIPoolingForward) {
+TEST_P(FasterRCNNMultiDTypeTest, ROIPoolingForward) {
     auto model = faster_rcnn_resnet50(91, false);
-    Variable images(Tensor({1, 3, 800, 800}, this->dtype_, this->device_), true);
+    convert_model(model);
+
+    auto images = createInput({1, 3, 800, 800});
 
     model->eval();
     auto detections = model->forward_inference(images);
@@ -170,11 +177,12 @@ TYPED_TEST(FasterRCNNMultiDTypeTest, ROIPoolingForward) {
     EXPECT_EQ(detections.size(), 1);
 }
 
-TYPED_TEST(FasterRCNNMultiDTypeTest, ROIAlignPrecision) {
+TEST_P(FasterRCNNMultiDTypeTest, ROIAlignPrecision) {
     auto model = faster_rcnn_resnet50(91, false);
+    convert_model(model);
 
     // Test with smaller image to verify ROI align precision
-    Variable images(Tensor({1, 3, 400, 400}, this->dtype_, this->device_), true);
+    auto images = createInput({1, 3, 400, 400});
 
     model->eval();
     auto detections = model->forward_inference(images);
@@ -183,41 +191,21 @@ TYPED_TEST(FasterRCNNMultiDTypeTest, ROIAlignPrecision) {
     EXPECT_EQ(detections.size(), 1);
 }
 
-TYPED_TEST(FasterRCNNMultiDTypeTest, ROIMultipleRegions) {
+TEST_P(FasterRCNNMultiDTypeTest, ROIMultipleRegions) {
     auto model = faster_rcnn_resnet50(91, false);
+    convert_model(model);
     model->train();
 
-    Variable images(Tensor({1, 3, 800, 800}, this->dtype_, this->device_), true);
+    auto images = createInput({1, 3, 800, 800});
 
     // Create targets with multiple boxes
-    std::vector<std::unordered_map<std::string, Tensor>> targets(1);
-    auto boxes = Tensor({5, 4}, this->dtype_, this->device_);
-    auto labels = Tensor({5}, DType::Int64, this->device_);
-
-    auto boxes_ptr = reinterpret_cast<TypeParam*>(boxes.data_ptr());
-    // Box 1
-    boxes_ptr[0] = static_cast<TypeParam>(50); boxes_ptr[1] = static_cast<TypeParam>(50);
-    boxes_ptr[2] = static_cast<TypeParam>(150); boxes_ptr[3] = static_cast<TypeParam>(150);
-    // Box 2
-    boxes_ptr[4] = static_cast<TypeParam>(200); boxes_ptr[5] = static_cast<TypeParam>(200);
-    boxes_ptr[6] = static_cast<TypeParam>(300); boxes_ptr[7] = static_cast<TypeParam>(300);
-    // Box 3
-    boxes_ptr[8] = static_cast<TypeParam>(350); boxes_ptr[9] = static_cast<TypeParam>(350);
-    boxes_ptr[10] = static_cast<TypeParam>(450); boxes_ptr[11] = static_cast<TypeParam>(450);
-    // Box 4
-    boxes_ptr[12] = static_cast<TypeParam>(500); boxes_ptr[13] = static_cast<TypeParam>(100);
-    boxes_ptr[14] = static_cast<TypeParam>(600); boxes_ptr[15] = static_cast<TypeParam>(200);
-    // Box 5
-    boxes_ptr[16] = static_cast<TypeParam>(100); boxes_ptr[17] = static_cast<TypeParam>(500);
-    boxes_ptr[18] = static_cast<TypeParam>(200); boxes_ptr[19] = static_cast<TypeParam>(600);
-
-    auto labels_data = labels.data<int64_t>();
-    for (int i = 0; i < 5; i++) {
-        labels_data[i] = i + 1;
-    }
-
-    targets[0]["boxes"] = boxes;
-    targets[0]["labels"] = labels;
+    auto targets = createTargets(5, {
+        {50.0f, 50.0f, 150.0f, 150.0f},
+        {200.0f, 200.0f, 300.0f, 300.0f},
+        {350.0f, 350.0f, 450.0f, 450.0f},
+        {500.0f, 100.0f, 600.0f, 200.0f},
+        {100.0f, 500.0f, 200.0f, 600.0f}
+    });
 
     auto losses = model->forward_train(images, targets);
 
@@ -229,9 +217,11 @@ TYPED_TEST(FasterRCNNMultiDTypeTest, ROIMultipleRegions) {
 // Detection Head Tests
 // ============================================================================
 
-TYPED_TEST(FasterRCNNMultiDTypeTest, DetectionHeadClassification) {
+TEST_P(FasterRCNNMultiDTypeTest, DetectionHeadClassification) {
     auto model = faster_rcnn_resnet50(91, false);
-    Variable images(Tensor({1, 3, 800, 800}, this->dtype_, this->device_), true);
+    convert_model(model);
+
+    auto images = createInput({1, 3, 800, 800});
 
     model->eval();
     auto detections = model->forward_inference(images);
@@ -242,32 +232,19 @@ TYPED_TEST(FasterRCNNMultiDTypeTest, DetectionHeadClassification) {
                 detections[0].find("boxes") != detections[0].end());
 }
 
-TYPED_TEST(FasterRCNNMultiDTypeTest, DetectionHeadBBoxRegression) {
+TEST_P(FasterRCNNMultiDTypeTest, DetectionHeadBBoxRegression) {
     auto model = faster_rcnn_resnet50(91, false);
+    convert_model(model);
     model->train();
 
-    Variable images(Tensor({1, 3, 800, 800}, this->dtype_, this->device_), true);
+    auto images = createInput({1, 3, 800, 800});
 
     // Create targets
-    std::vector<std::unordered_map<std::string, Tensor>> targets(1);
-    auto boxes = Tensor({3, 4}, this->dtype_, this->device_);
-    auto labels = Tensor({3}, DType::Int64, this->device_);
-
-    auto boxes_ptr = reinterpret_cast<TypeParam*>(boxes.data_ptr());
-    boxes_ptr[0] = static_cast<TypeParam>(100); boxes_ptr[1] = static_cast<TypeParam>(100);
-    boxes_ptr[2] = static_cast<TypeParam>(200); boxes_ptr[3] = static_cast<TypeParam>(200);
-    boxes_ptr[4] = static_cast<TypeParam>(300); boxes_ptr[5] = static_cast<TypeParam>(300);
-    boxes_ptr[6] = static_cast<TypeParam>(400); boxes_ptr[7] = static_cast<TypeParam>(400);
-    boxes_ptr[8] = static_cast<TypeParam>(500); boxes_ptr[9] = static_cast<TypeParam>(500);
-    boxes_ptr[10] = static_cast<TypeParam>(600); boxes_ptr[11] = static_cast<TypeParam>(600);
-
-    auto labels_data = labels.data<int64_t>();
-    labels_data[0] = 1;
-    labels_data[1] = 2;
-    labels_data[2] = 3;
-
-    targets[0]["boxes"] = boxes;
-    targets[0]["labels"] = labels;
+    auto targets = createTargets(3, {
+        {100.0f, 100.0f, 200.0f, 200.0f},
+        {300.0f, 300.0f, 400.0f, 400.0f},
+        {500.0f, 500.0f, 600.0f, 600.0f}
+    });
 
     auto losses = model->forward_train(images, targets);
 
@@ -275,9 +252,11 @@ TYPED_TEST(FasterRCNNMultiDTypeTest, DetectionHeadBBoxRegression) {
     EXPECT_TRUE(losses.find("loss_objectness") != losses.end());
 }
 
-TYPED_TEST(FasterRCNNMultiDTypeTest, DetectionHeadMultiClass) {
+TEST_P(FasterRCNNMultiDTypeTest, DetectionHeadMultiClass) {
     auto model = faster_rcnn_resnet50(91, false);  // 91 classes (COCO)
-    Variable images(Tensor({1, 3, 800, 800}, this->dtype_, this->device_), true);
+    convert_model(model);
+
+    auto images = createInput({1, 3, 800, 800});
 
     model->eval();
     auto detections = model->forward_inference(images);
@@ -290,9 +269,11 @@ TYPED_TEST(FasterRCNNMultiDTypeTest, DetectionHeadMultiClass) {
 // Forward Pass with Different Image Sizes
 // ============================================================================
 
-TYPED_TEST(FasterRCNNMultiDTypeTest, SmallImageSize) {
+TEST_P(FasterRCNNMultiDTypeTest, SmallImageSize) {
     auto model = faster_rcnn_resnet50(91, false);
-    Variable images(Tensor({1, 3, 400, 400}, this->dtype_, this->device_), true);
+    convert_model(model);
+
+    auto images = createInput({1, 3, 400, 400});
 
     model->eval();
     auto detections = model->forward_inference(images);
@@ -300,9 +281,11 @@ TYPED_TEST(FasterRCNNMultiDTypeTest, SmallImageSize) {
     EXPECT_EQ(detections.size(), 1);
 }
 
-TYPED_TEST(FasterRCNNMultiDTypeTest, MediumImageSize) {
+TEST_P(FasterRCNNMultiDTypeTest, MediumImageSize) {
     auto model = faster_rcnn_resnet50(91, false);
-    Variable images(Tensor({1, 3, 600, 600}, this->dtype_, this->device_), true);
+    convert_model(model);
+
+    auto images = createInput({1, 3, 600, 600});
 
     model->eval();
     auto detections = model->forward_inference(images);
@@ -310,9 +293,11 @@ TYPED_TEST(FasterRCNNMultiDTypeTest, MediumImageSize) {
     EXPECT_EQ(detections.size(), 1);
 }
 
-TYPED_TEST(FasterRCNNMultiDTypeTest, StandardImageSize) {
+TEST_P(FasterRCNNMultiDTypeTest, StandardImageSize) {
     auto model = faster_rcnn_resnet50(91, false);
-    Variable images(Tensor({1, 3, 800, 800}, this->dtype_, this->device_), true);
+    convert_model(model);
+
+    auto images = createInput({1, 3, 800, 800});
 
     model->eval();
     auto detections = model->forward_inference(images);
@@ -320,9 +305,11 @@ TYPED_TEST(FasterRCNNMultiDTypeTest, StandardImageSize) {
     EXPECT_EQ(detections.size(), 1);
 }
 
-TYPED_TEST(FasterRCNNMultiDTypeTest, LargeImageSize) {
+TEST_P(FasterRCNNMultiDTypeTest, LargeImageSize) {
     auto model = faster_rcnn_resnet50(91, false);
-    Variable images(Tensor({1, 3, 1024, 1024}, this->dtype_, this->device_), true);
+    convert_model(model);
+
+    auto images = createInput({1, 3, 1024, 1024});
 
     model->eval();
     auto detections = model->forward_inference(images);
@@ -330,9 +317,11 @@ TYPED_TEST(FasterRCNNMultiDTypeTest, LargeImageSize) {
     EXPECT_EQ(detections.size(), 1);
 }
 
-TYPED_TEST(FasterRCNNMultiDTypeTest, VeryLargeImageSize) {
+TEST_P(FasterRCNNMultiDTypeTest, VeryLargeImageSize) {
     auto model = faster_rcnn_resnet50(91, false);
-    Variable images(Tensor({1, 3, 1280, 1280}, this->dtype_, this->device_), true);
+    convert_model(model);
+
+    auto images = createInput({1, 3, 1280, 1280});
 
     model->eval();
     auto detections = model->forward_inference(images);
@@ -340,11 +329,12 @@ TYPED_TEST(FasterRCNNMultiDTypeTest, VeryLargeImageSize) {
     EXPECT_EQ(detections.size(), 1);
 }
 
-TYPED_TEST(FasterRCNNMultiDTypeTest, RectangularImageSize) {
+TEST_P(FasterRCNNMultiDTypeTest, RectangularImageSize) {
     auto model = faster_rcnn_resnet50(91, false);
+    convert_model(model);
 
     // Test with non-square image
-    Variable images(Tensor({1, 3, 600, 800}, this->dtype_, this->device_), true);
+    auto images = createInput({1, 3, 600, 800});
 
     model->eval();
     auto detections = model->forward_inference(images);
@@ -357,58 +347,40 @@ TYPED_TEST(FasterRCNNMultiDTypeTest, RectangularImageSize) {
 // Multi-Object Detection Tests
 // ============================================================================
 
-TYPED_TEST(FasterRCNNMultiDTypeTest, SingleObjectDetection) {
+TEST_P(FasterRCNNMultiDTypeTest, SingleObjectDetection) {
     auto model = faster_rcnn_resnet50(91, false);
+    convert_model(model);
     model->train();
 
-    Variable images(Tensor({1, 3, 800, 800}, this->dtype_, this->device_), true);
+    auto images = createInput({1, 3, 800, 800});
 
-    std::vector<std::unordered_map<std::string, Tensor>> targets(1);
-    auto boxes = Tensor({1, 4}, this->dtype_, this->device_);
-    auto labels = Tensor({1}, DType::Int64, this->device_);
-
-    auto boxes_ptr = reinterpret_cast<TypeParam*>(boxes.data_ptr());
-    boxes_ptr[0] = static_cast<TypeParam>(100); boxes_ptr[1] = static_cast<TypeParam>(100);
-    boxes_ptr[2] = static_cast<TypeParam>(300); boxes_ptr[3] = static_cast<TypeParam>(300);
-
-    auto labels_data = labels.data<int64_t>();
-    labels_data[0] = 1;
-
-    targets[0]["boxes"] = boxes;
-    targets[0]["labels"] = labels;
+    auto targets = createTargets(1, {
+        {100.0f, 100.0f, 300.0f, 300.0f}
+    });
 
     auto losses = model->forward_train(images, targets);
 
     EXPECT_TRUE(losses.find("loss_objectness") != losses.end());
 }
 
-TYPED_TEST(FasterRCNNMultiDTypeTest, MultiObjectDetection) {
+TEST_P(FasterRCNNMultiDTypeTest, MultiObjectDetection) {
     auto model = faster_rcnn_resnet50(91, false);
+    convert_model(model);
     model->train();
 
-    Variable images(Tensor({1, 3, 800, 800}, this->dtype_, this->device_), true);
+    auto images = createInput({1, 3, 800, 800});
 
-    // Create targets with multiple objects
-    std::vector<std::unordered_map<std::string, Tensor>> targets(1);
-    auto boxes = Tensor({8, 4}, this->dtype_, this->device_);
-    auto labels = Tensor({8}, DType::Int64, this->device_);
-
-    auto boxes_ptr = reinterpret_cast<TypeParam*>(boxes.data_ptr());
-    // 8 different objects at various locations
-    for (int i = 0; i < 8; i++) {
-        boxes_ptr[i*4 + 0] = static_cast<TypeParam>((i % 3) * 200 + 50);
-        boxes_ptr[i*4 + 1] = static_cast<TypeParam>((i / 3) * 200 + 50);
-        boxes_ptr[i*4 + 2] = static_cast<TypeParam>((i % 3) * 200 + 150);
-        boxes_ptr[i*4 + 3] = static_cast<TypeParam>((i / 3) * 200 + 150);
+    // Create targets with multiple objects at various locations
+    std::vector<std::array<float, 4>> boxes;
+    for (int i = 0; i < 8; ++i) {
+        boxes.push_back({
+            static_cast<float>((i % 3) * 200 + 50),
+            static_cast<float>((i / 3) * 200 + 50),
+            static_cast<float>((i % 3) * 200 + 150),
+            static_cast<float>((i / 3) * 200 + 150)
+        });
     }
-
-    auto labels_data = labels.data<int64_t>();
-    for (int i = 0; i < 8; i++) {
-        labels_data[i] = (i % 5) + 1;  // 5 different classes
-    }
-
-    targets[0]["boxes"] = boxes;
-    targets[0]["labels"] = labels;
+    auto targets = createTargets(8, boxes);
 
     auto losses = model->forward_train(images, targets);
 
@@ -416,32 +388,24 @@ TYPED_TEST(FasterRCNNMultiDTypeTest, MultiObjectDetection) {
     EXPECT_TRUE(losses.find("loss_objectness") != losses.end());
 }
 
-TYPED_TEST(FasterRCNNMultiDTypeTest, DenseObjectDetection) {
+TEST_P(FasterRCNNMultiDTypeTest, DenseObjectDetection) {
     auto model = faster_rcnn_resnet50(91, false);
+    convert_model(model);
     model->train();
 
-    Variable images(Tensor({1, 3, 800, 800}, this->dtype_, this->device_), true);
+    auto images = createInput({1, 3, 800, 800});
 
     // Create targets with many small objects
-    std::vector<std::unordered_map<std::string, Tensor>> targets(1);
-    auto boxes = Tensor({15, 4}, this->dtype_, this->device_);
-    auto labels = Tensor({15}, DType::Int64, this->device_);
-
-    auto boxes_ptr = reinterpret_cast<TypeParam*>(boxes.data_ptr());
-    for (int i = 0; i < 15; i++) {
-        boxes_ptr[i*4 + 0] = static_cast<TypeParam>((i % 5) * 150 + 20);
-        boxes_ptr[i*4 + 1] = static_cast<TypeParam>((i / 5) * 250 + 20);
-        boxes_ptr[i*4 + 2] = static_cast<TypeParam>((i % 5) * 150 + 100);
-        boxes_ptr[i*4 + 3] = static_cast<TypeParam>((i / 5) * 250 + 100);
+    std::vector<std::array<float, 4>> boxes;
+    for (int i = 0; i < 15; ++i) {
+        boxes.push_back({
+            static_cast<float>((i % 5) * 150 + 20),
+            static_cast<float>((i / 5) * 250 + 20),
+            static_cast<float>((i % 5) * 150 + 100),
+            static_cast<float>((i / 5) * 250 + 100)
+        });
     }
-
-    auto labels_data = labels.data<int64_t>();
-    for (int i = 0; i < 15; i++) {
-        labels_data[i] = (i % 10) + 1;
-    }
-
-    targets[0]["boxes"] = boxes;
-    targets[0]["labels"] = labels;
+    auto targets = createTargets(15, boxes);
 
     auto losses = model->forward_train(images, targets);
 
@@ -449,38 +413,20 @@ TYPED_TEST(FasterRCNNMultiDTypeTest, DenseObjectDetection) {
     EXPECT_TRUE(losses.find("loss_objectness") != losses.end());
 }
 
-TYPED_TEST(FasterRCNNMultiDTypeTest, OverlappingObjectDetection) {
+TEST_P(FasterRCNNMultiDTypeTest, OverlappingObjectDetection) {
     auto model = faster_rcnn_resnet50(91, false);
+    convert_model(model);
     model->train();
 
-    Variable images(Tensor({1, 3, 800, 800}, this->dtype_, this->device_), true);
+    auto images = createInput({1, 3, 800, 800});
 
-    // Create targets with overlapping boxes
-    std::vector<std::unordered_map<std::string, Tensor>> targets(1);
-    auto boxes = Tensor({4, 4}, this->dtype_, this->device_);
-    auto labels = Tensor({4}, DType::Int64, this->device_);
-
-    auto boxes_ptr = reinterpret_cast<TypeParam*>(boxes.data_ptr());
     // Overlapping boxes in center region
-    boxes_ptr[0] = static_cast<TypeParam>(300); boxes_ptr[1] = static_cast<TypeParam>(300);
-    boxes_ptr[2] = static_cast<TypeParam>(500); boxes_ptr[3] = static_cast<TypeParam>(500);
-
-    boxes_ptr[4] = static_cast<TypeParam>(320); boxes_ptr[5] = static_cast<TypeParam>(320);
-    boxes_ptr[6] = static_cast<TypeParam>(520); boxes_ptr[7] = static_cast<TypeParam>(520);
-
-    boxes_ptr[8] = static_cast<TypeParam>(340); boxes_ptr[9] = static_cast<TypeParam>(340);
-    boxes_ptr[10] = static_cast<TypeParam>(540); boxes_ptr[11] = static_cast<TypeParam>(540);
-
-    boxes_ptr[12] = static_cast<TypeParam>(360); boxes_ptr[13] = static_cast<TypeParam>(360);
-    boxes_ptr[14] = static_cast<TypeParam>(560); boxes_ptr[15] = static_cast<TypeParam>(560);
-
-    auto labels_data = labels.data<int64_t>();
-    for (int i = 0; i < 4; i++) {
-        labels_data[i] = i + 1;
-    }
-
-    targets[0]["boxes"] = boxes;
-    targets[0]["labels"] = labels;
+    auto targets = createTargets(4, {
+        {300.0f, 300.0f, 500.0f, 500.0f},
+        {320.0f, 320.0f, 520.0f, 520.0f},
+        {340.0f, 340.0f, 540.0f, 540.0f},
+        {360.0f, 360.0f, 560.0f, 560.0f}
+    });
 
     auto losses = model->forward_train(images, targets);
 
@@ -492,31 +438,18 @@ TYPED_TEST(FasterRCNNMultiDTypeTest, OverlappingObjectDetection) {
 // Gradient Flow and Training Tests
 // ============================================================================
 
-TYPED_TEST(FasterRCNNMultiDTypeTest, GradientFlowThroughModel) {
+TEST_P(FasterRCNNMultiDTypeTest, GradientFlowThroughModel) {
     auto model = faster_rcnn_resnet50(91, false);
+    convert_model(model);
     model->train();
 
-    Variable images(Tensor({1, 3, 800, 800}, this->dtype_, this->device_), true);
+    auto images = createInput({1, 3, 800, 800});
 
-    std::vector<std::unordered_map<std::string, Tensor>> targets(1);
-    auto boxes = Tensor({3, 4}, this->dtype_, this->device_);
-    auto labels = Tensor({3}, DType::Int64, this->device_);
-
-    auto boxes_ptr = reinterpret_cast<TypeParam*>(boxes.data_ptr());
-    boxes_ptr[0] = static_cast<TypeParam>(100); boxes_ptr[1] = static_cast<TypeParam>(100);
-    boxes_ptr[2] = static_cast<TypeParam>(200); boxes_ptr[3] = static_cast<TypeParam>(200);
-    boxes_ptr[4] = static_cast<TypeParam>(300); boxes_ptr[5] = static_cast<TypeParam>(300);
-    boxes_ptr[6] = static_cast<TypeParam>(400); boxes_ptr[7] = static_cast<TypeParam>(400);
-    boxes_ptr[8] = static_cast<TypeParam>(500); boxes_ptr[9] = static_cast<TypeParam>(500);
-    boxes_ptr[10] = static_cast<TypeParam>(600); boxes_ptr[11] = static_cast<TypeParam>(600);
-
-    auto labels_data = labels.data<int64_t>();
-    labels_data[0] = 1;
-    labels_data[1] = 2;
-    labels_data[2] = 3;
-
-    targets[0]["boxes"] = boxes;
-    targets[0]["labels"] = labels;
+    auto targets = createTargets(3, {
+        {100.0f, 100.0f, 200.0f, 200.0f},
+        {300.0f, 300.0f, 400.0f, 400.0f},
+        {500.0f, 500.0f, 600.0f, 600.0f}
+    });
 
     auto losses = model->forward_train(images, targets);
 
@@ -527,7 +460,7 @@ TYPED_TEST(FasterRCNNMultiDTypeTest, GradientFlowThroughModel) {
     EXPECT_GT(params.size(), 0);
 }
 
-TYPED_TEST(FasterRCNNMultiDTypeTest, ParameterCount) {
+TEST_P(FasterRCNNMultiDTypeTest, ParameterCount) {
     auto model = faster_rcnn_resnet50(91, false);
 
     auto params = model->parameters();
@@ -540,9 +473,11 @@ TYPED_TEST(FasterRCNNMultiDTypeTest, ParameterCount) {
 // Batch Processing Tests
 // ============================================================================
 
-TYPED_TEST(FasterRCNNMultiDTypeTest, BatchInference) {
+TEST_P(FasterRCNNMultiDTypeTest, BatchInference) {
     auto model = faster_rcnn_resnet50(91, false);
-    Variable images(Tensor({3, 3, 800, 800}, this->dtype_, this->device_), true);
+    convert_model(model);
+
+    auto images = createInput({3, 3, 800, 800});
 
     model->eval();
     auto detections = model->forward_inference(images);
@@ -551,9 +486,11 @@ TYPED_TEST(FasterRCNNMultiDTypeTest, BatchInference) {
     EXPECT_EQ(detections.size(), 3);
 }
 
-TYPED_TEST(FasterRCNNMultiDTypeTest, LargeBatchInference) {
+TEST_P(FasterRCNNMultiDTypeTest, LargeBatchInference) {
     auto model = faster_rcnn_resnet50(91, false);
-    Variable images(Tensor({8, 3, 600, 600}, this->dtype_, this->device_), true);
+    convert_model(model);
+
+    auto images = createInput({8, 3, 600, 600});
 
     model->eval();
     auto detections = model->forward_inference(images);
@@ -566,9 +503,11 @@ TYPED_TEST(FasterRCNNMultiDTypeTest, LargeBatchInference) {
 // Model Variants Tests
 // ============================================================================
 
-TYPED_TEST(FasterRCNNMultiDTypeTest, ResNet50Variant) {
+TEST_P(FasterRCNNMultiDTypeTest, ResNet50Variant) {
     auto model = faster_rcnn_resnet50(91, false);
-    Variable images(Tensor({1, 3, 800, 800}, this->dtype_, this->device_), true);
+    convert_model(model);
+
+    auto images = createInput({1, 3, 800, 800});
 
     model->eval();
     auto detections = model->forward_inference(images);
@@ -576,9 +515,11 @@ TYPED_TEST(FasterRCNNMultiDTypeTest, ResNet50Variant) {
     EXPECT_EQ(detections.size(), 1);
 }
 
-TYPED_TEST(FasterRCNNMultiDTypeTest, ResNet101Variant) {
+TEST_P(FasterRCNNMultiDTypeTest, ResNet101Variant) {
     auto model = faster_rcnn_resnet101(91, false);
-    Variable images(Tensor({1, 3, 800, 800}, this->dtype_, this->device_), true);
+    convert_model(model);
+
+    auto images = createInput({1, 3, 800, 800});
 
     model->eval();
     auto detections = model->forward_inference(images);
@@ -586,9 +527,11 @@ TYPED_TEST(FasterRCNNMultiDTypeTest, ResNet101Variant) {
     EXPECT_EQ(detections.size(), 1);
 }
 
-TYPED_TEST(FasterRCNNMultiDTypeTest, CustomNumClasses) {
+TEST_P(FasterRCNNMultiDTypeTest, CustomNumClasses) {
     auto model = faster_rcnn_resnet50(20, false);  // Custom 20 classes
-    Variable images(Tensor({1, 3, 800, 800}, this->dtype_, this->device_), true);
+    convert_model(model);
+
+    auto images = createInput({1, 3, 800, 800});
 
     model->eval();
     auto detections = model->forward_inference(images);
@@ -600,16 +543,17 @@ TYPED_TEST(FasterRCNNMultiDTypeTest, CustomNumClasses) {
 // Edge Cases
 // ============================================================================
 
-TYPED_TEST(FasterRCNNMultiDTypeTest, NoObjectsInImage) {
+TEST_P(FasterRCNNMultiDTypeTest, NoObjectsInImage) {
     auto model = faster_rcnn_resnet50(91, false);
+    convert_model(model);
     model->train();
 
-    Variable images(Tensor({1, 3, 800, 800}, this->dtype_, this->device_), true);
+    auto images = createInput({1, 3, 800, 800});
 
     // Empty targets (no objects)
     std::vector<std::unordered_map<std::string, Tensor>> targets(1);
-    auto boxes = Tensor({0, 4}, this->dtype_, this->device_);
-    auto labels = Tensor({0}, DType::Int64, this->device_);
+    auto boxes = Tensor({0, 4}, dtype(), device());
+    auto labels = Tensor({0}, DType::Int64, device());
 
     targets[0]["boxes"] = boxes;
     targets[0]["labels"] = labels;
@@ -619,32 +563,19 @@ TYPED_TEST(FasterRCNNMultiDTypeTest, NoObjectsInImage) {
     auto losses = model->forward_train(images, targets);
 }
 
-TYPED_TEST(FasterRCNNMultiDTypeTest, VerySmallObjects) {
+TEST_P(FasterRCNNMultiDTypeTest, VerySmallObjects) {
     auto model = faster_rcnn_resnet50(91, false);
+    convert_model(model);
     model->train();
 
-    Variable images(Tensor({1, 3, 800, 800}, this->dtype_, this->device_), true);
+    auto images = createInput({1, 3, 800, 800});
 
     // Small objects (10x10 pixels)
-    std::vector<std::unordered_map<std::string, Tensor>> targets(1);
-    auto boxes = Tensor({3, 4}, this->dtype_, this->device_);
-    auto labels = Tensor({3}, DType::Int64, this->device_);
-
-    auto boxes_ptr = reinterpret_cast<TypeParam*>(boxes.data_ptr());
-    boxes_ptr[0] = static_cast<TypeParam>(100); boxes_ptr[1] = static_cast<TypeParam>(100);
-    boxes_ptr[2] = static_cast<TypeParam>(110); boxes_ptr[3] = static_cast<TypeParam>(110);
-    boxes_ptr[4] = static_cast<TypeParam>(300); boxes_ptr[5] = static_cast<TypeParam>(300);
-    boxes_ptr[6] = static_cast<TypeParam>(310); boxes_ptr[7] = static_cast<TypeParam>(310);
-    boxes_ptr[8] = static_cast<TypeParam>(500); boxes_ptr[9] = static_cast<TypeParam>(500);
-    boxes_ptr[10] = static_cast<TypeParam>(510); boxes_ptr[11] = static_cast<TypeParam>(510);
-
-    auto labels_data = labels.data<int64_t>();
-    labels_data[0] = 1;
-    labels_data[1] = 2;
-    labels_data[2] = 3;
-
-    targets[0]["boxes"] = boxes;
-    targets[0]["labels"] = labels;
+    auto targets = createTargets(3, {
+        {100.0f, 100.0f, 110.0f, 110.0f},
+        {300.0f, 300.0f, 310.0f, 310.0f},
+        {500.0f, 500.0f, 510.0f, 510.0f}
+    });
 
     auto losses = model->forward_train(images, targets);
 
@@ -652,32 +583,29 @@ TYPED_TEST(FasterRCNNMultiDTypeTest, VerySmallObjects) {
     EXPECT_TRUE(losses.find("loss_objectness") != losses.end());
 }
 
-TYPED_TEST(FasterRCNNMultiDTypeTest, VeryLargeObjects) {
+TEST_P(FasterRCNNMultiDTypeTest, VeryLargeObjects) {
     auto model = faster_rcnn_resnet50(91, false);
+    convert_model(model);
     model->train();
 
-    Variable images(Tensor({1, 3, 800, 800}, this->dtype_, this->device_), true);
+    auto images = createInput({1, 3, 800, 800});
 
     // Large object covering most of image
-    std::vector<std::unordered_map<std::string, Tensor>> targets(1);
-    auto boxes = Tensor({1, 4}, this->dtype_, this->device_);
-    auto labels = Tensor({1}, DType::Int64, this->device_);
-
-    auto boxes_ptr = reinterpret_cast<TypeParam*>(boxes.data_ptr());
-    boxes_ptr[0] = static_cast<TypeParam>(50); boxes_ptr[1] = static_cast<TypeParam>(50);
-    boxes_ptr[2] = static_cast<TypeParam>(750); boxes_ptr[3] = static_cast<TypeParam>(750);
-
-    auto labels_data = labels.data<int64_t>();
-    labels_data[0] = 1;
-
-    targets[0]["boxes"] = boxes;
-    targets[0]["labels"] = labels;
+    auto targets = createTargets(1, {
+        {50.0f, 50.0f, 750.0f, 750.0f}
+    });
 
     auto losses = model->forward_train(images, targets);
 
     // Should handle very large objects
     EXPECT_TRUE(losses.find("loss_objectness") != losses.end());
 }
+
+// ============================================================================
+// Test Instantiation
+// ============================================================================
+
+INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(FasterRCNNMultiDTypeTest);
 
 // ============================================================================
 // Main

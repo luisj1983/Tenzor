@@ -607,7 +607,7 @@ auto matmul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tens
     const int64_t n = b_shape[b_shape.size() - 1];
 
     if (k != k2) {
-        throw std::invalid_argument("Inner dimensions must match for matmul");
+        throw std::runtime_error("Inner dimensions must match for matmul");
     }
 
     // Create output shape

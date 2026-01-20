@@ -20,6 +20,10 @@ namespace tenzor {
 // Math operation implementations - dispatched to backend kernels
 
 auto add(const Tensor& a, const Tensor& b) -> Tensor {
+    // Validate tensors are initialized
+    if (!a.impl() || !b.impl()) {
+        throw std::runtime_error("Cannot add uninitialized tensors");
+    }
     // Ensure tensors are contiguous before element-wise operation
     // Permute and reshape can create non-contiguous views
     Tensor a_contiguous = a.is_contiguous() ? a : a.contiguous();

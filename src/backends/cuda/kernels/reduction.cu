@@ -646,19 +646,24 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
     const auto& device = input.device();
     const auto& input_shape = input.shape();
     const auto& input_strides = input.strides();
+    const int64_t ndim = static_cast<int64_t>(input_shape.size());
 
     // Normalize negative dimension
     int64_t normalized_dim = dim;
-    if (dim < 0 && dim != INT64_MIN) {  // INT64_MIN means reduce all dimensions
-        normalized_dim = static_cast<int64_t>(input_shape.size()) + dim;
-        if (normalized_dim < 0) {
-            throw std::invalid_argument("Dimension out of range");
+    if (dim != INT64_MIN) {  // INT64_MIN means reduce all dimensions
+        if (dim < 0) {
+            normalized_dim = ndim + dim;
+        }
+        // Validate dimension is within bounds
+        if (normalized_dim < 0 || normalized_dim >= ndim) {
+            throw std::runtime_error("Dimension " + std::to_string(dim) +
+                " out of range for tensor with " + std::to_string(ndim) + " dimensions");
         }
     }
 
     auto output_shape = compute_reduction_shape(
         std::vector<int64_t>(input_shape.begin(), input_shape.end()),
-        dim, keepdim
+        normalized_dim, keepdim
     );
 
     Tensor output(output_shape, dtype, device);

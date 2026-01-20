@@ -1,78 +1,57 @@
 /**
  * @file test_convnext_multidtype.cpp
- * @brief Comprehensive multi-dtype tests for ConvNeXt variants
- * @details Tests ConvNeXt architectures with Float32, Float64, and Float16 data types
+ * @brief Multi-backend and multi-dtype tests for ConvNeXt variants
+ * @details Tests ConvNeXt architectures across CPU, CUDA, OneAPI backends
+ *          with Float32, Float64, and Float16 data types
  */
 
 #include <gtest/gtest.h>
-#include <tenzor/tenzor.hpp>
+#include "../multi_backend_dtype_fixture.hpp"
 #include "../../include/tenzor/models/convnext.hpp"
 
 using namespace tenzor;
 using namespace tenzor::models;
+using namespace tenzor::testing;
 
 // ============================================================================
-// Test Fixture with Parameterized DType
+// Test Fixture with Backend + DType Parameterization
 // ============================================================================
 
-class ConvNeXtMultiDTypeTest : public ::testing::TestWithParam<DType> {
+class ConvNeXtMultiDTypeTest : public MultiBackendDTypeTest {
 protected:
     void SetUp() override {
-        device_ = Device::cpu();
-        dtype_ = GetParam();
-
-        // Set tolerance based on dtype
-        switch (dtype_) {
-            case DType::Float16:
-                rel_tolerance_ = 1e-2;
-                abs_tolerance_ = 1e-3;
-                break;
-            case DType::Float32:
-                rel_tolerance_ = 1e-5;
-                abs_tolerance_ = 1e-6;
-                break;
-            case DType::Float64:
-                rel_tolerance_ = 1e-10;
-                abs_tolerance_ = 1e-11;
-                break;
-            default:
-                rel_tolerance_ = 1e-5;
-                abs_tolerance_ = 1e-6;
-        }
+        MultiBackendDTypeTest::SetUp();
     }
-
-    Device device_;
-    DType dtype_;
-    double rel_tolerance_;
-    double abs_tolerance_;
 };
 
 // ============================================================================
-// ConvNeXt-Tiny Tests (Multi-DType)
+// ConvNeXt-Tiny Tests (Multi-Backend Multi-DType)
 // ============================================================================
 
 TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtTinyForwardShape) {
     auto model = convnext_tiny(1000, false);
-    Variable input(Tensor({2, 3, 224, 224}, dtype_, device_), true);
+    convert_model(model);
+    Variable input(Tensor({2, 3, 224, 224}, dtype(), device()), true);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
     EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()),
               (std::vector<int64_t>{2, 1000}));
-    EXPECT_EQ(output.tensor().dtype(), dtype_);
+    EXPECT_EQ(output.tensor().dtype(), dtype());
 }
 
 TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtTinyGradientFlow) {
     auto model = convnext_tiny(10, false);
+    convert_model(model);
     model->train();
 
-    Variable input(Tensor({1, 3, 224, 224}, dtype_, device_), true);
+    Variable input(Tensor({1, 3, 224, 224}, dtype(), device()), true);
     Variable output = model->forward(input);
     Variable loss = tenzor::sum(output);
     loss.backward();
 
     EXPECT_TRUE(input.grad().has_value());
-    EXPECT_EQ(input.grad()->dtype(), dtype_);
+    EXPECT_EQ(input.grad()->dtype(), dtype());
 
     auto params = model->parameters();
     EXPECT_GT(params.size(), 0);
@@ -81,13 +60,14 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtTinyGradientFlow) {
     for (const auto& param : params) {
         if (param->requires_grad()) {
             EXPECT_TRUE(param->grad().has_value());
-            EXPECT_EQ(param->grad()->dtype(), dtype_);
+            EXPECT_EQ(param->grad()->dtype(), dtype());
         }
     }
 }
 
 TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtTinyParameterCount) {
     auto model = convnext_tiny(1000, false);
+    convert_model(model);
     auto params = model->parameters();
 
     size_t total_params = 0;
@@ -107,29 +87,34 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtTinyParameterCount) {
 TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtTinyDepthwiseConvolution) {
     // Test that depthwise convolutions work correctly
     auto model = convnext_tiny(10, false);
-    Variable input(Tensor({1, 3, 224, 224}, dtype_, device_), true);
+    convert_model(model);
+    Variable input(Tensor({1, 3, 224, 224}, dtype(), device()), true);
     Variable output = model->forward(input);
 
-    EXPECT_EQ(output.tensor().dtype(), dtype_);
-    EXPECT_FALSE(std::isnan(output.tensor().item<float>()));
+    EXPECT_EQ(output.tensor().dtype(), dtype());
+    // Check for NaN via reduction to CPU
+    auto cpu_output = output.tensor().to(Device::cpu()).to(DType::Float32);
+    EXPECT_FALSE(std::isnan(cpu_output.item<float>()));
 }
 
 TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtTinyLayerScaling) {
     // Test layer scaling functionality
     auto model = convnext_tiny(10, false);
+    convert_model(model);
     model->train();
 
-    Variable input(Tensor({1, 3, 224, 224}, dtype_, device_), true);
+    Variable input(Tensor({1, 3, 224, 224}, dtype(), device()), true);
     Variable output = model->forward(input);
     Variable loss = tenzor::sum(output);
     loss.backward();
 
     // Verify gradients are properly scaled
     EXPECT_TRUE(input.grad().has_value());
-    auto grad_data = input.grad().value().data<float>();
+    auto grad_cpu = input.grad().value().to(Device::cpu()).to(DType::Float32);
+    auto grad_data = grad_cpu.data<float>();
     bool has_nonzero_grad = false;
-    for (size_t i = 0; i < input.grad().value().numel(); ++i) {
-        if (std::abs(grad_data[i]) > abs_tolerance_) {
+    for (size_t i = 0; i < grad_cpu.numel(); ++i) {
+        if (std::abs(grad_data[i]) > atol()) {
             has_nonzero_grad = true;
             break;
         }
@@ -140,84 +125,93 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtTinyLayerScaling) {
 TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtTinyGELUActivation) {
     // Test GELU activation through forward pass
     auto model = convnext_tiny(10, false);
-    Variable input(Tensor({1, 3, 224, 224}, dtype_, device_), true);
+    convert_model(model);
+    Variable input(Tensor({1, 3, 224, 224}, dtype(), device()), true);
     Variable output = model->forward(input);
 
     // GELU should produce bounded outputs for reasonable inputs
-    auto output_data = output.tensor().data<float>();
-    for (size_t i = 0; i < std::min(size_t(100), static_cast<size_t>(output.tensor().numel())); ++i) {
+    auto cpu_output = output.tensor().to(Device::cpu()).to(DType::Float32);
+    auto output_data = cpu_output.data<float>();
+    for (size_t i = 0; i < std::min(size_t(100), static_cast<size_t>(cpu_output.numel())); ++i) {
         EXPECT_FALSE(std::isnan(output_data[i]));
         EXPECT_FALSE(std::isinf(output_data[i]));
     }
 }
 
 // ============================================================================
-// ConvNeXt-Small Tests (Multi-DType)
+// ConvNeXt-Small Tests (Multi-Backend Multi-DType)
 // ============================================================================
 
 TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtSmallForwardShape) {
     auto model = convnext_small(1000, false);
-    Variable input(Tensor({2, 3, 224, 224}, dtype_, device_), true);
+    convert_model(model);
+    Variable input(Tensor({2, 3, 224, 224}, dtype(), device()), true);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
     EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()),
               (std::vector<int64_t>{2, 1000}));
-    EXPECT_EQ(output.tensor().dtype(), dtype_);
+    EXPECT_EQ(output.tensor().dtype(), dtype());
 }
 
 TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtSmallGradientFlow) {
     auto model = convnext_small(10, false);
+    convert_model(model);
     model->train();
 
-    Variable input(Tensor({1, 3, 224, 224}, dtype_, device_), true);
+    Variable input(Tensor({1, 3, 224, 224}, dtype(), device()), true);
     Variable output = model->forward(input);
     Variable loss = tenzor::sum(output);
     loss.backward();
 
     EXPECT_TRUE(input.grad().has_value());
-    EXPECT_EQ(input.grad()->dtype(), dtype_);
+    EXPECT_EQ(input.grad()->dtype(), dtype());
 }
 
 TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtSmallDepthwiseConvolution) {
     auto model = convnext_small(10, false);
-    Variable input(Tensor({1, 3, 224, 224}, dtype_, device_), true);
+    convert_model(model);
+    Variable input(Tensor({1, 3, 224, 224}, dtype(), device()), true);
     Variable output = model->forward(input);
 
-    EXPECT_EQ(output.tensor().dtype(), dtype_);
-    EXPECT_FALSE(std::isnan(output.tensor().item<float>()));
+    EXPECT_EQ(output.tensor().dtype(), dtype());
+    auto cpu_output = output.tensor().to(Device::cpu()).to(DType::Float32);
+    EXPECT_FALSE(std::isnan(cpu_output.item<float>()));
 }
 
 // ============================================================================
-// ConvNeXt-Base Tests (Multi-DType)
+// ConvNeXt-Base Tests (Multi-Backend Multi-DType)
 // ============================================================================
 
 TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtBaseForwardShape) {
     auto model = convnext_base(1000, false);
-    Variable input(Tensor({2, 3, 224, 224}, dtype_, device_), true);
+    convert_model(model);
+    Variable input(Tensor({2, 3, 224, 224}, dtype(), device()), true);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
     EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()),
               (std::vector<int64_t>{2, 1000}));
-    EXPECT_EQ(output.tensor().dtype(), dtype_);
+    EXPECT_EQ(output.tensor().dtype(), dtype());
 }
 
 TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtBaseGradientFlow) {
     auto model = convnext_base(10, false);
+    convert_model(model);
     model->train();
 
-    Variable input(Tensor({1, 3, 224, 224}, dtype_, device_), true);
+    Variable input(Tensor({1, 3, 224, 224}, dtype(), device()), true);
     Variable output = model->forward(input);
     Variable loss = tenzor::sum(output);
     loss.backward();
 
     EXPECT_TRUE(input.grad().has_value());
-    EXPECT_EQ(input.grad()->dtype(), dtype_);
+    EXPECT_EQ(input.grad()->dtype(), dtype());
 }
 
 TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtBaseParameterCount) {
     auto model = convnext_base(1000, false);
+    convert_model(model);
     auto params = model->parameters();
 
     size_t total_params = 0;
@@ -236,18 +230,20 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtBaseParameterCount) {
 
 TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtBaseLayerScaling) {
     auto model = convnext_base(10, false);
+    convert_model(model);
     model->train();
 
-    Variable input(Tensor({1, 3, 224, 224}, dtype_, device_), true);
+    Variable input(Tensor({1, 3, 224, 224}, dtype(), device()), true);
     Variable output = model->forward(input);
     Variable loss = tenzor::sum(output);
     loss.backward();
 
     EXPECT_TRUE(input.grad().has_value());
-    auto grad_data = input.grad().value().data<float>();
+    auto grad_cpu = input.grad().value().to(Device::cpu()).to(DType::Float32);
+    auto grad_data = grad_cpu.data<float>();
     bool has_nonzero_grad = false;
-    for (size_t i = 0; i < input.grad().value().numel(); ++i) {
-        if (std::abs(grad_data[i]) > abs_tolerance_) {
+    for (size_t i = 0; i < grad_cpu.numel(); ++i) {
+        if (std::abs(grad_data[i]) > atol()) {
             has_nonzero_grad = true;
             break;
         }
@@ -256,35 +252,38 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtBaseLayerScaling) {
 }
 
 // ============================================================================
-// ConvNeXt-Large Tests (Multi-DType)
+// ConvNeXt-Large Tests (Multi-Backend Multi-DType)
 // ============================================================================
 
 TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtLargeForwardShape) {
     auto model = convnext_large(1000, false);
-    Variable input(Tensor({1, 3, 224, 224}, dtype_, device_), true);
+    convert_model(model);
+    Variable input(Tensor({1, 3, 224, 224}, dtype(), device()), true);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
     EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()),
               (std::vector<int64_t>{1, 1000}));
-    EXPECT_EQ(output.tensor().dtype(), dtype_);
+    EXPECT_EQ(output.tensor().dtype(), dtype());
 }
 
 TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtLargeGradientFlow) {
     auto model = convnext_large(10, false);
+    convert_model(model);
     model->train();
 
-    Variable input(Tensor({1, 3, 224, 224}, dtype_, device_), true);
+    Variable input(Tensor({1, 3, 224, 224}, dtype(), device()), true);
     Variable output = model->forward(input);
     Variable loss = tenzor::sum(output);
     loss.backward();
 
     EXPECT_TRUE(input.grad().has_value());
-    EXPECT_EQ(input.grad()->dtype(), dtype_);
+    EXPECT_EQ(input.grad()->dtype(), dtype());
 }
 
 TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtLargeParameterCount) {
     auto model = convnext_large(1000, false);
+    convert_model(model);
     auto params = model->parameters();
 
     size_t total_params = 0;
@@ -303,93 +302,102 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtLargeParameterCount) {
 
 TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtLargeGELUActivation) {
     auto model = convnext_large(10, false);
-    Variable input(Tensor({1, 3, 224, 224}, dtype_, device_), true);
+    convert_model(model);
+    Variable input(Tensor({1, 3, 224, 224}, dtype(), device()), true);
     Variable output = model->forward(input);
 
-    auto output_data = output.tensor().data<float>();
-    for (size_t i = 0; i < std::min(size_t(100), static_cast<size_t>(output.tensor().numel())); ++i) {
+    auto cpu_output = output.tensor().to(Device::cpu()).to(DType::Float32);
+    auto output_data = cpu_output.data<float>();
+    for (size_t i = 0; i < std::min(size_t(100), static_cast<size_t>(cpu_output.numel())); ++i) {
         EXPECT_FALSE(std::isnan(output_data[i]));
         EXPECT_FALSE(std::isinf(output_data[i]));
     }
 }
 
 // ============================================================================
-// ConvNeXt-XLarge Tests (Multi-DType)
+// ConvNeXt-XLarge Tests (Multi-Backend Multi-DType)
 // ============================================================================
 
 TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtXLargeForwardShape) {
     auto model = convnext_xlarge(1000, false);
-    Variable input(Tensor({1, 3, 224, 224}, dtype_, device_), true);
+    convert_model(model);
+    Variable input(Tensor({1, 3, 224, 224}, dtype(), device()), true);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
     EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()),
               (std::vector<int64_t>{1, 1000}));
-    EXPECT_EQ(output.tensor().dtype(), dtype_);
+    EXPECT_EQ(output.tensor().dtype(), dtype());
 }
 
 TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtXLargeGradientFlow) {
     auto model = convnext_xlarge(10, false);
+    convert_model(model);
     model->train();
 
-    Variable input(Tensor({1, 3, 224, 224}, dtype_, device_), true);
+    Variable input(Tensor({1, 3, 224, 224}, dtype(), device()), true);
     Variable output = model->forward(input);
     Variable loss = tenzor::sum(output);
     loss.backward();
 
     EXPECT_TRUE(input.grad().has_value());
-    EXPECT_EQ(input.grad()->dtype(), dtype_);
+    EXPECT_EQ(input.grad()->dtype(), dtype());
 }
 
 // ============================================================================
-// Edge Case Tests (Multi-DType)
+// Edge Case Tests (Multi-Backend Multi-DType)
 // ============================================================================
 
 TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtTinyBatchSizeOne) {
     auto model = convnext_tiny(10, false);
-    Variable input(Tensor({1, 3, 224, 224}, dtype_, device_), true);
+    convert_model(model);
+    Variable input(Tensor({1, 3, 224, 224}, dtype(), device()), true);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
     EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()),
               (std::vector<int64_t>{1, 10}));
-    EXPECT_EQ(output.tensor().dtype(), dtype_);
+    EXPECT_EQ(output.tensor().dtype(), dtype());
 }
 
 TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtTinyCustomClasses) {
     auto model = convnext_tiny(100, false);
-    Variable input(Tensor({2, 3, 224, 224}, dtype_, device_), true);
+    convert_model(model);
+    Variable input(Tensor({2, 3, 224, 224}, dtype(), device()), true);
     Variable output = model->forward(input);
 
     auto shape = output.tensor().shape();
     EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()),
               (std::vector<int64_t>{2, 100}));
-    EXPECT_EQ(output.tensor().dtype(), dtype_);
+    EXPECT_EQ(output.tensor().dtype(), dtype());
 }
 
 TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtTinyMultipleBatchSizes) {
     auto model = convnext_tiny(10, false);
+    convert_model(model);
 
     // Test with different batch sizes
     for (int batch_size : {1, 2, 4, 8}) {
-        Variable input(Tensor({batch_size, 3, 224, 224}, dtype_, device_), true);
+        Variable input(Tensor({batch_size, 3, 224, 224}, dtype(), device()), true);
         Variable output = model->forward(input);
 
         auto shape = output.tensor().shape();
         EXPECT_EQ(shape[0], batch_size);
         EXPECT_EQ(shape[1], 10);
-        EXPECT_EQ(output.tensor().dtype(), dtype_);
+        EXPECT_EQ(output.tensor().dtype(), dtype());
     }
 }
 
 TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtSmallNumericalStability) {
     auto model = convnext_small(10, false);
-    Variable input(Tensor({1, 3, 224, 224}, dtype_, device_), true);
+    convert_model(model);
+    Variable input(Tensor({1, 3, 224, 224}, dtype(), device()), true);
     Variable output = model->forward(input);
 
     // Check for numerical stability (no NaN or Inf)
-    auto data = output.tensor().data<float>();
-    for (size_t i = 0; i < output.tensor().numel(); ++i) {
+    auto cpu_output = output.tensor().to(Device::cpu()).to(DType::Float32);
+    auto data = cpu_output.data<float>();
+    for (size_t i = 0; i < cpu_output.numel(); ++i) {
         EXPECT_FALSE(std::isnan(data[i])) << "NaN detected at index " << i;
         EXPECT_FALSE(std::isinf(data[i])) << "Inf detected at index " << i;
     }
@@ -397,34 +405,39 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtSmallNumericalStability) {
 
 TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtBaseDepthwiseConsistency) {
     auto model = convnext_base(10, false);
-    Variable input(Tensor({1, 3, 224, 224}, dtype_, device_), true);
+    convert_model(model);
+    Variable input(Tensor({1, 3, 224, 224}, dtype(), device()), true);
 
     // Run forward pass twice with same input
     Variable output1 = model->forward(input);
     Variable output2 = model->forward(input);
 
     // Outputs should be identical (deterministic)
-    auto data1 = output1.tensor().data<float>();
-    auto data2 = output2.tensor().data<float>();
+    auto cpu_out1 = output1.tensor().to(Device::cpu()).to(DType::Float32);
+    auto cpu_out2 = output2.tensor().to(Device::cpu()).to(DType::Float32);
+    auto data1 = cpu_out1.data<float>();
+    auto data2 = cpu_out2.data<float>();
 
-    for (size_t i = 0; i < output1.tensor().numel(); ++i) {
-        EXPECT_NEAR(data1[i], data2[i], abs_tolerance_);
+    for (size_t i = 0; i < cpu_out1.numel(); ++i) {
+        EXPECT_NEAR(data1[i], data2[i], atol());
     }
 }
 
 TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtLargeGradientNumericalStability) {
     auto model = convnext_large(10, false);
+    convert_model(model);
     model->train();
 
-    Variable input(Tensor({1, 3, 224, 224}, dtype_, device_), true);
+    Variable input(Tensor({1, 3, 224, 224}, dtype(), device()), true);
     Variable output = model->forward(input);
     Variable loss = tenzor::sum(output);
     loss.backward();
 
     // Check gradient numerical stability
     EXPECT_TRUE(input.grad().has_value());
-    auto grad_data = input.grad().value().data<float>();
-    for (size_t i = 0; i < input.grad().value().numel(); ++i) {
+    auto grad_cpu = input.grad().value().to(Device::cpu()).to(DType::Float32);
+    auto grad_data = grad_cpu.data<float>();
+    for (size_t i = 0; i < grad_cpu.numel(); ++i) {
         EXPECT_FALSE(std::isnan(grad_data[i])) << "NaN gradient at index " << i;
         EXPECT_FALSE(std::isinf(grad_data[i])) << "Inf gradient at index " << i;
     }
@@ -437,11 +450,14 @@ TEST_P(ConvNeXtMultiDTypeTest, ConvNeXtLargeGradientNumericalStability) {
 TEST_P(ConvNeXtMultiDTypeTest, CrossVariantOutputShapeConsistency) {
     // All variants should produce same output shape for same num_classes
     int num_classes = 100;
-    Variable input(Tensor({1, 3, 224, 224}, dtype_, device_), true);
+    Variable input(Tensor({1, 3, 224, 224}, dtype(), device()), true);
 
     auto tiny = convnext_tiny(num_classes, false);
     auto small = convnext_small(num_classes, false);
     auto base = convnext_base(num_classes, false);
+    convert_model(tiny);
+    convert_model(small);
+    convert_model(base);
 
     auto output_tiny = tiny->forward(input);
     auto output_small = small->forward(input);
@@ -454,35 +470,25 @@ TEST_P(ConvNeXtMultiDTypeTest, CrossVariantOutputShapeConsistency) {
 
 TEST_P(ConvNeXtMultiDTypeTest, CrossVariantDTypePreservation) {
     // All variants should preserve dtype
-    Variable input(Tensor({1, 3, 224, 224}, dtype_, device_), true);
+    Variable input(Tensor({1, 3, 224, 224}, dtype(), device()), true);
 
     auto tiny = convnext_tiny(10, false);
     auto small = convnext_small(10, false);
+    convert_model(tiny);
+    convert_model(small);
 
     auto output_tiny = tiny->forward(input);
     auto output_small = small->forward(input);
 
-    EXPECT_EQ(output_tiny.tensor().dtype(), dtype_);
-    EXPECT_EQ(output_small.tensor().dtype(), dtype_);
+    EXPECT_EQ(output_tiny.tensor().dtype(), dtype());
+    EXPECT_EQ(output_small.tensor().dtype(), dtype());
 }
 
 // ============================================================================
-// Instantiate Tests for Multiple DTypes
+// Instantiate Tests for Multiple Backends and DTypes
 // ============================================================================
 
-INSTANTIATE_TEST_SUITE_P(
-    MultiDType,
-    ConvNeXtMultiDTypeTest,
-    ::testing::Values(DType::Float32, DType::Float64, DType::Float16),
-    [](const ::testing::TestParamInfo<DType>& info) {
-        switch (info.param) {
-            case DType::Float32: return "Float32";
-            case DType::Float64: return "Float64";
-            case DType::Float16: return "Float16";
-            default: return "Unknown";
-        }
-    }
-);
+INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(ConvNeXtMultiDTypeTest);
 
 // ============================================================================
 // Main

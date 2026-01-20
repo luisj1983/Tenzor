@@ -67,16 +67,16 @@ auto topk(const Tensor& input,
         inner_size *= input.shape()[i];
     }
 
-    // Process each slice along the specified dimension
-    if (input.dtype() == DType::Float32) {
-        const float* input_data = input_cont.data<float>();
-        float* values_data = values.data<float>();
+    // Helper lambda to process topk for any numeric type
+    auto process_topk = [&]<typename T>(T*) {
+        const T* input_data = input_cont.data<T>();
+        T* values_data = values.data<T>();
         int64_t* indices_data = indices.data<int64_t>();
 
         for (int64_t outer = 0; outer < outer_size; ++outer) {
             for (int64_t inner = 0; inner < inner_size; ++inner) {
                 // Create index-value pairs for this slice
-                std::vector<std::pair<float, int64_t>> pairs;
+                std::vector<std::pair<T, int64_t>> pairs;
                 pairs.reserve(dim_size);
 
                 for (int64_t i = 0; i < dim_size; ++i) {
@@ -112,8 +112,24 @@ auto topk(const Tensor& input,
                 }
             }
         }
-    } else {
-        throw std::runtime_error("topk currently only supports Float32 dtype");
+    };
+
+    // Process each slice along the specified dimension
+    switch (input.dtype()) {
+        case DType::Float32:
+            process_topk(static_cast<float*>(nullptr));
+            break;
+        case DType::Float64:
+            process_topk(static_cast<double*>(nullptr));
+            break;
+        case DType::Int32:
+            process_topk(static_cast<int32_t*>(nullptr));
+            break;
+        case DType::Int64:
+            process_topk(static_cast<int64_t*>(nullptr));
+            break;
+        default:
+            throw std::runtime_error("topk only supports Float32, Float64, Int32, and Int64 dtypes");
     }
 
     return {values, indices};
@@ -164,16 +180,16 @@ auto sort(const Tensor& input,
         inner_size *= input.shape()[i];
     }
 
-    // Process each slice
-    if (input.dtype() == DType::Float32) {
-        const float* input_data = input_cont.data<float>();
-        float* values_data = values.data<float>();
+    // Helper lambda to process sort for any numeric type
+    auto process_sort = [&]<typename T>(T*) {
+        const T* input_data = input_cont.data<T>();
+        T* values_data = values.data<T>();
         int64_t* indices_data = indices.data<int64_t>();
 
         for (int64_t outer = 0; outer < outer_size; ++outer) {
             for (int64_t inner = 0; inner < inner_size; ++inner) {
                 // Create index-value pairs
-                std::vector<std::pair<float, int64_t>> pairs;
+                std::vector<std::pair<T, int64_t>> pairs;
                 pairs.reserve(dim_size);
 
                 for (int64_t i = 0; i < dim_size; ++i) {
@@ -198,8 +214,24 @@ auto sort(const Tensor& input,
                 }
             }
         }
-    } else {
-        throw std::runtime_error("sort currently only supports Float32 dtype");
+    };
+
+    // Process each slice based on dtype
+    switch (input.dtype()) {
+        case DType::Float32:
+            process_sort(static_cast<float*>(nullptr));
+            break;
+        case DType::Float64:
+            process_sort(static_cast<double*>(nullptr));
+            break;
+        case DType::Int32:
+            process_sort(static_cast<int32_t*>(nullptr));
+            break;
+        case DType::Int64:
+            process_sort(static_cast<int64_t*>(nullptr));
+            break;
+        default:
+            throw std::runtime_error("sort only supports Float32, Float64, Int32, and Int64 dtypes");
     }
 
     return {values, indices};
@@ -218,16 +250,18 @@ auto unique(const Tensor& input,
     // Get contiguous flattened input
     Tensor input_flat = input.flatten().contiguous();
     const int64_t numel = input_flat.numel();
+    const DType dtype = input.dtype();
 
-    if (input.dtype() == DType::Float32) {
-        const float* data = input_flat.data<float>();
+    // Helper lambda to process unique for any numeric type
+    auto process_unique = [&]<typename T>(T*) -> std::tuple<Tensor, Tensor, Tensor> {
+        const T* data = input_flat.data<T>();
 
         // Map from value to (first_index, count)
-        std::vector<std::pair<float, std::pair<int64_t, int64_t>>> value_info;
-        std::unordered_map<float, size_t> value_to_idx;
+        std::vector<std::pair<T, std::pair<int64_t, int64_t>>> value_info;
+        std::unordered_map<T, size_t> value_to_idx;
 
         for (int64_t i = 0; i < numel; ++i) {
-            float val = data[i];
+            T val = data[i];
             auto it = value_to_idx.find(val);
             if (it == value_to_idx.end()) {
                 value_to_idx[val] = value_info.size();
@@ -246,8 +280,8 @@ auto unique(const Tensor& input,
         }
 
         // Create unique values tensor
-        Tensor unique_vals({num_unique}, DType::Float32, Device::cpu());
-        float* unique_data = unique_vals.data<float>();
+        Tensor unique_vals({num_unique}, dtype, Device::cpu());
+        T* unique_data = unique_vals.data<T>();
 
         for (int64_t i = 0; i < num_unique; ++i) {
             unique_data[i] = value_info[i].first;
@@ -260,7 +294,7 @@ auto unique(const Tensor& input,
             int64_t* inverse_data = inverse_indices.data<int64_t>();
 
             // Build value to output index map
-            std::unordered_map<float, int64_t> val_to_out_idx;
+            std::unordered_map<T, int64_t> val_to_out_idx;
             for (int64_t i = 0; i < num_unique; ++i) {
                 val_to_out_idx[value_info[i].first] = i;
             }
@@ -282,9 +316,21 @@ auto unique(const Tensor& input,
         }
 
         return {unique_vals, inverse_indices, counts};
+    };
 
-    } else {
-        throw std::runtime_error("unique currently only supports Float32 dtype");
+    switch (dtype) {
+        case DType::Float32:
+            return process_unique(static_cast<float*>(nullptr));
+        case DType::Float64:
+            return process_unique(static_cast<double*>(nullptr));
+        case DType::Int32:
+            return process_unique(static_cast<int32_t*>(nullptr));
+        case DType::Int64:
+            return process_unique(static_cast<int64_t*>(nullptr));
+        case DType::Bool:
+            return process_unique(static_cast<bool*>(nullptr));
+        default:
+            throw std::runtime_error("unique only supports Float32, Float64, Int32, Int64, and Bool dtypes");
     }
 }
 
@@ -328,13 +374,14 @@ auto cumsum(const Tensor& input, int64_t dim) -> Tensor {
         inner_size *= input.shape()[i];
     }
 
-    if (input.dtype() == DType::Float32) {
-        const float* input_data = input_cont.data<float>();
-        float* output_data = output.data<float>();
+    // Helper lambda for cumsum
+    auto process_cumsum = [&]<typename T>(T*) {
+        const T* input_data = input_cont.data<T>();
+        T* output_data = output.data<T>();
 
         for (int64_t outer = 0; outer < outer_size; ++outer) {
             for (int64_t inner = 0; inner < inner_size; ++inner) {
-                float cumsum_val = 0.0f;
+                T cumsum_val = static_cast<T>(0);
 
                 for (int64_t i = 0; i < dim_size; ++i) {
                     int64_t offset = outer * dim_size * inner_size + i * inner_size + inner;
@@ -343,8 +390,23 @@ auto cumsum(const Tensor& input, int64_t dim) -> Tensor {
                 }
             }
         }
-    } else {
-        throw std::runtime_error("cumsum currently only supports Float32 dtype");
+    };
+
+    switch (input.dtype()) {
+        case DType::Float32:
+            process_cumsum(static_cast<float*>(nullptr));
+            break;
+        case DType::Float64:
+            process_cumsum(static_cast<double*>(nullptr));
+            break;
+        case DType::Int32:
+            process_cumsum(static_cast<int32_t*>(nullptr));
+            break;
+        case DType::Int64:
+            process_cumsum(static_cast<int64_t*>(nullptr));
+            break;
+        default:
+            throw std::runtime_error("cumsum only supports Float32, Float64, Int32, and Int64 dtypes");
     }
 
     return output;
@@ -390,13 +452,14 @@ auto cumprod(const Tensor& input, int64_t dim) -> Tensor {
         inner_size *= input.shape()[i];
     }
 
-    if (input.dtype() == DType::Float32) {
-        const float* input_data = input_cont.data<float>();
-        float* output_data = output.data<float>();
+    // Helper lambda for cumprod
+    auto process_cumprod = [&]<typename T>(T*) {
+        const T* input_data = input_cont.data<T>();
+        T* output_data = output.data<T>();
 
         for (int64_t outer = 0; outer < outer_size; ++outer) {
             for (int64_t inner = 0; inner < inner_size; ++inner) {
-                float cumprod_val = 1.0f;
+                T cumprod_val = static_cast<T>(1);
 
                 for (int64_t i = 0; i < dim_size; ++i) {
                     int64_t offset = outer * dim_size * inner_size + i * inner_size + inner;
@@ -405,8 +468,23 @@ auto cumprod(const Tensor& input, int64_t dim) -> Tensor {
                 }
             }
         }
-    } else {
-        throw std::runtime_error("cumprod currently only supports Float32 dtype");
+    };
+
+    switch (input.dtype()) {
+        case DType::Float32:
+            process_cumprod(static_cast<float*>(nullptr));
+            break;
+        case DType::Float64:
+            process_cumprod(static_cast<double*>(nullptr));
+            break;
+        case DType::Int32:
+            process_cumprod(static_cast<int32_t*>(nullptr));
+            break;
+        case DType::Int64:
+            process_cumprod(static_cast<int64_t*>(nullptr));
+            break;
+        default:
+            throw std::runtime_error("cumprod only supports Float32, Float64, Int32, and Int64 dtypes");
     }
 
     return output;

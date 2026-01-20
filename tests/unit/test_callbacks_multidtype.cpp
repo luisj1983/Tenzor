@@ -1,9 +1,9 @@
 /**
  * @file test_callbacks_multidtype.cpp
- * @brief Multi-dtype unit tests for training callback system
+ * @brief Multi-dtype multi-backend tests for training callback system
  *
- * Tests callback functionality with Float32 and Float64 dtypes.
- * Callbacks are training utilities that should work with any dtype:
+ * Tests callback functionality with Float32, Float64, and Float16 dtypes across
+ * CPU, CUDA, OneAPI, Vulkan, and ROCm backends:
  * - ModelCheckpoint callback
  * - EarlyStopping callback
  * - LearningRateScheduler callback
@@ -13,25 +13,27 @@
  */
 
 #include <gtest/gtest.h>
+#include <tenzor/tenzor.hpp>
 #include <tenzor/nn/callbacks.hpp>
 #include <tenzor/nn/module.hpp>
 #include <tenzor/nn/layers/linear.hpp>
 #include <tenzor/nn/optim/sgd.hpp>
 #include <tenzor/nn/optim/adam.hpp>
+#include "../multi_backend_dtype_fixture.hpp"
 #include <sstream>
 #include <memory>
 #include <limits>
 
 using namespace tenzor;
 using namespace tenzor::nn;
+using namespace tenzor::testing;
 
 // ============================================================================
 // Helper Classes
 // ============================================================================
 
-// Helper class for testing custom callbacks (templated for dtype)
-template<typename T>
-class TestCallbackTyped : public Callback {
+// Helper class for testing custom callbacks
+class TestCallbackImpl : public Callback {
 public:
     int epoch_begin_count = 0;
     int epoch_end_count = 0;
@@ -40,8 +42,8 @@ public:
     int train_begin_count = 0;
     int train_end_count = 0;
 
-    T last_train_loss = static_cast<T>(0.0);
-    T last_val_loss = static_cast<T>(0.0);
+    float last_train_loss = 0.0f;
+    float last_val_loss = 0.0f;
     int last_epoch = -1;
 
     auto on_epoch_begin(int epoch) -> void override {
@@ -52,8 +54,8 @@ public:
     auto on_epoch_end(int epoch, float train_loss, float val_loss) -> void override {
         epoch_end_count++;
         last_epoch = epoch;
-        last_train_loss = static_cast<T>(train_loss);
-        last_val_loss = static_cast<T>(val_loss);
+        last_train_loss = train_loss;
+        last_val_loss = val_loss;
     }
 
     auto on_batch_begin(int batch_idx) -> void override {
@@ -73,19 +75,21 @@ public:
     }
 };
 
-// Test fixture template
-template<typename T>
-class CallbackMultiDtypeTest : public ::testing::Test {
-protected:
-    static constexpr DType dtype = std::is_same_v<T, float> ? DType::Float32 : DType::Float64;
+// ============================================================================
+// Callback Multi-Backend Multi-DType Test Fixture
+// ============================================================================
 
+class CallbackMultiDTypeTest : public MultiBackendDTypeTest {
+protected:
     void SetUp() override {
+        MultiBackendDTypeTest::SetUp();
+
         // Create simple model for testing
-        // Note: Linear layer doesn't accept dtype in constructor
-        // It will use the dtype of the input tensor during forward pass
         model = std::make_shared<Linear>(10, 5, true);
-        optimizer_sgd = std::make_shared<optim::SGD>(model->parameters(), static_cast<T>(0.01));
-        optimizer_adam = std::make_shared<optim::Adam>(model->parameters(), static_cast<T>(0.001));
+        convert_model(*model);
+
+        optimizer_sgd = std::make_shared<optim::SGD>(model->parameters(), 0.01f);
+        optimizer_adam = std::make_shared<optim::Adam>(model->parameters(), 0.001f);
     }
 
     std::shared_ptr<Linear> model;
@@ -93,15 +97,11 @@ protected:
     std::shared_ptr<optim::Adam> optimizer_adam;
 };
 
-// Type definitions for parameterized tests
-using DTypeList = ::testing::Types<float, double>;
-TYPED_TEST_SUITE(CallbackMultiDtypeTest, DTypeList);
-
 // ============================================================================
 // Base Callback Tests
 // ============================================================================
 
-TYPED_TEST(CallbackMultiDtypeTest, BaseCallbackInterface) {
+TEST_P(CallbackMultiDTypeTest, BaseCallbackInterface) {
     auto callback = std::make_shared<Callback>();
 
     // Should not crash when calling hooks on base class
@@ -113,9 +113,8 @@ TYPED_TEST(CallbackMultiDtypeTest, BaseCallbackInterface) {
     EXPECT_NO_THROW(callback->on_train_end());
 }
 
-TYPED_TEST(CallbackMultiDtypeTest, CustomCallbackTracking) {
-    using T = TypeParam;
-    auto callback = std::make_shared<TestCallbackTyped<T>>();
+TEST_P(CallbackMultiDTypeTest, CustomCallbackTracking) {
+    auto callback = std::make_shared<TestCallbackImpl>();
 
     callback->on_train_begin();
     EXPECT_EQ(callback->train_begin_count, 1);
@@ -131,14 +130,8 @@ TYPED_TEST(CallbackMultiDtypeTest, CustomCallbackTracking) {
 
     callback->on_epoch_end(0, 0.5f, 0.4f);
     EXPECT_EQ(callback->epoch_end_count, 1);
-
-    if constexpr (std::is_same_v<T, float>) {
-        EXPECT_FLOAT_EQ(callback->last_train_loss, static_cast<T>(0.5));
-        EXPECT_FLOAT_EQ(callback->last_val_loss, static_cast<T>(0.4));
-    } else {
-        EXPECT_DOUBLE_EQ(callback->last_train_loss, static_cast<T>(0.5));
-        EXPECT_DOUBLE_EQ(callback->last_val_loss, static_cast<T>(0.4));
-    }
+    EXPECT_FLOAT_EQ(callback->last_train_loss, 0.5f);
+    EXPECT_FLOAT_EQ(callback->last_val_loss, 0.4f);
 
     callback->on_train_end();
     EXPECT_EQ(callback->train_end_count, 1);
@@ -148,13 +141,13 @@ TYPED_TEST(CallbackMultiDtypeTest, CustomCallbackTracking) {
 // ProgressCallback Tests
 // ============================================================================
 
-TYPED_TEST(CallbackMultiDtypeTest, ProgressCallbackCreation) {
+TEST_P(CallbackMultiDTypeTest, ProgressCallbackCreation) {
     auto progress = std::make_shared<ProgressCallback>(10);
     EXPECT_NO_THROW(progress->set_total_batches(100));
     EXPECT_NO_THROW(progress->set_total_epochs(50));
 }
 
-TYPED_TEST(CallbackMultiDtypeTest, ProgressCallbackHooks) {
+TEST_P(CallbackMultiDTypeTest, ProgressCallbackHooks) {
     auto progress = std::make_shared<ProgressCallback>(5);
     progress->set_total_batches(20);
     progress->set_total_epochs(10);
@@ -171,7 +164,7 @@ TYPED_TEST(CallbackMultiDtypeTest, ProgressCallbackHooks) {
     EXPECT_NO_THROW(progress->on_train_end());
 }
 
-TYPED_TEST(CallbackMultiDtypeTest, ProgressCallbackWithMultipleEpochs) {
+TEST_P(CallbackMultiDTypeTest, ProgressCallbackWithMultipleEpochs) {
     auto progress = std::make_shared<ProgressCallback>(3);
     progress->set_total_batches(10);
     progress->set_total_epochs(5);
@@ -194,14 +187,14 @@ TYPED_TEST(CallbackMultiDtypeTest, ProgressCallbackWithMultipleEpochs) {
 // EarlyStoppingCallback Tests
 // ============================================================================
 
-TYPED_TEST(CallbackMultiDtypeTest, EarlyStoppingCallbackCreation) {
+TEST_P(CallbackMultiDTypeTest, EarlyStoppingCallbackCreation) {
     auto early_stop = std::make_shared<EarlyStoppingCallback>(5, 0.001f);
     EXPECT_FALSE(early_stop->should_stop());
     EXPECT_FLOAT_EQ(early_stop->best_loss(), std::numeric_limits<float>::max());
     EXPECT_EQ(early_stop->wait_count(), 0);
 }
 
-TYPED_TEST(CallbackMultiDtypeTest, EarlyStoppingImprovement) {
+TEST_P(CallbackMultiDTypeTest, EarlyStoppingImprovement) {
     auto early_stop = std::make_shared<EarlyStoppingCallback>(3, 0.01f, "val_loss");
 
     // First epoch - improvement
@@ -222,7 +215,7 @@ TYPED_TEST(CallbackMultiDtypeTest, EarlyStoppingImprovement) {
     EXPECT_EQ(early_stop->wait_count(), 1);
 }
 
-TYPED_TEST(CallbackMultiDtypeTest, EarlyStoppingTriggered) {
+TEST_P(CallbackMultiDTypeTest, EarlyStoppingTriggered) {
     auto early_stop = std::make_shared<EarlyStoppingCallback>(2, 0.0f, "val_loss");
 
     // Initial improvement
@@ -240,7 +233,7 @@ TYPED_TEST(CallbackMultiDtypeTest, EarlyStoppingTriggered) {
     EXPECT_EQ(early_stop->wait_count(), 2);
 }
 
-TYPED_TEST(CallbackMultiDtypeTest, EarlyStoppingMonitorTrainLoss) {
+TEST_P(CallbackMultiDTypeTest, EarlyStoppingMonitorTrainLoss) {
     auto early_stop = std::make_shared<EarlyStoppingCallback>(2, 0.0f, "train_loss");
 
     // Should monitor train_loss instead of val_loss
@@ -252,7 +245,7 @@ TYPED_TEST(CallbackMultiDtypeTest, EarlyStoppingMonitorTrainLoss) {
     EXPECT_EQ(early_stop->wait_count(), 0);  // Should reset because train_loss improved
 }
 
-TYPED_TEST(CallbackMultiDtypeTest, EarlyStoppingReset) {
+TEST_P(CallbackMultiDTypeTest, EarlyStoppingReset) {
     auto early_stop = std::make_shared<EarlyStoppingCallback>(3, 0.01f, "val_loss");
 
     // Initial improvement
@@ -272,10 +265,10 @@ TYPED_TEST(CallbackMultiDtypeTest, EarlyStoppingReset) {
 // ModelCheckpointCallback Tests
 // ============================================================================
 
-TYPED_TEST(CallbackMultiDtypeTest, ModelCheckpointCallbackCreation) {
+TEST_P(CallbackMultiDTypeTest, ModelCheckpointCallbackCreation) {
     auto checkpoint = std::make_shared<ModelCheckpointCallback>(
         "/tmp/model_epoch_{epoch}.pt",
-        this->model,
+        model,
         true,  // save_best_only
         "val_loss"
     );
@@ -284,10 +277,10 @@ TYPED_TEST(CallbackMultiDtypeTest, ModelCheckpointCallbackCreation) {
     EXPECT_EQ(checkpoint->last_checkpoint(), "");
 }
 
-TYPED_TEST(CallbackMultiDtypeTest, ModelCheckpointSaveBestOnly) {
+TEST_P(CallbackMultiDTypeTest, ModelCheckpointSaveBestOnly) {
     auto checkpoint = std::make_shared<ModelCheckpointCallback>(
-        "/tmp/test_model_best_multidtype.pt",
-        this->model,
+        "/tmp/test_model_best_multidtype_" + backend_name() + ".pt",
+        model,
         true  // save_best_only
     );
 
@@ -305,10 +298,10 @@ TYPED_TEST(CallbackMultiDtypeTest, ModelCheckpointSaveBestOnly) {
     EXPECT_FLOAT_EQ(checkpoint->best_loss(), old_best);  // Should not change
 }
 
-TYPED_TEST(CallbackMultiDtypeTest, ModelCheckpointFilepathTemplate) {
+TEST_P(CallbackMultiDTypeTest, ModelCheckpointFilepathTemplate) {
     auto checkpoint = std::make_shared<ModelCheckpointCallback>(
-        "/tmp/model_epoch_{epoch:03d}_multidtype.pt",
-        this->model,
+        "/tmp/model_epoch_{epoch:03d}_" + backend_name() + ".pt",
+        model,
         false  // save every epoch
     );
 
@@ -317,10 +310,10 @@ TYPED_TEST(CallbackMultiDtypeTest, ModelCheckpointFilepathTemplate) {
     EXPECT_NO_THROW(checkpoint->on_epoch_end(9, 0.8f, 0.7f));
 }
 
-TYPED_TEST(CallbackMultiDtypeTest, ModelCheckpointMonitorTrainLoss) {
+TEST_P(CallbackMultiDTypeTest, ModelCheckpointMonitorTrainLoss) {
     auto checkpoint = std::make_shared<ModelCheckpointCallback>(
-        "/tmp/test_model_trainloss.pt",
-        this->model,
+        "/tmp/test_model_trainloss_" + backend_name() + ".pt",
+        model,
         true,
         "train_loss"
     );
@@ -338,9 +331,9 @@ TYPED_TEST(CallbackMultiDtypeTest, ModelCheckpointMonitorTrainLoss) {
 // LRSchedulerCallback Tests
 // ============================================================================
 
-TYPED_TEST(CallbackMultiDtypeTest, LRSchedulerCallbackCreation) {
+TEST_P(CallbackMultiDTypeTest, LRSchedulerCallbackCreation) {
     auto scheduler = std::make_shared<LRSchedulerCallback>(
-        this->optimizer_sgd,
+        optimizer_sgd,
         "step",
         0.1f,
         10
@@ -350,16 +343,15 @@ TYPED_TEST(CallbackMultiDtypeTest, LRSchedulerCallbackCreation) {
     EXPECT_GT(scheduler->current_lr(), 0.0f);
 }
 
-TYPED_TEST(CallbackMultiDtypeTest, LRSchedulerStepDecay) {
+TEST_P(CallbackMultiDTypeTest, LRSchedulerStepDecay) {
     auto scheduler = std::make_shared<LRSchedulerCallback>(
-        this->optimizer_sgd,
+        optimizer_sgd,
         "step",
         0.5f,   // decay by 0.5x
         3       // every 3 epochs
     );
 
     scheduler->on_train_begin();
-    float initial_lr = scheduler->current_lr();
 
     // Epochs 0-2: no decay
     scheduler->on_epoch_end(0, 1.0f, 0.9f);
@@ -374,9 +366,9 @@ TYPED_TEST(CallbackMultiDtypeTest, LRSchedulerStepDecay) {
     EXPECT_LE(lr_after_decay, lr_before_decay);
 }
 
-TYPED_TEST(CallbackMultiDtypeTest, LRSchedulerExponentialDecay) {
+TEST_P(CallbackMultiDTypeTest, LRSchedulerExponentialDecay) {
     auto scheduler = std::make_shared<LRSchedulerCallback>(
-        this->optimizer_adam,
+        optimizer_adam,
         "exponential",
         0.9f
     );
@@ -395,9 +387,9 @@ TYPED_TEST(CallbackMultiDtypeTest, LRSchedulerExponentialDecay) {
     EXPECT_LT(final_lr, initial_lr);
 }
 
-TYPED_TEST(CallbackMultiDtypeTest, LRSchedulerCosineAnnealing) {
+TEST_P(CallbackMultiDTypeTest, LRSchedulerCosineAnnealing) {
     auto scheduler = std::make_shared<LRSchedulerCallback>(
-        this->optimizer_sgd,
+        optimizer_sgd,
         "cosine",
         0.1f,
         10,  // total epochs
@@ -417,14 +409,14 @@ TYPED_TEST(CallbackMultiDtypeTest, LRSchedulerCosineAnnealing) {
     // With cosine annealing, final LR should be different from initial
 }
 
-TYPED_TEST(CallbackMultiDtypeTest, LRSchedulerMultipleSchedules) {
+TEST_P(CallbackMultiDTypeTest, LRSchedulerMultipleSchedules) {
     // Test different schedule types
     auto step_sched = std::make_shared<LRSchedulerCallback>(
-        this->optimizer_sgd, "step", 0.5f, 5
+        optimizer_sgd, "step", 0.5f, 5
     );
 
     auto exp_sched = std::make_shared<LRSchedulerCallback>(
-        this->optimizer_adam, "exponential", 0.95f
+        optimizer_adam, "exponential", 0.95f
     );
 
     step_sched->on_train_begin();
@@ -444,17 +436,16 @@ TYPED_TEST(CallbackMultiDtypeTest, LRSchedulerMultipleSchedules) {
 // CallbackList Tests
 // ============================================================================
 
-TYPED_TEST(CallbackMultiDtypeTest, CallbackListCreation) {
+TEST_P(CallbackMultiDTypeTest, CallbackListCreation) {
     CallbackList callbacks;
     EXPECT_EQ(callbacks.callbacks().size(), 0);
 }
 
-TYPED_TEST(CallbackMultiDtypeTest, CallbackListAddCallbacks) {
-    using T = TypeParam;
+TEST_P(CallbackMultiDTypeTest, CallbackListAddCallbacks) {
     CallbackList callbacks;
 
-    auto cb1 = std::make_shared<TestCallbackTyped<T>>();
-    auto cb2 = std::make_shared<TestCallbackTyped<T>>();
+    auto cb1 = std::make_shared<TestCallbackImpl>();
+    auto cb2 = std::make_shared<TestCallbackImpl>();
     auto cb3 = std::make_shared<ProgressCallback>();
 
     callbacks.add(cb1);
@@ -464,12 +455,11 @@ TYPED_TEST(CallbackMultiDtypeTest, CallbackListAddCallbacks) {
     EXPECT_EQ(callbacks.callbacks().size(), 3);
 }
 
-TYPED_TEST(CallbackMultiDtypeTest, CallbackListCallsAllCallbacks) {
-    using T = TypeParam;
+TEST_P(CallbackMultiDTypeTest, CallbackListCallsAllCallbacks) {
     CallbackList callbacks;
 
-    auto cb1 = std::make_shared<TestCallbackTyped<T>>();
-    auto cb2 = std::make_shared<TestCallbackTyped<T>>();
+    auto cb1 = std::make_shared<TestCallbackImpl>();
+    auto cb2 = std::make_shared<TestCallbackImpl>();
 
     callbacks.add(cb1);
     callbacks.add(cb2);
@@ -498,11 +488,10 @@ TYPED_TEST(CallbackMultiDtypeTest, CallbackListCallsAllCallbacks) {
     EXPECT_EQ(cb2->train_end_count, 1);
 }
 
-TYPED_TEST(CallbackMultiDtypeTest, CallbackListRemoveCallbacks) {
-    using T = TypeParam;
+TEST_P(CallbackMultiDTypeTest, CallbackListRemoveCallbacks) {
     CallbackList callbacks;
 
-    auto cb1 = std::make_shared<TestCallbackTyped<T>>();
+    auto cb1 = std::make_shared<TestCallbackImpl>();
     auto cb2 = std::make_shared<ProgressCallback>();
 
     callbacks.add(cb1);
@@ -518,7 +507,7 @@ TYPED_TEST(CallbackMultiDtypeTest, CallbackListRemoveCallbacks) {
 // Integration Tests
 // ============================================================================
 
-TYPED_TEST(CallbackMultiDtypeTest, MultipleCallbacksWithEarlyStopping) {
+TEST_P(CallbackMultiDTypeTest, MultipleCallbacksWithEarlyStopping) {
     CallbackList callbacks;
 
     auto progress = std::make_shared<ProgressCallback>(1);
@@ -558,16 +547,16 @@ TYPED_TEST(CallbackMultiDtypeTest, MultipleCallbacksWithEarlyStopping) {
     EXPECT_TRUE(early_stop->should_stop());
 }
 
-TYPED_TEST(CallbackMultiDtypeTest, CallbackWithModelAndOptimizer) {
+TEST_P(CallbackMultiDTypeTest, CallbackWithModelAndOptimizer) {
     // Create callbacks
     auto checkpoint = std::make_shared<ModelCheckpointCallback>(
-        "/tmp/test_model_integrated.pt",
-        this->model,
+        "/tmp/test_model_integrated_" + backend_name() + ".pt",
+        model,
         true
     );
 
     auto lr_scheduler = std::make_shared<LRSchedulerCallback>(
-        this->optimizer_adam,
+        optimizer_adam,
         "step",
         0.1f,
         5
@@ -594,22 +583,20 @@ TYPED_TEST(CallbackMultiDtypeTest, CallbackWithModelAndOptimizer) {
     EXPECT_GT(lr_scheduler->current_lr(), 0.0f);
 }
 
-TYPED_TEST(CallbackMultiDtypeTest, CompleteTrainingWorkflow) {
-    using T = TypeParam;
-
+TEST_P(CallbackMultiDTypeTest, CompleteTrainingWorkflow) {
     CallbackList callbacks;
 
     // Add all callback types
-    auto custom_cb = std::make_shared<TestCallbackTyped<T>>();
+    auto custom_cb = std::make_shared<TestCallbackImpl>();
     auto progress = std::make_shared<ProgressCallback>(2);
     auto early_stop = std::make_shared<EarlyStoppingCallback>(5, 0.001f);
     auto checkpoint = std::make_shared<ModelCheckpointCallback>(
-        "/tmp/workflow_model.pt",
-        this->model,
+        "/tmp/workflow_model_" + backend_name() + ".pt",
+        model,
         true
     );
     auto lr_scheduler = std::make_shared<LRSchedulerCallback>(
-        this->optimizer_sgd,
+        optimizer_sgd,
         "exponential",
         0.95f
     );
@@ -659,13 +646,11 @@ TYPED_TEST(CallbackMultiDtypeTest, CompleteTrainingWorkflow) {
     EXPECT_GT(lr_scheduler->current_lr(), 0.0f);
 }
 
-TYPED_TEST(CallbackMultiDtypeTest, CallbackOrderMatters) {
-    using T = TypeParam;
-
+TEST_P(CallbackMultiDTypeTest, CallbackOrderMatters) {
     CallbackList callbacks;
 
-    auto cb1 = std::make_shared<TestCallbackTyped<T>>();
-    auto cb2 = std::make_shared<TestCallbackTyped<T>>();
+    auto cb1 = std::make_shared<TestCallbackImpl>();
+    auto cb2 = std::make_shared<TestCallbackImpl>();
 
     // Add in specific order
     callbacks.add(cb1);
@@ -678,12 +663,10 @@ TYPED_TEST(CallbackMultiDtypeTest, CallbackOrderMatters) {
     EXPECT_EQ(cb2->epoch_end_count, 1);
 }
 
-TYPED_TEST(CallbackMultiDtypeTest, LRSchedulerWithDifferentOptimizers) {
-    using T = TypeParam;
-
+TEST_P(CallbackMultiDTypeTest, LRSchedulerWithDifferentOptimizers) {
     // Test with SGD
     auto sgd_scheduler = std::make_shared<LRSchedulerCallback>(
-        this->optimizer_sgd,
+        optimizer_sgd,
         "step",
         0.5f,
         3
@@ -691,7 +674,7 @@ TYPED_TEST(CallbackMultiDtypeTest, LRSchedulerWithDifferentOptimizers) {
 
     // Test with Adam
     auto adam_scheduler = std::make_shared<LRSchedulerCallback>(
-        this->optimizer_adam,
+        optimizer_adam,
         "exponential",
         0.9f
     );
@@ -716,7 +699,7 @@ TYPED_TEST(CallbackMultiDtypeTest, LRSchedulerWithDifferentOptimizers) {
 // Edge Cases and Error Handling
 // ============================================================================
 
-TYPED_TEST(CallbackMultiDtypeTest, EarlyStoppingWithZeroPatience) {
+TEST_P(CallbackMultiDTypeTest, EarlyStoppingWithZeroPatience) {
     auto early_stop = std::make_shared<EarlyStoppingCallback>(0, 0.0f);
 
     // Should trigger immediately after first epoch
@@ -724,7 +707,7 @@ TYPED_TEST(CallbackMultiDtypeTest, EarlyStoppingWithZeroPatience) {
     EXPECT_TRUE(early_stop->should_stop());
 }
 
-TYPED_TEST(CallbackMultiDtypeTest, CallbackListEmpty) {
+TEST_P(CallbackMultiDTypeTest, CallbackListEmpty) {
     CallbackList callbacks;
 
     // Should handle empty list without crashing
@@ -735,11 +718,11 @@ TYPED_TEST(CallbackMultiDtypeTest, CallbackListEmpty) {
     EXPECT_NO_THROW(callbacks.on_train_end());
 }
 
-TYPED_TEST(CallbackMultiDtypeTest, ModelCheckpointWithInvalidPath) {
+TEST_P(CallbackMultiDTypeTest, ModelCheckpointWithInvalidPath) {
     // Test with path that might fail
     auto checkpoint = std::make_shared<ModelCheckpointCallback>(
         "/invalid_path/model.pt",
-        this->model,
+        model,
         true
     );
 
@@ -747,10 +730,10 @@ TYPED_TEST(CallbackMultiDtypeTest, ModelCheckpointWithInvalidPath) {
     EXPECT_NO_THROW(checkpoint->on_epoch_end(0, 1.0f, 0.9f));
 }
 
-TYPED_TEST(CallbackMultiDtypeTest, LRSchedulerWithInvalidSchedule) {
+TEST_P(CallbackMultiDTypeTest, LRSchedulerWithInvalidSchedule) {
     // Test with potentially invalid schedule parameters
     auto scheduler = std::make_shared<LRSchedulerCallback>(
-        this->optimizer_sgd,
+        optimizer_sgd,
         "unknown_schedule",  // Unknown schedule type
         0.5f,
         10
@@ -760,7 +743,42 @@ TYPED_TEST(CallbackMultiDtypeTest, LRSchedulerWithInvalidSchedule) {
     EXPECT_NO_THROW(scheduler->on_train_begin());
 }
 
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
+// ============================================================================
+// Model Forward Pass with Callbacks
+// ============================================================================
+
+TEST_P(CallbackMultiDTypeTest, ModelForwardWithCallback) {
+    // Test that model works properly with callbacks
+    Variable input = createInput({4, 10}, true);
+
+    auto output = model->forward(input);
+
+    EXPECT_EQ(output.shape()[0], 4);
+    EXPECT_EQ(output.shape()[1], 5);
+    EXPECT_EQ(output.tensor().dtype(), dtype());
 }
+
+// ============================================================================
+// Test Instantiation
+// ============================================================================
+
+INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(CallbackMultiDTypeTest);
+
+/*
+ * COVERAGE SUMMARY:
+ *
+ * Test Cases: 33
+ * DTypes Tested: Float32, Float64, Float16
+ * Backends Tested: CPU, CUDA, OneAPI
+ * Total Scenarios: 33 tests × 3 dtypes × 3 backends = 297 test scenarios
+ *
+ * Coverage:
+ * - Base callback: interface, custom tracking
+ * - ProgressCallback: creation, hooks, multiple epochs
+ * - EarlyStoppingCallback: creation, improvement tracking, triggering, monitoring
+ * - ModelCheckpointCallback: creation, save best only, filepath template, monitoring
+ * - LRSchedulerCallback: creation, step decay, exponential, cosine, multiple schedules
+ * - CallbackList: creation, adding, calling all, ordering
+ * - Integration: complete workflows, model+optimizer integration
+ * - Edge cases: zero patience, empty list, invalid paths, invalid schedules
+ */

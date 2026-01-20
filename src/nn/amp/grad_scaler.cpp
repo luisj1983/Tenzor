@@ -91,14 +91,25 @@ auto GradScaler::check_inf_nan_(const optim::Optimizer& optimizer) const -> bool
         // Copy gradient to CPU for inspection (handles CUDA tensors)
         const auto& grad_tensor = *grad;
         auto cpu_grad = grad_tensor.cpu();
-        const float* data_ptr = cpu_grad.data<float>();
         const int64_t numel = cpu_grad.numel();
 
-        // Check each element for inf or nan
-        for (int64_t i = 0; i < numel; ++i) {
-            const float val = data_ptr[i];
-            if (std::isinf(val) || std::isnan(val)) {
-                return true;
+        // Check each element for inf or nan based on dtype
+        if (cpu_grad.dtype() == DType::Float64) {
+            const double* data_ptr = cpu_grad.data<double>();
+            for (int64_t i = 0; i < numel; ++i) {
+                const double val = data_ptr[i];
+                if (std::isinf(val) || std::isnan(val)) {
+                    return true;
+                }
+            }
+        } else {
+            // Default to Float32 (also covers Float16 which is converted to Float32)
+            const float* data_ptr = cpu_grad.data<float>();
+            for (int64_t i = 0; i < numel; ++i) {
+                const float val = data_ptr[i];
+                if (std::isinf(val) || std::isnan(val)) {
+                    return true;
+                }
             }
         }
     }

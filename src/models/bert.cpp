@@ -248,8 +248,8 @@ auto BertPooler::forward_impl(const Variable& hidden_states) -> Variable {
         }
     } else if (dtype == DType::Float16) {
         // Float16 data needs special handling
-        auto* sel_data = selection_matrix_cpu.data<uint16_t>();
-        uint16_t one_f16 = 0x3C00;  // Float16 representation of 1.0
+        auto* sel_data = selection_matrix_cpu.data<Float16>();
+        Float16 one_f16(1.0f);
         for (int64_t b = 0; b < batch_size; ++b) {
             sel_data[b * (batch_size * seq_len) + b * seq_len] = one_f16;
         }
@@ -476,7 +476,7 @@ auto BertForQuestionAnswering::forward(const Variable& input_ids,
     } else if (dtype == DType::Float64) {
         start_selector.data<double>()[0] = 1.0;
     } else if (dtype == DType::Float16) {
-        start_selector.data<uint16_t>()[0] = 0x3C00;  // Float16 representation of 1.0
+        start_selector.data<Float16>()[0] = Float16(1.0f);
     }
 
     // End logits: multiply by [0, 1]
@@ -487,7 +487,7 @@ auto BertForQuestionAnswering::forward(const Variable& input_ids,
     } else if (dtype == DType::Float64) {
         end_selector.data<double>()[1] = 1.0;
     } else if (dtype == DType::Float16) {
-        end_selector.data<uint16_t>()[1] = 0x3C00;  // Float16 representation of 1.0
+        end_selector.data<Float16>()[1] = Float16(1.0f);
     }
 
     // Use matmul to select: [batch*seq_len, 2] @ [2, 1] = [batch*seq_len, 1]

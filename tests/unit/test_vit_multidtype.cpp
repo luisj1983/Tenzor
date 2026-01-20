@@ -1,11 +1,12 @@
 /**
  * @file test_vit_multidtype.cpp
- * @brief Multi-dtype tests for Vision Transformer (ViT) variants
+ * @brief Multi-backend and multi-dtype tests for Vision Transformer (ViT) variants
  *
- * Tests ViT models with Float32, Float64, and Float16 data types to ensure:
+ * Tests ViT models across all backends (CPU, CUDA, OneAPI) and dtypes
+ * (Float32, Float64, Float16) to ensure:
  * - Proper dtype propagation through patch embedding, position embeddings, and transformers
  * - Correct output shapes across all ViT variants (Tiny, Small, Base, Large, Huge)
- * - Gradient flow with different dtypes
+ * - Gradient flow with different dtypes and backends
  * - Class token handling across dtypes
  * - Different image sizes and patch sizes
  */
@@ -15,58 +16,19 @@
 #include "../../include/tenzor/models/vit.hpp"
 #include "../../include/tenzor/core/tensor.hpp"
 #include "../../include/tenzor/autograd/variable.hpp"
+#include "../multi_backend_dtype_fixture.hpp"
 #include <tuple>
 #include <vector>
 
 using namespace tenzor;
 using namespace tenzor::models;
+using namespace tenzor::testing;
 
 // ============================================================================
-// Parameterized Test Fixture
+// Parameterized Test Fixture (Multi-Backend + Multi-DType)
 // ============================================================================
 
-class ViTMultiDtypeTest : public ::testing::TestWithParam<DType> {
-protected:
-    void SetUp() override {
-        device_ = Device::cpu();
-        dtype_ = GetParam();
-
-        // Set tolerance based on dtype
-        if (dtype_ == DType::Float16) {
-            rtol_ = 1e-2f;
-            atol_ = 1e-2f;
-        } else if (dtype_ == DType::Float32) {
-            rtol_ = 1e-4f;
-            atol_ = 1e-5f;
-        } else {  // Float64
-            rtol_ = 1e-6f;
-            atol_ = 1e-7f;
-        }
-    }
-
-    Device device_;
-    DType dtype_;
-    float rtol_;
-    float atol_;
-
-    // Helper to create input tensor with current dtype
-    Variable createInput(const std::vector<int64_t>& shape, bool requires_grad = true) {
-        return Variable(Tensor(shape, dtype_, device_), requires_grad);
-    }
-
-    // Helper to count total parameters
-    size_t countParameters(const std::vector<std::shared_ptr<Variable>>& params) {
-        size_t total = 0;
-        for (const auto& p : params) {
-            size_t param_size = 1;
-            for (auto dim : p->tensor().shape()) {
-                param_size *= dim;
-            }
-            total += param_size;
-        }
-        return total;
-    }
-};
+class ViTMultiDtypeTest : public MultiBackendDTypeTest {};
 
 // ============================================================================
 // PatchEmbedding Tests
@@ -80,30 +42,28 @@ TEST_P(ViTMultiDtypeTest, PatchEmbeddingForwardShape) {
 
     auto patch_embed = std::make_shared<PatchEmbedding>(
         image_size, patch_size, num_channels, hidden_size);
+    convert_model(patch_embed);
 
-    Variable input = createInput({2, num_channels, image_size, image_size});
-    Variable output = patch_embed->forward(input);
+    auto input = createInput({2, num_channels, image_size, image_size});
+    auto output = patch_embed->forward(input);
 
     // Expected: (batch, num_patches, hidden_size)
     // num_patches = (224/16) * (224/16) = 196
-    auto shape = output.tensor().shape();
-    EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()),
-              (std::vector<int64_t>{2, 196, 768}));
-
-    // Verify output dtype matches input
-    EXPECT_EQ(output.tensor().dtype(), dtype_);
+    expectShape(output.tensor(), {2, 196, 768});
+    expectDType(output.tensor());
 }
 
 TEST_P(ViTMultiDtypeTest, PatchEmbeddingGradientFlow) {
     auto patch_embed = std::make_shared<PatchEmbedding>(224, 16, 3, 768);
+    convert_model(patch_embed);
 
-    Variable input = createInput({1, 3, 224, 224});
-    Variable output = patch_embed->forward(input);
-    Variable loss = tenzor::sum(output);
+    auto input = createInput({1, 3, 224, 224});
+    auto output = patch_embed->forward(input);
+    auto loss = tenzor::sum(output);
     loss.backward();
 
     EXPECT_TRUE(input.grad().has_value());
-    EXPECT_EQ(input.grad()->dtype(), dtype_);
+    EXPECT_EQ(input.grad()->dtype(), dtype());
 
     auto params = patch_embed->parameters();
     EXPECT_GT(params.size(), 0);
@@ -111,7 +71,7 @@ TEST_P(ViTMultiDtypeTest, PatchEmbeddingGradientFlow) {
     // Check gradient dtype for parameters
     for (const auto& param : params) {
         if (param->grad().has_value()) {
-            EXPECT_EQ(param->grad()->dtype(), dtype_);
+            EXPECT_EQ(param->grad()->dtype(), dtype());
         }
     }
 }
@@ -130,23 +90,21 @@ TEST_P(ViTMultiDtypeTest, PatchEmbeddingNumPatches) {
 TEST_P(ViTMultiDtypeTest, PatchEmbeddingDifferentPatchSizes) {
     // Test patch size 14
     auto patch_embed_14 = std::make_shared<PatchEmbedding>(224, 14, 3, 1280);
-    Variable input_14 = createInput({1, 3, 224, 224});
-    Variable output_14 = patch_embed_14->forward(input_14);
+    convert_model(patch_embed_14);
+    auto input_14 = createInput({1, 3, 224, 224});
+    auto output_14 = patch_embed_14->forward(input_14);
 
-    auto shape_14 = output_14.tensor().shape();
-    EXPECT_EQ(std::vector<int64_t>(shape_14.begin(), shape_14.end()),
-              (std::vector<int64_t>{1, 256, 1280}));
-    EXPECT_EQ(output_14.tensor().dtype(), dtype_);
+    expectShape(output_14.tensor(), {1, 256, 1280});
+    expectDType(output_14.tensor());
 
     // Test patch size 32
     auto patch_embed_32 = std::make_shared<PatchEmbedding>(224, 32, 3, 768);
-    Variable input_32 = createInput({1, 3, 224, 224});
-    Variable output_32 = patch_embed_32->forward(input_32);
+    convert_model(patch_embed_32);
+    auto input_32 = createInput({1, 3, 224, 224});
+    auto output_32 = patch_embed_32->forward(input_32);
 
-    auto shape_32 = output_32.tensor().shape();
-    EXPECT_EQ(std::vector<int64_t>(shape_32.begin(), shape_32.end()),
-              (std::vector<int64_t>{1, 49, 768}));
-    EXPECT_EQ(output_32.tensor().dtype(), dtype_);
+    expectShape(output_32.tensor(), {1, 49, 768});
+    expectDType(output_32.tensor());
 }
 
 // ============================================================================
@@ -156,42 +114,43 @@ TEST_P(ViTMultiDtypeTest, PatchEmbeddingDifferentPatchSizes) {
 TEST_P(ViTMultiDtypeTest, ViTEmbeddingsForwardShape) {
     auto config = ViTConfig::base_patch16(224);
     auto embeddings = std::make_shared<ViTEmbeddings>(config);
+    convert_model(embeddings);
 
-    Variable input = createInput({2, 3, 224, 224});
-    Variable output = embeddings->forward(input);
+    auto input = createInput({2, 3, 224, 224});
+    auto output = embeddings->forward(input);
 
     // Expected: (batch, num_patches + 1 (CLS), hidden_size)
     // num_patches = 196, so seq_len = 197
-    auto shape = output.tensor().shape();
-    EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()),
-              (std::vector<int64_t>{2, 197, 768}));
-    EXPECT_EQ(output.tensor().dtype(), dtype_);
+    expectShape(output.tensor(), {2, 197, 768});
+    expectDType(output.tensor());
 }
 
 TEST_P(ViTMultiDtypeTest, ViTEmbeddingsGradientFlow) {
     auto config = ViTConfig::base_patch16(224);
     auto embeddings = std::make_shared<ViTEmbeddings>(config);
+    convert_model(embeddings);
 
-    Variable input = createInput({1, 3, 224, 224});
-    Variable output = embeddings->forward(input);
-    Variable loss = tenzor::sum(output);
+    auto input = createInput({1, 3, 224, 224});
+    auto output = embeddings->forward(input);
+    auto loss = tenzor::sum(output);
     loss.backward();
 
     EXPECT_TRUE(input.grad().has_value());
-    EXPECT_EQ(input.grad()->dtype(), dtype_);
+    EXPECT_EQ(input.grad()->dtype(), dtype());
 }
 
 TEST_P(ViTMultiDtypeTest, ViTEmbeddingsClassToken) {
     auto config = ViTConfig::base_patch16(224);
     auto embeddings = std::make_shared<ViTEmbeddings>(config);
+    convert_model(embeddings);
 
-    Variable input = createInput({2, 3, 224, 224});
-    Variable output = embeddings->forward(input);
+    auto input = createInput({2, 3, 224, 224});
+    auto output = embeddings->forward(input);
 
     // Verify class token is added (seq_len should be num_patches + 1)
     auto shape = output.tensor().shape();
     EXPECT_EQ(shape[1], 197);  // 196 patches + 1 class token
-    EXPECT_EQ(output.tensor().dtype(), dtype_);
+    expectDType(output.tensor());
 }
 
 // ============================================================================
@@ -213,27 +172,27 @@ TEST_P(ViTMultiDtypeTest, ViTBaseConfig) {
 
 TEST_P(ViTMultiDtypeTest, ViTBasePatch16ForwardShape) {
     auto model = ViT_Base_Patch16(1000, false, 224);
+    convert_model(model);
 
-    Variable input = createInput({2, 3, 224, 224});
-    Variable output = model->forward(input);
+    auto input = createInput({2, 3, 224, 224});
+    auto output = model->forward(input);
 
-    auto shape = output.tensor().shape();
-    EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()),
-              (std::vector<int64_t>{2, 1000}));
-    EXPECT_EQ(output.tensor().dtype(), dtype_);
+    expectShape(output.tensor(), {2, 1000});
+    expectDType(output.tensor());
 }
 
 TEST_P(ViTMultiDtypeTest, ViTBasePatch16GradientFlow) {
     auto model = ViT_Base_Patch16(10, false, 224);
+    convert_model(model);
     model->train();
 
-    Variable input = createInput({1, 3, 224, 224});
-    Variable output = model->forward(input);
-    Variable loss = tenzor::sum(output);
+    auto input = createInput({1, 3, 224, 224});
+    auto output = model->forward(input);
+    auto loss = tenzor::sum(output);
     loss.backward();
 
     EXPECT_TRUE(input.grad().has_value());
-    EXPECT_EQ(input.grad()->dtype(), dtype_);
+    EXPECT_EQ(input.grad()->dtype(), dtype());
 
     auto params = model->parameters();
     EXPECT_GT(params.size(), 0);
@@ -241,6 +200,7 @@ TEST_P(ViTMultiDtypeTest, ViTBasePatch16GradientFlow) {
 
 TEST_P(ViTMultiDtypeTest, ViTBasePatch16ParameterCount) {
     auto model = ViT_Base_Patch16(1000, false, 224);
+    convert_model(model);
     auto params = model->parameters();
 
     // ViT-Base should have around 86M parameters
@@ -253,26 +213,24 @@ TEST_P(ViTMultiDtypeTest, ViTBasePatch16ParameterCount) {
 
 TEST_P(ViTMultiDtypeTest, ViTBasePatch16BatchSizeOne) {
     auto model = ViT_Base_Patch16(10, false, 224);
+    convert_model(model);
 
-    Variable input = createInput({1, 3, 224, 224});
-    Variable output = model->forward(input);
+    auto input = createInput({1, 3, 224, 224});
+    auto output = model->forward(input);
 
-    auto shape = output.tensor().shape();
-    EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()),
-              (std::vector<int64_t>{1, 10}));
-    EXPECT_EQ(output.tensor().dtype(), dtype_);
+    expectShape(output.tensor(), {1, 10});
+    expectDType(output.tensor());
 }
 
 TEST_P(ViTMultiDtypeTest, ViTBasePatch16CustomClasses) {
     auto model = ViT_Base_Patch16(100, false, 224);
+    convert_model(model);
 
-    Variable input = createInput({2, 3, 224, 224});
-    Variable output = model->forward(input);
+    auto input = createInput({2, 3, 224, 224});
+    auto output = model->forward(input);
 
-    auto shape = output.tensor().shape();
-    EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()),
-              (std::vector<int64_t>{2, 100}));
-    EXPECT_EQ(output.tensor().dtype(), dtype_);
+    expectShape(output.tensor(), {2, 100});
+    expectDType(output.tensor());
 }
 
 // ============================================================================
@@ -289,27 +247,27 @@ TEST_P(ViTMultiDtypeTest, ViTBasePatch32Config) {
 
 TEST_P(ViTMultiDtypeTest, ViTBasePatch32ForwardShape) {
     auto model = ViT_Base_Patch32(1000, false, 224);
+    convert_model(model);
 
-    Variable input = createInput({2, 3, 224, 224});
-    Variable output = model->forward(input);
+    auto input = createInput({2, 3, 224, 224});
+    auto output = model->forward(input);
 
-    auto shape = output.tensor().shape();
-    EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()),
-              (std::vector<int64_t>{2, 1000}));
-    EXPECT_EQ(output.tensor().dtype(), dtype_);
+    expectShape(output.tensor(), {2, 1000});
+    expectDType(output.tensor());
 }
 
 TEST_P(ViTMultiDtypeTest, ViTBasePatch32GradientFlow) {
     auto model = ViT_Base_Patch32(10, false, 224);
+    convert_model(model);
     model->train();
 
-    Variable input = createInput({1, 3, 224, 224});
-    Variable output = model->forward(input);
-    Variable loss = tenzor::sum(output);
+    auto input = createInput({1, 3, 224, 224});
+    auto output = model->forward(input);
+    auto loss = tenzor::sum(output);
     loss.backward();
 
     EXPECT_TRUE(input.grad().has_value());
-    EXPECT_EQ(input.grad()->dtype(), dtype_);
+    EXPECT_EQ(input.grad()->dtype(), dtype());
 }
 
 // ============================================================================
@@ -329,31 +287,32 @@ TEST_P(ViTMultiDtypeTest, ViTLargeConfig) {
 
 TEST_P(ViTMultiDtypeTest, ViTLargePatch16ForwardShape) {
     auto model = ViT_Large_Patch16(1000, false, 224);
+    convert_model(model);
 
-    Variable input = createInput({2, 3, 224, 224});
-    Variable output = model->forward(input);
+    auto input = createInput({2, 3, 224, 224});
+    auto output = model->forward(input);
 
-    auto shape = output.tensor().shape();
-    EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()),
-              (std::vector<int64_t>{2, 1000}));
-    EXPECT_EQ(output.tensor().dtype(), dtype_);
+    expectShape(output.tensor(), {2, 1000});
+    expectDType(output.tensor());
 }
 
 TEST_P(ViTMultiDtypeTest, ViTLargePatch16GradientFlow) {
     auto model = ViT_Large_Patch16(10, false, 224);
+    convert_model(model);
     model->train();
 
-    Variable input = createInput({1, 3, 224, 224});
-    Variable output = model->forward(input);
-    Variable loss = tenzor::sum(output);
+    auto input = createInput({1, 3, 224, 224});
+    auto output = model->forward(input);
+    auto loss = tenzor::sum(output);
     loss.backward();
 
     EXPECT_TRUE(input.grad().has_value());
-    EXPECT_EQ(input.grad()->dtype(), dtype_);
+    EXPECT_EQ(input.grad()->dtype(), dtype());
 }
 
 TEST_P(ViTMultiDtypeTest, ViTLargePatch16ParameterCount) {
     auto model = ViT_Large_Patch16(1000, false, 224);
+    convert_model(model);
     auto params = model->parameters();
 
     // ViT-Large should have around 307M parameters
@@ -370,14 +329,13 @@ TEST_P(ViTMultiDtypeTest, ViTLargePatch16ParameterCount) {
 
 TEST_P(ViTMultiDtypeTest, ViTLargePatch32ForwardShape) {
     auto model = ViT_Large_Patch32(1000, false, 224);
+    convert_model(model);
 
-    Variable input = createInput({2, 3, 224, 224});
-    Variable output = model->forward(input);
+    auto input = createInput({2, 3, 224, 224});
+    auto output = model->forward(input);
 
-    auto shape = output.tensor().shape();
-    EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()),
-              (std::vector<int64_t>{2, 1000}));
-    EXPECT_EQ(output.tensor().dtype(), dtype_);
+    expectShape(output.tensor(), {2, 1000});
+    expectDType(output.tensor());
 }
 
 // ============================================================================
@@ -399,31 +357,32 @@ TEST_P(ViTMultiDtypeTest, ViTHugeConfig) {
 
 TEST_P(ViTMultiDtypeTest, ViTHugePatch14ForwardShape) {
     auto model = ViT_Huge_Patch14(1000, false, 224);
+    convert_model(model);
 
-    Variable input = createInput({1, 3, 224, 224});
-    Variable output = model->forward(input);
+    auto input = createInput({1, 3, 224, 224});
+    auto output = model->forward(input);
 
-    auto shape = output.tensor().shape();
-    EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()),
-              (std::vector<int64_t>{1, 1000}));
-    EXPECT_EQ(output.tensor().dtype(), dtype_);
+    expectShape(output.tensor(), {1, 1000});
+    expectDType(output.tensor());
 }
 
 TEST_P(ViTMultiDtypeTest, ViTHugePatch14GradientFlow) {
     auto model = ViT_Huge_Patch14(10, false, 224);
+    convert_model(model);
     model->train();
 
-    Variable input = createInput({1, 3, 224, 224});
-    Variable output = model->forward(input);
-    Variable loss = tenzor::sum(output);
+    auto input = createInput({1, 3, 224, 224});
+    auto output = model->forward(input);
+    auto loss = tenzor::sum(output);
     loss.backward();
 
     EXPECT_TRUE(input.grad().has_value());
-    EXPECT_EQ(input.grad()->dtype(), dtype_);
+    EXPECT_EQ(input.grad()->dtype(), dtype());
 }
 
 TEST_P(ViTMultiDtypeTest, ViTHugePatch14ParameterCount) {
     auto model = ViT_Huge_Patch14(1000, false, 224);
+    convert_model(model);
     auto params = model->parameters();
 
     // ViT-Huge should have around 632M parameters
@@ -440,14 +399,13 @@ TEST_P(ViTMultiDtypeTest, ViTHugePatch14ParameterCount) {
 
 TEST_P(ViTMultiDtypeTest, ViTHugePatch16ForwardShape) {
     auto model = ViT_Huge_Patch16(1000, false, 224);
+    convert_model(model);
 
-    Variable input = createInput({1, 3, 224, 224});
-    Variable output = model->forward(input);
+    auto input = createInput({1, 3, 224, 224});
+    auto output = model->forward(input);
 
-    auto shape = output.tensor().shape();
-    EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()),
-              (std::vector<int64_t>{1, 1000}));
-    EXPECT_EQ(output.tensor().dtype(), dtype_);
+    expectShape(output.tensor(), {1, 1000});
+    expectDType(output.tensor());
 }
 
 // ============================================================================
@@ -457,27 +415,25 @@ TEST_P(ViTMultiDtypeTest, ViTHugePatch16ForwardShape) {
 TEST_P(ViTMultiDtypeTest, ViTBaseDifferentImageSize384) {
     // Test with 384x384 input (commonly used for fine-tuning)
     auto model = ViT_Base_Patch16(1000, false, 384);
+    convert_model(model);
 
-    Variable input = createInput({1, 3, 384, 384});
-    Variable output = model->forward(input);
+    auto input = createInput({1, 3, 384, 384});
+    auto output = model->forward(input);
 
-    auto shape = output.tensor().shape();
-    EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()),
-              (std::vector<int64_t>{1, 1000}));
-    EXPECT_EQ(output.tensor().dtype(), dtype_);
+    expectShape(output.tensor(), {1, 1000});
+    expectDType(output.tensor());
 }
 
 TEST_P(ViTMultiDtypeTest, ViTBaseDifferentImageSize512) {
     // Test with 512x512 input
     auto model = ViT_Base_Patch16(1000, false, 512);
+    convert_model(model);
 
-    Variable input = createInput({1, 3, 512, 512});
-    Variable output = model->forward(input);
+    auto input = createInput({1, 3, 512, 512});
+    auto output = model->forward(input);
 
-    auto shape = output.tensor().shape();
-    EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()),
-              (std::vector<int64_t>{1, 1000}));
-    EXPECT_EQ(output.tensor().dtype(), dtype_);
+    expectShape(output.tensor(), {1, 1000});
+    expectDType(output.tensor());
 
     // Verify number of patches: 512/16 = 32, 32*32 = 1024 patches
     auto config = ViTConfig::base_patch16(512);
@@ -505,40 +461,37 @@ TEST_P(ViTMultiDtypeTest, ViTConfigNumPatchesCalculation) {
 
 TEST_P(ViTMultiDtypeTest, ViTBaseLargeBatchSize) {
     auto model = ViT_Base_Patch16(10, false, 224);
+    convert_model(model);
 
-    Variable input = createInput({8, 3, 224, 224});
-    Variable output = model->forward(input);
+    auto input = createInput({8, 3, 224, 224});
+    auto output = model->forward(input);
 
-    auto shape = output.tensor().shape();
-    EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()),
-              (std::vector<int64_t>{8, 10}));
-    EXPECT_EQ(output.tensor().dtype(), dtype_);
+    expectShape(output.tensor(), {8, 10});
+    expectDType(output.tensor());
 }
 
 TEST_P(ViTMultiDtypeTest, ViTBaseSingleChannel) {
     // Test with grayscale input (1 channel)
     auto patch_embed = std::make_shared<PatchEmbedding>(224, 16, 1, 768);
+    convert_model(patch_embed);
 
-    Variable input = createInput({2, 1, 224, 224});
-    Variable output = patch_embed->forward(input);
+    auto input = createInput({2, 1, 224, 224});
+    auto output = patch_embed->forward(input);
 
-    auto shape = output.tensor().shape();
-    EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()),
-              (std::vector<int64_t>{2, 196, 768}));
-    EXPECT_EQ(output.tensor().dtype(), dtype_);
+    expectShape(output.tensor(), {2, 196, 768});
+    expectDType(output.tensor());
 }
 
 TEST_P(ViTMultiDtypeTest, ViTBaseMultiChannel) {
     // Test with hyperspectral input (4 channels)
     auto patch_embed = std::make_shared<PatchEmbedding>(224, 16, 4, 768);
+    convert_model(patch_embed);
 
-    Variable input = createInput({2, 4, 224, 224});
-    Variable output = patch_embed->forward(input);
+    auto input = createInput({2, 4, 224, 224});
+    auto output = patch_embed->forward(input);
 
-    auto shape = output.tensor().shape();
-    EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()),
-              (std::vector<int64_t>{2, 196, 768}));
-    EXPECT_EQ(output.tensor().dtype(), dtype_);
+    expectShape(output.tensor(), {2, 196, 768});
+    expectDType(output.tensor());
 }
 
 // ============================================================================
@@ -547,18 +500,19 @@ TEST_P(ViTMultiDtypeTest, ViTBaseMultiChannel) {
 
 TEST_P(ViTMultiDtypeTest, ViTBaseTrainEvalMode) {
     auto model = ViT_Base_Patch16(10, false, 224);
+    convert_model(model);
 
-    Variable input = createInput({2, 3, 224, 224});
+    auto input = createInput({2, 3, 224, 224});
 
     // Test in training mode
     model->train();
-    Variable output_train = model->forward(input);
-    EXPECT_EQ(output_train.tensor().dtype(), dtype_);
+    auto output_train = model->forward(input);
+    expectDType(output_train.tensor());
 
     // Test in evaluation mode
     model->eval();
-    Variable output_eval = model->forward(input);
-    EXPECT_EQ(output_eval.tensor().dtype(), dtype_);
+    auto output_eval = model->forward(input);
+    expectDType(output_eval.tensor());
 
     // Both should have same shape
     auto shape_train = output_train.tensor().shape();
@@ -568,28 +522,10 @@ TEST_P(ViTMultiDtypeTest, ViTBaseTrainEvalMode) {
 }
 
 // ============================================================================
-// Instantiate Tests for Each DType
+// Instantiate Tests for Each Backend + DType Combination
 // ============================================================================
 
-INSTANTIATE_TEST_SUITE_P(
-    MultiDType,
-    ViTMultiDtypeTest,
-    ::testing::Values(
-        DType::Float32,
-        DType::Float64,
-        DType::Float16
-    ),
-    [](const ::testing::TestParamInfo<DType>& info) {
-        std::string name;
-        switch (info.param) {
-            case DType::Float32: name = "Float32"; break;
-            case DType::Float64: name = "Float64"; break;
-            case DType::Float16: name = "Float16"; break;
-            default: name = "Unknown"; break;
-        }
-        return name;
-    }
-);
+INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(ViTMultiDtypeTest);
 
 // ============================================================================
 // Main

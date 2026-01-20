@@ -6,6 +6,7 @@
 #include "tenzor/nn/layers/segmentation.hpp"
 #include "tenzor/autograd/variable.hpp"
 #include "tenzor/autograd/function.hpp"
+#include "tenzor/autograd/ops.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/math.hpp"
 #include <cmath>
@@ -166,13 +167,8 @@ auto ASPP::forward_impl(const Variable& input) -> Variable {
     feat5 = upsample_bilinear(feat5, H, W);     // [N, out_channels, H, W]
     features.push_back(feat5);
 
-    // Concatenate all branches along channel dimension
-    std::vector<Tensor> feature_tensors;
-    for (const auto& f : features) {
-        feature_tensors.push_back(f.tensor());
-    }
-    auto concat_tensor = cat(feature_tensors, 1);  // [N, out_channels * 5, H, W]
-    auto concat = Variable(concat_tensor, input.requires_grad());
+    // Concatenate all branches along channel dimension using autograd-aware cat
+    auto concat = tenzor::cat(features, 1);  // [N, out_channels * 5, H, W]
 
     // Project to output channels
     auto output = project_->forward(concat);  // [N, out_channels, H, W]
@@ -202,9 +198,17 @@ auto upsample_bilinear(const Variable& input, int64_t target_h, int64_t target_w
     float scale_h = static_cast<float>(H_in) / target_h;
     float scale_w = static_cast<float>(W_in) / target_w;
 
-    // Create output tensor
-    Tensor output(std::vector<int64_t>{N, C, target_h, target_w}, input.tensor().dtype(), input.tensor().device());
-    const Tensor& in_data = input.tensor();
+    // Remember original dtype for output conversion
+    DType original_dtype = input.tensor().dtype();
+
+    // Convert to Float32 for computation (on CPU for direct memory access)
+    Tensor in_data = input.tensor().to(Device::cpu());
+    if (in_data.dtype() != DType::Float32) {
+        in_data = in_data.to(DType::Float32);
+    }
+
+    // Create output tensor in Float32 for computation
+    Tensor output(std::vector<int64_t>{N, C, target_h, target_w}, DType::Float32, Device::cpu());
 
     // Bilinear interpolation implementation
     auto* out_ptr = output.data<float>();
@@ -253,6 +257,14 @@ auto upsample_bilinear(const Variable& input, int64_t target_h, int64_t target_w
                 }
             }
         }
+    }
+
+    // Convert output back to original dtype and device
+    if (output.dtype() != original_dtype) {
+        output = output.to(original_dtype);
+    }
+    if (output.device() != input.tensor().device()) {
+        output = output.to(input.tensor().device());
     }
 
     // Create Variable with gradient tracking if needed

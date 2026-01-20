@@ -82,9 +82,16 @@ auto box_iou(const Tensor& boxes1, const Tensor& boxes2, IoUType iou_type) -> Te
 
     // For CPU, use manual implementation to avoid slice bugs
     if (boxes1.device() == Device::cpu() && boxes2.device() == Device::cpu()) {
+        // Remember original dtype for output
+        DType original_dtype = boxes1.dtype();
+
+        // Convert to Float32 for computation
+        auto boxes1_f32 = boxes1.to(DType::Float32);
+        auto boxes2_f32 = boxes2.to(DType::Float32);
+
         auto result = zeros({N, M}, DType::Float32, Device::cpu());
-        const float* boxes1_data = static_cast<const float*>(boxes1.data_ptr());
-        const float* boxes2_data = static_cast<const float*>(boxes2.data_ptr());
+        const float* boxes1_data = static_cast<const float*>(boxes1_f32.data_ptr());
+        const float* boxes2_data = static_cast<const float*>(boxes2_f32.data_ptr());
         float* result_data = static_cast<float*>(result.data_ptr());
 
         constexpr float pi = 3.14159265358979323846f;
@@ -166,7 +173,8 @@ auto box_iou(const Tensor& boxes1, const Tensor& boxes2, IoUType iou_type) -> Te
             }
         }
 
-        return result;
+        // Convert back to original dtype
+        return result.to(original_dtype);
     }
 
     // Compute areas

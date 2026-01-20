@@ -772,11 +772,21 @@ auto UpsampleBilinearBackward::backward(std::vector<Tensor> grad_outputs) -> std
     // Distribute gradients from upsampled output back to input size
     // For nearest neighbor upsampling: each output pixel's gradient goes to its source input pixel
 
-    const auto& grad_output = grad_outputs[0];
-    const auto& shape = grad_output.shape();
+    const auto& grad_output_orig = grad_outputs[0];
+    const auto& shape = grad_output_orig.shape();
 
     if (shape.size() != 4) {
         throw std::runtime_error("UpsampleBilinearBackward: Expected 4D gradient tensor (N, C, H, W)");
+    }
+
+    // Remember original dtype and device for output conversion
+    DType original_dtype = grad_output_orig.dtype();
+    Device original_device = grad_output_orig.device();
+
+    // Convert to Float32 on CPU for computation
+    Tensor grad_output = grad_output_orig.to(Device::cpu());
+    if (grad_output.dtype() != DType::Float32) {
+        grad_output = grad_output.to(DType::Float32);
     }
 
     int64_t N = shape[0];
@@ -784,8 +794,8 @@ auto UpsampleBilinearBackward::backward(std::vector<Tensor> grad_outputs) -> std
     int64_t H_out = shape[2];
     int64_t W_out = shape[3];
 
-    // Create gradient tensor for input (all zeros initially)
-    auto grad_input = zeros({N, C, input_h_, input_w_}, grad_output.dtype(), grad_output.device());
+    // Create gradient tensor for input (all zeros initially) in Float32
+    auto grad_input = zeros({N, C, input_h_, input_w_}, DType::Float32, Device::cpu());
 
     // Calculate scaling factors (same as forward pass)
     float scale_h = static_cast<float>(input_h_) / output_h_;
@@ -814,6 +824,14 @@ auto UpsampleBilinearBackward::backward(std::vector<Tensor> grad_outputs) -> std
                 }
             }
         }
+    }
+
+    // Convert back to original dtype and device
+    if (grad_input.dtype() != original_dtype) {
+        grad_input = grad_input.to(original_dtype);
+    }
+    if (grad_input.device() != original_device) {
+        grad_input = grad_input.to(original_device);
     }
 
     return {grad_input};

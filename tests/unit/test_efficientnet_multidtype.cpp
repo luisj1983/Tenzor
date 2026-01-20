@@ -1,59 +1,43 @@
 /**
  * @file test_efficientnet_multidtype.cpp
- * @brief Comprehensive multi-dtype tests for EfficientNet B0-B7 variants
- * @details Tests Float32, Float64, and Float16 support for efficient vision models
+ * @brief Multi-backend and multi-dtype tests for EfficientNet B0-B7 variants
+ * @details Tests Float32, Float64, and Float16 support across CPU, CUDA, OneAPI backends
  */
 
 #include <gtest/gtest.h>
-#include <tenzor/tenzor.hpp>
+#include "../multi_backend_dtype_fixture.hpp"
 #include "../../include/tenzor/models/efficientnet.hpp"
-#include "../../include/tenzor/core/tensor.hpp"
-#include "../../include/tenzor/autograd/variable.hpp"
 
 using namespace tenzor;
 using namespace tenzor::models;
+using namespace tenzor::testing;
 
 // ============================================================================
-// Multi-DType Test Fixture
+// Multi-Backend Multi-DType Test Fixture
 // ============================================================================
 
-class EfficientNetMultiDTypeTest : public ::testing::TestWithParam<DType> {
+class EfficientNetMultiDTypeTest : public MultiBackendDTypeTest {
 protected:
     void SetUp() override {
-        dtype_ = GetParam();
-        device_ = Device::cpu();
-    }
-
-    DType dtype_;
-    Device device_;
-
-    // Helper to check shapes match
-    void expectShapeEquals(const Tensor& tensor,
-                          const std::vector<int64_t>& expected_shape) {
-        auto shape = tensor.shape();
-        EXPECT_EQ(std::vector<int64_t>(shape.begin(), shape.end()), expected_shape);
-    }
-
-    // Helper to check dtype matches
-    void expectDTypeEquals(const Tensor& tensor, DType expected_dtype) {
-        EXPECT_EQ(tensor.dtype(), expected_dtype);
+        MultiBackendDTypeTest::SetUp();
     }
 };
 
 // ============================================================================
-// SqueezeExcitation Multi-DType Tests
+// SqueezeExcitation Multi-Backend Multi-DType Tests
 // ============================================================================
 
 TEST_P(EfficientNetMultiDTypeTest, SqueezeExcitationForwardShape) {
     int64_t channels = 64;
     auto se = std::make_shared<EfficientNetSqueezeExcitation>(channels, 0.25);
+    convert_model(se);
 
-    Variable input(Tensor({2, channels, 14, 14}, dtype_, device_), true);
+    Variable input(Tensor({2, channels, 14, 14}, dtype(), device()), true);
     Variable output = se->forward(input);
 
     // SE preserves input shape and dtype
-    expectShapeEquals(output.tensor(), {2, channels, 14, 14});
-    expectDTypeEquals(output.tensor(), dtype_);
+    expectShape(output.tensor(), {2, channels, 14, 14});
+    expectDType(output.tensor());
 }
 
 TEST_P(EfficientNetMultiDTypeTest, SqueezeExcitationDifferentChannels) {
@@ -62,18 +46,20 @@ TEST_P(EfficientNetMultiDTypeTest, SqueezeExcitationDifferentChannels) {
 
     for (int64_t channels : channel_sizes) {
         auto se = std::make_shared<EfficientNetSqueezeExcitation>(channels, 0.25);
-        Variable input(Tensor({1, channels, 7, 7}, dtype_, device_), true);
+        convert_model(se);
+        Variable input(Tensor({1, channels, 7, 7}, dtype(), device()), true);
         Variable output = se->forward(input);
 
-        expectShapeEquals(output.tensor(), {1, channels, 7, 7});
-        expectDTypeEquals(output.tensor(), dtype_);
+        expectShape(output.tensor(), {1, channels, 7, 7});
+        expectDType(output.tensor());
     }
 }
 
 TEST_P(EfficientNetMultiDTypeTest, SqueezeExcitationGradientFlow) {
     auto se = std::make_shared<EfficientNetSqueezeExcitation>(32, 0.25);
+    convert_model(se);
 
-    Variable input(Tensor({1, 32, 7, 7}, dtype_, device_), true);
+    Variable input(Tensor({1, 32, 7, 7}, dtype(), device()), true);
     Variable output = se->forward(input);
     Variable loss = tenzor::sum(output * output);
     loss.backward();
@@ -83,7 +69,7 @@ TEST_P(EfficientNetMultiDTypeTest, SqueezeExcitationGradientFlow) {
     EXPECT_GT(params.size(), 0);
     for (const auto& param : params) {
         EXPECT_TRUE(param->grad().has_value());
-        expectDTypeEquals(param->grad().value(), dtype_);
+        expectDType(param->grad().value());
     }
 }
 
@@ -93,39 +79,42 @@ TEST_P(EfficientNetMultiDTypeTest, SqueezeExcitationDifferentReductionRatios) {
 
     for (double ratio : reduction_ratios) {
         auto se = std::make_shared<EfficientNetSqueezeExcitation>(channels, ratio);
-        Variable input(Tensor({2, channels, 14, 14}, dtype_, device_), true);
+        convert_model(se);
+        Variable input(Tensor({2, channels, 14, 14}, dtype(), device()), true);
         Variable output = se->forward(input);
 
-        expectShapeEquals(output.tensor(), {2, channels, 14, 14});
-        expectDTypeEquals(output.tensor(), dtype_);
+        expectShape(output.tensor(), {2, channels, 14, 14});
+        expectDType(output.tensor());
     }
 }
 
 // ============================================================================
-// MBConvBlock Multi-DType Tests
+// MBConvBlock Multi-Backend Multi-DType Tests
 // ============================================================================
 
 TEST_P(EfficientNetMultiDTypeTest, MBConvBlockNoExpansionShape) {
     // MBConv with expand_ratio=1 (no expansion phase)
     auto block = std::make_shared<MBConvBlock>(32, 32, 1, 3, 1, true, 0.25, 0.0);
+    convert_model(block);
 
-    Variable input(Tensor({2, 32, 28, 28}, dtype_, device_), true);
+    Variable input(Tensor({2, 32, 28, 28}, dtype(), device()), true);
     Variable output = block->forward(input);
 
-    expectShapeEquals(output.tensor(), {2, 32, 28, 28});
-    expectDTypeEquals(output.tensor(), dtype_);
+    expectShape(output.tensor(), {2, 32, 28, 28});
+    expectDType(output.tensor());
 }
 
 TEST_P(EfficientNetMultiDTypeTest, MBConvBlockWithExpansionShape) {
     // MBConv with expand_ratio=6
     auto block = std::make_shared<MBConvBlock>(32, 64, 6, 3, 2, true, 0.25, 0.0);
+    convert_model(block);
 
-    Variable input(Tensor({2, 32, 28, 28}, dtype_, device_), true);
+    Variable input(Tensor({2, 32, 28, 28}, dtype(), device()), true);
     Variable output = block->forward(input);
 
     // Stride=2 halves spatial dims, channels change to out_channels
-    expectShapeEquals(output.tensor(), {2, 64, 14, 14});
-    expectDTypeEquals(output.tensor(), dtype_);
+    expectShape(output.tensor(), {2, 64, 14, 14});
+    expectDType(output.tensor());
 }
 
 TEST_P(EfficientNetMultiDTypeTest, MBConvBlockDifferentExpansionRatios) {
@@ -133,11 +122,12 @@ TEST_P(EfficientNetMultiDTypeTest, MBConvBlockDifferentExpansionRatios) {
 
     for (int ratio : expansion_ratios) {
         auto block = std::make_shared<MBConvBlock>(16, 24, ratio, 3, 1, true, 0.25, 0.0);
-        Variable input(Tensor({2, 16, 56, 56}, dtype_, device_), true);
+        convert_model(block);
+        Variable input(Tensor({2, 16, 56, 56}, dtype(), device()), true);
         Variable output = block->forward(input);
 
-        expectShapeEquals(output.tensor(), {2, 24, 56, 56});
-        expectDTypeEquals(output.tensor(), dtype_);
+        expectShape(output.tensor(), {2, 24, 56, 56});
+        expectDType(output.tensor());
     }
 }
 
@@ -146,11 +136,12 @@ TEST_P(EfficientNetMultiDTypeTest, MBConvBlockDifferentKernelSizes) {
 
     for (int kernel : kernel_sizes) {
         auto block = std::make_shared<MBConvBlock>(24, 40, 6, kernel, 1, true, 0.25, 0.0);
-        Variable input(Tensor({2, 24, 28, 28}, dtype_, device_), true);
+        convert_model(block);
+        Variable input(Tensor({2, 24, 28, 28}, dtype(), device()), true);
         Variable output = block->forward(input);
 
-        expectShapeEquals(output.tensor(), {2, 40, 28, 28});
-        expectDTypeEquals(output.tensor(), dtype_);
+        expectShape(output.tensor(), {2, 40, 28, 28});
+        expectDType(output.tensor());
     }
 }
 
@@ -158,71 +149,77 @@ TEST_P(EfficientNetMultiDTypeTest, MBConvBlockDifferentStrides) {
     // Test stride=1 (same size) and stride=2 (downsampling)
     auto block_stride1 = std::make_shared<MBConvBlock>(32, 48, 6, 3, 1, true, 0.25, 0.0);
     auto block_stride2 = std::make_shared<MBConvBlock>(32, 48, 6, 3, 2, true, 0.25, 0.0);
+    convert_model(block_stride1);
+    convert_model(block_stride2);
 
-    Variable input(Tensor({2, 32, 56, 56}, dtype_, device_), true);
+    Variable input(Tensor({2, 32, 56, 56}, dtype(), device()), true);
 
     Variable output1 = block_stride1->forward(input);
-    expectShapeEquals(output1.tensor(), {2, 48, 56, 56});
+    expectShape(output1.tensor(), {2, 48, 56, 56});
 
     Variable output2 = block_stride2->forward(input);
-    expectShapeEquals(output2.tensor(), {2, 48, 28, 28});
+    expectShape(output2.tensor(), {2, 48, 28, 28});
 }
 
 TEST_P(EfficientNetMultiDTypeTest, MBConvBlockGradientFlow) {
     auto block = std::make_shared<MBConvBlock>(16, 24, 6, 3, 1, true, 0.25, 0.0);
+    convert_model(block);
 
-    Variable input(Tensor({2, 16, 56, 56}, dtype_, device_), true);
+    Variable input(Tensor({2, 16, 56, 56}, dtype(), device()), true);
     Variable output = block->forward(input);
     Variable loss = tenzor::sum(output);
     loss.backward();
 
     EXPECT_TRUE(input.grad().has_value());
-    expectDTypeEquals(input.grad().value(), dtype_);
+    expectDType(input.grad().value());
 
     auto params = block->parameters();
     EXPECT_GT(params.size(), 0);
     for (const auto& param : params) {
         EXPECT_TRUE(param->grad().has_value());
-        expectDTypeEquals(param->grad().value(), dtype_);
+        expectDType(param->grad().value());
     }
 }
 
 TEST_P(EfficientNetMultiDTypeTest, MBConvBlockWithoutSE) {
     // Test MBConv without Squeeze-and-Excitation
     auto block = std::make_shared<MBConvBlock>(32, 48, 6, 3, 1, false, 0.25, 0.0);
+    convert_model(block);
 
-    Variable input(Tensor({2, 32, 28, 28}, dtype_, device_), true);
+    Variable input(Tensor({2, 32, 28, 28}, dtype(), device()), true);
     Variable output = block->forward(input);
 
-    expectShapeEquals(output.tensor(), {2, 48, 28, 28});
-    expectDTypeEquals(output.tensor(), dtype_);
+    expectShape(output.tensor(), {2, 48, 28, 28});
+    expectDType(output.tensor());
 }
 
 // ============================================================================
-// EfficientNet-B0 Multi-DType Tests
+// EfficientNet-B0 Multi-Backend Multi-DType Tests
 // ============================================================================
 
 TEST_P(EfficientNetMultiDTypeTest, EfficientNetB0ForwardShape) {
     auto model = efficientnet_b0(1000, false);
+    convert_model(model);
 
-    Variable input(Tensor({2, 3, 224, 224}, dtype_, device_), true);
+    Variable input(Tensor({2, 3, 224, 224}, dtype(), device()), true);
     Variable output = model->forward(input);
 
-    expectShapeEquals(output.tensor(), {2, 1000});
-    expectDTypeEquals(output.tensor(), dtype_);
+    expectShape(output.tensor(), {2, 1000});
+    expectDType(output.tensor());
 }
 
 TEST_P(EfficientNetMultiDTypeTest, EfficientNetB0GradientFlow) {
     auto model = efficientnet_b0(10, false);
+    convert_model(model);
     model->train();
 
-    Variable input(Tensor({1, 3, 224, 224}, dtype_, device_), true);
+    Variable input(Tensor({1, 3, 224, 224}, dtype(), device()), true);
     Variable output = model->forward(input);
     Variable loss = tenzor::sum(output);
     loss.backward();
 
     EXPECT_TRUE(input.grad().has_value());
-    expectDTypeEquals(input.grad().value(), dtype_);
+    expectDType(input.grad().value());
 
     auto params = model->parameters();
     EXPECT_GT(params.size(), 0);
@@ -230,258 +227,278 @@ TEST_P(EfficientNetMultiDTypeTest, EfficientNetB0GradientFlow) {
 
 TEST_P(EfficientNetMultiDTypeTest, EfficientNetB0SmallBatch) {
     auto model = efficientnet_b0(10, false);
+    convert_model(model);
 
     // Test with batch size 1
-    Variable input(Tensor({1, 3, 224, 224}, dtype_, device_), true);
+    Variable input(Tensor({1, 3, 224, 224}, dtype(), device()), true);
     Variable output = model->forward(input);
 
-    expectShapeEquals(output.tensor(), {1, 10});
-    expectDTypeEquals(output.tensor(), dtype_);
+    expectShape(output.tensor(), {1, 10});
+    expectDType(output.tensor());
 }
 
 TEST_P(EfficientNetMultiDTypeTest, EfficientNetB0CustomClasses) {
     // Test with non-standard number of classes
     auto model = efficientnet_b0(100, false);
+    convert_model(model);
 
-    Variable input(Tensor({2, 3, 224, 224}, dtype_, device_), true);
+    Variable input(Tensor({2, 3, 224, 224}, dtype(), device()), true);
     Variable output = model->forward(input);
 
-    expectShapeEquals(output.tensor(), {2, 100});
-    expectDTypeEquals(output.tensor(), dtype_);
+    expectShape(output.tensor(), {2, 100});
+    expectDType(output.tensor());
 }
 
 TEST_P(EfficientNetMultiDTypeTest, EfficientNetB0DifferentBatchSizes) {
     auto model = efficientnet_b0(10, false);
+    convert_model(model);
     std::vector<int64_t> batch_sizes = {1, 2, 4, 8};
 
     for (int64_t batch : batch_sizes) {
-        Variable input(Tensor({batch, 3, 224, 224}, dtype_, device_), true);
+        Variable input(Tensor({batch, 3, 224, 224}, dtype(), device()), true);
         Variable output = model->forward(input);
 
-        expectShapeEquals(output.tensor(), {batch, 10});
-        expectDTypeEquals(output.tensor(), dtype_);
+        expectShape(output.tensor(), {batch, 10});
+        expectDType(output.tensor());
     }
 }
 
 // ============================================================================
-// EfficientNet-B1 Multi-DType Tests
+// EfficientNet-B1 Multi-Backend Multi-DType Tests
 // ============================================================================
 
 TEST_P(EfficientNetMultiDTypeTest, EfficientNetB1ForwardShape) {
     auto model = efficientnet_b1(1000, false);
+    convert_model(model);
 
-    Variable input(Tensor({2, 3, 240, 240}, dtype_, device_), true);
+    Variable input(Tensor({2, 3, 240, 240}, dtype(), device()), true);
     Variable output = model->forward(input);
 
-    expectShapeEquals(output.tensor(), {2, 1000});
-    expectDTypeEquals(output.tensor(), dtype_);
+    expectShape(output.tensor(), {2, 1000});
+    expectDType(output.tensor());
 }
 
 TEST_P(EfficientNetMultiDTypeTest, EfficientNetB1GradientFlow) {
     auto model = efficientnet_b1(10, false);
+    convert_model(model);
     model->train();
 
-    Variable input(Tensor({1, 3, 240, 240}, dtype_, device_), true);
+    Variable input(Tensor({1, 3, 240, 240}, dtype(), device()), true);
     Variable output = model->forward(input);
     Variable loss = tenzor::sum(output);
     loss.backward();
 
     EXPECT_TRUE(input.grad().has_value());
-    expectDTypeEquals(input.grad().value(), dtype_);
+    expectDType(input.grad().value());
 }
 
 TEST_P(EfficientNetMultiDTypeTest, EfficientNetB1CustomResolution) {
     auto model = efficientnet_b1(10, false);
+    convert_model(model);
 
     // Test with different resolutions
-    Variable input_224(Tensor({1, 3, 224, 224}, dtype_, device_), true);
+    Variable input_224(Tensor({1, 3, 224, 224}, dtype(), device()), true);
     Variable output_224 = model->forward(input_224);
-    expectShapeEquals(output_224.tensor(), {1, 10});
+    expectShape(output_224.tensor(), {1, 10});
 
-    Variable input_256(Tensor({1, 3, 256, 256}, dtype_, device_), true);
+    Variable input_256(Tensor({1, 3, 256, 256}, dtype(), device()), true);
     Variable output_256 = model->forward(input_256);
-    expectShapeEquals(output_256.tensor(), {1, 10});
+    expectShape(output_256.tensor(), {1, 10});
 }
 
 // ============================================================================
-// EfficientNet-B2 Multi-DType Tests
+// EfficientNet-B2 Multi-Backend Multi-DType Tests
 // ============================================================================
 
 TEST_P(EfficientNetMultiDTypeTest, EfficientNetB2ForwardShape) {
     auto model = efficientnet_b2(1000, false);
+    convert_model(model);
 
-    Variable input(Tensor({2, 3, 260, 260}, dtype_, device_), true);
+    Variable input(Tensor({2, 3, 260, 260}, dtype(), device()), true);
     Variable output = model->forward(input);
 
-    expectShapeEquals(output.tensor(), {2, 1000});
-    expectDTypeEquals(output.tensor(), dtype_);
+    expectShape(output.tensor(), {2, 1000});
+    expectDType(output.tensor());
 }
 
 TEST_P(EfficientNetMultiDTypeTest, EfficientNetB2GradientFlow) {
     auto model = efficientnet_b2(10, false);
+    convert_model(model);
     model->train();
 
-    Variable input(Tensor({1, 3, 260, 260}, dtype_, device_), true);
+    Variable input(Tensor({1, 3, 260, 260}, dtype(), device()), true);
     Variable output = model->forward(input);
     Variable loss = tenzor::sum(output);
     loss.backward();
 
     EXPECT_TRUE(input.grad().has_value());
-    expectDTypeEquals(input.grad().value(), dtype_);
+    expectDType(input.grad().value());
 }
 
 // ============================================================================
-// EfficientNet-B3 Multi-DType Tests
+// EfficientNet-B3 Multi-Backend Multi-DType Tests
 // ============================================================================
 
 TEST_P(EfficientNetMultiDTypeTest, EfficientNetB3ForwardShape) {
     auto model = efficientnet_b3(1000, false);
+    convert_model(model);
 
-    Variable input(Tensor({1, 3, 300, 300}, dtype_, device_), true);
+    Variable input(Tensor({1, 3, 300, 300}, dtype(), device()), true);
     Variable output = model->forward(input);
 
-    expectShapeEquals(output.tensor(), {1, 1000});
-    expectDTypeEquals(output.tensor(), dtype_);
+    expectShape(output.tensor(), {1, 1000});
+    expectDType(output.tensor());
 }
 
 TEST_P(EfficientNetMultiDTypeTest, EfficientNetB3BatchSizeOne) {
     auto model = efficientnet_b3(10, false);
+    convert_model(model);
 
     // Test with batch size 1
-    Variable input(Tensor({1, 3, 300, 300}, dtype_, device_), true);
+    Variable input(Tensor({1, 3, 300, 300}, dtype(), device()), true);
     Variable output = model->forward(input);
 
-    expectShapeEquals(output.tensor(), {1, 10});
-    expectDTypeEquals(output.tensor(), dtype_);
+    expectShape(output.tensor(), {1, 10});
+    expectDType(output.tensor());
 }
 
 TEST_P(EfficientNetMultiDTypeTest, EfficientNetB3GradientFlow) {
     auto model = efficientnet_b3(10, false);
+    convert_model(model);
     model->train();
 
-    Variable input(Tensor({1, 3, 300, 300}, dtype_, device_), true);
+    Variable input(Tensor({1, 3, 300, 300}, dtype(), device()), true);
     Variable output = model->forward(input);
     Variable loss = tenzor::sum(output);
     loss.backward();
 
     EXPECT_TRUE(input.grad().has_value());
-    expectDTypeEquals(input.grad().value(), dtype_);
+    expectDType(input.grad().value());
 }
 
 // ============================================================================
-// EfficientNet-B4 Multi-DType Tests
+// EfficientNet-B4 Multi-Backend Multi-DType Tests
 // ============================================================================
 
 TEST_P(EfficientNetMultiDTypeTest, EfficientNetB4ForwardShape) {
     auto model = efficientnet_b4(1000, false);
+    convert_model(model);
 
-    Variable input(Tensor({1, 3, 380, 380}, dtype_, device_), true);
+    Variable input(Tensor({1, 3, 380, 380}, dtype(), device()), true);
     Variable output = model->forward(input);
 
-    expectShapeEquals(output.tensor(), {1, 1000});
-    expectDTypeEquals(output.tensor(), dtype_);
+    expectShape(output.tensor(), {1, 1000});
+    expectDType(output.tensor());
 }
 
 TEST_P(EfficientNetMultiDTypeTest, EfficientNetB4CustomClasses) {
     auto model = efficientnet_b4(50, false);
+    convert_model(model);
 
-    Variable input(Tensor({1, 3, 380, 380}, dtype_, device_), true);
+    Variable input(Tensor({1, 3, 380, 380}, dtype(), device()), true);
     Variable output = model->forward(input);
 
-    expectShapeEquals(output.tensor(), {1, 50});
-    expectDTypeEquals(output.tensor(), dtype_);
+    expectShape(output.tensor(), {1, 50});
+    expectDType(output.tensor());
 }
 
 // ============================================================================
-// EfficientNet-B5 Multi-DType Tests
+// EfficientNet-B5 Multi-Backend Multi-DType Tests
 // ============================================================================
 
 TEST_P(EfficientNetMultiDTypeTest, EfficientNetB5ForwardShape) {
     auto model = efficientnet_b5(1000, false);
+    convert_model(model);
 
-    Variable input(Tensor({1, 3, 456, 456}, dtype_, device_), true);
+    Variable input(Tensor({1, 3, 456, 456}, dtype(), device()), true);
     Variable output = model->forward(input);
 
-    expectShapeEquals(output.tensor(), {1, 1000});
-    expectDTypeEquals(output.tensor(), dtype_);
+    expectShape(output.tensor(), {1, 1000});
+    expectDType(output.tensor());
 }
 
 TEST_P(EfficientNetMultiDTypeTest, EfficientNetB5GradientFlow) {
     auto model = efficientnet_b5(10, false);
+    convert_model(model);
     model->train();
 
-    Variable input(Tensor({1, 3, 456, 456}, dtype_, device_), true);
+    Variable input(Tensor({1, 3, 456, 456}, dtype(), device()), true);
     Variable output = model->forward(input);
     Variable loss = tenzor::sum(output);
     loss.backward();
 
     EXPECT_TRUE(input.grad().has_value());
-    expectDTypeEquals(input.grad().value(), dtype_);
+    expectDType(input.grad().value());
 }
 
 // ============================================================================
-// EfficientNet-B6 Multi-DType Tests
+// EfficientNet-B6 Multi-Backend Multi-DType Tests
 // ============================================================================
 
 TEST_P(EfficientNetMultiDTypeTest, EfficientNetB6ForwardShape) {
     auto model = efficientnet_b6(1000, false);
+    convert_model(model);
 
-    Variable input(Tensor({1, 3, 528, 528}, dtype_, device_), true);
+    Variable input(Tensor({1, 3, 528, 528}, dtype(), device()), true);
     Variable output = model->forward(input);
 
-    expectShapeEquals(output.tensor(), {1, 1000});
-    expectDTypeEquals(output.tensor(), dtype_);
+    expectShape(output.tensor(), {1, 1000});
+    expectDType(output.tensor());
 }
 
 TEST_P(EfficientNetMultiDTypeTest, EfficientNetB6CustomClasses) {
     auto model = efficientnet_b6(200, false);
+    convert_model(model);
 
-    Variable input(Tensor({1, 3, 528, 528}, dtype_, device_), true);
+    Variable input(Tensor({1, 3, 528, 528}, dtype(), device()), true);
     Variable output = model->forward(input);
 
-    expectShapeEquals(output.tensor(), {1, 200});
-    expectDTypeEquals(output.tensor(), dtype_);
+    expectShape(output.tensor(), {1, 200});
+    expectDType(output.tensor());
 }
 
 // ============================================================================
-// EfficientNet-B7 Multi-DType Tests
+// EfficientNet-B7 Multi-Backend Multi-DType Tests
 // ============================================================================
 
 TEST_P(EfficientNetMultiDTypeTest, EfficientNetB7ForwardShape) {
     auto model = efficientnet_b7(1000, false);
+    convert_model(model);
 
-    Variable input(Tensor({1, 3, 600, 600}, dtype_, device_), true);
+    Variable input(Tensor({1, 3, 600, 600}, dtype(), device()), true);
     Variable output = model->forward(input);
 
-    expectShapeEquals(output.tensor(), {1, 1000});
-    expectDTypeEquals(output.tensor(), dtype_);
+    expectShape(output.tensor(), {1, 1000});
+    expectDType(output.tensor());
 }
 
 TEST_P(EfficientNetMultiDTypeTest, EfficientNetB7GradientFlow) {
     auto model = efficientnet_b7(10, false);
+    convert_model(model);
     model->train();
 
-    Variable input(Tensor({1, 3, 600, 600}, dtype_, device_), true);
+    Variable input(Tensor({1, 3, 600, 600}, dtype(), device()), true);
     Variable output = model->forward(input);
     Variable loss = tenzor::sum(output);
     loss.backward();
 
     EXPECT_TRUE(input.grad().has_value());
-    expectDTypeEquals(input.grad().value(), dtype_);
+    expectDType(input.grad().value());
 }
 
 TEST_P(EfficientNetMultiDTypeTest, EfficientNetB7BatchProcessing) {
     auto model = efficientnet_b7(10, false);
+    convert_model(model);
 
-    Variable input(Tensor({2, 3, 600, 600}, dtype_, device_), true);
+    Variable input(Tensor({2, 3, 600, 600}, dtype(), device()), true);
     Variable output = model->forward(input);
 
-    expectShapeEquals(output.tensor(), {2, 10});
-    expectDTypeEquals(output.tensor(), dtype_);
+    expectShape(output.tensor(), {2, 10});
+    expectDType(output.tensor());
 }
 
 // ============================================================================
-// Compound Scaling Multi-DType Tests
+// Compound Scaling Multi-Backend Multi-DType Tests
 // ============================================================================
 
 TEST_P(EfficientNetMultiDTypeTest, CompoundScalingConfig) {
@@ -499,6 +516,8 @@ TEST_P(EfficientNetMultiDTypeTest, CompoundScalingEffects) {
     // Test that compound scaling produces different model sizes
     auto model_b0 = efficientnet_b0(10, false);
     auto model_b3 = efficientnet_b3(10, false);
+    convert_model(model_b0);
+    convert_model(model_b3);
 
     auto params_b0 = model_b0->parameters();
     auto params_b3 = model_b3->parameters();
@@ -508,50 +527,53 @@ TEST_P(EfficientNetMultiDTypeTest, CompoundScalingEffects) {
 }
 
 // ============================================================================
-// Different Image Sizes Multi-DType Tests
+// Different Image Sizes Multi-Backend Multi-DType Tests
 // ============================================================================
 
 TEST_P(EfficientNetMultiDTypeTest, DifferentImageSizesB0) {
     auto model = efficientnet_b0(10, false);
+    convert_model(model);
 
     // Test with various image sizes
     std::vector<int64_t> sizes = {224, 256, 384};
 
     for (int64_t size : sizes) {
-        Variable input(Tensor({1, 3, size, size}, dtype_, device_), true);
+        Variable input(Tensor({1, 3, size, size}, dtype(), device()), true);
         Variable output = model->forward(input);
 
-        expectShapeEquals(output.tensor(), {1, 10});
-        expectDTypeEquals(output.tensor(), dtype_);
+        expectShape(output.tensor(), {1, 10});
+        expectDType(output.tensor());
     }
 }
 
 TEST_P(EfficientNetMultiDTypeTest, DifferentImageSizesB4) {
     auto model = efficientnet_b4(10, false);
+    convert_model(model);
 
     // Test with various image sizes (larger for B4)
     std::vector<int64_t> sizes = {320, 380, 512};
 
     for (int64_t size : sizes) {
-        Variable input(Tensor({1, 3, size, size}, dtype_, device_), true);
+        Variable input(Tensor({1, 3, size, size}, dtype(), device()), true);
         Variable output = model->forward(input);
 
-        expectShapeEquals(output.tensor(), {1, 10});
-        expectDTypeEquals(output.tensor(), dtype_);
+        expectShape(output.tensor(), {1, 10});
+        expectDType(output.tensor());
     }
 }
 
 TEST_P(EfficientNetMultiDTypeTest, NonSquareInputImages) {
     auto model = efficientnet_b0(10, false);
+    convert_model(model);
 
     // Test with non-square inputs (should still work due to adaptive pooling)
-    Variable input_rect1(Tensor({1, 3, 224, 256}, dtype_, device_), true);
+    Variable input_rect1(Tensor({1, 3, 224, 256}, dtype(), device()), true);
     Variable output_rect1 = model->forward(input_rect1);
-    expectShapeEquals(output_rect1.tensor(), {1, 10});
+    expectShape(output_rect1.tensor(), {1, 10});
 
-    Variable input_rect2(Tensor({1, 3, 256, 224}, dtype_, device_), true);
+    Variable input_rect2(Tensor({1, 3, 256, 224}, dtype(), device()), true);
     Variable output_rect2 = model->forward(input_rect2);
-    expectShapeEquals(output_rect2.tensor(), {1, 10});
+    expectShape(output_rect2.tensor(), {1, 10});
 }
 
 // ============================================================================
@@ -563,18 +585,21 @@ TEST_P(EfficientNetMultiDTypeTest, VariantResolutionProgression) {
     auto b0 = efficientnet_b0(10, false);
     auto b3 = efficientnet_b3(10, false);
     auto b7 = efficientnet_b7(10, false);
+    convert_model(b0);
+    convert_model(b3);
+    convert_model(b7);
 
-    Variable input_b0(Tensor({1, 3, 224, 224}, dtype_, device_), true);
+    Variable input_b0(Tensor({1, 3, 224, 224}, dtype(), device()), true);
     Variable output_b0 = b0->forward(input_b0);
-    expectShapeEquals(output_b0.tensor(), {1, 10});
+    expectShape(output_b0.tensor(), {1, 10});
 
-    Variable input_b3(Tensor({1, 3, 300, 300}, dtype_, device_), true);
+    Variable input_b3(Tensor({1, 3, 300, 300}, dtype(), device()), true);
     Variable output_b3 = b3->forward(input_b3);
-    expectShapeEquals(output_b3.tensor(), {1, 10});
+    expectShape(output_b3.tensor(), {1, 10});
 
-    Variable input_b7(Tensor({1, 3, 600, 600}, dtype_, device_), true);
+    Variable input_b7(Tensor({1, 3, 600, 600}, dtype(), device()), true);
     Variable output_b7 = b7->forward(input_b7);
-    expectShapeEquals(output_b7.tensor(), {1, 10});
+    expectShape(output_b7.tensor(), {1, 10});
 }
 
 TEST_P(EfficientNetMultiDTypeTest, VariantParameterScaling) {
@@ -584,6 +609,10 @@ TEST_P(EfficientNetMultiDTypeTest, VariantParameterScaling) {
         efficientnet_b1(10, false),
         efficientnet_b2(10, false)
     };
+
+    for (auto& model : models) {
+        convert_model(model);
+    }
 
     std::vector<size_t> param_counts;
     for (const auto& model : models) {
@@ -617,47 +646,54 @@ TEST_P(EfficientNetMultiDTypeTest, MinimalBatchSize) {
         efficientnet_b4(10, false)
     };
 
+    for (auto& model : models) {
+        convert_model(model);
+    }
+
     std::vector<int64_t> resolutions = {224, 260, 380};
 
     for (size_t i = 0; i < models.size(); ++i) {
-        Variable input(Tensor({1, 3, resolutions[i], resolutions[i]}, dtype_, device_), true);
+        Variable input(Tensor({1, 3, resolutions[i], resolutions[i]}, dtype(), device()), true);
         Variable output = models[i]->forward(input);
-        expectShapeEquals(output.tensor(), {1, 10});
-        expectDTypeEquals(output.tensor(), dtype_);
+        expectShape(output.tensor(), {1, 10});
+        expectDType(output.tensor());
     }
 }
 
 TEST_P(EfficientNetMultiDTypeTest, LargeBatchSize) {
     auto model = efficientnet_b0(10, false);
+    convert_model(model);
 
     // Test with larger batch size
-    Variable input(Tensor({16, 3, 224, 224}, dtype_, device_), true);
+    Variable input(Tensor({16, 3, 224, 224}, dtype(), device()), true);
     Variable output = model->forward(input);
 
-    expectShapeEquals(output.tensor(), {16, 10});
-    expectDTypeEquals(output.tensor(), dtype_);
+    expectShape(output.tensor(), {16, 10});
+    expectDType(output.tensor());
 }
 
 TEST_P(EfficientNetMultiDTypeTest, SingleClassOutput) {
     // Test with single class (binary classification scenario)
     auto model = efficientnet_b0(1, false);
+    convert_model(model);
 
-    Variable input(Tensor({2, 3, 224, 224}, dtype_, device_), true);
+    Variable input(Tensor({2, 3, 224, 224}, dtype(), device()), true);
     Variable output = model->forward(input);
 
-    expectShapeEquals(output.tensor(), {2, 1});
-    expectDTypeEquals(output.tensor(), dtype_);
+    expectShape(output.tensor(), {2, 1});
+    expectDType(output.tensor());
 }
 
 TEST_P(EfficientNetMultiDTypeTest, ManyClassesOutput) {
     // Test with many classes (fine-grained classification)
     auto model = efficientnet_b0(10000, false);
+    convert_model(model);
 
-    Variable input(Tensor({2, 3, 224, 224}, dtype_, device_), true);
+    Variable input(Tensor({2, 3, 224, 224}, dtype(), device()), true);
     Variable output = model->forward(input);
 
-    expectShapeEquals(output.tensor(), {2, 10000});
-    expectDTypeEquals(output.tensor(), dtype_);
+    expectShape(output.tensor(), {2, 10000});
+    expectDType(output.tensor());
 }
 
 // ============================================================================
@@ -666,44 +702,31 @@ TEST_P(EfficientNetMultiDTypeTest, ManyClassesOutput) {
 
 TEST_P(EfficientNetMultiDTypeTest, TrainingVsEvalMode) {
     auto model = efficientnet_b0(10, false);
-    Variable input(Tensor({2, 3, 224, 224}, dtype_, device_), true);
+    convert_model(model);
+    Variable input(Tensor({2, 3, 224, 224}, dtype(), device()), true);
 
     // Test in evaluation mode
     model->eval();
     Variable output_eval = model->forward(input);
-    expectShapeEquals(output_eval.tensor(), {2, 10});
+    expectShape(output_eval.tensor(), {2, 10});
 
     // Test in training mode
     model->train();
     Variable output_train = model->forward(input);
-    expectShapeEquals(output_train.tensor(), {2, 10});
+    expectShape(output_train.tensor(), {2, 10});
 
     // Both should produce same shape
-    auto shape_eval = output_eval.tensor().shape(); auto shape_train = output_train.tensor().shape();
-    EXPECT_EQ(std::vector<int64_t>(shape_eval.begin(), shape_eval.end()), std::vector<int64_t>(shape_train.begin(), shape_train.end()));
+    auto shape_eval = output_eval.tensor().shape();
+    auto shape_train = output_train.tensor().shape();
+    EXPECT_EQ(std::vector<int64_t>(shape_eval.begin(), shape_eval.end()),
+              std::vector<int64_t>(shape_train.begin(), shape_train.end()));
 }
 
 // ============================================================================
-// Instantiate Tests for All DTypes
+// Instantiate Tests for All Backends and DTypes
 // ============================================================================
 
-INSTANTIATE_TEST_SUITE_P(
-    MultiDTypeSupport,
-    EfficientNetMultiDTypeTest,
-    ::testing::Values(
-        DType::Float32,
-        DType::Float64,
-        DType::Float16
-    ),
-    [](const ::testing::TestParamInfo<DType>& info) {
-        switch (info.param) {
-            case DType::Float32: return "Float32";
-            case DType::Float64: return "Float64";
-            case DType::Float16: return "Float16";
-            default: return "Unknown";
-        }
-    }
-);
+INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(EfficientNetMultiDTypeTest);
 
 // ============================================================================
 // Main

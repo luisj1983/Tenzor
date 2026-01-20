@@ -1,63 +1,32 @@
 /**
  * @file test_resnet_multidtype.cpp
- * @brief Comprehensive multi-dtype tests for ResNet family
+ * @brief Multi-backend and multi-dtype tests for ResNet family
  *
- * Tests ResNet models with Float32, Float64, and Float16 data types.
+ * Tests ResNet models with Float32, Float64, and Float16 data types
+ * across CPU, CUDA, and OneAPI backends.
  * ResNet is a critical vision architecture with residual connections that
  * enable deep network training and gradient flow.
  */
 
 #include <gtest/gtest.h>
-#include <tenzor/tenzor.hpp>
+#include "../multi_backend_dtype_fixture.hpp"
 #include "../../include/tenzor/models/resnet.hpp"
-#include "../../include/tenzor/core/tensor.hpp"
-#include "../../include/tenzor/autograd/variable.hpp"
 #include <cmath>
 
 using namespace tenzor;
 using namespace tenzor::models;
+using namespace tenzor::testing;
 
 // ============================================================================
-// Test Fixture with Multi-dtype Support
+// Test Fixture with Multi-Backend Multi-DType Support
 // ============================================================================
 
-template<typename T>
-class ResNetMultiDTypeTest : public ::testing::Test {
+class ResNetMultiDTypeTest : public MultiBackendDTypeTest {
 protected:
     void SetUp() override {
-        device_ = Device::cpu();
-        dtype_ = GetDType();
-
-        // Set tolerance based on data type
-        if (dtype_ == DType::Float16) {
-            // Very relaxed tolerance for Float16 due to deep network accumulation
-            abs_tol_ = 1e-1f;
-            rel_tol_ = 1e-1f;
-            param_count_tol_ = 0.05f;  // 5% tolerance for parameter counts
-        } else if (dtype_ == DType::Float64) {
-            abs_tol_ = 1e-5f;
-            rel_tol_ = 1e-5f;
-            param_count_tol_ = 0.01f;  // 1% tolerance
-        } else {  // Float32
-            abs_tol_ = 1e-4f;
-            rel_tol_ = 1e-4f;
-            param_count_tol_ = 0.01f;
-        }
-    }
-
-    DType GetDType() const {
-        if constexpr (std::is_same_v<T, float>) {
-            return DType::Float32;
-        } else if constexpr (std::is_same_v<T, double>) {
-            return DType::Float64;
-        } else {
-            return DType::Float16;
-        }
-    }
-
-    bool CheckShape(const Variable& var, const std::vector<int64_t>& expected_shape) {
-        auto shape = var.tensor().shape();
-        return std::vector<int64_t>(shape.begin(), shape.end()) == expected_shape;
+        MultiBackendDTypeTest::SetUp();
+        // Set parameter count tolerance based on dtype
+        param_count_tol_ = (dtype() == DType::Float16) ? 0.05f : 0.01f;
     }
 
     bool CheckParameterCount(int64_t actual, int64_t expected) {
@@ -65,38 +34,26 @@ protected:
         return std::abs(actual - expected) <= tolerance;
     }
 
-    Device device_;
-    DType dtype_;
-    float abs_tol_;
-    float rel_tol_;
     float param_count_tol_;
 };
-
-// Define test types
-struct Float32Type { using type = float; };
-struct Float64Type { using type = double; };
-struct Float16Type { using type = uint16_t; };  // Using uint16_t as placeholder for Float16
-
-using TestTypes = ::testing::Types<float, double, uint16_t>;
-TYPED_TEST_SUITE(ResNetMultiDTypeTest, TestTypes);
 
 // ============================================================================
 // BasicBlock Tests - Core Residual Building Block
 // ============================================================================
 
-TYPED_TEST(ResNetMultiDTypeTest, BasicBlockForwardShape) {
+TEST_P(ResNetMultiDTypeTest, BasicBlockForwardShape) {
     // Test BasicBlock with no downsampling (stride=1, same channels)
     auto block = std::make_shared<BasicBlock>(64, 64, 1, 1, 64, nullptr);
+    convert_model(block);
 
-    Variable input(Tensor({2, 64, 56, 56}, this->dtype_, this->device_), true);
+    Variable input(Tensor({2, 64, 56, 56}, dtype(), device()), true);
     Variable output = block->forward(input);
 
     // Output shape should match input shape for identity mapping
-    EXPECT_TRUE(this->CheckShape(output, {2, 64, 56, 56}))
-        << "BasicBlock should preserve shape with stride=1";
+    expectShape(output.tensor(), {2, 64, 56, 56});
 }
 
-TYPED_TEST(ResNetMultiDTypeTest, BasicBlockForwardShapeWithStride) {
+TEST_P(ResNetMultiDTypeTest, BasicBlockForwardShapeWithStride) {
     // Test BasicBlock with stride=2 (spatial downsampling)
     auto downsample = std::make_shared<nn::Sequential>();
     auto conv = std::make_shared<nn::Conv2d>(64, 128, 1, 2, 0, 1, 1, false);
@@ -105,21 +62,22 @@ TYPED_TEST(ResNetMultiDTypeTest, BasicBlockForwardShapeWithStride) {
     downsample->add_module(bn);
 
     auto block = std::make_shared<BasicBlock>(64, 128, 2, 1, 64, downsample);
+    convert_model(block);
 
-    Variable input(Tensor({2, 64, 56, 56}, this->dtype_, this->device_), true);
+    Variable input(Tensor({2, 64, 56, 56}, dtype(), device()), true);
     Variable output = block->forward(input);
 
     // Spatial dimensions halved, channels increased
-    EXPECT_TRUE(this->CheckShape(output, {2, 128, 28, 28}))
-        << "BasicBlock with stride=2 should halve spatial dimensions";
+    expectShape(output.tensor(), {2, 128, 28, 28});
 }
 
-TYPED_TEST(ResNetMultiDTypeTest, BasicBlockGradientFlow) {
+TEST_P(ResNetMultiDTypeTest, BasicBlockGradientFlow) {
     // Critical test: verify gradients flow through skip connection
     auto block = std::make_shared<BasicBlock>(64, 64, 1, 1, 64, nullptr);
+    convert_model(block);
     block->train();
 
-    Variable input(Tensor({2, 64, 56, 56}, this->dtype_, this->device_), true);
+    Variable input(Tensor({2, 64, 56, 56}, dtype(), device()), true);
     Variable output = block->forward(input);
 
     Variable loss = tenzor::sum(output * output);
@@ -145,21 +103,21 @@ TYPED_TEST(ResNetMultiDTypeTest, BasicBlockGradientFlow) {
             params_with_grad++;
         }
     }
-    EXPECT_EQ(params_with_grad, params.size())
+    EXPECT_EQ(params_with_grad, static_cast<int>(params.size()))
         << "All parameters should have gradients after backward pass";
 }
 
-TYPED_TEST(ResNetMultiDTypeTest, BasicBlockMultipleBatchSizes) {
+TEST_P(ResNetMultiDTypeTest, BasicBlockMultipleBatchSizes) {
     // Test BasicBlock with different batch sizes
     auto block = std::make_shared<BasicBlock>(64, 64, 1, 1, 64, nullptr);
+    convert_model(block);
     block->eval();
 
     for (int batch_size : {1, 2, 4, 8, 16}) {
-        Variable input(Tensor({batch_size, 64, 56, 56}, this->dtype_, this->device_), false);
+        Variable input(Tensor({batch_size, 64, 56, 56}, dtype(), device()), false);
         Variable output = block->forward(input);
 
-        EXPECT_TRUE(this->CheckShape(output, {batch_size, 64, 56, 56}))
-            << "BasicBlock should handle batch_size=" << batch_size;
+        expectShape(output.tensor(), {batch_size, 64, 56, 56});
     }
 }
 
@@ -167,19 +125,19 @@ TYPED_TEST(ResNetMultiDTypeTest, BasicBlockMultipleBatchSizes) {
 // Bottleneck Tests - Deeper Networks (ResNet-50+)
 // ============================================================================
 
-TYPED_TEST(ResNetMultiDTypeTest, BottleneckForwardShape) {
+TEST_P(ResNetMultiDTypeTest, BottleneckForwardShape) {
     // Test Bottleneck with no downsampling
     auto block = std::make_shared<Bottleneck>(256, 64, 1, 1, 64, nullptr);
+    convert_model(block);
 
-    Variable input(Tensor({2, 256, 56, 56}, this->dtype_, this->device_), true);
+    Variable input(Tensor({2, 256, 56, 56}, dtype(), device()), true);
     Variable output = block->forward(input);
 
     // Output channels = 64 * expansion (4) = 256
-    EXPECT_TRUE(this->CheckShape(output, {2, 256, 56, 56}))
-        << "Bottleneck should maintain dimensions with stride=1";
+    expectShape(output.tensor(), {2, 256, 56, 56});
 }
 
-TYPED_TEST(ResNetMultiDTypeTest, BottleneckForwardShapeWithStride) {
+TEST_P(ResNetMultiDTypeTest, BottleneckForwardShapeWithStride) {
     // Test Bottleneck with stride=2
     auto downsample = std::make_shared<nn::Sequential>();
     auto conv = std::make_shared<nn::Conv2d>(256, 512, 1, 2, 0, 1, 1, false);
@@ -188,16 +146,16 @@ TYPED_TEST(ResNetMultiDTypeTest, BottleneckForwardShapeWithStride) {
     downsample->add_module(bn);
 
     auto block = std::make_shared<Bottleneck>(256, 128, 2, 1, 64, downsample);
+    convert_model(block);
 
-    Variable input(Tensor({2, 256, 56, 56}, this->dtype_, this->device_), true);
+    Variable input(Tensor({2, 256, 56, 56}, dtype(), device()), true);
     Variable output = block->forward(input);
 
     // Output: channels = 128 * 4 = 512, spatial halved
-    EXPECT_TRUE(this->CheckShape(output, {2, 512, 28, 28}))
-        << "Bottleneck with stride=2 should halve spatial and increase channels";
+    expectShape(output.tensor(), {2, 512, 28, 28});
 }
 
-TYPED_TEST(ResNetMultiDTypeTest, BottleneckGroupedConvolution) {
+TEST_P(ResNetMultiDTypeTest, BottleneckGroupedConvolution) {
     // Test Bottleneck with groups (ResNeXt)
     auto downsample = std::make_shared<nn::Sequential>();
     auto conv = std::make_shared<nn::Conv2d>(256, 512, 1, 1, 0, 1, 1, false);
@@ -207,20 +165,21 @@ TYPED_TEST(ResNetMultiDTypeTest, BottleneckGroupedConvolution) {
 
     // groups=32, base_width=4 (ResNeXt-50 32x4d configuration)
     auto block = std::make_shared<Bottleneck>(256, 128, 1, 32, 4, downsample);
+    convert_model(block);
 
-    Variable input(Tensor({2, 256, 56, 56}, this->dtype_, this->device_), true);
+    Variable input(Tensor({2, 256, 56, 56}, dtype(), device()), true);
     Variable output = block->forward(input);
 
-    EXPECT_TRUE(this->CheckShape(output, {2, 512, 56, 56}))
-        << "Bottleneck should support grouped convolutions (ResNeXt)";
+    expectShape(output.tensor(), {2, 512, 56, 56});
 }
 
-TYPED_TEST(ResNetMultiDTypeTest, BottleneckGradientFlow) {
+TEST_P(ResNetMultiDTypeTest, BottleneckGradientFlow) {
     // Test gradient flow through deeper Bottleneck structure
     auto block = std::make_shared<Bottleneck>(256, 64, 1, 1, 64, nullptr);
+    convert_model(block);
     block->train();
 
-    Variable input(Tensor({2, 256, 56, 56}, this->dtype_, this->device_), true);
+    Variable input(Tensor({2, 256, 56, 56}, dtype(), device()), true);
     Variable output = block->forward(input);
 
     Variable loss = tenzor::sum(output * output);
@@ -242,8 +201,9 @@ TYPED_TEST(ResNetMultiDTypeTest, BottleneckGradientFlow) {
 // ResNet-18 Tests - Smallest Standard ResNet
 // ============================================================================
 
-TYPED_TEST(ResNetMultiDTypeTest, ResNet18Architecture) {
+TEST_P(ResNetMultiDTypeTest, ResNet18Architecture) {
     auto model = resnet18(1000, false);
+    convert_model(model);
 
     auto params = model->parameters();
     EXPECT_GT(params.size(), 0) << "ResNet-18 should have parameters";
@@ -254,38 +214,39 @@ TYPED_TEST(ResNetMultiDTypeTest, ResNet18Architecture) {
         total_params += param->tensor().numel();
     }
 
-    EXPECT_TRUE(this->CheckParameterCount(total_params, 11700000))
+    EXPECT_TRUE(CheckParameterCount(total_params, 11700000))
         << "ResNet-18 should have ~11.7M parameters, got " << total_params;
 }
 
-TYPED_TEST(ResNetMultiDTypeTest, ResNet18ForwardShape) {
+TEST_P(ResNetMultiDTypeTest, ResNet18ForwardShape) {
     auto model = resnet18(1000, false);
+    convert_model(model);
     model->eval();
 
     // Standard ImageNet input: (N, 3, 224, 224)
-    Variable input(Tensor({2, 3, 224, 224}, this->dtype_, this->device_), false);
+    Variable input(Tensor({2, 3, 224, 224}, dtype(), device()), false);
     Variable output = model->forward(input);
 
     // Output should be (N, num_classes)
-    EXPECT_TRUE(this->CheckShape(output, {2, 1000}))
-        << "ResNet-18 should output (batch, 1000) for ImageNet";
+    expectShape(output.tensor(), {2, 1000});
 }
 
-TYPED_TEST(ResNetMultiDTypeTest, ResNet18CustomClasses) {
+TEST_P(ResNetMultiDTypeTest, ResNet18CustomClasses) {
     // Test with custom number of classes (e.g., CIFAR-10)
     auto model = resnet18(10, false);
+    convert_model(model);
     model->eval();
 
-    Variable input(Tensor({4, 3, 224, 224}, this->dtype_, this->device_), false);
+    Variable input(Tensor({4, 3, 224, 224}, dtype(), device()), false);
     Variable output = model->forward(input);
 
-    EXPECT_TRUE(this->CheckShape(output, {4, 10}))
-        << "ResNet-18 should support custom number of classes";
+    expectShape(output.tensor(), {4, 10});
 }
 
-TYPED_TEST(ResNetMultiDTypeTest, ResNet18DifferentInputSizes) {
+TEST_P(ResNetMultiDTypeTest, ResNet18DifferentInputSizes) {
     // Test ResNet-18 with various input sizes
     auto model = resnet18(1000, false);
+    convert_model(model);
     model->eval();
 
     std::vector<std::pair<int, int>> sizes = {
@@ -296,19 +257,19 @@ TYPED_TEST(ResNetMultiDTypeTest, ResNet18DifferentInputSizes) {
     };
 
     for (const auto& [h, w] : sizes) {
-        Variable input(Tensor({2, 3, h, w}, this->dtype_, this->device_), false);
+        Variable input(Tensor({2, 3, h, w}, dtype(), device()), false);
         Variable output = model->forward(input);
 
-        EXPECT_TRUE(this->CheckShape(output, {2, 1000}))
-            << "ResNet-18 should handle " << h << "x" << w << " input";
+        expectShape(output.tensor(), {2, 1000});
     }
 }
 
-TYPED_TEST(ResNetMultiDTypeTest, ResNet18GradientFlow) {
+TEST_P(ResNetMultiDTypeTest, ResNet18GradientFlow) {
     auto model = resnet18(10, false);
+    convert_model(model);
     model->train();
 
-    Variable input(Tensor({2, 3, 224, 224}, this->dtype_, this->device_), true);
+    Variable input(Tensor({2, 3, 224, 224}, dtype(), device()), true);
     Variable output = model->forward(input);
 
     Variable loss = tenzor::sum(output * output);
@@ -323,7 +284,7 @@ TYPED_TEST(ResNetMultiDTypeTest, ResNet18GradientFlow) {
         }
     }
 
-    EXPECT_EQ(params_with_grad, params.size())
+    EXPECT_EQ(params_with_grad, static_cast<int>(params.size()))
         << "All ResNet-18 parameters should receive gradients";
 }
 
@@ -331,19 +292,20 @@ TYPED_TEST(ResNetMultiDTypeTest, ResNet18GradientFlow) {
 // ResNet-34 Tests - Deeper BasicBlock Network
 // ============================================================================
 
-TYPED_TEST(ResNetMultiDTypeTest, ResNet34ForwardShape) {
+TEST_P(ResNetMultiDTypeTest, ResNet34ForwardShape) {
     auto model = resnet34(1000, false);
+    convert_model(model);
     model->eval();
 
-    Variable input(Tensor({2, 3, 224, 224}, this->dtype_, this->device_), false);
+    Variable input(Tensor({2, 3, 224, 224}, dtype(), device()), false);
     Variable output = model->forward(input);
 
-    EXPECT_TRUE(this->CheckShape(output, {2, 1000}))
-        << "ResNet-34 should output (batch, 1000)";
+    expectShape(output.tensor(), {2, 1000});
 }
 
-TYPED_TEST(ResNetMultiDTypeTest, ResNet34ParameterCount) {
+TEST_P(ResNetMultiDTypeTest, ResNet34ParameterCount) {
     auto model = resnet34(1000, false);
+    convert_model(model);
 
     int64_t total_params = 0;
     for (const auto& param : model->parameters()) {
@@ -351,15 +313,16 @@ TYPED_TEST(ResNetMultiDTypeTest, ResNet34ParameterCount) {
     }
 
     // ResNet-34: 21.8M parameters
-    EXPECT_TRUE(this->CheckParameterCount(total_params, 21800000))
+    EXPECT_TRUE(CheckParameterCount(total_params, 21800000))
         << "ResNet-34 should have ~21.8M parameters, got " << total_params;
 }
 
-TYPED_TEST(ResNetMultiDTypeTest, ResNet34GradientFlow) {
+TEST_P(ResNetMultiDTypeTest, ResNet34GradientFlow) {
     auto model = resnet34(10, false);
+    convert_model(model);
     model->train();
 
-    Variable input(Tensor({2, 3, 224, 224}, this->dtype_, this->device_), true);
+    Variable input(Tensor({2, 3, 224, 224}, dtype(), device()), true);
     Variable output = model->forward(input);
 
     Variable loss = tenzor::sum(output);
@@ -382,19 +345,20 @@ TYPED_TEST(ResNetMultiDTypeTest, ResNet34GradientFlow) {
 // ResNet-50 Tests - First Bottleneck Architecture
 // ============================================================================
 
-TYPED_TEST(ResNetMultiDTypeTest, ResNet50ForwardShape) {
+TEST_P(ResNetMultiDTypeTest, ResNet50ForwardShape) {
     auto model = resnet50(1000, false);
+    convert_model(model);
     model->eval();
 
-    Variable input(Tensor({2, 3, 224, 224}, this->dtype_, this->device_), false);
+    Variable input(Tensor({2, 3, 224, 224}, dtype(), device()), false);
     Variable output = model->forward(input);
 
-    EXPECT_TRUE(this->CheckShape(output, {2, 1000}))
-        << "ResNet-50 should output (batch, 1000)";
+    expectShape(output.tensor(), {2, 1000});
 }
 
-TYPED_TEST(ResNetMultiDTypeTest, ResNet50ParameterCount) {
+TEST_P(ResNetMultiDTypeTest, ResNet50ParameterCount) {
     auto model = resnet50(1000, false);
+    convert_model(model);
 
     int64_t total_params = 0;
     for (const auto& param : model->parameters()) {
@@ -402,15 +366,16 @@ TYPED_TEST(ResNetMultiDTypeTest, ResNet50ParameterCount) {
     }
 
     // ResNet-50: 25.6M parameters
-    EXPECT_TRUE(this->CheckParameterCount(total_params, 25600000))
+    EXPECT_TRUE(CheckParameterCount(total_params, 25600000))
         << "ResNet-50 should have ~25.6M parameters, got " << total_params;
 }
 
-TYPED_TEST(ResNetMultiDTypeTest, ResNet50GradientFlow) {
+TEST_P(ResNetMultiDTypeTest, ResNet50GradientFlow) {
     auto model = resnet50(10, false);
+    convert_model(model);
     model->train();
 
-    Variable input(Tensor({2, 3, 224, 224}, this->dtype_, this->device_), true);
+    Variable input(Tensor({2, 3, 224, 224}, dtype(), device()), true);
     Variable output = model->forward(input);
 
     Variable loss = tenzor::sum(output);
@@ -438,36 +403,37 @@ TYPED_TEST(ResNetMultiDTypeTest, ResNet50GradientFlow) {
         << "Last layer (fc) should receive gradients in ResNet-50";
 }
 
-TYPED_TEST(ResNetMultiDTypeTest, ResNet50FeatureExtraction) {
+TEST_P(ResNetMultiDTypeTest, ResNet50FeatureExtraction) {
     // Test ResNet-50 for feature extraction (transfer learning)
     auto model = resnet50(1000, false);
+    convert_model(model);
     model->eval();
 
-    Variable input(Tensor({2, 3, 224, 224}, this->dtype_, this->device_), false);
+    Variable input(Tensor({2, 3, 224, 224}, dtype(), device()), false);
     Variable features = model->forward(input);
 
     // Features should be high-dimensional
-    EXPECT_TRUE(this->CheckShape(features, {2, 1000}))
-        << "ResNet-50 features should be (batch, 1000)";
+    expectShape(features.tensor(), {2, 1000});
 }
 
 // ============================================================================
 // ResNet-101 and ResNet-152 Tests - Very Deep Networks
 // ============================================================================
 
-TYPED_TEST(ResNetMultiDTypeTest, ResNet101ForwardShape) {
+TEST_P(ResNetMultiDTypeTest, ResNet101ForwardShape) {
     auto model = resnet101(1000, false);
+    convert_model(model);
     model->eval();
 
-    Variable input(Tensor({2, 3, 224, 224}, this->dtype_, this->device_), false);
+    Variable input(Tensor({2, 3, 224, 224}, dtype(), device()), false);
     Variable output = model->forward(input);
 
-    EXPECT_TRUE(this->CheckShape(output, {2, 1000}))
-        << "ResNet-101 should output (batch, 1000)";
+    expectShape(output.tensor(), {2, 1000});
 }
 
-TYPED_TEST(ResNetMultiDTypeTest, ResNet101ParameterCount) {
+TEST_P(ResNetMultiDTypeTest, ResNet101ParameterCount) {
     auto model = resnet101(1000, false);
+    convert_model(model);
 
     int64_t total_params = 0;
     for (const auto& param : model->parameters()) {
@@ -475,23 +441,24 @@ TYPED_TEST(ResNetMultiDTypeTest, ResNet101ParameterCount) {
     }
 
     // ResNet-101: ~44.5M parameters
-    EXPECT_TRUE(this->CheckParameterCount(total_params, 44500000))
+    EXPECT_TRUE(CheckParameterCount(total_params, 44500000))
         << "ResNet-101 should have ~44.5M parameters, got " << total_params;
 }
 
-TYPED_TEST(ResNetMultiDTypeTest, ResNet152ForwardShape) {
+TEST_P(ResNetMultiDTypeTest, ResNet152ForwardShape) {
     auto model = resnet152(1000, false);
+    convert_model(model);
     model->eval();
 
-    Variable input(Tensor({2, 3, 224, 224}, this->dtype_, this->device_), false);
+    Variable input(Tensor({2, 3, 224, 224}, dtype(), device()), false);
     Variable output = model->forward(input);
 
-    EXPECT_TRUE(this->CheckShape(output, {2, 1000}))
-        << "ResNet-152 should output (batch, 1000)";
+    expectShape(output.tensor(), {2, 1000});
 }
 
-TYPED_TEST(ResNetMultiDTypeTest, ResNet152ParameterCount) {
+TEST_P(ResNetMultiDTypeTest, ResNet152ParameterCount) {
     auto model = resnet152(1000, false);
+    convert_model(model);
 
     int64_t total_params = 0;
     for (const auto& param : model->parameters()) {
@@ -499,7 +466,7 @@ TYPED_TEST(ResNetMultiDTypeTest, ResNet152ParameterCount) {
     }
 
     // ResNet-152: ~60M parameters
-    EXPECT_TRUE(this->CheckParameterCount(total_params, 60000000))
+    EXPECT_TRUE(CheckParameterCount(total_params, 60000000))
         << "ResNet-152 should have ~60M parameters, got " << total_params;
 }
 
@@ -507,19 +474,20 @@ TYPED_TEST(ResNetMultiDTypeTest, ResNet152ParameterCount) {
 // ResNeXt Tests - Grouped Convolutions
 // ============================================================================
 
-TYPED_TEST(ResNetMultiDTypeTest, ResNeXt50_32x4dForwardShape) {
+TEST_P(ResNetMultiDTypeTest, ResNeXt50_32x4dForwardShape) {
     auto model = resnext50_32x4d(1000, false);
+    convert_model(model);
     model->eval();
 
-    Variable input(Tensor({2, 3, 224, 224}, this->dtype_, this->device_), false);
+    Variable input(Tensor({2, 3, 224, 224}, dtype(), device()), false);
     Variable output = model->forward(input);
 
-    EXPECT_TRUE(this->CheckShape(output, {2, 1000}))
-        << "ResNeXt-50 32x4d should output (batch, 1000)";
+    expectShape(output.tensor(), {2, 1000});
 }
 
-TYPED_TEST(ResNetMultiDTypeTest, ResNeXt50ParameterCount) {
+TEST_P(ResNetMultiDTypeTest, ResNeXt50ParameterCount) {
     auto model = resnext50_32x4d(1000, false);
+    convert_model(model);
 
     int64_t total_params = 0;
     for (const auto& param : model->parameters()) {
@@ -527,26 +495,27 @@ TYPED_TEST(ResNetMultiDTypeTest, ResNeXt50ParameterCount) {
     }
 
     // ResNeXt-50 32x4d: ~25M parameters (similar to ResNet-50)
-    EXPECT_TRUE(this->CheckParameterCount(total_params, 25000000))
+    EXPECT_TRUE(CheckParameterCount(total_params, 25000000))
         << "ResNeXt-50 32x4d should have ~25M parameters";
 }
 
-TYPED_TEST(ResNetMultiDTypeTest, ResNeXt101_32x8dForwardShape) {
+TEST_P(ResNetMultiDTypeTest, ResNeXt101_32x8dForwardShape) {
     auto model = resnext101_32x8d(1000, false);
+    convert_model(model);
     model->eval();
 
-    Variable input(Tensor({2, 3, 224, 224}, this->dtype_, this->device_), false);
+    Variable input(Tensor({2, 3, 224, 224}, dtype(), device()), false);
     Variable output = model->forward(input);
 
-    EXPECT_TRUE(this->CheckShape(output, {2, 1000}))
-        << "ResNeXt-101 32x8d should output (batch, 1000)";
+    expectShape(output.tensor(), {2, 1000});
 }
 
-TYPED_TEST(ResNetMultiDTypeTest, ResNeXtGradientFlow) {
+TEST_P(ResNetMultiDTypeTest, ResNeXtGradientFlow) {
     auto model = resnext50_32x4d(10, false);
+    convert_model(model);
     model->train();
 
-    Variable input(Tensor({2, 3, 224, 224}, this->dtype_, this->device_), true);
+    Variable input(Tensor({2, 3, 224, 224}, dtype(), device()), true);
     Variable output = model->forward(input);
 
     Variable loss = tenzor::sum(output);
@@ -569,19 +538,20 @@ TYPED_TEST(ResNetMultiDTypeTest, ResNeXtGradientFlow) {
 // Wide ResNet Tests - Increased Width
 // ============================================================================
 
-TYPED_TEST(ResNetMultiDTypeTest, WideResNet50_2ForwardShape) {
+TEST_P(ResNetMultiDTypeTest, WideResNet50_2ForwardShape) {
     auto model = wide_resnet50_2(1000, false);
+    convert_model(model);
     model->eval();
 
-    Variable input(Tensor({2, 3, 224, 224}, this->dtype_, this->device_), false);
+    Variable input(Tensor({2, 3, 224, 224}, dtype(), device()), false);
     Variable output = model->forward(input);
 
-    EXPECT_TRUE(this->CheckShape(output, {2, 1000}))
-        << "Wide ResNet-50-2 should output (batch, 1000)";
+    expectShape(output.tensor(), {2, 1000});
 }
 
-TYPED_TEST(ResNetMultiDTypeTest, WideResNet50ParameterCount) {
+TEST_P(ResNetMultiDTypeTest, WideResNet50ParameterCount) {
     auto model = wide_resnet50_2(1000, false);
+    convert_model(model);
 
     int64_t total_params = 0;
     for (const auto& param : model->parameters()) {
@@ -593,23 +563,24 @@ TYPED_TEST(ResNetMultiDTypeTest, WideResNet50ParameterCount) {
         << "Wide ResNet-50-2 should have more parameters than ResNet-50";
 }
 
-TYPED_TEST(ResNetMultiDTypeTest, WideResNet101_2ForwardShape) {
+TEST_P(ResNetMultiDTypeTest, WideResNet101_2ForwardShape) {
     auto model = wide_resnet101_2(1000, false);
+    convert_model(model);
     model->eval();
 
-    Variable input(Tensor({2, 3, 224, 224}, this->dtype_, this->device_), false);
+    Variable input(Tensor({2, 3, 224, 224}, dtype(), device()), false);
     Variable output = model->forward(input);
 
-    EXPECT_TRUE(this->CheckShape(output, {2, 1000}))
-        << "Wide ResNet-101-2 should output (batch, 1000)";
+    expectShape(output.tensor(), {2, 1000});
 }
 
 // ============================================================================
 // Training Mode Tests - BatchNorm Behavior
 // ============================================================================
 
-TYPED_TEST(ResNetMultiDTypeTest, TrainingModeSwitch) {
+TEST_P(ResNetMultiDTypeTest, TrainingModeSwitch) {
     auto model = resnet18(10, false);
+    convert_model(model);
 
     // Test training mode
     model->train();
@@ -622,10 +593,11 @@ TYPED_TEST(ResNetMultiDTypeTest, TrainingModeSwitch) {
         << "Model should be in eval mode after eval()";
 }
 
-TYPED_TEST(ResNetMultiDTypeTest, BatchNormBehaviorDifference) {
+TEST_P(ResNetMultiDTypeTest, BatchNormBehaviorDifference) {
     auto model = resnet18(10, false);
+    convert_model(model);
 
-    Variable input(Tensor({2, 3, 224, 224}, this->dtype_, this->device_), false);
+    Variable input(Tensor({2, 3, 224, 224}, dtype(), device()), false);
 
     // Forward in training mode
     model->train();
@@ -636,39 +608,35 @@ TYPED_TEST(ResNetMultiDTypeTest, BatchNormBehaviorDifference) {
     Variable output_eval = model->forward(input);
 
     // Both should produce valid outputs with correct shape
-    EXPECT_TRUE(this->CheckShape(output_train, {2, 10}))
-        << "Training mode output should have correct shape";
-    EXPECT_TRUE(this->CheckShape(output_eval, {2, 10}))
-        << "Eval mode output should have correct shape";
+    expectShape(output_train.tensor(), {2, 10});
+    expectShape(output_eval.tensor(), {2, 10});
 }
 
 // ============================================================================
 // Transfer Learning Tests
 // ============================================================================
 
-TYPED_TEST(ResNetMultiDTypeTest, TransferLearningFineTuning) {
+TEST_P(ResNetMultiDTypeTest, TransferLearningFineTuning) {
     // Simulate transfer learning: pretrained model, new classification head
     auto model = resnet50(1000, false);  // ImageNet classes
-
-    // In practice, you would load pretrained weights here
+    convert_model(model);
 
     // Replace final layer for new task (e.g., 10 classes)
-    // This tests the architecture's flexibility for transfer learning
     auto new_fc = std::make_shared<nn::Linear>(2048, 10);
 
     // Forward pass with new classifier
     model->eval();
-    Variable input(Tensor({2, 3, 224, 224}, this->dtype_, this->device_), false);
+    Variable input(Tensor({2, 3, 224, 224}, dtype(), device()), false);
 
     // Model should still work with original architecture
     Variable output = model->forward(input);
-    EXPECT_TRUE(this->CheckShape(output, {2, 1000}))
-        << "Model structure supports transfer learning";
+    expectShape(output.tensor(), {2, 1000});
 }
 
-TYPED_TEST(ResNetMultiDTypeTest, FeatureExtractionMode) {
+TEST_P(ResNetMultiDTypeTest, FeatureExtractionMode) {
     // Test using ResNet as feature extractor
     auto model = resnet50(1000, false);
+    convert_model(model);
     model->eval();
 
     // Freeze all parameters (for feature extraction)
@@ -676,20 +644,21 @@ TYPED_TEST(ResNetMultiDTypeTest, FeatureExtractionMode) {
         param->set_requires_grad(false);
     }
 
-    Variable input(Tensor({2, 3, 224, 224}, this->dtype_, this->device_), false);
+    Variable input(Tensor({2, 3, 224, 224}, dtype(), device()), false);
     Variable features = model->forward(input);
 
-    EXPECT_TRUE(this->CheckShape(features, {2, 1000}))
-        << "Feature extraction should produce consistent output";
+    expectShape(features.tensor(), {2, 1000});
 }
 
 // ============================================================================
 // State Dict Tests - Model Persistence
 // ============================================================================
 
-TYPED_TEST(ResNetMultiDTypeTest, StateDictSaveLoad) {
+TEST_P(ResNetMultiDTypeTest, StateDictSaveLoad) {
     auto model1 = resnet18(10, false);
     auto model2 = resnet18(10, false);
+    convert_model(model1);
+    convert_model(model2);
 
     // Get state from model1
     auto state = model1->state_dict();
@@ -710,7 +679,7 @@ TYPED_TEST(ResNetMultiDTypeTest, StateDictSaveLoad) {
 // Edge Cases and Error Handling
 // ============================================================================
 
-TYPED_TEST(ResNetMultiDTypeTest, BasicBlockRejectsGroups) {
+TEST_P(ResNetMultiDTypeTest, BasicBlockRejectsGroups) {
     // BasicBlock should reject groups != 1
     EXPECT_THROW({
         auto block = std::make_shared<BasicBlock>(64, 64, 1, 32, 64, nullptr);
@@ -718,7 +687,7 @@ TYPED_TEST(ResNetMultiDTypeTest, BasicBlockRejectsGroups) {
         << "BasicBlock should reject grouped convolutions";
 }
 
-TYPED_TEST(ResNetMultiDTypeTest, BasicBlockRejectsWideWidth) {
+TEST_P(ResNetMultiDTypeTest, BasicBlockRejectsWideWidth) {
     // BasicBlock should reject base_width != 64
     EXPECT_THROW({
         auto block = std::make_shared<BasicBlock>(64, 64, 1, 1, 128, nullptr);
@@ -726,48 +695,49 @@ TYPED_TEST(ResNetMultiDTypeTest, BasicBlockRejectsWideWidth) {
         << "BasicBlock should reject non-standard width";
 }
 
-TYPED_TEST(ResNetMultiDTypeTest, SmallBatchSize) {
+TEST_P(ResNetMultiDTypeTest, SmallBatchSize) {
     // Test with batch size 1 (important for inference)
     auto model = resnet18(10, false);
+    convert_model(model);
     model->eval();
 
-    Variable input(Tensor({1, 3, 224, 224}, this->dtype_, this->device_), false);
+    Variable input(Tensor({1, 3, 224, 224}, dtype(), device()), false);
     Variable output = model->forward(input);
 
-    EXPECT_TRUE(this->CheckShape(output, {1, 10}))
-        << "ResNet should handle batch_size=1";
+    expectShape(output.tensor(), {1, 10});
 }
 
-TYPED_TEST(ResNetMultiDTypeTest, LargeBatchSize) {
+TEST_P(ResNetMultiDTypeTest, LargeBatchSize) {
     // Test with larger batch size
     auto model = resnet18(10, false);
+    convert_model(model);
     model->eval();
 
-    Variable input(Tensor({16, 3, 224, 224}, this->dtype_, this->device_), false);
+    Variable input(Tensor({16, 3, 224, 224}, dtype(), device()), false);
     Variable output = model->forward(input);
 
-    EXPECT_TRUE(this->CheckShape(output, {16, 10}))
-        << "ResNet should handle large batch sizes";
+    expectShape(output.tensor(), {16, 10});
 }
 
-TYPED_TEST(ResNetMultiDTypeTest, MinimalInputSize) {
+TEST_P(ResNetMultiDTypeTest, MinimalInputSize) {
     // Test minimum viable input size (32x32 after all downsampling)
     auto model = resnet18(10, false);
+    convert_model(model);
     model->eval();
 
-    Variable input(Tensor({2, 3, 32, 32}, this->dtype_, this->device_), false);
+    Variable input(Tensor({2, 3, 32, 32}, dtype(), device()), false);
     Variable output = model->forward(input);
 
-    EXPECT_TRUE(this->CheckShape(output, {2, 10}))
-        << "ResNet should handle 32x32 input (CIFAR size)";
+    expectShape(output.tensor(), {2, 10});
 }
 
 // ============================================================================
 // Performance and Memory Tests
 // ============================================================================
 
-TYPED_TEST(ResNetMultiDTypeTest, ParameterSharing) {
+TEST_P(ResNetMultiDTypeTest, ParameterSharing) {
     auto model = resnet18(10, false);
+    convert_model(model);
 
     // Get parameters twice and verify they share underlying storage
     auto params1 = model->parameters();
@@ -783,11 +753,12 @@ TYPED_TEST(ResNetMultiDTypeTest, ParameterSharing) {
     }
 }
 
-TYPED_TEST(ResNetMultiDTypeTest, ZeroGrad) {
+TEST_P(ResNetMultiDTypeTest, ZeroGrad) {
     auto model = resnet18(10, false);
+    convert_model(model);
     model->train();
 
-    Variable input(Tensor({2, 3, 224, 224}, this->dtype_, this->device_), true);
+    Variable input(Tensor({2, 3, 224, 224}, dtype(), device()), true);
     Variable output = model->forward(input);
 
     Variable loss = tenzor::sum(output);
@@ -800,24 +771,25 @@ TYPED_TEST(ResNetMultiDTypeTest, ZeroGrad) {
     for (const auto& param : model->parameters()) {
         if (param->grad().has_value()) {
             auto grad_sum = tenzor::sum(*param->grad());
-            auto* ptr = static_cast<float*>(grad_sum.data_ptr());
-            EXPECT_NEAR(ptr[0], 0.0f, this->abs_tol_)
+            auto cpu_grad = grad_sum.to(Device::cpu()).to(DType::Float32);
+            auto* ptr = cpu_grad.data<float>();
+            EXPECT_NEAR(ptr[0], 0.0f, atol())
                 << "Gradients should be zero after zero_grad()";
         }
     }
 }
 
-TYPED_TEST(ResNetMultiDTypeTest, MultipleForwardPasses) {
+TEST_P(ResNetMultiDTypeTest, MultipleForwardPasses) {
     // Test multiple forward passes (important for training loops)
     auto model = resnet18(10, false);
+    convert_model(model);
     model->eval();
 
-    Variable input(Tensor({2, 3, 224, 224}, this->dtype_, this->device_), false);
+    Variable input(Tensor({2, 3, 224, 224}, dtype(), device()), false);
 
     for (int i = 0; i < 5; ++i) {
         Variable output = model->forward(input);
-        EXPECT_TRUE(this->CheckShape(output, {2, 10}))
-            << "Multiple forward passes should maintain correctness (pass " << i << ")";
+        expectShape(output.tensor(), {2, 10});
     }
 }
 
@@ -825,12 +797,13 @@ TYPED_TEST(ResNetMultiDTypeTest, MultipleForwardPasses) {
 // Residual Connection Tests - Core Innovation
 // ============================================================================
 
-TYPED_TEST(ResNetMultiDTypeTest, ResidualConnectionIdentity) {
+TEST_P(ResNetMultiDTypeTest, ResidualConnectionIdentity) {
     // Test that residual connections preserve gradient flow
     auto model = resnet18(10, false);
+    convert_model(model);
     model->train();
 
-    Variable input(Tensor({2, 3, 224, 224}, this->dtype_, this->device_), true);
+    Variable input(Tensor({2, 3, 224, 224}, dtype(), device()), true);
     Variable output = model->forward(input);
 
     Variable loss = tenzor::sum(output * output);
@@ -841,12 +814,13 @@ TYPED_TEST(ResNetMultiDTypeTest, ResidualConnectionIdentity) {
         << "Residual connections should enable gradient flow to input";
 }
 
-TYPED_TEST(ResNetMultiDTypeTest, DeepNetworkGradientFlow) {
+TEST_P(ResNetMultiDTypeTest, DeepNetworkGradientFlow) {
     // Test that very deep network (ResNet-152) maintains gradient flow
     auto model = resnet152(10, false);
+    convert_model(model);
     model->train();
 
-    Variable input(Tensor({2, 3, 224, 224}, this->dtype_, this->device_), true);
+    Variable input(Tensor({2, 3, 224, 224}, dtype(), device()), true);
     Variable output = model->forward(input);
 
     Variable loss = tenzor::sum(output);
@@ -866,6 +840,12 @@ TYPED_TEST(ResNetMultiDTypeTest, DeepNetworkGradientFlow) {
     EXPECT_TRUE(found_early_grad)
         << "ResNet-152 should maintain gradient flow to early layers via residual connections";
 }
+
+// ============================================================================
+// Instantiate Tests for All Backends and DTypes
+// ============================================================================
+
+INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(ResNetMultiDTypeTest);
 
 int main(int argc, char** argv) {
     tenzor::initialize();

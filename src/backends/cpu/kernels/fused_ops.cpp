@@ -429,8 +429,20 @@ auto fused_gelu_kernel(const Tensor& input) -> Tensor {
             double tanh_val = std::tanh(inner);
             out_data[i] = 0.5 * x * (1.0 + tanh_val);
         }
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* in_data = input.data<Float16>();
+        Float16* out_data = result.data<Float16>();
+        size_t n = static_cast<size_t>(input.numel());
+
+        for (size_t i = 0; i < n; ++i) {
+            float x = static_cast<float>(in_data[i]);
+            float x_cubed = x * x * x;
+            float inner = sqrt_2_over_pi * (x + coeff * x_cubed);
+            float tanh_val = std::tanh(inner);
+            out_data[i] = Float16(0.5f * x * (1.0f + tanh_val));
+        }
     } else {
-        throw std::runtime_error("fused_gelu: Only Float32/Float64 supported");
+        throw std::runtime_error("fused_gelu: Only Float32/Float64/Float16 supported");
     }
 
     return result;

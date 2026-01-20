@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <cstring>
 #include <iostream>
+#include <type_traits>
+#include <stdexcept>
 
 namespace tenzor {
 
@@ -113,11 +115,37 @@ auto Tensor::is_contiguous() const noexcept -> bool {
 // Template instantiations for common types
 template<typename T>
 auto Tensor::data() -> T* {
+    if (!impl_ || !impl_->storage) {
+        throw std::runtime_error("Cannot access data of uninitialized tensor");
+    }
+    // Allow byte-level access (uint8_t) for any dtype - used for raw memory operations
+    // For other types, validate dtype matches requested type
+    using CleanT = std::remove_const_t<T>;
+    if constexpr (!std::is_same_v<CleanT, uint8_t> && !std::is_same_v<CleanT, char> &&
+                  !std::is_same_v<CleanT, unsigned char> && !std::is_same_v<CleanT, signed char>) {
+        constexpr DType expected_dtype = type_to_dtype_v<CleanT>;
+        if (impl_->dtype != expected_dtype) {
+            throw std::runtime_error("Type mismatch: requested type does not match tensor dtype");
+        }
+    }
     return static_cast<T*>(impl_->storage->data()) + impl_->offset;
 }
 
 template<typename T>
 auto Tensor::data() const -> const T* {
+    if (!impl_ || !impl_->storage) {
+        throw std::runtime_error("Cannot access data of uninitialized tensor");
+    }
+    // Allow byte-level access (uint8_t) for any dtype - used for raw memory operations
+    // For other types, validate dtype matches requested type
+    using CleanT = std::remove_const_t<T>;
+    if constexpr (!std::is_same_v<CleanT, uint8_t> && !std::is_same_v<CleanT, char> &&
+                  !std::is_same_v<CleanT, unsigned char> && !std::is_same_v<CleanT, signed char>) {
+        constexpr DType expected_dtype = type_to_dtype_v<CleanT>;
+        if (impl_->dtype != expected_dtype) {
+            throw std::runtime_error("Type mismatch: requested type does not match tensor dtype");
+        }
+    }
     return static_cast<const T*>(impl_->storage->data()) + impl_->offset;
 }
 
@@ -152,9 +180,9 @@ template auto Tensor::data<bool>() const -> const bool*;
 // Additional instantiations for const-qualified template parameters (used by quantization)
 template auto Tensor::data<const float>() -> const float*;
 template auto Tensor::data<const float>() const -> const float*;
-template auto Tensor::data<const int>() const -> const int*;
 template auto Tensor::data<const unsigned char>() const -> const unsigned char*;
 template auto Tensor::data<const signed char>() const -> const signed char*;
+template auto Tensor::data<const int>() const -> const int*;
 
 // Template instantiations for item<T>() - extract scalar from single-element tensor
 template<> auto Tensor::item<float>() const -> float {
@@ -843,11 +871,11 @@ auto Tensor::reshape(std::vector<int64_t> new_shape) const -> Tensor {
     for (size_t i = 0; i < new_shape.size(); ++i) {
         if (new_shape[i] == -1) {
             if (infer_dim != -1) {
-                throw std::invalid_argument("Only one dimension can be inferred");
+                throw std::runtime_error("Only one dimension can be inferred");
             }
             infer_dim = static_cast<int64_t>(i);
         } else if (new_shape[i] <= 0) {
-            throw std::invalid_argument("Invalid shape dimension");
+            throw std::runtime_error("Invalid shape dimension");
         } else {
             total *= new_shape[i];
         }
@@ -855,10 +883,10 @@ auto Tensor::reshape(std::vector<int64_t> new_shape) const -> Tensor {
 
     if (infer_dim != -1) {
         if (total == 0) {
-            throw std::invalid_argument("Cannot infer dimension: product of known dimensions is zero");
+            throw std::runtime_error("Cannot infer dimension: product of known dimensions is zero");
         }
         if (numel() % total != 0) {
-            throw std::invalid_argument("Cannot infer dimension");
+            throw std::runtime_error("Cannot infer dimension");
         }
         new_shape[infer_dim] = numel() / total;
         total = numel();
@@ -916,11 +944,11 @@ auto Tensor::view(std::vector<int64_t> new_shape) const -> Tensor {
     for (size_t i = 0; i < new_shape.size(); ++i) {
         if (new_shape[i] == -1) {
             if (infer_dim != -1) {
-                throw std::invalid_argument("Only one dimension can be inferred");
+                throw std::runtime_error("Only one dimension can be inferred");
             }
             infer_dim = static_cast<int64_t>(i);
         } else if (new_shape[i] <= 0) {
-            throw std::invalid_argument("Invalid shape dimension");
+            throw std::runtime_error("Invalid shape dimension");
         } else {
             total *= new_shape[i];
         }
@@ -928,10 +956,10 @@ auto Tensor::view(std::vector<int64_t> new_shape) const -> Tensor {
 
     if (infer_dim != -1) {
         if (total == 0) {
-            throw std::invalid_argument("Cannot infer dimension: product of known dimensions is zero");
+            throw std::runtime_error("Cannot infer dimension: product of known dimensions is zero");
         }
         if (numel() % total != 0) {
-            throw std::invalid_argument("Cannot infer dimension");
+            throw std::runtime_error("Cannot infer dimension");
         }
         new_shape[infer_dim] = numel() / total;
         total = numel();
@@ -939,7 +967,7 @@ auto Tensor::view(std::vector<int64_t> new_shape) const -> Tensor {
 
     // Validate total elements match
     if (total != numel()) {
-        throw std::invalid_argument("View shape incompatible with number of elements");
+        throw std::runtime_error("View shape incompatible with number of elements");
     }
 
     // View is a zero-copy operation - create a new tensor that shares the same storage
@@ -970,7 +998,7 @@ auto Tensor::transpose(int64_t dim0, int64_t dim1) const -> Tensor {
     if (dim1 < 0) dim1 += ndims;
 
     if (dim0 < 0 || dim0 >= ndims || dim1 < 0 || dim1 >= ndims) {
-        throw std::out_of_range("Dimension out of range");
+        throw std::out_of_range("Dimension out of range for transpose");
     }
 
     // For 2D tensors, default is transpose(0, 1)
@@ -1010,7 +1038,7 @@ auto Tensor::permute(std::vector<int64_t> dims) const -> Tensor {
         if (dim < 0) dim += ndims;
 
         if (dim < 0 || dim >= ndims) {
-            throw std::out_of_range("Dimension out of range in permutation");
+            throw std::invalid_argument("Dimension out of range in permutation");
         }
         if (seen[dim]) {
             throw std::invalid_argument("Duplicate dimension in permutation");
@@ -1050,10 +1078,10 @@ auto Tensor::squeeze(std::optional<int64_t> dim) const -> Tensor {
         if (d < 0) d += ndims;
 
         if (d < 0 || d >= ndims) {
-            throw std::out_of_range("Dimension out of range");
+            throw std::out_of_range("Dimension out of range for squeeze");
         }
 
-        // If dimension is not singleton, return unchanged tensor (no-op)
+        // PyTorch behavior: if dimension is not singleton, return unchanged tensor
         if (impl_->shape[d] != 1) {
             return *this;
         }
@@ -1137,10 +1165,10 @@ auto Tensor::flatten(int64_t start_dim, int64_t end_dim) const -> Tensor {
     if (end_dim < 0) end_dim += ndims;
 
     if (start_dim < 0 || start_dim >= ndims) {
-        throw std::out_of_range("start_dim out of range");
+        throw std::runtime_error("start_dim out of range");
     }
     if (end_dim < 0 || end_dim >= ndims) {
-        throw std::out_of_range("end_dim out of range");
+        throw std::runtime_error("end_dim out of range");
     }
     if (start_dim > end_dim) {
         throw std::invalid_argument("start_dim must be <= end_dim");
@@ -1195,7 +1223,7 @@ auto Tensor::operator[](int64_t idx) const -> Tensor {
 
     // Validate index is in bounds
     if (normalized_idx < 0 || normalized_idx >= dim0_size) {
-        throw std::out_of_range("Index " + std::to_string(idx) +
+        throw std::runtime_error("Index " + std::to_string(idx) +
                                 " is out of bounds for dimension 0 with size " +
                                 std::to_string(dim0_size));
     }
@@ -1221,7 +1249,7 @@ auto Tensor::slice(int64_t dim, int64_t start, int64_t end, int64_t step) const 
     // Normalize dimension
     if (dim < 0) dim += ndims;
     if (dim < 0 || dim >= ndims) {
-        throw std::out_of_range("Dimension out of range for slice");
+        throw std::runtime_error("Dimension out of range for slice");
     }
 
     const int64_t dim_size = impl_->shape[dim];
@@ -1230,19 +1258,26 @@ auto Tensor::slice(int64_t dim, int64_t start, int64_t end, int64_t step) const 
     if (start < 0) start += dim_size;
     if (end < 0) end += dim_size;
 
-    // Clamp to valid range
-    start = std::clamp(start, int64_t{0}, dim_size);
-    end = std::clamp(end, int64_t{0}, dim_size);
+    // Validate bounds (strict mode - no clamping)
+    if (start < 0 || start > dim_size) {
+        throw std::runtime_error("Slice start index " + std::to_string(start) +
+            " out of bounds for dimension with size " + std::to_string(dim_size));
+    }
+    if (end < 0 || end > dim_size) {
+        throw std::runtime_error("Slice end index " + std::to_string(end) +
+            " out of bounds for dimension with size " + std::to_string(dim_size));
+    }
+    if (start > end) {
+        throw std::runtime_error("Slice start index " + std::to_string(start) +
+            " greater than end index " + std::to_string(end));
+    }
 
     if (step <= 0) {
-        throw std::invalid_argument("Step must be positive");
+        throw std::runtime_error("Step must be positive");
     }
 
     // Calculate new dimension size
-    int64_t new_dim_size = 0;
-    if (end > start) {
-        new_dim_size = (end - start + step - 1) / step;  // Ceiling division
-    }
+    int64_t new_dim_size = (end - start + step - 1) / step;  // Ceiling division
 
     // Create new tensor that shares storage with original
     Tensor result;

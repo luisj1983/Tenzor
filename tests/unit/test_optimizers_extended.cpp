@@ -13,8 +13,24 @@
 #include <cmath>
 #include <vector>
 
+// Forward declare tenzor::initialize
+namespace tenzor {
+    void initialize();
+}
+
 using namespace tenzor;
 using namespace tenzor::optim;
+
+// Global test environment to initialize Tenzor library
+class TenzorTestEnvironment : public ::testing::Environment {
+public:
+    void SetUp() override {
+        tenzor::initialize();
+    }
+};
+
+static ::testing::Environment* const tenzor_env =
+    ::testing::AddGlobalTestEnvironment(new TenzorTestEnvironment);
 
 class OptimizersExtendedTest : public ::testing::Test {
 protected:

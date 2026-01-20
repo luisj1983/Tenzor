@@ -378,6 +378,26 @@ protected:
         TypedVerifier<T>::expectEq(vals[2], static_cast<T>(3), "Unique value 2");
     }
 
+    // Specialized test for bool (only 2 unique values possible)
+    void testUniqueBasicBool() {
+        auto t = Tensor({6}, DType::Bool, cpu);
+        auto data = t.data<bool>();
+        data[0] = false;
+        data[1] = true;
+        data[2] = false;
+        data[3] = true;
+        data[4] = true;
+        data[5] = false;
+
+        auto [unique_vals, inverse, counts] = unique(t, true, false, false);
+
+        EXPECT_EQ(unique_vals.numel(), 2);
+
+        auto vals = unique_vals.data<bool>();
+        EXPECT_EQ(vals[0], false);  // false < true in sorted order
+        EXPECT_EQ(vals[1], true);
+    }
+
     template<typename T>
     void testUniqueWithCounts() {
         auto t = Tensor({5}, dtype, cpu);
@@ -396,6 +416,25 @@ protected:
         EXPECT_EQ(counts_data[0], 3);  // 1 appears 3 times
         EXPECT_EQ(counts_data[1], 2);  // 2 appears 2 times
     }
+
+    // Specialized test for bool with counts
+    void testUniqueWithCountsBool() {
+        auto t = Tensor({5}, DType::Bool, cpu);
+        auto data = t.data<bool>();
+        data[0] = false;
+        data[1] = true;
+        data[2] = false;
+        data[3] = false;
+        data[4] = true;
+
+        auto [unique_vals, inverse, counts_tensor] = unique(t, true, false, true);
+
+        EXPECT_EQ(unique_vals.numel(), 2);
+
+        auto counts_data = counts_tensor.data<int64_t>();
+        EXPECT_EQ(counts_data[0], 3);  // false appears 3 times
+        EXPECT_EQ(counts_data[1], 2);  // true appears 2 times
+    }
 };
 
 TEST_P(UniqueMultiDTypeTest, UniqueBasic) {
@@ -410,7 +449,7 @@ TEST_P(UniqueMultiDTypeTest, UniqueBasic) {
     } else if (dtype == DType::Int64) {
         testUniqueBasic<int64_t>();
     } else if (dtype == DType::Bool) {
-        testUniqueBasic<bool>();
+        testUniqueBasicBool();
     }
 }
 
@@ -426,7 +465,7 @@ TEST_P(UniqueMultiDTypeTest, UniqueWithCounts) {
     } else if (dtype == DType::Int64) {
         testUniqueWithCounts<int64_t>();
     } else if (dtype == DType::Bool) {
-        testUniqueWithCounts<bool>();
+        testUniqueWithCountsBool();
     }
 }
 

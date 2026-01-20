@@ -82,6 +82,11 @@ auto ones(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
         if (!backend) {
             throw std::runtime_error("Backend not available for device type");
         }
+        // Validate device index
+        if (device.index < 0 || device.index >= backend->device_count()) {
+            throw std::runtime_error("Invalid device index " + std::to_string(device.index) +
+                " for backend with " + std::to_string(backend->device_count()) + " device(s)");
+        }
 
         OpAttributes attrs;
         attrs["shape"] = shape_to_string(shape);
@@ -95,6 +100,12 @@ auto ones(std::vector<int64_t> shape, DType dtype, Device device) -> Tensor {
         //}
 
         return backend->dispatch("ones", {}, attrs)[0];
+    }
+
+    // CPU path: validate device index (only index 0 is valid for CPU)
+    if (device.index != 0) {
+        throw std::runtime_error("Invalid device index " + std::to_string(device.index) +
+            " for CPU (only index 0 is valid)");
     }
 
     // CPU path: use uninitialized allocation (avoid wasteful zeroing before fill)
@@ -637,8 +648,34 @@ auto linspace(float start, float end, int64_t steps, DType dtype, Device device)
             }
             break;
         }
+        case DType::Float16: {
+            Float16* ptr = static_cast<Float16*>(data);
+            if (steps == 1) {
+                ptr[0] = Float16(start);
+            } else {
+                for (int64_t i = 0; i < steps; ++i) {
+                    ptr[i] = Float16(static_cast<float>(start + i * step_size));
+                }
+                // Ensure the last element is exactly 'end' to avoid floating point errors
+                ptr[steps - 1] = Float16(end);
+            }
+            break;
+        }
+        case DType::BFloat16: {
+            BFloat16* ptr = static_cast<BFloat16*>(data);
+            if (steps == 1) {
+                ptr[0] = BFloat16(start);
+            } else {
+                for (int64_t i = 0; i < steps; ++i) {
+                    ptr[i] = BFloat16(static_cast<float>(start + i * step_size));
+                }
+                // Ensure the last element is exactly 'end' to avoid floating point errors
+                ptr[steps - 1] = BFloat16(end);
+            }
+            break;
+        }
         default:
-            throw std::runtime_error("Unsupported dtype for linspace() - only Float32 and Float64 are supported");
+            throw std::runtime_error("Unsupported dtype for linspace()");
     }
     return tensor;
 }

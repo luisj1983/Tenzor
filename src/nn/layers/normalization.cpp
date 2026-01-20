@@ -1111,16 +1111,17 @@ public:
         auto& rstd_orig = saved[2];
         auto& weight_orig = saved[3];
 
-        // Save original device for returning results
+        // Save original device and dtype for returning results
         auto original_device = grad_output_orig.device();
+        auto original_dtype = grad_output_orig.dtype();
 
-        // Move tensors to CPU for backward computation if on GPU
+        // Move tensors to CPU and convert to Float32 for backward computation
         // TODO: Implement CUDA kernel for GroupNorm backward for better performance
-        auto grad_output = grad_output_orig.to(Device::cpu()).contiguous();
-        auto input = input_orig.to(Device::cpu()).contiguous();
-        auto mean = mean_orig.to(Device::cpu()).contiguous();
-        auto rstd = rstd_orig.to(Device::cpu()).contiguous();
-        auto weight = weight_orig.to(Device::cpu()).contiguous();
+        auto grad_output = grad_output_orig.to(Device::cpu()).to(DType::Float32).contiguous();
+        auto input = input_orig.to(Device::cpu()).to(DType::Float32).contiguous();
+        auto mean = mean_orig.to(Device::cpu()).to(DType::Float32).contiguous();
+        auto rstd = rstd_orig.to(Device::cpu()).to(DType::Float32).contiguous();
+        auto weight = weight_orig.to(Device::cpu()).to(DType::Float32).contiguous();
 
         auto shape = input.shape();
         int64_t N = shape[0];
@@ -1136,8 +1137,8 @@ public:
         auto* weight_data = weight.data<float>();
 
         auto grad_input = zeros_like(input);
-        auto grad_weight = zeros({C}, grad_output.dtype(), grad_output.device());
-        auto grad_bias = zeros({C}, grad_output.dtype(), grad_output.device());
+        auto grad_weight = zeros({C}, DType::Float32, Device::cpu());
+        auto grad_bias = zeros({C}, DType::Float32, Device::cpu());
 
         auto* grad_in_data = grad_input.data<float>();
         auto* grad_weight_data = grad_weight.data<float>();
@@ -1194,10 +1195,10 @@ public:
             }
         }
 
-        // Move results back to original device
-        return {grad_input.to(original_device).contiguous(),
-                grad_weight.to(original_device).contiguous(),
-                grad_bias.to(original_device).contiguous()};
+        // Move results back to original device and dtype
+        return {grad_input.to(original_dtype).to(original_device).contiguous(),
+                grad_weight.to(original_dtype).to(original_device).contiguous(),
+                grad_bias.to(original_dtype).to(original_device).contiguous()};
     }
 
 private:
@@ -1256,12 +1257,13 @@ auto GroupNorm::forward_impl(const Variable& input) -> Variable {
     auto original_device = input.tensor().device();
     auto original_dtype = input.tensor().dtype();
 
-    // For Float16, convert to Float32 for CPU computation
+    // For Float16 and Float64, convert to Float32 for CPU computation
+    // (CPU computation uses float pointers for efficiency)
     Tensor input_tensor_cpu = input.tensor();
     if (original_device.type != Device::Type::CPU) {
         input_tensor_cpu = input_tensor_cpu.cpu();
     }
-    if (original_dtype == DType::Float16) {
+    if (original_dtype == DType::Float16 || original_dtype == DType::Float64) {
         input_tensor_cpu = input_tensor_cpu.to(DType::Float32);
     }
     Variable input_cpu = Variable(input_tensor_cpu, input.requires_grad());
@@ -1271,14 +1273,14 @@ auto GroupNorm::forward_impl(const Variable& input) -> Variable {
     bool weight_requires_grad = affine_ ? parameters_["weight"]->requires_grad() : weight_.requires_grad();
     bool bias_requires_grad = affine_ ? parameters_["bias"]->requires_grad() : bias_.requires_grad();
 
-    // Move to CPU and convert Float16 to Float32 for computation
+    // Move to CPU and convert Float16/Float64 to Float32 for computation
     Tensor weight_tensor_cpu = weight_tensor;
     Tensor bias_tensor_cpu = bias_tensor;
     if (weight_tensor.device().type != Device::Type::CPU) {
         weight_tensor_cpu = weight_tensor_cpu.cpu();
         bias_tensor_cpu = bias_tensor_cpu.cpu();
     }
-    if (weight_tensor_cpu.dtype() == DType::Float16) {
+    if (weight_tensor_cpu.dtype() == DType::Float16 || weight_tensor_cpu.dtype() == DType::Float64) {
         weight_tensor_cpu = weight_tensor_cpu.to(DType::Float32);
         bias_tensor_cpu = bias_tensor_cpu.to(DType::Float32);
     }
@@ -1377,8 +1379,8 @@ auto GroupNorm::forward_impl(const Variable& input) -> Variable {
 
     // Convert back to original dtype and move to original device if needed
     Tensor output_final = output;
-    if (original_dtype == DType::Float16) {
-        output_final = output_final.to(DType::Float16);
+    if (original_dtype == DType::Float16 || original_dtype == DType::Float64) {
+        output_final = output_final.to(original_dtype);
     }
     if (original_device.type != Device::Type::CPU) {
         output_final = output_final.to(original_device);

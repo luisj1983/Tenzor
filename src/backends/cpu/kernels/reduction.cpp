@@ -444,6 +444,11 @@ static auto normalize_dim(int64_t dim, int64_t ndim) -> int64_t {
     if (dim < 0) {
         dim += ndim;
     }
+    // Validate dimension is within bounds
+    if (dim < 0 || dim >= ndim) {
+        throw std::runtime_error("Dimension " + std::to_string(dim) +
+            " out of range for tensor with " + std::to_string(ndim) + " dimensions");
+    }
     return dim;
 }
 
