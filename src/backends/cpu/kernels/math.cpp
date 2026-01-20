@@ -4171,6 +4171,14 @@ auto add_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
             }
             break;
         }
+        case DType::Float16: {
+            Float16* a_data = a.data<Float16>();
+            const Float16* b_data = b.data<Float16>();
+            for (int64_t i = 0; i < n; i++) {
+                a_data[i] = Float16(static_cast<float>(a_data[i]) + static_cast<float>(b_data[i]));
+            }
+            break;
+        }
         default:
             throw std::runtime_error("add_inplace: unsupported dtype");
     }
@@ -4214,6 +4222,14 @@ auto sub_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
             #pragma omp parallel for if(n > 10000)
             for (int64_t i = 0; i < n; i++) {
                 a_data[i] -= b_data[i];
+            }
+            break;
+        }
+        case DType::Float16: {
+            Float16* a_data = a.data<Float16>();
+            const Float16* b_data = b.data<Float16>();
+            for (int64_t i = 0; i < n; i++) {
+                a_data[i] = Float16(static_cast<float>(a_data[i]) - static_cast<float>(b_data[i]));
             }
             break;
         }
@@ -4263,6 +4279,14 @@ auto mul_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
             }
             break;
         }
+        case DType::Float16: {
+            Float16* a_data = a.data<Float16>();
+            const Float16* b_data = b.data<Float16>();
+            for (int64_t i = 0; i < n; i++) {
+                a_data[i] = Float16(static_cast<float>(a_data[i]) * static_cast<float>(b_data[i]));
+            }
+            break;
+        }
         default:
             throw std::runtime_error("mul_inplace: unsupported dtype");
     }
@@ -4306,6 +4330,14 @@ auto div_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
             #pragma omp parallel for if(n > 10000)
             for (int64_t i = 0; i < n; i++) {
                 a_data[i] /= b_data[i];
+            }
+            break;
+        }
+        case DType::Float16: {
+            Float16* a_data = a.data<Float16>();
+            const Float16* b_data = b.data<Float16>();
+            for (int64_t i = 0; i < n; i++) {
+                a_data[i] = Float16(static_cast<float>(a_data[i]) / static_cast<float>(b_data[i]));
             }
             break;
         }

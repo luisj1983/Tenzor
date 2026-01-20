@@ -336,7 +336,7 @@ auto add_(Tensor& self, const Tensor& other) -> Tensor& {
 
     // Result should be same tensor modified in-place
     // Copy result data back to self if backend created new tensor
-    if (result[0].data<float>() != self.data<float>()) {
+    if (result[0].data_ptr() != self.data_ptr()) {
         self = result[0];
     }
 
@@ -356,7 +356,7 @@ auto mul_(Tensor& self, const Tensor& other) -> Tensor& {
     auto result = dispatch<OpId::MulInplace>(inputs);
 
     // Result should be same tensor modified in-place
-    if (result[0].data<float>() != self.data<float>()) {
+    if (result[0].data_ptr() != self.data_ptr()) {
         self = result[0];
     }
 
@@ -376,7 +376,7 @@ auto sub_(Tensor& self, const Tensor& other) -> Tensor& {
     auto result = dispatch<OpId::SubInplace>(inputs);
 
     // Result should be same tensor modified in-place
-    if (result[0].data<float>() != self.data<float>()) {
+    if (result[0].data_ptr() != self.data_ptr()) {
         self = result[0];
     }
 
@@ -396,7 +396,7 @@ auto div_(Tensor& self, const Tensor& other) -> Tensor& {
     auto result = dispatch<OpId::DivInplace>(inputs);
 
     // Result should be same tensor modified in-place
-    if (result[0].data<float>() != self.data<float>()) {
+    if (result[0].data_ptr() != self.data_ptr()) {
         self = result[0];
     }
 

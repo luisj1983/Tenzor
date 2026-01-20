@@ -188,8 +188,8 @@ GPT2Model::GPT2Model(const GPT2Config& config)
     register_module("dropout", dropout_);
 }
 
-auto GPT2Model::create_causal_attention_mask(int64_t seq_len, Device device) const -> Tensor {
-    return nn::create_causal_mask(seq_len, device);
+auto GPT2Model::create_causal_attention_mask(int64_t seq_len, Device device, DType dtype) const -> Tensor {
+    return nn::create_causal_mask(seq_len, device, dtype);
 }
 
 auto GPT2Model::forward(const Variable& input_ids,
@@ -201,9 +201,11 @@ auto GPT2Model::forward(const Variable& input_ids,
     auto hidden_states = embeddings_->forward(input_ids, position_ids);
 
     // Create causal mask if not provided
+    // Use hidden_states dtype to ensure dtype compatibility
     Tensor causal_mask = attention_mask;
     if (attention_mask.numel() == 0) {
-        causal_mask = create_causal_attention_mask(seq_len, input_ids.tensor().device());
+        causal_mask = create_causal_attention_mask(seq_len, input_ids.tensor().device(),
+                                                    hidden_states.tensor().dtype());
     }
 
     // Pass through decoder layers
@@ -281,9 +283,14 @@ auto TextGenerator::apply_temperature(const Variable& logits, double temperature
         return logits;
     }
     // Scale logits by dividing by temperature
-    // Create on CPU first, then move to target device
+    // Create temperature tensor with same dtype as logits
+    auto dtype = logits.tensor().dtype();
     auto temp_tensor_cpu = Tensor(std::vector<int64_t>{1}, DType::Float32, Device::cpu());
     temp_tensor_cpu.data<float>()[0] = static_cast<float>(temperature);
+    // Convert to logits dtype if needed
+    if (dtype != DType::Float32) {
+        temp_tensor_cpu = temp_tensor_cpu.to(dtype);
+    }
     auto temp_tensor = temp_tensor_cpu.to(logits.tensor().device());
     Variable temp_var(temp_tensor, false);
     return logits / temp_var;
@@ -295,8 +302,11 @@ auto TextGenerator::logits_to_probs(const Variable& logits, double temperature) 
 }
 
 auto TextGenerator::sample_from_probs(const Tensor& probs) -> int64_t {
-    // Sample from categorical distribution (move to CPU for data access)
+    // Sample from categorical distribution (move to CPU and convert to Float32 for data access)
     Tensor probs_cpu = probs.to(Device::cpu());
+    if (probs_cpu.dtype() != DType::Float32) {
+        probs_cpu = probs_cpu.to(DType::Float32);
+    }
     const float* probs_data = probs_cpu.data<float>();
     auto vocab_size = probs.shape()[probs.ndim() - 1];
 
@@ -317,8 +327,11 @@ auto TextGenerator::top_k_filter(const Tensor& logits, int64_t k) const -> std::
     auto vocab_size = logits.shape()[logits.ndim() - 1];
     auto original_device = logits.device();
 
-    // Move to CPU for processing
+    // Move to CPU and convert to Float32 for processing
     Tensor logits_cpu = logits.to(Device::cpu());
+    if (logits_cpu.dtype() != DType::Float32) {
+        logits_cpu = logits_cpu.to(DType::Float32);
+    }
     const float* logits_data = logits_cpu.data<float>();
 
     // Get logits for last position
@@ -351,8 +364,11 @@ auto TextGenerator::top_p_filter(const Tensor& probs, double p) const -> std::pa
     auto vocab_size = probs.shape()[probs.ndim() - 1];
     auto original_device = probs.device();
 
-    // Move to CPU for processing
+    // Move to CPU and convert to Float32 for processing
     Tensor probs_cpu = probs.to(Device::cpu());
+    if (probs_cpu.dtype() != DType::Float32) {
+        probs_cpu = probs_cpu.to(DType::Float32);
+    }
     const float* probs_data = probs_cpu.data<float>();
 
     // Get probs for last position
@@ -452,9 +468,12 @@ auto TextGenerator::greedy_search(const Tensor& input_ids) -> Tensor {
         // Forward pass - explicitly use the 3-argument overload
         auto logits = model_.forward(current_var, Variable{}, Tensor{});
 
-        // Get logits for last position [batch, vocab_size] and move to CPU
+        // Get logits for last position [batch, vocab_size], move to CPU and convert to Float32
         auto last_logits = logits.tensor().slice(1, step - 1, step, 1).squeeze(1);
         Tensor last_logits_cpu = last_logits.to(Device::cpu());
+        if (last_logits_cpu.dtype() != DType::Float32) {
+            last_logits_cpu = last_logits_cpu.to(DType::Float32);
+        }
 
         // Get argmax (greedy)
         const float* logits_data = last_logits_cpu.data<float>();
@@ -521,6 +540,10 @@ auto TextGenerator::top_k_sampling(const Tensor& input_ids, int64_t top_k, doubl
         auto logits = model_.forward(current_var, Variable{}, Tensor{});
         auto last_logits = logits.tensor().slice(1, step - 1, step, 1).squeeze(1);
         Tensor last_logits_cpu = last_logits.to(Device::cpu());
+        // Convert to Float32 for processing
+        if (last_logits_cpu.dtype() != DType::Float32) {
+            last_logits_cpu = last_logits_cpu.to(DType::Float32);
+        }
 
         for (int64_t b = 0; b < batch_size; ++b) {
             // Get logits for this batch item (on CPU)
@@ -588,6 +611,10 @@ auto TextGenerator::top_p_sampling(const Tensor& input_ids, double top_p, double
         auto logits = model_.forward(current_var, Variable{}, Tensor{});
         auto last_logits = logits.tensor().slice(1, step - 1, step, 1).squeeze(1);
         Tensor last_logits_cpu = last_logits.to(Device::cpu());
+        // Convert to Float32 for processing
+        if (last_logits_cpu.dtype() != DType::Float32) {
+            last_logits_cpu = last_logits_cpu.to(DType::Float32);
+        }
 
         for (int64_t b = 0; b < batch_size; ++b) {
             // Get logits for this batch item (on CPU)
@@ -673,8 +700,11 @@ auto TextGenerator::beam_search(const Tensor& input_ids, int64_t num_beams) -> T
             auto log_probs_var = nn::log_softmax(last_var, -1);
             auto log_probs = log_probs_var.tensor();
 
-            // Move to CPU for data access
+            // Move to CPU and convert to Float32 for data access
             Tensor log_probs_cpu = log_probs.to(Device::cpu());
+            if (log_probs_cpu.dtype() != DType::Float32) {
+                log_probs_cpu = log_probs_cpu.to(DType::Float32);
+            }
             const float* log_probs_data = log_probs_cpu.data<float>();
             auto vocab_size = log_probs.numel();
 

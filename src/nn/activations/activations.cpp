@@ -594,7 +594,7 @@ auto relu_(Tensor& input) -> Tensor& {
     auto result = dispatch(OpId::ReLUInplace, inputs);
 
     // Result should be same tensor modified in-place
-    if (result[0].data<float>() != input.data<float>()) {
+    if (result[0].data_ptr() != input.data_ptr()) {
         input = result[0];
     }
 
@@ -610,7 +610,7 @@ auto sigmoid_(Tensor& input) -> Tensor& {
     auto result = dispatch(OpId::SigmoidInplace, inputs);
 
     // Result should be same tensor modified in-place
-    if (result[0].data<float>() != input.data<float>()) {
+    if (result[0].data_ptr() != input.data_ptr()) {
         input = result[0];
     }
 
@@ -626,7 +626,7 @@ auto tanh_(Tensor& input) -> Tensor& {
     auto result = dispatch(OpId::TanhInplace, inputs);
 
     // Result should be same tensor modified in-place
-    if (result[0].data<float>() != input.data<float>()) {
+    if (result[0].data_ptr() != input.data_ptr()) {
         input = result[0];
     }
 
@@ -644,7 +644,7 @@ auto leaky_relu_(Tensor& input, double negative_slope) -> Tensor& {
     auto result = dispatch(OpId::LeakyReLUInplace, inputs, attrs);
 
     // Result should be same tensor modified in-place
-    if (result[0].data<float>() != input.data<float>()) {
+    if (result[0].data_ptr() != input.data_ptr()) {
         input = result[0];
     }
 
@@ -660,7 +660,7 @@ auto gelu_(Tensor& input) -> Tensor& {
     auto result = dispatch(OpId::GeluInplace, inputs);
 
     // Result should be same tensor modified in-place
-    if (result[0].data<float>() != input.data<float>()) {
+    if (result[0].data_ptr() != input.data_ptr()) {
         input = result[0];
     }
 

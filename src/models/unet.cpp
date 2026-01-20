@@ -150,10 +150,10 @@ UNet::UNet(int64_t in_channels, int64_t num_classes, bool bilinear)
     , num_classes_(num_classes)
     , bilinear_(bilinear)
 {
-    // Determine bottleneck factor
-    // When using bilinear, we use factor 1 (512 max channels)
-    // When using learned upsampling, we use factor 2 (1024 max channels)
-    bottleneck_factor_ = bilinear ? 1 : 2;
+    // Bottleneck factor is always 2 (1024 max channels)
+    // This ensures correct channel dimensions in the decoder path
+    // regardless of upsampling method (bilinear or transposed conv)
+    bottleneck_factor_ = 2;
 
     // Initial convolution (no downsampling)
     // in_channels -> 64

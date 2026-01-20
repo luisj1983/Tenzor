@@ -2328,5 +2328,158 @@ auto softplus_backward_kernel(const Tensor& grad_output, const Tensor& input, fl
     return grad_input;
 }
 
+// ============================================================================
+// In-place activation kernels
+// ============================================================================
+
+auto relu_inplace_kernel(Tensor& input) -> void {
+    if (input.dtype() == DType::Float32) {
+        float* data = input.data<float>();
+        size_t n = input.numel();
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            data[i] = data[i] > 0.0f ? data[i] : 0.0f;
+        }
+    } else if (input.dtype() == DType::Float64) {
+        double* data = input.data<double>();
+        size_t n = input.numel();
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            data[i] = data[i] > 0.0 ? data[i] : 0.0;
+        }
+    } else if (input.dtype() == DType::Float16) {
+        Float16* data = input.data<Float16>();
+        size_t n = input.numel();
+        for (size_t i = 0; i < n; ++i) {
+            float val = static_cast<float>(data[i]);
+            data[i] = Float16(val > 0.0f ? val : 0.0f);
+        }
+    } else {
+        throw std::runtime_error("relu_inplace: Unsupported dtype");
+    }
+}
+
+auto sigmoid_inplace_kernel(Tensor& input) -> void {
+    if (input.dtype() == DType::Float32) {
+        float* data = input.data<float>();
+        size_t n = input.numel();
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            data[i] = 1.0f / (1.0f + std::exp(-data[i]));
+        }
+    } else if (input.dtype() == DType::Float64) {
+        double* data = input.data<double>();
+        size_t n = input.numel();
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            data[i] = 1.0 / (1.0 + std::exp(-data[i]));
+        }
+    } else if (input.dtype() == DType::Float16) {
+        Float16* data = input.data<Float16>();
+        size_t n = input.numel();
+        for (size_t i = 0; i < n; ++i) {
+            float val = static_cast<float>(data[i]);
+            data[i] = Float16(1.0f / (1.0f + std::exp(-val)));
+        }
+    } else {
+        throw std::runtime_error("sigmoid_inplace: Unsupported dtype");
+    }
+}
+
+auto tanh_inplace_kernel(Tensor& input) -> void {
+    if (input.dtype() == DType::Float32) {
+        float* data = input.data<float>();
+        size_t n = input.numel();
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            data[i] = std::tanh(data[i]);
+        }
+    } else if (input.dtype() == DType::Float64) {
+        double* data = input.data<double>();
+        size_t n = input.numel();
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            data[i] = std::tanh(data[i]);
+        }
+    } else if (input.dtype() == DType::Float16) {
+        Float16* data = input.data<Float16>();
+        size_t n = input.numel();
+        for (size_t i = 0; i < n; ++i) {
+            float val = static_cast<float>(data[i]);
+            data[i] = Float16(std::tanh(val));
+        }
+    } else {
+        throw std::runtime_error("tanh_inplace: Unsupported dtype");
+    }
+}
+
+auto leaky_relu_inplace_kernel(Tensor& input, float alpha) -> void {
+    if (input.dtype() == DType::Float32) {
+        float* data = input.data<float>();
+        size_t n = input.numel();
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            data[i] = data[i] > 0.0f ? data[i] : alpha * data[i];
+        }
+    } else if (input.dtype() == DType::Float64) {
+        double* data = input.data<double>();
+        size_t n = input.numel();
+        double alpha_d = static_cast<double>(alpha);
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            data[i] = data[i] > 0.0 ? data[i] : alpha_d * data[i];
+        }
+    } else if (input.dtype() == DType::Float16) {
+        Float16* data = input.data<Float16>();
+        size_t n = input.numel();
+        for (size_t i = 0; i < n; ++i) {
+            float val = static_cast<float>(data[i]);
+            data[i] = Float16(val > 0.0f ? val : alpha * val);
+        }
+    } else {
+        throw std::runtime_error("leaky_relu_inplace: Unsupported dtype");
+    }
+}
+
+auto gelu_inplace_kernel(Tensor& input) -> void {
+    constexpr float sqrt_2_over_pi = 0.7978845608028654f;
+    constexpr float coeff = 0.044715f;
+
+    if (input.dtype() == DType::Float32) {
+        float* data = input.data<float>();
+        size_t n = input.numel();
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            float x = data[i];
+            float x_cubed = x * x * x;
+            float inner = sqrt_2_over_pi * (x + coeff * x_cubed);
+            data[i] = 0.5f * x * (1.0f + std::tanh(inner));
+        }
+    } else if (input.dtype() == DType::Float64) {
+        double* data = input.data<double>();
+        size_t n = input.numel();
+        constexpr double sqrt_2_over_pi_d = 0.7978845608028654;
+        constexpr double coeff_d = 0.044715;
+        #pragma omp parallel for schedule(static) if(n > ACTIVATION_OMP_THRESHOLD)
+        for (size_t i = 0; i < n; ++i) {
+            double x = data[i];
+            double x_cubed = x * x * x;
+            double inner = sqrt_2_over_pi_d * (x + coeff_d * x_cubed);
+            data[i] = 0.5 * x * (1.0 + std::tanh(inner));
+        }
+    } else if (input.dtype() == DType::Float16) {
+        Float16* data = input.data<Float16>();
+        size_t n = input.numel();
+        for (size_t i = 0; i < n; ++i) {
+            float x = static_cast<float>(data[i]);
+            float x_cubed = x * x * x;
+            float inner = sqrt_2_over_pi * (x + coeff * x_cubed);
+            data[i] = Float16(0.5f * x * (1.0f + std::tanh(inner)));
+        }
+    } else {
+        throw std::runtime_error("gelu_inplace: Unsupported dtype");
+    }
+}
+
 } // namespace cpu
 } // namespace tenzor

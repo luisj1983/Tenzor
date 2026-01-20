@@ -227,7 +227,7 @@ TEST_P(GPTMultiDTypeTest, DecoderLayerWithCausalMask) {
     hidden_states = to_dtype(hidden_states);
 
     // Create causal mask
-    Tensor causal_mask = nn::create_causal_mask(seq_len_, device());
+    Tensor causal_mask = nn::create_causal_mask(seq_len_, device(), dtype());
 
     Variable input_var(hidden_states, false);
     auto output = layer.forward(input_var, causal_mask);
@@ -387,7 +387,7 @@ TEST_P(GPTMultiDTypeTest, GPT2ModelWithCausalMask) {
     model.train(false);
 
     Tensor input_ids = create_input_ids(batch_size_, seq_len_);
-    Tensor causal_mask = nn::create_causal_mask(seq_len_, device());
+    Tensor causal_mask = nn::create_causal_mask(seq_len_, device(), dtype());
 
     Variable input_var(input_ids, false);
     auto output = model.forward(input_var, Variable{}, causal_mask);

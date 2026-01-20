@@ -33,6 +33,7 @@ set(CPU_BACKEND_SOURCES
     kernels/pooling.cpp
     kernels/nn_kernels.cpp
     kernels/rnn_kernels.cpp
+    kernels/vision.cpp
 )
 
 # Create CPU backend shared library

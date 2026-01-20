@@ -298,9 +298,10 @@ protected:
      *
      * @param seq_len Sequence length
      * @param device Device to create mask on
+     * @param dtype Data type for the mask (should match hidden states dtype)
      * @return Causal mask of shape (seq_len, seq_len)
      */
-    auto create_causal_attention_mask(int64_t seq_len, Device device) const -> Tensor;
+    auto create_causal_attention_mask(int64_t seq_len, Device device, DType dtype) const -> Tensor;
 };
 
 /**

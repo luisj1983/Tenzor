@@ -78,6 +78,13 @@ namespace cpu {
     auto mul_inplace_kernel(Tensor& a, const Tensor& b) -> void;
     auto div_inplace_kernel(Tensor& a, const Tensor& b) -> void;
 
+    // Inplace activation operations
+    auto relu_inplace_kernel(Tensor& input) -> void;
+    auto sigmoid_inplace_kernel(Tensor& input) -> void;
+    auto tanh_inplace_kernel(Tensor& input) -> void;
+    auto leaky_relu_inplace_kernel(Tensor& input, float alpha) -> void;
+    auto gelu_inplace_kernel(Tensor& input) -> void;
+
     // Activations
     auto relu_kernel(const Tensor& input) -> Tensor;
     auto relu_backward_kernel(const Tensor& grad_output, const Tensor& input) -> Tensor;
@@ -225,6 +232,10 @@ namespace cpu {
     // Dropout
     auto dropout_kernel(const Tensor& input, float p, bool training) -> std::pair<Tensor, Tensor>;
     auto dropout_backward_kernel(const Tensor& grad_output, const Tensor& mask, float p) -> Tensor;
+
+    // Vision operations
+    auto interpolate_kernel(const Tensor& input, const std::vector<int64_t>& size,
+                            const std::string& mode, bool align_corners) -> Tensor;
 } // namespace cpu
 
 /**
@@ -259,6 +270,38 @@ void register_cpu_kernels(BackendDispatchTable& table) {
     TENZOR_REGISTER_INPLACE_KERNEL(table, SubInplace, cpu::sub_inplace_kernel);
     TENZOR_REGISTER_INPLACE_KERNEL(table, MulInplace, cpu::mul_inplace_kernel);
     TENZOR_REGISTER_INPLACE_KERNEL(table, DivInplace, cpu::div_inplace_kernel);
+
+    // Inplace activation operations
+    table.register_kernel(OpId::ReLUInplace, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        Tensor input = inputs[0];  // Copy to allow modification
+        cpu::relu_inplace_kernel(input);
+        return std::vector<Tensor>{input};
+    });
+
+    table.register_kernel(OpId::SigmoidInplace, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        Tensor input = inputs[0];
+        cpu::sigmoid_inplace_kernel(input);
+        return std::vector<Tensor>{input};
+    });
+
+    table.register_kernel(OpId::TanhInplace, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        Tensor input = inputs[0];
+        cpu::tanh_inplace_kernel(input);
+        return std::vector<Tensor>{input};
+    });
+
+    table.register_kernel(OpId::LeakyReLUInplace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        float alpha = parse_attr<float>(attrs, "alpha", 0.01f);
+        Tensor input = inputs[0];
+        cpu::leaky_relu_inplace_kernel(input, alpha);
+        return std::vector<Tensor>{input};
+    });
+
+    table.register_kernel(OpId::GeluInplace, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        Tensor input = inputs[0];
+        cpu::gelu_inplace_kernel(input);
+        return std::vector<Tensor>{input};
+    });
 
     // =========================================================================
     // Reduction Operations
@@ -840,6 +883,17 @@ void register_cpu_kernels(BackendDispatchTable& table) {
             W_ih_bwd, W_hh_bwd, bias_ih_bwd, bias_hh_bwd,
             h0, c0
         );
+    });
+
+    // =========================================================================
+    // Vision Operations
+    // =========================================================================
+    table.register_kernel(OpId::Interpolate, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // Parse size as comma-separated int64_t values
+        auto size = parse_int_list(attrs, "size");
+        std::string mode = parse_attr<std::string>(attrs, "mode", "bilinear");
+        bool align_corners = parse_attr<bool>(attrs, "align_corners", false);
+        return std::vector<Tensor>{cpu::interpolate_kernel(inputs[0], size, mode, align_corners)};
     });
 
     // Note: Creation operations (Zeros, Ones, etc.) are handled differently
