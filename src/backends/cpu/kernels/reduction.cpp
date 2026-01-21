@@ -856,6 +856,55 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
             }
             break;
         }
+        case DType::Float16: {
+            auto* input_data = input.data<Float16>();
+            auto* output_data = output.data<Float16>();
+
+            if (dim == REDUCE_ALL) {
+                // Compute max in Float32
+                float max_val = std::numeric_limits<float>::lowest();
+                const int64_t n = input.numel();
+                #pragma omp parallel for reduction(max:max_val) if(n > REDUCTION_OMP_THRESHOLD)
+                for (int64_t i = 0; i < n; i++) {
+                    float val = static_cast<float>(input_data[i]);
+                    if (val > max_val) {
+                        max_val = val;
+                    }
+                }
+                output_data[0] = Float16(max_val);
+            } else {
+                // Dimensional reduction - compute in Float32
+                const int64_t num_outputs = output.numel();
+                const int64_t dim_size = input_shape[dim];
+                const int64_t dim_stride = input_strides[dim];
+
+                #pragma omp parallel for if(num_outputs > 1000)
+                for (int64_t out_idx = 0; out_idx < num_outputs; out_idx++) {
+                    // Calculate input base index
+                    int64_t base_idx = 0;
+                    int64_t remaining = out_idx;
+                    for (int64_t d = ndim - 1; d >= 0; d--) {
+                        if (d == dim) continue;
+                        int64_t out_d = (d > dim) ? d - 1 : d;
+                        int64_t size = (d > dim) ? input_shape[d] : input_shape[d];
+                        int64_t coord = remaining % size;
+                        remaining /= size;
+                        base_idx += coord * input_strides[d];
+                    }
+
+                    float max_val = std::numeric_limits<float>::lowest();
+                    for (int64_t i = 0; i < dim_size; i++) {
+                        int64_t in_idx = base_idx + i * dim_stride;
+                        float val = static_cast<float>(input_data[in_idx]);
+                        if (val > max_val) {
+                            max_val = val;
+                        }
+                    }
+                    output_data[out_idx] = Float16(max_val);
+                }
+            }
+            break;
+        }
         case DType::Float64: {
             auto* input_data = input.data<double>();
             auto* output_data = output.data<double>();
@@ -1016,6 +1065,55 @@ auto min_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
             }
             break;
         }
+        case DType::Float16: {
+            auto* input_data = input.data<Float16>();
+            auto* output_data = output.data<Float16>();
+
+            if (dim == REDUCE_ALL) {
+                // Compute min in Float32
+                float min_val = std::numeric_limits<float>::max();
+                const int64_t n = input.numel();
+                #pragma omp parallel for reduction(min:min_val) if(n > REDUCTION_OMP_THRESHOLD)
+                for (int64_t i = 0; i < n; i++) {
+                    float val = static_cast<float>(input_data[i]);
+                    if (val < min_val) {
+                        min_val = val;
+                    }
+                }
+                output_data[0] = Float16(min_val);
+            } else {
+                // Dimensional reduction - compute in Float32
+                const int64_t num_outputs = output.numel();
+                const int64_t dim_size = input_shape[dim];
+                const int64_t dim_stride = input_strides[dim];
+
+                #pragma omp parallel for if(num_outputs > 1000)
+                for (int64_t out_idx = 0; out_idx < num_outputs; out_idx++) {
+                    // Calculate input base index
+                    int64_t base_idx = 0;
+                    int64_t remaining = out_idx;
+                    for (int64_t d = ndim - 1; d >= 0; d--) {
+                        if (d == dim) continue;
+                        int64_t out_d = (d > dim) ? d - 1 : d;
+                        int64_t size = (d > dim) ? input_shape[d] : input_shape[d];
+                        int64_t coord = remaining % size;
+                        remaining /= size;
+                        base_idx += coord * input_strides[d];
+                    }
+
+                    float min_val = std::numeric_limits<float>::max();
+                    for (int64_t i = 0; i < dim_size; i++) {
+                        int64_t in_idx = base_idx + i * dim_stride;
+                        float val = static_cast<float>(input_data[in_idx]);
+                        if (val < min_val) {
+                            min_val = val;
+                        }
+                    }
+                    output_data[out_idx] = Float16(min_val);
+                }
+            }
+            break;
+        }
         case DType::Float64: {
             auto* input_data = input.data<double>();
             auto* output_data = output.data<double>();
@@ -1171,6 +1269,64 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
                                std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                                std::vector<int64_t>(input_strides.begin(), input_strides.end()),
                                dim);
+            }
+            break;
+        }
+        case DType::Float16: {
+            auto* input_data = input.data<Float16>();
+            if (dim == REDUCE_ALL) {
+                // Convert to Float32 comparison
+                const int64_t n = input.numel();
+                if (n == 0) throw std::runtime_error("argmax: input tensor is empty");
+                int64_t max_idx = 0;
+                float max_val = static_cast<float>(input_data[0]);
+                for (int64_t i = 1; i < n; i++) {
+                    float val = static_cast<float>(input_data[i]);
+                    if (val > max_val) {
+                        max_val = val;
+                        max_idx = i;
+                    }
+                }
+                output_data[0] = max_idx;
+            } else {
+                // Dimensional argmax
+                const int64_t dim_size = input_shape[dim];
+                const int64_t output_size = output.numel();
+
+                #pragma omp parallel for if(output_size > 1000)
+                for (int64_t out_idx = 0; out_idx < output_size; out_idx++) {
+                    std::vector<int64_t> indices(ndim, 0);
+                    int64_t tmp = out_idx;
+                    for (int64_t d = 0; d < ndim; d++) {
+                        if (d == dim) continue;
+                        int64_t size = input_shape[d];
+                        indices[d] = tmp % size;
+                        tmp /= size;
+                    }
+
+                    indices[dim] = 0;
+                    int64_t in_idx = 0;
+                    for (int64_t d = 0; d < ndim; d++) {
+                        in_idx += indices[d] * input_strides[d];
+                    }
+
+                    float max_val = static_cast<float>(input_data[in_idx]);
+                    int64_t max_idx = 0;
+
+                    for (int64_t i = 1; i < dim_size; i++) {
+                        indices[dim] = i;
+                        in_idx = 0;
+                        for (int64_t d = 0; d < ndim; d++) {
+                            in_idx += indices[d] * input_strides[d];
+                        }
+                        float val = static_cast<float>(input_data[in_idx]);
+                        if (val > max_val) {
+                            max_val = val;
+                            max_idx = i;
+                        }
+                    }
+                    output_data[out_idx] = max_idx;
+                }
             }
             break;
         }
@@ -1482,6 +1638,16 @@ auto argsort_kernel(const Tensor& input, int64_t dim, bool descending) -> Tensor
         }
         case DType::Int64: {
             auto* input_data = input.data<int64_t>();
+            argsort_along_dim(input_data, output_data,
+                            std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                            std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                            dim, descending);
+            break;
+        }
+        case DType::Float16: {
+            // Convert Float16 to Float32 for sorting
+            auto input_f32 = input.to(DType::Float32);
+            auto* input_data = input_f32.data<float>();
             argsort_along_dim(input_data, output_data,
                             std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                             std::vector<int64_t>(input_strides.begin(), input_strides.end()),

@@ -535,13 +535,10 @@ auto cat(const std::vector<Variable>& inputs, int64_t dim) -> Variable {
     }
     grad_fn->set_next_functions(next_funcs);
 
-    // Track input variables that require grad for gradient accumulation
-    std::vector<Variable> input_vars;
-    for (const auto& input : inputs) {
-        if (input.requires_grad()) {
-            input_vars.push_back(input);
-        }
-    }
+    // Track input variables for gradient accumulation
+    // MUST include all inputs to maintain 1:1 index correspondence with gradients
+    // The engine correctly skips variables that don't require grad
+    std::vector<Variable> input_vars(inputs.begin(), inputs.end());
     grad_fn->set_input_variables(input_vars);
 
     // Compute result using tensor-level cat

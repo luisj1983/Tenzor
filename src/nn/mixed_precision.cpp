@@ -38,8 +38,8 @@ auto MixedPrecisionTrainer::train_step(const Variable& input, const Variable& ta
             loss = loss_fn_(output, target);
         }
 
-        // Store unscaled loss value for logging
-        loss_value = loss.tensor().item<float>();
+        // Store unscaled loss value for logging (convert to Float32 for item<float>)
+        loss_value = loss.tensor().to(DType::Float32).item<float>();
 
         // Scale loss to prevent gradient underflow
         auto scaled_loss = scaler_.scale(loss);
@@ -62,7 +62,7 @@ auto MixedPrecisionTrainer::train_step(const Variable& input, const Variable& ta
         // Standard FP32 training path (fallback)
         auto output = model_->forward(input);
         loss = loss_fn_(output, target);
-        loss_value = loss.tensor().item<float>();
+        loss_value = loss.tensor().to(DType::Float32).item<float>();
 
         // Backward pass
         loss.backward();
@@ -90,7 +90,7 @@ auto MixedPrecisionTrainer::eval_step(const Variable& input, const Variable& tar
     // Compute loss in FP32
     auto loss = loss_fn_(output, target);
 
-    return loss.tensor().item<float>();
+    return loss.tensor().to(DType::Float32).item<float>();
 }
 
 auto MixedPrecisionTrainer::fit(

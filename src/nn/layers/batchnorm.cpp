@@ -362,17 +362,12 @@ auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
                 result.set_grad_fn(grad_fn);
 
                 // Track input variables for gradient accumulation
-                std::vector<Variable> input_vars;
-                if (input.requires_grad()) {
-                    input_vars.push_back(input);
-                }
+                // MUST include all inputs to maintain 1:1 index correspondence with gradients
+                // The engine correctly skips variables that don't require grad
+                std::vector<Variable> input_vars = {input};
                 if (affine_ && cached_weight_ && cached_bias_) {
-                    if (cached_weight_->requires_grad()) {
-                        input_vars.push_back(*cached_weight_);
-                    }
-                    if (cached_bias_->requires_grad()) {
-                        input_vars.push_back(*cached_bias_);
-                    }
+                    input_vars.push_back(*cached_weight_);
+                    input_vars.push_back(*cached_bias_);
                 }
                 grad_fn->set_input_variables(input_vars);
 
@@ -550,17 +545,12 @@ auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
         result.set_grad_fn(grad_fn);
 
         // Track input variables for gradient accumulation
-        std::vector<Variable> input_vars;
-        if (input.requires_grad()) {
-            input_vars.push_back(input);
-        }
+        // MUST include all inputs to maintain 1:1 index correspondence with gradients
+        // The engine correctly skips variables that don't require grad
+        std::vector<Variable> input_vars = {input};
         if (affine_ && cached_weight_ && cached_bias_) {
-            if (cached_weight_->requires_grad()) {
-                input_vars.push_back(*cached_weight_);
-            }
-            if (cached_bias_->requires_grad()) {
-                input_vars.push_back(*cached_bias_);
-            }
+            input_vars.push_back(*cached_weight_);
+            input_vars.push_back(*cached_bias_);
         }
         grad_fn->set_input_variables(input_vars);
 
@@ -859,17 +849,13 @@ auto BatchNorm1d::forward_impl(const Variable& input) -> Variable {
 
         result.set_grad_fn(grad_fn);
 
-        std::vector<Variable> input_vars;
-        if (input.requires_grad()) {
-            input_vars.push_back(input);
-        }
+        // Track input variables for gradient accumulation
+        // MUST include all inputs to maintain 1:1 index correspondence with gradients
+        // The engine correctly skips variables that don't require grad
+        std::vector<Variable> input_vars = {input};
         if (affine_ && cached_weight_ && cached_bias_) {
-            if (cached_weight_->requires_grad()) {
-                input_vars.push_back(*cached_weight_);
-            }
-            if (cached_bias_->requires_grad()) {
-                input_vars.push_back(*cached_bias_);
-            }
+            input_vars.push_back(*cached_weight_);
+            input_vars.push_back(*cached_bias_);
         }
         grad_fn->set_input_variables(input_vars);
 

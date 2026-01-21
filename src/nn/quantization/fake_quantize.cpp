@@ -214,12 +214,22 @@ auto QATHelper::convert_to_quantized(Module& model) -> std::shared_ptr<Module> {
 auto StraightThroughEstimator::forward(const Tensor& input, float quant_min, float quant_max)
     -> Tensor {
     // Clamp values to quantization range
-    Tensor output = input.clone();
+    // Work in Float32 for processing
+    Tensor input_f32 = input;
+    if (input.dtype() != DType::Float32) {
+        input_f32 = input.to(DType::Float32);
+    }
+    Tensor output = input_f32.clone();
     float* data = output.data<float>();
     int64_t n = output.numel();
 
     for (int64_t i = 0; i < n; ++i) {
         data[i] = std::clamp(data[i], quant_min, quant_max);
+    }
+
+    // Convert back to original dtype if needed
+    if (input.dtype() != DType::Float32) {
+        output = output.to(input.dtype());
     }
 
     return output;
@@ -232,8 +242,17 @@ auto StraightThroughEstimator::backward(
     float quant_max
 ) -> Tensor {
     // Pass gradients through for values within range, zero otherwise
-    Tensor grad_input = grad_output.clone();
-    const float* input_data = input.data<const float>();
+    // Work in Float32 for processing
+    Tensor input_f32 = input;
+    if (input.dtype() != DType::Float32) {
+        input_f32 = input.to(DType::Float32);
+    }
+    Tensor grad_f32 = grad_output;
+    if (grad_output.dtype() != DType::Float32) {
+        grad_f32 = grad_output.to(DType::Float32);
+    }
+    Tensor grad_input = grad_f32.clone();
+    const float* input_data = input_f32.data<const float>();
     float* grad_data = grad_input.data<float>();
     int64_t n = grad_input.numel();
 
@@ -241,6 +260,11 @@ auto StraightThroughEstimator::backward(
         if (input_data[i] < quant_min || input_data[i] > quant_max) {
             grad_data[i] = 0.0f;  // Zero gradient for out-of-range values
         }
+    }
+
+    // Convert back to original dtype if needed
+    if (grad_output.dtype() != DType::Float32) {
+        grad_input = grad_input.to(grad_output.dtype());
     }
 
     return grad_input;

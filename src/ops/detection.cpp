@@ -481,9 +481,13 @@ auto batched_nms(const Tensor& boxes, const Tensor& scores,
         auto kept_boxes = tenzor::index_select(filtered_boxes, 0, keep);
         auto kept_scores = tenzor::index_select(filtered_scores, 0, keep);
 
+        // Convert to Float32 on CPU for data extraction
+        auto kept_boxes_f32 = kept_boxes.to(Device::cpu()).to(DType::Float32);
+        auto kept_scores_f32 = kept_scores.to(Device::cpu()).to(DType::Float32);
+
         // Append to output
-        const float* box_data = static_cast<const float*>(kept_boxes.data_ptr());
-        const float* score_data = static_cast<const float*>(kept_scores.data_ptr());
+        const float* box_data = kept_boxes_f32.data<float>();
+        const float* score_data = kept_scores_f32.data<float>();
 
         for (int64_t i = 0; i < num_keep; ++i) {
             all_boxes.push_back(box_data[i * 4 + 0]);

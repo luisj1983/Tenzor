@@ -3639,6 +3639,10 @@ auto ge_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             const int64_t* a_data = a.data<int64_t>();
             const int64_t* b_data = b.data<int64_t>();
             for (size_t i = 0; i < n; ++i) { c_data[i] = (a_data[i] >= b_data[i]); }
+        } else if (a.dtype() == DType::Float16) {
+            const Float16* a_data = a.data<Float16>();
+            const Float16* b_data = b.data<Float16>();
+            for (size_t i = 0; i < n; ++i) { c_data[i] = (static_cast<float>(a_data[i]) >= static_cast<float>(b_data[i])); }
         } else {
             throw std::runtime_error("Unsupported dtype for ge operation");
         }
@@ -3664,6 +3668,11 @@ auto ge_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             const int64_t* b_data = b.data<int64_t>();
             detail::broadcast_op<int64_t, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
                                 [](int64_t x, int64_t y) { return x >= y; });
+        } else if (a.dtype() == DType::Float16) {
+            const Float16* a_data = a.data<Float16>();
+            const Float16* b_data = b.data<Float16>();
+            detail::broadcast_op<Float16, bool>(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
+                                [](Float16 x, Float16 y) { return static_cast<float>(x) >= static_cast<float>(y); });
         } else {
             throw std::runtime_error("Unsupported dtype for ge operation");
         }
@@ -4133,49 +4142,87 @@ auto reciprocal_kernel(const Tensor& input) -> Tensor {
 // In-place operations
 auto add_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
     int64_t n = a.numel();
+    bool same_shape = detail::have_same_shape(a, b);
+
+    auto shape_a = a.shape();
+    auto shape_b = b.shape();
+    std::vector<int64_t> shape_a_vec(shape_a.begin(), shape_a.end());
+    std::vector<int64_t> shape_b_vec(shape_b.begin(), shape_b.end());
+
+    // Validate that b can be broadcast to a's shape
+    if (!same_shape && !detail::can_broadcast_to(shape_a, shape_b)) {
+        throw std::runtime_error("In-place add: shapes are not compatible for broadcasting");
+    }
 
     switch (a.dtype()) {
         case DType::Float32: {
             float* a_data = a.data<float>();
             const float* b_data = b.data<float>();
-            #pragma omp parallel for if(n > 10000)
-            for (int64_t i = 0; i < n; i++) {
-                a_data[i] += b_data[i];
+            if (same_shape) {
+                #pragma omp parallel for if(n > 10000)
+                for (int64_t i = 0; i < n; i++) {
+                    a_data[i] += b_data[i];
+                }
+            } else {
+                detail::broadcast_op_inplace(a_data, b_data, shape_a_vec, shape_b_vec,
+                    [](float x, float y) { return x + y; });
             }
             break;
         }
         case DType::Float64: {
             double* a_data = a.data<double>();
             const double* b_data = b.data<double>();
-            #pragma omp parallel for if(n > 10000)
-            for (int64_t i = 0; i < n; i++) {
-                a_data[i] += b_data[i];
+            if (same_shape) {
+                #pragma omp parallel for if(n > 10000)
+                for (int64_t i = 0; i < n; i++) {
+                    a_data[i] += b_data[i];
+                }
+            } else {
+                detail::broadcast_op_inplace(a_data, b_data, shape_a_vec, shape_b_vec,
+                    [](double x, double y) { return x + y; });
             }
             break;
         }
         case DType::Int32: {
             int32_t* a_data = a.data<int32_t>();
             const int32_t* b_data = b.data<int32_t>();
-            #pragma omp parallel for if(n > 10000)
-            for (int64_t i = 0; i < n; i++) {
-                a_data[i] += b_data[i];
+            if (same_shape) {
+                #pragma omp parallel for if(n > 10000)
+                for (int64_t i = 0; i < n; i++) {
+                    a_data[i] += b_data[i];
+                }
+            } else {
+                detail::broadcast_op_inplace(a_data, b_data, shape_a_vec, shape_b_vec,
+                    [](int32_t x, int32_t y) { return x + y; });
             }
             break;
         }
         case DType::Int64: {
             int64_t* a_data = a.data<int64_t>();
             const int64_t* b_data = b.data<int64_t>();
-            #pragma omp parallel for if(n > 10000)
-            for (int64_t i = 0; i < n; i++) {
-                a_data[i] += b_data[i];
+            if (same_shape) {
+                #pragma omp parallel for if(n > 10000)
+                for (int64_t i = 0; i < n; i++) {
+                    a_data[i] += b_data[i];
+                }
+            } else {
+                detail::broadcast_op_inplace(a_data, b_data, shape_a_vec, shape_b_vec,
+                    [](int64_t x, int64_t y) { return x + y; });
             }
             break;
         }
         case DType::Float16: {
             Float16* a_data = a.data<Float16>();
             const Float16* b_data = b.data<Float16>();
-            for (int64_t i = 0; i < n; i++) {
-                a_data[i] = Float16(static_cast<float>(a_data[i]) + static_cast<float>(b_data[i]));
+            if (same_shape) {
+                for (int64_t i = 0; i < n; i++) {
+                    a_data[i] = Float16(static_cast<float>(a_data[i]) + static_cast<float>(b_data[i]));
+                }
+            } else {
+                detail::broadcast_op_inplace(a_data, b_data, shape_a_vec, shape_b_vec,
+                    [](Float16 x, Float16 y) {
+                        return Float16(static_cast<float>(x) + static_cast<float>(y));
+                    });
             }
             break;
         }
@@ -4187,49 +4234,87 @@ auto add_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
 
 auto sub_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
     int64_t n = a.numel();
+    bool same_shape = detail::have_same_shape(a, b);
+
+    auto shape_a = a.shape();
+    auto shape_b = b.shape();
+    std::vector<int64_t> shape_a_vec(shape_a.begin(), shape_a.end());
+    std::vector<int64_t> shape_b_vec(shape_b.begin(), shape_b.end());
+
+    // Validate that b can be broadcast to a's shape
+    if (!same_shape && !detail::can_broadcast_to(shape_a, shape_b)) {
+        throw std::runtime_error("In-place sub: shapes are not compatible for broadcasting");
+    }
 
     switch (a.dtype()) {
         case DType::Float32: {
             float* a_data = a.data<float>();
             const float* b_data = b.data<float>();
-            #pragma omp parallel for if(n > 10000)
-            for (int64_t i = 0; i < n; i++) {
-                a_data[i] -= b_data[i];
+            if (same_shape) {
+                #pragma omp parallel for if(n > 10000)
+                for (int64_t i = 0; i < n; i++) {
+                    a_data[i] -= b_data[i];
+                }
+            } else {
+                detail::broadcast_op_inplace(a_data, b_data, shape_a_vec, shape_b_vec,
+                    [](float x, float y) { return x - y; });
             }
             break;
         }
         case DType::Float64: {
             double* a_data = a.data<double>();
             const double* b_data = b.data<double>();
-            #pragma omp parallel for if(n > 10000)
-            for (int64_t i = 0; i < n; i++) {
-                a_data[i] -= b_data[i];
+            if (same_shape) {
+                #pragma omp parallel for if(n > 10000)
+                for (int64_t i = 0; i < n; i++) {
+                    a_data[i] -= b_data[i];
+                }
+            } else {
+                detail::broadcast_op_inplace(a_data, b_data, shape_a_vec, shape_b_vec,
+                    [](double x, double y) { return x - y; });
             }
             break;
         }
         case DType::Int32: {
             int32_t* a_data = a.data<int32_t>();
             const int32_t* b_data = b.data<int32_t>();
-            #pragma omp parallel for if(n > 10000)
-            for (int64_t i = 0; i < n; i++) {
-                a_data[i] -= b_data[i];
+            if (same_shape) {
+                #pragma omp parallel for if(n > 10000)
+                for (int64_t i = 0; i < n; i++) {
+                    a_data[i] -= b_data[i];
+                }
+            } else {
+                detail::broadcast_op_inplace(a_data, b_data, shape_a_vec, shape_b_vec,
+                    [](int32_t x, int32_t y) { return x - y; });
             }
             break;
         }
         case DType::Int64: {
             int64_t* a_data = a.data<int64_t>();
             const int64_t* b_data = b.data<int64_t>();
-            #pragma omp parallel for if(n > 10000)
-            for (int64_t i = 0; i < n; i++) {
-                a_data[i] -= b_data[i];
+            if (same_shape) {
+                #pragma omp parallel for if(n > 10000)
+                for (int64_t i = 0; i < n; i++) {
+                    a_data[i] -= b_data[i];
+                }
+            } else {
+                detail::broadcast_op_inplace(a_data, b_data, shape_a_vec, shape_b_vec,
+                    [](int64_t x, int64_t y) { return x - y; });
             }
             break;
         }
         case DType::Float16: {
             Float16* a_data = a.data<Float16>();
             const Float16* b_data = b.data<Float16>();
-            for (int64_t i = 0; i < n; i++) {
-                a_data[i] = Float16(static_cast<float>(a_data[i]) - static_cast<float>(b_data[i]));
+            if (same_shape) {
+                for (int64_t i = 0; i < n; i++) {
+                    a_data[i] = Float16(static_cast<float>(a_data[i]) - static_cast<float>(b_data[i]));
+                }
+            } else {
+                detail::broadcast_op_inplace(a_data, b_data, shape_a_vec, shape_b_vec,
+                    [](Float16 x, Float16 y) {
+                        return Float16(static_cast<float>(x) - static_cast<float>(y));
+                    });
             }
             break;
         }
@@ -4241,49 +4326,87 @@ auto sub_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
 
 auto mul_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
     int64_t n = a.numel();
+    bool same_shape = detail::have_same_shape(a, b);
+
+    auto shape_a = a.shape();
+    auto shape_b = b.shape();
+    std::vector<int64_t> shape_a_vec(shape_a.begin(), shape_a.end());
+    std::vector<int64_t> shape_b_vec(shape_b.begin(), shape_b.end());
+
+    // Validate that b can be broadcast to a's shape
+    if (!same_shape && !detail::can_broadcast_to(shape_a, shape_b)) {
+        throw std::runtime_error("In-place mul: shapes are not compatible for broadcasting");
+    }
 
     switch (a.dtype()) {
         case DType::Float32: {
             float* a_data = a.data<float>();
             const float* b_data = b.data<float>();
-            #pragma omp parallel for if(n > 10000)
-            for (int64_t i = 0; i < n; i++) {
-                a_data[i] *= b_data[i];
+            if (same_shape) {
+                #pragma omp parallel for if(n > 10000)
+                for (int64_t i = 0; i < n; i++) {
+                    a_data[i] *= b_data[i];
+                }
+            } else {
+                detail::broadcast_op_inplace(a_data, b_data, shape_a_vec, shape_b_vec,
+                    [](float x, float y) { return x * y; });
             }
             break;
         }
         case DType::Float64: {
             double* a_data = a.data<double>();
             const double* b_data = b.data<double>();
-            #pragma omp parallel for if(n > 10000)
-            for (int64_t i = 0; i < n; i++) {
-                a_data[i] *= b_data[i];
+            if (same_shape) {
+                #pragma omp parallel for if(n > 10000)
+                for (int64_t i = 0; i < n; i++) {
+                    a_data[i] *= b_data[i];
+                }
+            } else {
+                detail::broadcast_op_inplace(a_data, b_data, shape_a_vec, shape_b_vec,
+                    [](double x, double y) { return x * y; });
             }
             break;
         }
         case DType::Int32: {
             int32_t* a_data = a.data<int32_t>();
             const int32_t* b_data = b.data<int32_t>();
-            #pragma omp parallel for if(n > 10000)
-            for (int64_t i = 0; i < n; i++) {
-                a_data[i] *= b_data[i];
+            if (same_shape) {
+                #pragma omp parallel for if(n > 10000)
+                for (int64_t i = 0; i < n; i++) {
+                    a_data[i] *= b_data[i];
+                }
+            } else {
+                detail::broadcast_op_inplace(a_data, b_data, shape_a_vec, shape_b_vec,
+                    [](int32_t x, int32_t y) { return x * y; });
             }
             break;
         }
         case DType::Int64: {
             int64_t* a_data = a.data<int64_t>();
             const int64_t* b_data = b.data<int64_t>();
-            #pragma omp parallel for if(n > 10000)
-            for (int64_t i = 0; i < n; i++) {
-                a_data[i] *= b_data[i];
+            if (same_shape) {
+                #pragma omp parallel for if(n > 10000)
+                for (int64_t i = 0; i < n; i++) {
+                    a_data[i] *= b_data[i];
+                }
+            } else {
+                detail::broadcast_op_inplace(a_data, b_data, shape_a_vec, shape_b_vec,
+                    [](int64_t x, int64_t y) { return x * y; });
             }
             break;
         }
         case DType::Float16: {
             Float16* a_data = a.data<Float16>();
             const Float16* b_data = b.data<Float16>();
-            for (int64_t i = 0; i < n; i++) {
-                a_data[i] = Float16(static_cast<float>(a_data[i]) * static_cast<float>(b_data[i]));
+            if (same_shape) {
+                for (int64_t i = 0; i < n; i++) {
+                    a_data[i] = Float16(static_cast<float>(a_data[i]) * static_cast<float>(b_data[i]));
+                }
+            } else {
+                detail::broadcast_op_inplace(a_data, b_data, shape_a_vec, shape_b_vec,
+                    [](Float16 x, Float16 y) {
+                        return Float16(static_cast<float>(x) * static_cast<float>(y));
+                    });
             }
             break;
         }
@@ -4295,49 +4418,87 @@ auto mul_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
 
 auto div_inplace_kernel(Tensor& a, const Tensor& b) -> Tensor& {
     int64_t n = a.numel();
+    bool same_shape = detail::have_same_shape(a, b);
+
+    auto shape_a = a.shape();
+    auto shape_b = b.shape();
+    std::vector<int64_t> shape_a_vec(shape_a.begin(), shape_a.end());
+    std::vector<int64_t> shape_b_vec(shape_b.begin(), shape_b.end());
+
+    // Validate that b can be broadcast to a's shape
+    if (!same_shape && !detail::can_broadcast_to(shape_a, shape_b)) {
+        throw std::runtime_error("In-place div: shapes are not compatible for broadcasting");
+    }
 
     switch (a.dtype()) {
         case DType::Float32: {
             float* a_data = a.data<float>();
             const float* b_data = b.data<float>();
-            #pragma omp parallel for if(n > 10000)
-            for (int64_t i = 0; i < n; i++) {
-                a_data[i] /= b_data[i];
+            if (same_shape) {
+                #pragma omp parallel for if(n > 10000)
+                for (int64_t i = 0; i < n; i++) {
+                    a_data[i] /= b_data[i];
+                }
+            } else {
+                detail::broadcast_op_inplace(a_data, b_data, shape_a_vec, shape_b_vec,
+                    [](float x, float y) { return x / y; });
             }
             break;
         }
         case DType::Float64: {
             double* a_data = a.data<double>();
             const double* b_data = b.data<double>();
-            #pragma omp parallel for if(n > 10000)
-            for (int64_t i = 0; i < n; i++) {
-                a_data[i] /= b_data[i];
+            if (same_shape) {
+                #pragma omp parallel for if(n > 10000)
+                for (int64_t i = 0; i < n; i++) {
+                    a_data[i] /= b_data[i];
+                }
+            } else {
+                detail::broadcast_op_inplace(a_data, b_data, shape_a_vec, shape_b_vec,
+                    [](double x, double y) { return x / y; });
             }
             break;
         }
         case DType::Int32: {
             int32_t* a_data = a.data<int32_t>();
             const int32_t* b_data = b.data<int32_t>();
-            #pragma omp parallel for if(n > 10000)
-            for (int64_t i = 0; i < n; i++) {
-                a_data[i] /= b_data[i];
+            if (same_shape) {
+                #pragma omp parallel for if(n > 10000)
+                for (int64_t i = 0; i < n; i++) {
+                    a_data[i] /= b_data[i];
+                }
+            } else {
+                detail::broadcast_op_inplace(a_data, b_data, shape_a_vec, shape_b_vec,
+                    [](int32_t x, int32_t y) { return x / y; });
             }
             break;
         }
         case DType::Int64: {
             int64_t* a_data = a.data<int64_t>();
             const int64_t* b_data = b.data<int64_t>();
-            #pragma omp parallel for if(n > 10000)
-            for (int64_t i = 0; i < n; i++) {
-                a_data[i] /= b_data[i];
+            if (same_shape) {
+                #pragma omp parallel for if(n > 10000)
+                for (int64_t i = 0; i < n; i++) {
+                    a_data[i] /= b_data[i];
+                }
+            } else {
+                detail::broadcast_op_inplace(a_data, b_data, shape_a_vec, shape_b_vec,
+                    [](int64_t x, int64_t y) { return x / y; });
             }
             break;
         }
         case DType::Float16: {
             Float16* a_data = a.data<Float16>();
             const Float16* b_data = b.data<Float16>();
-            for (int64_t i = 0; i < n; i++) {
-                a_data[i] = Float16(static_cast<float>(a_data[i]) / static_cast<float>(b_data[i]));
+            if (same_shape) {
+                for (int64_t i = 0; i < n; i++) {
+                    a_data[i] = Float16(static_cast<float>(a_data[i]) / static_cast<float>(b_data[i]));
+                }
+            } else {
+                detail::broadcast_op_inplace(a_data, b_data, shape_a_vec, shape_b_vec,
+                    [](Float16 x, Float16 y) {
+                        return Float16(static_cast<float>(x) / static_cast<float>(y));
+                    });
             }
             break;
         }

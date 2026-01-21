@@ -71,7 +71,17 @@ auto QuantizedLinear::forward_quantized(const QuantizedTensor& input) -> Tensor 
     // Perform quantized matrix multiplication
     const int8_t* input_data = input.data().data<const int8_t>();
     const int8_t* weight_data = weight_.data().data<const int8_t>();
-    const float* bias_data = bias_.has_value() ? bias_->data<const float>() : nullptr;
+    // Convert bias to Float32 if needed
+    std::optional<Tensor> bias_f32;
+    const float* bias_data = nullptr;
+    if (bias_.has_value()) {
+        if (bias_->dtype() != DType::Float32) {
+            bias_f32 = bias_->to(DType::Float32);
+            bias_data = bias_f32->data<const float>();
+        } else {
+            bias_data = bias_->data<const float>();
+        }
+    }
     float* output_data = output.data<float>();
 
     // Use kernel for computation
@@ -185,7 +195,17 @@ auto QuantizedConv2d::forward_quantized(const QuantizedTensor& input) -> Tensor 
 
     const int8_t* input_data = input.data().data<const int8_t>();
     const int8_t* weight_data = weight_.data().data<const int8_t>();
-    const float* bias_data = bias_.has_value() ? bias_->data<const float>() : nullptr;
+    // Convert bias to Float32 if needed
+    std::optional<Tensor> bias_f32;
+    const float* bias_data = nullptr;
+    if (bias_.has_value()) {
+        if (bias_->dtype() != DType::Float32) {
+            bias_f32 = bias_->to(DType::Float32);
+            bias_data = bias_f32->data<const float>();
+        } else {
+            bias_data = bias_->data<const float>();
+        }
+    }
     float* output_data = output.data<float>();
 
     kernels::quantized_conv2d_kernel(

@@ -27,6 +27,30 @@ inline bool are_broadcastable(std::span<const int64_t> shape_a,
     return true;
 }
 
+// Check if shape_b can be broadcast to shape_a (for in-place operations)
+// Returns true if shape_b can be broadcast to match shape_a
+inline bool can_broadcast_to(std::span<const int64_t> shape_a,
+                              std::span<const int64_t> shape_b) {
+    // shape_b must have <= dimensions than shape_a (or extra dims must be 1)
+    // Each dimension of shape_b must either match shape_a or be 1
+
+    size_t ndim_a = shape_a.size();
+    size_t ndim_b = shape_b.size();
+
+    // Check from the rightmost (trailing) dimension
+    for (size_t i = 0; i < std::max(ndim_a, ndim_b); ++i) {
+        int64_t dim_a = i < ndim_a ? shape_a[ndim_a - 1 - i] : 1;
+        int64_t dim_b = i < ndim_b ? shape_b[ndim_b - 1 - i] : 1;
+
+        // For in-place broadcast: dim_b must be 1 or equal to dim_a
+        if (dim_b != 1 && dim_b != dim_a) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 // Compute the broadcasted output shape
 inline std::vector<int64_t> compute_broadcast_shape(std::span<const int64_t> shape_a,
                                                      std::span<const int64_t> shape_b) {
@@ -143,6 +167,41 @@ void broadcast_op(const TIn* a_data, const TIn* b_data, TOut* c_data,
         }
 
         c_data[out_idx] = op(a_data[idx_a], b_data[idx_b]);
+    }
+}
+
+// In-place broadcast operation template
+// Applies op(a, b) and stores result back in a
+// b is broadcast to match a's shape
+template<typename T, typename Op>
+void broadcast_op_inplace(T* a_data, const T* b_data,
+                          std::span<const int64_t> shape_a,
+                          std::span<const int64_t> shape_b,
+                          Op op) {
+    // For in-place, output shape is always shape_a
+    // b must be broadcastable to a's shape
+    auto strides_b = compute_broadcast_strides(shape_b, shape_a);
+
+    int64_t total_elements = 1;
+    for (auto dim : shape_a) {
+        total_elements *= dim;
+    }
+
+    // Iterate over all elements of a
+    for (int64_t out_idx = 0; out_idx < total_elements; ++out_idx) {
+        // Convert flat index to multi-dimensional index for b
+        int64_t idx_b = 0;
+        int64_t tmp = out_idx;
+
+        for (size_t i = 0; i < shape_a.size(); ++i) {
+            int64_t coord = tmp % shape_a[shape_a.size() - 1 - i];
+            tmp /= shape_a[shape_a.size() - 1 - i];
+
+            int64_t stride_idx = shape_a.size() - 1 - i;
+            idx_b += coord * strides_b[stride_idx];
+        }
+
+        a_data[out_idx] = op(a_data[out_idx], b_data[idx_b]);
     }
 }
 

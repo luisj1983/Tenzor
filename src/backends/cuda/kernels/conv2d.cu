@@ -1429,8 +1429,8 @@ __global__ void conv_transpose2d_forward_kernel_impl(
         int64_t oc = c % out_channels_per_group;  // Output channel within group
         int64_t in_start = g * in_channels_per_group;
 
-        // Initialize accumulator
-        float sum = 0.0f;
+        // Initialize accumulator using template type for proper precision
+        T sum = T(0);
 
         // Gather from all input positions that contribute to this output position
         for (int64_t ic = 0; ic < in_channels_per_group; ++ic) {
@@ -1457,14 +1457,14 @@ __global__ void conv_transpose2d_forward_kernel_impl(
                             int64_t input_idx = b * (in_channels * in_h * in_w) +
                                                (in_start + ic) * (in_h * in_w) +
                                                ih * in_w + iw;
-                            float input_val = float(input[input_idx]);
+                            T input_val = input[input_idx];
 
                             // Get weight value
                             // Weight shape: (in_channels, out_channels/groups, kernel_h, kernel_w)
                             int64_t weight_idx = (in_start + ic) * (out_channels_per_group * kernel_h * kernel_w) +
                                                 oc * (kernel_h * kernel_w) +
                                                 kh * kernel_w + kw;
-                            float weight_val = float(weight[weight_idx]);
+                            T weight_val = weight[weight_idx];
 
                             sum += input_val * weight_val;
                         }
@@ -1475,10 +1475,10 @@ __global__ void conv_transpose2d_forward_kernel_impl(
 
         // Add bias if present
         if (has_bias) {
-            sum += float(bias[c]);
+            sum += bias[c];
         }
 
-        output[idx] = T(sum);
+        output[idx] = sum;
     }
 }
 
@@ -1627,8 +1627,24 @@ auto conv_transpose2d_forward_kernel(
             in_channels_per_group, out_channels_per_group,
             has_bias
         );
+    } else if (input.dtype() == DType::Float64) {
+        // Float64 path
+        const double* input_ptr = input.data<double>();
+        const double* weight_ptr = weight.data<double>();
+        const double* bias_ptr = has_bias ? bias->data<double>() : nullptr;
+        double* output_ptr = output.data<double>();
+
+        conv_transpose2d_forward_kernel_impl<double><<<grid, block, 0, stream>>>(
+            input_ptr, weight_ptr, bias_ptr, output_ptr,
+            batch, in_channels, in_h, in_w,
+            out_channels, out_h, out_w,
+            kernel_h, kernel_w,
+            stride, padding, dilation, groups,
+            in_channels_per_group, out_channels_per_group,
+            has_bias
+        );
     } else {
-        // Float32 path
+        // Float32 path (default)
         const float* input_ptr = input.data<float>();
         const float* weight_ptr = weight.data<float>();
         const float* bias_ptr = has_bias ? bias->data<float>() : nullptr;

@@ -95,9 +95,19 @@ auto compute_quantization_params(
     Tensor scale({min.numel()}, DType::Float32, min.device());
     Tensor zero_point({min.numel()}, DType::Int32, min.device());
 
+    // Convert to Float32 for data access
+    Tensor min_f32 = min;
+    Tensor max_f32 = max;
+    if (min.dtype() != DType::Float32) {
+        min_f32 = min.to(DType::Float32);
+    }
+    if (max.dtype() != DType::Float32) {
+        max_f32 = max.to(DType::Float32);
+    }
+
     // Get data pointers
-    const float* min_data = min.data<const float>();
-    const float* max_data = max.data<const float>();
+    const float* min_data = min_f32.data<const float>();
+    const float* max_data = max_f32.data<const float>();
     float* scale_data = scale.data<float>();
     int32_t* zp_data = zero_point.data<int32_t>();
 
@@ -147,7 +157,12 @@ auto quantize_tensor(const Tensor& input, const QuantizationParams& params)
     auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
     Tensor quantized(shape_vec, out_dtype, input.device());
 
-    const float* input_data = input.data<const float>();
+    // Convert input to Float32 for processing
+    Tensor input_f32 = input;
+    if (input.dtype() != DType::Float32) {
+        input_f32 = input.to(DType::Float32);
+    }
+    const float* input_data = input_f32.data<const float>();
     const float* scale_data = params.scale.data<const float>();
     const int32_t* zp_data = params.zero_point.data<const int32_t>();
 
@@ -206,8 +221,12 @@ auto quantize_tensor(const Tensor& input, const QuantizationParams& params)
 
 auto quantize_per_tensor_symmetric(const Tensor& input, QuantDType dtype)
     -> QuantizedTensor {
-    // Compute min and max
-    const float* data = input.data<const float>();
+    // Convert to Float32 for data access
+    Tensor input_f32 = input;
+    if (input.dtype() != DType::Float32) {
+        input_f32 = input.to(DType::Float32);
+    }
+    const float* data = input_f32.data<const float>();
     int64_t n = input.numel();
 
     float min_val = data[0];
@@ -229,7 +248,12 @@ auto quantize_per_tensor_symmetric(const Tensor& input, QuantDType dtype)
 
 auto quantize_per_tensor_asymmetric(const Tensor& input, QuantDType dtype)
     -> QuantizedTensor {
-    const float* data = input.data<const float>();
+    // Convert to Float32 for data access
+    Tensor input_f32 = input;
+    if (input.dtype() != DType::Float32) {
+        input_f32 = input.to(DType::Float32);
+    }
+    const float* data = input_f32.data<const float>();
     int64_t n = input.numel();
 
     float min_val = data[0];
@@ -258,7 +282,12 @@ auto quantize_per_channel_symmetric(const Tensor& input, int64_t axis, QuantDTyp
     Tensor min({num_channels}, DType::Float32, input.device());
     Tensor max({num_channels}, DType::Float32, input.device());
 
-    const float* input_data = input.data<const float>();
+    // Convert input to Float32 for data access
+    Tensor input_f32 = input;
+    if (input.dtype() != DType::Float32) {
+        input_f32 = input.to(DType::Float32);
+    }
+    const float* input_data = input_f32.data<const float>();
     float* min_data = min.data<float>();
     float* max_data = max.data<float>();
 
@@ -292,7 +321,12 @@ auto quantize_per_channel_asymmetric(const Tensor& input, int64_t axis, QuantDTy
     Tensor min({num_channels}, DType::Float32, input.device());
     Tensor max({num_channels}, DType::Float32, input.device());
 
-    const float* input_data = input.data<const float>();
+    // Convert input to Float32 for data access
+    Tensor input_f32 = input;
+    if (input.dtype() != DType::Float32) {
+        input_f32 = input.to(DType::Float32);
+    }
+    const float* input_data = input_f32.data<const float>();
     float* min_data = min.data<float>();
     float* max_data = max.data<float>();
 
@@ -386,7 +420,12 @@ auto compute_quantization_error(const Tensor& original, const QuantizedTensor& q
     -> std::tuple<float, float, float> {
     Tensor dequant = quantized.dequantize();
 
-    const float* orig_data = original.data<const float>();
+    // Convert to Float32 for data access
+    Tensor orig_f32 = original;
+    if (original.dtype() != DType::Float32) {
+        orig_f32 = original.to(DType::Float32);
+    }
+    const float* orig_data = orig_f32.data<const float>();
     const float* deq_data = dequant.data<const float>();
     int64_t n = original.numel();
 
@@ -464,7 +503,12 @@ auto calibrate_quantization_params(
 
         // Compute per-channel min/max across all samples
         for (const auto& sample : samples) {
-            const float* data = sample.data<const float>();
+            // Convert to Float32 for data access
+            Tensor sample_f32 = sample;
+            if (sample.dtype() != DType::Float32) {
+                sample_f32 = sample.to(DType::Float32);
+            }
+            const float* data = sample_f32.data<const float>();
             for (int64_t c = 0; c < num_channels; ++c) {
                 for (int64_t i = 0; i < channel_size; ++i) {
                     float val = data[c * channel_size + i];
@@ -492,7 +536,12 @@ auto calibrate_quantization_params(
 
         bool has_data = false;
         for (const auto& sample : samples) {
-            const float* data = sample.data<const float>();
+            // Convert to Float32 for data access
+            Tensor sample_f32 = sample;
+            if (sample.dtype() != DType::Float32) {
+                sample_f32 = sample.to(DType::Float32);
+            }
+            const float* data = sample_f32.data<const float>();
             int64_t n = sample.numel();
 
             if (n == 0) continue;  // Skip empty tensors

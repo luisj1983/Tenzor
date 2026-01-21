@@ -207,6 +207,27 @@ auto index_select_kernel(const Tensor& input, int64_t dim, const Tensor& index) 
                 }
             }
         }
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* in_data = input.data<Float16>();
+        Float16* out_data = output.data<Float16>();
+
+        for (int64_t outer = 0; outer < outer_size; ++outer) {
+            for (int64_t idx = 0; idx < num_indices; ++idx) {
+                int64_t src_idx = index_data[idx];
+                if (src_idx < 0) src_idx += in_shape[dim];
+                if (src_idx < 0 || src_idx >= in_shape[dim]) {
+                    throw std::out_of_range("index_select: index out of range");
+                }
+
+                for (int64_t inner = 0; inner < inner_size; ++inner) {
+                    int64_t in_offset = outer * in_strides[dim] * in_shape[dim] +
+                                       src_idx * in_strides[dim] + inner;
+                    int64_t out_offset = outer * out_strides[dim] * num_indices +
+                                        idx * out_strides[dim] + inner;
+                    out_data[out_offset] = in_data[in_offset];
+                }
+            }
+        }
     } else {
         throw std::runtime_error("index_select: unsupported dtype");
     }

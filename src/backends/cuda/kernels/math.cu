@@ -182,6 +182,27 @@ inline bool have_same_shape(const Tensor& a, const Tensor& b) {
     return true;
 }
 
+// Check if shape_b can be broadcast to shape_a (for in-place operations)
+// Returns true if shape_b can be broadcast to match shape_a
+inline bool can_broadcast_to(const std::vector<int64_t>& shape_a,
+                              const std::vector<int64_t>& shape_b) {
+    size_t ndim_a = shape_a.size();
+    size_t ndim_b = shape_b.size();
+
+    // Check from the rightmost (trailing) dimension
+    for (size_t i = 0; i < std::max(ndim_a, ndim_b); ++i) {
+        int64_t dim_a = i < ndim_a ? shape_a[ndim_a - 1 - i] : 1;
+        int64_t dim_b = i < ndim_b ? shape_b[ndim_b - 1 - i] : 1;
+
+        // For in-place broadcast: dim_b must be 1 or equal to dim_a
+        if (dim_b != 1 && dim_b != dim_a) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 } // namespace detail
 
 // ============================================================================
@@ -246,6 +267,30 @@ struct DivOp {
         return a / b;
     }
 };
+
+// Generic in-place broadcast kernel - works for all in-place binary operations
+// Reads from a (target) and b (other), writes result back to a
+template<typename T, typename Op>
+__global__ void broadcast_inplace_kernel(
+    T* a, const T* b,
+    const int64_t* strides_b,
+    const int64_t* output_shape, int64_t ndim, int64_t n, Op op) {
+
+    CUDA_KERNEL_LOOP(out_idx, n) {
+        int64_t idx_b = 0;
+        int64_t tmp = out_idx;
+
+        // Convert flat index to multi-dimensional indices
+        // Working from rightmost (fastest-varying) dimension
+        for (int64_t i = ndim - 1; i >= 0; --i) {
+            int64_t coord = tmp % output_shape[i];
+            tmp /= output_shape[i];
+            idx_b += coord * strides_b[i];
+        }
+
+        a[out_idx] = op(a[out_idx], b[idx_b]);
+    }
+}
 
 // Subtract kernel - element-wise subtraction
 template<typename T>
@@ -1645,18 +1690,96 @@ __global__ void div_inplace_kernel_impl(T* data, const T* other, int64_t n) {
     }
 }
 
+// Float16 in-place kernels
+__global__ void add_inplace_kernel_f16(__half* data, const __half* other, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        data[idx] = __hadd(data[idx], other[idx]);
+    }
+}
+
+__global__ void sub_inplace_kernel_f16(__half* data, const __half* other, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        data[idx] = __hsub(data[idx], other[idx]);
+    }
+}
+
+__global__ void mul_inplace_kernel_f16(__half* data, const __half* other, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        data[idx] = __hmul(data[idx], other[idx]);
+    }
+}
+
+__global__ void div_inplace_kernel_f16(__half* data, const __half* other, int64_t n) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        data[idx] = __hdiv(data[idx], other[idx]);
+    }
+}
+
 auto add_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream) -> Tensor {
     int64_t n = inout.numel();
+    bool same_shape = detail::have_same_shape(inout, other);
 
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
 
-    if (inout.dtype() == DType::Float32) {
-        add_inplace_kernel_impl<<<grid, block, 0, stream>>>(inout.data<float>(), other.data<float>(), n);
-    } else if (inout.dtype() == DType::Float64) {
-        add_inplace_kernel_impl<<<grid, block, 0, stream>>>(inout.data<double>(), other.data<double>(), n);
+    if (same_shape) {
+        // Fast path: same shape, element-wise operation
+        if (inout.dtype() == DType::Float32) {
+            add_inplace_kernel_impl<<<grid, block, 0, stream>>>(inout.data<float>(), other.data<float>(), n);
+        } else if (inout.dtype() == DType::Float64) {
+            add_inplace_kernel_impl<<<grid, block, 0, stream>>>(inout.data<double>(), other.data<double>(), n);
+        } else if (inout.dtype() == DType::Float16) {
+            add_inplace_kernel_f16<<<grid, block, 0, stream>>>(
+                reinterpret_cast<__half*>(inout.data<Float16>()),
+                reinterpret_cast<const __half*>(other.data<Float16>()), n);
+        } else {
+            throw std::runtime_error("add_inplace operation only supports Float32, Float64, and Float16 dtypes");
+        }
     } else {
-        throw std::runtime_error("add_inplace operation only supports Float32 and Float64 dtypes");
+        // Broadcast path: compute strides for the 'other' tensor
+        auto inout_shape = inout.shape();
+        auto other_shape = other.shape();
+        std::vector<int64_t> inout_shape_vec(inout_shape.begin(), inout_shape.end());
+        std::vector<int64_t> other_shape_vec(other_shape.begin(), other_shape.end());
+
+        // Validate that other can be broadcast to inout's shape
+        if (!detail::can_broadcast_to(inout_shape_vec, other_shape_vec)) {
+            throw std::runtime_error("In-place add: shapes are not compatible for broadcasting");
+        }
+
+        // For in-place, output shape is always inout's shape
+        std::vector<int64_t> strides_b = detail::compute_broadcast_strides(other_shape_vec, inout_shape_vec);
+
+        // Copy shapes/strides to device
+        int64_t ndim = inout_shape_vec.size();
+        int64_t* d_strides_b = nullptr;
+        int64_t* d_output_shape = nullptr;
+        CUDA_CHECK(cudaMalloc(&d_strides_b, ndim * sizeof(int64_t)));
+        CUDA_CHECK(cudaMalloc(&d_output_shape, ndim * sizeof(int64_t)));
+        CUDA_CHECK(cudaMemcpyAsync(d_strides_b, strides_b.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(d_output_shape, inout_shape_vec.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice, stream));
+
+        if (inout.dtype() == DType::Float32) {
+            broadcast_inplace_kernel<<<grid, block, 0, stream>>>(
+                inout.data<float>(), other.data<float>(),
+                d_strides_b, d_output_shape, ndim, n, AddOp{});
+        } else if (inout.dtype() == DType::Float64) {
+            broadcast_inplace_kernel<<<grid, block, 0, stream>>>(
+                inout.data<double>(), other.data<double>(),
+                d_strides_b, d_output_shape, ndim, n, AddOp{});
+        } else if (inout.dtype() == DType::Float16) {
+            broadcast_inplace_kernel<<<grid, block, 0, stream>>>(
+                reinterpret_cast<__half*>(inout.data<Float16>()),
+                reinterpret_cast<const __half*>(other.data<Float16>()),
+                d_strides_b, d_output_shape, ndim, n, AddOp{});
+        } else {
+            CUDA_CHECK(cudaFree(d_strides_b));
+            CUDA_CHECK(cudaFree(d_output_shape));
+            throw std::runtime_error("add_inplace operation only supports Float32, Float64, and Float16 dtypes");
+        }
+
+        CUDA_CHECK(cudaFree(d_strides_b));
+        CUDA_CHECK(cudaFree(d_output_shape));
     }
 
     CUDA_CHECK(cudaGetLastError());
@@ -1666,16 +1789,65 @@ auto add_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream)
 
 auto sub_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream) -> Tensor {
     int64_t n = inout.numel();
+    bool same_shape = detail::have_same_shape(inout, other);
 
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
 
-    if (inout.dtype() == DType::Float32) {
-        sub_inplace_kernel_impl<<<grid, block, 0, stream>>>(inout.data<float>(), other.data<float>(), n);
-    } else if (inout.dtype() == DType::Float64) {
-        sub_inplace_kernel_impl<<<grid, block, 0, stream>>>(inout.data<double>(), other.data<double>(), n);
+    if (same_shape) {
+        if (inout.dtype() == DType::Float32) {
+            sub_inplace_kernel_impl<<<grid, block, 0, stream>>>(inout.data<float>(), other.data<float>(), n);
+        } else if (inout.dtype() == DType::Float64) {
+            sub_inplace_kernel_impl<<<grid, block, 0, stream>>>(inout.data<double>(), other.data<double>(), n);
+        } else if (inout.dtype() == DType::Float16) {
+            sub_inplace_kernel_f16<<<grid, block, 0, stream>>>(
+                reinterpret_cast<__half*>(inout.data<Float16>()),
+                reinterpret_cast<const __half*>(other.data<Float16>()), n);
+        } else {
+            throw std::runtime_error("sub_inplace operation only supports Float32, Float64, and Float16 dtypes");
+        }
     } else {
-        throw std::runtime_error("sub_inplace operation only supports Float32 and Float64 dtypes");
+        auto inout_shape = inout.shape();
+        auto other_shape = other.shape();
+        std::vector<int64_t> inout_shape_vec(inout_shape.begin(), inout_shape.end());
+        std::vector<int64_t> other_shape_vec(other_shape.begin(), other_shape.end());
+
+        // Validate that other can be broadcast to inout's shape
+        if (!detail::can_broadcast_to(inout_shape_vec, other_shape_vec)) {
+            throw std::runtime_error("In-place sub: shapes are not compatible for broadcasting");
+        }
+
+        std::vector<int64_t> strides_b = detail::compute_broadcast_strides(other_shape_vec, inout_shape_vec);
+
+        int64_t ndim = inout_shape_vec.size();
+        int64_t* d_strides_b = nullptr;
+        int64_t* d_output_shape = nullptr;
+        CUDA_CHECK(cudaMalloc(&d_strides_b, ndim * sizeof(int64_t)));
+        CUDA_CHECK(cudaMalloc(&d_output_shape, ndim * sizeof(int64_t)));
+        CUDA_CHECK(cudaMemcpyAsync(d_strides_b, strides_b.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(d_output_shape, inout_shape_vec.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice, stream));
+
+        if (inout.dtype() == DType::Float32) {
+            broadcast_inplace_kernel<<<grid, block, 0, stream>>>(
+                inout.data<float>(), other.data<float>(),
+                d_strides_b, d_output_shape, ndim, n, SubOp{});
+        } else if (inout.dtype() == DType::Float64) {
+            broadcast_inplace_kernel<<<grid, block, 0, stream>>>(
+                inout.data<double>(), other.data<double>(),
+                d_strides_b, d_output_shape, ndim, n, SubOp{});
+        } else if (inout.dtype() == DType::Float16) {
+            broadcast_inplace_kernel<<<grid, block, 0, stream>>>(
+                reinterpret_cast<__half*>(inout.data<Float16>()),
+                reinterpret_cast<const __half*>(other.data<Float16>()),
+                d_strides_b, d_output_shape, ndim, n, SubOp{});
+        } else {
+            CUDA_CHECK(cudaFree(d_strides_b));
+            CUDA_CHECK(cudaFree(d_output_shape));
+            throw std::runtime_error("sub_inplace operation only supports Float32, Float64, and Float16 dtypes");
+        }
+
+        CUDA_CHECK(cudaFree(d_strides_b));
+        CUDA_CHECK(cudaFree(d_output_shape));
     }
 
     CUDA_CHECK(cudaGetLastError());
@@ -1685,16 +1857,65 @@ auto sub_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream)
 
 auto mul_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream) -> Tensor {
     int64_t n = inout.numel();
+    bool same_shape = detail::have_same_shape(inout, other);
 
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
 
-    if (inout.dtype() == DType::Float32) {
-        mul_inplace_kernel_impl<<<grid, block, 0, stream>>>(inout.data<float>(), other.data<float>(), n);
-    } else if (inout.dtype() == DType::Float64) {
-        mul_inplace_kernel_impl<<<grid, block, 0, stream>>>(inout.data<double>(), other.data<double>(), n);
+    if (same_shape) {
+        if (inout.dtype() == DType::Float32) {
+            mul_inplace_kernel_impl<<<grid, block, 0, stream>>>(inout.data<float>(), other.data<float>(), n);
+        } else if (inout.dtype() == DType::Float64) {
+            mul_inplace_kernel_impl<<<grid, block, 0, stream>>>(inout.data<double>(), other.data<double>(), n);
+        } else if (inout.dtype() == DType::Float16) {
+            mul_inplace_kernel_f16<<<grid, block, 0, stream>>>(
+                reinterpret_cast<__half*>(inout.data<Float16>()),
+                reinterpret_cast<const __half*>(other.data<Float16>()), n);
+        } else {
+            throw std::runtime_error("mul_inplace operation only supports Float32, Float64, and Float16 dtypes");
+        }
     } else {
-        throw std::runtime_error("mul_inplace operation only supports Float32 and Float64 dtypes");
+        auto inout_shape = inout.shape();
+        auto other_shape = other.shape();
+        std::vector<int64_t> inout_shape_vec(inout_shape.begin(), inout_shape.end());
+        std::vector<int64_t> other_shape_vec(other_shape.begin(), other_shape.end());
+
+        // Validate that other can be broadcast to inout's shape
+        if (!detail::can_broadcast_to(inout_shape_vec, other_shape_vec)) {
+            throw std::runtime_error("In-place mul: shapes are not compatible for broadcasting");
+        }
+
+        std::vector<int64_t> strides_b = detail::compute_broadcast_strides(other_shape_vec, inout_shape_vec);
+
+        int64_t ndim = inout_shape_vec.size();
+        int64_t* d_strides_b = nullptr;
+        int64_t* d_output_shape = nullptr;
+        CUDA_CHECK(cudaMalloc(&d_strides_b, ndim * sizeof(int64_t)));
+        CUDA_CHECK(cudaMalloc(&d_output_shape, ndim * sizeof(int64_t)));
+        CUDA_CHECK(cudaMemcpyAsync(d_strides_b, strides_b.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(d_output_shape, inout_shape_vec.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice, stream));
+
+        if (inout.dtype() == DType::Float32) {
+            broadcast_inplace_kernel<<<grid, block, 0, stream>>>(
+                inout.data<float>(), other.data<float>(),
+                d_strides_b, d_output_shape, ndim, n, MulOp{});
+        } else if (inout.dtype() == DType::Float64) {
+            broadcast_inplace_kernel<<<grid, block, 0, stream>>>(
+                inout.data<double>(), other.data<double>(),
+                d_strides_b, d_output_shape, ndim, n, MulOp{});
+        } else if (inout.dtype() == DType::Float16) {
+            broadcast_inplace_kernel<<<grid, block, 0, stream>>>(
+                reinterpret_cast<__half*>(inout.data<Float16>()),
+                reinterpret_cast<const __half*>(other.data<Float16>()),
+                d_strides_b, d_output_shape, ndim, n, MulOp{});
+        } else {
+            CUDA_CHECK(cudaFree(d_strides_b));
+            CUDA_CHECK(cudaFree(d_output_shape));
+            throw std::runtime_error("mul_inplace operation only supports Float32, Float64, and Float16 dtypes");
+        }
+
+        CUDA_CHECK(cudaFree(d_strides_b));
+        CUDA_CHECK(cudaFree(d_output_shape));
     }
 
     CUDA_CHECK(cudaGetLastError());
@@ -1704,16 +1925,65 @@ auto mul_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream)
 
 auto div_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream) -> Tensor {
     int64_t n = inout.numel();
+    bool same_shape = detail::have_same_shape(inout, other);
 
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
 
-    if (inout.dtype() == DType::Float32) {
-        div_inplace_kernel_impl<<<grid, block, 0, stream>>>(inout.data<float>(), other.data<float>(), n);
-    } else if (inout.dtype() == DType::Float64) {
-        div_inplace_kernel_impl<<<grid, block, 0, stream>>>(inout.data<double>(), other.data<double>(), n);
+    if (same_shape) {
+        if (inout.dtype() == DType::Float32) {
+            div_inplace_kernel_impl<<<grid, block, 0, stream>>>(inout.data<float>(), other.data<float>(), n);
+        } else if (inout.dtype() == DType::Float64) {
+            div_inplace_kernel_impl<<<grid, block, 0, stream>>>(inout.data<double>(), other.data<double>(), n);
+        } else if (inout.dtype() == DType::Float16) {
+            div_inplace_kernel_f16<<<grid, block, 0, stream>>>(
+                reinterpret_cast<__half*>(inout.data<Float16>()),
+                reinterpret_cast<const __half*>(other.data<Float16>()), n);
+        } else {
+            throw std::runtime_error("div_inplace operation only supports Float32, Float64, and Float16 dtypes");
+        }
     } else {
-        throw std::runtime_error("div_inplace operation only supports Float32 and Float64 dtypes");
+        auto inout_shape = inout.shape();
+        auto other_shape = other.shape();
+        std::vector<int64_t> inout_shape_vec(inout_shape.begin(), inout_shape.end());
+        std::vector<int64_t> other_shape_vec(other_shape.begin(), other_shape.end());
+
+        // Validate that other can be broadcast to inout's shape
+        if (!detail::can_broadcast_to(inout_shape_vec, other_shape_vec)) {
+            throw std::runtime_error("In-place div: shapes are not compatible for broadcasting");
+        }
+
+        std::vector<int64_t> strides_b = detail::compute_broadcast_strides(other_shape_vec, inout_shape_vec);
+
+        int64_t ndim = inout_shape_vec.size();
+        int64_t* d_strides_b = nullptr;
+        int64_t* d_output_shape = nullptr;
+        CUDA_CHECK(cudaMalloc(&d_strides_b, ndim * sizeof(int64_t)));
+        CUDA_CHECK(cudaMalloc(&d_output_shape, ndim * sizeof(int64_t)));
+        CUDA_CHECK(cudaMemcpyAsync(d_strides_b, strides_b.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync(d_output_shape, inout_shape_vec.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice, stream));
+
+        if (inout.dtype() == DType::Float32) {
+            broadcast_inplace_kernel<<<grid, block, 0, stream>>>(
+                inout.data<float>(), other.data<float>(),
+                d_strides_b, d_output_shape, ndim, n, DivOp{});
+        } else if (inout.dtype() == DType::Float64) {
+            broadcast_inplace_kernel<<<grid, block, 0, stream>>>(
+                inout.data<double>(), other.data<double>(),
+                d_strides_b, d_output_shape, ndim, n, DivOp{});
+        } else if (inout.dtype() == DType::Float16) {
+            broadcast_inplace_kernel<<<grid, block, 0, stream>>>(
+                reinterpret_cast<__half*>(inout.data<Float16>()),
+                reinterpret_cast<const __half*>(other.data<Float16>()),
+                d_strides_b, d_output_shape, ndim, n, DivOp{});
+        } else {
+            CUDA_CHECK(cudaFree(d_strides_b));
+            CUDA_CHECK(cudaFree(d_output_shape));
+            throw std::runtime_error("div_inplace operation only supports Float32, Float64, and Float16 dtypes");
+        }
+
+        CUDA_CHECK(cudaFree(d_strides_b));
+        CUDA_CHECK(cudaFree(d_output_shape));
     }
 
     CUDA_CHECK(cudaGetLastError());

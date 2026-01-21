@@ -292,12 +292,15 @@ auto YOLOv3::forward_impl(const Variable& input) -> Variable {
         int64_t grid_w = shape[3];
 
         int64_t num_boxes = grid_h * grid_w * num_anchors;
-        Tensor scores = Tensor({N, num_boxes}, DType::Float32, pred.device());
+        // Create scores with proper shape for batched_nms: {N, num_boxes, num_classes}
+        Tensor scores = Tensor({N, num_boxes, num_classes_}, DType::Float32, Device::cpu());
 
-        const float* pred_data = pred.data<const float>();
+        // Convert prediction to Float32 on CPU for data extraction
+        auto pred_cpu = pred.to(Device::cpu()).to(DType::Float32);
+        const float* pred_data = pred_cpu.data<float>();
         float* scores_data = scores.data<float>();
 
-        // Extract objectness * max_class_prob for each box
+        // Extract objectness * class_prob for each box and class
         for (int64_t b = 0; b < N; ++b) {
             int64_t box_idx = 0;
             for (int64_t gy = 0; gy < grid_h; ++gy) {
@@ -309,22 +312,20 @@ auto YOLOv3::forward_impl(const Variable& input) -> Variable {
                         // Get objectness
                         float objectness = 1.0f / (1.0f + std::exp(-pred_data[pred_offset + 4]));
 
-                        // Find max class probability
-                        float max_class_prob = 0.0f;
+                        // Extract score for each class (objectness * class_prob)
                         for (int64_t c = 0; c < num_classes_; ++c) {
                             float class_prob = 1.0f / (1.0f + std::exp(-pred_data[pred_offset + 5 + c]));
-                            max_class_prob = std::max(max_class_prob, class_prob);
+                            int64_t score_idx = (b * num_boxes + box_idx) * num_classes_ + c;
+                            scores_data[score_idx] = objectness * class_prob;
                         }
-
-                        // Combined score
-                        scores_data[b * num_boxes + box_idx] = objectness * max_class_prob;
                         box_idx++;
                     }
                 }
             }
         }
 
-        all_scores.push_back(scores);
+        // Move scores to original device
+        all_scores.push_back(scores.to(pred.device()));
     }
 
     auto scores = tenzor::cat(all_scores, 1);
@@ -400,9 +401,13 @@ auto YOLOv3::decode_predictions(const std::vector<Variable>& predictions, int64_
         int64_t num_boxes = grid_h * grid_w * num_anchors;
         Tensor boxes = Tensor({N, num_boxes, 4}, DType::Float32, pred.device());
 
+        // Convert prediction to Float32 on CPU for data extraction
+        auto pred_cpu = pred.to(Device::cpu()).to(DType::Float32);
+        auto boxes_cpu = boxes.to(Device::cpu());
+
         // Get raw prediction data
-        const float* pred_data = pred.data<const float>();
-        float* boxes_data = boxes.data<float>();
+        const float* pred_data = pred_cpu.data<float>();
+        float* boxes_data = boxes_cpu.data<float>();
 
         // Decode boxes for each batch
         for (int64_t b = 0; b < N; ++b) {
@@ -463,7 +468,8 @@ auto YOLOv3::decode_predictions(const std::vector<Variable>& predictions, int64_
             }
         }
 
-        all_boxes.push_back(boxes);
+        // Move back to original device if needed
+        all_boxes.push_back(boxes_cpu.to(pred.device()));
     }
 
     // Concatenate all boxes from different scales
@@ -473,14 +479,29 @@ auto YOLOv3::decode_predictions(const std::vector<Variable>& predictions, int64_
 auto YOLOv3::postprocess(const Tensor& boxes, const Tensor& scores)
     -> std::vector<std::tuple<Tensor, Tensor, Tensor>> {
 
-    // Simplified post-processing - would need proper batch extraction
-    // For now, apply NMS to entire batch (not optimal but functional)
     std::vector<std::tuple<Tensor, Tensor, Tensor>> results;
 
-    auto [kept_boxes, kept_scores, kept_labels] =
-        ops::batched_nms(boxes, scores, nms_threshold_, conf_threshold_, 100);
+    // Handle batch dimension: boxes is (batch, num_boxes, 4), scores is (batch, num_boxes, num_classes)
+    if (boxes.ndim() == 3) {
+        int64_t batch_size = boxes.shape()[0];
 
-    results.emplace_back(kept_boxes, kept_scores, kept_labels);
+        for (int64_t b = 0; b < batch_size; ++b) {
+            // Extract boxes and scores for this image: shape (num_boxes, 4) and (num_boxes, num_classes)
+            auto img_boxes = boxes.slice(0, b, b + 1).squeeze(0);
+            auto img_scores = scores.slice(0, b, b + 1).squeeze(0);
+
+            auto [kept_boxes, kept_scores, kept_labels] =
+                ops::batched_nms(img_boxes, img_scores, nms_threshold_, conf_threshold_, 100);
+
+            results.emplace_back(kept_boxes, kept_scores, kept_labels);
+        }
+    } else {
+        // Assume boxes is already (N, 4) and scores is (N, num_classes)
+        auto [kept_boxes, kept_scores, kept_labels] =
+            ops::batched_nms(boxes, scores, nms_threshold_, conf_threshold_, 100);
+
+        results.emplace_back(kept_boxes, kept_scores, kept_labels);
+    }
 
     return results;
 }
@@ -897,9 +918,12 @@ auto YOLOv5::forward_impl(const Variable& input) -> Variable {
         int64_t grid_w = shape[3];
 
         int64_t num_boxes = grid_h * grid_w * num_anchors;
-        Tensor scores = Tensor({N, num_boxes}, DType::Float32, pred.device());
+        // Create scores with proper shape for batched_nms: {N, num_boxes, num_classes}
+        Tensor scores = Tensor({N, num_boxes, num_classes_}, DType::Float32, Device::cpu());
 
-        const float* pred_data = pred.data<const float>();
+        // Convert prediction to Float32 on CPU for data extraction
+        auto pred_cpu = pred.to(Device::cpu()).to(DType::Float32);
+        const float* pred_data = pred_cpu.data<float>();
         float* scores_data = scores.data<float>();
 
         for (int64_t b = 0; b < N; ++b) {
@@ -911,20 +935,21 @@ auto YOLOv5::forward_impl(const Variable& input) -> Variable {
                         int64_t pred_offset = pred_idx * (5 + num_classes_);
 
                         float objectness = 1.0f / (1.0f + std::exp(-pred_data[pred_offset + 4]));
-                        float max_class_prob = 0.0f;
+
+                        // Extract score for each class (objectness * class_prob)
                         for (int64_t c = 0; c < num_classes_; ++c) {
                             float class_prob = 1.0f / (1.0f + std::exp(-pred_data[pred_offset + 5 + c]));
-                            max_class_prob = std::max(max_class_prob, class_prob);
+                            int64_t score_idx = (b * num_boxes + box_idx) * num_classes_ + c;
+                            scores_data[score_idx] = objectness * class_prob;
                         }
-
-                        scores_data[b * num_boxes + box_idx] = objectness * max_class_prob;
                         box_idx++;
                     }
                 }
             }
         }
 
-        all_scores.push_back(scores);
+        // Move scores to original device
+        all_scores.push_back(scores.to(pred.device()));
     }
 
     auto scores = tenzor::cat(all_scores, 1);
@@ -946,12 +971,94 @@ auto YOLOv5::forward_raw(const Variable& input) -> std::vector<Variable> {
 
 auto YOLOv5::decode_predictions(const std::vector<Variable>& predictions, int64_t img_size)
     -> Tensor {
-    // Similar to YOLOv3 but with improved decoding
     std::vector<Tensor> all_boxes;
+    std::vector<int64_t> strides = {8, 16, 32};  // P3, P4, P5
 
-    for (const auto& pred : predictions) {
-        auto shape = pred.tensor().shape();
-        all_boxes.push_back(Tensor({shape[0], shape[2] * shape[3] * shape[1], 4}, DType::Float32, Device::cpu()));
+    for (size_t i = 0; i < predictions.size(); ++i) {
+        auto pred = predictions[i].tensor();
+        auto shape = pred.shape();
+        int64_t N = shape[0];
+        int64_t num_anchors = shape[1];
+        int64_t grid_h = shape[2];
+        int64_t grid_w = shape[3];
+        int64_t stride = strides[i];
+
+        // Get anchors for this scale
+        const auto& anchors = (i == 0) ? anchors_p3_ :
+                              (i == 1) ? anchors_p4_ : anchors_p5_;
+
+        // Create output tensor for decoded boxes: [N, grid_h * grid_w * num_anchors, 4]
+        int64_t num_boxes = grid_h * grid_w * num_anchors;
+        Tensor boxes = Tensor({N, num_boxes, 4}, DType::Float32, pred.device());
+
+        // Convert prediction to Float32 on CPU for data extraction
+        auto pred_cpu = pred.to(Device::cpu()).to(DType::Float32);
+        auto boxes_cpu = boxes.to(Device::cpu());
+
+        // Get raw prediction data
+        const float* pred_data = pred_cpu.data<float>();
+        float* boxes_data = boxes_cpu.data<float>();
+
+        // Decode boxes for each batch
+        for (int64_t b = 0; b < N; ++b) {
+            int64_t box_idx = 0;
+
+            // Iterate over grid cells
+            for (int64_t gy = 0; gy < grid_h; ++gy) {
+                for (int64_t gx = 0; gx < grid_w; ++gx) {
+                    // Iterate over anchors at this grid cell
+                    for (int64_t a = 0; a < num_anchors; ++a) {
+                        // Prediction format: [tx, ty, tw, th, objectness, class_probs...]
+                        int64_t pred_idx = ((b * num_anchors + a) * grid_h + gy) * grid_w + gx;
+                        int64_t pred_offset = pred_idx * (5 + num_classes_);
+
+                        // Extract box parameters
+                        float tx = pred_data[pred_offset + 0];
+                        float ty = pred_data[pred_offset + 1];
+                        float tw = pred_data[pred_offset + 2];
+                        float th = pred_data[pred_offset + 3];
+
+                        // YOLOv5 uses sigmoid for tx, ty
+                        float sigmoid_tx = 1.0f / (1.0f + std::exp(-tx));
+                        float sigmoid_ty = 1.0f / (1.0f + std::exp(-ty));
+
+                        // Compute box center
+                        float bx = (gx + sigmoid_tx) * stride;
+                        float by = (gy + sigmoid_ty) * stride;
+
+                        // Compute box size using anchor dimensions
+                        float anchor_w = anchors[a].first;
+                        float anchor_h = anchors[a].second;
+                        float bw = anchor_w * std::exp(tw);
+                        float bh = anchor_h * std::exp(th);
+
+                        // Convert to (x1, y1, x2, y2) format
+                        float x1 = bx - bw / 2.0f;
+                        float y1 = by - bh / 2.0f;
+                        float x2 = bx + bw / 2.0f;
+                        float y2 = by + bh / 2.0f;
+
+                        // Clamp to image boundaries
+                        x1 = std::max(0.0f, std::min(x1, static_cast<float>(img_size)));
+                        y1 = std::max(0.0f, std::min(y1, static_cast<float>(img_size)));
+                        x2 = std::max(0.0f, std::min(x2, static_cast<float>(img_size)));
+                        y2 = std::max(0.0f, std::min(y2, static_cast<float>(img_size)));
+
+                        // Write to output
+                        int64_t out_offset = (b * num_boxes + box_idx) * 4;
+                        boxes_data[out_offset + 0] = x1;
+                        boxes_data[out_offset + 1] = y1;
+                        boxes_data[out_offset + 2] = x2;
+                        boxes_data[out_offset + 3] = y2;
+
+                        box_idx++;
+                    }
+                }
+            }
+        }
+
+        // Move back to original device if needed
+        all_boxes.push_back(boxes_cpu.to(pred.device()));
     }
 
     return tenzor::cat(all_boxes, 1);
@@ -960,14 +1067,29 @@ auto YOLOv5::decode_predictions(const std::vector<Variable>& predictions, int64_
 auto YOLOv5::postprocess(const Tensor& boxes, const Tensor& scores)
     -> std::vector<std::tuple<Tensor, Tensor, Tensor>> {
 
-    // Simplified post-processing - would need proper batch extraction
-    // For now, apply NMS to entire batch (not optimal but functional)
     std::vector<std::tuple<Tensor, Tensor, Tensor>> results;
 
-    auto [kept_boxes, kept_scores, kept_labels] =
-        ops::batched_nms(boxes, scores, nms_threshold_, conf_threshold_, 100);
+    // Handle batch dimension: boxes is (batch, num_boxes, 4), scores is (batch, num_boxes, num_classes)
+    if (boxes.ndim() == 3) {
+        int64_t batch_size = boxes.shape()[0];
 
-    results.emplace_back(kept_boxes, kept_scores, kept_labels);
+        for (int64_t b = 0; b < batch_size; ++b) {
+            // Extract boxes and scores for this image: shape (num_boxes, 4) and (num_boxes, num_classes)
+            auto img_boxes = boxes.slice(0, b, b + 1).squeeze(0);
+            auto img_scores = scores.slice(0, b, b + 1).squeeze(0);
+
+            auto [kept_boxes, kept_scores, kept_labels] =
+                ops::batched_nms(img_boxes, img_scores, nms_threshold_, conf_threshold_, 100);
+
+            results.emplace_back(kept_boxes, kept_scores, kept_labels);
+        }
+    } else {
+        // Assume boxes is already (N, 4) and scores is (N, num_classes)
+        auto [kept_boxes, kept_scores, kept_labels] =
+            ops::batched_nms(boxes, scores, nms_threshold_, conf_threshold_, 100);
+
+        results.emplace_back(kept_boxes, kept_scores, kept_labels);
+    }
 
     return results;
 }
