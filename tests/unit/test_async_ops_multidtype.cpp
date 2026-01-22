@@ -246,6 +246,10 @@ TEST_P(AsyncOpsMultiDTypeTest, AsyncSoftmaxCorrectness) {
     auto result_cpu = result.to(Device::cpu()).to(DType::Float32);
     const float* result_data = result_cpu.data<float>();
 
+    // Use slightly looser tolerance for sum checks since we're summing 10 values
+    // and floating point errors can accumulate
+    float sum_tolerance = std::max(atol() * 10.0f, 1e-6f);
+
     for (int64_t i = 0; i < 32; ++i) {
         float row_sum = 0.0f;
         for (int64_t j = 0; j < 10; ++j) {
@@ -254,7 +258,7 @@ TEST_P(AsyncOpsMultiDTypeTest, AsyncSoftmaxCorrectness) {
             EXPECT_LT(val, 1.0f);
             row_sum += val;
         }
-        EXPECT_NEAR(row_sum, 1.0f, atol());
+        EXPECT_NEAR(row_sum, 1.0f, sum_tolerance);
     }
 }
 

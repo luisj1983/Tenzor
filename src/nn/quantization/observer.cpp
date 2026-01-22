@@ -20,8 +20,16 @@ MinMaxObserver::MinMaxObserver(bool per_channel, int64_t axis)
     : per_channel_(per_channel), axis_(axis) {}
 
 auto MinMaxObserver::observe(const Tensor& tensor) -> void {
-    const float* data = tensor.data<const float>();
-    int64_t n = tensor.numel();
+    // Convert to Float32 for data access if necessary
+    Tensor tensor_f32 = tensor;
+    if (tensor.dtype() != DType::Float32) {
+        tensor_f32 = tensor.to(DType::Float32);
+    }
+    if (tensor_f32.device() != Device::cpu()) {
+        tensor_f32 = tensor_f32.to(Device::cpu());
+    }
+    const float* data = tensor_f32.data<const float>();
+    int64_t n = tensor_f32.numel();
 
     if (!has_data_) {
         // First observation - initialize min/max
@@ -122,8 +130,16 @@ MovingAverageMinMaxObserver::MovingAverageMinMaxObserver(float momentum,
 }
 
 auto MovingAverageMinMaxObserver::observe(const Tensor& tensor) -> void {
-    const float* data = tensor.data<const float>();
-    int64_t n = tensor.numel();
+    // Convert to Float32 for data access if necessary
+    Tensor tensor_f32 = tensor;
+    if (tensor.dtype() != DType::Float32) {
+        tensor_f32 = tensor.to(DType::Float32);
+    }
+    if (tensor_f32.device() != Device::cpu()) {
+        tensor_f32 = tensor_f32.to(Device::cpu());
+    }
+    const float* data = tensor_f32.data<const float>();
+    int64_t n = tensor_f32.numel();
 
     if (!has_data_) {
         // Initialize with first observation
@@ -235,8 +251,16 @@ HistogramObserver::HistogramObserver(int64_t num_bins,
 }
 
 auto HistogramObserver::update_histogram(const Tensor& tensor) -> void {
-    const float* data = tensor.data<const float>();
-    int64_t n = tensor.numel();
+    // Convert to Float32 for data access if necessary
+    Tensor tensor_f32 = tensor;
+    if (tensor.dtype() != DType::Float32) {
+        tensor_f32 = tensor.to(DType::Float32);
+    }
+    if (tensor_f32.device() != Device::cpu()) {
+        tensor_f32 = tensor_f32.to(Device::cpu());
+    }
+    const float* data = tensor_f32.data<const float>();
+    int64_t n = tensor_f32.numel();
 
     if (total_count_ == 0) {
         // First update - find initial range
@@ -353,7 +377,16 @@ PerChannelHistogramObserver::PerChannelHistogramObserver(int64_t axis,
       percentile_high_(percentile_high) {}
 
 auto PerChannelHistogramObserver::observe(const Tensor& tensor) -> void {
-    auto shape = tensor.shape();
+    // Convert to Float32 for data access if necessary
+    Tensor tensor_f32 = tensor;
+    if (tensor.dtype() != DType::Float32) {
+        tensor_f32 = tensor.to(DType::Float32);
+    }
+    if (tensor_f32.device() != Device::cpu()) {
+        tensor_f32 = tensor_f32.to(Device::cpu());
+    }
+
+    auto shape = tensor_f32.shape();
     int64_t num_channels = shape[axis_];
 
     // Initialize observers if needed
@@ -366,8 +399,8 @@ auto PerChannelHistogramObserver::observe(const Tensor& tensor) -> void {
     }
 
     // Extract and observe each channel
-    int64_t channel_size = tensor.numel() / num_channels;
-    const float* data = tensor.data<const float>();
+    int64_t channel_size = tensor_f32.numel() / num_channels;
+    const float* data = tensor_f32.data<const float>();
 
     for (int64_t c = 0; c < num_channels; ++c) {
         // Create temporary tensor for this channel

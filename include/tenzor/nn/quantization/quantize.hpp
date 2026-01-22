@@ -65,16 +65,17 @@ struct QuantizationParams {
  */
 class QuantizedTensor {
 public:
-    QuantizedTensor(Tensor data, QuantizationParams params)
-        : data_(std::move(data)), params_(std::move(params)) {}
+    QuantizedTensor(Tensor data, QuantizationParams params, DType original_dtype = DType::Float32)
+        : data_(std::move(data)), params_(std::move(params)), original_dtype_(original_dtype) {}
 
     auto data() const -> const Tensor& { return data_; }
     auto params() const -> const QuantizationParams& { return params_; }
+    auto original_dtype() const -> DType { return original_dtype_; }
 
     /**
      * @brief Dequantize tensor back to floating point.
      *
-     * @return Dequantized floating-point tensor
+     * @return Dequantized floating-point tensor (in original dtype)
      */
     auto dequantize() const -> Tensor;
 
@@ -91,6 +92,7 @@ public:
 private:
     Tensor data_;                    ///< Quantized integer data
     QuantizationParams params_;      ///< Quantization parameters
+    DType original_dtype_;           ///< Original floating-point dtype before quantization
 };
 
 /**

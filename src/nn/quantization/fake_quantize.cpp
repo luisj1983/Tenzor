@@ -75,7 +75,12 @@ auto FakeQuantize::forward_impl(const Variable& input) -> Variable {
 auto FakeQuantize::apply_fake_quantization(const Tensor& input) const -> Tensor {
     // Quantize then immediately dequantize
     QuantizedTensor q_tensor = quantize_tensor(input, *qparams_);
-    return dequantize_tensor(q_tensor);
+    Tensor output = dequantize_tensor(q_tensor);
+    // Preserve original dtype
+    if (output.dtype() != input.dtype()) {
+        output = output.to(input.dtype());
+    }
+    return output;
 }
 
 auto FakeQuantize::set_qparams(const QuantizationParams& params) -> void {
@@ -140,7 +145,12 @@ auto fake_quantize_activation(
     );
 
     QuantizedTensor q_tensor = quantize_tensor(input, params);
-    return dequantize_tensor(q_tensor);
+    Tensor output = dequantize_tensor(q_tensor);
+    // Preserve original dtype
+    if (output.dtype() != input.dtype()) {
+        output = output.to(input.dtype());
+    }
+    return output;
 }
 
 auto fake_quantize_weight(
@@ -156,7 +166,12 @@ auto fake_quantize_weight(
     );
 
     QuantizedTensor q_tensor = quantize_tensor(weight, params);
-    return dequantize_tensor(q_tensor);
+    Tensor output = dequantize_tensor(q_tensor);
+    // Preserve original dtype
+    if (output.dtype() != weight.dtype()) {
+        output = output.to(weight.dtype());
+    }
+    return output;
 }
 
 // ============================================================================

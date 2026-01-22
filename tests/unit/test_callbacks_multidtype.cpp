@@ -702,9 +702,13 @@ TEST_P(CallbackMultiDTypeTest, LRSchedulerWithDifferentOptimizers) {
 TEST_P(CallbackMultiDTypeTest, EarlyStoppingWithZeroPatience) {
     auto early_stop = std::make_shared<EarlyStoppingCallback>(0, 0.0f);
 
-    // Should trigger immediately after first epoch
+    // First epoch: loss improves from infinity to 0.5 (this is an improvement, no stop)
     early_stop->on_epoch_end(0, 1.0f, 0.5f);
-    EXPECT_TRUE(early_stop->should_stop());
+    EXPECT_FALSE(early_stop->should_stop()) << "First improvement should not trigger stop";
+
+    // Second epoch: loss stays same (no improvement with patience=0 should stop)
+    early_stop->on_epoch_end(1, 1.0f, 0.5f);
+    EXPECT_TRUE(early_stop->should_stop()) << "Zero patience should stop on first non-improvement";
 }
 
 TEST_P(CallbackMultiDTypeTest, CallbackListEmpty) {

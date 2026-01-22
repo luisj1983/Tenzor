@@ -189,17 +189,17 @@ auto process_masks(const Tensor& mask_logits,
     auto mask_w = mask_logits.shape()[3];
 
     if (num_detections == 0) {
-        // No detections, return empty masks
+        // No detections, return empty 4D masks: [0, 1, H, W]
         return Tensor(
-            std::vector<int64_t>{0, image_height, image_width},
+            std::vector<int64_t>{0, 1, image_height, image_width},
             mask_logits.dtype(),
             mask_logits.device()
         );
     }
 
-    // Create output masks tensor
+    // Create output masks tensor: [num_detections, 1, H, W]
     auto full_masks = Tensor(
-        std::vector<int64_t>{num_detections, image_height, image_width},
+        std::vector<int64_t>{num_detections, 1, image_height, image_width},
         DType::UInt8,
         mask_logits.device()
     );

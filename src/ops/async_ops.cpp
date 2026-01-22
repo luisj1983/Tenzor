@@ -23,11 +23,23 @@ namespace {
 // Simple tensor-based activation implementations
 auto tensor_relu(const Tensor& input) -> Tensor {
     auto result = input.clone();
-    float* data = static_cast<float*>(result.data_ptr());
     int64_t size = result.numel();
 
-    for (int64_t i = 0; i < size; ++i) {
-        data[i] = std::max(0.0f, data[i]);
+    if (input.dtype() == DType::Float32) {
+        float* data = static_cast<float*>(result.data_ptr());
+        for (int64_t i = 0; i < size; ++i) {
+            data[i] = std::max(0.0f, data[i]);
+        }
+    } else if (input.dtype() == DType::Float64) {
+        double* data = static_cast<double*>(result.data_ptr());
+        for (int64_t i = 0; i < size; ++i) {
+            data[i] = std::max(0.0, data[i]);
+        }
+    } else {
+        // For Float16 and other types, convert to Float32, process, convert back
+        Tensor input_f32 = input.to(DType::Float32);
+        auto result_f32 = tensor_relu(input_f32);
+        return result_f32.to(input.dtype());
     }
 
     return result;
@@ -35,11 +47,23 @@ auto tensor_relu(const Tensor& input) -> Tensor {
 
 auto tensor_sigmoid(const Tensor& input) -> Tensor {
     auto result = input.clone();
-    float* data = static_cast<float*>(result.data_ptr());
     int64_t size = result.numel();
 
-    for (int64_t i = 0; i < size; ++i) {
-        data[i] = 1.0f / (1.0f + std::exp(-data[i]));
+    if (input.dtype() == DType::Float32) {
+        float* data = static_cast<float*>(result.data_ptr());
+        for (int64_t i = 0; i < size; ++i) {
+            data[i] = 1.0f / (1.0f + std::exp(-data[i]));
+        }
+    } else if (input.dtype() == DType::Float64) {
+        double* data = static_cast<double*>(result.data_ptr());
+        for (int64_t i = 0; i < size; ++i) {
+            data[i] = 1.0 / (1.0 + std::exp(-data[i]));
+        }
+    } else {
+        // For Float16 and other types, convert to Float32, process, convert back
+        Tensor input_f32 = input.to(DType::Float32);
+        auto result_f32 = tensor_sigmoid(input_f32);
+        return result_f32.to(input.dtype());
     }
 
     return result;

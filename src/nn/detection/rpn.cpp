@@ -143,8 +143,8 @@ auto RegionProposalNetwork::assign_anchors_to_gt(
     // Start with all labels as -1 (ignore)
     std::vector<int64_t> label_data(num_anchors, -1);
 
-    // Get IoU values as CPU tensor
-    auto max_iou_cpu = max_iou_per_anchor.to(Device::cpu());
+    // Get IoU values as CPU Float32 tensor for data access
+    auto max_iou_cpu = max_iou_per_anchor.to(Device::cpu()).to(DType::Float32);
     const float* iou_data = max_iou_cpu.data<float>();
 
     // Set labels based on IoU thresholds

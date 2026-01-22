@@ -873,7 +873,8 @@ auto compute_roi_head_loss(
     auto device = class_logits.device();
 
     if (num_rois == 0 || targets.empty()) {
-        auto zero_loss = Variable(Tensor({}, DType::Float32, device).fill_(0.0), false);
+        // Return differentiable zero for gradient flow
+        auto zero_loss = Variable(Tensor({}, class_logits.dtype(), device).fill_(0.0), true);
         return std::make_tuple(zero_loss, zero_loss);
     }
 
@@ -885,7 +886,7 @@ auto compute_roi_head_loss(
     // Classification loss: multi-class cross-entropy
     nn::CrossEntropyLoss ce_loss;
     auto cls_loss = ce_loss.forward(
-        Variable(class_logits, false),
+        Variable(class_logits, true),  // requires_grad=true for gradient tracking
         roi_labels
     );
 
@@ -932,11 +933,15 @@ auto compute_roi_head_loss(
 
         auto fg_selected_deltas = ops::stack(selected_deltas, 0);  // (num_fg, 4)
 
-        // Compute Smooth L1 loss
-        auto bbox_loss_tensor = smooth_l1_loss(fg_selected_deltas, fg_target_boxes, 1.0f);
-        bbox_loss = Variable(tenzor::mean(bbox_loss_tensor), false);
+        // Compute Smooth L1 loss using nn::SmoothL1Loss for gradient tracking
+        nn::SmoothL1Loss smooth_l1(nn::Reduction::Mean, 1.0);
+        bbox_loss = smooth_l1.forward(
+            Variable(fg_selected_deltas, true),
+            Variable(fg_target_boxes, false)
+        );
     } else {
-        bbox_loss = Variable(Tensor({}, DType::Float32, device).fill_(0.0), false);
+        // Return differentiable zero for gradient flow
+        bbox_loss = Variable(Tensor({}, class_logits.dtype(), device).fill_(0.0), true);
     }
 
     return std::make_tuple(cls_loss, bbox_loss);
@@ -954,7 +959,8 @@ auto compute_mask_loss(
     auto device = mask_logits.device();
 
     if (num_rois == 0 || targets.size() < 2) {
-        return Variable(Tensor({}, DType::Float32, device).fill_(0.0), false);
+        // Return differentiable zero for gradient flow
+        return Variable(Tensor({}, mask_logits.dtype(), device).fill_(0.0), true);
     }
 
     auto mask_targets = targets[0];  // (num_rois, H, W)
@@ -962,7 +968,7 @@ auto compute_mask_loss(
 
     // Use the existing mask_loss function from mask_head
     auto loss = nn::detection::mask_loss(
-        Variable(mask_logits, false),
+        Variable(mask_logits, true),  // requires_grad=true for gradient tracking
         mask_targets,
         class_labels
     );

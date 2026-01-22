@@ -216,7 +216,7 @@ auto quantize_tensor(const Tensor& input, const QuantizationParams& params)
         }
     }
 
-    return QuantizedTensor(quantized, params);
+    return QuantizedTensor(quantized, params, input.dtype());
 }
 
 auto quantize_per_tensor_symmetric(const Tensor& input, QuantDType dtype)
@@ -409,6 +409,12 @@ auto dequantize_tensor(const QuantizedTensor& quantized) -> Tensor {
         }
     }
 
+    // Convert to original dtype if different from Float32
+    DType orig_dtype = quantized.original_dtype();
+    if (orig_dtype != DType::Float32) {
+        output = output.to(orig_dtype);
+    }
+
     return output;
 }
 
@@ -425,8 +431,12 @@ auto compute_quantization_error(const Tensor& original, const QuantizedTensor& q
     if (original.dtype() != DType::Float32) {
         orig_f32 = original.to(DType::Float32);
     }
+    Tensor deq_f32 = dequant;
+    if (dequant.dtype() != DType::Float32) {
+        deq_f32 = dequant.to(DType::Float32);
+    }
     const float* orig_data = orig_f32.data<const float>();
-    const float* deq_data = dequant.data<const float>();
+    const float* deq_data = deq_f32.data<const float>();
     int64_t n = original.numel();
 
     float mae = 0.0f;
