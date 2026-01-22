@@ -37,7 +37,8 @@ protected:
     // Helper to check for finite values in output
     bool checkFiniteValues(const Variable& var, size_t num_samples = 1000) {
         auto tensor_cpu = var.tensor().to(Device::cpu());
-        if (tensor_cpu.dtype() == DType::Float16 || tensor_cpu.dtype() == DType::BFloat16) {
+        // Convert any non-Float32 type to Float32 for data access
+        if (tensor_cpu.dtype() != DType::Float32) {
             tensor_cpu = tensor_cpu.to(DType::Float32);
         }
         auto data = tensor_cpu.data<float>();

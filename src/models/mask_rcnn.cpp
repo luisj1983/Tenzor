@@ -201,7 +201,9 @@ auto assign_anchors_to_targets(
     // Create labels: 1 = positive, 0 = negative, -1 = ignore
     auto labels = Tensor({N}, DType::Int64, device);
     auto* labels_data = labels.data<int64_t>();
-    auto* max_iou_data = max_iou.data<float>();
+    // Convert max_iou to Float32 for data access
+    auto max_iou_f32 = max_iou.to(Device::cpu()).to(DType::Float32);
+    auto* max_iou_data = max_iou_f32.data<float>();
 
     for (int64_t i = 0; i < N; ++i) {
         if (max_iou_data[i] >= pos_threshold) {
@@ -468,7 +470,7 @@ auto MaskRCNN::forward_train(const Variable& images,
     // 7. Match sampled ROIs to ground truth to get their labels and target boxes
     auto num_sampled = sampled_rois.shape()[0];
     auto sampled_labels = Tensor({num_sampled}, DType::Int64, sampled_rois.device());
-    auto sampled_target_boxes = Tensor({num_sampled, 4}, DType::Float32, sampled_rois.device());
+    auto sampled_target_boxes = Tensor({num_sampled, 4}, sampled_rois.dtype(), sampled_rois.device());
 
     // Initialize all to background
     auto* sampled_labels_data = sampled_labels.data<int64_t>();
@@ -503,8 +505,18 @@ auto MaskRCNN::forward_train(const Variable& images,
         auto max_iou = tenzor::max(iou_matrix, 1);  // (num_sampled,)
 
         auto* matched_idx_data = matched_gt_idx.data<int64_t>();
-        auto* max_iou_data = max_iou.data<float>();
+        // Convert max_iou to Float32 for data access
+        auto max_iou_f32 = max_iou.to(Device::cpu()).to(DType::Float32);
+        auto* max_iou_data = max_iou_f32.data<float>();
         auto* gt_labels_data = gt_labels_flat.data<int64_t>();
+
+        // Convert GT boxes to Float32 for data access
+        auto gt_boxes_0_f32 = gt_boxes_0.to(Device::cpu()).to(DType::Float32);
+        auto* gt_boxes_data = gt_boxes_0_f32.data<float>();
+
+        // Convert target boxes to Float32 on CPU for writing
+        auto target_boxes_f32 = sampled_target_boxes.to(Device::cpu()).to(DType::Float32);
+        auto* target_boxes_data = target_boxes_f32.data<float>();
 
         // Assign labels and target boxes based on IoU threshold
         for (int64_t i = 0; i < num_sampled; ++i) {
@@ -513,17 +525,14 @@ auto MaskRCNN::forward_train(const Variable& images,
                 sampled_labels_data[i] = gt_labels_data[gt_idx];
 
                 // Copy target box coordinates
-                auto gt_box_row = tenzor::select(gt_boxes_0, 0, gt_idx);
-                auto target_box_row = tenzor::select(sampled_target_boxes, 0, i);
-
-                // Copy box coordinates
-                auto* gt_box_data = static_cast<const float*>(gt_box_row.data_ptr());
-                auto* target_box_data = static_cast<float*>(target_box_row.data_ptr());
                 for (int j = 0; j < 4; ++j) {
-                    target_box_data[j] = gt_box_data[j];
+                    target_boxes_data[i * 4 + j] = gt_boxes_data[gt_idx * 4 + j];
                 }
             }
         }
+
+        // Convert target boxes back to original dtype and device
+        sampled_target_boxes = target_boxes_f32.to(sampled_rois.dtype()).to(sampled_rois.device());
     }
 
     // Compute ROI head losses
@@ -599,7 +608,9 @@ auto MaskRCNN::forward_train(const Variable& images,
     }
 
     // 10. Compute mask loss
-    std::vector<Tensor> mask_targets = {sampled_masks, sampled_labels};
+    // Convert sampled_masks to match mask_logits dtype
+    auto sampled_masks_converted = sampled_masks.to(mask_logits.tensor().dtype());
+    std::vector<Tensor> mask_targets = {sampled_masks_converted, sampled_labels};
     auto mask_loss_val = compute_mask_loss(
         mask_logits.tensor(),
         mask_targets
@@ -682,9 +693,9 @@ auto compute_rpn_loss(
     auto num_anchors = objectness_logits.shape()[1];
     auto device = objectness_logits.device();
 
-    // Collect losses for all images in batch
-    std::vector<Tensor> cls_losses;
-    std::vector<Tensor> bbox_losses;
+    // Collect losses for all images in batch (keep as Variables for gradient tracking)
+    std::vector<Variable> cls_losses;
+    std::vector<Variable> bbox_losses;
 
     for (int64_t b = 0; b < batch_size; ++b) {
         // Get ground truth for this image
@@ -774,13 +785,14 @@ auto compute_rpn_loss(
 
         nn::CrossEntropyLoss ce_loss;
         auto cls_loss_var = ce_loss.forward(
-            Variable(sampled_logits, false),
+            Variable(sampled_logits, true),  // requires_grad=true for gradient tracking
             sampled_labels_full
         );
-        cls_losses.push_back(cls_loss_var.tensor());
+        cls_losses.push_back(cls_loss_var);
         std::cerr << "[compute_rpn_loss] CrossEntropyLoss completed" << std::endl;
 
         // Regression loss: only for positive anchors
+        std::cerr << "[compute_rpn_loss] pos_count=" << pos_count << std::endl;
         if (pos_count > 0) {
             // Get positive anchor indices
             std::vector<int64_t> pos_indices;
@@ -806,29 +818,42 @@ auto compute_rpn_loss(
             // Encode GT boxes as regression targets
             auto bbox_targets = encode_boxes(pos_matched_boxes, pos_anchors);
 
-            // Compute Smooth L1 loss
-            auto bbox_loss_tensor = smooth_l1_loss(pos_bbox_pred, bbox_targets, 1.0f);
-            bbox_loss_tensor = tenzor::mean(bbox_loss_tensor);
-            bbox_losses.push_back(bbox_loss_tensor);
+            // Compute Smooth L1 loss using nn::SmoothL1Loss for gradient tracking
+            nn::SmoothL1Loss smooth_l1(nn::Reduction::Mean, 1.0);
+            auto bbox_loss_var = smooth_l1.forward(
+                Variable(pos_bbox_pred, true),
+                Variable(bbox_targets, false)
+            );
+            bbox_losses.push_back(bbox_loss_var);
         }
     }
 
-    // Average losses across batch
+    // Average losses across batch - sum Variables and divide by count for gradient tracking
+    std::cerr << "[compute_rpn_loss] cls_losses.size()=" << cls_losses.size()
+              << " bbox_losses.size()=" << bbox_losses.size() << std::endl;
     Variable cls_loss_final;
     Variable bbox_loss_final;
 
     if (!cls_losses.empty()) {
-        auto cls_loss_stacked = ops::stack(cls_losses, 0);
-        cls_loss_final = Variable(tenzor::mean(cls_loss_stacked), false);
+        cls_loss_final = cls_losses[0];
+        for (size_t i = 1; i < cls_losses.size(); ++i) {
+            cls_loss_final = cls_loss_final + cls_losses[i];
+        }
+        cls_loss_final = cls_loss_final / static_cast<float>(cls_losses.size());
     } else {
-        cls_loss_final = Variable(Tensor({}, DType::Float32, device).fill_(0.0), false);
+        // Even with no samples, return differentiable zero for gradient flow
+        cls_loss_final = Variable(Tensor({}, objectness_logits.dtype(), device).fill_(0.0), true);
     }
 
     if (!bbox_losses.empty()) {
-        auto bbox_loss_stacked = ops::stack(bbox_losses, 0);
-        bbox_loss_final = Variable(tenzor::mean(bbox_loss_stacked), false);
+        bbox_loss_final = bbox_losses[0];
+        for (size_t i = 1; i < bbox_losses.size(); ++i) {
+            bbox_loss_final = bbox_loss_final + bbox_losses[i];
+        }
+        bbox_loss_final = bbox_loss_final / static_cast<float>(bbox_losses.size());
     } else {
-        bbox_loss_final = Variable(Tensor({}, DType::Float32, device).fill_(0.0), false);
+        // Even with no positive samples, return differentiable zero for gradient flow
+        bbox_loss_final = Variable(Tensor({}, objectness_logits.dtype(), device).fill_(0.0), true);
     }
 
     return std::make_tuple(cls_loss_final, bbox_loss_final);
@@ -855,7 +880,7 @@ auto compute_roi_head_loss(
     // For simplicity, assume targets[0] is labels, targets[1] is target boxes
     // In a full implementation, this would come from ROI sampling
     auto roi_labels = targets[0];  // (num_rois,)
-    auto roi_target_boxes = targets.size() > 1 ? targets[1] : Tensor({num_rois, 4}, DType::Float32, device);
+    auto roi_target_boxes = targets.size() > 1 ? targets[1] : Tensor({num_rois, 4}, box_regression.dtype(), device);
 
     // Classification loss: multi-class cross-entropy
     nn::CrossEntropyLoss ce_loss;
@@ -991,7 +1016,7 @@ auto MaskRCNN::generate_proposals(const Variable& features) -> Tensor {
 
     auto proposals = Tensor(
         std::vector<int64_t>{num_proposals, 5},
-        DType::Float32,
+        features.tensor().dtype(),  // Use input dtype for multi-dtype support
         features.tensor().device()
     );
 
