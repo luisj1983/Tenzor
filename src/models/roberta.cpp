@@ -225,26 +225,23 @@ auto RobertaForQuestionAnswering::forward(const Variable& input_ids,
     auto dtype = logits.tensor().dtype();
 
     // Start logits: multiply by [1, 0]
-    Tensor start_selector(std::vector<int64_t>{2, 1}, dtype, logits.tensor().device());
+    // Create selector in Float32 then convert to target dtype for Float16 compatibility
+    Tensor start_selector(std::vector<int64_t>{2, 1}, DType::Float32, Device::cpu());
     start_selector.zero_();
-    if (dtype == DType::Float32) {
-        start_selector.data<float>()[0] = 1.0f;
-    } else if (dtype == DType::Float64) {
-        start_selector.data<double>()[0] = 1.0;
-    } else if (dtype == DType::Float16) {
-        start_selector.data<uint16_t>()[0] = 0x3C00;  // Float16 representation of 1.0
+    start_selector.data<float>()[0] = 1.0f;
+    if (dtype != DType::Float32) {
+        start_selector = start_selector.to(dtype);
     }
+    start_selector = start_selector.to(logits.tensor().device());
 
     // End logits: multiply by [0, 1]
-    Tensor end_selector(std::vector<int64_t>{2, 1}, dtype, logits.tensor().device());
+    Tensor end_selector(std::vector<int64_t>{2, 1}, DType::Float32, Device::cpu());
     end_selector.zero_();
-    if (dtype == DType::Float32) {
-        end_selector.data<float>()[1] = 1.0f;
-    } else if (dtype == DType::Float64) {
-        end_selector.data<double>()[1] = 1.0;
-    } else if (dtype == DType::Float16) {
-        end_selector.data<uint16_t>()[1] = 0x3C00;  // Float16 representation of 1.0
+    end_selector.data<float>()[1] = 1.0f;
+    if (dtype != DType::Float32) {
+        end_selector = end_selector.to(dtype);
     }
+    end_selector = end_selector.to(logits.tensor().device());
 
     // Use matmul to select: [batch*seq_len, 2] @ [2, 1] = [batch*seq_len, 1]
     Variable start_selector_var(start_selector, false);

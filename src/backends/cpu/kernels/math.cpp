@@ -2819,23 +2819,32 @@ auto exp_kernel(const Tensor& input) -> Tensor {
         Float16* out_data = result.data<Float16>();
 
         // Use F16C + fast SIMD exp with OpenMP for large arrays
+        // Clamp input to prevent Float16 overflow: exp(11) ≈ 60000 < 65504 (Float16 max)
+        constexpr float fp16_exp_max = 11.0f;
+        constexpr float fp16_exp_min = -88.0f;  // exp(-88) ≈ 0, underflow to 0 is acceptable
         if (n < OMP_THRESHOLD_MEDIUM) {
 #ifdef __F16C__
             size_t i = 0;
+            __m256 clamp_max = _mm256_set1_ps(fp16_exp_max);
+            __m256 clamp_min = _mm256_set1_ps(fp16_exp_min);
             for (; i + 8 <= n; i += 8) {
                 __m128i packed = _mm_loadu_si128(reinterpret_cast<const __m128i*>(in_data + i));
                 __m256 fp32 = _mm256_cvtph_ps(packed);
+                // Clamp to safe range for Float16
+                fp32 = _mm256_min_ps(_mm256_max_ps(fp32, clamp_min), clamp_max);
                 __m256 result_v = fast_math::exp_avx2(fp32);
                 __m128i out_packed = _mm256_cvtps_ph(result_v, _MM_FROUND_TO_NEAREST_INT);
                 _mm_storeu_si128(reinterpret_cast<__m128i*>(out_data + i), out_packed);
             }
             for (; i < n; ++i) {
                 float val = static_cast<float>(in_data[i]);
+                val = std::max(fp16_exp_min, std::min(val, fp16_exp_max));
                 out_data[i] = Float16(std::exp(val));
             }
 #else
             for (size_t i = 0; i < n; ++i) {
                 float val = static_cast<float>(in_data[i]);
+                val = std::max(fp16_exp_min, std::min(val, fp16_exp_max));
                 out_data[i] = Float16(std::exp(val));
             }
 #endif
@@ -2850,21 +2859,27 @@ auto exp_kernel(const Tensor& input) -> Tensor {
                 size_t end = std::min(start + chunk_size, n);
 
 #ifdef __F16C__
+                __m256 clamp_max = _mm256_set1_ps(fp16_exp_max);
+                __m256 clamp_min = _mm256_set1_ps(fp16_exp_min);
                 size_t i = start;
                 for (; i + 8 <= end; i += 8) {
                     __m128i packed = _mm_loadu_si128(reinterpret_cast<const __m128i*>(in_data + i));
                     __m256 fp32 = _mm256_cvtph_ps(packed);
+                    // Clamp to safe range for Float16
+                    fp32 = _mm256_min_ps(_mm256_max_ps(fp32, clamp_min), clamp_max);
                     __m256 result_v = fast_math::exp_avx2(fp32);
                     __m128i out_packed = _mm256_cvtps_ph(result_v, _MM_FROUND_TO_NEAREST_INT);
                     _mm_storeu_si128(reinterpret_cast<__m128i*>(out_data + i), out_packed);
                 }
                 for (; i < end; ++i) {
                     float val = static_cast<float>(in_data[i]);
+                    val = std::max(fp16_exp_min, std::min(val, fp16_exp_max));
                     out_data[i] = Float16(std::exp(val));
                 }
 #else
                 for (size_t i = start; i < end; ++i) {
                     float val = static_cast<float>(in_data[i]);
+                    val = std::max(fp16_exp_min, std::min(val, fp16_exp_max));
                     out_data[i] = Float16(std::exp(val));
                 }
 #endif

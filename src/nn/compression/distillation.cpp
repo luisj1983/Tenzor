@@ -7,6 +7,7 @@
 #include "tenzor/nn/activations/activations.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
+#include "tenzor/autograd/ops.hpp"
 #include <cmath>
 #include <stdexcept>
 
@@ -85,23 +86,26 @@ auto distillation_loss(
     float T = config.temperature;
     float alpha = config.alpha;
 
-    // Cast logits to Float32 only if needed for consistent dtype across all operations
-    Variable student_logits_fp32 = (student_logits.tensor().dtype() == DType::Float32)
-        ? student_logits
-        : Variable(student_logits.tensor().to(DType::Float32), student_logits.requires_grad());
+    // Only cast Float16 to Float32 for numerical stability
+    // Preserve Float32 and Float64 as-is
+    auto student_dtype = student_logits.tensor().dtype();
+    Variable student_logits_cast = (student_dtype == DType::Float16)
+        ? Variable(student_logits.tensor().to(DType::Float32), student_logits.requires_grad())
+        : student_logits;
 
-    Variable teacher_logits_fp32 = (teacher_logits.tensor().dtype() == DType::Float32)
-        ? Variable(teacher_logits.tensor(), false)  // Ensure teacher never needs gradients
-        : Variable(teacher_logits.tensor().to(DType::Float32), false);
+    auto teacher_dtype = teacher_logits.tensor().dtype();
+    Variable teacher_logits_cast = (teacher_dtype == DType::Float16)
+        ? Variable(teacher_logits.tensor().to(DType::Float32), false)
+        : Variable(teacher_logits.tensor(), false);  // Ensure teacher never needs gradients
 
     // Compute soft target loss (KL divergence)
     Variable soft_loss;
     {
         // Teacher soft targets (no gradients) - already Float32
-        Variable teacher_soft = temperature_softmax(teacher_logits_fp32, T, -1);
+        Variable teacher_soft = temperature_softmax(teacher_logits_cast, T, -1);
 
         // Student log probabilities - already Float32
-        Variable student_log_soft = temperature_log_softmax(student_logits_fp32, T, -1);
+        Variable student_log_soft = temperature_log_softmax(student_logits_cast, T, -1);
 
         // KL divergence: sum(P * log(P/Q)) = sum(P * (log P - log Q))
         // Here we use: -sum(P * log Q) since we ignore teacher's entropy
@@ -122,7 +126,7 @@ auto distillation_loss(
             // Convert class indices to one-hot encoding
             auto target_shape = targets.value().shape();
             int64_t batch_size = target_shape[0];
-            auto logits_shape = student_logits_fp32.tensor().shape();
+            auto logits_shape = student_logits_cast.tensor().shape();
             int64_t num_classes = logits_shape[1];
 
             // Create one-hot tensor
@@ -143,7 +147,7 @@ auto distillation_loss(
         }
 
         auto ce_loss = CrossEntropyLoss(Reduction::Mean);
-        Variable hard_loss = ce_loss(student_logits_fp32, targets_onehot);
+        Variable hard_loss = ce_loss(student_logits_cast, targets_onehot);
 
         // Combine losses: alpha * soft + (1 - alpha) * hard
         return soft_loss * alpha + hard_loss * (1.0f - alpha);
@@ -399,57 +403,81 @@ auto kl_divergence(
     // Here: P = targets, Q = predictions
     // Since we have log Q, we compute: sum(P * (log P - log Q))
 
-    // Ensure both tensors are Float32 only if needed for consistent computation
-    Variable log_predictions_fp32 = (log_predictions.tensor().dtype() == DType::Float32)
-        ? log_predictions
-        : Variable(log_predictions.tensor().to(DType::Float32), log_predictions.requires_grad());
+    // Only cast Float16 to Float32 for numerical stability
+    // Preserve Float32 and Float64 as-is
+    auto pred_dtype = log_predictions.tensor().dtype();
+    Variable log_predictions_cast = (pred_dtype == DType::Float16)
+        ? Variable(log_predictions.tensor().to(DType::Float32), log_predictions.requires_grad())
+        : log_predictions;
 
-    Variable targets_fp32 = (targets.tensor().dtype() == DType::Float32)
-        ? Variable(targets.tensor(), false)  // Targets don't need gradients
-        : Variable(targets.tensor().to(DType::Float32), false);
+    auto target_dtype = targets.tensor().dtype();
+    Variable targets_cast = (target_dtype == DType::Float16)
+        ? Variable(targets.tensor().to(DType::Float32), false)
+        : Variable(targets.tensor(), false);  // Targets don't need gradients
 
     // KL(P||Q) = sum(P * (log P - log Q))
     // Handle edge case: when P = 0, use convention that 0 * log(0) = 0
     // We compute this element-wise to avoid nan from log(0)
 
-    const float* p_data = targets_fp32.tensor().data<const float>();
-    const float* log_q_data = log_predictions_fp32.tensor().data<const float>();
-    int64_t numel = targets_fp32.tensor().numel();
+    int64_t numel = targets_cast.tensor().numel();
+    auto result_shape = std::vector<int64_t>(targets_cast.tensor().shape().begin(),
+                                             targets_cast.tensor().shape().end());
+    DType compute_dtype = log_predictions_cast.tensor().dtype();
+    Tensor kl_tensor(result_shape, compute_dtype, targets_cast.tensor().device());
 
-    auto result_shape = std::vector<int64_t>(targets_fp32.tensor().shape().begin(),
-                                             targets_fp32.tensor().shape().end());
-    Tensor kl_tensor(result_shape, DType::Float32, targets_fp32.tensor().device());
-    float* kl_data = kl_tensor.data<float>();
+    if (compute_dtype == DType::Float64) {
+        const double* p_data = targets_cast.tensor().data<double>();
+        const double* log_q_data = log_predictions_cast.tensor().data<double>();
+        double* kl_data = kl_tensor.data<double>();
 
-    constexpr float EPSILON = 1e-10f;
-    for (int64_t i = 0; i < numel; ++i) {
-        float p = p_data[i];
-        float log_q = log_q_data[i];
+        constexpr double EPSILON = 1e-10;
+        for (int64_t i = 0; i < numel; ++i) {
+            double p = p_data[i];
+            double log_q = log_q_data[i];
 
-        if (p > EPSILON) {
-            // P * (log P - log Q)
-            float log_p = std::log(p);
-            kl_data[i] = p * (log_p - log_q);
-        } else {
-            // When P ≈ 0, use convention that 0 * log(0) = 0
-            kl_data[i] = 0.0f;
+            if (p > EPSILON) {
+                double log_p = std::log(p);
+                kl_data[i] = p * (log_p - log_q);
+            } else {
+                kl_data[i] = 0.0;
+            }
+        }
+    } else {
+        // Float32 (including converted Float16)
+        const float* p_data = targets_cast.tensor().data<float>();
+        const float* log_q_data = log_predictions_cast.tensor().data<float>();
+        float* kl_data = kl_tensor.data<float>();
+
+        constexpr float EPSILON = 1e-10f;
+        for (int64_t i = 0; i < numel; ++i) {
+            float p = p_data[i];
+            float log_q = log_q_data[i];
+
+            if (p > EPSILON) {
+                float log_p = std::log(p);
+                kl_data[i] = p * (log_p - log_q);
+            } else {
+                kl_data[i] = 0.0f;
+            }
         }
     }
 
-    Variable kl(kl_tensor, log_predictions_fp32.requires_grad());
+    Variable kl(kl_tensor, log_predictions_cast.requires_grad());
 
     // Apply reduction
     if (reduction == "none") {
         return kl;
     } else if (reduction == "sum") {
         // Sum all elements
-        return Variable(kl.tensor(), log_predictions_fp32.requires_grad());
+        return sum(kl);
     } else if (reduction == "mean") {
         // Mean over all elements
-        return Variable(kl.tensor(), log_predictions_fp32.requires_grad());
+        return mean(kl);
     } else if (reduction == "batchmean") {
         // Sum over elements, divide by batch size
-        return Variable(kl.tensor(), log_predictions_fp32.requires_grad());
+        auto total = sum(kl);
+        int64_t batch_size = targets_cast.tensor().shape()[0];
+        return total / static_cast<float>(batch_size);
     } else {
         throw std::runtime_error("Unknown reduction type: " + reduction);
     }

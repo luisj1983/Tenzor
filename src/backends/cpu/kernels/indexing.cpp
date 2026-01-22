@@ -50,13 +50,16 @@ auto index_select_kernel(const Tensor& input, int64_t dim, const Tensor& index) 
 
     // Get number of indices
     const int64_t num_indices = index.numel();
-    if (num_indices == 0) {
-        throw std::invalid_argument("index_select: index tensor cannot be empty");
-    }
 
     // Compute output shape
     std::vector<int64_t> output_shape(input.shape().begin(), input.shape().end());
     output_shape[dim] = num_indices;
+
+    // Handle empty index tensor - return empty tensor with correct shape
+    // This matches PyTorch behavior where index_select with empty indices returns empty tensor
+    if (num_indices == 0) {
+        return Tensor(output_shape, input.dtype(), input.device());
+    }
 
     // Create output tensor
     Tensor output(output_shape, input.dtype(), input.device());

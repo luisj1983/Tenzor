@@ -108,7 +108,7 @@ auto CrossEntropyLoss::forward(const Variable& input, const Tensor& target) -> V
     Variable one_hot_var;
 
     // Check if target is a floating point type (one-hot encoded)
-    bool is_float_target = (target.dtype() == DType::Float32 || target.dtype() == DType::Float64) && target.ndim() == 2;
+    bool is_float_target = (target.dtype() == DType::Float32 || target.dtype() == DType::Float64 || target.dtype() == DType::Float16) && target.ndim() == 2;
 
     if (is_float_target) {
         // Target is already one-hot encoded (Float32 or Float64 with shape [N, C])

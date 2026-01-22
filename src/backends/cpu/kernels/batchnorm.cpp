@@ -218,6 +218,58 @@ void batchnorm_mean_var_impl(const T* input,
     }
 }
 
+// Specialized Float16 version that accumulates in Float32 to prevent overflow
+// Float16 has limited range (~65504 max), so summing many values can overflow
+template<>
+void batchnorm_mean_var_impl<Float16>(const Float16* input,
+                                       Float16* mean,
+                                       Float16* variance,
+                                       int64_t N,
+                                       int64_t C,
+                                       int64_t H,
+                                       int64_t W) {
+    int64_t spatial_size = H * W;
+    int64_t total_elements = N * spatial_size;
+
+    if (total_elements == 0) {
+        throw std::runtime_error("BatchNorm2d: Cannot compute mean/variance for empty tensor (total_elements = 0)");
+    }
+
+#ifdef _OPENMP
+    int nthreads = omp_get_max_threads();
+    int effective_threads = std::min({nthreads, static_cast<int>(C), 4});
+    int final_threads = std::max(1, effective_threads);
+#else
+    int final_threads = 1;
+#endif
+
+    // Accumulate in Float32 to prevent overflow
+    #pragma omp parallel for num_threads(final_threads) if(C > 1)
+    for (int64_t c = 0; c < C; c++) {
+        // Compute mean with Float32 accumulation
+        float sum = 0.0f;
+        for (int64_t n = 0; n < N; n++) {
+            const Float16* ch_ptr = input + (n * C + c) * spatial_size;
+            for (int64_t hw = 0; hw < spatial_size; hw++) {
+                sum += static_cast<float>(ch_ptr[hw]);
+            }
+        }
+        float channel_mean = sum / static_cast<float>(total_elements);
+        mean[c] = Float16(channel_mean);
+
+        // Compute variance with Float32 accumulation
+        float sum_sq_diff = 0.0f;
+        for (int64_t n = 0; n < N; n++) {
+            const Float16* ch_ptr = input + (n * C + c) * spatial_size;
+            for (int64_t hw = 0; hw < spatial_size; hw++) {
+                float diff = static_cast<float>(ch_ptr[hw]) - channel_mean;
+                sum_sq_diff += diff * diff;
+            }
+        }
+        variance[c] = Float16(sum_sq_diff / static_cast<float>(total_elements));
+    }
+}
+
 auto batchnorm2d_mean_var_kernel(const Tensor& input) -> std::vector<Tensor> {
     auto shape = input.shape();
     if (shape.size() != 4) {
