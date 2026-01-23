@@ -198,10 +198,10 @@ auto assign_anchors_to_targets(
     auto max_iou = tenzor::max(iou_matrix, 1);  // (N,)
     auto matched_idx = tenzor::argmax(iou_matrix, 1);  // (N,)
 
-    // Create labels: 1 = positive, 0 = negative, -1 = ignore
-    auto labels = Tensor({N}, DType::Int64, device);
-    auto* labels_data = labels.data<int64_t>();
-    // Convert max_iou to Float32 for data access
+    // Create labels on CPU for data access, then move to device
+    auto labels_cpu = Tensor({N}, DType::Int64, Device::cpu());
+    auto* labels_data = labels_cpu.data<int64_t>();
+    // Convert max_iou to Float32 on CPU for data access
     auto max_iou_f32 = max_iou.to(Device::cpu()).to(DType::Float32);
     auto* max_iou_data = max_iou_f32.data<float>();
 
@@ -214,6 +214,9 @@ auto assign_anchors_to_targets(
             labels_data[i] = -1;  // Ignore (between thresholds)
         }
     }
+
+    // Move labels to target device
+    auto labels = labels_cpu.to(device);
 
     // Gather matched GT boxes
     auto matched_boxes = tenzor::index_select(gt_boxes, 0, matched_idx);
@@ -432,10 +435,10 @@ auto MaskRCNN::forward_train(const Variable& images,
     // 2. Generate proposals with RPN
     auto [rpn_cls_logits, rpn_bbox_deltas] = rpn_->forward_multi(features);
 
-    // Generate anchor boxes
+    // Generate anchor boxes on the same device as features
     auto H = features.tensor().shape()[2];
     auto W = features.tensor().shape()[3];
-    auto anchors = anchor_generator_->generate(H, W, 16);  // stride=16
+    auto anchors = anchor_generator_->generate(H, W, 16, features.tensor().device());  // stride=16
 
     // Compute RPN losses
     // Prepare ground truth boxes for each image in batch
@@ -469,11 +472,14 @@ auto MaskRCNN::forward_train(const Variable& images,
 
     // 7. Match sampled ROIs to ground truth to get their labels and target boxes
     auto num_sampled = sampled_rois.shape()[0];
-    auto sampled_labels = Tensor({num_sampled}, DType::Int64, sampled_rois.device());
-    auto sampled_target_boxes = Tensor({num_sampled, 4}, sampled_rois.dtype(), sampled_rois.device());
+    auto original_device = sampled_rois.device();
+
+    // Create labels and boxes on CPU for data manipulation
+    auto sampled_labels_cpu = Tensor({num_sampled}, DType::Int64, Device::cpu());
+    auto sampled_target_boxes_cpu = Tensor({num_sampled, 4}, DType::Float32, Device::cpu());
 
     // Initialize all to background
-    auto* sampled_labels_data = sampled_labels.data<int64_t>();
+    auto* sampled_labels_data = sampled_labels_cpu.data<int64_t>();
     for (int64_t i = 0; i < num_sampled; ++i) {
         sampled_labels_data[i] = 0;
     }
@@ -504,19 +510,20 @@ auto MaskRCNN::forward_train(const Variable& images,
         auto matched_gt_idx = tenzor::argmax(iou_matrix, 1);  // (num_sampled,)
         auto max_iou = tenzor::max(iou_matrix, 1);  // (num_sampled,)
 
-        auto* matched_idx_data = matched_gt_idx.data<int64_t>();
-        // Convert max_iou to Float32 for data access
+        // Move all tensors to CPU for data access
+        auto matched_idx_cpu = matched_gt_idx.to(Device::cpu());
+        auto* matched_idx_data = matched_idx_cpu.data<int64_t>();
         auto max_iou_f32 = max_iou.to(Device::cpu()).to(DType::Float32);
         auto* max_iou_data = max_iou_f32.data<float>();
-        auto* gt_labels_data = gt_labels_flat.data<int64_t>();
+        auto gt_labels_cpu = gt_labels_flat.to(Device::cpu());
+        auto* gt_labels_data = gt_labels_cpu.data<int64_t>();
 
-        // Convert GT boxes to Float32 for data access
+        // Convert GT boxes to Float32 on CPU for data access
         auto gt_boxes_0_f32 = gt_boxes_0.to(Device::cpu()).to(DType::Float32);
         auto* gt_boxes_data = gt_boxes_0_f32.data<float>();
 
-        // Convert target boxes to Float32 on CPU for writing
-        auto target_boxes_f32 = sampled_target_boxes.to(Device::cpu()).to(DType::Float32);
-        auto* target_boxes_data = target_boxes_f32.data<float>();
+        // Use the CPU target boxes buffer
+        auto* target_boxes_data = sampled_target_boxes_cpu.data<float>();
 
         // Assign labels and target boxes based on IoU threshold
         for (int64_t i = 0; i < num_sampled; ++i) {
@@ -530,10 +537,11 @@ auto MaskRCNN::forward_train(const Variable& images,
                 }
             }
         }
-
-        // Convert target boxes back to original dtype and device
-        sampled_target_boxes = target_boxes_f32.to(sampled_rois.dtype()).to(sampled_rois.device());
     }
+
+    // Move CPU tensors to target device
+    auto sampled_labels = sampled_labels_cpu.to(original_device);
+    auto sampled_target_boxes = sampled_target_boxes_cpu.to(sampled_rois.dtype()).to(original_device);
 
     // Compute ROI head losses
     std::vector<Tensor> roi_targets = {sampled_labels, sampled_target_boxes};
@@ -555,17 +563,10 @@ auto MaskRCNN::forward_train(const Variable& images,
     auto mask_output_H = mask_logits.tensor().shape()[2];
     auto mask_output_W = mask_logits.tensor().shape()[3];
 
-    // Create masks at the correct resolution to match mask head output
-    auto sampled_masks = Tensor({num_sampled, mask_output_H, mask_output_W},
-                                DType::Float32, sampled_rois.device());
-
-    // Resample GT masks to match ROIs
-    // For proper training, we should:
-    // 1. For each ROI, find its matched GT object
-    // 2. Extract the mask region corresponding to the ROI box
-    // 3. Resize to mask_output_H x mask_output_W (28x28)
-    auto* sampled_masks_data = static_cast<float*>(sampled_masks.data_ptr());
-    std::fill(sampled_masks_data, sampled_masks_data + sampled_masks.numel(), 0.0f);
+    // Create masks on CPU for data manipulation
+    auto sampled_masks_cpu = Tensor({num_sampled, mask_output_H, mask_output_W},
+                                    DType::Float32, Device::cpu());
+    sampled_masks_cpu.fill_(0.0f);
 
     // Simplified mask sampling: for foreground ROIs, extract corresponding GT masks
     if (num_gt > 0) {
@@ -573,39 +574,39 @@ auto MaskRCNN::forward_train(const Variable& images,
         auto gt_masks_0 = tenzor::select(gt_masks, 0, 0);  // (num_gt, H, W)
 
         for (int64_t i = 0; i < num_sampled; ++i) {
-            if (sampled_labels_data[i] > 0) {  // Foreground ROI
-                // Find best matching GT box (already computed earlier)
+            if (sampled_labels_data[i] > 0) {  // Foreground ROI (using CPU labels)
+                // Find best matching GT box
                 auto roi_box = sampled_rois.slice(0, i, i+1).slice(1, 1, 5);  // (1, 4)
 
-                // For simplicity, use argmax IoU to find matching GT mask
-                // In production, this would be more sophisticated
                 auto gt_boxes_0 = tenzor::select(gt_boxes, 0, 0);
                 auto iou = ops::box_iou(roi_box.squeeze(0).unsqueeze(0), gt_boxes_0);
-                auto best_gt_idx = tenzor::argmax(iou, 1).item<int64_t>();
+                auto best_gt_idx = tenzor::argmax(iou, 1).to(Device::cpu()).item<int64_t>();
 
                 if (best_gt_idx < num_gt) {
                     // Extract GT mask and resize to match mask head output
                     auto gt_mask = tenzor::select(gt_masks_0, 0, best_gt_idx);  // (H, W)
 
                     // Resize GT mask to (mask_output_H, mask_output_W)
-                    // For simplicity, use bilinear interpolation
                     auto resized_mask = ops::interpolate(
                         gt_mask.unsqueeze(0).unsqueeze(0),  // (1, 1, H, W)
                         std::vector<int64_t>{mask_output_H, mask_output_W},
                         "bilinear",
                         false
                     );
-                    resized_mask = resized_mask.squeeze(0).squeeze(0);  // (mask_output_H, mask_output_W)
+                    resized_mask = resized_mask.squeeze(0).squeeze(0).to(Device::cpu());
 
-                    // Copy to sampled_masks
-                    auto target_mask = tenzor::select(sampled_masks, 0, i);
-                    auto* resized_data = static_cast<const float*>(resized_mask.data_ptr());
-                    auto* target_data = static_cast<float*>(target_mask.data_ptr());
+                    // Copy to sampled_masks_cpu
+                    auto target_mask_cpu = tenzor::select(sampled_masks_cpu, 0, i);
+                    auto* resized_data = resized_mask.data<float>();
+                    auto* target_data = target_mask_cpu.data<float>();
                     std::copy(resized_data, resized_data + mask_output_H * mask_output_W, target_data);
                 }
             }
         }
     }
+
+    // Move sampled_masks to target device
+    auto sampled_masks = sampled_masks_cpu.to(original_device);
 
     // 10. Compute mask loss
     // Convert sampled_masks to match mask_logits dtype
@@ -723,9 +724,10 @@ auto compute_rpn_loss(
         auto bbox_reg_b = tenzor::select(box_regression, 0, b);  // (num_anchors, 4)
 
         // Classification loss: Binary cross-entropy for objectness
-        // Convert labels to one-hot: background=0, foreground=1
+        // Move labels to CPU for data access
         auto num_total = labels.shape()[0];
-        auto* labels_data = labels.data<int64_t>();
+        auto labels_cpu = labels.to(Device::cpu());
+        auto* labels_data = labels_cpu.data<int64_t>();
 
         // Count positive and negative samples
         int64_t num_pos = 0;
@@ -765,12 +767,13 @@ auto compute_rpn_loss(
             continue;
         }
 
-        // Create index tensor
-        auto indices_tensor = Tensor({static_cast<int64_t>(sampled_indices.size())}, DType::Int64, device);
-        auto* indices_data = indices_tensor.data<int64_t>();
+        // Create index tensor on CPU and move to device
+        auto indices_tensor_cpu = Tensor({static_cast<int64_t>(sampled_indices.size())}, DType::Int64, Device::cpu());
+        auto* indices_data = indices_tensor_cpu.data<int64_t>();
         for (size_t i = 0; i < sampled_indices.size(); ++i) {
             indices_data[i] = sampled_indices[i];
         }
+        auto indices_tensor = indices_tensor_cpu.to(device);
 
         // Select sampled objectness logits and labels
         auto sampled_logits = tenzor::index_select(obj_logits_b, 0, indices_tensor);
@@ -802,11 +805,12 @@ auto compute_rpn_loss(
                 }
             }
 
-            auto pos_indices_tensor = Tensor({static_cast<int64_t>(pos_indices.size())}, DType::Int64, device);
-            auto* pos_indices_data = pos_indices_tensor.data<int64_t>();
+            auto pos_indices_tensor_cpu = Tensor({static_cast<int64_t>(pos_indices.size())}, DType::Int64, Device::cpu());
+            auto* pos_indices_data = pos_indices_tensor_cpu.data<int64_t>();
             for (size_t i = 0; i < pos_indices.size(); ++i) {
                 pos_indices_data[i] = pos_indices[i];
             }
+            auto pos_indices_tensor = pos_indices_tensor_cpu.to(device);
 
             // Get predicted deltas for positive anchors
             auto pos_bbox_pred = tenzor::index_select(bbox_reg_b, 0, pos_indices_tensor);
@@ -891,7 +895,9 @@ auto compute_roi_head_loss(
     );
 
     // Box regression loss: only for non-background classes
-    auto* labels_data = roi_labels.data<int64_t>();
+    // Move labels to CPU for data access
+    auto roi_labels_cpu = roi_labels.to(Device::cpu());
+    auto* labels_data = roi_labels_cpu.data<int64_t>();
     std::vector<int64_t> fg_indices;
 
     for (int64_t i = 0; i < num_rois; ++i) {
@@ -902,28 +908,27 @@ auto compute_roi_head_loss(
 
     Variable bbox_loss;
     if (!fg_indices.empty()) {
-        // Create index tensor for foreground ROIs
-        auto fg_idx_tensor = Tensor({static_cast<int64_t>(fg_indices.size())}, DType::Int64, device);
-        auto* fg_idx_data = fg_idx_tensor.data<int64_t>();
+        // Create index tensor on CPU and move to device
+        auto fg_idx_tensor_cpu = Tensor({static_cast<int64_t>(fg_indices.size())}, DType::Int64, Device::cpu());
+        auto* fg_idx_data = fg_idx_tensor_cpu.data<int64_t>();
         for (size_t i = 0; i < fg_indices.size(); ++i) {
             fg_idx_data[i] = fg_indices[i];
         }
+        auto fg_idx_tensor = fg_idx_tensor_cpu.to(device);
 
         // Get foreground box predictions and targets
-        // For each foreground ROI, select the 4 coordinates for its class
         auto fg_box_regression = tenzor::index_select(box_regression, 0, fg_idx_tensor);
         auto fg_target_boxes = tenzor::index_select(roi_target_boxes, 0, fg_idx_tensor);
         auto fg_labels = tenzor::index_select(roi_labels, 0, fg_idx_tensor);
+        auto fg_labels_cpu = fg_labels.to(Device::cpu());
 
         // Extract box deltas for the predicted class
-        // box_regression shape: (num_fg, (num_classes+1)*4)
-        // We need to select the 4 values corresponding to each ROI's class
         auto num_fg = fg_box_regression.shape()[0];
         std::vector<Tensor> selected_deltas;
 
         for (int64_t i = 0; i < num_fg; ++i) {
-            auto fg_row = tenzor::select(fg_box_regression, 0, i);  // ((num_classes+1)*4,)
-            int64_t class_idx = static_cast<const int64_t*>(fg_labels.data_ptr())[i];
+            auto fg_row = tenzor::select(fg_box_regression, 0, i);
+            int64_t class_idx = fg_labels_cpu.data<int64_t>()[i];
 
             // Select 4 values for this class
             auto start_idx = class_idx * 4;
@@ -1010,8 +1015,8 @@ auto MaskRCNN::generate_proposals(const Variable& features) -> Tensor {
     auto W = features.tensor().shape()[3];
     auto batch_size = features.tensor().shape()[0];
 
-    // Generate anchor boxes
-    auto anchors = anchor_generator_->generate(H, W, 16);
+    // Generate anchor boxes on the same device as features
+    auto anchors = anchor_generator_->generate(H, W, 16, features.tensor().device());
 
     // For now, return top K anchors as proposals
     // Format: (batch_idx, x1, y1, x2, y2)

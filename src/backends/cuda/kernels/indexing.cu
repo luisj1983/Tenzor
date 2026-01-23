@@ -40,7 +40,9 @@ constexpr int BLOCK_SIZE = 256;
 
 inline int get_num_blocks(int64_t n, int block_size = BLOCK_SIZE) {
     int num_blocks = (n + block_size - 1) / block_size;
-    return std::min(num_blocks, 65535);
+    // Ensure at least 1 block to avoid CUDA invalid argument error
+    // Grid-stride loop will naturally handle n=0 by not executing any iterations
+    return std::max(1, std::min(num_blocks, 65535));
 }
 
 // ============================================================================
@@ -666,6 +668,191 @@ auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y,
 
     CUDA_CHECK(cudaGetLastError());
     return output;
+}
+
+// ============================================================================
+// embedding kernel (lookup table for token IDs)
+// ============================================================================
+
+template<typename T>
+__global__ void embedding_kernel_impl(
+    const T* weight,           // [num_embeddings, embedding_dim]
+    const int64_t* indices,    // [*] (any shape of int64 indices)
+    T* output,                 // [*, embedding_dim]
+    int64_t num_indices,
+    int64_t embedding_dim) {
+
+    int64_t total_elements = num_indices * embedding_dim;
+
+    CUDA_GRID_STRIDE_LOOP(idx, total_elements) {
+        int64_t i = idx / embedding_dim;  // which index
+        int64_t j = idx % embedding_dim;  // which embedding dimension
+
+        int64_t token_idx = indices[i];
+        output[idx] = weight[token_idx * embedding_dim + j];
+    }
+}
+
+auto embedding_kernel(const Tensor& weight, const Tensor& indices,
+                      cudaStream_t stream) -> Tensor {
+    // weight: [num_embeddings, embedding_dim]
+    // indices: [*] (any shape of int64 indices)
+    // output: [*, embedding_dim]
+
+    auto w_shape = weight.shape();
+    auto idx_shape = indices.shape();
+
+    int64_t embedding_dim = w_shape[1];
+    int64_t num_indices = indices.numel();
+
+    // Build output shape: indices shape + embedding_dim
+    std::vector<int64_t> output_shape(idx_shape.begin(), idx_shape.end());
+    output_shape.push_back(embedding_dim);
+
+    Tensor output(output_shape, weight.dtype(), weight.device());
+
+    if (num_indices == 0) return output;
+
+    int64_t total_elements = num_indices * embedding_dim;
+    int num_blocks = get_num_blocks(total_elements);
+
+    // Ensure indices are int64
+    Tensor indices_int64 = (indices.dtype() == DType::Int64) ? indices : indices.to(DType::Int64);
+
+    #define LAUNCH_EMBEDDING(T) \
+        embedding_kernel_impl<T><<<num_blocks, BLOCK_SIZE, 0, stream>>>( \
+            weight.data<T>(), indices_int64.data<int64_t>(), output.data<T>(), \
+            num_indices, embedding_dim)
+
+    switch (weight.dtype()) {
+        case DType::Float32: LAUNCH_EMBEDDING(float); break;
+        case DType::Float64: LAUNCH_EMBEDDING(double); break;
+        case DType::Float16:
+            embedding_kernel_impl<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                reinterpret_cast<const __half*>(weight.data_ptr()),
+                indices_int64.data<int64_t>(),
+                reinterpret_cast<__half*>(output.data_ptr()),
+                num_indices, embedding_dim);
+            break;
+        default:
+            throw std::runtime_error("embedding: unsupported dtype");
+    }
+
+    #undef LAUNCH_EMBEDDING
+
+    CUDA_CHECK(cudaGetLastError());
+    return output;
+}
+
+// ============================================================================
+// embedding_backward kernel (gradient accumulation)
+// ============================================================================
+
+template<typename T>
+__global__ void embedding_backward_kernel_impl(
+    const T* grad_output,      // [*, embedding_dim]
+    const int64_t* indices,    // [*]
+    T* grad_weight,            // [num_embeddings, embedding_dim]
+    int64_t num_indices,
+    int64_t embedding_dim) {
+
+    int64_t total_elements = num_indices * embedding_dim;
+
+    CUDA_GRID_STRIDE_LOOP(idx, total_elements) {
+        int64_t i = idx / embedding_dim;  // which index
+        int64_t j = idx % embedding_dim;  // which embedding dimension
+
+        int64_t token_idx = indices[i];
+        // Use atomicAdd for thread-safe accumulation
+        atomicAdd(&grad_weight[token_idx * embedding_dim + j], grad_output[idx]);
+    }
+}
+
+// Specialization for float16 using atomicAdd for __half
+template<>
+__global__ void embedding_backward_kernel_impl<__half>(
+    const __half* grad_output,
+    const int64_t* indices,
+    __half* grad_weight,
+    int64_t num_indices,
+    int64_t embedding_dim) {
+
+    int64_t total_elements = num_indices * embedding_dim;
+
+    CUDA_GRID_STRIDE_LOOP(idx, total_elements) {
+        int64_t i = idx / embedding_dim;
+        int64_t j = idx % embedding_dim;
+
+        int64_t token_idx = indices[i];
+        // Convert to float for atomic add, then convert back
+        // Note: CUDA provides atomicAdd for __half on compute capability >= 7.0
+#if __CUDA_ARCH__ >= 700
+        atomicAdd(&grad_weight[token_idx * embedding_dim + j], grad_output[idx]);
+#else
+        // Fallback for older architectures: convert to float
+        float val = __half2float(grad_output[idx]);
+        // Use compare-and-swap based atomic add for half
+        unsigned int* addr = reinterpret_cast<unsigned int*>(&grad_weight[(token_idx * embedding_dim + j) & ~1]);
+        unsigned int old_val, new_val;
+        do {
+            old_val = *addr;
+            __half* h = reinterpret_cast<__half*>(&old_val);
+            __half result = __float2half(__half2float(h[(token_idx * embedding_dim + j) & 1]) + val);
+            new_val = old_val;
+            reinterpret_cast<__half*>(&new_val)[(token_idx * embedding_dim + j) & 1] = result;
+        } while (atomicCAS(addr, old_val, new_val) != old_val);
+#endif
+    }
+}
+
+auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
+                               int64_t num_embeddings, cudaStream_t stream) -> Tensor {
+    // grad_output: [*, embedding_dim]
+    // indices: [*]
+    // output (grad_weight): [num_embeddings, embedding_dim]
+
+    auto grad_shape = grad_output.shape();
+    int64_t embedding_dim = grad_shape[grad_shape.size() - 1];
+    int64_t num_indices = indices.numel();
+
+    // Create zero-initialized gradient weight tensor
+    std::vector<int64_t> grad_weight_shape = {num_embeddings, embedding_dim};
+    Tensor grad_weight(grad_weight_shape, grad_output.dtype(), grad_output.device());
+
+    // Zero initialize
+    cudaMemsetAsync(grad_weight.data_ptr(), 0, grad_weight.numel() * dtype_size(grad_output.dtype()), stream);
+
+    if (num_indices == 0) return grad_weight;
+
+    int64_t total_elements = num_indices * embedding_dim;
+    int num_blocks = get_num_blocks(total_elements);
+
+    // Ensure indices are int64
+    Tensor indices_int64 = (indices.dtype() == DType::Int64) ? indices : indices.to(DType::Int64);
+
+    #define LAUNCH_EMBEDDING_BWD(T) \
+        embedding_backward_kernel_impl<T><<<num_blocks, BLOCK_SIZE, 0, stream>>>( \
+            grad_output.data<T>(), indices_int64.data<int64_t>(), grad_weight.data<T>(), \
+            num_indices, embedding_dim)
+
+    switch (grad_output.dtype()) {
+        case DType::Float32: LAUNCH_EMBEDDING_BWD(float); break;
+        case DType::Float64: LAUNCH_EMBEDDING_BWD(double); break;
+        case DType::Float16:
+            embedding_backward_kernel_impl<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                reinterpret_cast<const __half*>(grad_output.data_ptr()),
+                indices_int64.data<int64_t>(),
+                reinterpret_cast<__half*>(grad_weight.data_ptr()),
+                num_indices, embedding_dim);
+            break;
+        default:
+            throw std::runtime_error("embedding_backward: unsupported dtype");
+    }
+
+    #undef LAUNCH_EMBEDDING_BWD
+
+    CUDA_CHECK(cudaGetLastError());
+    return grad_weight;
 }
 
 } // namespace cuda

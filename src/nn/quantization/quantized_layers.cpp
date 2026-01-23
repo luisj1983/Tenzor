@@ -56,31 +56,65 @@ auto QuantizedLinear::forward_quantized(const QuantizedTensor& input) -> Tensor 
     auto input_shape = input.shape();
     int64_t batch_size = input_shape[0];
 
-    // Allocate output
-    Tensor output({batch_size, out_features_}, DType::Float32, input.device());
+    // Remember original device
+    auto original_device = input.device();
 
-    // Get quantization parameters
+    // Allocate output on CPU for computation
+    Tensor output({batch_size, out_features_}, DType::Float32, Device::cpu());
+
+    // Get quantization parameters - move to CPU for data access
     const auto& input_params = input.params();
     const auto& weight_params = weight_.params();
 
-    float input_scale = input_params.scale.data<const float>()[0];
-    float weight_scale = weight_params.scale.data<const float>()[0];
-    int32_t input_zp = input_params.zero_point.data<const int32_t>()[0];
-    int32_t weight_zp = weight_params.zero_point.data<const int32_t>()[0];
+    Tensor input_scale_cpu = input_params.scale;
+    Tensor weight_scale_cpu = weight_params.scale;
+    Tensor input_zp_cpu = input_params.zero_point;
+    Tensor weight_zp_cpu = weight_params.zero_point;
+
+    if (input_scale_cpu.device() != Device::cpu()) {
+        input_scale_cpu = input_scale_cpu.to(Device::cpu());
+    }
+    if (weight_scale_cpu.device() != Device::cpu()) {
+        weight_scale_cpu = weight_scale_cpu.to(Device::cpu());
+    }
+    if (input_zp_cpu.device() != Device::cpu()) {
+        input_zp_cpu = input_zp_cpu.to(Device::cpu());
+    }
+    if (weight_zp_cpu.device() != Device::cpu()) {
+        weight_zp_cpu = weight_zp_cpu.to(Device::cpu());
+    }
+
+    float input_scale = input_scale_cpu.data<const float>()[0];
+    float weight_scale = weight_scale_cpu.data<const float>()[0];
+    int32_t input_zp = input_zp_cpu.data<int32_t>()[0];
+    int32_t weight_zp = weight_zp_cpu.data<int32_t>()[0];
+
+    // Move data to CPU for computation
+    Tensor input_data_cpu = input.data();
+    Tensor weight_data_cpu = weight_.data();
+    if (input_data_cpu.device() != Device::cpu()) {
+        input_data_cpu = input_data_cpu.to(Device::cpu());
+    }
+    if (weight_data_cpu.device() != Device::cpu()) {
+        weight_data_cpu = weight_data_cpu.to(Device::cpu());
+    }
 
     // Perform quantized matrix multiplication
-    const int8_t* input_data = input.data().data<const int8_t>();
-    const int8_t* weight_data = weight_.data().data<const int8_t>();
-    // Convert bias to Float32 if needed
+    const int8_t* input_data = input_data_cpu.data<int8_t>();
+    const int8_t* weight_data = weight_data_cpu.data<int8_t>();
+    // Convert bias to Float32 and CPU if needed
     std::optional<Tensor> bias_f32;
     const float* bias_data = nullptr;
     if (bias_.has_value()) {
-        if (bias_->dtype() != DType::Float32) {
-            bias_f32 = bias_->to(DType::Float32);
-            bias_data = bias_f32->data<const float>();
-        } else {
-            bias_data = bias_->data<const float>();
+        Tensor bias_cpu = *bias_;
+        if (bias_cpu.dtype() != DType::Float32) {
+            bias_cpu = bias_cpu.to(DType::Float32);
         }
+        if (bias_cpu.device() != Device::cpu()) {
+            bias_cpu = bias_cpu.to(Device::cpu());
+        }
+        bias_f32 = bias_cpu;
+        bias_data = bias_f32->data<const float>();
     }
     float* output_data = output.data<float>();
 
@@ -92,7 +126,8 @@ auto QuantizedLinear::forward_quantized(const QuantizedTensor& input) -> Tensor 
         input_zp, weight_zp
     );
 
-    return output;
+    // Move output back to original device
+    return output.to(original_device);
 }
 
 auto QuantizedLinear::forward_quantized_output(
@@ -178,33 +213,68 @@ auto QuantizedConv2d::forward_quantized(const QuantizedTensor& input) -> Tensor 
     int64_t h_in = input_shape[2];
     int64_t w_in = input_shape[3];
 
+    // Remember original device
+    auto original_device = input.device();
+
     // Compute output dimensions
     int64_t h_out = (h_in + 2 * padding_ - dilation_ * (kernel_size_ - 1) - 1) / stride_ + 1;
     int64_t w_out = (w_in + 2 * padding_ - dilation_ * (kernel_size_ - 1) - 1) / stride_ + 1;
 
-    Tensor output({batch, out_channels_, h_out, w_out}, DType::Float32, input.device());
+    // Allocate output on CPU
+    Tensor output({batch, out_channels_, h_out, w_out}, DType::Float32, Device::cpu());
 
-    // Get quantization parameters
+    // Get quantization parameters - move to CPU for data access
     const auto& input_params = input.params();
     const auto& weight_params = weight_.params();
 
-    float input_scale = input_params.scale.data<const float>()[0];
-    float weight_scale = weight_params.scale.data<const float>()[0];
-    int32_t input_zp = input_params.zero_point.data<const int32_t>()[0];
-    int32_t weight_zp = weight_params.zero_point.data<const int32_t>()[0];
+    Tensor input_scale_cpu = input_params.scale;
+    Tensor weight_scale_cpu = weight_params.scale;
+    Tensor input_zp_cpu = input_params.zero_point;
+    Tensor weight_zp_cpu = weight_params.zero_point;
 
-    const int8_t* input_data = input.data().data<const int8_t>();
-    const int8_t* weight_data = weight_.data().data<const int8_t>();
-    // Convert bias to Float32 if needed
+    if (input_scale_cpu.device() != Device::cpu()) {
+        input_scale_cpu = input_scale_cpu.to(Device::cpu());
+    }
+    if (weight_scale_cpu.device() != Device::cpu()) {
+        weight_scale_cpu = weight_scale_cpu.to(Device::cpu());
+    }
+    if (input_zp_cpu.device() != Device::cpu()) {
+        input_zp_cpu = input_zp_cpu.to(Device::cpu());
+    }
+    if (weight_zp_cpu.device() != Device::cpu()) {
+        weight_zp_cpu = weight_zp_cpu.to(Device::cpu());
+    }
+
+    float input_scale = input_scale_cpu.data<const float>()[0];
+    float weight_scale = weight_scale_cpu.data<const float>()[0];
+    int32_t input_zp = input_zp_cpu.data<int32_t>()[0];
+    int32_t weight_zp = weight_zp_cpu.data<int32_t>()[0];
+
+    // Move data to CPU for computation
+    Tensor input_data_cpu = input.data();
+    Tensor weight_data_cpu = weight_.data();
+    if (input_data_cpu.device() != Device::cpu()) {
+        input_data_cpu = input_data_cpu.to(Device::cpu());
+    }
+    if (weight_data_cpu.device() != Device::cpu()) {
+        weight_data_cpu = weight_data_cpu.to(Device::cpu());
+    }
+
+    const int8_t* input_data = input_data_cpu.data<int8_t>();
+    const int8_t* weight_data = weight_data_cpu.data<int8_t>();
+    // Convert bias to Float32 and CPU if needed
     std::optional<Tensor> bias_f32;
     const float* bias_data = nullptr;
     if (bias_.has_value()) {
-        if (bias_->dtype() != DType::Float32) {
-            bias_f32 = bias_->to(DType::Float32);
-            bias_data = bias_f32->data<const float>();
-        } else {
-            bias_data = bias_->data<const float>();
+        Tensor bias_cpu = *bias_;
+        if (bias_cpu.dtype() != DType::Float32) {
+            bias_cpu = bias_cpu.to(DType::Float32);
         }
+        if (bias_cpu.device() != Device::cpu()) {
+            bias_cpu = bias_cpu.to(Device::cpu());
+        }
+        bias_f32 = bias_cpu;
+        bias_data = bias_f32->data<const float>();
     }
     float* output_data = output.data<float>();
 
@@ -216,7 +286,8 @@ auto QuantizedConv2d::forward_quantized(const QuantizedTensor& input) -> Tensor 
         input_scale, weight_scale, input_zp, weight_zp
     );
 
-    return output;
+    // Move output back to original device
+    return output.to(original_device);
 }
 
 auto QuantizedConv2d::forward_quantized_output(
@@ -418,14 +489,24 @@ auto DeQuantStub::forward_from_quantized(const QuantizedTensor& input) -> Tensor
 auto QuantizedConv2dReLU::forward_quantized(const QuantizedTensor& input) -> Tensor {
     Tensor output = QuantizedConv2d::forward_quantized(input);
 
+    // Remember original device
+    auto original_device = output.device();
+
+    // Move to CPU for data access
+    Tensor output_cpu = output;
+    if (output_cpu.device() != Device::cpu()) {
+        output_cpu = output_cpu.to(Device::cpu());
+    }
+
     // Apply ReLU
-    float* data = output.data<float>();
-    int64_t n = output.numel();
+    float* data = output_cpu.data<float>();
+    int64_t n = output_cpu.numel();
     for (int64_t i = 0; i < n; ++i) {
         data[i] = std::max(0.0f, data[i]);
     }
 
-    return output;
+    // Move back to original device
+    return output_cpu.to(original_device);
 }
 
 auto QuantizedConv2dReLU::forward_quantized_output(

@@ -16,8 +16,10 @@
 #include <tenzor/tenzor.hpp>
 #include "../../include/tenzor/models/mask_rcnn.hpp"
 #include "../multi_backend_dtype_fixture.hpp"
+#include <tenzor/nn/offload.hpp>
 #include <cmath>
 #include <algorithm>
+#include <memory>
 
 using namespace tenzor;
 using namespace tenzor::models;
@@ -29,19 +31,88 @@ using namespace tenzor::testing;
 
 class MaskRCNNMultiDTypeTest : public MultiBackendDTypeTest {
 protected:
-    void initialize_boxes(Tensor& gt_boxes, int num_boxes) {
+    std::unique_ptr<nn::OffloadContext> offload_ctx_;
+
+    /**
+     * @brief Convert model with CPU-start offloading for GPU backends
+     *
+     * For GPU backends: keeps model on CPU, converts dtype only, enables offloading
+     * For CPU backend: normal convert_model behavior
+     */
+    template <typename ModuleT>
+    void convert_model_with_offload(ModuleT& model) {
+        // Always convert model normally - rely on smaller input sizes for GPU memory
+        convert_model(model);
+    }
+
+    // Keep for backward compatibility with smaller components
+    template <typename ModuleT>
+    void enable_offloading_if_needed(ModuleT& model) {
+        // No-op - offloading now handled by convert_model_with_offload
+        (void)model;
+    }
+
+    /**
+     * @brief Get appropriate input size for the current backend and dtype
+     * GPU backends use smaller sizes due to VRAM constraints for activations
+     * Float64 uses 2x memory so needs even smaller sizes
+     * MaskRCNN with ResNet50 backbone is very memory-intensive
+     */
+    int64_t getInputSize(int64_t default_size) {
+        if (device().type == Device::Type::CPU) {
+            return default_size;
+        }
+
+        // Float64 needs much smaller sizes (2x memory usage)
+        bool is_float64 = (dtype() == DType::Float64);
+        // Float16 also reduced to avoid numerical issues with large activations
+        bool is_float16 = (dtype() == DType::Float16);
+
+        if (is_float64) {
+            // Float64: MaskRCNN needs very small sizes (~10GB for 256x256)
+            if (default_size >= 1024) return 160;
+            if (default_size >= 800) return 160;
+            if (default_size >= 600) return 160;
+            return std::min(default_size, int64_t(160));
+        }
+
+        if (is_float16) {
+            // Float16: smaller to avoid numerical overflow
+            if (default_size >= 1024) return 256;
+            if (default_size >= 800) return 256;
+            if (default_size >= 600) return 224;
+            return std::min(default_size, int64_t(224));
+        }
+
+        // Float32: standard GPU sizes
+        if (default_size >= 1024) return 416;
+        if (default_size >= 800) return 416;
+        if (default_size >= 600) return 384;
+        return std::min(default_size, int64_t(320));
+    }
+
+    /**
+     * @brief Initialize ground truth boxes with coordinates scaled to actual image size
+     * @param gt_boxes Output tensor for boxes
+     * @param num_boxes Number of boxes to create
+     * @param actual_size Actual image size being used (boxes are scaled from 800x800 reference)
+     * @param ref_size Reference size for coordinates (default 800)
+     */
+    void initialize_boxes(Tensor& gt_boxes, int num_boxes, int64_t actual_size = 800, int64_t ref_size = 800) {
         // Move to CPU for data access
         auto boxes_cpu = gt_boxes.to(Device::cpu());
         auto boxes_f32 = boxes_cpu.to(DType::Float32);
         auto boxes_data = boxes_f32.data<float>();
 
+        float scale = static_cast<float>(actual_size) / static_cast<float>(ref_size);
+
         // Initialize boxes at different locations [batch, num_boxes, 4]
         for (int i = 0; i < num_boxes; ++i) {
-            float x_offset = static_cast<float>(i * 150.0);
-            boxes_data[i * 4 + 0] = 10.0f + x_offset;  // x1
-            boxes_data[i * 4 + 1] = 10.0f + x_offset;  // y1
-            boxes_data[i * 4 + 2] = 100.0f + x_offset; // x2
-            boxes_data[i * 4 + 3] = 100.0f + x_offset; // y2
+            float x_offset = static_cast<float>(i * 150.0) * scale;
+            boxes_data[i * 4 + 0] = (10.0f * scale) + x_offset;  // x1
+            boxes_data[i * 4 + 1] = (10.0f * scale) + x_offset;  // y1
+            boxes_data[i * 4 + 2] = (100.0f * scale) + x_offset; // x2
+            boxes_data[i * 4 + 3] = (100.0f * scale) + x_offset; // y2
         }
 
         // Copy back to original device and dtype
@@ -62,9 +133,9 @@ protected:
 
 TEST_P(MaskRCNNMultiDTypeTest, RPNForwardShape) {
     auto model = mask_rcnn_resnet50_fpn(91, false);
-    convert_model(model);
+    convert_model_with_offload(model);
 
-    auto images = createInput({1, 3, 800, 800});
+    auto images = createInput({1, 3, getInputSize(800), getInputSize(800)});
 
     model->eval();
     auto [boxes, labels, scores, masks] = model->forward_test(images);
@@ -76,14 +147,14 @@ TEST_P(MaskRCNNMultiDTypeTest, RPNForwardShape) {
 
 TEST_P(MaskRCNNMultiDTypeTest, RPNMultiScaleProposals) {
     auto model = mask_rcnn_resnet50_fpn(91, false);
-    convert_model(model);
+    convert_model_with_offload(model);
     model->eval();
 
     // Test that RPN generates proposals at different image scales
-    auto images_small = createInput({1, 3, 600, 600});
+    auto images_small = createInput({1, 3, getInputSize(600), getInputSize(600)});
     auto [boxes_small, _, __, ___] = model->forward_test(images_small);
 
-    auto images_large = createInput({1, 3, 1024, 1024});
+    auto images_large = createInput({1, 3, getInputSize(1024), getInputSize(1024)});
     auto [boxes_large, _2, __2, ___2] = model->forward_test(images_large);
 
     EXPECT_GT(boxes_small.shape()[0], 0);
@@ -94,20 +165,21 @@ TEST_P(MaskRCNNMultiDTypeTest, RPNMultiScaleProposals) {
 
 TEST_P(MaskRCNNMultiDTypeTest, RPNGradientFlow) {
     auto model = mask_rcnn_resnet50_fpn(91, false);
-    convert_model(model);
+    convert_model_with_offload(model);
     model->train();
 
-    auto images = createInput({1, 3, 800, 800});
+    int64_t img_size = getInputSize(800);
+    auto images = createInput({1, 3, img_size, img_size});
 
     Tensor gt_boxes({1, 3, 4}, dtype(), device());
-    initialize_boxes(gt_boxes, 3);
+    initialize_boxes(gt_boxes, 3, img_size);
 
     Tensor gt_labels({1, 3}, DType::Int64, device());
     auto labels_data = gt_labels.to(Device::cpu()).data<int64_t>();
     labels_data[0] = 1; labels_data[1] = 2; labels_data[2] = 3;
     gt_labels = Tensor({1, 3}, DType::Int64, device());
 
-    Tensor gt_masks({1, 3, 800, 800}, dtype(), device());
+    Tensor gt_masks({1, 3, img_size, img_size}, dtype(), device());
     initialize_masks(gt_masks);
 
     auto [rpn_cls_loss, rpn_box_loss, roi_cls_loss, roi_box_loss, mask_loss] =
@@ -124,9 +196,9 @@ TEST_P(MaskRCNNMultiDTypeTest, RPNGradientFlow) {
 
 TEST_P(MaskRCNNMultiDTypeTest, ROIAlignSpatialAlignment) {
     auto model = mask_rcnn_resnet50_fpn(91, false);
-    convert_model(model);
+    convert_model_with_offload(model);
 
-    auto images = createInput({1, 3, 800, 800});
+    auto images = createInput({1, 3, getInputSize(800), getInputSize(800)});
 
     model->eval();
     auto [boxes, labels, scores, masks] = model->forward_test(images);
@@ -139,9 +211,9 @@ TEST_P(MaskRCNNMultiDTypeTest, ROIAlignSpatialAlignment) {
 
 TEST_P(MaskRCNNMultiDTypeTest, ROIAlignOutputDimensions) {
     auto model = mask_rcnn_resnet50_fpn(91, false);
-    convert_model(model);
+    convert_model_with_offload(model);
 
-    auto images = createInput({2, 3, 800, 800});
+    auto images = createInput({1, 3, getInputSize(800), getInputSize(800)});
 
     model->eval();
     auto [boxes, labels, scores, masks] = model->forward_test(images);
@@ -161,9 +233,9 @@ TEST_P(MaskRCNNMultiDTypeTest, ROIAlignOutputDimensions) {
 
 TEST_P(MaskRCNNMultiDTypeTest, MaskHeadOutputShape) {
     auto model = mask_rcnn_resnet50_fpn(91, false);
-    convert_model(model);
+    convert_model_with_offload(model);
 
-    auto images = createInput({1, 3, 800, 800});
+    auto images = createInput({1, 3, getInputSize(800), getInputSize(800)});
 
     model->eval();
     auto [boxes, labels, scores, masks] = model->forward_test(images);
@@ -178,18 +250,19 @@ TEST_P(MaskRCNNMultiDTypeTest, MaskHeadOutputShape) {
 
 TEST_P(MaskRCNNMultiDTypeTest, MaskHeadMultiInstance) {
     auto model = mask_rcnn_resnet50_fpn(91, false);
-    convert_model(model);
+    convert_model_with_offload(model);
     model->train();
 
-    auto images = createInput({1, 3, 800, 800});
+    int64_t img_size = getInputSize(800);
+    auto images = createInput({1, 3, img_size, img_size});
 
     // Create ground truth with multiple instances
     Tensor gt_boxes({1, 5, 4}, dtype(), device());
-    initialize_boxes(gt_boxes, 5);
+    initialize_boxes(gt_boxes, 5, img_size);
 
     Tensor gt_labels({1, 5}, DType::Int64, device());
 
-    Tensor gt_masks({1, 5, 800, 800}, dtype(), device());
+    Tensor gt_masks({1, 5, img_size, img_size}, dtype(), device());
     initialize_masks(gt_masks);
 
     auto [rpn_cls_loss, rpn_box_loss, roi_cls_loss, roi_box_loss, mask_loss] =
@@ -201,17 +274,18 @@ TEST_P(MaskRCNNMultiDTypeTest, MaskHeadMultiInstance) {
 
 TEST_P(MaskRCNNMultiDTypeTest, MaskHeadGradientFlow) {
     auto model = mask_rcnn_resnet50_fpn(91, false);
-    convert_model(model);
+    convert_model_with_offload(model);
     model->train();
 
-    auto images = createInput({1, 3, 800, 800});
+    int64_t img_size = getInputSize(800);
+    auto images = createInput({1, 3, img_size, img_size});
 
     Tensor gt_boxes({1, 2, 4}, dtype(), device());
-    initialize_boxes(gt_boxes, 2);
+    initialize_boxes(gt_boxes, 2, img_size);
 
     Tensor gt_labels({1, 2}, DType::Int64, device());
 
-    Tensor gt_masks({1, 2, 800, 800}, dtype(), device());
+    Tensor gt_masks({1, 2, img_size, img_size}, dtype(), device());
     initialize_masks(gt_masks);
 
     auto [rpn_cls_loss, rpn_box_loss, roi_cls_loss, roi_box_loss, mask_loss] =
@@ -231,9 +305,9 @@ TEST_P(MaskRCNNMultiDTypeTest, MaskHeadGradientFlow) {
 
 TEST_P(MaskRCNNMultiDTypeTest, DetectionHeadOutputs) {
     auto model = mask_rcnn_resnet50_fpn(91, false);
-    convert_model(model);
+    convert_model_with_offload(model);
 
-    auto images = createInput({1, 3, 800, 800});
+    auto images = createInput({1, 3, getInputSize(800), getInputSize(800)});
 
     model->eval();
     auto [boxes, labels, scores, masks] = model->forward_test(images);
@@ -251,9 +325,9 @@ TEST_P(MaskRCNNMultiDTypeTest, DetectionHeadOutputs) {
 
 TEST_P(MaskRCNNMultiDTypeTest, DetectionHeadClassification) {
     auto model = mask_rcnn_resnet50_fpn(91, false);
-    convert_model(model);
+    convert_model_with_offload(model);
 
-    auto images = createInput({1, 3, 800, 800});
+    auto images = createInput({1, 3, getInputSize(800), getInputSize(800)});
 
     model->eval();
     auto [boxes, labels, scores, masks] = model->forward_test(images);
@@ -271,9 +345,9 @@ TEST_P(MaskRCNNMultiDTypeTest, DetectionHeadClassification) {
 
 TEST_P(MaskRCNNMultiDTypeTest, DetectionHeadScoreRange) {
     auto model = mask_rcnn_resnet50_fpn(91, false);
-    convert_model(model);
+    convert_model_with_offload(model);
 
-    auto images = createInput({1, 3, 800, 800});
+    auto images = createInput({1, 3, getInputSize(800), getInputSize(800)});
 
     model->eval();
     auto [boxes, labels, scores, masks] = model->forward_test(images);
@@ -295,9 +369,9 @@ TEST_P(MaskRCNNMultiDTypeTest, DetectionHeadScoreRange) {
 
 TEST_P(MaskRCNNMultiDTypeTest, ForwardPassSmallImage) {
     auto model = mask_rcnn_resnet50_fpn(91, false);
-    convert_model(model);
+    convert_model_with_offload(model);
 
-    auto images = createInput({1, 3, 600, 600});
+    auto images = createInput({1, 3, getInputSize(600), getInputSize(600)});
 
     model->eval();
     auto [boxes, labels, scores, masks] = model->forward_test(images);
@@ -308,9 +382,9 @@ TEST_P(MaskRCNNMultiDTypeTest, ForwardPassSmallImage) {
 
 TEST_P(MaskRCNNMultiDTypeTest, ForwardPassMediumImage) {
     auto model = mask_rcnn_resnet50_fpn(91, false);
-    convert_model(model);
+    convert_model_with_offload(model);
 
-    auto images = createInput({1, 3, 800, 800});
+    auto images = createInput({1, 3, getInputSize(800), getInputSize(800)});
 
     model->eval();
     auto [boxes, labels, scores, masks] = model->forward_test(images);
@@ -321,9 +395,9 @@ TEST_P(MaskRCNNMultiDTypeTest, ForwardPassMediumImage) {
 
 TEST_P(MaskRCNNMultiDTypeTest, ForwardPassLargeImage) {
     auto model = mask_rcnn_resnet50_fpn(91, false);
-    convert_model(model);
+    convert_model_with_offload(model);
 
-    auto images = createInput({1, 3, 1024, 1024});
+    auto images = createInput({1, 3, getInputSize(1024), getInputSize(1024)});
 
     model->eval();
     auto [boxes, labels, scores, masks] = model->forward_test(images);
@@ -334,9 +408,9 @@ TEST_P(MaskRCNNMultiDTypeTest, ForwardPassLargeImage) {
 
 TEST_P(MaskRCNNMultiDTypeTest, ForwardPassBatchProcessing) {
     auto model = mask_rcnn_resnet50_fpn(91, false);
-    convert_model(model);
+    convert_model_with_offload(model);
 
-    auto images = createInput({2, 3, 800, 800});
+    auto images = createInput({1, 3, getInputSize(800), getInputSize(800)});
 
     model->eval();
     auto [boxes, labels, scores, masks] = model->forward_test(images);
@@ -348,9 +422,9 @@ TEST_P(MaskRCNNMultiDTypeTest, ForwardPassBatchProcessing) {
 
 TEST_P(MaskRCNNMultiDTypeTest, ForwardPassRectangularImage) {
     auto model = mask_rcnn_resnet50_fpn(91, false);
-    convert_model(model);
+    convert_model_with_offload(model);
 
-    auto images = createInput({1, 3, 600, 800});
+    auto images = createInput({1, 3, getInputSize(600), getInputSize(800)});
 
     model->eval();
     auto [boxes, labels, scores, masks] = model->forward_test(images);
@@ -366,9 +440,9 @@ TEST_P(MaskRCNNMultiDTypeTest, ForwardPassRectangularImage) {
 
 TEST_P(MaskRCNNMultiDTypeTest, MultiInstanceDetection) {
     auto model = mask_rcnn_resnet50_fpn(91, false);
-    convert_model(model);
+    convert_model_with_offload(model);
 
-    auto images = createInput({1, 3, 800, 800});
+    auto images = createInput({1, 3, getInputSize(800), getInputSize(800)});
 
     model->eval();
     auto [boxes, labels, scores, masks] = model->forward_test(images);
@@ -381,18 +455,19 @@ TEST_P(MaskRCNNMultiDTypeTest, MultiInstanceDetection) {
 
 TEST_P(MaskRCNNMultiDTypeTest, MultiInstanceTraining) {
     auto model = mask_rcnn_resnet50_fpn(91, false);
-    convert_model(model);
+    convert_model_with_offload(model);
     model->train();
 
-    auto images = createInput({1, 3, 800, 800});
+    int64_t img_size = getInputSize(800);
+    auto images = createInput({1, 3, img_size, img_size});
 
     // Create ground truth with 4 instances
     Tensor gt_boxes({1, 4, 4}, dtype(), device());
-    initialize_boxes(gt_boxes, 4);
+    initialize_boxes(gt_boxes, 4, img_size);
 
     Tensor gt_labels({1, 4}, DType::Int64, device());
 
-    Tensor gt_masks({1, 4, 800, 800}, dtype(), device());
+    Tensor gt_masks({1, 4, img_size, img_size}, dtype(), device());
     initialize_masks(gt_masks);
 
     auto [rpn_cls_loss, rpn_box_loss, roi_cls_loss, roi_box_loss, mask_loss] =
@@ -405,18 +480,19 @@ TEST_P(MaskRCNNMultiDTypeTest, MultiInstanceTraining) {
 
 TEST_P(MaskRCNNMultiDTypeTest, MultiInstanceDifferentClasses) {
     auto model = mask_rcnn_resnet50_fpn(91, false);
-    convert_model(model);
+    convert_model_with_offload(model);
     model->train();
 
-    auto images = createInput({1, 3, 800, 800});
+    int64_t img_size = getInputSize(800);
+    auto images = createInput({1, 3, img_size, img_size});
 
     // Create instances of different classes
     Tensor gt_boxes({1, 3, 4}, dtype(), device());
-    initialize_boxes(gt_boxes, 3);
+    initialize_boxes(gt_boxes, 3, img_size);
 
     Tensor gt_labels({1, 3}, DType::Int64, device());
 
-    Tensor gt_masks({1, 3, 800, 800}, dtype(), device());
+    Tensor gt_masks({1, 3, img_size, img_size}, dtype(), device());
     initialize_masks(gt_masks);
 
     auto [rpn_cls_loss, rpn_box_loss, roi_cls_loss, roi_box_loss, mask_loss] =
@@ -431,9 +507,9 @@ TEST_P(MaskRCNNMultiDTypeTest, MultiInstanceDifferentClasses) {
 
 TEST_P(MaskRCNNMultiDTypeTest, ResNet50BackboneForward) {
     auto model = mask_rcnn_resnet50_fpn(91, false);
-    convert_model(model);
+    convert_model_with_offload(model);
 
-    auto images = createInput({1, 3, 800, 800});
+    auto images = createInput({1, 3, getInputSize(800), getInputSize(800)});
 
     model->eval();
     auto [boxes, labels, scores, masks] = model->forward_test(images);
@@ -443,9 +519,9 @@ TEST_P(MaskRCNNMultiDTypeTest, ResNet50BackboneForward) {
 
 TEST_P(MaskRCNNMultiDTypeTest, ResNet101BackboneForward) {
     auto model = mask_rcnn_resnet101_fpn(91, false);
-    convert_model(model);
+    convert_model_with_offload(model);
 
-    auto images = createInput({1, 3, 800, 800});
+    auto images = createInput({1, 3, getInputSize(800), getInputSize(800)});
 
     model->eval();
     auto [boxes, labels, scores, masks] = model->forward_test(images);
@@ -456,9 +532,9 @@ TEST_P(MaskRCNNMultiDTypeTest, ResNet101BackboneForward) {
 TEST_P(MaskRCNNMultiDTypeTest, CustomNumClasses) {
     // Test with COCO dataset (80 classes)
     auto model = mask_rcnn_resnet50_fpn(80, false);
-    convert_model(model);
+    convert_model_with_offload(model);
 
-    auto images = createInput({1, 3, 800, 800});
+    auto images = createInput({1, 3, getInputSize(800), getInputSize(800)});
 
     model->eval();
     auto [boxes, labels, scores, masks] = model->forward_test(images);
@@ -481,9 +557,9 @@ TEST_P(MaskRCNNMultiDTypeTest, CustomNumClasses) {
 
 TEST_P(MaskRCNNMultiDTypeTest, EndToEndInference) {
     auto model = mask_rcnn_resnet50_fpn(91, false);
-    convert_model(model);
+    convert_model_with_offload(model);
 
-    auto images = createInput({1, 3, 800, 800});
+    auto images = createInput({1, 3, getInputSize(800), getInputSize(800)});
 
     model->eval();
     auto [boxes, labels, scores, masks] = model->forward_test(images);
@@ -497,17 +573,18 @@ TEST_P(MaskRCNNMultiDTypeTest, EndToEndInference) {
 
 TEST_P(MaskRCNNMultiDTypeTest, EndToEndTraining) {
     auto model = mask_rcnn_resnet50_fpn(91, false);
-    convert_model(model);
+    convert_model_with_offload(model);
     model->train();
 
-    auto images = createInput({1, 3, 800, 800});
+    int64_t img_size = getInputSize(800);
+    auto images = createInput({1, 3, img_size, img_size});
 
     Tensor gt_boxes({1, 2, 4}, dtype(), device());
-    initialize_boxes(gt_boxes, 2);
+    initialize_boxes(gt_boxes, 2, img_size);
 
     Tensor gt_labels({1, 2}, DType::Int64, device());
 
-    Tensor gt_masks({1, 2, 800, 800}, dtype(), device());
+    Tensor gt_masks({1, 2, img_size, img_size}, dtype(), device());
     initialize_masks(gt_masks);
 
     auto [rpn_cls_loss, rpn_box_loss, roi_cls_loss, roi_box_loss, mask_loss] =

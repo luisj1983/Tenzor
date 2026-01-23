@@ -7,6 +7,7 @@
  */
 
 #include "tenzor/backend/dispatch_table.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/backend/kernel_registry.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "tenzor/ops/creation.hpp"
@@ -48,6 +49,13 @@ namespace cuda {
     auto sub_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream) -> Tensor;
     auto mul_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream) -> Tensor;
     auto div_inplace_kernel(Tensor& inout, const Tensor& other, cudaStream_t stream) -> Tensor;
+
+    // In-place activation operations
+    auto relu_inplace_kernel(Tensor& input, cudaStream_t stream) -> void;
+    auto sigmoid_inplace_kernel(Tensor& input, cudaStream_t stream) -> void;
+    auto tanh_inplace_kernel(Tensor& input, cudaStream_t stream) -> void;
+    auto leaky_relu_inplace_kernel(Tensor& input, float alpha, cudaStream_t stream) -> void;
+    auto gelu_inplace_kernel(Tensor& input, cudaStream_t stream) -> void;
 
     // Unary operations
     auto sqrt_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
@@ -147,6 +155,19 @@ namespace cuda {
     auto masked_select_kernel(const Tensor& input, const Tensor& mask, cudaStream_t stream) -> Tensor;
     auto masked_fill_kernel(const Tensor& input, const Tensor& mask, double value, cudaStream_t stream) -> Tensor;
     auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y, cudaStream_t stream) -> Tensor;
+
+    // Embedding operations
+    auto embedding_kernel(const Tensor& weight, const Tensor& indices, cudaStream_t stream) -> Tensor;
+    auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices, int64_t num_embeddings, cudaStream_t stream) -> Tensor;
+
+    // Fused operations
+    auto fused_linear_relu_cuda(const Tensor& input, const Tensor& weight, const Tensor* bias) -> Tensor;
+    auto fused_batchnorm_relu_cuda(const Tensor& input, const Tensor& running_mean, const Tensor& running_var, const Tensor& weight, const Tensor& bias, float eps) -> Tensor;
+    auto fused_add_relu_cuda(const Tensor& a, const Tensor& b) -> Tensor;
+    auto fused_gelu_cuda(const Tensor& input) -> Tensor;
+
+    // Vision/Interpolation operations
+    auto interpolate_cuda(const Tensor& input, const std::vector<int64_t>& size, const std::string& mode, bool align_corners) -> Tensor;
 
     // BatchNorm2d operations
     auto batchnorm2d_mean_var(const Tensor& input, Tensor& mean, Tensor& variance, cudaStream_t stream) -> void;
@@ -340,6 +361,38 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_inplace_kernel(OpId::MulInplace, cuda::mul_inplace_dispatch);
     table.register_inplace_kernel(OpId::DivInplace, cuda::div_inplace_dispatch);
 
+    // Inplace activation operations
+    table.register_kernel(OpId::ReLUInplace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        Tensor input = inputs[0];  // Copy to allow modification
+        cuda::relu_inplace_kernel(input, get_cuda_stream(attrs));
+        return std::vector<Tensor>{input};
+    });
+
+    table.register_kernel(OpId::SigmoidInplace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        Tensor input = inputs[0];
+        cuda::sigmoid_inplace_kernel(input, get_cuda_stream(attrs));
+        return std::vector<Tensor>{input};
+    });
+
+    table.register_kernel(OpId::TanhInplace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        Tensor input = inputs[0];
+        cuda::tanh_inplace_kernel(input, get_cuda_stream(attrs));
+        return std::vector<Tensor>{input};
+    });
+
+    table.register_kernel(OpId::LeakyReLUInplace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        float alpha = parse_attr<float>(attrs, "alpha", 0.01f);
+        Tensor input = inputs[0];
+        cuda::leaky_relu_inplace_kernel(input, alpha, get_cuda_stream(attrs));
+        return std::vector<Tensor>{input};
+    });
+
+    table.register_kernel(OpId::GeluInplace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        Tensor input = inputs[0];
+        cuda::gelu_inplace_kernel(input, get_cuda_stream(attrs));
+        return std::vector<Tensor>{input};
+    });
+
     // =========================================================================
     // Reduction Operations
     // =========================================================================
@@ -372,6 +425,18 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         int64_t dim = parse_attr<int64_t>(attrs, "dim", INT64_MIN);
         bool keepdim = parse_attr<bool>(attrs, "keepdim", false);
         return std::vector<Tensor>{cuda::argmin_kernel(inputs[0], dim, keepdim, get_cuda_stream(attrs))};
+    });
+    // ArgSort - CPU fallback for now (proper CUDA implementation would use Thrust or CUB)
+    table.register_kernel(OpId::ArgSort, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        // Transfer to CPU, do argsort, transfer back
+        Device original_device = inputs[0].device();
+        Tensor cpu_input = inputs[0].to(Device::cpu());
+        OpAttributes cpu_attrs = attrs;
+        cpu_attrs.erase("stream");  // Remove CUDA stream from attrs for CPU
+        std::vector<Tensor> cpu_inputs = {cpu_input};
+        // Dispatch will automatically use CPU backend since tensor is on CPU
+        auto result = tenzor::dispatch(OpId::ArgSort, cpu_inputs, cpu_attrs)[0];
+        return std::vector<Tensor>{result.to(original_device)};
     });
     table.register_kernel(OpId::Prod, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
         int64_t dim = parse_attr<int64_t>(attrs, "dim", INT64_MIN);
@@ -649,6 +714,40 @@ void register_cuda_kernels(BackendDispatchTable& table) {
 #endif
 
     // =========================================================================
+    // Pooling Backward Operations
+    // =========================================================================
+#ifdef TENZOR_HAS_CUDNN
+    table.register_single_output_kernel(OpId::MaxPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        // inputs: [grad_output, input, output]
+        int64_t kernel_size = parse_attr<int64_t>(attrs, "kernel_size", 2);
+        int64_t stride = parse_attr<int64_t>(attrs, "stride", kernel_size);
+        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
+        return cuda::cudnn_maxpool2d_backward(inputs[0], inputs[1], inputs[2], kernel_size, stride, padding, get_cuda_stream(attrs));
+    });
+    table.register_single_output_kernel(OpId::AvgPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        // inputs: [grad_output, input]
+        int64_t kernel_size = parse_attr<int64_t>(attrs, "kernel_size", 2);
+        int64_t stride = parse_attr<int64_t>(attrs, "stride", kernel_size);
+        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
+        return cuda::cudnn_avgpool2d_backward(inputs[0], inputs[1], kernel_size, stride, padding, get_cuda_stream(attrs));
+    });
+#else
+    table.register_single_output_kernel(OpId::MaxPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        // inputs: [grad_output, indices], attrs: input_shape
+        auto input_shape = parse_int_list(attrs, "input_shape");
+        return cuda::maxpool2d_backward_kernel(inputs[0], inputs[1], input_shape, get_cuda_stream(attrs));
+    });
+    table.register_single_output_kernel(OpId::AvgPool2dBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        // inputs: [grad_output], attrs: input_shape, kernel_size, stride, padding
+        auto input_shape = parse_int_list(attrs, "input_shape");
+        int64_t kernel_size = parse_attr<int64_t>(attrs, "kernel_size", 2);
+        int64_t stride = parse_attr<int64_t>(attrs, "stride", kernel_size);
+        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
+        return cuda::avgpool2d_backward_kernel(inputs[0], input_shape, kernel_size, stride, padding, get_cuda_stream(attrs));
+    });
+#endif
+
+    // =========================================================================
     // Normalization Operations
     // =========================================================================
     table.register_kernel(OpId::BatchNorm2dMeanVar, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
@@ -839,6 +938,58 @@ void register_cuda_kernels(BackendDispatchTable& table) {
             get_cuda_stream(attrs)
         );
         return std::vector<Tensor>{param};  // Return modified param
+    });
+
+    // =========================================================================
+    // Embedding Operations (lookup table for token IDs)
+    // =========================================================================
+    table.register_single_output_kernel(OpId::Embedding, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        // inputs: [weight, indices]
+        return cuda::embedding_kernel(inputs[0], inputs[1], get_cuda_stream(attrs));
+    });
+
+    table.register_single_output_kernel(OpId::EmbeddingBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        // inputs: [grad_output, indices]
+        // attrs: num_embeddings
+        int64_t num_embeddings = parse_attr<int64_t>(attrs, "num_embeddings", 0);
+        return cuda::embedding_backward_kernel(inputs[0], inputs[1], num_embeddings, get_cuda_stream(attrs));
+    });
+
+    // =========================================================================
+    // Fused Operations (optimized combined kernels)
+    // =========================================================================
+    table.register_single_output_kernel(OpId::FusedLinearReLU, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+        // inputs: [input, weight] or [input, weight, bias]
+        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        return cuda::fused_linear_relu_cuda(inputs[0], inputs[1], bias);
+    });
+
+    table.register_single_output_kernel(OpId::FusedBatchNormReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        // inputs: [input, running_mean, running_var, weight, bias]
+        float eps = parse_attr<float>(attrs, "eps", 1e-5f);
+        return cuda::fused_batchnorm_relu_cuda(inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], eps);
+    });
+
+    table.register_single_output_kernel(OpId::FusedAddReLU, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+        // inputs: [a, b]
+        return cuda::fused_add_relu_cuda(inputs[0], inputs[1]);
+    });
+
+    table.register_single_output_kernel(OpId::FusedGelu, [](std::span<const Tensor> inputs, const OpAttributes&) -> Tensor {
+        // inputs: [input]
+        return cuda::fused_gelu_cuda(inputs[0]);
+    });
+
+    // =========================================================================
+    // Vision/Interpolation Operations
+    // =========================================================================
+    table.register_single_output_kernel(OpId::Interpolate, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        // inputs: [input]
+        // attrs: size (comma-separated), mode, align_corners
+        auto size = parse_int_list(attrs, "size");
+        std::string mode = parse_attr<std::string>(attrs, "mode", "bilinear");
+        bool align_corners = parse_attr<bool>(attrs, "align_corners", false);
+        return cuda::interpolate_cuda(inputs[0], size, mode, align_corners);
     });
 }
 

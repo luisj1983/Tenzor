@@ -36,14 +36,20 @@ namespace cuda {
 inline void compute_launch_config_1d(int64_t n, dim3& grid, dim3& block) {
     const int block_size = 256;
     block = dim3(block_size, 1, 1);
-    grid = dim3((n + block_size - 1) / block_size, 1, 1);
+    // Ensure at least 1 block to avoid CUDA invalid argument error
+    // Grid-stride loop will naturally handle n=0 by not executing any iterations
+    int64_t num_blocks = (n + block_size - 1) / block_size;
+    grid = dim3(num_blocks > 0 ? static_cast<unsigned int>(num_blocks) : 1, 1, 1);
 }
 
 inline void compute_launch_config_2d(int64_t rows, int64_t cols, dim3& grid, dim3& block) {
     const int block_x = 16;
     const int block_y = 16;
     block = dim3(block_x, block_y, 1);
-    grid = dim3((cols + block_x - 1) / block_x, (rows + block_y - 1) / block_y, 1);
+    // Ensure at least 1 block in each dimension to avoid CUDA invalid argument error
+    unsigned int grid_x = static_cast<unsigned int>((cols + block_x - 1) / block_x);
+    unsigned int grid_y = static_cast<unsigned int>((rows + block_y - 1) / block_y);
+    grid = dim3(grid_x > 0 ? grid_x : 1, grid_y > 0 ? grid_y : 1, 1);
 }
 
 #define CUDA_KERNEL_LOOP(i, n) \
@@ -1201,19 +1207,21 @@ auto conv2d_backward_kernel(
                                    compute_grad_input, compute_grad_weight, compute_grad_bias, stream);
     }
 
-    // Initialize outputs (Float32 path)
+    // Initialize outputs - handle both Float32 and Float64
     Tensor grad_input({batch, in_channels, height, width}, input.dtype(), input.device());
     Tensor grad_weight({out_channels, in_channels_per_group, kernel_h, kernel_w}, weight.dtype(), weight.device());
     Tensor grad_bias({out_channels}, weight.dtype(), weight.device());
 
+    size_t elem_size = (input.dtype() == DType::Float64) ? sizeof(double) : sizeof(float);
+
     if (compute_grad_input) {
-        CUDA_CHECK(cudaMemsetAsync(grad_input.data<float>(), 0, grad_input.numel() * sizeof(float), stream));
+        CUDA_CHECK(cudaMemsetAsync(grad_input.data_ptr(), 0, grad_input.numel() * elem_size, stream));
     }
     if (compute_grad_weight) {
-        CUDA_CHECK(cudaMemsetAsync(grad_weight.data<float>(), 0, grad_weight.numel() * sizeof(float), stream));
+        CUDA_CHECK(cudaMemsetAsync(grad_weight.data_ptr(), 0, grad_weight.numel() * elem_size, stream));
     }
     if (compute_grad_bias) {
-        CUDA_CHECK(cudaMemsetAsync(grad_bias.data<float>(), 0, grad_bias.numel() * sizeof(float), stream));
+        CUDA_CHECK(cudaMemsetAsync(grad_bias.data_ptr(), 0, grad_bias.numel() * elem_size, stream));
     }
 
     // Create cuBLAS handle

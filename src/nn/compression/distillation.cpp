@@ -129,18 +129,29 @@ auto distillation_loss(
             auto logits_shape = student_logits_cast.tensor().shape();
             int64_t num_classes = logits_shape[1];
 
-            // Create one-hot tensor
-            std::vector<int64_t> onehot_shape = {batch_size, num_classes};
-            targets_onehot = Tensor(onehot_shape, DType::Float32, targets.value().device());
-            targets_onehot.fill_(0.0f);
+            // Move targets to CPU for indexing, create one-hot on CPU, then transfer
+            Tensor targets_cpu = targets.value();
+            if (targets.value().device() != Device::cpu()) {
+                targets_cpu = targets.value().to(Device::cpu());
+            }
 
-            // Fill one-hot encoding
-            auto* onehot_data = targets_onehot.data<float>();
-            auto* indices = targets.value().data<int64_t>();
+            // Create one-hot tensor on CPU first
+            std::vector<int64_t> onehot_shape = {batch_size, num_classes};
+            Tensor onehot_cpu(onehot_shape, DType::Float32, Device::cpu());
+            onehot_cpu.fill_(0.0f);
+
+            // Fill one-hot encoding on CPU
+            auto* onehot_data = onehot_cpu.data<float>();
+            auto* indices = targets_cpu.data<int64_t>();
             for (int64_t i = 0; i < batch_size; ++i) {
                 int64_t class_idx = indices[i];
                 onehot_data[i * num_classes + class_idx] = 1.0f;
             }
+
+            // Transfer to original device if needed
+            targets_onehot = (targets.value().device() == Device::cpu())
+                ? onehot_cpu
+                : onehot_cpu.to(targets.value().device());
         } else {
             // Already in the correct format
             targets_onehot = targets.value();
@@ -423,12 +434,25 @@ auto kl_divergence(
     auto result_shape = std::vector<int64_t>(targets_cast.tensor().shape().begin(),
                                              targets_cast.tensor().shape().end());
     DType compute_dtype = log_predictions_cast.tensor().dtype();
-    Tensor kl_tensor(result_shape, compute_dtype, targets_cast.tensor().device());
+    Device target_device = targets_cast.tensor().device();
+
+    // Move tensors to CPU for data access, compute, then transfer result
+    Tensor targets_cpu = targets_cast.tensor();
+    if (target_device != Device::cpu()) {
+        targets_cpu = targets_cast.tensor().to(Device::cpu());
+    }
+    Tensor log_preds_cpu = log_predictions_cast.tensor();
+    if (log_predictions_cast.tensor().device() != Device::cpu()) {
+        log_preds_cpu = log_predictions_cast.tensor().to(Device::cpu());
+    }
+
+    // Create result tensor on CPU
+    Tensor kl_cpu(result_shape, compute_dtype, Device::cpu());
 
     if (compute_dtype == DType::Float64) {
-        const double* p_data = targets_cast.tensor().data<double>();
-        const double* log_q_data = log_predictions_cast.tensor().data<double>();
-        double* kl_data = kl_tensor.data<double>();
+        const double* p_data = targets_cpu.data<double>();
+        const double* log_q_data = log_preds_cpu.data<double>();
+        double* kl_data = kl_cpu.data<double>();
 
         constexpr double EPSILON = 1e-10;
         for (int64_t i = 0; i < numel; ++i) {
@@ -437,16 +461,18 @@ auto kl_divergence(
 
             if (p > EPSILON) {
                 double log_p = std::log(p);
-                kl_data[i] = p * (log_p - log_q);
+                // Clamp to non-negative: KL divergence is always >= 0
+                // Small negative values can occur due to floating point precision
+                kl_data[i] = std::max(0.0, p * (log_p - log_q));
             } else {
                 kl_data[i] = 0.0;
             }
         }
     } else {
         // Float32 (including converted Float16)
-        const float* p_data = targets_cast.tensor().data<float>();
-        const float* log_q_data = log_predictions_cast.tensor().data<float>();
-        float* kl_data = kl_tensor.data<float>();
+        const float* p_data = targets_cpu.data<float>();
+        const float* log_q_data = log_preds_cpu.data<float>();
+        float* kl_data = kl_cpu.data<float>();
 
         constexpr float EPSILON = 1e-10f;
         for (int64_t i = 0; i < numel; ++i) {
@@ -455,12 +481,19 @@ auto kl_divergence(
 
             if (p > EPSILON) {
                 float log_p = std::log(p);
-                kl_data[i] = p * (log_p - log_q);
+                // Clamp to non-negative: KL divergence is always >= 0
+                // Small negative values can occur due to floating point precision
+                kl_data[i] = std::max(0.0f, p * (log_p - log_q));
             } else {
                 kl_data[i] = 0.0f;
             }
         }
     }
+
+    // Transfer result back to original device if needed
+    Tensor kl_tensor = (target_device == Device::cpu())
+        ? kl_cpu
+        : kl_cpu.to(target_device);
 
     Variable kl(kl_tensor, log_predictions_cast.requires_grad());
 

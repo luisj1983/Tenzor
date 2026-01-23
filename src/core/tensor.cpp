@@ -800,10 +800,23 @@ auto Tensor::fill_(float value) -> Tensor& {
         return *this;
     }
 
-    // Direct implementation - fill tensor data with the value
     const int64_t n = numel();
 
-    // Handle different dtypes
+    // For non-CPU devices, create a CPU tensor, fill it, then copy to this tensor
+    if (device().type != Device::Type::CPU) {
+        // Create CPU tensor with same shape and dtype
+        std::vector<int64_t> shape_vec(shape().begin(), shape().end());
+        Tensor cpu_tensor(shape_vec, dtype(), Device::cpu());
+        cpu_tensor.fill_(value);  // Recursively fill on CPU
+
+        // Copy the filled data to this tensor's device
+        Tensor filled = cpu_tensor.to(device());
+        // Copy the storage
+        impl_->storage = filled.impl_->storage;
+        return *this;
+    }
+
+    // Direct implementation for CPU tensors - fill data with the value
     switch (impl_->dtype) {
         case DType::Float32: {
             float* ptr = data<float>();

@@ -25,12 +25,15 @@ auto PruningMask::apply(const Tensor& weights) const -> Tensor {
 }
 
 auto PruningMask::compute_sparsity() const -> float {
-    // Convert to Float32 for processing if needed
-    Tensor mask_f32 = mask;
-    if (mask.dtype() != DType::Float32) {
-        mask_f32 = mask.to(DType::Float32);
+    // Move to CPU first if on GPU, then convert to Float32 for processing
+    Tensor mask_cpu = mask;
+    if (mask.device() != Device::cpu()) {
+        mask_cpu = mask.to(Device::cpu());
     }
-    auto mask_data = mask_f32.data<float>();
+    if (mask_cpu.dtype() != DType::Float32) {
+        mask_cpu = mask_cpu.to(DType::Float32);
+    }
+    auto mask_data = mask_cpu.data<float>();
     int64_t total = mask.numel();
     int64_t zeros = 0;
 
@@ -105,17 +108,20 @@ auto create_mask_from_importance(const Tensor& importance, float sparsity) -> Te
     int64_t total = importance.numel();
     int64_t num_to_prune = static_cast<int64_t>(total * sparsity);
 
-    // Convert to Float32 for processing if needed
-    Tensor imp_f32 = importance;
-    if (importance.dtype() != DType::Float32) {
-        imp_f32 = importance.to(DType::Float32);
+    // Move to CPU first if on GPU, then convert to Float32 for processing
+    Tensor imp_cpu = importance;
+    if (importance.device() != Device::cpu()) {
+        imp_cpu = importance.to(Device::cpu());
+    }
+    if (imp_cpu.dtype() != DType::Float32) {
+        imp_cpu = imp_cpu.to(DType::Float32);
     }
 
     // Copy importance scores to vector for sorting
     std::vector<std::pair<float, int64_t>> scores;
     scores.reserve(total);
 
-    auto imp_data = imp_f32.data<float>();
+    auto imp_data = imp_cpu.data<float>();
     for (int64_t i = 0; i < total; ++i) {
         scores.emplace_back(imp_data[i], i);
     }
@@ -176,12 +182,15 @@ auto prune_unstructured(
         for (auto& [name, param] : named_params) {
             if (name.find("weight") != std::string::npos) {
                 auto importance = compute_importance(param->tensor(), criterion);
-                // Convert to Float32 for data access
-                Tensor imp_f32 = importance;
-                if (importance.dtype() != DType::Float32) {
-                    imp_f32 = importance.to(DType::Float32);
+                // Move to CPU first if on GPU, then convert to Float32 for data access
+                Tensor imp_cpu = importance;
+                if (importance.device() != Device::cpu()) {
+                    imp_cpu = importance.to(Device::cpu());
                 }
-                auto imp_data = imp_f32.data<float>();
+                if (imp_cpu.dtype() != DType::Float32) {
+                    imp_cpu = imp_cpu.to(DType::Float32);
+                }
+                auto imp_data = imp_cpu.data<float>();
                 for (int64_t i = 0; i < importance.numel(); ++i) {
                     all_importances.push_back(imp_data[i]);
                 }
@@ -197,14 +206,17 @@ auto prune_unstructured(
         for (auto& [name, param] : named_params) {
             if (name.find("weight") != std::string::npos) {
                 auto importance = compute_importance(param->tensor(), criterion);
-                // Convert to Float32 for data access
-                Tensor imp_f32 = importance;
-                if (importance.dtype() != DType::Float32) {
-                    imp_f32 = importance.to(DType::Float32);
+                // Move to CPU first if on GPU, then convert to Float32 for data access
+                Tensor imp_cpu = importance;
+                if (importance.device() != Device::cpu()) {
+                    imp_cpu = importance.to(Device::cpu());
                 }
-                auto imp_data = imp_f32.data<float>();
+                if (imp_cpu.dtype() != DType::Float32) {
+                    imp_cpu = imp_cpu.to(DType::Float32);
+                }
+                auto imp_data = imp_cpu.data<float>();
 
-                // Create mask as Float32 first
+                // Create mask as Float32 on CPU first
                 auto shape_span = importance.shape();
                 std::vector<int64_t> shape_vec(shape_span.begin(), shape_span.end());
                 Tensor mask_f32(shape_vec, DType::Float32, Device::cpu());
@@ -330,12 +342,15 @@ auto prune_channels(
     std::vector<std::pair<float, int64_t>> channel_importance;
     channel_importance.reserve(out_channels);
 
-    // Convert to Float32 for data access
-    Tensor weight_f32 = weight;
-    if (weight.dtype() != DType::Float32) {
-        weight_f32 = weight.to(DType::Float32);
+    // Move to CPU first if on GPU, then convert to Float32 for data access
+    Tensor weight_cpu = weight;
+    if (weight.device() != Device::cpu()) {
+        weight_cpu = weight.to(Device::cpu());
     }
-    auto* weight_data = weight_f32.data<float>();
+    if (weight_cpu.dtype() != DType::Float32) {
+        weight_cpu = weight_cpu.to(DType::Float32);
+    }
+    auto* weight_data = weight_cpu.data<float>();
 
     for (int64_t oc = 0; oc < out_channels; ++oc) {
         float importance = 0.0f;
@@ -408,12 +423,15 @@ auto prune_channels(
         }
     }
 
-    // Copy weight data for kept channels (convert to Float32 for data access)
-    Tensor new_weight_f32 = new_weight;
-    if (new_weight.dtype() != DType::Float32) {
-        new_weight_f32 = new_weight.to(DType::Float32);
+    // Move new_weight to CPU first if on GPU, then convert to Float32 for data access
+    Tensor new_weight_cpu = new_weight;
+    if (new_weight.device() != Device::cpu()) {
+        new_weight_cpu = new_weight.to(Device::cpu());
     }
-    auto* new_weight_data = new_weight_f32.data<float>();
+    if (new_weight_cpu.dtype() != DType::Float32) {
+        new_weight_cpu = new_weight_cpu.to(DType::Float32);
+    }
+    auto* new_weight_data = new_weight_cpu.data<float>();
     int64_t channel_size = in_channels_per_group * kernel_h * kernel_w;
 
     for (int64_t i = 0; i < channels_to_keep; ++i) {
@@ -426,16 +444,24 @@ auto prune_channels(
 
     // Copy bias if present
     if (has_bias) {
-        Tensor bias_f32 = bias;
-        if (bias.dtype() != DType::Float32) {
-            bias_f32 = bias.to(DType::Float32);
+        // Move bias to CPU first if on GPU, then convert to Float32
+        Tensor bias_cpu = bias;
+        if (bias.device() != Device::cpu()) {
+            bias_cpu = bias.to(Device::cpu());
         }
-        Tensor new_bias_f32 = new_bias;
-        if (new_bias.dtype() != DType::Float32) {
-            new_bias_f32 = new_bias.to(DType::Float32);
+        if (bias_cpu.dtype() != DType::Float32) {
+            bias_cpu = bias_cpu.to(DType::Float32);
         }
-        auto* bias_data = bias_f32.data<float>();
-        auto* new_bias_data = new_bias_f32.data<float>();
+        // Move new_bias to CPU first if on GPU, then convert to Float32
+        Tensor new_bias_cpu = new_bias;
+        if (new_bias.device() != Device::cpu()) {
+            new_bias_cpu = new_bias.to(Device::cpu());
+        }
+        if (new_bias_cpu.dtype() != DType::Float32) {
+            new_bias_cpu = new_bias_cpu.to(DType::Float32);
+        }
+        auto* bias_data = bias_cpu.data<float>();
+        auto* new_bias_data = new_bias_cpu.data<float>();
 
         for (int64_t i = 0; i < channels_to_keep; ++i) {
             new_bias_data[i] = bias_data[keep_indices[i]];
@@ -497,12 +523,15 @@ auto prune_layers(
 
         // Compute layer importance using the specified criterion
         auto importance = compute_importance(param->tensor(), criterion);
-        // Convert to Float32 for data access
-        Tensor imp_f32 = importance;
-        if (importance.dtype() != DType::Float32) {
-            imp_f32 = importance.to(DType::Float32);
+        // Move to CPU first if on GPU, then convert to Float32 for data access
+        Tensor imp_cpu = importance;
+        if (importance.device() != Device::cpu()) {
+            imp_cpu = importance.to(Device::cpu());
         }
-        auto imp_data = imp_f32.data<float>();
+        if (imp_cpu.dtype() != DType::Float32) {
+            imp_cpu = imp_cpu.to(DType::Float32);
+        }
+        auto imp_data = imp_cpu.data<float>();
 
         // Aggregate importance across all weights in the layer
         float total_importance = 0.0f;
@@ -656,12 +685,15 @@ auto compute_sparsity(const std::shared_ptr<Module>& module) -> float {
     int64_t zero_params = 0;
 
     for (auto& param : params) {
-        // Convert to Float32 for data access
-        Tensor tensor_f32 = param->tensor();
-        if (param->tensor().dtype() != DType::Float32) {
-            tensor_f32 = param->tensor().to(DType::Float32);
+        // Move to CPU first if on GPU, then convert to Float32 for data access
+        Tensor tensor_cpu = param->tensor();
+        if (param->tensor().device() != Device::cpu()) {
+            tensor_cpu = param->tensor().to(Device::cpu());
         }
-        auto data = tensor_f32.data<float>();
+        if (tensor_cpu.dtype() != DType::Float32) {
+            tensor_cpu = tensor_cpu.to(DType::Float32);
+        }
+        auto data = tensor_cpu.data<float>();
         int64_t numel = param->tensor().numel();
         total_params += numel;
 
@@ -683,12 +715,15 @@ auto analyze_layer_sparsity(
 
     auto named_params = module->named_parameters();
     for (auto& [name, param] : named_params) {
-        // Convert to Float32 for data access
-        Tensor tensor_f32 = param->tensor();
-        if (param->tensor().dtype() != DType::Float32) {
-            tensor_f32 = param->tensor().to(DType::Float32);
+        // Move to CPU first if on GPU, then convert to Float32 for data access
+        Tensor tensor_cpu = param->tensor();
+        if (param->tensor().device() != Device::cpu()) {
+            tensor_cpu = param->tensor().to(Device::cpu());
         }
-        auto data = tensor_f32.data<float>();
+        if (tensor_cpu.dtype() != DType::Float32) {
+            tensor_cpu = tensor_cpu.to(DType::Float32);
+        }
+        auto data = tensor_cpu.data<float>();
         int64_t numel = param->tensor().numel();
         int64_t zeros = 0;
 
@@ -719,12 +754,15 @@ auto compute_compression_ratio(
     }
 
     for (auto& param : pruned_params) {
-        // Convert to Float32 for data access
-        Tensor tensor_f32 = param->tensor();
-        if (param->tensor().dtype() != DType::Float32) {
-            tensor_f32 = param->tensor().to(DType::Float32);
+        // Move to CPU first if on GPU, then convert to Float32 for data access
+        Tensor tensor_cpu = param->tensor();
+        if (param->tensor().device() != Device::cpu()) {
+            tensor_cpu = param->tensor().to(Device::cpu());
         }
-        auto data = tensor_f32.data<float>();
+        if (tensor_cpu.dtype() != DType::Float32) {
+            tensor_cpu = tensor_cpu.to(DType::Float32);
+        }
+        auto data = tensor_cpu.data<float>();
         for (int64_t i = 0; i < param->tensor().numel(); ++i) {
             if (std::abs(data[i]) >= 1e-8f) {
                 pruned_nonzero++;

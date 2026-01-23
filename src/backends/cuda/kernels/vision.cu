@@ -26,7 +26,10 @@ namespace cuda {
 inline void compute_launch_config_1d(int64_t n, dim3& grid, dim3& block) {
     const int block_size = 256;
     block = dim3(block_size, 1, 1);
-    grid = dim3((n + block_size - 1) / block_size, 1, 1);
+    // Ensure at least 1 block to avoid CUDA invalid argument error
+    // Grid-stride loop will naturally handle n=0 by not executing any iterations
+    int64_t num_blocks = (n + block_size - 1) / block_size;
+    grid = dim3(num_blocks > 0 ? static_cast<unsigned int>(num_blocks) : 1, 1, 1);
 }
 
 #define CUDA_KERNEL_LOOP(i, n) \
@@ -253,15 +256,16 @@ __global__ void interpolate_bilinear_kernel(
         float w10 = fy * (1.0f - fx);
         float w11 = fy * fx;
 
-        // Get pixel values
+        // Get pixel values and convert to float for interpolation
         int64_t base_idx = b * (channels * in_h * in_w) + c * (in_h * in_w);
-        T v00 = input[base_idx + y0 * in_w + x0];
-        T v01 = input[base_idx + y0 * in_w + x1];
-        T v10 = input[base_idx + y1 * in_w + x0];
-        T v11 = input[base_idx + y1 * in_w + x1];
+        float v00 = static_cast<float>(input[base_idx + y0 * in_w + x0]);
+        float v01 = static_cast<float>(input[base_idx + y0 * in_w + x1]);
+        float v10 = static_cast<float>(input[base_idx + y1 * in_w + x0]);
+        float v11 = static_cast<float>(input[base_idx + y1 * in_w + x1]);
 
-        // Interpolate
-        output[idx] = static_cast<T>(w00 * v00 + w01 * v01 + w10 * v10 + w11 * v11);
+        // Interpolate in float, then convert back
+        float result = w00 * v00 + w01 * v01 + w10 * v10 + w11 * v11;
+        output[idx] = static_cast<T>(result);
     }
 }
 
@@ -498,6 +502,12 @@ auto interpolate_cuda(const Tensor& input,
                 output.data<double>(),
                 batch, channels, in_h, in_w, out_h, out_w
             );
+        } else if (input.dtype() == DType::Float16) {
+            interpolate_nearest_kernel<__half><<<grid, block>>>(
+                reinterpret_cast<const __half*>(input.data_ptr()),
+                reinterpret_cast<__half*>(output.data_ptr()),
+                batch, channels, in_h, in_w, out_h, out_w
+            );
         } else {
             throw std::runtime_error("interpolate_cuda: Unsupported dtype");
         }
@@ -516,6 +526,13 @@ auto interpolate_cuda(const Tensor& input,
                 batch, channels, in_h, in_w, out_h, out_w,
                 align_corners
             );
+        } else if (input.dtype() == DType::Float16) {
+            interpolate_bilinear_kernel<__half><<<grid, block>>>(
+                reinterpret_cast<const __half*>(input.data_ptr()),
+                reinterpret_cast<__half*>(output.data_ptr()),
+                batch, channels, in_h, in_w, out_h, out_w,
+                align_corners
+            );
         } else {
             throw std::runtime_error("interpolate_cuda: Unsupported dtype");
         }
@@ -531,6 +548,13 @@ auto interpolate_cuda(const Tensor& input,
             interpolate_bicubic_kernel<double><<<grid, block>>>(
                 input.data<double>(),
                 output.data<double>(),
+                batch, channels, in_h, in_w, out_h, out_w,
+                align_corners
+            );
+        } else if (input.dtype() == DType::Float16) {
+            interpolate_bicubic_kernel<__half><<<grid, block>>>(
+                reinterpret_cast<const __half*>(input.data_ptr()),
+                reinterpret_cast<__half*>(output.data_ptr()),
                 batch, channels, in_h, in_w, out_h, out_w,
                 align_corners
             );

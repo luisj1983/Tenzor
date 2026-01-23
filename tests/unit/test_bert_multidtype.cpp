@@ -81,38 +81,48 @@ protected:
 
     // Helper: Create input token IDs (always Int64)
     auto create_input_ids() -> Variable {
-        Tensor input_ids({batch_size_, seq_len_}, DType::Int64, device());
+        // Create on CPU first, fill data, then transfer to target device
+        Tensor input_ids_cpu({batch_size_, seq_len_}, DType::Int64, Device::cpu());
 
         std::vector<int64_t> data(batch_size_ * seq_len_);
         for (size_t i = 0; i < data.size(); ++i) {
             data[i] = i % config_.vocab_size;
         }
-        std::copy(data.begin(), data.end(), input_ids.data<int64_t>());
+        std::copy(data.begin(), data.end(), input_ids_cpu.data<int64_t>());
 
+        Tensor input_ids = (device() == Device::cpu()) ? input_ids_cpu : input_ids_cpu.to(device());
         return Variable(input_ids, true);
     }
 
     // Helper: Create attention mask (in current dtype)
     auto create_attention_mask() -> Tensor {
-        Tensor mask({batch_size_, seq_len_}, dtype(), device());
+        // Create on CPU first, fill data, then transfer to target device
+        Tensor mask_cpu({batch_size_, seq_len_}, dtype(), Device::cpu());
 
         if (dtype() == DType::Float32) {
-            mask.fill_(1.0f);
+            auto* data = mask_cpu.data<float>();
+            for (int64_t i = 0; i < batch_size_ * seq_len_; ++i) {
+                data[i] = 1.0f;
+            }
         } else if (dtype() == DType::Float64) {
-            mask.fill_(1.0);
+            auto* data = mask_cpu.data<double>();
+            for (int64_t i = 0; i < batch_size_ * seq_len_; ++i) {
+                data[i] = 1.0;
+            }
         } else if (dtype() == DType::Float16) {
-            auto* data = mask.data<Float16>();
+            auto* data = mask_cpu.data<Float16>();
             for (int64_t i = 0; i < batch_size_ * seq_len_; ++i) {
                 data[i] = Float16(1.0f);
             }
         }
 
-        return mask;
+        return (device() == Device::cpu()) ? mask_cpu : mask_cpu.to(device());
     }
 
     // Helper: Create token type IDs (always Int64)
     auto create_token_type_ids() -> Variable {
-        Tensor type_ids({batch_size_, seq_len_}, DType::Int64, device());
+        // Create on CPU first, fill data, then transfer to target device
+        Tensor type_ids_cpu({batch_size_, seq_len_}, DType::Int64, Device::cpu());
 
         std::vector<int64_t> data(batch_size_ * seq_len_);
         for (int64_t b = 0; b < batch_size_; ++b) {
@@ -120,26 +130,35 @@ protected:
                 data[b * seq_len_ + i] = (i < seq_len_ / 2) ? 0 : 1;
             }
         }
-        std::copy(data.begin(), data.end(), type_ids.data<int64_t>());
+        std::copy(data.begin(), data.end(), type_ids_cpu.data<int64_t>());
 
+        Tensor type_ids = (device() == Device::cpu()) ? type_ids_cpu : type_ids_cpu.to(device());
         return Variable(type_ids, false);
     }
 
     // Helper: Create hidden states tensor
     auto create_hidden_states() -> Variable {
-        Tensor hidden_states({batch_size_, seq_len_, config_.hidden_size}, dtype(), device());
+        // Create on CPU first, fill data, then transfer to target device
+        Tensor hidden_cpu({batch_size_, seq_len_, config_.hidden_size}, dtype(), Device::cpu());
 
         if (dtype() == DType::Float32) {
-            hidden_states.fill_(0.1f);
+            auto* data = hidden_cpu.data<float>();
+            for (int64_t i = 0; i < batch_size_ * seq_len_ * config_.hidden_size; ++i) {
+                data[i] = 0.1f;
+            }
         } else if (dtype() == DType::Float64) {
-            hidden_states.fill_(0.1);
+            auto* data = hidden_cpu.data<double>();
+            for (int64_t i = 0; i < batch_size_ * seq_len_ * config_.hidden_size; ++i) {
+                data[i] = 0.1;
+            }
         } else if (dtype() == DType::Float16) {
-            auto* data = hidden_states.data<Float16>();
+            auto* data = hidden_cpu.data<Float16>();
             for (int64_t i = 0; i < batch_size_ * seq_len_ * config_.hidden_size; ++i) {
                 data[i] = Float16(0.1f);
             }
         }
 
+        Tensor hidden_states = (device() == Device::cpu()) ? hidden_cpu : hidden_cpu.to(device());
         return Variable(hidden_states, true);
     }
 
@@ -432,14 +451,15 @@ TEST_P(BertMultiDtypeTest, BertModelDifferentSequenceLengths) {
     model.to(device());
     if (dtype() != DType::Float32) model.to(dtype());
 
-    // Test with shorter sequence
+    // Test with shorter sequence - create on CPU first
     int64_t short_seq_len = 8;
-    Tensor short_ids({batch_size_, short_seq_len}, DType::Int64, device());
+    Tensor short_ids_cpu({batch_size_, short_seq_len}, DType::Int64, Device::cpu());
     std::vector<int64_t> short_data(batch_size_ * short_seq_len);
     for (size_t i = 0; i < short_data.size(); ++i) {
         short_data[i] = i % config_.vocab_size;
     }
-    std::copy(short_data.begin(), short_data.end(), short_ids.data<int64_t>());
+    std::copy(short_data.begin(), short_data.end(), short_ids_cpu.data<int64_t>());
+    Tensor short_ids = (device() == Device::cpu()) ? short_ids_cpu : short_ids_cpu.to(device());
 
     Variable short_input(short_ids, true);
     auto [short_seq, short_pool] = model.forward(short_input);
@@ -691,10 +711,11 @@ TEST_P(BertMultiDtypeTest, BertModelShortSequence) {
     if (dtype() != DType::Float32) model.to(dtype());
 
     int64_t short_seq = 4;
-    Tensor ids({1, short_seq}, DType::Int64, device());
+    Tensor ids_cpu({1, short_seq}, DType::Int64, Device::cpu());
     for (int64_t i = 0; i < short_seq; ++i) {
-        ids.data<int64_t>()[i] = i;
+        ids_cpu.data<int64_t>()[i] = i;
     }
+    Tensor ids = (device() == Device::cpu()) ? ids_cpu : ids_cpu.to(device());
 
     Variable input(ids, true);
     auto [seq_out, pool_out] = model.forward(input);
@@ -707,10 +728,11 @@ TEST_P(BertMultiDtypeTest, BertModelBatchSizeOne) {
     model.to(device());
     if (dtype() != DType::Float32) model.to(dtype());
 
-    Tensor ids({1, seq_len_}, DType::Int64, device());
+    Tensor ids_cpu({1, seq_len_}, DType::Int64, Device::cpu());
     for (int64_t i = 0; i < seq_len_; ++i) {
-        ids.data<int64_t>()[i] = i % config_.vocab_size;
+        ids_cpu.data<int64_t>()[i] = i % config_.vocab_size;
     }
+    Tensor ids = (device() == Device::cpu()) ? ids_cpu : ids_cpu.to(device());
 
     Variable input(ids, true);
     auto [seq_out, pool_out] = model.forward(input);
@@ -725,11 +747,12 @@ TEST_P(BertMultiDtypeTest, BertModelLargeBatch) {
     if (dtype() != DType::Float32) model.to(dtype());
 
     int64_t large_batch = 8;
-    Tensor ids({large_batch, seq_len_}, DType::Int64, device());
-    auto* data = ids.data<int64_t>();
+    Tensor ids_cpu({large_batch, seq_len_}, DType::Int64, Device::cpu());
+    auto* data = ids_cpu.data<int64_t>();
     for (int64_t i = 0; i < large_batch * seq_len_; ++i) {
         data[i] = i % config_.vocab_size;
     }
+    Tensor ids = (device() == Device::cpu()) ? ids_cpu : ids_cpu.to(device());
 
     Variable input(ids, true);
     auto [seq_out, pool_out] = model.forward(input);

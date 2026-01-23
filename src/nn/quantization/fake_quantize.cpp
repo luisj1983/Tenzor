@@ -229,10 +229,16 @@ auto QATHelper::convert_to_quantized(Module& model) -> std::shared_ptr<Module> {
 auto StraightThroughEstimator::forward(const Tensor& input, float quant_min, float quant_max)
     -> Tensor {
     // Clamp values to quantization range
-    // Work in Float32 for processing
+    // Remember original device
+    auto original_device = input.device();
+
+    // Work in Float32 on CPU for processing
     Tensor input_f32 = input;
     if (input.dtype() != DType::Float32) {
         input_f32 = input.to(DType::Float32);
+    }
+    if (input_f32.device() != Device::cpu()) {
+        input_f32 = input_f32.to(Device::cpu());
     }
     Tensor output = input_f32.clone();
     float* data = output.data<float>();
@@ -241,6 +247,9 @@ auto StraightThroughEstimator::forward(const Tensor& input, float quant_min, flo
     for (int64_t i = 0; i < n; ++i) {
         data[i] = std::clamp(data[i], quant_min, quant_max);
     }
+
+    // Move back to original device
+    output = output.to(original_device);
 
     // Convert back to original dtype if needed
     if (input.dtype() != DType::Float32) {
@@ -257,14 +266,23 @@ auto StraightThroughEstimator::backward(
     float quant_max
 ) -> Tensor {
     // Pass gradients through for values within range, zero otherwise
-    // Work in Float32 for processing
+    // Remember original device
+    auto original_device = grad_output.device();
+
+    // Work in Float32 on CPU for processing
     Tensor input_f32 = input;
     if (input.dtype() != DType::Float32) {
         input_f32 = input.to(DType::Float32);
     }
+    if (input_f32.device() != Device::cpu()) {
+        input_f32 = input_f32.to(Device::cpu());
+    }
     Tensor grad_f32 = grad_output;
     if (grad_output.dtype() != DType::Float32) {
         grad_f32 = grad_output.to(DType::Float32);
+    }
+    if (grad_f32.device() != Device::cpu()) {
+        grad_f32 = grad_f32.to(Device::cpu());
     }
     Tensor grad_input = grad_f32.clone();
     const float* input_data = input_f32.data<const float>();
@@ -276,6 +294,9 @@ auto StraightThroughEstimator::backward(
             grad_data[i] = 0.0f;  // Zero gradient for out-of-range values
         }
     }
+
+    // Move back to original device
+    grad_input = grad_input.to(original_device);
 
     // Convert back to original dtype if needed
     if (grad_output.dtype() != DType::Float32) {

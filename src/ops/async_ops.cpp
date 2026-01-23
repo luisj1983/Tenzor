@@ -22,7 +22,16 @@ namespace {
 
 // Simple tensor-based activation implementations
 auto tensor_relu(const Tensor& input) -> Tensor {
-    auto result = input.clone();
+    // Remember original device
+    auto original_device = input.device();
+
+    // Move to CPU for data access
+    Tensor input_cpu = input;
+    if (input_cpu.device() != Device::cpu()) {
+        input_cpu = input_cpu.to(Device::cpu());
+    }
+
+    auto result = input_cpu.clone();
     int64_t size = result.numel();
 
     if (input.dtype() == DType::Float32) {
@@ -37,16 +46,26 @@ auto tensor_relu(const Tensor& input) -> Tensor {
         }
     } else {
         // For Float16 and other types, convert to Float32, process, convert back
-        Tensor input_f32 = input.to(DType::Float32);
+        Tensor input_f32 = input_cpu.to(DType::Float32);
         auto result_f32 = tensor_relu(input_f32);
-        return result_f32.to(input.dtype());
+        result = result_f32.to(input.dtype());
     }
 
-    return result;
+    // Move back to original device
+    return result.to(original_device);
 }
 
 auto tensor_sigmoid(const Tensor& input) -> Tensor {
-    auto result = input.clone();
+    // Remember original device
+    auto original_device = input.device();
+
+    // Move to CPU for data access
+    Tensor input_cpu = input;
+    if (input_cpu.device() != Device::cpu()) {
+        input_cpu = input_cpu.to(Device::cpu());
+    }
+
+    auto result = input_cpu.clone();
     int64_t size = result.numel();
 
     if (input.dtype() == DType::Float32) {
@@ -61,12 +80,13 @@ auto tensor_sigmoid(const Tensor& input) -> Tensor {
         }
     } else {
         // For Float16 and other types, convert to Float32, process, convert back
-        Tensor input_f32 = input.to(DType::Float32);
+        Tensor input_f32 = input_cpu.to(DType::Float32);
         auto result_f32 = tensor_sigmoid(input_f32);
-        return result_f32.to(input.dtype());
+        result = result_f32.to(input.dtype());
     }
 
-    return result;
+    // Move back to original device
+    return result.to(original_device);
 }
 
 auto tensor_softmax(const Tensor& input, int64_t dim) -> Tensor {

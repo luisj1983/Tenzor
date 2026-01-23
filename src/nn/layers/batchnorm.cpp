@@ -312,6 +312,14 @@ auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
             if (running_var.device() != original_device) {
                 running_var = running_var.to(original_device);
             }
+            // Convert running stats to input dtype for kernel compatibility
+            DType input_dtype = input_work.dtype();
+            if (running_mean.dtype() != input_dtype) {
+                running_mean = running_mean.to(input_dtype);
+            }
+            if (running_var.dtype() != input_dtype) {
+                running_var = running_var.to(input_dtype);
+            }
 
             Tensor weight = cached_weight_->tensor();
             Tensor bias = cached_bias_->tensor();
@@ -320,6 +328,13 @@ auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
             }
             if (bias.device() != original_device) {
                 bias = bias.to(original_device);
+            }
+            // Convert weight/bias to input dtype for kernel compatibility
+            if (weight.dtype() != input_dtype) {
+                weight = weight.to(input_dtype);
+            }
+            if (bias.dtype() != input_dtype) {
+                bias = bias.to(input_dtype);
             }
 
             OpAttributes fused_attrs;
@@ -332,9 +347,9 @@ auto BatchNorm2d::forward_impl(const Variable& input) -> Variable {
             std::vector<Tensor> fused_inputs = {input_work, running_mean, running_var, weight, bias};
             std::vector<Tensor> fused_results = dispatch(OpId::BatchNorm2dFusedTraining, fused_inputs, fused_attrs);
 
-            // Update running stats from cuDNN
-            rm_var_ptr->tensor() = fused_results[1];
-            rv_var_ptr->tensor() = fused_results[2];
+            // Update running stats from cuDNN (store back as Float32 for storage efficiency)
+            rm_var_ptr->tensor() = fused_results[1].to(DType::Float32);
+            rv_var_ptr->tensor() = fused_results[2].to(DType::Float32);
             batch_mean = fused_results[3];  // saved_mean for backward
             batch_var = fused_results[4];   // saved_inv_var for backward
             num_batches_tracked_++;

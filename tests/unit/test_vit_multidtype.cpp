@@ -28,7 +28,41 @@ using namespace tenzor::testing;
 // Parameterized Test Fixture (Multi-Backend + Multi-DType)
 // ============================================================================
 
-class ViTMultiDtypeTest : public MultiBackendDTypeTest {};
+class ViTMultiDtypeTest : public MultiBackendDTypeTest {
+protected:
+    /**
+     * @brief Get reduced image size for memory-constrained configurations
+     * For CUDA on large models with Float64/Float32, use smaller images to fit in 8GB
+     * Sizes are chosen to be divisible by common patch sizes (14, 16)
+     */
+    int getImageSizeForMemory(int default_size, size_t param_count, bool needs_gradients, int patch_size = 16) const {
+        if (backend_name() != "cuda") return default_size;
+
+        bool is_float64 = (dtype() == DType::Float64);
+
+        // ViT-Huge (~632M params) with Float64 + gradients needs very small images
+        if (param_count > 500'000'000 && needs_gradients && is_float64) {
+            return 56;  // 56 is divisible by 14, gives 4x4=16 patches
+        }
+        // ViT-Huge (~632M params) with Float32 + gradients
+        if (param_count > 500'000'000 && needs_gradients) {
+            return 112;  // 112 is divisible by 14 and 16
+        }
+        // ViT-Huge forward-only with Float64
+        if (param_count > 500'000'000 && is_float64) {
+            return 112;  // Divisible by 14 and 16
+        }
+        // ViT-Large with gradients and Float64
+        if (param_count > 200'000'000 && needs_gradients && is_float64) {
+            return 160;  // Divisible by 16
+        }
+        // Large image sizes (512+) need reduction with Float64
+        if (default_size >= 512 && is_float64) {
+            return 384;  // Divisible by 16
+        }
+        return default_size;
+    }
+};
 
 // ============================================================================
 // PatchEmbedding Tests
@@ -297,11 +331,14 @@ TEST_P(ViTMultiDtypeTest, ViTLargePatch16ForwardShape) {
 }
 
 TEST_P(ViTMultiDtypeTest, ViTLargePatch16GradientFlow) {
-    auto model = ViT_Large_Patch16(10, false, 224);
+    // Use smaller image for Float64 CUDA to fit in 8GB
+    int img_size = getImageSizeForMemory(224, 307'000'000, true);
+
+    auto model = ViT_Large_Patch16(10, false, img_size);
     convert_model(model);
     model->train();
 
-    auto input = createInput({1, 3, 224, 224});
+    auto input = createInput({1, 3, img_size, img_size});
     auto output = model->forward(input);
     auto loss = tenzor::sum(output);
     loss.backward();
@@ -356,10 +393,13 @@ TEST_P(ViTMultiDtypeTest, ViTHugeConfig) {
 }
 
 TEST_P(ViTMultiDtypeTest, ViTHugePatch14ForwardShape) {
-    auto model = ViT_Huge_Patch14(1000, false, 224);
+    // Use smaller image for Float64 CUDA to fit in 8GB
+    int img_size = getImageSizeForMemory(224, 632'000'000, false);
+
+    auto model = ViT_Huge_Patch14(1000, false, img_size);
     convert_model(model);
 
-    auto input = createInput({1, 3, 224, 224});
+    auto input = createInput({1, 3, img_size, img_size});
     auto output = model->forward(input);
 
     expectShape(output.tensor(), {1, 1000});
@@ -367,11 +407,30 @@ TEST_P(ViTMultiDtypeTest, ViTHugePatch14ForwardShape) {
 }
 
 TEST_P(ViTMultiDtypeTest, ViTHugePatch14GradientFlow) {
-    auto model = ViT_Huge_Patch14(10, false, 224);
+    // For CUDA + Float64, use a reduced model (8 layers instead of 32)
+    // to fit in 8GB GPU memory (~160M params instead of 632M)
+    bool use_reduced_model = (backend_name() == "cuda" && dtype() == DType::Float64);
+    int img_size = use_reduced_model ? 112 : getImageSizeForMemory(224, 632'000'000, true);
+
+    std::shared_ptr<ViTForImageClassification> model;
+    if (use_reduced_model) {
+        // Create reduced ViT-Huge config: same hidden size but 8 layers
+        ViTConfig config;
+        config.image_size = img_size;
+        config.patch_size = 14;
+        config.hidden_size = 1280;        // Same as Huge
+        config.num_hidden_layers = 8;     // Reduced from 32 to 8
+        config.num_attention_heads = 16;  // Same as Huge
+        config.intermediate_size = 5120;  // Same as Huge
+        model = std::make_shared<ViTForImageClassification>(config, 10);
+    } else {
+        model = ViT_Huge_Patch14(10, false, img_size);
+    }
+
     convert_model(model);
     model->train();
 
-    auto input = createInput({1, 3, 224, 224});
+    auto input = createInput({1, 3, img_size, img_size});
     auto output = model->forward(input);
     auto loss = tenzor::sum(output);
     loss.backward();
@@ -398,10 +457,13 @@ TEST_P(ViTMultiDtypeTest, ViTHugePatch14ParameterCount) {
 // ============================================================================
 
 TEST_P(ViTMultiDtypeTest, ViTHugePatch16ForwardShape) {
-    auto model = ViT_Huge_Patch16(1000, false, 224);
+    // Use smaller image for Float64 CUDA to fit in 8GB
+    int img_size = getImageSizeForMemory(224, 632'000'000, false);
+
+    auto model = ViT_Huge_Patch16(1000, false, img_size);
     convert_model(model);
 
-    auto input = createInput({1, 3, 224, 224});
+    auto input = createInput({1, 3, img_size, img_size});
     auto output = model->forward(input);
 
     expectShape(output.tensor(), {1, 1000});
@@ -425,19 +487,22 @@ TEST_P(ViTMultiDtypeTest, ViTBaseDifferentImageSize384) {
 }
 
 TEST_P(ViTMultiDtypeTest, ViTBaseDifferentImageSize512) {
-    // Test with 512x512 input
-    auto model = ViT_Base_Patch16(1000, false, 512);
+    // Use smaller image for Float64 CUDA to fit in 8GB (384 instead of 512)
+    int img_size = getImageSizeForMemory(512, 86'000'000, false);
+
+    auto model = ViT_Base_Patch16(1000, false, img_size);
     convert_model(model);
 
-    auto input = createInput({1, 3, 512, 512});
+    auto input = createInput({1, 3, img_size, img_size});
     auto output = model->forward(input);
 
     expectShape(output.tensor(), {1, 1000});
     expectDType(output.tensor());
 
-    // Verify number of patches: 512/16 = 32, 32*32 = 1024 patches
-    auto config = ViTConfig::base_patch16(512);
-    EXPECT_EQ(config.num_patches(), 1024);
+    // Verify number of patches based on image size
+    auto config = ViTConfig::base_patch16(img_size);
+    int expected_patches = (img_size / 16) * (img_size / 16);
+    EXPECT_EQ(config.num_patches(), expected_patches);
 }
 
 // ============================================================================

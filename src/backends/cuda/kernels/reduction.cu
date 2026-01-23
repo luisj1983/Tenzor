@@ -62,6 +62,25 @@ __device__ __forceinline__ __half warp_reduce_sum(__half val) {
     return val;
 }
 
+// Helper for __half comparison (using __hgt and __hlt)
+__device__ __forceinline__ __half cuda_max_val(__half a, __half b) {
+    return __hgt(a, b) ? a : b;
+}
+
+__device__ __forceinline__ __half cuda_min_val(__half a, __half b) {
+    return __hlt(a, b) ? a : b;
+}
+
+// Get negative infinity for __half
+__device__ __forceinline__ __half half_neg_inf() {
+    return __ushort_as_half(0xFC00);  // -inf in half precision
+}
+
+// Get positive infinity for __half
+__device__ __forceinline__ __half half_pos_inf() {
+    return __ushort_as_half(0x7C00);  // +inf in half precision
+}
+
 template<typename T>
 __device__ __forceinline__ T warp_reduce_max(T val) {
     #pragma unroll
@@ -72,12 +91,34 @@ __device__ __forceinline__ T warp_reduce_max(T val) {
     return val;
 }
 
+// Specialization for __half
+template<>
+__device__ __forceinline__ __half warp_reduce_max(__half val) {
+    #pragma unroll
+    for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
+        __half other = __shfl_down_sync(0xffffffff, val, offset);
+        val = cuda_max_val(val, other);
+    }
+    return val;
+}
+
 template<typename T>
 __device__ __forceinline__ T warp_reduce_min(T val) {
     #pragma unroll
     for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
         T other = __shfl_down_sync(0xffffffff, val, offset);
         val = (val < other) ? val : other;
+    }
+    return val;
+}
+
+// Specialization for __half
+template<>
+__device__ __forceinline__ __half warp_reduce_min(__half val) {
+    #pragma unroll
+    for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
+        __half other = __shfl_down_sync(0xffffffff, val, offset);
+        val = cuda_min_val(val, other);
     }
     return val;
 }
@@ -206,6 +247,104 @@ __global__ void min_reduce_kernel(const T* input, T* output, int64_t n) {
             if (tid + offset < blockDim.x) {
                 T other = shared[tid + offset];
                 val = (val < other) ? val : other;
+            }
+        }
+        val = warp_reduce_min(val);
+
+        if (tid == 0) {
+            output[blockIdx.x] = val;
+        }
+    }
+}
+
+// ============================================================================
+// Half-precision specializations for max/min reduction kernels
+// ============================================================================
+
+// Specialized max_reduce_kernel for __half
+__global__ void max_reduce_kernel_half(const __half* input, __half* output, int64_t n) {
+    __shared__ __half shared[REDUCTION_BLOCK_SIZE];
+
+    int tid = threadIdx.x;
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t grid_size = blockDim.x * gridDim.x;
+
+    // Initialize with first element or negative infinity
+    __half thread_max = (idx < n) ? input[idx] : half_neg_inf();
+
+    // Grid-stride loop
+    for (int64_t i = idx + grid_size; i < n; i += grid_size) {
+        __half val = input[i];
+        thread_max = cuda_max_val(val, thread_max);
+    }
+
+    shared[tid] = thread_max;
+    __syncthreads();
+
+    // Block-level reduction
+    for (int stride = blockDim.x / 2; stride > WARP_SIZE; stride >>= 1) {
+        if (tid < stride) {
+            __half other = shared[tid + stride];
+            shared[tid] = cuda_max_val(shared[tid], other);
+        }
+        __syncthreads();
+    }
+
+    // Warp-level reduction
+    if (tid < WARP_SIZE) {
+        __half val = shared[tid];
+        #pragma unroll
+        for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
+            if (tid + offset < blockDim.x) {
+                __half other = shared[tid + offset];
+                val = cuda_max_val(val, other);
+            }
+        }
+        val = warp_reduce_max(val);
+
+        if (tid == 0) {
+            output[blockIdx.x] = val;
+        }
+    }
+}
+
+// Specialized min_reduce_kernel for __half
+__global__ void min_reduce_kernel_half(const __half* input, __half* output, int64_t n) {
+    __shared__ __half shared[REDUCTION_BLOCK_SIZE];
+
+    int tid = threadIdx.x;
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t grid_size = blockDim.x * gridDim.x;
+
+    // Initialize with first element or positive infinity
+    __half thread_min = (idx < n) ? input[idx] : half_pos_inf();
+
+    // Grid-stride loop
+    for (int64_t i = idx + grid_size; i < n; i += grid_size) {
+        __half val = input[i];
+        thread_min = cuda_min_val(val, thread_min);
+    }
+
+    shared[tid] = thread_min;
+    __syncthreads();
+
+    // Block-level reduction
+    for (int stride = blockDim.x / 2; stride > WARP_SIZE; stride >>= 1) {
+        if (tid < stride) {
+            __half other = shared[tid + stride];
+            shared[tid] = cuda_min_val(shared[tid], other);
+        }
+        __syncthreads();
+    }
+
+    // Warp-level reduction
+    if (tid < WARP_SIZE) {
+        __half val = shared[tid];
+        #pragma unroll
+        for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
+            if (tid + offset < blockDim.x) {
+                __half other = shared[tid + offset];
+                val = cuda_min_val(val, other);
             }
         }
         val = warp_reduce_min(val);
@@ -361,6 +500,104 @@ __global__ void min_along_dim_kernel(
         }
         T val = input[in_idx];
         min_val = (val < min_val) ? val : min_val;
+    }
+
+    output[out_idx] = min_val;
+}
+
+// Specialized max_along_dim_kernel for __half
+__global__ void max_along_dim_kernel_half(
+    const __half* input,
+    __half* output,
+    const int64_t* input_shape,
+    const int64_t* input_strides,
+    int64_t ndim,
+    int64_t dim,
+    int64_t output_size,
+    int64_t dim_size
+) {
+    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (out_idx >= output_size) return;
+
+    // Compute multi-dimensional indices
+    int64_t indices[8];
+    int64_t tmp = out_idx;
+
+    for (int64_t d = 0; d < ndim; d++) {
+        if (d == dim) {
+            indices[d] = 0;
+            continue;
+        }
+        indices[d] = tmp % input_shape[d];
+        tmp /= input_shape[d];
+    }
+
+    // Find max along the reduction dimension
+    indices[dim] = 0;
+    int64_t in_idx = 0;
+    for (int64_t d = 0; d < ndim; d++) {
+        in_idx += indices[d] * input_strides[d];
+    }
+    __half max_val = input[in_idx];
+
+    for (int64_t i = 1; i < dim_size; i++) {
+        indices[dim] = i;
+        in_idx = 0;
+        for (int64_t d = 0; d < ndim; d++) {
+            in_idx += indices[d] * input_strides[d];
+        }
+        __half val = input[in_idx];
+        max_val = cuda_max_val(val, max_val);
+    }
+
+    output[out_idx] = max_val;
+}
+
+// Specialized min_along_dim_kernel for __half
+__global__ void min_along_dim_kernel_half(
+    const __half* input,
+    __half* output,
+    const int64_t* input_shape,
+    const int64_t* input_strides,
+    int64_t ndim,
+    int64_t dim,
+    int64_t output_size,
+    int64_t dim_size
+) {
+    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (out_idx >= output_size) return;
+
+    // Compute multi-dimensional indices
+    int64_t indices[8];
+    int64_t tmp = out_idx;
+
+    for (int64_t d = 0; d < ndim; d++) {
+        if (d == dim) {
+            indices[d] = 0;
+            continue;
+        }
+        indices[d] = tmp % input_shape[d];
+        tmp /= input_shape[d];
+    }
+
+    // Find min along the reduction dimension
+    indices[dim] = 0;
+    int64_t in_idx = 0;
+    for (int64_t d = 0; d < ndim; d++) {
+        in_idx += indices[d] * input_strides[d];
+    }
+    __half min_val = input[in_idx];
+
+    for (int64_t i = 1; i < dim_size; i++) {
+        indices[dim] = i;
+        in_idx = 0;
+        for (int64_t d = 0; d < ndim; d++) {
+            in_idx += indices[d] * input_strides[d];
+        }
+        __half val = input[in_idx];
+        min_val = cuda_min_val(val, min_val);
     }
 
     output[out_idx] = min_val;
@@ -638,6 +875,140 @@ static void launch_dim_reduction_min(
 }
 
 // ============================================================================
+// Half-precision specialized launch functions
+// ============================================================================
+
+static void launch_full_reduction_max_half(const __half* d_input, __half* d_output, int64_t n, cudaStream_t stream = nullptr) {
+    if (n == 0) {
+        throw std::runtime_error("max: input tensor is empty");
+    }
+
+    if (n == 1) {
+        cudaMemcpyAsync(d_output, d_input, sizeof(__half), cudaMemcpyDeviceToDevice, stream);
+        return;
+    }
+
+    int num_blocks = std::min<int>((n + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE, 1024);
+
+    if (num_blocks == 1) {
+        max_reduce_kernel_half<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
+        cudaStreamSynchronize(stream);
+    } else {
+        __half* d_temp;
+        cudaMalloc(&d_temp, num_blocks * sizeof(__half));
+        max_reduce_kernel_half<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
+        max_reduce_kernel_half<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, d_output, num_blocks);
+
+        cudaStreamSynchronize(stream);
+        cudaFree(d_temp);
+    }
+}
+
+static void launch_full_reduction_min_half(const __half* d_input, __half* d_output, int64_t n, cudaStream_t stream = nullptr) {
+    if (n == 0) {
+        throw std::runtime_error("min: input tensor is empty");
+    }
+
+    if (n == 1) {
+        cudaMemcpyAsync(d_output, d_input, sizeof(__half), cudaMemcpyDeviceToDevice, stream);
+        return;
+    }
+
+    int num_blocks = std::min<int>((n + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE, 1024);
+
+    if (num_blocks == 1) {
+        min_reduce_kernel_half<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
+        cudaStreamSynchronize(stream);
+    } else {
+        __half* d_temp;
+        cudaMalloc(&d_temp, num_blocks * sizeof(__half));
+        min_reduce_kernel_half<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
+        min_reduce_kernel_half<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, d_output, num_blocks);
+
+        cudaStreamSynchronize(stream);
+        cudaFree(d_temp);
+    }
+}
+
+static void launch_dim_reduction_max_half(
+    const __half* d_input,
+    __half* d_output,
+    const std::vector<int64_t>& input_shape,
+    const std::vector<int64_t>& input_strides,
+    int64_t dim
+) {
+    const int64_t ndim = input_shape.size();
+    const int64_t dim_size = input_shape[dim];
+
+    int64_t output_size = 1;
+    for (int64_t i = 0; i < ndim; i++) {
+        if (i != dim) {
+            output_size *= input_shape[i];
+        }
+    }
+
+    if (output_size == 0 || dim_size == 0) {
+        return;
+    }
+
+    int64_t* d_shape;
+    int64_t* d_strides;
+    cudaMalloc(&d_shape, ndim * sizeof(int64_t));
+    cudaMalloc(&d_strides, ndim * sizeof(int64_t));
+    cudaMemcpy(d_shape, input_shape.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_strides, input_strides.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice);
+
+    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+    max_along_dim_kernel_half<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
+        d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size
+    );
+
+    cudaDeviceSynchronize();
+
+    cudaFree(d_shape);
+    cudaFree(d_strides);
+}
+
+static void launch_dim_reduction_min_half(
+    const __half* d_input,
+    __half* d_output,
+    const std::vector<int64_t>& input_shape,
+    const std::vector<int64_t>& input_strides,
+    int64_t dim
+) {
+    const int64_t ndim = input_shape.size();
+    const int64_t dim_size = input_shape[dim];
+
+    int64_t output_size = 1;
+    for (int64_t i = 0; i < ndim; i++) {
+        if (i != dim) {
+            output_size *= input_shape[i];
+        }
+    }
+
+    if (output_size == 0 || dim_size == 0) {
+        return;
+    }
+
+    int64_t* d_shape;
+    int64_t* d_strides;
+    cudaMalloc(&d_shape, ndim * sizeof(int64_t));
+    cudaMalloc(&d_strides, ndim * sizeof(int64_t));
+    cudaMemcpy(d_shape, input_shape.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_strides, input_strides.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice);
+
+    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+    min_along_dim_kernel_half<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
+        d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size
+    );
+
+    cudaDeviceSynchronize();
+
+    cudaFree(d_shape);
+    cudaFree(d_strides);
+}
+
+// ============================================================================
 // Public API
 // ============================================================================
 
@@ -800,7 +1171,9 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t st
     }
 
     if (count == 0) {
-        throw std::runtime_error("mean: cannot compute mean of empty tensor");
+        // Return 0 for mean of empty tensor - this is practical for loss computation
+        // in object detection where no samples may be selected
+        return sum_result;  // sum_result is already 0 for empty tensor
     }
 
     // Divide by count (in-place) using proper CUDA kernel
@@ -913,6 +1286,22 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
             }
             break;
         }
+        case DType::Float16: {
+            auto* input_data = reinterpret_cast<const __half*>(input.data_ptr());
+            auto* output_data = reinterpret_cast<__half*>(output.data_ptr());
+
+            if (dim < 0) {
+                launch_full_reduction_max_half(input_data, output_data, input.numel(), stream);
+            } else {
+                launch_dim_reduction_max_half(
+                    input_data, output_data,
+                    std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                    std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                    dim
+                );
+            }
+            break;
+        }
         default:
             throw std::runtime_error("max: unsupported dtype");
     }
@@ -997,6 +1386,22 @@ auto min_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t str
                 launch_full_reduction_min(input_data, output_data, input.numel(), stream);
             } else {
                 launch_dim_reduction_min(
+                    input_data, output_data,
+                    std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                    std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                    dim
+                );
+            }
+            break;
+        }
+        case DType::Float16: {
+            auto* input_data = reinterpret_cast<const __half*>(input.data_ptr());
+            auto* output_data = reinterpret_cast<__half*>(output.data_ptr());
+
+            if (dim < 0) {
+                launch_full_reduction_min_half(input_data, output_data, input.numel(), stream);
+            } else {
+                launch_dim_reduction_min_half(
                     input_data, output_data,
                     std::vector<int64_t>(input_shape.begin(), input_shape.end()),
                     std::vector<int64_t>(input_strides.begin(), input_strides.end()),
@@ -1249,6 +1654,232 @@ __global__ void argmin_along_dim_kernel(
     output[out_idx] = min_idx;
 }
 
+// ============================================================================
+// Half-precision specializations for argmax/argmin kernels
+// ============================================================================
+
+// Specialized argmax_full_kernel for __half
+__global__ void argmax_full_kernel_half(const __half* input, int64_t* output, int64_t n) {
+    __shared__ __half shared_vals[REDUCTION_BLOCK_SIZE];
+    __shared__ int64_t shared_idxs[REDUCTION_BLOCK_SIZE];
+
+    int tid = threadIdx.x;
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t grid_size = blockDim.x * gridDim.x;
+
+    // Initialize with first element or negative infinity
+    __half thread_max = (idx < n) ? input[idx] : half_neg_inf();
+    int64_t thread_idx = (idx < n) ? idx : 0;
+
+    // Grid-stride loop to find local maximum
+    for (int64_t i = idx + grid_size; i < n; i += grid_size) {
+        __half val = input[i];
+        if (__hgt(val, thread_max)) {
+            thread_max = val;
+            thread_idx = i;
+        }
+    }
+
+    shared_vals[tid] = thread_max;
+    shared_idxs[tid] = thread_idx;
+    __syncthreads();
+
+    // Block-level reduction
+    for (int stride = blockDim.x / 2; stride >= 32; stride >>= 1) {
+        if (tid < stride) {
+            if (__hgt(shared_vals[tid + stride], shared_vals[tid])) {
+                shared_vals[tid] = shared_vals[tid + stride];
+                shared_idxs[tid] = shared_idxs[tid + stride];
+            }
+        }
+        __syncthreads();
+    }
+
+    // Warp-level reduction (last 32 threads)
+    if (tid < 32) {
+        __half val = shared_vals[tid];
+        int64_t val_idx = shared_idxs[tid];
+
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset /= 2) {
+            __half other_val = __shfl_down_sync(0xffffffff, val, offset);
+            int64_t other_idx = __shfl_down_sync(0xffffffff, val_idx, offset);
+            if (__hgt(other_val, val)) {
+                val = other_val;
+                val_idx = other_idx;
+            }
+        }
+
+        if (tid == 0) {
+            output[blockIdx.x] = val_idx;
+        }
+    }
+}
+
+// Specialized argmin_full_kernel for __half
+__global__ void argmin_full_kernel_half(const __half* input, int64_t* output, int64_t n) {
+    __shared__ __half shared_vals[REDUCTION_BLOCK_SIZE];
+    __shared__ int64_t shared_idxs[REDUCTION_BLOCK_SIZE];
+
+    int tid = threadIdx.x;
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t grid_size = blockDim.x * gridDim.x;
+
+    // Initialize with first element or positive infinity
+    __half thread_min = (idx < n) ? input[idx] : half_pos_inf();
+    int64_t thread_idx = (idx < n) ? idx : 0;
+
+    // Grid-stride loop to find local minimum
+    for (int64_t i = idx + grid_size; i < n; i += grid_size) {
+        __half val = input[i];
+        if (__hlt(val, thread_min)) {
+            thread_min = val;
+            thread_idx = i;
+        }
+    }
+
+    shared_vals[tid] = thread_min;
+    shared_idxs[tid] = thread_idx;
+    __syncthreads();
+
+    // Block-level reduction
+    for (int stride = blockDim.x / 2; stride >= 32; stride >>= 1) {
+        if (tid < stride) {
+            if (__hlt(shared_vals[tid + stride], shared_vals[tid])) {
+                shared_vals[tid] = shared_vals[tid + stride];
+                shared_idxs[tid] = shared_idxs[tid + stride];
+            }
+        }
+        __syncthreads();
+    }
+
+    // Warp-level reduction (last 32 threads)
+    if (tid < 32) {
+        __half val = shared_vals[tid];
+        int64_t val_idx = shared_idxs[tid];
+
+        #pragma unroll
+        for (int offset = 16; offset > 0; offset /= 2) {
+            __half other_val = __shfl_down_sync(0xffffffff, val, offset);
+            int64_t other_idx = __shfl_down_sync(0xffffffff, val_idx, offset);
+            if (__hlt(other_val, val)) {
+                val = other_val;
+                val_idx = other_idx;
+            }
+        }
+
+        if (tid == 0) {
+            output[blockIdx.x] = val_idx;
+        }
+    }
+}
+
+// Specialized argmax_along_dim_kernel for __half
+__global__ void argmax_along_dim_kernel_half(
+    const __half* input,
+    int64_t* output,
+    const int64_t* input_shape,
+    const int64_t* input_strides,
+    int64_t ndim,
+    int64_t dim,
+    int64_t output_size,
+    int64_t dim_size
+) {
+    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (out_idx >= output_size) return;
+
+    // Compute multi-dimensional indices
+    int64_t indices[8];
+    int64_t tmp = out_idx;
+
+    for (int64_t d = 0; d < ndim; d++) {
+        if (d == dim) {
+            indices[d] = 0;
+            continue;
+        }
+        indices[d] = tmp % input_shape[d];
+        tmp /= input_shape[d];
+    }
+
+    // Find argmax along the reduction dimension
+    indices[dim] = 0;
+    int64_t in_idx = 0;
+    for (int64_t d = 0; d < ndim; d++) {
+        in_idx += indices[d] * input_strides[d];
+    }
+    __half max_val = input[in_idx];
+    int64_t max_idx = 0;
+
+    for (int64_t i = 1; i < dim_size; i++) {
+        indices[dim] = i;
+        in_idx = 0;
+        for (int64_t d = 0; d < ndim; d++) {
+            in_idx += indices[d] * input_strides[d];
+        }
+        __half val = input[in_idx];
+        if (__hgt(val, max_val)) {
+            max_val = val;
+            max_idx = i;
+        }
+    }
+
+    output[out_idx] = max_idx;
+}
+
+// Specialized argmin_along_dim_kernel for __half
+__global__ void argmin_along_dim_kernel_half(
+    const __half* input,
+    int64_t* output,
+    const int64_t* input_shape,
+    const int64_t* input_strides,
+    int64_t ndim,
+    int64_t dim,
+    int64_t output_size,
+    int64_t dim_size
+) {
+    int64_t out_idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (out_idx >= output_size) return;
+
+    // Compute multi-dimensional indices
+    int64_t indices[8];
+    int64_t tmp = out_idx;
+
+    for (int64_t d = 0; d < ndim; d++) {
+        if (d == dim) {
+            indices[d] = 0;
+            continue;
+        }
+        indices[d] = tmp % input_shape[d];
+        tmp /= input_shape[d];
+    }
+
+    // Find argmin along the reduction dimension
+    indices[dim] = 0;
+    int64_t in_idx = 0;
+    for (int64_t d = 0; d < ndim; d++) {
+        in_idx += indices[d] * input_strides[d];
+    }
+    __half min_val = input[in_idx];
+    int64_t min_idx = 0;
+
+    for (int64_t i = 1; i < dim_size; i++) {
+        indices[dim] = i;
+        in_idx = 0;
+        for (int64_t d = 0; d < ndim; d++) {
+            in_idx += indices[d] * input_strides[d];
+        }
+        __half val = input[in_idx];
+        if (__hlt(val, min_val)) {
+            min_val = val;
+            min_idx = i;
+        }
+    }
+
+    output[out_idx] = min_idx;
+}
+
 // Helper function to launch argmax reduction
 template<typename T>
 static void launch_full_argmax(const T* d_input, int64_t* d_output, int64_t n, cudaStream_t stream = nullptr) {
@@ -1438,6 +2069,188 @@ static void launch_dim_argmin(
     cudaFree(d_strides);
 }
 
+// ============================================================================
+// Half-precision specialized launch functions for argmax/argmin
+// ============================================================================
+
+static void launch_full_argmax_half(const __half* d_input, int64_t* d_output, int64_t n, cudaStream_t stream = nullptr) {
+    if (n == 0) {
+        throw std::runtime_error("argmax: input tensor is empty");
+    }
+
+    if (n == 1) {
+        int64_t zero = 0;
+        cudaMemcpyAsync(d_output, &zero, sizeof(int64_t), cudaMemcpyHostToDevice, stream);
+        return;
+    }
+
+    int num_blocks = std::min<int>((n + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE, 1024);
+
+    if (num_blocks == 1) {
+        argmax_full_kernel_half<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
+        cudaStreamSynchronize(stream);
+    } else {
+        // Two-phase reduction
+        int64_t* d_temp;
+        cudaMalloc(&d_temp, num_blocks * sizeof(int64_t));
+        argmax_full_kernel_half<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
+
+        // Second pass: find argmax of argmaxes
+        std::vector<int64_t> temp_idxs(num_blocks);
+        cudaMemcpyAsync(temp_idxs.data(), d_temp, num_blocks * sizeof(int64_t), cudaMemcpyDeviceToHost, stream);
+        cudaStreamSynchronize(stream);
+
+        // Find the true maximum among the block results
+        std::vector<__half> temp_vals(num_blocks);
+        for (int i = 0; i < num_blocks; i++) {
+            cudaMemcpyAsync(&temp_vals[i], &d_input[temp_idxs[i]], sizeof(__half), cudaMemcpyDeviceToHost, stream);
+        }
+        cudaStreamSynchronize(stream);
+
+        __half max_val = temp_vals[0];
+        int64_t max_idx = temp_idxs[0];
+        for (int i = 1; i < num_blocks; i++) {
+            if (__half2float(temp_vals[i]) > __half2float(max_val)) {
+                max_val = temp_vals[i];
+                max_idx = temp_idxs[i];
+            }
+        }
+
+        cudaMemcpyAsync(d_output, &max_idx, sizeof(int64_t), cudaMemcpyHostToDevice, stream);
+        cudaStreamSynchronize(stream);
+        cudaFree(d_temp);
+    }
+}
+
+static void launch_full_argmin_half(const __half* d_input, int64_t* d_output, int64_t n, cudaStream_t stream = nullptr) {
+    if (n == 0) {
+        throw std::runtime_error("argmin: input tensor is empty");
+    }
+
+    if (n == 1) {
+        int64_t zero = 0;
+        cudaMemcpyAsync(d_output, &zero, sizeof(int64_t), cudaMemcpyHostToDevice, stream);
+        return;
+    }
+
+    int num_blocks = std::min<int>((n + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE, 1024);
+
+    if (num_blocks == 1) {
+        argmin_full_kernel_half<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
+        cudaStreamSynchronize(stream);
+    } else {
+        // Two-phase reduction
+        int64_t* d_temp;
+        cudaMalloc(&d_temp, num_blocks * sizeof(int64_t));
+        argmin_full_kernel_half<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
+
+        // Second pass: find argmin of argmins
+        std::vector<int64_t> temp_idxs(num_blocks);
+        cudaMemcpyAsync(temp_idxs.data(), d_temp, num_blocks * sizeof(int64_t), cudaMemcpyDeviceToHost, stream);
+        cudaStreamSynchronize(stream);
+
+        // Find the true minimum among the block results
+        std::vector<__half> temp_vals(num_blocks);
+        for (int i = 0; i < num_blocks; i++) {
+            cudaMemcpyAsync(&temp_vals[i], &d_input[temp_idxs[i]], sizeof(__half), cudaMemcpyDeviceToHost, stream);
+        }
+        cudaStreamSynchronize(stream);
+
+        __half min_val = temp_vals[0];
+        int64_t min_idx = temp_idxs[0];
+        for (int i = 1; i < num_blocks; i++) {
+            if (__half2float(temp_vals[i]) < __half2float(min_val)) {
+                min_val = temp_vals[i];
+                min_idx = temp_idxs[i];
+            }
+        }
+
+        cudaMemcpyAsync(d_output, &min_idx, sizeof(int64_t), cudaMemcpyHostToDevice, stream);
+        cudaStreamSynchronize(stream);
+        cudaFree(d_temp);
+    }
+}
+
+static void launch_dim_argmax_half(
+    const __half* d_input,
+    int64_t* d_output,
+    const std::vector<int64_t>& input_shape,
+    const std::vector<int64_t>& input_strides,
+    int64_t dim
+) {
+    const int64_t ndim = input_shape.size();
+    const int64_t dim_size = input_shape[dim];
+
+    int64_t output_size = 1;
+    for (int64_t i = 0; i < ndim; i++) {
+        if (i != dim) {
+            output_size *= input_shape[i];
+        }
+    }
+
+    if (output_size == 0 || dim_size == 0) {
+        return;
+    }
+
+    // Copy shape and strides to device
+    int64_t* d_shape;
+    int64_t* d_strides;
+    cudaMalloc(&d_shape, ndim * sizeof(int64_t));
+    cudaMalloc(&d_strides, ndim * sizeof(int64_t));
+    cudaMemcpy(d_shape, input_shape.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_strides, input_strides.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice);
+
+    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+    argmax_along_dim_kernel_half<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
+        d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size
+    );
+
+    cudaDeviceSynchronize();
+
+    cudaFree(d_shape);
+    cudaFree(d_strides);
+}
+
+static void launch_dim_argmin_half(
+    const __half* d_input,
+    int64_t* d_output,
+    const std::vector<int64_t>& input_shape,
+    const std::vector<int64_t>& input_strides,
+    int64_t dim
+) {
+    const int64_t ndim = input_shape.size();
+    const int64_t dim_size = input_shape[dim];
+
+    int64_t output_size = 1;
+    for (int64_t i = 0; i < ndim; i++) {
+        if (i != dim) {
+            output_size *= input_shape[i];
+        }
+    }
+
+    if (output_size == 0 || dim_size == 0) {
+        return;
+    }
+
+    // Copy shape and strides to device
+    int64_t* d_shape;
+    int64_t* d_strides;
+    cudaMalloc(&d_shape, ndim * sizeof(int64_t));
+    cudaMalloc(&d_strides, ndim * sizeof(int64_t));
+    cudaMemcpy(d_shape, input_shape.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_strides, input_strides.data(), ndim * sizeof(int64_t), cudaMemcpyHostToDevice);
+
+    int num_blocks = (output_size + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE;
+    argmin_along_dim_kernel_half<<<num_blocks, REDUCTION_BLOCK_SIZE>>>(
+        d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size
+    );
+
+    cudaDeviceSynchronize();
+
+    cudaFree(d_shape);
+    cudaFree(d_strides);
+}
+
 // Public API for argmax
 auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t stream) -> Tensor {
     const auto dtype = input.dtype();
@@ -1527,8 +2340,24 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t 
             }
             break;
         }
+        case DType::Float16: {
+            auto* input_data = reinterpret_cast<const __half*>(input.data_ptr());
+            auto* output_data = output.data<int64_t>();
+
+            if (dim == INT64_MIN) {
+                launch_full_argmax_half(input_data, output_data, input.numel(), stream);
+            } else {
+                launch_dim_argmax_half(
+                    input_data, output_data,
+                    std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                    std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                    normalized_dim
+                );
+            }
+            break;
+        }
         default:
-            throw std::runtime_error("argmax: only Float32, Float64, Int32, and Int64 are supported");
+            throw std::runtime_error("argmax: only Float32, Float64, Float16, Int32, and Int64 are supported");
     }
 
     cudaStreamSynchronize(stream);
@@ -1630,8 +2459,24 @@ auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t 
             }
             break;
         }
+        case DType::Float16: {
+            auto* input_data = reinterpret_cast<const __half*>(input.data_ptr());
+            auto* output_data = output.data<int64_t>();
+
+            if (dim == INT64_MIN) {
+                launch_full_argmin_half(input_data, output_data, input.numel(), stream);
+            } else {
+                launch_dim_argmin_half(
+                    input_data, output_data,
+                    std::vector<int64_t>(input_shape.begin(), input_shape.end()),
+                    std::vector<int64_t>(input_strides.begin(), input_strides.end()),
+                    normalized_dim
+                );
+            }
+            break;
+        }
         default:
-            throw std::runtime_error("argmin: only Float32, Float64, Int32, and Int64 are supported");
+            throw std::runtime_error("argmin: only Float32, Float64, Float16, Int32, and Int64 are supported");
     }
 
     cudaStreamSynchronize(stream);

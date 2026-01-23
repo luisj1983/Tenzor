@@ -152,32 +152,24 @@ auto ViTEmbeddings::forward_impl(const Variable& pixel_values) -> Variable {
 
     // Expand [CLS] token for batch: [1, 1, hidden_size] -> [batch, 1, hidden_size]
     // We need to repeat the [CLS] token for each sample in the batch
-    auto cls_shape = cls_token_.shape();
-    Tensor cls_expanded({batch_size, 1, config_.hidden_size},
-                        dtype, pixel_values.tensor().device());
+    // Use tensor operations to support both CPU and GPU devices
 
-    // Copy [CLS] token data for each batch (using template lambda for multi-dtype)
-    auto copy_cls_data = [&]<typename T>() {
-        const T* cls_data = cls_token_.tensor().data<T>();
-        T* expanded_data = cls_expanded.data<T>();
-        for (int64_t b = 0; b < batch_size; ++b) {
-            std::copy(cls_data, cls_data + config_.hidden_size,
-                      expanded_data + b * config_.hidden_size);
-        }
-    };
-
-    if (dtype == DType::Float32) {
-        copy_cls_data.template operator()<float>();
-    } else if (dtype == DType::Float64) {
-        copy_cls_data.template operator()<double>();
-    } else if (dtype == DType::Float16) {
-        copy_cls_data.template operator()<Float16>();
-    } else {
-        throw std::runtime_error("Unsupported dtype for ViTEmbeddings");
+    // First, ensure cls_token is on the same device and dtype as the input
+    Tensor cls_tensor = cls_token_.tensor();
+    if (cls_tensor.device() != pixel_values.tensor().device()) {
+        cls_tensor = cls_tensor.to(pixel_values.tensor().device());
+    }
+    if (cls_tensor.dtype() != dtype) {
+        cls_tensor = cls_tensor.to(dtype);
     }
 
-    Variable cls_tokens(cls_expanded, true);
-    cls_tokens.set_grad_fn(cls_token_.grad_fn());  // Share gradient function
+    // Expand the [CLS] token to batch size using repeat (tensor-level op)
+    // [1, 1, hidden_size] -> [batch, 1, hidden_size]
+    Tensor cls_expanded = tenzor::repeat(cls_tensor, {batch_size, 1, 1});
+    Variable cls_tokens(cls_expanded, cls_token_.requires_grad());
+    if (cls_token_.grad_fn()) {
+        cls_tokens.set_grad_fn(cls_token_.grad_fn());
+    }
 
     // Concatenate [CLS] token with patch embeddings using autograd cat
     // This maintains the gradient chain for proper backpropagation
@@ -343,31 +335,41 @@ auto ViTForImageClassification::forward_impl(const Variable& pixel_values) -> Va
     int64_t seq_len = shape[1];
     int64_t hidden_size = shape[2];
     DType dtype = sequence_output.tensor().dtype();
+    auto target_device = sequence_output.tensor().device();
 
-    // Use matrix multiplication to extract first token
+    // Use selection matrix approach to preserve gradient flow
+    // Reshape: [batch, seq_len, hidden] -> [batch * seq_len, hidden]
     auto reshaped = tenzor::reshape(sequence_output, {batch_size * seq_len, hidden_size});
 
-    Tensor selection_matrix({batch_size, batch_size * seq_len},
-                           dtype, sequence_output.tensor().device());
-    selection_matrix.zero_();
+    // Create selection matrix on CPU then transfer to device
+    Tensor selection_matrix_cpu({batch_size, batch_size * seq_len}, dtype, Device::cpu());
+    selection_matrix_cpu.zero_();
 
-    // Set selection values using template lambda for multi-dtype
-    auto set_selection = [&]<typename T>(T one_val) {
-        T* sel_data = selection_matrix.data<T>();
-        for (int64_t b = 0; b < batch_size; ++b) {
-            sel_data[b * (batch_size * seq_len) + b * seq_len] = one_val;
-        }
-    };
-
+    // Fill selection matrix with appropriate dtype
     if (dtype == DType::Float32) {
-        set_selection.template operator()<float>(1.0f);
+        float* sel_data = selection_matrix_cpu.data<float>();
+        for (int64_t b = 0; b < batch_size; ++b) {
+            sel_data[b * (batch_size * seq_len) + b * seq_len] = 1.0f;
+        }
     } else if (dtype == DType::Float64) {
-        set_selection.template operator()<double>(1.0);
+        double* sel_data = selection_matrix_cpu.data<double>();
+        for (int64_t b = 0; b < batch_size; ++b) {
+            sel_data[b * (batch_size * seq_len) + b * seq_len] = 1.0;
+        }
     } else if (dtype == DType::Float16) {
-        set_selection.template operator()<Float16>(Float16(1.0f));
+        auto* sel_data = selection_matrix_cpu.data<Float16>();
+        Float16 one_f16(1.0f);
+        for (int64_t b = 0; b < batch_size; ++b) {
+            sel_data[b * (batch_size * seq_len) + b * seq_len] = one_f16;
+        }
     }
 
-    Variable selection_var(selection_matrix, false);
+    // Transfer to target device if needed
+    Tensor selection_matrix = (target_device == Device::cpu()) ?
+                               selection_matrix_cpu : selection_matrix_cpu.to(target_device);
+
+    // Use matmul to select: [batch, batch*seq_len] @ [batch*seq_len, hidden] = [batch, hidden]
+    Variable selection_var(selection_matrix, false);  // No grad needed for constant matrix
     auto cls_output = tenzor::matmul(selection_var, reshaped);  // [batch, hidden_size]
 
     // Classify

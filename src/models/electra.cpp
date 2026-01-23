@@ -148,20 +148,41 @@ auto ElectraForPreTraining::forward(const Variable& input_ids,
 
     // Use the same dtype as gen_probs for consistency
     auto dtype = gen_probs.tensor().dtype();
-    Tensor is_replaced(shape_vec, dtype, input_ids.tensor().device());
-    is_replaced.zero_();
+    Device target_device = input_ids.tensor().device();
 
-    const int64_t* mask_data = masked_positions.data<int64_t>();
-    const int64_t* orig_data = original_tokens.data<int64_t>();
-    int64_t* gen_data = generated_tokens.data<int64_t>();
+    // Move tensors to CPU for data access
+    Tensor masked_positions_cpu = masked_positions;
+    if (masked_positions.device() != Device::cpu()) {
+        masked_positions_cpu = masked_positions.to(Device::cpu());
+    }
+    Tensor original_tokens_cpu = original_tokens;
+    if (original_tokens.device() != Device::cpu()) {
+        original_tokens_cpu = original_tokens.to(Device::cpu());
+    }
+    Tensor generated_tokens_cpu = generated_tokens;
+    if (generated_tokens.device() != Device::cpu()) {
+        generated_tokens_cpu = generated_tokens.to(Device::cpu());
+    }
+    Tensor gen_probs_cpu = gen_probs.tensor();
+    if (gen_probs.tensor().device() != Device::cpu()) {
+        gen_probs_cpu = gen_probs.tensor().to(Device::cpu());
+    }
+
+    // Create is_replaced on CPU
+    Tensor is_replaced_cpu(shape_vec, dtype, Device::cpu());
+    is_replaced_cpu.zero_();
+
+    const int64_t* mask_data = masked_positions_cpu.data<int64_t>();
+    const int64_t* orig_data = original_tokens_cpu.data<int64_t>();
+    int64_t* gen_data = generated_tokens_cpu.data<int64_t>();
 
     // Sample from generator for masked positions with dtype-specific handling
     // For sampling, we convert probabilities to float32 as it doesn't require high precision
     std::vector<float> float_probs(config_.vocab_size);
 
     if (dtype == DType::Float32) {
-        float* repl_data = is_replaced.data<float>();
-        auto probs_data = gen_probs.tensor().data<float>();
+        float* repl_data = is_replaced_cpu.data<float>();
+        auto probs_data = gen_probs_cpu.data<float>();
 
         for (int64_t b = 0; b < batch_size; ++b) {
             for (int64_t s = 0; s < seq_len; ++s) {
@@ -176,8 +197,8 @@ auto ElectraForPreTraining::forward(const Variable& input_ids,
             }
         }
     } else if (dtype == DType::Float64) {
-        double* repl_data = is_replaced.data<double>();
-        auto probs_data = gen_probs.tensor().data<double>();
+        double* repl_data = is_replaced_cpu.data<double>();
+        auto probs_data = gen_probs_cpu.data<double>();
 
         for (int64_t b = 0; b < batch_size; ++b) {
             for (int64_t s = 0; s < seq_len; ++s) {
@@ -196,10 +217,10 @@ auto ElectraForPreTraining::forward(const Variable& input_ids,
             }
         }
     } else if (dtype == DType::Float16) {
-        uint16_t* repl_data = is_replaced.data<uint16_t>();
-        auto probs_data = gen_probs.tensor().data<uint16_t>();
-        uint16_t zero_f16 = 0x0000;  // Float16 representation of 0.0
-        uint16_t one_f16 = 0x3C00;   // Float16 representation of 1.0
+        Float16* repl_data = is_replaced_cpu.data<Float16>();
+        auto probs_data = gen_probs_cpu.data<Float16>();
+        Float16 zero_f16(static_cast<uint16_t>(0x0000));  // Float16 representation of 0.0
+        Float16 one_f16(static_cast<uint16_t>(0x3C00));   // Float16 representation of 1.0
 
         for (int64_t b = 0; b < batch_size; ++b) {
             for (int64_t s = 0; s < seq_len; ++s) {
@@ -207,24 +228,10 @@ auto ElectraForPreTraining::forward(const Variable& input_ids,
 
                 if (mask_data[idx] == 1) {
                     // Convert float16 probabilities to float for sampling
-                    const uint16_t* pos_probs = probs_data + idx * config_.vocab_size;
+                    const Float16* pos_probs = probs_data + idx * config_.vocab_size;
                     for (int64_t i = 0; i < config_.vocab_size; ++i) {
-                        // Simple float16 to float conversion (proper conversion would use intrinsics)
-                        uint16_t f16 = pos_probs[i];
-                        uint32_t sign = (f16 >> 15) & 0x1;
-                        uint32_t exp = (f16 >> 10) & 0x1F;
-                        uint32_t frac = f16 & 0x3FF;
-
-                        // Convert to float32
-                        uint32_t f32_bits;
-                        if (exp == 0) {
-                            f32_bits = (sign << 31);  // Zero or denormal -> zero
-                        } else if (exp == 31) {
-                            f32_bits = (sign << 31) | 0x7F800000;  // Inf or NaN
-                        } else {
-                            f32_bits = (sign << 31) | ((exp + 112) << 23) | (frac << 13);
-                        }
-                        std::memcpy(&float_probs[i], &f32_bits, sizeof(float));
+                        // Use Float16's conversion operator to float
+                        float_probs[i] = static_cast<float>(pos_probs[i]);
                     }
                     int64_t sampled_token = sample_from_distribution(float_probs.data(), config_.vocab_size);
                     gen_data[idx] = sampled_token;
@@ -232,6 +239,18 @@ auto ElectraForPreTraining::forward(const Variable& input_ids,
                 }
             }
         }
+    }
+
+    // Transfer back to original device
+    Tensor is_replaced = (target_device == Device::cpu())
+        ? is_replaced_cpu
+        : is_replaced_cpu.to(target_device);
+
+    // Update generated_tokens on the original device
+    if (target_device != Device::cpu()) {
+        generated_tokens = generated_tokens_cpu.to(target_device);
+    } else {
+        generated_tokens = generated_tokens_cpu;
     }
 
     // Step 3: Discriminator classifies all tokens as real/replaced
@@ -264,9 +283,16 @@ auto ElectraForPreTraining::compute_loss(const Variable& gen_logits,
     // Compute cross-entropy loss for masked positions
     auto reshaped_logits = tenzor::reshape(gen_logits, {batch_size * seq_len, vocab_size});
 
-    // Create labels tensor
-    Tensor labels_flat(std::vector<int64_t>{batch_size * seq_len}, DType::Int64, original_tokens.device());
-    std::copy_n(original_tokens.data<int64_t>(), batch_size * seq_len, labels_flat.data<int64_t>());
+    // Create labels tensor - move to CPU for data access, then transfer to device
+    Tensor original_tokens_cpu = original_tokens;
+    if (original_tokens.device() != Device::cpu()) {
+        original_tokens_cpu = original_tokens.to(Device::cpu());
+    }
+    Tensor labels_cpu(std::vector<int64_t>{batch_size * seq_len}, DType::Int64, Device::cpu());
+    std::copy_n(original_tokens_cpu.data<int64_t>(), batch_size * seq_len, labels_cpu.data<int64_t>());
+    Tensor labels_flat = (original_tokens.device() == Device::cpu())
+        ? labels_cpu
+        : labels_cpu.to(original_tokens.device());
     Variable labels_var(labels_flat, false);
 
     // Compute log softmax for cross-entropy
@@ -447,28 +473,35 @@ auto ElectraForQuestionAnswering::forward(const Variable& input_ids,
     // Create selection matrices to extract start and end logits
     // Use the same dtype as logits for consistency
     auto dtype = logits.tensor().dtype();
+    Device target_device = logits.tensor().device();
 
-    // Start logits: multiply by [1, 0]
-    Tensor start_selector(std::vector<int64_t>{2, 1}, dtype, logits.tensor().device());
-    start_selector.zero_();
+    // Start logits: multiply by [1, 0] - create on CPU first, then transfer
+    Tensor start_selector_cpu(std::vector<int64_t>{2, 1}, dtype, Device::cpu());
+    start_selector_cpu.zero_();
     if (dtype == DType::Float32) {
-        start_selector.data<float>()[0] = 1.0f;
+        start_selector_cpu.data<float>()[0] = 1.0f;
     } else if (dtype == DType::Float64) {
-        start_selector.data<double>()[0] = 1.0;
+        start_selector_cpu.data<double>()[0] = 1.0;
     } else if (dtype == DType::Float16) {
-        start_selector.data<uint16_t>()[0] = 0x3C00;  // Float16 representation of 1.0
+        start_selector_cpu.data<Float16>()[0] = Float16(static_cast<uint16_t>(0x3C00));  // Float16 representation of 1.0
     }
+    Tensor start_selector = (target_device == Device::cpu())
+        ? start_selector_cpu
+        : start_selector_cpu.to(target_device);
 
-    // End logits: multiply by [0, 1]
-    Tensor end_selector(std::vector<int64_t>{2, 1}, dtype, logits.tensor().device());
-    end_selector.zero_();
+    // End logits: multiply by [0, 1] - create on CPU first, then transfer
+    Tensor end_selector_cpu(std::vector<int64_t>{2, 1}, dtype, Device::cpu());
+    end_selector_cpu.zero_();
     if (dtype == DType::Float32) {
-        end_selector.data<float>()[1] = 1.0f;
+        end_selector_cpu.data<float>()[1] = 1.0f;
     } else if (dtype == DType::Float64) {
-        end_selector.data<double>()[1] = 1.0;
+        end_selector_cpu.data<double>()[1] = 1.0;
     } else if (dtype == DType::Float16) {
-        end_selector.data<uint16_t>()[1] = 0x3C00;  // Float16 representation of 1.0
+        end_selector_cpu.data<Float16>()[1] = Float16(static_cast<uint16_t>(0x3C00));  // Float16 representation of 1.0
     }
+    Tensor end_selector = (target_device == Device::cpu())
+        ? end_selector_cpu
+        : end_selector_cpu.to(target_device);
 
     // Use matmul to select: [batch*seq_len, 2] @ [2, 1] = [batch*seq_len, 1]
     Variable start_selector_var(start_selector, false);

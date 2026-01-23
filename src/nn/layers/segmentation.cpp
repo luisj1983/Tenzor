@@ -270,13 +270,8 @@ auto upsample_bilinear(const Variable& input, int64_t target_h, int64_t target_w
     // Create Variable with gradient tracking if needed
     Variable result(output, input.requires_grad());
 
-    std::cout << "[DEBUG] upsample_bilinear: input.requires_grad()=" << input.requires_grad()
-              << ", is_grad_enabled()=" << is_grad_enabled() << std::endl;
-
     // Set up autograd if gradients are needed
     if (input.requires_grad() && is_grad_enabled()) {
-        std::cout << "[DEBUG] Creating UpsampleBilinearBackward grad_fn" << std::endl;
-
         // Create backward function
         auto grad_fn = std::make_shared<UpsampleBilinearBackward>(
             H_in, W_in, target_h, target_w
@@ -299,9 +294,6 @@ auto upsample_bilinear(const Variable& input, int64_t target_h, int64_t target_w
 
         // Attach gradient function to result
         result.set_grad_fn(grad_fn);
-
-        std::cout << "[DEBUG] result.has_grad_fn()=" << (result.grad_fn() != nullptr)
-                  << ", result.is_leaf()=" << result.is_leaf() << std::endl;
     }
 
     return result;

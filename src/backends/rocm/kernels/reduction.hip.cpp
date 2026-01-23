@@ -1194,7 +1194,9 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, hipStream_t str
     }
 
     if (count == 0) {
-        throw std::runtime_error("mean: cannot compute mean of empty tensor");
+        // Return 0 for mean of empty tensor - this is practical for loss computation
+        // in object detection where no samples may be selected
+        return sum_result;  // sum_result is already 0 for empty tensor
     }
 
     // Divide by count using scaling kernel

@@ -67,7 +67,10 @@ __device__ __host__ inline BFloat16 from_cuda_bfloat16(const __nv_bfloat16& x) {
 inline void compute_launch_config_1d(int64_t n, dim3& grid, dim3& block) {
     const int block_size = 256;  // Optimal for most GPUs
     block = dim3(block_size, 1, 1);
-    grid = dim3((n + block_size - 1) / block_size, 1, 1);
+    // Ensure at least 1 block to avoid CUDA invalid argument error
+    // Grid-stride loop will naturally handle n=0 by not executing any iterations
+    int64_t num_blocks = (n + block_size - 1) / block_size;
+    grid = dim3(num_blocks > 0 ? static_cast<unsigned int>(num_blocks) : 1, 1, 1);
 }
 
 // Grid-stride loop pattern for better scalability
@@ -766,6 +769,11 @@ auto add_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
     std::vector<int64_t> output_shape = detail::compute_broadcast_shape(a_shape_vec, b_shape_vec);
     Tensor result(output_shape, a.dtype(), a.device());
 
+    int64_t n = result.numel();
+    if (n == 0) {
+        return result;
+    }
+
     // Compute strides
     std::vector<int64_t> strides_a = detail::compute_broadcast_strides(a_shape_vec, output_shape);
     std::vector<int64_t> strides_b = detail::compute_broadcast_strides(b_shape_vec, output_shape);
@@ -781,7 +789,6 @@ auto add_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
     CUDA_CHECK(cudaMemcpy(d_strides_b, strides_b.data(), output_shape.size() * sizeof(int64_t), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_output_shape, output_shape.data(), output_shape.size() * sizeof(int64_t), cudaMemcpyHostToDevice));
 
-    int64_t n = result.numel();
     int64_t ndim = output_shape.size();
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
@@ -909,6 +916,11 @@ auto sub_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
     std::vector<int64_t> output_shape = detail::compute_broadcast_shape(a_shape_vec, b_shape_vec);
     Tensor result(output_shape, a.dtype(), a.device());
 
+    int64_t n = result.numel();
+    if (n == 0) {
+        return result;
+    }
+
     std::vector<int64_t> strides_a = detail::compute_broadcast_strides(a_shape_vec, output_shape);
     std::vector<int64_t> strides_b = detail::compute_broadcast_strides(b_shape_vec, output_shape);
 
@@ -922,7 +934,6 @@ auto sub_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
     CUDA_CHECK(cudaMemcpy(d_strides_b, strides_b.data(), output_shape.size() * sizeof(int64_t), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_output_shape, output_shape.data(), output_shape.size() * sizeof(int64_t), cudaMemcpyHostToDevice));
 
-    int64_t n = result.numel();
     int64_t ndim = output_shape.size();
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
@@ -1047,6 +1058,11 @@ auto mul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
     std::vector<int64_t> output_shape = detail::compute_broadcast_shape(a_shape_vec, b_shape_vec);
     Tensor result(output_shape, a.dtype(), a.device());
 
+    int64_t n = result.numel();
+    if (n == 0) {
+        return result;
+    }
+
     std::vector<int64_t> strides_a = detail::compute_broadcast_strides(a_shape_vec, output_shape);
     std::vector<int64_t> strides_b = detail::compute_broadcast_strides(b_shape_vec, output_shape);
 
@@ -1060,7 +1076,6 @@ auto mul_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
     CUDA_CHECK(cudaMemcpy(d_strides_b, strides_b.data(), output_shape.size() * sizeof(int64_t), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_output_shape, output_shape.data(), output_shape.size() * sizeof(int64_t), cudaMemcpyHostToDevice));
 
-    int64_t n = result.numel();
     int64_t ndim = output_shape.size();
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
@@ -1163,6 +1178,11 @@ auto div_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
     std::vector<int64_t> output_shape = detail::compute_broadcast_shape(a_shape_vec, b_shape_vec);
     Tensor result(output_shape, a.dtype(), a.device());
 
+    int64_t n = result.numel();
+    if (n == 0) {
+        return result;
+    }
+
     std::vector<int64_t> strides_a = detail::compute_broadcast_strides(a_shape_vec, output_shape);
     std::vector<int64_t> strides_b = detail::compute_broadcast_strides(b_shape_vec, output_shape);
 
@@ -1176,7 +1196,6 @@ auto div_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
     CUDA_CHECK(cudaMemcpy(d_strides_b, strides_b.data(), output_shape.size() * sizeof(int64_t), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_output_shape, output_shape.data(), output_shape.size() * sizeof(int64_t), cudaMemcpyHostToDevice));
 
-    int64_t n = result.numel();
     int64_t ndim = output_shape.size();
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);
@@ -2762,6 +2781,11 @@ auto compare_kernel_launcher(const Tensor& a, const Tensor& b, cudaStream_t stre
     std::vector<int64_t> output_shape = detail::compute_broadcast_shape(a_shape_vec, b_shape_vec);
     Tensor result(output_shape, DType::Bool, a.device());
 
+    int64_t n = result.numel();
+    if (n == 0) {
+        return result;
+    }
+
     // Compute strides
     std::vector<int64_t> strides_a = detail::compute_broadcast_strides(a_shape_vec, output_shape);
     std::vector<int64_t> strides_b = detail::compute_broadcast_strides(b_shape_vec, output_shape);
@@ -2777,7 +2801,6 @@ auto compare_kernel_launcher(const Tensor& a, const Tensor& b, cudaStream_t stre
     CUDA_CHECK(cudaMemcpy(d_strides_b, strides_b.data(), output_shape.size() * sizeof(int64_t), cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_output_shape, output_shape.data(), output_shape.size() * sizeof(int64_t), cudaMemcpyHostToDevice));
 
-    int64_t n = result.numel();
     int64_t ndim = output_shape.size();
     dim3 grid, block;
     compute_launch_config_1d(n, grid, block);

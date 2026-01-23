@@ -205,9 +205,14 @@ auto process_masks(const Tensor& mask_logits,
     );
     full_masks.fill_(0);
 
-    // Process each detection
-    auto* class_labels_data = static_cast<const int64_t*>(class_labels.data_ptr());
-    auto* boxes_data = static_cast<const float*>(boxes.data_ptr());
+    // Move class_labels and boxes to CPU for data access
+    auto class_labels_cpu = class_labels.to(Device::cpu());
+    auto boxes_cpu = boxes.to(DType::Float32).to(Device::cpu());
+    auto* class_labels_data = class_labels_cpu.data<int64_t>();
+    auto* boxes_data = boxes_cpu.data<float>();
+
+    // Keep track of original device for final output
+    auto original_device = mask_logits.device();
 
     for (int64_t i = 0; i < num_detections; ++i) {
         // Get class label and select corresponding mask
@@ -259,11 +264,13 @@ auto process_masks(const Tensor& mask_logits,
         auto threshold_tensor = tenzor::ones_like(resized_mask) * static_cast<float>(threshold);
         auto binary_mask = (resized_mask > threshold_tensor).to(DType::UInt8);
 
-        // Paste into full image at ROI location
-        // Note: This is a simplified version. In practice, we'd use advanced indexing
-        auto* full_data = static_cast<uint8_t*>(full_masks.data_ptr());
-        auto* binary_data = static_cast<const uint8_t*>(binary_mask.data_ptr());
+        // Move to CPU for data access
+        auto binary_mask_cpu = binary_mask.to(Device::cpu());
+        auto full_masks_cpu = full_masks.to(Device::cpu());
+        auto* full_data = full_masks_cpu.data<uint8_t>();
+        auto* binary_data = binary_mask_cpu.data<uint8_t>();
 
+        // Paste into full image at ROI location
         for (int64_t h = 0; h < roi_h && (roi_y + h) < image_height; ++h) {
             for (int64_t w = 0; w < roi_w && (roi_x + w) < image_width; ++w) {
                 int64_t full_idx = i * image_height * image_width +
@@ -273,6 +280,9 @@ auto process_masks(const Tensor& mask_logits,
                 full_data[full_idx] = binary_data[binary_idx];
             }
         }
+
+        // Copy back to original tensor (in-place update)
+        full_masks = full_masks_cpu.to(original_device);
     }
 
     return full_masks;

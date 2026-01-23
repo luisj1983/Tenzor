@@ -14,7 +14,10 @@ namespace cuda {
 
 // Helper to clamp blocks to max grid size
 inline int clamp_blocks(int64_t blocks) {
-    return static_cast<int>(std::min(blocks, static_cast<int64_t>(65535)));
+    // Ensure at least 1 block to avoid CUDA invalid argument error
+    // Grid-stride loop will naturally handle n=0 by not executing any iterations
+    int64_t clamped = std::min(blocks, static_cast<int64_t>(65535));
+    return static_cast<int>(clamped > 0 ? clamped : 1);
 }
 
 // Helper to create a zero-initialized CUDA tensor
@@ -161,11 +164,39 @@ auto fused_linear_relu_cuda(
             out_features,
             bias != nullptr
         );
+    } else if (input.dtype() == DType::Float64) {
+        const double* bias_ptr = bias ? bias->data<double>() : nullptr;
+        fused_linear_relu_kernel<<<blocks, threads>>>(
+            input.data<double>(),
+            weight.data<double>(),
+            bias_ptr,
+            output.data<double>(),
+            batch_size,
+            in_features,
+            out_features,
+            bias != nullptr
+        );
+    } else if (input.dtype() == DType::Float16) {
+        const __half* bias_ptr = bias ? reinterpret_cast<const __half*>(bias->data_ptr()) : nullptr;
+        fused_linear_relu_kernel<<<blocks, threads>>>(
+            reinterpret_cast<const __half*>(input.data_ptr()),
+            reinterpret_cast<const __half*>(weight.data_ptr()),
+            bias_ptr,
+            reinterpret_cast<__half*>(output.data_ptr()),
+            batch_size,
+            in_features,
+            out_features,
+            bias != nullptr
+        );
     } else {
-        throw std::runtime_error("fused_linear_relu_cuda: Only Float32 supported");
+        throw std::runtime_error("fused_linear_relu_cuda: Unsupported dtype");
     }
 
     CUDA_CHECK(cudaGetLastError());
+
+    // Synchronize to ensure kernel completes before returning result
+    // This is necessary for correctness when results are immediately used
+    CUDA_CHECK(cudaDeviceSynchronize());
 
     return output;
 }
@@ -173,6 +204,27 @@ auto fused_linear_relu_cuda(
 // ==============================================================================
 // Fused BatchNorm + ReLU CUDA Kernel
 // ==============================================================================
+
+// Device helper for rsqrt that works with different types
+template<typename T>
+__device__ __forceinline__ T device_rsqrt(T x) {
+    return rsqrtf(static_cast<float>(x));
+}
+
+template<>
+__device__ __forceinline__ float device_rsqrt<float>(float x) {
+    return rsqrtf(x);
+}
+
+template<>
+__device__ __forceinline__ double device_rsqrt<double>(double x) {
+    return rsqrt(x);
+}
+
+template<>
+__device__ __forceinline__ __half device_rsqrt<__half>(__half x) {
+    return hrsqrt(x);
+}
 
 template<typename T>
 __global__ void fused_batchnorm_relu_kernel(
@@ -196,7 +248,7 @@ __global__ void fused_batchnorm_relu_kernel(
         int64_t c = (idx / spatial_size) % num_features;
         int64_t n = idx / (spatial_size * num_features);
 
-        T normalized = (input[idx] - mean[c]) * rsqrtf(var[c] + eps);
+        T normalized = (input[idx] - mean[c]) * device_rsqrt(var[c] + eps);
         T scaled = normalized * gamma[c] + beta[c];
 
         // ReLU
@@ -239,8 +291,34 @@ auto fused_batchnorm_relu_cuda(
             spatial_size,
             eps
         );
+    } else if (input.dtype() == DType::Float64) {
+        fused_batchnorm_relu_kernel<<<blocks, threads>>>(
+            input.data<double>(),
+            running_mean.data<double>(),
+            running_var.data<double>(),
+            weight.data<double>(),
+            bias.data<double>(),
+            output.data<double>(),
+            batch_size,
+            num_features,
+            spatial_size,
+            static_cast<double>(eps)
+        );
+    } else if (input.dtype() == DType::Float16) {
+        fused_batchnorm_relu_kernel<<<blocks, threads>>>(
+            reinterpret_cast<const __half*>(input.data_ptr()),
+            reinterpret_cast<const __half*>(running_mean.data_ptr()),
+            reinterpret_cast<const __half*>(running_var.data_ptr()),
+            reinterpret_cast<const __half*>(weight.data_ptr()),
+            reinterpret_cast<const __half*>(bias.data_ptr()),
+            reinterpret_cast<__half*>(output.data_ptr()),
+            batch_size,
+            num_features,
+            spatial_size,
+            __float2half(eps)
+        );
     } else {
-        throw std::runtime_error("fused_batchnorm_relu_cuda: Only Float32 supported");
+        throw std::runtime_error("fused_batchnorm_relu_cuda: Unsupported dtype");
     }
 
     CUDA_CHECK(cudaGetLastError());
@@ -386,8 +464,22 @@ auto fused_add_relu_cuda(const Tensor& a, const Tensor& b) -> Tensor {
             result.data<float>(),
             n
         );
+    } else if (a.dtype() == DType::Float64) {
+        fused_add_relu_kernel<<<blocks, threads>>>(
+            a.data<double>(),
+            b.data<double>(),
+            result.data<double>(),
+            n
+        );
+    } else if (a.dtype() == DType::Float16) {
+        fused_add_relu_kernel<<<blocks, threads>>>(
+            reinterpret_cast<const __half*>(a.data_ptr()),
+            reinterpret_cast<const __half*>(b.data_ptr()),
+            reinterpret_cast<__half*>(result.data_ptr()),
+            n
+        );
     } else {
-        throw std::runtime_error("fused_add_relu_cuda: Only Float32 supported");
+        throw std::runtime_error("fused_add_relu_cuda: Unsupported dtype");
     }
 
     CUDA_CHECK(cudaGetLastError());
@@ -399,24 +491,91 @@ auto fused_add_relu_cuda(const Tensor& a, const Tensor& b) -> Tensor {
 // Fused GELU CUDA Kernel
 // ==============================================================================
 
+// Device helper for tanh that works with different types
+template<typename T>
+__device__ __forceinline__ T device_tanh(T x) {
+    return tanhf(static_cast<float>(x));
+}
+
+template<>
+__device__ __forceinline__ float device_tanh<float>(float x) {
+    return tanhf(x);
+}
+
+template<>
+__device__ __forceinline__ double device_tanh<double>(double x) {
+    return tanh(x);
+}
+
+template<>
+__device__ __forceinline__ __half device_tanh<__half>(__half x) {
+    // Convert to float, compute tanh, convert back
+    return __float2half(tanhf(__half2float(x)));
+}
+
 template<typename T>
 __global__ void fused_gelu_kernel(
     const T* input,
     T* output,
     int64_t n
 ) {
-    constexpr T sqrt_2_over_pi = 0.7978845608f;
-    constexpr T coeff = 0.044715f;
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t stride = blockDim.x * gridDim.x;
+
+    for (int64_t i = tid; i < n; i += stride) {
+        // Use float constants and convert for type safety
+        float x_f = static_cast<float>(input[i]);
+        constexpr float sqrt_2_over_pi = 0.7978845608f;
+        constexpr float coeff = 0.044715f;
+        float x_cubed = x_f * x_f * x_f;
+        float inner = sqrt_2_over_pi * (x_f + coeff * x_cubed);
+        float tanh_val = tanhf(inner);
+        float result = 0.5f * x_f * (1.0f + tanh_val);
+        output[i] = static_cast<T>(result);
+    }
+}
+
+// Specialized GELU kernel for float (optimized)
+template<>
+__global__ void fused_gelu_kernel<float>(
+    const float* input,
+    float* output,
+    int64_t n
+) {
+    constexpr float sqrt_2_over_pi = 0.7978845608f;
+    constexpr float coeff = 0.044715f;
 
     int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t stride = blockDim.x * gridDim.x;
 
     for (int64_t i = tid; i < n; i += stride) {
-        T x = input[i];
-        T x_cubed = x * x * x;
-        T inner = sqrt_2_over_pi * (x + coeff * x_cubed);
-        T tanh_val = tanhf(inner);
-        output[i] = T(0.5) * x * (T(1.0) + tanh_val);
+        float x = input[i];
+        float x_cubed = x * x * x;
+        float inner = sqrt_2_over_pi * (x + coeff * x_cubed);
+        float tanh_val = tanhf(inner);
+        output[i] = 0.5f * x * (1.0f + tanh_val);
+    }
+}
+
+// Specialized GELU kernel for double (optimized)
+template<>
+__global__ void fused_gelu_kernel<double>(
+    const double* input,
+    double* output,
+    int64_t n
+) {
+    constexpr double sqrt_2_over_pi = 0.7978845608028654;
+    constexpr double coeff = 0.044715;
+
+    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+    int64_t stride = blockDim.x * gridDim.x;
+
+    for (int64_t i = tid; i < n; i += stride) {
+        double x = input[i];
+        double x_cubed = x * x * x;
+        double inner = sqrt_2_over_pi * (x + coeff * x_cubed);
+        double tanh_val = tanh(inner);
+        output[i] = 0.5 * x * (1.0 + tanh_val);
     }
 }
 
@@ -434,8 +593,20 @@ auto fused_gelu_cuda(const Tensor& input) -> Tensor {
             output.data<float>(),
             n
         );
+    } else if (input.dtype() == DType::Float64) {
+        fused_gelu_kernel<<<blocks, threads>>>(
+            input.data<double>(),
+            output.data<double>(),
+            n
+        );
+    } else if (input.dtype() == DType::Float16) {
+        fused_gelu_kernel<<<blocks, threads>>>(
+            reinterpret_cast<const __half*>(input.data_ptr()),
+            reinterpret_cast<__half*>(output.data_ptr()),
+            n
+        );
     } else {
-        throw std::runtime_error("fused_gelu_cuda: Only Float32 supported");
+        throw std::runtime_error("fused_gelu_cuda: Unsupported dtype");
     }
 
     CUDA_CHECK(cudaGetLastError());
@@ -562,8 +733,20 @@ auto fused_layer_norm_cuda(
             norm_size,
             eps
         );
+    } else if (input.dtype() == DType::Float64) {
+        fused_layer_norm_kernel<double, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
+            input.data<double>(),
+            weight.data<double>(),
+            bias.data<double>(),
+            output.data<double>(),
+            mean.data<double>(),
+            inv_std.data<double>(),
+            batch_size,
+            norm_size,
+            static_cast<double>(eps)
+        );
     } else {
-        throw std::runtime_error("fused_layer_norm_cuda: Only Float32 supported");
+        throw std::runtime_error("fused_layer_norm_cuda: Only Float32 and Float64 supported");
     }
 
     CUDA_CHECK(cudaGetLastError());
@@ -697,8 +880,21 @@ auto fused_layer_norm_backward_cuda(
             batch_size,
             norm_size
         );
+    } else if (input.dtype() == DType::Float64) {
+        fused_layer_norm_backward_kernel<double, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
+            grad_output.data<double>(),
+            input.data<double>(),
+            weight.data<double>(),
+            mean.data<double>(),
+            inv_std.data<double>(),
+            grad_input.data<double>(),
+            grad_weight.data<double>(),
+            grad_bias.data<double>(),
+            batch_size,
+            norm_size
+        );
     } else {
-        throw std::runtime_error("fused_layer_norm_backward_cuda: Only Float32 supported");
+        throw std::runtime_error("fused_layer_norm_backward_cuda: Only Float32 and Float64 supported");
     }
 
     CUDA_CHECK(cudaGetLastError());

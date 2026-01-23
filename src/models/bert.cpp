@@ -467,28 +467,33 @@ auto BertForQuestionAnswering::forward(const Variable& input_ids,
     // Create selection matrices to extract start and end logits
     // Use the same dtype as logits for consistency
     auto dtype = logits.tensor().dtype();
+    auto target_device = logits.tensor().device();
 
-    // Start logits: multiply by [1, 0]
-    Tensor start_selector(std::vector<int64_t>{2, 1}, dtype, logits.tensor().device());
-    start_selector.zero_();
+    // Start logits: multiply by [1, 0] - create on CPU first
+    Tensor start_selector_cpu(std::vector<int64_t>{2, 1}, dtype, Device::cpu());
+    start_selector_cpu.zero_();
     if (dtype == DType::Float32) {
-        start_selector.data<float>()[0] = 1.0f;
+        start_selector_cpu.data<float>()[0] = 1.0f;
     } else if (dtype == DType::Float64) {
-        start_selector.data<double>()[0] = 1.0;
+        start_selector_cpu.data<double>()[0] = 1.0;
     } else if (dtype == DType::Float16) {
-        start_selector.data<Float16>()[0] = Float16(1.0f);
+        start_selector_cpu.data<Float16>()[0] = Float16(1.0f);
     }
+    Tensor start_selector = (target_device == Device::cpu()) ?
+                            start_selector_cpu : start_selector_cpu.to(target_device);
 
-    // End logits: multiply by [0, 1]
-    Tensor end_selector(std::vector<int64_t>{2, 1}, dtype, logits.tensor().device());
-    end_selector.zero_();
+    // End logits: multiply by [0, 1] - create on CPU first
+    Tensor end_selector_cpu(std::vector<int64_t>{2, 1}, dtype, Device::cpu());
+    end_selector_cpu.zero_();
     if (dtype == DType::Float32) {
-        end_selector.data<float>()[1] = 1.0f;
+        end_selector_cpu.data<float>()[1] = 1.0f;
     } else if (dtype == DType::Float64) {
-        end_selector.data<double>()[1] = 1.0;
+        end_selector_cpu.data<double>()[1] = 1.0;
     } else if (dtype == DType::Float16) {
-        end_selector.data<Float16>()[1] = Float16(1.0f);
+        end_selector_cpu.data<Float16>()[1] = Float16(1.0f);
     }
+    Tensor end_selector = (target_device == Device::cpu()) ?
+                          end_selector_cpu : end_selector_cpu.to(target_device);
 
     // Use matmul to select: [batch*seq_len, 2] @ [2, 1] = [batch*seq_len, 1]
     Variable start_selector_var(start_selector, false);

@@ -369,7 +369,23 @@ public:
         int64_t H_out = grad_shape[2];
         int64_t W_out = grad_shape[3];
 
-        // Initialize gradient w.r.t input with zeros on same device
+        // Use backend dispatch for non-CPU devices (CUDA, Vulkan, etc.)
+        if (grad_output.device().type != Device::Type::CPU) {
+            std::vector<Tensor> tensors_for_dispatch = {grad_output};
+            auto* backend = Dispatcher::get_backend(tensors_for_dispatch);
+            std::vector<Tensor> inputs = {grad_output};
+            auto result = backend->dispatch(
+                "avg_pool2d_backward",
+                inputs,
+                {{"input_shape", std::to_string(N) + "," + std::to_string(C) + "," + std::to_string(H_in_) + "," + std::to_string(W_in_)},
+                 {"kernel_size", std::to_string(kernel_size_)},
+                 {"stride", std::to_string(stride_)},
+                 {"padding", std::to_string(padding_)}}
+            );
+            return {result[0]};
+        }
+
+        // CPU path - Initialize gradient w.r.t input with zeros on same device
         auto grad_input = zeros({N, C, H_in_, W_in_}, grad_output.dtype(), grad_output.device());
 
         auto dtype = grad_output.dtype();

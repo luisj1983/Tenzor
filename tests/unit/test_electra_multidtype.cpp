@@ -50,22 +50,15 @@ protected:
                 << "Dimension " << i << " mismatch on " << device().to_string();
         }
 
-        // ELECTRA models output Float32 by default
-        EXPECT_EQ(output_tensor.dtype(), DType::Float32)
-            << "ELECTRA output should be Float32 on " << device().to_string();
-
-        // Test dtype conversion if requested dtype differs
-        if (dtype() != DType::Float32) {
-            auto converted = output_tensor.to(dtype());
-            EXPECT_EQ(converted.dtype(), dtype())
-                << "Converted output should have requested dtype on " << device().to_string();
-
-            // Verify shape preserved after conversion
-            auto converted_shape = converted.shape();
-            for (size_t i = 0; i < expected_shape.size(); ++i) {
-                EXPECT_EQ(converted_shape[i], expected_shape[i]);
-            }
-            return converted;
+        // Model output dtype should match the parameterized dtype (after model.to(dtype()) call)
+        // For Float16, models may output Float32 for numerical stability
+        if (dtype() == DType::Float16) {
+            // Float16 models may output Float32 for stability, accept either
+            EXPECT_TRUE(output_tensor.dtype() == DType::Float16 || output_tensor.dtype() == DType::Float32)
+                << "ELECTRA Float16 output should be Float16 or Float32 on " << device().to_string();
+        } else {
+            EXPECT_EQ(output_tensor.dtype(), dtype())
+                << "ELECTRA output dtype should match model dtype on " << device().to_string();
         }
 
         return output_tensor;
@@ -96,6 +89,8 @@ TEST_P(ElectraMultiDTypeTest, GeneratorForwardPass) {
     config.num_hidden_layers = 2;
     config.generator_layers = 2;
     ElectraGenerator generator(config);
+    generator.to(device());
+    if (dtype() != DType::Float32) generator.to(dtype());
 
     int64_t batch_size = 2;
     int64_t seq_len = 8;
@@ -133,6 +128,8 @@ TEST_P(ElectraMultiDTypeTest, GeneratorDifferentSequenceLengths) {
     config.num_hidden_layers = 1;
     config.generator_layers = 1;
     ElectraGenerator generator(config);
+    generator.to(device());
+    if (dtype() != DType::Float32) generator.to(dtype());
 
     // Test with different sequence lengths
     std::vector<int64_t> seq_lengths = {4, 8, 16};
@@ -157,6 +154,8 @@ TEST_P(ElectraMultiDTypeTest, DiscriminatorForwardPass) {
     auto config = ElectraConfig::small();
     config.num_hidden_layers = 2;
     ElectraDiscriminator discriminator(config);
+    discriminator.to(device());
+    if (dtype() != DType::Float32) discriminator.to(dtype());
 
     int64_t batch_size = 2;
     int64_t seq_len = 8;
@@ -191,6 +190,8 @@ TEST_P(ElectraMultiDTypeTest, DiscriminatorDifferentSequenceLengths) {
     auto config = ElectraConfig::small();
     config.num_hidden_layers = 1;
     ElectraDiscriminator discriminator(config);
+    discriminator.to(device());
+    if (dtype() != DType::Float32) discriminator.to(dtype());
 
     std::vector<int64_t> seq_lengths = {4, 8, 12};
 
@@ -215,6 +216,8 @@ TEST_P(ElectraMultiDTypeTest, PreTrainingReplacedTokenDetection) {
     config.num_hidden_layers = 1;
     config.generator_layers = 1;
     ElectraForPreTraining model(config);
+    model.to(device());
+    if (dtype() != DType::Float32) model.to(dtype());
 
     int64_t batch_size = 2;
     int64_t seq_len = 8;
@@ -274,6 +277,8 @@ TEST_P(ElectraMultiDTypeTest, PreTrainingAllTokensUsed) {
     config.num_hidden_layers = 1;
     config.generator_layers = 1;
     ElectraForPreTraining model(config);
+    model.to(device());
+    if (dtype() != DType::Float32) model.to(dtype());
 
     int64_t batch_size = 2;
     int64_t seq_len = 10;
@@ -316,6 +321,8 @@ TEST_P(ElectraMultiDTypeTest, PreTrainingLossComputation) {
     config.num_hidden_layers = 1;
     config.generator_layers = 1;
     ElectraForPreTraining model(config);
+    model.to(device());
+    if (dtype() != DType::Float32) model.to(dtype());
 
     int64_t batch_size = 2;
     int64_t seq_len = 8;
@@ -434,6 +441,8 @@ TEST_P(ElectraMultiDTypeTest, SequenceClassificationForward) {
     config.num_hidden_layers = 2;
     int64_t num_labels = 3;
     ElectraForSequenceClassification model(config, num_labels);
+    model.to(device());
+    if (dtype() != DType::Float32) model.to(dtype());
 
     int64_t batch_size = 2;
     int64_t seq_len = 10;
@@ -451,6 +460,8 @@ TEST_P(ElectraMultiDTypeTest, SequenceClassificationGradientFlow) {
     config.num_hidden_layers = 1;
     int64_t num_labels = 2;
     ElectraForSequenceClassification model(config, num_labels);
+    model.to(device());
+    if (dtype() != DType::Float32) model.to(dtype());
 
     int64_t batch_size = 2;
     int64_t seq_len = 8;
@@ -477,6 +488,8 @@ TEST_P(ElectraMultiDTypeTest, TokenClassificationForward) {
     config.num_hidden_layers = 2;
     int64_t num_labels = 9;  // NER typically has ~9 labels
     ElectraForTokenClassification model(config, num_labels);
+    model.to(device());
+    if (dtype() != DType::Float32) model.to(dtype());
 
     int64_t batch_size = 2;
     int64_t seq_len = 10;
@@ -497,6 +510,8 @@ TEST_P(ElectraMultiDTypeTest, QuestionAnsweringForward) {
     auto config = ElectraConfig::small();
     config.num_hidden_layers = 2;
     ElectraForQuestionAnswering model(config);
+    model.to(device());
+    if (dtype() != DType::Float32) model.to(dtype());
 
     int64_t batch_size = 2;
     int64_t seq_len = 10;
@@ -522,6 +537,8 @@ TEST_P(ElectraMultiDTypeTest, DTypeConversionAccuracy) {
     auto config = ElectraConfig::small();
     config.num_hidden_layers = 1;
     ElectraDiscriminator discriminator(config);
+    discriminator.to(device());
+    if (dtype() != DType::Float32) discriminator.to(dtype());
 
     int64_t batch_size = 2;
     int64_t seq_len = 8;
@@ -530,8 +547,9 @@ TEST_P(ElectraMultiDTypeTest, DTypeConversionAccuracy) {
     Variable input_ids(input_tensor, false);
     auto logits = discriminator.forward(input_ids, Tensor{}, Variable{});
 
-    // Get Float32 output
-    auto output_f32 = logits.tensor().to(Device::cpu());
+    // Get output and convert to Float32 for comparison (model outputs in target dtype)
+    auto output_cpu = logits.tensor().to(Device::cpu());
+    auto output_f32 = output_cpu.to(DType::Float32);
 
     // Convert to target dtype and back
     auto output_converted = output_f32.to(dtype());

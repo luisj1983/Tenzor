@@ -40,7 +40,9 @@ inline void compute_launch_config_1d(int64_t n, dim3& grid, dim3& block) {
     block = dim3(threads_per_block);
     int64_t num_blocks = (n + threads_per_block - 1) / threads_per_block;
     num_blocks = std::min(num_blocks, static_cast<int64_t>(65535));
-    grid = dim3(static_cast<unsigned int>(num_blocks));
+    // Ensure at least 1 block to avoid CUDA invalid argument error
+    // Grid-stride loop will naturally handle n=0 by not executing any iterations
+    grid = dim3(num_blocks > 0 ? static_cast<unsigned int>(num_blocks) : 1);
 }
 
 #define CUDA_GRID_STRIDE_LOOP(i, n) \
@@ -429,6 +431,16 @@ auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, cudaStream_t strea
     CUDA_CHECK(cudaMemcpy(d_offsets, host_offsets.data(),
                           num_tensors * sizeof(int64_t), cudaMemcpyHostToDevice));
 
+    // Handle empty output case - don't launch kernel with 0 blocks
+    if (total_elements == 0) {
+        cudaFree(d_input_ptrs);
+        cudaFree(d_input_shapes);
+        cudaFree(d_output_shape);
+        cudaFree(d_output_strides);
+        cudaFree(d_offsets);
+        return output;
+    }
+
     // Launch kernel
     const int num_blocks = get_num_blocks(total_elements);
 
@@ -579,11 +591,15 @@ auto repeat_kernel(const Tensor& input, const std::vector<int64_t>& repeats, cud
         repeat_kernel_device<<<grid, block, 0, stream>>>(
             input.data<double>(), output.data<double>(),
             d_input_shape, d_input_strides, d_repeats, ndim, n);
+    } else if (input.dtype() == DType::Float16) {
+        repeat_kernel_device<<<grid, block, 0, stream>>>(
+            input.data<Float16>(), output.data<Float16>(),
+            d_input_shape, d_input_strides, d_repeats, ndim, n);
     } else {
         cudaFree(d_input_shape);
         cudaFree(d_input_strides);
         cudaFree(d_repeats);
-        throw std::runtime_error("repeat operation only supports Float32 and Float64 dtypes");
+        throw std::runtime_error("repeat operation only supports Float32, Float64, and Float16 dtypes");
     }
 
     cudaError_t err = cudaGetLastError();

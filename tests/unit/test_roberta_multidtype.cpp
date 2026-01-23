@@ -76,19 +76,25 @@ protected:
 
     // Helper: Create input token IDs (always Int64)
     Variable create_input_ids() {
-        Tensor input_ids({batch_size_, seq_len_}, DType::Int64, device());
+        // Create on CPU first, fill data, then transfer to device
+        Tensor input_ids_cpu({batch_size_, seq_len_}, DType::Int64, Device::cpu());
 
-        auto data = input_ids.data<int64_t>();
-        for (int64_t i = 0; i < input_ids.numel(); ++i) {
+        auto data = input_ids_cpu.data<int64_t>();
+        for (int64_t i = 0; i < input_ids_cpu.numel(); ++i) {
             data[i] = i % config_.vocab_size;
         }
+
+        Tensor input_ids = (device() == Device::cpu())
+            ? input_ids_cpu
+            : input_ids_cpu.to(device());
 
         return Variable(input_ids, true);
     }
 
     // Helper: Create attention mask
     Tensor create_attention_mask(bool with_padding = false) {
-        Tensor mask({batch_size_, seq_len_}, dtype(), device());
+        // Create on CPU first, fill data, then transfer to device
+        Tensor mask_cpu({batch_size_, seq_len_}, dtype(), Device::cpu());
 
         // Use template lambda to handle different dtypes
         auto fill_mask = [&]<typename T>(T* ptr) {
@@ -105,14 +111,16 @@ protected:
         };
 
         if (dtype() == DType::Float32) {
-            fill_mask(mask.data<float>());
+            fill_mask(mask_cpu.data<float>());
         } else if (dtype() == DType::Float64) {
-            fill_mask(mask.data<double>());
+            fill_mask(mask_cpu.data<double>());
         } else if (dtype() == DType::Float16) {
-            fill_mask(mask.data<Float16>());
+            fill_mask(mask_cpu.data<Float16>());
         }
 
-        return mask;
+        return (device() == Device::cpu())
+            ? mask_cpu
+            : mask_cpu.to(device());
     }
 
     // Helper: Create token type IDs (always Int64, always zeros for RoBERTa)
@@ -196,13 +204,16 @@ TEST_P(RobertaMultiDTypeTest, ModelForwardShortSequence) {
     RobertaModel model(config_);
     convert_model(model);
 
-    // Create shorter sequence (8 tokens)
+    // Create shorter sequence (8 tokens) on CPU first, then transfer
     int64_t short_seq_len = 8;
-    Tensor input_tensor({batch_size_, short_seq_len}, DType::Int64, device());
-    auto data = input_tensor.data<int64_t>();
-    for (int64_t i = 0; i < input_tensor.numel(); ++i) {
+    Tensor input_tensor_cpu({batch_size_, short_seq_len}, DType::Int64, Device::cpu());
+    auto data = input_tensor_cpu.data<int64_t>();
+    for (int64_t i = 0; i < input_tensor_cpu.numel(); ++i) {
         data[i] = i % config_.vocab_size;
     }
+    Tensor input_tensor = (device() == Device::cpu())
+        ? input_tensor_cpu
+        : input_tensor_cpu.to(device());
     Variable input_ids(input_tensor, false);
 
     auto outputs = model.forward(input_ids, Tensor{}, Variable{}, Variable{});
@@ -215,13 +226,16 @@ TEST_P(RobertaMultiDTypeTest, ModelForwardLongSequence) {
     RobertaModel model(config_);
     convert_model(model);
 
-    // Create longer sequence (32 tokens)
+    // Create longer sequence (32 tokens) on CPU first, then transfer
     int64_t long_seq_len = 32;
-    Tensor input_tensor({batch_size_, long_seq_len}, DType::Int64, device());
-    auto data = input_tensor.data<int64_t>();
-    for (int64_t i = 0; i < input_tensor.numel(); ++i) {
+    Tensor input_tensor_cpu({batch_size_, long_seq_len}, DType::Int64, Device::cpu());
+    auto data = input_tensor_cpu.data<int64_t>();
+    for (int64_t i = 0; i < input_tensor_cpu.numel(); ++i) {
         data[i] = i % config_.vocab_size;
     }
+    Tensor input_tensor = (device() == Device::cpu())
+        ? input_tensor_cpu
+        : input_tensor_cpu.to(device());
     Variable input_ids(input_tensor, false);
 
     auto outputs = model.forward(input_ids, Tensor{}, Variable{}, Variable{});

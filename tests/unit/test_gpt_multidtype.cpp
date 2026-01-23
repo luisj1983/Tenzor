@@ -68,24 +68,26 @@ protected:
 
     // Helper to create input IDs tensor
     Tensor create_input_ids(int64_t batch, int64_t seq_len) {
-        Tensor input_ids({batch, seq_len}, DType::Int64, device());
-        auto data = input_ids.data<int64_t>();
-        for (int64_t i = 0; i < input_ids.numel(); ++i) {
+        // Create on CPU first, fill data, then transfer to target device
+        Tensor input_ids_cpu({batch, seq_len}, DType::Int64, Device::cpu());
+        auto data = input_ids_cpu.data<int64_t>();
+        for (int64_t i = 0; i < input_ids_cpu.numel(); ++i) {
             data[i] = i % config_.vocab_size;
         }
-        return input_ids;
+        return (device() == Device::cpu()) ? input_ids_cpu : input_ids_cpu.to(device());
     }
 
     // Helper to create position IDs tensor
     Tensor create_position_ids(int64_t batch, int64_t seq_len) {
-        Tensor position_ids({batch, seq_len}, DType::Int64, device());
-        auto pos_data = position_ids.data<int64_t>();
+        // Create on CPU first, fill data, then transfer to target device
+        Tensor position_ids_cpu({batch, seq_len}, DType::Int64, Device::cpu());
+        auto pos_data = position_ids_cpu.data<int64_t>();
         for (int64_t b = 0; b < batch; ++b) {
             for (int64_t s = 0; s < seq_len; ++s) {
                 pos_data[b * seq_len + s] = s;
             }
         }
-        return position_ids;
+        return (device() == Device::cpu()) ? position_ids_cpu : position_ids_cpu.to(device());
     }
 
     // Helper to convert tensor to target dtype
@@ -423,9 +425,10 @@ TEST_P(GPTMultiDTypeTest, GPT2LMHeadLogitsRange) {
     convert_model(model);
     model.train(false);
 
-    Tensor input_ids({1, 4}, DType::Int64, device());
-    auto data = input_ids.data<int64_t>();
+    Tensor input_ids_cpu({1, 4}, DType::Int64, Device::cpu());
+    auto data = input_ids_cpu.data<int64_t>();
     data[0] = 10; data[1] = 20; data[2] = 30; data[3] = 40;
+    Tensor input_ids = (device() == Device::cpu()) ? input_ids_cpu : input_ids_cpu.to(device());
 
     Variable input_var(input_ids, false);
     auto logits = model.forward(input_var, Variable{}, Tensor{});
@@ -509,11 +512,12 @@ TEST_P(GPTMultiDTypeTest, GPT3LMHeadModelForward) {
     convert_model(model);
     model.train(false);
 
-    Tensor input_ids({1, 8}, DType::Int64, device());
-    auto data = input_ids.data<int64_t>();
+    Tensor input_ids_cpu({1, 8}, DType::Int64, Device::cpu());
+    auto data = input_ids_cpu.data<int64_t>();
     for (int64_t i = 0; i < 8; ++i) {
         data[i] = i * 10;
     }
+    Tensor input_ids = (device() == Device::cpu()) ? input_ids_cpu : input_ids_cpu.to(device());
 
     Variable input_var(input_ids, false);
     auto logits = model.forward(input_var, Variable{}, Tensor{});
@@ -534,11 +538,12 @@ TEST_P(GPTMultiDTypeTest, GPT3LMHeadModelGradientFlow) {
     convert_model(model);
     model.train();
 
-    Tensor input_ids({1, 8}, DType::Int64, device());
-    auto data = input_ids.data<int64_t>();
+    Tensor input_ids_cpu2({1, 8}, DType::Int64, Device::cpu());
+    auto data2 = input_ids_cpu2.data<int64_t>();
     for (int64_t i = 0; i < 8; ++i) {
-        data[i] = i * 10;
+        data2[i] = i * 10;
     }
+    Tensor input_ids = (device() == Device::cpu()) ? input_ids_cpu2 : input_ids_cpu2.to(device());
 
     Variable input_var(input_ids, false);
     auto logits = model.forward(input_var, Variable{}, Tensor{});
@@ -576,17 +581,19 @@ TEST_P(GPTMultiDTypeTest, GeneratorGreedySearch) {
 
     TextGenerator generator(model, gen_config);
 
-    Tensor input_ids({1, 4}, DType::Int64, device());
-    auto data = input_ids.data<int64_t>();
+    Tensor input_ids_cpu({1, 4}, DType::Int64, Device::cpu());
+    auto data = input_ids_cpu.data<int64_t>();
     data[0] = 10; data[1] = 20; data[2] = 30; data[3] = 40;
+    Tensor input_ids = (device() == Device::cpu()) ? input_ids_cpu : input_ids_cpu.to(device());
 
     auto output = generator.greedy_search(input_ids);
+    auto output_cpu = (output.device() == Device::cpu()) ? output : output.to(Device::cpu());
 
     EXPECT_EQ(output.shape()[0], 1);
     EXPECT_EQ(output.shape()[1], gen_config.max_length);
 
     // Check that first tokens match input
-    auto output_data = output.data<int64_t>();
+    auto output_data = output_cpu.data<int64_t>();
     EXPECT_EQ(output_data[0], 10);
     EXPECT_EQ(output_data[1], 20);
     EXPECT_EQ(output_data[2], 30);
@@ -613,17 +620,19 @@ TEST_P(GPTMultiDTypeTest, GeneratorTopKSampling) {
 
     TextGenerator generator(model, gen_config);
 
-    Tensor input_ids({1, 3}, DType::Int64, device());
-    auto data = input_ids.data<int64_t>();
+    Tensor input_ids_cpu({1, 3}, DType::Int64, Device::cpu());
+    auto data = input_ids_cpu.data<int64_t>();
     data[0] = 5; data[1] = 15; data[2] = 25;
+    Tensor input_ids = (device() == Device::cpu()) ? input_ids_cpu : input_ids_cpu.to(device());
 
     auto output = generator.top_k_sampling(input_ids, gen_config.top_k, gen_config.temperature);
+    auto output_cpu = (output.device() == Device::cpu()) ? output : output.to(Device::cpu());
 
     EXPECT_EQ(output.shape()[0], 1);
     EXPECT_EQ(output.shape()[1], gen_config.max_length);
 
     // Verify input tokens are preserved
-    auto output_data = output.data<int64_t>();
+    auto output_data = output_cpu.data<int64_t>();
     EXPECT_EQ(output_data[0], 5);
     EXPECT_EQ(output_data[1], 15);
     EXPECT_EQ(output_data[2], 25);
@@ -649,17 +658,19 @@ TEST_P(GPTMultiDTypeTest, GeneratorTopPSampling) {
 
     TextGenerator generator(model, gen_config);
 
-    Tensor input_ids({1, 3}, DType::Int64, device());
-    auto data = input_ids.data<int64_t>();
+    Tensor input_ids_cpu({1, 3}, DType::Int64, Device::cpu());
+    auto data = input_ids_cpu.data<int64_t>();
     data[0] = 7; data[1] = 17; data[2] = 27;
+    Tensor input_ids = (device() == Device::cpu()) ? input_ids_cpu : input_ids_cpu.to(device());
 
     auto output = generator.top_p_sampling(input_ids, gen_config.top_p, gen_config.temperature);
+    auto output_cpu = (output.device() == Device::cpu()) ? output : output.to(Device::cpu());
 
     EXPECT_EQ(output.shape()[0], 1);
     EXPECT_EQ(output.shape()[1], gen_config.max_length);
 
     // Verify all tokens are valid
-    auto output_data = output.data<int64_t>();
+    auto output_data = output_cpu.data<int64_t>();
     for (int64_t i = 0; i < gen_config.max_length; ++i) {
         EXPECT_GE(output_data[i], 0);
         EXPECT_LT(output_data[i], config_.vocab_size);
@@ -678,17 +689,19 @@ TEST_P(GPTMultiDTypeTest, GeneratorBeamSearch) {
 
     TextGenerator generator(model, gen_config);
 
-    Tensor input_ids({1, 2}, DType::Int64, device());
-    auto data = input_ids.data<int64_t>();
+    Tensor input_ids_cpu({1, 2}, DType::Int64, Device::cpu());
+    auto data = input_ids_cpu.data<int64_t>();
     data[0] = 100; data[1] = 200;
+    Tensor input_ids = (device() == Device::cpu()) ? input_ids_cpu : input_ids_cpu.to(device());
 
     auto output = generator.beam_search(input_ids, gen_config.num_beams);
+    auto output_cpu = (output.device() == Device::cpu()) ? output : output.to(Device::cpu());
 
     EXPECT_EQ(output.shape()[0], 1);
     EXPECT_EQ(output.shape()[1], gen_config.max_length);
 
     // Check input tokens preserved
-    auto output_data = output.data<int64_t>();
+    auto output_data = output_cpu.data<int64_t>();
     EXPECT_EQ(output_data[0], 100);
     EXPECT_EQ(output_data[1], 200);
 
@@ -710,17 +723,19 @@ TEST_P(GPTMultiDTypeTest, GeneratorGenericGenerate) {
 
     TextGenerator generator(model, gen_config);
 
-    Tensor input_ids({1, 2}, DType::Int64, device());
-    auto data = input_ids.data<int64_t>();
+    Tensor input_ids_cpu({1, 2}, DType::Int64, Device::cpu());
+    auto data = input_ids_cpu.data<int64_t>();
     data[0] = 50; data[1] = 60;
+    Tensor input_ids = (device() == Device::cpu()) ? input_ids_cpu : input_ids_cpu.to(device());
 
     auto output = generator.generate(input_ids);
+    auto output_cpu = (output.device() == Device::cpu()) ? output : output.to(Device::cpu());
 
     EXPECT_EQ(output.shape()[0], 1);
     EXPECT_EQ(output.shape()[1], gen_config.max_length);
 
     // Verify all tokens are valid
-    auto output_data = output.data<int64_t>();
+    auto output_data = output_cpu.data<int64_t>();
     for (int64_t i = 0; i < gen_config.max_length; ++i) {
         EXPECT_GE(output_data[i], 0);
         EXPECT_LT(output_data[i], config_.vocab_size);
@@ -794,19 +809,21 @@ TEST_P(GPTMultiDTypeTest, EndToEndTextGeneration) {
 
     TextGenerator generator(model, gen_config);
 
-    // Create input
-    Tensor input_ids({1, 3}, DType::Int64, device());
-    auto data = input_ids.data<int64_t>();
+    // Create input on CPU first, then transfer
+    Tensor input_ids_cpu({1, 3}, DType::Int64, Device::cpu());
+    auto data = input_ids_cpu.data<int64_t>();
     data[0] = 1; data[1] = 2; data[2] = 3;
+    Tensor input_ids = (device() == Device::cpu()) ? input_ids_cpu : input_ids_cpu.to(device());
 
     // Generate
     auto output = generator.generate(input_ids);
+    auto output_cpu = (output.device() == Device::cpu()) ? output : output.to(Device::cpu());
 
     // Verify output shape and content
     EXPECT_EQ(output.shape()[0], 1);
     EXPECT_EQ(output.shape()[1], gen_config.max_length);
 
-    auto output_data = output.data<int64_t>();
+    auto output_data = output_cpu.data<int64_t>();
 
     // Input tokens should be preserved
     EXPECT_EQ(output_data[0], 1);
@@ -824,9 +841,10 @@ TEST_P(GPTMultiDTypeTest, TrainingModeVsEvalMode) {
     GPT2LMHeadModel model(config_);
     convert_model(model);
 
-    Tensor input_ids({1, 4}, DType::Int64, device());
-    auto data = input_ids.data<int64_t>();
+    Tensor input_ids_cpu({1, 4}, DType::Int64, Device::cpu());
+    auto data = input_ids_cpu.data<int64_t>();
     data[0] = 10; data[1] = 20; data[2] = 30; data[3] = 40;
+    Tensor input_ids = (device() == Device::cpu()) ? input_ids_cpu : input_ids_cpu.to(device());
     Variable input_var(input_ids, false);
 
     // Training mode
@@ -878,20 +896,22 @@ TEST_P(GPTMultiDTypeTest, BatchedGeneration) {
 
     TextGenerator generator(model, gen_config);
 
-    // Test with batch size 3
-    Tensor input_ids({3, 4}, DType::Int64, device());
-    auto data = input_ids.data<int64_t>();
-    for (int64_t i = 0; i < input_ids.numel(); ++i) {
+    // Test with batch size 3 - create on CPU first
+    Tensor input_ids_cpu({3, 4}, DType::Int64, Device::cpu());
+    auto data = input_ids_cpu.data<int64_t>();
+    for (int64_t i = 0; i < input_ids_cpu.numel(); ++i) {
         data[i] = (i * 10) % config_.vocab_size;
     }
+    Tensor input_ids = (device() == Device::cpu()) ? input_ids_cpu : input_ids_cpu.to(device());
 
     auto output = generator.greedy_search(input_ids);
+    auto output_cpu = (output.device() == Device::cpu()) ? output : output.to(Device::cpu());
 
     EXPECT_EQ(output.shape()[0], 3);
     EXPECT_EQ(output.shape()[1], gen_config.max_length);
 
     // Verify all tokens are valid
-    auto output_data = output.data<int64_t>();
+    auto output_data = output_cpu.data<int64_t>();
     for (int64_t i = 0; i < output.numel(); ++i) {
         EXPECT_GE(output_data[i], 0);
         EXPECT_LT(output_data[i], config_.vocab_size);

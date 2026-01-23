@@ -31,13 +31,16 @@ auto MinMaxObserver::observe(const Tensor& tensor) -> void {
     const float* data = tensor_f32.data<const float>();
     int64_t n = tensor_f32.numel();
 
+    // Track original device for later
+    auto original_device = tensor.device();
+
     if (!has_data_) {
-        // First observation - initialize min/max
+        // First observation - initialize min/max on CPU
         if (per_channel_) {
             auto shape = tensor.shape();
             int64_t num_channels = shape[axis_];
-            min_val_ = Tensor({num_channels}, DType::Float32, tensor.device());
-            max_val_ = Tensor({num_channels}, DType::Float32, tensor.device());
+            min_val_ = Tensor({num_channels}, DType::Float32, Device::cpu());
+            max_val_ = Tensor({num_channels}, DType::Float32, Device::cpu());
 
             float* min_data = min_val_.data<float>();
             float* max_data = max_val_.data<float>();
@@ -57,9 +60,11 @@ auto MinMaxObserver::observe(const Tensor& tensor) -> void {
                 min_data[c] = ch_min;
                 max_data[c] = ch_max;
             }
+
+            // Keep on CPU (small scalars, accessed from CPU)
         } else {
-            min_val_ = Tensor({1}, DType::Float32, tensor.device());
-            max_val_ = Tensor({1}, DType::Float32, tensor.device());
+            min_val_ = Tensor({1}, DType::Float32, Device::cpu());
+            max_val_ = Tensor({1}, DType::Float32, Device::cpu());
 
             float min_v = data[0];
             float max_v = data[0];
@@ -79,8 +84,18 @@ auto MinMaxObserver::observe(const Tensor& tensor) -> void {
             int64_t num_channels = shape[axis_];
             int64_t channel_size = n / num_channels;
 
-            float* min_data = min_val_.data<float>();
-            float* max_data = max_val_.data<float>();
+            // Move to CPU for data access
+            Tensor min_cpu = min_val_;
+            Tensor max_cpu = max_val_;
+            if (min_cpu.device() != Device::cpu()) {
+                min_cpu = min_cpu.to(Device::cpu());
+            }
+            if (max_cpu.device() != Device::cpu()) {
+                max_cpu = max_cpu.to(Device::cpu());
+            }
+
+            float* min_data = min_cpu.data<float>();
+            float* max_data = max_cpu.data<float>();
 
             for (int64_t c = 0; c < num_channels; ++c) {
                 for (int64_t i = 0; i < channel_size; ++i) {
@@ -89,14 +104,32 @@ auto MinMaxObserver::observe(const Tensor& tensor) -> void {
                     max_data[c] = std::max(max_data[c], val);
                 }
             }
+
+            // Keep on CPU (small scalars, accessed from CPU)
+            min_val_ = min_cpu;
+            max_val_ = max_cpu;
         } else {
-            float* min_data = min_val_.data<float>();
-            float* max_data = max_val_.data<float>();
+            // Move to CPU for data access
+            Tensor min_cpu = min_val_;
+            Tensor max_cpu = max_val_;
+            if (min_cpu.device() != Device::cpu()) {
+                min_cpu = min_cpu.to(Device::cpu());
+            }
+            if (max_cpu.device() != Device::cpu()) {
+                max_cpu = max_cpu.to(Device::cpu());
+            }
+
+            float* min_data = min_cpu.data<float>();
+            float* max_data = max_cpu.data<float>();
 
             for (int64_t i = 0; i < n; ++i) {
                 min_data[0] = std::min(min_data[0], data[i]);
                 max_data[0] = std::max(max_data[0], data[i]);
             }
+
+            // Keep on CPU (small scalars, accessed from CPU)
+            min_val_ = min_cpu;
+            max_val_ = max_cpu;
         }
     }
 }
@@ -141,13 +174,16 @@ auto MovingAverageMinMaxObserver::observe(const Tensor& tensor) -> void {
     const float* data = tensor_f32.data<const float>();
     int64_t n = tensor_f32.numel();
 
+    // Track original device for later
+    auto original_device = tensor.device();
+
     if (!has_data_) {
-        // Initialize with first observation
+        // Initialize with first observation on CPU
         if (per_channel_) {
             auto shape = tensor.shape();
             int64_t num_channels = shape[axis_];
-            min_val_ = Tensor({num_channels}, DType::Float32, tensor.device());
-            max_val_ = Tensor({num_channels}, DType::Float32, tensor.device());
+            min_val_ = Tensor({num_channels}, DType::Float32, Device::cpu());
+            max_val_ = Tensor({num_channels}, DType::Float32, Device::cpu());
 
             float* min_data = min_val_.data<float>();
             float* max_data = max_val_.data<float>();
@@ -167,9 +203,11 @@ auto MovingAverageMinMaxObserver::observe(const Tensor& tensor) -> void {
                 min_data[c] = ch_min;
                 max_data[c] = ch_max;
             }
+
+            // Keep on CPU (small scalars, accessed from CPU)
         } else {
-            min_val_ = Tensor({1}, DType::Float32, tensor.device());
-            max_val_ = Tensor({1}, DType::Float32, tensor.device());
+            min_val_ = Tensor({1}, DType::Float32, Device::cpu());
+            max_val_ = Tensor({1}, DType::Float32, Device::cpu());
 
             float min_v = data[0];
             float max_v = data[0];
@@ -189,8 +227,18 @@ auto MovingAverageMinMaxObserver::observe(const Tensor& tensor) -> void {
             int64_t num_channels = shape[axis_];
             int64_t channel_size = n / num_channels;
 
-            float* min_data = min_val_.data<float>();
-            float* max_data = max_val_.data<float>();
+            // Move to CPU for data access
+            Tensor min_cpu = min_val_;
+            Tensor max_cpu = max_val_;
+            if (min_cpu.device() != Device::cpu()) {
+                min_cpu = min_cpu.to(Device::cpu());
+            }
+            if (max_cpu.device() != Device::cpu()) {
+                max_cpu = max_cpu.to(Device::cpu());
+            }
+
+            float* min_data = min_cpu.data<float>();
+            float* max_data = max_cpu.data<float>();
 
             for (int64_t c = 0; c < num_channels; ++c) {
                 float ch_min = data[c * channel_size];
@@ -205,6 +253,10 @@ auto MovingAverageMinMaxObserver::observe(const Tensor& tensor) -> void {
                 min_data[c] = momentum_ * min_data[c] + (1.0f - momentum_) * ch_min;
                 max_data[c] = momentum_ * max_data[c] + (1.0f - momentum_) * ch_max;
             }
+
+            // Keep on CPU (small scalars, accessed from CPU)
+            min_val_ = min_cpu;
+            max_val_ = max_cpu;
         } else {
             float min_v = data[0];
             float max_v = data[0];
@@ -213,11 +265,25 @@ auto MovingAverageMinMaxObserver::observe(const Tensor& tensor) -> void {
                 max_v = std::max(max_v, data[i]);
             }
 
-            float* min_data = min_val_.data<float>();
-            float* max_data = max_val_.data<float>();
+            // Move to CPU for data access
+            Tensor min_cpu = min_val_;
+            Tensor max_cpu = max_val_;
+            if (min_cpu.device() != Device::cpu()) {
+                min_cpu = min_cpu.to(Device::cpu());
+            }
+            if (max_cpu.device() != Device::cpu()) {
+                max_cpu = max_cpu.to(Device::cpu());
+            }
+
+            float* min_data = min_cpu.data<float>();
+            float* max_data = max_cpu.data<float>();
 
             min_data[0] = momentum_ * min_data[0] + (1.0f - momentum_) * min_v;
             max_data[0] = momentum_ * max_data[0] + (1.0f - momentum_) * max_v;
+
+            // Keep on CPU (small scalars, accessed from CPU)
+            min_val_ = min_cpu;
+            max_val_ = max_cpu;
         }
     }
 }
@@ -403,8 +469,8 @@ auto PerChannelHistogramObserver::observe(const Tensor& tensor) -> void {
     const float* data = tensor_f32.data<const float>();
 
     for (int64_t c = 0; c < num_channels; ++c) {
-        // Create temporary tensor for this channel
-        Tensor channel_data({channel_size}, DType::Float32, tensor.device());
+        // Create temporary tensor for this channel on CPU
+        Tensor channel_data({channel_size}, DType::Float32, Device::cpu());
         float* ch_ptr = channel_data.data<float>();
 
         for (int64_t i = 0; i < channel_size; ++i) {
@@ -430,8 +496,13 @@ auto PerChannelHistogramObserver::calculate_qparams(QuantDType dtype, Quantizati
 
     for (int64_t c = 0; c < num_channels; ++c) {
         auto ch_params = channel_observers_[c]->calculate_qparams(dtype, scheme);
-        min_data[c] = ch_params.scale.data<const float>()[0];  // Simplified
-        max_data[c] = ch_params.scale.data<const float>()[0];
+        // Move scale to CPU for data access
+        Tensor scale_cpu = ch_params.scale;
+        if (scale_cpu.device() != Device::cpu()) {
+            scale_cpu = scale_cpu.to(Device::cpu());
+        }
+        min_data[c] = scale_cpu.data<const float>()[0];  // Simplified
+        max_data[c] = scale_cpu.data<const float>()[0];
     }
 
     auto params = compute_quantization_params(min, max, dtype, scheme);

@@ -40,7 +40,10 @@ constexpr int BLOCK_SIZE = 256;
 
 // Calculate grid size for element-wise operations
 inline int get_num_blocks(int64_t n, int block_size = BLOCK_SIZE) {
-    return (n + block_size - 1) / block_size;
+    int num_blocks = (n + block_size - 1) / block_size;
+    // Ensure at least 1 block to avoid CUDA invalid argument error
+    // Grid-stride loop will naturally handle n=0 by not executing any iterations
+    return num_blocks > 0 ? num_blocks : 1;
 }
 
 // ============================================================================
@@ -1384,6 +1387,254 @@ extern "C" {
         log_softmax_backward_kernel<double><<<num_blocks, SOFTMAX_BLOCK_SIZE, shared_mem_size>>>(
             grad_output, output, grad_input, batch_size, dim_size);
         CUDA_CHECK(cudaGetLastError());
+    }
+}
+
+// ============================================================================
+// In-Place Activation CUDA Kernels
+// ============================================================================
+
+// In-place ReLU: x = max(0, x)
+template<typename T>
+__global__ void relu_inplace_cuda_kernel(T* data, int64_t n) {
+    CUDA_GRID_STRIDE_LOOP(idx, n) {
+        data[idx] = data[idx] > T(0) ? data[idx] : T(0);
+    }
+}
+
+// Vectorized in-place ReLU using float4
+__global__ void relu_inplace_vectorized_kernel(float4* __restrict__ data, int64_t n4) {
+    CUDA_GRID_STRIDE_LOOP(idx, n4) {
+        float4 x = data[idx];
+        x.x = fmaxf(0.0f, x.x);
+        x.y = fmaxf(0.0f, x.y);
+        x.z = fmaxf(0.0f, x.z);
+        x.w = fmaxf(0.0f, x.w);
+        data[idx] = x;
+    }
+}
+
+__global__ void relu_inplace_remainder_kernel(float* data, int64_t start, int64_t n) {
+    int64_t idx = blockIdx.x * blockDim.x + threadIdx.x + start;
+    if (idx < n) {
+        data[idx] = fmaxf(0.0f, data[idx]);
+    }
+}
+
+// In-place Sigmoid: x = 1 / (1 + exp(-x))
+template<typename T>
+__global__ void sigmoid_inplace_cuda_kernel(T* data, int64_t n) {
+    CUDA_GRID_STRIDE_LOOP(idx, n) {
+        data[idx] = T(1) / (T(1) + device_exp(-data[idx]));
+    }
+}
+
+// In-place Tanh: x = tanh(x)
+template<typename T>
+__global__ void tanh_inplace_cuda_kernel(T* data, int64_t n) {
+    CUDA_GRID_STRIDE_LOOP(idx, n) {
+        data[idx] = tanh(data[idx]);
+    }
+}
+
+// Specialization for __half
+template<>
+__global__ void tanh_inplace_cuda_kernel<__half>(__half* data, int64_t n) {
+    CUDA_GRID_STRIDE_LOOP(idx, n) {
+        // Convert to float, apply tanh, convert back
+        float val = __half2float(data[idx]);
+        data[idx] = __float2half(tanhf(val));
+    }
+}
+
+// In-place LeakyReLU: x = max(alpha * x, x)
+template<typename T>
+__global__ void leaky_relu_inplace_cuda_kernel(T* data, T alpha, int64_t n) {
+    CUDA_GRID_STRIDE_LOOP(idx, n) {
+        T val = data[idx];
+        data[idx] = val > T(0) ? val : alpha * val;
+    }
+}
+
+// In-place GELU: x = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+template<typename T>
+__global__ void gelu_inplace_cuda_kernel(T* data, int64_t n) {
+    constexpr T sqrt_2_over_pi = T(0.7978845608028654);
+    constexpr T coeff = T(0.044715);
+
+    CUDA_GRID_STRIDE_LOOP(idx, n) {
+        T x = data[idx];
+        T x_cubed = x * x * x;
+        T inner = sqrt_2_over_pi * (x + coeff * x_cubed);
+        data[idx] = T(0.5) * x * (T(1) + tanh(inner));
+    }
+}
+
+// Specialization for __half
+template<>
+__global__ void gelu_inplace_cuda_kernel<__half>(__half* data, int64_t n) {
+    CUDA_GRID_STRIDE_LOOP(idx, n) {
+        float x = __half2float(data[idx]);
+        float x_cubed = x * x * x;
+        float inner = 0.7978845608028654f * (x + 0.044715f * x_cubed);
+        data[idx] = __float2half(0.5f * x * (1.0f + tanhf(inner)));
+    }
+}
+
+// ============================================================================
+// In-Place Activation Tensor Wrapper Functions
+// ============================================================================
+
+// In-place ReLU wrapper
+auto relu_inplace_kernel(Tensor& input, cudaStream_t stream) -> void {
+    int64_t n = input.numel();
+    if (n == 0) return;
+
+    if (input.dtype() == DType::Float32) {
+        float* data_ptr = input.data<float>();
+
+        // Use vectorized kernel for large tensors with aligned pointers
+        if (n >= VECTORIZED_THRESHOLD &&
+            reinterpret_cast<uintptr_t>(data_ptr) % 16 == 0) {
+
+            int64_t n4 = n / 4;
+            int64_t remainder = n % 4;
+
+            if (n4 > 0) {
+                int num_blocks = get_num_blocks(n4);
+                relu_inplace_vectorized_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                    reinterpret_cast<float4*>(data_ptr), n4);
+            }
+
+            if (remainder > 0) {
+                int64_t start = n4 * 4;
+                int num_blocks_rem = (remainder + BLOCK_SIZE - 1) / BLOCK_SIZE;
+                relu_inplace_remainder_kernel<<<num_blocks_rem, BLOCK_SIZE, 0, stream>>>(
+                    data_ptr, start, n);
+            }
+        } else {
+            int num_blocks = get_num_blocks(n);
+            relu_inplace_cuda_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(data_ptr, n);
+        }
+    } else if (input.dtype() == DType::Float64) {
+        int num_blocks = get_num_blocks(n);
+        relu_inplace_cuda_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            input.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        int num_blocks = get_num_blocks(n);
+        relu_inplace_cuda_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<__half*>(input.data_ptr()), n);
+    } else {
+        throw std::runtime_error("ReLU inplace only supports Float32, Float64, and Float16 dtypes");
+    }
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        throw std::runtime_error(std::string("CUDA error in relu_inplace_kernel: ") + cudaGetErrorString(err));
+    }
+}
+
+// In-place Sigmoid wrapper
+auto sigmoid_inplace_kernel(Tensor& input, cudaStream_t stream) -> void {
+    int64_t n = input.numel();
+    if (n == 0) return;
+
+    int num_blocks = get_num_blocks(n);
+
+    if (input.dtype() == DType::Float32) {
+        sigmoid_inplace_cuda_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            input.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        sigmoid_inplace_cuda_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            input.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        sigmoid_inplace_cuda_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<__half*>(input.data_ptr()), n);
+    } else {
+        throw std::runtime_error("Sigmoid inplace only supports Float32, Float64, and Float16 dtypes");
+    }
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        throw std::runtime_error(std::string("CUDA error in sigmoid_inplace_kernel: ") + cudaGetErrorString(err));
+    }
+}
+
+// In-place Tanh wrapper
+auto tanh_inplace_kernel(Tensor& input, cudaStream_t stream) -> void {
+    int64_t n = input.numel();
+    if (n == 0) return;
+
+    int num_blocks = get_num_blocks(n);
+
+    if (input.dtype() == DType::Float32) {
+        tanh_inplace_cuda_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            input.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        tanh_inplace_cuda_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            input.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        tanh_inplace_cuda_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<__half*>(input.data_ptr()), n);
+    } else {
+        throw std::runtime_error("Tanh inplace only supports Float32, Float64, and Float16 dtypes");
+    }
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        throw std::runtime_error(std::string("CUDA error in tanh_inplace_kernel: ") + cudaGetErrorString(err));
+    }
+}
+
+// In-place LeakyReLU wrapper
+auto leaky_relu_inplace_kernel(Tensor& input, float alpha, cudaStream_t stream) -> void {
+    int64_t n = input.numel();
+    if (n == 0) return;
+
+    int num_blocks = get_num_blocks(n);
+
+    if (input.dtype() == DType::Float32) {
+        leaky_relu_inplace_cuda_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            input.data<float>(), alpha, n);
+    } else if (input.dtype() == DType::Float64) {
+        leaky_relu_inplace_cuda_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            input.data<double>(), static_cast<double>(alpha), n);
+    } else if (input.dtype() == DType::Float16) {
+        leaky_relu_inplace_cuda_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<__half*>(input.data_ptr()), __float2half(alpha), n);
+    } else {
+        throw std::runtime_error("LeakyReLU inplace only supports Float32, Float64, and Float16 dtypes");
+    }
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        throw std::runtime_error(std::string("CUDA error in leaky_relu_inplace_kernel: ") + cudaGetErrorString(err));
+    }
+}
+
+// In-place GELU wrapper
+auto gelu_inplace_kernel(Tensor& input, cudaStream_t stream) -> void {
+    int64_t n = input.numel();
+    if (n == 0) return;
+
+    int num_blocks = get_num_blocks(n);
+
+    if (input.dtype() == DType::Float32) {
+        gelu_inplace_cuda_kernel<float><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            input.data<float>(), n);
+    } else if (input.dtype() == DType::Float64) {
+        gelu_inplace_cuda_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            input.data<double>(), n);
+    } else if (input.dtype() == DType::Float16) {
+        gelu_inplace_cuda_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<__half*>(input.data_ptr()), n);
+    } else {
+        throw std::runtime_error("GELU inplace only supports Float32, Float64, and Float16 dtypes");
+    }
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        throw std::runtime_error(std::string("CUDA error in gelu_inplace_kernel: ") + cudaGetErrorString(err));
     }
 }
 
