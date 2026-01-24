@@ -133,8 +133,9 @@ auto mask_loss(const Variable& mask_logits,
     std::vector<Tensor> selected_masks;
     selected_masks.reserve(num_rois);
 
-    // Get class labels data pointer
-    auto* class_labels_data = static_cast<const int64_t*>(class_labels.data_ptr());
+    // Move class labels to CPU for data access (GPU data_ptr() access causes segfault)
+    auto class_labels_cpu = class_labels.to(Device::cpu());
+    auto* class_labels_data = static_cast<const int64_t*>(class_labels_cpu.data_ptr());
 
     for (int64_t i = 0; i < num_rois; ++i) {
         int64_t class_idx = class_labels_data[i];

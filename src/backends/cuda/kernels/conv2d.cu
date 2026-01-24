@@ -1207,21 +1207,26 @@ auto conv2d_backward_kernel(
                                    compute_grad_input, compute_grad_weight, compute_grad_bias, stream);
     }
 
-    // Initialize outputs - handle both Float32 and Float64
+    // Check if Float64 - this custom kernel only supports Float32
+    // Float64 should be handled by cuDNN; if we reach here, throw a descriptive error
+    if (input.dtype() == DType::Float64) {
+        throw std::runtime_error("conv2d_backward_kernel: Float64 not supported in custom kernel. "
+                                 "Ensure cuDNN is enabled for Float64 convolution gradients.");
+    }
+
+    // Initialize outputs (Float32 path)
     Tensor grad_input({batch, in_channels, height, width}, input.dtype(), input.device());
     Tensor grad_weight({out_channels, in_channels_per_group, kernel_h, kernel_w}, weight.dtype(), weight.device());
     Tensor grad_bias({out_channels}, weight.dtype(), weight.device());
 
-    size_t elem_size = (input.dtype() == DType::Float64) ? sizeof(double) : sizeof(float);
-
     if (compute_grad_input) {
-        CUDA_CHECK(cudaMemsetAsync(grad_input.data_ptr(), 0, grad_input.numel() * elem_size, stream));
+        CUDA_CHECK(cudaMemsetAsync(grad_input.data<float>(), 0, grad_input.numel() * sizeof(float), stream));
     }
     if (compute_grad_weight) {
-        CUDA_CHECK(cudaMemsetAsync(grad_weight.data_ptr(), 0, grad_weight.numel() * elem_size, stream));
+        CUDA_CHECK(cudaMemsetAsync(grad_weight.data<float>(), 0, grad_weight.numel() * sizeof(float), stream));
     }
     if (compute_grad_bias) {
-        CUDA_CHECK(cudaMemsetAsync(grad_bias.data_ptr(), 0, grad_bias.numel() * elem_size, stream));
+        CUDA_CHECK(cudaMemsetAsync(grad_bias.data<float>(), 0, grad_bias.numel() * sizeof(float), stream));
     }
 
     // Create cuBLAS handle

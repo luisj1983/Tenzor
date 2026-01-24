@@ -159,13 +159,6 @@ auto FasterRCNN::forward_train(
     const std::vector<std::pair<int64_t, int64_t>>* image_shapes)
     -> std::unordered_map<std::string, Variable> {
 
-    std::cout << "[DEBUG] FasterRCNN::forward_train called" << std::endl;
-    std::cout << "[DEBUG]   images.shape() = [" << images.shape()[0] << ", "
-              << images.shape()[1] << ", " << images.shape()[2] << ", "
-              << images.shape()[3] << "]" << std::endl;
-    std::cout << "[DEBUG]   num targets = " << targets.size() << std::endl;
-    std::cout.flush();
-
     if (!is_training()) {
         throw std::runtime_error(
             "forward_train called in eval mode. Use train() first."
@@ -204,21 +197,9 @@ auto FasterRCNN::forward_train(
     // Generate proposals with RPN (computes RPN losses)
     auto proposals = rpn_->forward_proposals(features, shapes, &gt_boxes);
 
-    std::cout << "[DEBUG] RPN forward_proposals returned, proposals.size() = " << proposals.size() << std::endl;
-    if (!proposals.empty()) {
-        std::cout << "[DEBUG]   proposals[0].shape() = [" << proposals[0].shape()[0] << ", " << proposals[0].shape()[1] << "]" << std::endl;
-    }
-    std::cout << "[DEBUG]   gt_boxes.size() = " << gt_boxes.size() << std::endl;
-    std::cout << "[DEBUG]   gt_labels.size() = " << gt_labels.size() << std::endl;
-    std::cout << "[DEBUG] About to call roi_head->forward_detections" << std::endl;
-    std::cout.flush();
-
     // Get detections from ROI head (computes ROI losses)
     // ROI head needs both boxes and labels for proper class assignment
     roi_head_->forward_detections(features, proposals, shapes, &gt_boxes, &gt_labels);
-
-    std::cout << "[DEBUG] ROI head forward_detections returned successfully" << std::endl;
-    std::cout.flush();
 
     // Collect all losses
     std::unordered_map<std::string, Variable> all_losses;

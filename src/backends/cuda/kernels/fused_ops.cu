@@ -654,7 +654,7 @@ __global__ void fused_layer_norm_kernel(
         __syncthreads();
     }
 
-    T mean = shared_data[0] / norm_size;
+    T mean = shared_data[0] / static_cast<T>(norm_size);
     __syncthreads();
 
     // Compute variance
@@ -674,8 +674,8 @@ __global__ void fused_layer_norm_kernel(
         __syncthreads();
     }
 
-    T variance = shared_data[0] / norm_size;
-    T inv_std = rsqrtf(variance + eps);
+    T variance = shared_data[0] / static_cast<T>(norm_size);
+    T inv_std = device_rsqrt(variance + eps);
 
     // Save mean and inv_std for backward pass
     if (threadIdx.x == 0) {
@@ -745,8 +745,20 @@ auto fused_layer_norm_cuda(
             norm_size,
             static_cast<double>(eps)
         );
+    } else if (input.dtype() == DType::Float16) {
+        fused_layer_norm_kernel<__half, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
+            reinterpret_cast<const __half*>(input.data_ptr()),
+            reinterpret_cast<const __half*>(weight.data_ptr()),
+            reinterpret_cast<const __half*>(bias.data_ptr()),
+            reinterpret_cast<__half*>(output.data_ptr()),
+            reinterpret_cast<__half*>(mean.data_ptr()),
+            reinterpret_cast<__half*>(inv_std.data_ptr()),
+            batch_size,
+            norm_size,
+            __float2half(eps)
+        );
     } else {
-        throw std::runtime_error("fused_layer_norm_cuda: Only Float32 and Float64 supported");
+        throw std::runtime_error("fused_layer_norm_cuda: Unsupported dtype");
     }
 
     CUDA_CHECK(cudaGetLastError());
@@ -820,8 +832,8 @@ __global__ void fused_layer_norm_backward_kernel(
         __syncthreads();
     }
 
-    T mean_grad_out = shared_sum1[0] / norm_size;
-    T mean_grad_out_normalized = shared_sum2[0] / norm_size;
+    T mean_grad_out = shared_sum1[0] / static_cast<T>(norm_size);
+    T mean_grad_out_normalized = shared_sum2[0] / static_cast<T>(norm_size);
 
     // Compute input gradients
     for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
@@ -893,8 +905,21 @@ auto fused_layer_norm_backward_cuda(
             batch_size,
             norm_size
         );
+    } else if (input.dtype() == DType::Float16) {
+        fused_layer_norm_backward_kernel<__half, BLOCK_SIZE><<<blocks, BLOCK_SIZE>>>(
+            reinterpret_cast<const __half*>(grad_output.data_ptr()),
+            reinterpret_cast<const __half*>(input.data_ptr()),
+            reinterpret_cast<const __half*>(weight.data_ptr()),
+            reinterpret_cast<const __half*>(mean.data_ptr()),
+            reinterpret_cast<const __half*>(inv_std.data_ptr()),
+            reinterpret_cast<__half*>(grad_input.data_ptr()),
+            reinterpret_cast<__half*>(grad_weight.data_ptr()),
+            reinterpret_cast<__half*>(grad_bias.data_ptr()),
+            batch_size,
+            norm_size
+        );
     } else {
-        throw std::runtime_error("fused_layer_norm_backward_cuda: Only Float32 and Float64 supported");
+        throw std::runtime_error("fused_layer_norm_backward_cuda: Unsupported dtype");
     }
 
     CUDA_CHECK(cudaGetLastError());

@@ -59,6 +59,16 @@ auto RoIBoxHead::forward_features(const Variable& roi_features)
 
     // Flatten ROI features
     auto num_rois = roi_features.shape()[0];
+
+    // Handle empty ROI features
+    if (num_rois == 0) {
+        auto empty_logits = Variable(
+            ops::zeros({0, num_classes_ + 1}, roi_features.dtype(), roi_features.device()), false);
+        auto empty_deltas = Variable(
+            ops::zeros({0, num_classes_ * 4}, roi_features.dtype(), roi_features.device()), false);
+        return {empty_logits, empty_deltas};
+    }
+
     auto flattened = reshape(roi_features, {num_rois, -1});
 
     // Two FC layers with ReLU
@@ -204,9 +214,13 @@ auto RoIHead::sample_rois(const Tensor& labels) -> Tensor {
     auto positive_mask = gt(labels, zero_tensor);
     auto negative_mask = eq(labels, zero_tensor);
 
-    auto num_pos = ops::sum(positive_mask.to(DType::Int64)).item<int64_t>();
-    auto num_neg = ops::sum(negative_mask.to(DType::Int64)).item<int64_t>();
+    // Get indices first to avoid sum/nonzero mismatch on GPU
+    auto pos_indices = ops::nonzero(positive_mask).squeeze(-1);
+    auto neg_indices = ops::nonzero(negative_mask).squeeze(-1);
 
+    // Use actual number of indices
+    auto num_pos = pos_indices.numel();
+    auto num_neg = neg_indices.numel();
 
     // Determine number of samples
     int64_t num_pos_samples = static_cast<int64_t>(
@@ -217,28 +231,27 @@ auto RoIHead::sample_rois(const Tensor& labels) -> Tensor {
     int64_t num_neg_samples = batch_size_per_image_ - num_pos_samples;
     num_neg_samples = std::min(num_neg_samples, num_neg);
 
-    // Get indices
-    auto pos_indices = ops::nonzero(positive_mask).squeeze(-1);
-    auto neg_indices = ops::nonzero(negative_mask).squeeze(-1);
-
 
     // Randomly sample
     // BUG FIX: Use actual number of indices, not num_pos/num_neg
     // Same fix as applied to RPN - must use pos_indices.numel() and neg_indices.numel()
+    // Note: randperm only supports CPU, so generate on CPU and move to target device
+    auto target_device = labels.device();
+
     if (num_pos_samples == 0) {
         // Create empty tensor when no positive samples needed
-        pos_indices = Tensor({0}, DType::Int64, labels.device());
+        pos_indices = Tensor({0}, DType::Int64, target_device);
     } else if (num_pos_samples < pos_indices.numel()) {
-        auto perm = ops::randperm(pos_indices.numel(), labels.device());
+        auto perm = ops::randperm(pos_indices.numel(), Device::cpu()).to(target_device);
         pos_indices = ops::index_select(pos_indices, 0,
                                         slice(perm, 0, 0, num_pos_samples));
     }
 
     if (num_neg_samples == 0) {
         // Create empty tensor when no negative samples needed
-        neg_indices = Tensor({0}, DType::Int64, labels.device());
+        neg_indices = Tensor({0}, DType::Int64, target_device);
     } else if (num_neg_samples < neg_indices.numel()) {
-        auto perm = ops::randperm(neg_indices.numel(), labels.device());
+        auto perm = ops::randperm(neg_indices.numel(), Device::cpu()).to(target_device);
         neg_indices = ops::index_select(neg_indices, 0,
                                         slice(perm, 0, 0, num_neg_samples));
     }
@@ -255,11 +268,18 @@ auto RoIHead::postprocess_detections(
 
     std::unordered_map<std::string, Tensor> result;
 
+    auto num_rois = proposals.shape()[0];
+
+    // Handle empty proposals
+    if (num_rois == 0) {
+        result["boxes"] = ops::zeros({0, 4}, proposals.dtype(), proposals.device());
+        result["scores"] = ops::zeros({0}, proposals.dtype(), proposals.device());
+        result["labels"] = ops::zeros({0}, DType::Int64, proposals.device());
+        return result;
+    }
+
     // Apply softmax to get class probabilities
     auto class_probs = tenzor::softmax(Variable(class_logits, false), 1).tensor();
-
-    // Reshape box deltas to (num_rois, num_classes, 4)
-    auto num_rois = proposals.shape()[0];
     auto box_deltas_reshaped = tenzor::reshape(box_deltas,
                                              {num_rois, num_classes_, 4});
 
@@ -370,9 +390,7 @@ auto RoIHead::forward_detections(
 
 
         // Get predictions
-
         auto [class_logits, box_deltas] = box_head_->forward_features(roi_features);
-
 
         // Training mode: compute losses
         if (is_training() && gt_boxes != nullptr && gt_labels != nullptr &&
@@ -459,13 +477,19 @@ auto RoIHead::forward_detections(
             auto fg_mask = gt(sampled_labels, zero_tensor);
             auto num_fg = ops::sum(fg_mask.to(DType::Int64)).item<int64_t>();
 
-            if (num_fg > 0) {
-                auto fg_indices = ops::nonzero(fg_mask).squeeze(-1);
+            // Get foreground indices
+            auto fg_indices = ops::nonzero(fg_mask).squeeze(-1);
 
+            // BUG FIX: Use actual number of indices from nonzero, not sum
+            // There can be a mismatch between sum(mask) and nonzero(mask).numel() on GPU
+            num_fg = fg_indices.numel();
+
+            if (num_fg > 0) {
                 // Get foreground predictions and targets
                 auto fg_box_deltas = ops::index_select(
                     sampled_box_deltas, 0, fg_indices
                 );
+
                 auto fg_proposals = ops::index_select(
                     sampled_proposals, 0, fg_indices
                 );

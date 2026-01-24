@@ -111,6 +111,27 @@ auto fused_linear_relu_kernel(
                 out_data[idx] = std::max(0.0, val);
             }
         }
+    } else if (input.dtype() == DType::Float16) {
+        // Float16: convert to Float32 for computation, convert back
+        Tensor output_f32 = output.to(DType::Float32);
+        Tensor bias_f32 = bias ? bias->to(DType::Float32) : Tensor();
+
+        float* out_data = output_f32.data<float>();
+        const float* bias_data = bias ? bias_f32.data<float>() : nullptr;
+
+        for (size_t i = 0; i < static_cast<size_t>(batch_size); ++i) {
+            for (size_t j = 0; j < static_cast<size_t>(out_features); ++j) {
+                size_t idx = i * out_features + j;
+                float val = out_data[idx];
+                if (bias_data) {
+                    val += bias_data[j];
+                }
+                // ReLU
+                out_data[idx] = std::max(0.0f, val);
+            }
+        }
+
+        output = output_f32.to(DType::Float16);
     }
 
     // Reshape back to original batch dimensions
@@ -270,6 +291,12 @@ auto fused_batchnorm_relu_kernel(
     std::vector<int64_t> shape_vec(input.shape().begin(), input.shape().end());
     Tensor output = zeros(shape_vec, input.dtype(), input.device());
 
+    int64_t batch_size = input.shape()[0];
+    int64_t spatial_size = 1;
+    for (size_t i = 2; i < input.shape().size(); ++i) {
+        spatial_size *= input.shape()[i];
+    }
+
     if (input.dtype() == DType::Float32) {
         const float* in_data = input.data<float>();
         const float* mean_data = running_mean.data<float>();
@@ -277,12 +304,6 @@ auto fused_batchnorm_relu_kernel(
         const float* gamma_data = weight.data<float>();
         const float* beta_data = bias.data<float>();
         float* out_data = output.data<float>();
-
-        int64_t batch_size = input.shape()[0];
-        int64_t spatial_size = 1;
-        for (size_t i = 2; i < input.shape().size(); ++i) {
-            spatial_size *= input.shape()[i];
-        }
 
         // Fused batchnorm + ReLU
         for (int64_t n = 0; n < batch_size; ++n) {
@@ -302,8 +323,61 @@ auto fused_batchnorm_relu_kernel(
                 }
             }
         }
+    } else if (input.dtype() == DType::Float64) {
+        const double* in_data = input.data<double>();
+        const double* mean_data = running_mean.data<double>();
+        const double* var_data = running_var.data<double>();
+        const double* gamma_data = weight.data<double>();
+        const double* beta_data = bias.data<double>();
+        double* out_data = output.data<double>();
+
+        // Fused batchnorm + ReLU
+        for (int64_t n = 0; n < batch_size; ++n) {
+            for (int64_t c = 0; c < num_features; ++c) {
+                double mean = mean_data[c];
+                double var = var_data[c];
+                double gamma = gamma_data[c];
+                double beta = beta_data[c];
+                double inv_std = 1.0 / std::sqrt(var + static_cast<double>(eps));
+
+                for (int64_t s = 0; s < spatial_size; ++s) {
+                    size_t idx = n * num_features * spatial_size + c * spatial_size + s;
+                    double normalized = (in_data[idx] - mean) * inv_std;
+                    double scaled = normalized * gamma + beta;
+                    // ReLU
+                    out_data[idx] = std::max(0.0, scaled);
+                }
+            }
+        }
+    } else if (input.dtype() == DType::Float16) {
+        const Float16* in_data = input.data<Float16>();
+        const Float16* mean_data = running_mean.data<Float16>();
+        const Float16* var_data = running_var.data<Float16>();
+        const Float16* gamma_data = weight.data<Float16>();
+        const Float16* beta_data = bias.data<Float16>();
+        Float16* out_data = output.data<Float16>();
+
+        // Fused batchnorm + ReLU (compute in float for numerical stability)
+        for (int64_t n = 0; n < batch_size; ++n) {
+            for (int64_t c = 0; c < num_features; ++c) {
+                float mean = static_cast<float>(mean_data[c]);
+                float var = static_cast<float>(var_data[c]);
+                float gamma = static_cast<float>(gamma_data[c]);
+                float beta = static_cast<float>(beta_data[c]);
+                float inv_std = 1.0f / std::sqrt(var + eps);
+
+                for (int64_t s = 0; s < spatial_size; ++s) {
+                    size_t idx = n * num_features * spatial_size + c * spatial_size + s;
+                    float in_val = static_cast<float>(in_data[idx]);
+                    float normalized = (in_val - mean) * inv_std;
+                    float scaled = normalized * gamma + beta;
+                    // ReLU
+                    out_data[idx] = Float16(std::max(0.0f, scaled));
+                }
+            }
+        }
     } else {
-        throw std::runtime_error("fused_batchnorm_relu: Only Float32 supported");
+        throw std::runtime_error("fused_batchnorm_relu: Unsupported dtype");
     }
 
     return output;
@@ -386,8 +460,17 @@ auto fused_add_relu_kernel(const Tensor& a, const Tensor& b) -> Tensor {
         for (size_t i = 0; i < n; ++i) {
             data[i] = std::max(0.0, data[i]);
         }
+    } else if (result.dtype() == DType::Float16) {
+        // Float16: convert to Float32 for computation, convert back
+        Tensor result_f32 = result.to(DType::Float32);
+        float* data = result_f32.data<float>();
+        size_t n = static_cast<size_t>(result.numel());
+        for (size_t i = 0; i < n; ++i) {
+            data[i] = std::max(0.0f, data[i]);
+        }
+        result = result_f32.to(DType::Float16);
     } else {
-        throw std::runtime_error("fused_add_relu: Only Float32/Float64 supported");
+        throw std::runtime_error("fused_add_relu: unsupported dtype");
     }
 
     return result;

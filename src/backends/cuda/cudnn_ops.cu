@@ -2850,6 +2850,34 @@ auto cudnn_layer_norm_forward(
         output = output_f32.to(DType::Float64);
         mean_tensor = mean_f32.to(DType::Float64);
         inv_std_tensor = inv_std_f32.to(DType::Float64);
+    } else if (input_c.dtype() == DType::Float16) {
+        // Float16: convert to Float32, compute, convert back for numerical stability
+        constexpr int BLOCK_SIZE = 256;
+        int blocks = static_cast<int>(batch_size);
+
+        Tensor input_f32 = input_c.to(DType::Float32);
+        Tensor weight_f32 = weight_c.to(DType::Float32);
+        Tensor bias_f32 = bias_c.to(DType::Float32);
+        Tensor output_f32(std::vector<int64_t>(shape.begin(), shape.end()), DType::Float32, input.device());
+        Tensor mean_f32({batch_size}, DType::Float32, input.device());
+        Tensor inv_std_f32({batch_size}, DType::Float32, input.device());
+
+        optimized_layer_norm_kernel<BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
+            input_f32.data<float>(),
+            weight_f32.data<float>(),
+            bias_f32.data<float>(),
+            output_f32.data<float>(),
+            mean_f32.data<float>(),
+            inv_std_f32.data<float>(),
+            batch_size,
+            norm_size,
+            eps
+        );
+
+        // Convert outputs back to Float16
+        output = output_f32.to(DType::Float16);
+        mean_tensor = mean_f32.to(DType::Float16);
+        inv_std_tensor = inv_std_f32.to(DType::Float16);
     } else {
         throw std::runtime_error("cudnn_layer_norm_forward: unsupported dtype");
     }
@@ -2944,6 +2972,41 @@ auto cudnn_layer_norm_backward(
         grad_input = grad_input_f32.to(DType::Float64);
         grad_weight = grad_weight_f32.to(DType::Float64);
         grad_bias = grad_bias_f32.to(DType::Float64);
+    } else if (input_c.dtype() == DType::Float16) {
+        // Float16: convert to Float32, compute, convert back for numerical stability
+        constexpr int BLOCK_SIZE = 256;
+        int blocks = static_cast<int>(batch_size);
+
+        Tensor grad_out_f32 = grad_out_c.to(DType::Float32);
+        Tensor input_f32 = input_c.to(DType::Float32);
+        Tensor weight_f32 = weight_c.to(DType::Float32);
+        Tensor mean_f32 = mean_c.to(DType::Float32);
+        Tensor inv_std_f32 = inv_std_c.to(DType::Float32);
+        Tensor grad_input_f32(std::vector<int64_t>(shape.begin(), shape.end()), DType::Float32, input.device());
+        Tensor grad_weight_f32({norm_size}, DType::Float32, weight.device());
+        Tensor grad_bias_f32({norm_size}, DType::Float32, weight.device());
+
+        // Zero initialize gradient accumulation tensors
+        cudaMemsetAsync(grad_weight_f32.data_ptr(), 0, grad_weight_f32.numel() * sizeof(float), stream);
+        cudaMemsetAsync(grad_bias_f32.data_ptr(), 0, grad_bias_f32.numel() * sizeof(float), stream);
+
+        optimized_layer_norm_backward_kernel<BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
+            grad_out_f32.data<float>(),
+            input_f32.data<float>(),
+            weight_f32.data<float>(),
+            mean_f32.data<float>(),
+            inv_std_f32.data<float>(),
+            grad_input_f32.data<float>(),
+            grad_weight_f32.data<float>(),
+            grad_bias_f32.data<float>(),
+            batch_size,
+            norm_size
+        );
+
+        // Convert outputs back to Float16
+        grad_input = grad_input_f32.to(DType::Float16);
+        grad_weight = grad_weight_f32.to(DType::Float16);
+        grad_bias = grad_bias_f32.to(DType::Float16);
     } else {
         throw std::runtime_error("cudnn_layer_norm_backward: unsupported dtype");
     }

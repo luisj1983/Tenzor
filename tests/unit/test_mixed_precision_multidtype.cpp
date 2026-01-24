@@ -93,11 +93,6 @@ TEST_P(MixedPrecisionMultiDTypeTest, ConfigFP16WithBaseDType) {
 
 // Test 2: Train step with different base dtypes and FP16 mixed precision
 TEST_P(MixedPrecisionMultiDTypeTest, TrainStepWithMixedPrecision) {
-    // Skip Float16 for randn
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 randn not supported";
-    }
-
     auto loss_fn_lambda = [this](const Variable& pred, const Variable& target) {
         return loss_fn(pred, target);
     };
@@ -123,8 +118,10 @@ TEST_P(MixedPrecisionMultiDTypeTest, TrainStepWithMixedPrecision) {
 
 // Test 3: Multiple training steps
 TEST_P(MixedPrecisionMultiDTypeTest, MultipleTrainStepsWithBaseDType) {
+    // Float16 training without gradient scaling causes numerical instability
+    // (gradients overflow/underflow leading to NaN after a few steps)
     if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 randn not supported";
+        GTEST_SKIP() << "Float16 training without mixed precision is numerically unstable";
     }
 
     auto model = std::make_shared<SimpleMLP>(5, 10, 3);
@@ -164,10 +161,6 @@ TEST_P(MixedPrecisionMultiDTypeTest, MultipleTrainStepsWithBaseDType) {
 
 // Test 4: Evaluation step
 TEST_P(MixedPrecisionMultiDTypeTest, EvalStepWithBaseDType) {
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 randn not supported";
-    }
-
     auto model = std::make_shared<SimpleMLP>(5, 10, 3);
     convert_model(*model);
     auto opt = std::make_shared<optim::SGD>(model->parameters(), 0.01);
@@ -195,10 +188,6 @@ TEST_P(MixedPrecisionMultiDTypeTest, EvalStepWithBaseDType) {
 
 // Test 5: GradScaler behavior
 TEST_P(MixedPrecisionMultiDTypeTest, GradScalerWithBaseDType) {
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 randn not supported";
-    }
-
     auto model = std::make_shared<SimpleMLP>(5, 10, 3);
     convert_model(*model);
     auto opt = std::make_shared<optim::SGD>(model->parameters(), 0.01);
@@ -233,10 +222,6 @@ TEST_P(MixedPrecisionMultiDTypeTest, GradScalerWithBaseDType) {
 
 // Test 6: Loss precision - loss should be computed correctly
 TEST_P(MixedPrecisionMultiDTypeTest, LossPrecisionWithBaseDType) {
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 randn not supported";
-    }
-
     auto model = std::make_shared<SimpleMLP>(5, 10, 3);
     convert_model(*model);
     auto opt = std::make_shared<optim::SGD>(model->parameters(), 0.01);
@@ -271,10 +256,6 @@ TEST_P(MixedPrecisionMultiDTypeTest, LossPrecisionWithBaseDType) {
 
 // Test 7: Convergence test
 TEST_P(MixedPrecisionMultiDTypeTest, ConvergenceWithBaseDType) {
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 randn not supported";
-    }
-
     auto model = std::make_shared<SimpleMLP>(2, 8, 1);
     convert_model(*model);
     auto opt = std::make_shared<optim::SGD>(model->parameters(), 0.1);
@@ -324,10 +305,6 @@ TEST_P(MixedPrecisionMultiDTypeTest, ConvergenceWithBaseDType) {
 
 // Test 8: Statistics tracking
 TEST_P(MixedPrecisionMultiDTypeTest, StatisticsTrackingWithBaseDType) {
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 randn not supported";
-    }
-
     auto model = std::make_shared<SimpleMLP>(5, 10, 3);
     convert_model(*model);
     auto opt = std::make_shared<optim::SGD>(model->parameters(), 0.01);
@@ -356,10 +333,6 @@ TEST_P(MixedPrecisionMultiDTypeTest, StatisticsTrackingWithBaseDType) {
 
 // Test 9: Reset statistics
 TEST_P(MixedPrecisionMultiDTypeTest, ResetStatisticsWithBaseDType) {
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 randn not supported";
-    }
-
     auto model = std::make_shared<SimpleMLP>(5, 10, 3);
     convert_model(*model);
     auto opt = std::make_shared<optim::SGD>(model->parameters(), 0.01);

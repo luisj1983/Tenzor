@@ -69,26 +69,23 @@ protected:
         bool is_float16 = (dtype() == DType::Float16);
 
         if (is_float64) {
-            // Float64: MaskRCNN needs very small sizes (~10GB for 256x256)
-            if (default_size >= 1024) return 160;
-            if (default_size >= 800) return 160;
-            if (default_size >= 600) return 160;
-            return std::min(default_size, int64_t(160));
+            // Float64: MaskRCNN needs very small sizes (2x memory of Float32)
+            // For 8GB VRAM, use 128-160 pixel inputs
+            if (default_size >= 600) return 128;
+            return std::min(default_size, int64_t(128));
         }
 
         if (is_float16) {
             // Float16: smaller to avoid numerical overflow
-            if (default_size >= 1024) return 256;
-            if (default_size >= 800) return 256;
-            if (default_size >= 600) return 224;
-            return std::min(default_size, int64_t(224));
+            // For 8GB VRAM, use 192-224 pixel inputs
+            if (default_size >= 600) return 192;
+            return std::min(default_size, int64_t(192));
         }
 
-        // Float32: standard GPU sizes
-        if (default_size >= 1024) return 416;
-        if (default_size >= 800) return 416;
-        if (default_size >= 600) return 384;
-        return std::min(default_size, int64_t(320));
+        // Float32: reduced for 8GB VRAM
+        // MaskRCNN with ResNet50 backbone needs ~4-6GB for 256x256 input
+        if (default_size >= 600) return 224;
+        return std::min(default_size, int64_t(224));
     }
 
     /**

@@ -80,8 +80,27 @@ auto box_iou(const Tensor& boxes1, const Tensor& boxes2, IoUType iou_type) -> Te
     const int64_t N = boxes1.shape()[0];
     const int64_t M = boxes2.shape()[0];
 
-    // For CPU, use manual implementation to avoid slice bugs
-    if (boxes1.device() == Device::cpu() && boxes2.device() == Device::cpu()) {
+    // For Float16 on any device, convert to Float32 for numerical stability
+    // (Float16 has limited precision and some tensor ops may not support it well)
+    if (boxes1.dtype() == DType::Float16 || boxes2.dtype() == DType::Float16) {
+        auto boxes1_f32 = boxes1.to(DType::Float32);
+        auto boxes2_f32 = boxes2.to(DType::Float32);
+        auto result_f32 = box_iou(boxes1_f32, boxes2_f32, iou_type);
+        return result_f32.to(boxes1.dtype());
+    }
+
+    // For all devices, use CPU path for reliability (GPU tensor ops can be slow/unstable)
+    // Move to CPU, compute, and move result back to original device
+    Device original_device = boxes1.device();
+    if (original_device != Device::cpu()) {
+        auto boxes1_cpu = boxes1.to(Device::cpu());
+        auto boxes2_cpu = boxes2.to(Device::cpu());
+        auto result_cpu = box_iou(boxes1_cpu, boxes2_cpu, iou_type);
+        return result_cpu.to(original_device);
+    }
+
+    // CPU implementation using manual loops for reliability
+    {
         // Remember original dtype for output
         DType original_dtype = boxes1.dtype();
 
@@ -214,20 +233,6 @@ auto box_iou(const Tensor& boxes1, const Tensor& boxes2, IoUType iou_type) -> Te
     // Compute IoU
     auto iou = inter_area / (union_area + 1e-7f);
 
-    // DEBUG: Check IoU calculation for single box case
-    if (N == 1 && M == 1) {
-        const float* area1_ptr = static_cast<const float*>(area1.data_ptr());
-        const float* area2_ptr = static_cast<const float*>(area2.data_ptr());
-        const float* inter_ptr = static_cast<const float*>(inter_area.data_ptr());
-        const float* union_ptr = static_cast<const float*>(union_area.data_ptr());
-        const float* iou_ptr = static_cast<const float*>(iou.data_ptr());
-        std::cerr << "[IoU DEBUG] area1=" << area1_ptr[0]
-                  << " area2=" << area2_ptr[0]
-                  << " inter=" << inter_ptr[0]
-                  << " union=" << union_ptr[0]
-                  << " IoU=" << iou_ptr[0] << std::endl;
-    }
-
     if (iou_type == IoUType::IoU) {
         return iou;
     }
@@ -322,18 +327,6 @@ auto box_iou(const Tensor& boxes1, const Tensor& boxes2, IoUType iou_type) -> Te
 
     // Complete IoU
     // CIoU = IoU - center_dist^2 / diag_dist^2 - alpha * v
-
-    // DEBUG: Print shapes and first values
-    if (num_boxes1 == 1 && num_boxes2 == 1) {
-        const float* iou_ptr = static_cast<const float*>(iou_cpu.data_ptr());
-        const float* center_ptr = static_cast<const float*>(center_dist_sq_cpu.data_ptr());
-        const float* diag_ptr = static_cast<const float*>(diag_dist_sq_cpu.data_ptr());
-        std::cerr << "[CIoU DEBUG] IoU=" << iou_ptr[0]
-                  << " center_dist²=" << center_ptr[0]
-                  << " diag_dist²=" << diag_ptr[0]
-                  << " v=" << v_data[0]
-                  << " alpha=" << alpha_data[0] << std::endl;
-    }
 
     auto ciou_cpu = iou_cpu - center_dist_sq_cpu / (diag_dist_sq_cpu + 1e-7f) - alpha * v;
 

@@ -184,9 +184,14 @@ auto RegionProposalNetwork::sample_anchors(const Tensor& labels) -> Tensor {
     auto positive_mask = eq(labels, ones_tensor);
     auto negative_mask = eq(labels, zeros_tensor);
 
-    auto num_pos = ops::sum(positive_mask.to(DType::Int64)).item<int64_t>();
-    auto num_neg = ops::sum(negative_mask.to(DType::Int64)).item<int64_t>();
+    // Get indices of positive and negative anchors
+    // BUG FIX: Use nonzero indices directly instead of sum to avoid sum/nonzero mismatch on GPU
+    auto pos_indices = ops::nonzero(positive_mask).squeeze(-1);
+    auto neg_indices = ops::nonzero(negative_mask).squeeze(-1);
 
+    // Use actual number of indices
+    auto num_pos = pos_indices.numel();
+    auto num_neg = neg_indices.numel();
 
     // Determine number of samples
     int64_t num_pos_samples = static_cast<int64_t>(
@@ -198,31 +203,26 @@ auto RegionProposalNetwork::sample_anchors(const Tensor& labels) -> Tensor {
     num_neg_samples = std::min(num_neg_samples, num_neg);
 
 
-    // Get indices of positive and negative anchors
-
-    auto pos_indices = ops::nonzero(positive_mask).squeeze(-1);
-
-
-    auto neg_indices = ops::nonzero(negative_mask).squeeze(-1);
-
-
     // Randomly sample
     // BUG FIX: Use actual number of indices, not num_pos/num_neg
     // num_pos/num_neg count labels==1 or labels==0, but we need to sample from pos_indices/neg_indices
+    // Note: randperm only supports CPU, so generate on CPU and move to target device
+    auto target_device = labels.device();
+
     if (num_pos_samples == 0) {
         // Create empty tensor when no positive samples needed
-        pos_indices = Tensor({0}, DType::Int64, labels.device());
+        pos_indices = Tensor({0}, DType::Int64, target_device);
     } else if (num_pos_samples < pos_indices.numel()) {
-        auto perm = ops::randperm(pos_indices.numel(), labels.device());
+        auto perm = ops::randperm(pos_indices.numel(), Device::cpu()).to(target_device);
         pos_indices = ops::index_select(pos_indices, 0,
                                         slice(perm, 0, 0, num_pos_samples));
     }
 
     if (num_neg_samples == 0) {
         // Create empty tensor when no negative samples needed
-        neg_indices = Tensor({0}, DType::Int64, labels.device());
+        neg_indices = Tensor({0}, DType::Int64, target_device);
     } else if (num_neg_samples < neg_indices.numel()) {
-        auto perm = ops::randperm(neg_indices.numel(), labels.device());
+        auto perm = ops::randperm(neg_indices.numel(), Device::cpu()).to(target_device);
         neg_indices = ops::index_select(neg_indices, 0,
                                         slice(perm, 0, 0, num_neg_samples));
     }
@@ -242,7 +242,6 @@ auto RegionProposalNetwork::generate_proposals(
     const std::pair<int64_t, int64_t>& image_shape)
     -> Tensor {
 
-
     // Decode boxes from deltas
     auto proposals = ops::decode_boxes(box_deltas, anchors);
 
@@ -251,11 +250,16 @@ auto RegionProposalNetwork::generate_proposals(
                                          image_shape.first,
                                          image_shape.second);
 
-    // Remove small boxes
-    auto keep = ops::remove_small_boxes(proposals, objectness, 1.0);
+    // Remove small boxes - use very small threshold to keep more proposals
+    // Original threshold of 1.0 is too aggressive for small images
+    auto keep = ops::remove_small_boxes(proposals, objectness, 0.001);
+
+    // Handle empty case: return empty proposals
+    if (keep.numel() == 0) {
+        return ops::zeros({0, 4}, proposals.dtype(), proposals.device());
+    }
 
     proposals = ops::index_select(proposals, 0, keep);
-
     auto scores = ops::index_select(objectness, 0, keep);
 
     // Sort by score and keep top pre_nms_top_n
@@ -266,7 +270,6 @@ auto RegionProposalNetwork::generate_proposals(
     }
 
     proposals = ops::index_select(proposals, 0, sorted_indices);
-
     scores = ops::index_select(scores, 0, sorted_indices);
 
     // Apply NMS
@@ -277,11 +280,7 @@ auto RegionProposalNetwork::generate_proposals(
         keep_nms = slice(keep_nms, 0, 0, post_nms_top_n_);
     }
 
-
-    auto result = ops::index_select(proposals, 0, keep_nms);
-
-
-    return result;
+    return ops::index_select(proposals, 0, keep_nms);
 }
 
 auto RegionProposalNetwork::forward_proposals(
@@ -304,6 +303,7 @@ auto RegionProposalNetwork::forward_proposals(
     auto anchors = anchor_generator_->generate(
         feat_h, feat_w, stride, features.device()
     );
+
     // Convert anchors to match features dtype
     if (anchors.dtype() != features.dtype()) {
         anchors = anchors.to(features.dtype());
@@ -313,10 +313,8 @@ auto RegionProposalNetwork::forward_proposals(
 
     // Process each image in batch
     for (int64_t i = 0; i < batch_size; ++i) {
-
         // Extract predictions for this image
         auto img_objectness = ops::select(objectness.tensor(), 0, i);
-
         auto img_box_reg = ops::select(box_regression.tensor(), 0, i);
 
         // Training mode: compute losses
@@ -331,18 +329,14 @@ auto RegionProposalNetwork::forward_proposals(
             // Sample anchors
             auto sampled_indices = sample_anchors(labels);
 
-
             // Compute classification loss (binary cross entropy)
-
             auto sampled_objectness = ops::index_select(
                 img_objectness, 0, sampled_indices
             );
 
-
             auto sampled_labels = ops::index_select(
                 labels, 0, sampled_indices
             );
-
 
             BCEWithLogitsLoss bce_loss;
             // Convert labels to same dtype as objectness for BCE loss
@@ -356,13 +350,13 @@ auto RegionProposalNetwork::forward_proposals(
             auto ones_tensor = full(std::vector<int64_t>(sampled_labels.shape().begin(), sampled_labels.shape().end()),
                                     static_cast<float>(1), sampled_labels.dtype(), sampled_labels.device());
             auto positive_mask = eq(sampled_labels, ones_tensor);
-            auto num_positives = ops::sum(
-                positive_mask.to(DType::Int64)
-            ).item<int64_t>();
+
+            // Get positive indices first to avoid sum/nonzero mismatch on GPU
+            auto pos_indices = ops::nonzero(positive_mask).squeeze(-1);
+            auto num_positives = pos_indices.numel();
 
             Variable reg_loss;
             if (num_positives > 0) {
-                auto pos_indices = ops::nonzero(positive_mask).squeeze(-1);
                 auto pos_box_reg = ops::index_select(
                     ops::index_select(img_box_reg, 0, sampled_indices),
                     0, pos_indices

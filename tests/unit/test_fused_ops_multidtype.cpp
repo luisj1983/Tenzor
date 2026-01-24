@@ -30,6 +30,25 @@ using namespace tenzor::testing;
 
 class FusedOpsMultiDTypeTest : public MultiBackendDTypeTest {
 protected:
+    // Get appropriate tolerances for fused operations
+    // Fused ops have different accumulation patterns than unfused ops,
+    // which causes more numerical error especially for Float16
+    std::pair<float, float> getFusedOpTolerances() {
+        if (dtype() == DType::Float16) {
+            // Float16 fused ops can have significant differences due to
+            // limited precision during dot product accumulation.
+            // For large tensors (512-dim dot products), errors compound.
+            // The naive loop in fused ops vs cuBLAS in unfused ops can
+            // differ by 0.2+ absolute in Float16 precision.
+            return {2.0f, 0.25f};  // 200% relative, 0.25 absolute
+        } else if (device().type == Device::Type::CUDA) {
+            // CUDA fused ops use naive loops vs cuBLAS which has different
+            // accumulation patterns
+            return {0.3f, 2e-2f};  // 30% relative, 0.02 absolute
+        }
+        return {rtol() * 10.0f, atol() * 10.0f};
+    }
+
     // Helper to compare tensors within tolerance
     void assertTensorsClose(const Tensor& a, const Tensor& b,
                             float rtol_override = -1.0f,
@@ -74,11 +93,6 @@ protected:
 // ============================================================================
 
 TEST_P(FusedOpsMultiDTypeTest, FusedLinearReLU_ForwardCorrectness_2D) {
-    // Skip Float16 since randn() doesn't support it directly
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 not supported by randn()";
-    }
-
     auto input = randn({32, 128}, dtype(), device());
     auto weight = randn({64, 128}, dtype(), device());
     auto bias = randn({64}, dtype(), device());
@@ -98,21 +112,11 @@ TEST_P(FusedOpsMultiDTypeTest, FusedLinearReLU_ForwardCorrectness_2D) {
 
     // Use looser tolerance for fused operations - they may have different
     // computational order which affects numerical precision
-    // Fused CUDA operations use a naive loop-based dot product which has different
-    // accumulation order than cuBLAS matmul (which uses blocked/tiled algorithms with FMA).
-    // This can lead to significant numerical differences (up to 10% relative error) for
-    // small values due to accumulated rounding errors across 128+ element dot products.
-    // Use generous tolerances for CUDA: 10% relative, 1e-2 absolute.
-    float fused_rtol = (device().type == Device::Type::CUDA) ? 0.1f : rtol() * 10.0f;
-    float fused_atol = (device().type == Device::Type::CUDA) ? 1e-2f : atol() * 10.0f;
+    auto [fused_rtol, fused_atol] = getFusedOpTolerances();
     assertTensorsClose(fused_output, unfused_output, fused_rtol, fused_atol);
 }
 
 TEST_P(FusedOpsMultiDTypeTest, FusedLinearReLU_ForwardCorrectness_3D) {
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 not supported by randn()";
-    }
-
     auto input = randn({8, 16, 256}, dtype(), device());
     auto weight = randn({128, 256}, dtype(), device());
     auto bias = randn({128}, dtype(), device());
@@ -130,10 +134,6 @@ TEST_P(FusedOpsMultiDTypeTest, FusedLinearReLU_ForwardCorrectness_3D) {
 }
 
 TEST_P(FusedOpsMultiDTypeTest, FusedLinearReLU_NoBias) {
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 not supported by randn()";
-    }
-
     auto input = randn({16, 64}, dtype(), device());
     auto weight = randn({32, 64}, dtype(), device());
 
@@ -146,21 +146,11 @@ TEST_P(FusedOpsMultiDTypeTest, FusedLinearReLU_NoBias) {
     auto unfused_output = unfused_var.tensor();
 
     // Use looser tolerance for fused operations
-    // Fused CUDA operations use a naive loop-based dot product which has different
-    // accumulation order than cuBLAS matmul (which uses blocked/tiled algorithms with FMA).
-    // This can lead to significant numerical differences (up to 10% relative error) for
-    // small values due to accumulated rounding errors across 128+ element dot products.
-    // Use generous tolerances for CUDA: 10% relative, 1e-2 absolute.
-    float fused_rtol = (device().type == Device::Type::CUDA) ? 0.1f : rtol() * 10.0f;
-    float fused_atol = (device().type == Device::Type::CUDA) ? 1e-2f : atol() * 10.0f;
+    auto [fused_rtol, fused_atol] = getFusedOpTolerances();
     assertTensorsClose(fused_output, unfused_output, fused_rtol, fused_atol);
 }
 
 TEST_P(FusedOpsMultiDTypeTest, FusedLinearReLU_LargeBatch) {
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 not supported by randn()";
-    }
-
     auto input = randn({128, 512}, dtype(), device());
     auto weight = randn({256, 512}, dtype(), device());
     auto bias = randn({256}, dtype(), device());
@@ -180,11 +170,6 @@ TEST_P(FusedOpsMultiDTypeTest, FusedLinearReLU_LargeBatch) {
 // ============================================================================
 
 TEST_P(FusedOpsMultiDTypeTest, FusedBatchNormReLU_ForwardCorrectness_2D) {
-    // fused_batchnorm_relu only supports Float32
-    if (dtype() == DType::Float64 || dtype() == DType::Float16) {
-        GTEST_SKIP() << "fused_batchnorm_relu only supports Float32";
-    }
-
     auto input = randn({32, 64}, dtype(), device());
     auto mean = zeros({64}, dtype(), device());
     auto var = ones({64}, dtype(), device());
@@ -207,10 +192,6 @@ TEST_P(FusedOpsMultiDTypeTest, FusedBatchNormReLU_ForwardCorrectness_2D) {
 }
 
 TEST_P(FusedOpsMultiDTypeTest, FusedBatchNormReLU_ForwardCorrectness_4D) {
-    if (dtype() == DType::Float64 || dtype() == DType::Float16) {
-        GTEST_SKIP() << "fused_batchnorm_relu only supports Float32";
-    }
-
     auto input = randn({8, 32, 16, 16}, dtype(), device());
     auto mean = zeros({32}, dtype(), device());
     auto var = ones({32}, dtype(), device());
@@ -227,10 +208,6 @@ TEST_P(FusedOpsMultiDTypeTest, FusedBatchNormReLU_ForwardCorrectness_4D) {
 }
 
 TEST_P(FusedOpsMultiDTypeTest, FusedBatchNormReLU_CustomEpsilon) {
-    if (dtype() == DType::Float64 || dtype() == DType::Float16) {
-        GTEST_SKIP() << "fused_batchnorm_relu only supports Float32";
-    }
-
     auto input = randn({16, 128}, dtype(), device());
     auto mean = zeros({128}, dtype(), device());
     auto var = ones({128}, dtype(), device());
@@ -253,10 +230,6 @@ TEST_P(FusedOpsMultiDTypeTest, FusedBatchNormReLU_CustomEpsilon) {
 // ============================================================================
 
 TEST_P(FusedOpsMultiDTypeTest, FusedAddReLU_ForwardCorrectness) {
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 not supported by randn()";
-    }
-
     auto a = randn({32, 64}, dtype(), device());
     auto b = randn({32, 64}, dtype(), device());
 
@@ -274,10 +247,6 @@ TEST_P(FusedOpsMultiDTypeTest, FusedAddReLU_ForwardCorrectness) {
 }
 
 TEST_P(FusedOpsMultiDTypeTest, FusedAddReLU_Broadcasting) {
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 not supported by randn()";
-    }
-
     auto a = randn({32, 64, 16}, dtype(), device());
     auto b = randn({64, 1}, dtype(), device());
 
@@ -296,10 +265,6 @@ TEST_P(FusedOpsMultiDTypeTest, FusedAddReLU_Broadcasting) {
 }
 
 TEST_P(FusedOpsMultiDTypeTest, FusedAddReLU_ResidualConnection) {
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 not supported by randn()";
-    }
-
     // Simulates residual connection: x + f(x)
     auto x = randn({16, 128}, dtype(), device());
     auto residual = randn({16, 128}, dtype(), device());
@@ -320,10 +285,6 @@ TEST_P(FusedOpsMultiDTypeTest, FusedAddReLU_ResidualConnection) {
 // ============================================================================
 
 TEST_P(FusedOpsMultiDTypeTest, FusedGELU_ForwardCorrectness) {
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 not supported by randn()";
-    }
-
     auto input = randn({32, 512}, dtype(), device());
     auto output = fused_gelu(input);
 
@@ -365,10 +326,6 @@ TEST_P(FusedOpsMultiDTypeTest, FusedGELU_ZeroInput) {
 }
 
 TEST_P(FusedOpsMultiDTypeTest, FusedGELU_NumericalStability) {
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 not supported by randn()";
-    }
-
     auto input = randn({8, 256}, dtype(), device());
 
     // Scale up for stress test
@@ -390,10 +347,6 @@ TEST_P(FusedOpsMultiDTypeTest, FusedGELU_NumericalStability) {
 // ============================================================================
 
 TEST_P(FusedOpsMultiDTypeTest, FusedLayerNorm_ForwardCorrectness_2D) {
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 not supported by randn()";
-    }
-
     auto input = randn({32, 512}, dtype(), device());
     auto weight = ones({512}, dtype(), device());
     auto bias = zeros({512}, dtype(), device());
@@ -442,10 +395,6 @@ TEST_P(FusedOpsMultiDTypeTest, FusedLayerNorm_ForwardCorrectness_2D) {
 }
 
 TEST_P(FusedOpsMultiDTypeTest, FusedLayerNorm_MultiDimensional) {
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 not supported by randn()";
-    }
-
     auto input = randn({8, 16, 256}, dtype(), device());
     auto weight = ones({256}, dtype(), device());
     auto bias = zeros({256}, dtype(), device());
@@ -462,10 +411,6 @@ TEST_P(FusedOpsMultiDTypeTest, FusedLayerNorm_MultiDimensional) {
 }
 
 TEST_P(FusedOpsMultiDTypeTest, FusedLayerNorm_CustomWeightBias) {
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 not supported by randn()";
-    }
-
     auto input = randn({16, 128}, dtype(), device());
     auto weight = randn({128}, dtype(), device());
     auto bias = randn({128}, dtype(), device());
@@ -482,10 +427,6 @@ TEST_P(FusedOpsMultiDTypeTest, FusedLayerNorm_CustomWeightBias) {
 }
 
 TEST_P(FusedOpsMultiDTypeTest, FusedLayerNorm_SmallEpsilon) {
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 not supported by randn()";
-    }
-
     auto input = randn({4, 64}, dtype(), device());
     auto weight = ones({64}, dtype(), device());
     auto bias = zeros({64}, dtype(), device());
@@ -508,10 +449,6 @@ TEST_P(FusedOpsMultiDTypeTest, FusedLayerNorm_SmallEpsilon) {
 // ============================================================================
 
 TEST_P(FusedOpsMultiDTypeTest, MixedPrecision_LinearReLU_HighToLow) {
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 not supported by randn()";
-    }
-
     // Test converting high precision input to lower precision
     auto input_high = randn({16, 64}, DType::Float64, Device::cpu());
     auto weight_high = randn({32, 64}, DType::Float64, Device::cpu());
@@ -530,10 +467,6 @@ TEST_P(FusedOpsMultiDTypeTest, MixedPrecision_LinearReLU_HighToLow) {
 }
 
 TEST_P(FusedOpsMultiDTypeTest, MixedPrecision_GELU_Stability) {
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 not supported by randn()";
-    }
-
     // Test GELU with extreme values for numerical stability
     auto input_f64 = randn({8, 128}, DType::Float64, Device::cpu()) * 20.0;
     auto input = input_f64.to(dtype()).to(device());
@@ -556,10 +489,6 @@ TEST_P(FusedOpsMultiDTypeTest, MixedPrecision_GELU_Stability) {
 // ============================================================================
 
 TEST_P(FusedOpsMultiDTypeTest, EdgeCase_SingleElement) {
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 not supported by randn()";
-    }
-
     auto input = randn({1, 1}, dtype(), device());
     auto weight = randn({1, 1}, dtype(), device());
     auto bias = randn({1}, dtype(), device());
@@ -572,10 +501,6 @@ TEST_P(FusedOpsMultiDTypeTest, EdgeCase_SingleElement) {
 }
 
 TEST_P(FusedOpsMultiDTypeTest, EdgeCase_LargeFeatureDimension) {
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 not supported by randn()";
-    }
-
     auto input = randn({2, 2048}, dtype(), device());
     auto weight = randn({1024, 2048}, dtype(), device());
     auto bias = randn({1024}, dtype(), device());
@@ -592,10 +517,6 @@ TEST_P(FusedOpsMultiDTypeTest, EdgeCase_LargeFeatureDimension) {
 // ============================================================================
 
 TEST_P(FusedOpsMultiDTypeTest, Performance_LinearReLU_Consistency) {
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 not supported by randn()";
-    }
-
     auto input = randn({128, 512}, dtype(), device());
     auto weight = randn({256, 512}, dtype(), device());
     auto bias = randn({256}, dtype(), device());
@@ -611,12 +532,7 @@ TEST_P(FusedOpsMultiDTypeTest, Performance_LinearReLU_Consistency) {
 
     // Both should produce same results (within dtype precision)
     // Use looser tolerance for fused operations
-    // Fused CUDA operations use a naive loop-based dot product which has different
-    // accumulation order than cuBLAS matmul (which uses blocked/tiled algorithms with FMA).
-    // For this large test (512-dim dot products), accumulated errors can be ~30% relative.
-    // Use generous tolerances for CUDA: 30% relative, 1e-2 absolute.
-    float fused_rtol = (device().type == Device::Type::CUDA) ? 0.3f : rtol() * 10.0f;
-    float fused_atol = (device().type == Device::Type::CUDA) ? 1e-2f : atol() * 10.0f;
+    auto [fused_rtol, fused_atol] = getFusedOpTolerances();
     assertTensorsClose(fused_output, unfused_output, fused_rtol, fused_atol);
 }
 

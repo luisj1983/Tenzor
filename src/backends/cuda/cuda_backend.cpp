@@ -1494,7 +1494,9 @@ public:
                 #ifdef TENZOR_HAS_CUDNN
                 // Detect memory format from input strides
                 // For ChannelsLast tensors, use native NHWC cuDNN path - no conversion overhead!
-                bool use_nhwc = (inputs[0].memory_format() == MemoryFormat::ChannelsLast);
+                // Note: cuDNN NHWC format doesn't support Float64, so force NCHW path for Float64
+                bool use_nhwc = (inputs[0].memory_format() == MemoryFormat::ChannelsLast) &&
+                                (inputs[0].dtype() != DType::Float64);
 
                 try {
                     if (use_nhwc) {
@@ -1506,7 +1508,10 @@ public:
                         return {cuda::cudnn_conv2d_forward(inputs[0], inputs[1], bias_ptr, stride, padding, dilation, groups, stream)};
                     }
                 } catch (const std::exception& e) {
-                    // Fall back to custom kernel if cuDNN fails
+                    // Fall back to custom kernel if cuDNN fails (but not for Float64 since custom kernel doesn't support it)
+                    if (inputs[0].dtype() == DType::Float64) {
+                        throw std::runtime_error(std::string("conv2d_forward cuDNN failed for Float64: ") + e.what());
+                    }
                     return {cuda::conv2d_forward_kernel(inputs[0], inputs[1], bias_ptr, stride, padding, dilation, groups, stream)};
                 }
                 #else
@@ -1533,7 +1538,9 @@ public:
 
                 #ifdef TENZOR_HAS_CUDNN
                 // Detect memory format from input strides (inputs[1] is the original input)
-                bool use_nhwc = (inputs[1].memory_format() == MemoryFormat::ChannelsLast);
+                // Note: cuDNN NHWC format doesn't support Float64, so force NCHW path for Float64
+                bool use_nhwc = (inputs[1].memory_format() == MemoryFormat::ChannelsLast) &&
+                                (inputs[0].dtype() != DType::Float64);
 
                 try {
                     if (use_nhwc) {
@@ -1551,7 +1558,13 @@ public:
                         return {grad_input, grad_weight, grad_bias};
                     }
                 } catch (const std::exception& e) {
-                    // Fall back to custom kernel if cuDNN fails
+                    // For Float64, re-throw cuDNN error since custom kernel doesn't support it
+                    if (inputs[0].dtype() == DType::Float64) {
+                        throw std::runtime_error(
+                            std::string("conv2d_backward cuDNN failed for Float64: ") + e.what()
+                        );
+                    }
+                    // Fall back to custom kernel if cuDNN fails for other dtypes
                     auto [grad_input, grad_weight, grad_bias] = cuda::conv2d_backward_kernel(
                         inputs[0], inputs[1], inputs[2], stride, padding, dilation, groups,
                         compute_grad_input, compute_grad_weight, compute_grad_bias, stream
@@ -1601,6 +1614,10 @@ public:
                     );
                     return std::vector<Tensor>{grad_input};
                 } catch (const std::exception& e) {
+                    // Re-throw for Float64 since custom kernel doesn't support it
+                    if (inputs[0].dtype() == DType::Float64) {
+                        throw std::runtime_error(std::string("conv2d_backward_input cuDNN failed for Float64: ") + e.what());
+                    }
                     auto [grad_input, grad_weight, grad_bias] = cuda::conv2d_backward_kernel(
                         inputs[0], dummy_input, inputs[1], stride, padding, dilation, groups,
                         true, false, false, stream
@@ -1649,6 +1666,10 @@ public:
                     );
                     return std::vector<Tensor>{grad_weight};
                 } catch (const std::exception& e) {
+                    // Re-throw for Float64 since custom kernel doesn't support it
+                    if (inputs[0].dtype() == DType::Float64) {
+                        throw std::runtime_error(std::string("conv2d_backward_weight cuDNN failed for Float64: ") + e.what());
+                    }
                     auto [grad_input, grad_weight, grad_bias] = cuda::conv2d_backward_kernel(
                         inputs[0], inputs[1], dummy_weight, stride, padding, dilation, groups,
                         false, true, false, stream
@@ -1690,6 +1711,10 @@ public:
                     );
                     return std::vector<Tensor>{gb};
                 } catch (const std::exception& e) {
+                    // Re-throw for Float64 since custom kernel doesn't support it
+                    if (inputs[0].dtype() == DType::Float64) {
+                        throw std::runtime_error(std::string("conv2d_backward_bias cuDNN failed for Float64: ") + e.what());
+                    }
                     auto [gi, gw, gb] = cuda::conv2d_backward_kernel(
                         inputs[0], dummy_input, dummy_weight, 1, 0, 1, 1,
                         false, false, true, stream

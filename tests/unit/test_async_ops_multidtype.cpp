@@ -77,11 +77,6 @@ TEST_P(AsyncOpsMultiDTypeTest, FutureIsReady) {
 // ==============================================================================
 
 TEST_P(AsyncOpsMultiDTypeTest, AsyncMatmulCorrectness) {
-    // Skip Float16 for randn (not supported directly)
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 randn not supported";
-    }
-
     auto a = randn({32, 64}, dtype(), device());
     auto b = randn({64, 48}, dtype(), device());
 
@@ -96,10 +91,6 @@ TEST_P(AsyncOpsMultiDTypeTest, AsyncMatmulCorrectness) {
 }
 
 TEST_P(AsyncOpsMultiDTypeTest, AsyncAddCorrectness) {
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 randn not supported";
-    }
-
     auto a = randn({100, 100}, dtype(), device());
     auto b = randn({100, 100}, dtype(), device());
 
@@ -111,10 +102,6 @@ TEST_P(AsyncOpsMultiDTypeTest, AsyncAddCorrectness) {
 }
 
 TEST_P(AsyncOpsMultiDTypeTest, AsyncMulCorrectness) {
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 randn not supported";
-    }
-
     auto a = randn({50, 50}, dtype(), device());
     auto b = randn({50, 50}, dtype(), device());
 
@@ -126,10 +113,6 @@ TEST_P(AsyncOpsMultiDTypeTest, AsyncMulCorrectness) {
 }
 
 TEST_P(AsyncOpsMultiDTypeTest, AsyncSubCorrectness) {
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 randn not supported";
-    }
-
     auto a = randn({80, 60}, dtype(), device());
     auto b = randn({80, 60}, dtype(), device());
 
@@ -141,10 +124,6 @@ TEST_P(AsyncOpsMultiDTypeTest, AsyncSubCorrectness) {
 }
 
 TEST_P(AsyncOpsMultiDTypeTest, AsyncDivCorrectness) {
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 randn not supported";
-    }
-
     auto a = randn({40, 40}, dtype(), device());
     auto b = randn({40, 40}, dtype(), device());
 
@@ -160,10 +139,6 @@ TEST_P(AsyncOpsMultiDTypeTest, AsyncDivCorrectness) {
 }
 
 TEST_P(AsyncOpsMultiDTypeTest, AsyncReLUCorrectness) {
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 randn not supported";
-    }
-
     auto input = randn({100, 100}, dtype(), device());
     auto half = full({100, 100}, 0.5f, dtype(), device());
     input = sub(input, half);
@@ -184,10 +159,6 @@ TEST_P(AsyncOpsMultiDTypeTest, AsyncReLUCorrectness) {
 }
 
 TEST_P(AsyncOpsMultiDTypeTest, AsyncSigmoidCorrectness) {
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 randn not supported";
-    }
-
     auto input = randn({50, 50}, dtype(), device());
 
     auto future = async_sigmoid(input);
@@ -208,10 +179,6 @@ TEST_P(AsyncOpsMultiDTypeTest, AsyncSigmoidCorrectness) {
 }
 
 TEST_P(AsyncOpsMultiDTypeTest, AsyncTanhCorrectness) {
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 randn not supported";
-    }
-
     auto input = randn({60, 40}, dtype(), device());
 
     auto future = async_tanh(input);
@@ -233,10 +200,6 @@ TEST_P(AsyncOpsMultiDTypeTest, AsyncTanhCorrectness) {
 }
 
 TEST_P(AsyncOpsMultiDTypeTest, AsyncSoftmaxCorrectness) {
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 randn not supported";
-    }
-
     auto input = randn({32, 10}, dtype(), device());
 
     auto future = async_softmax(input, 1);
@@ -267,10 +230,6 @@ TEST_P(AsyncOpsMultiDTypeTest, AsyncSoftmaxCorrectness) {
 // ==============================================================================
 
 TEST_P(AsyncOpsMultiDTypeTest, AsyncOperationsNonBlocking) {
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 randn not supported";
-    }
-
     auto a = randn({512, 512}, dtype(), device());
     auto b = randn({512, 512}, dtype(), device());
 
@@ -290,10 +249,6 @@ TEST_P(AsyncOpsMultiDTypeTest, AsyncOperationsNonBlocking) {
 }
 
 TEST_P(AsyncOpsMultiDTypeTest, MultipleAsyncOperationsOverlap) {
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 randn not supported";
-    }
-
     auto a1 = randn({128, 128}, dtype(), device());
     auto b1 = randn({128, 128}, dtype(), device());
     auto a2 = randn({128, 128}, dtype(), device());
@@ -329,10 +284,6 @@ TEST_P(AsyncOpsMultiDTypeTest, MultipleAsyncOperationsOverlap) {
 // ==============================================================================
 
 TEST_P(AsyncOpsMultiDTypeTest, WaitAll) {
-    if (dtype() == DType::Float16) {
-        GTEST_SKIP() << "Float16 randn not supported";
-    }
-
     auto a1 = randn({50, 50}, dtype(), device());
     auto a2 = randn({50, 50}, dtype(), device());
     auto a3 = randn({50, 50}, dtype(), device());

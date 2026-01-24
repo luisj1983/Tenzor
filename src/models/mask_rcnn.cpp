@@ -36,8 +36,6 @@ namespace {
  *           = |x - y| - 0.5 * beta      otherwise
  */
 auto smooth_l1_loss(const Tensor& input, const Tensor& target, float beta = 1.0f) -> Tensor {
-    std::cerr << "[smooth_l1_loss DEBUG] input.dtype()=" << static_cast<int>(input.dtype())
-              << " target.dtype()=" << static_cast<int>(target.dtype()) << std::endl;
     auto diff = input - target;
     auto abs_diff = tenzor::abs(diff);
 
@@ -424,13 +422,8 @@ auto MaskRCNN::forward_train(const Variable& images,
                               const Tensor& gt_masks)
     -> std::tuple<Variable, Variable, Variable, Variable, Variable> {
 
-    std::cerr << "[forward_train] START - gt_boxes.dtype()=" << static_cast<int>(gt_boxes.dtype())
-              << " gt_labels.dtype()=" << static_cast<int>(gt_labels.dtype()) << std::endl;
-
     // 1. Extract features from backbone
-    std::cerr << "[forward_train] Extracting features..." << std::endl;
     auto features = extract_features(images);
-    std::cerr << "[forward_train] Features extracted, dtype=" << static_cast<int>(features.tensor().dtype()) << std::endl;
 
     // 2. Generate proposals with RPN
     auto [rpn_cls_logits, rpn_bbox_deltas] = rpn_->forward_multi(features);
@@ -499,11 +492,6 @@ auto MaskRCNN::forward_train(const Variable& images,
         auto roi_boxes = sampled_rois.slice(1, 1, 5);  // (num_sampled, 4)
 
         // Compute IoU between ROIs and GT boxes
-        std::cerr << "[forward_train] About to call box_iou:" << std::endl;
-        std::cerr << "  roi_boxes.dtype()=" << static_cast<int>(roi_boxes.dtype())
-                  << " shape=[" << roi_boxes.shape()[0] << "," << roi_boxes.shape()[1] << "]" << std::endl;
-        std::cerr << "  gt_boxes_0.dtype()=" << static_cast<int>(gt_boxes_0.dtype())
-                  << " shape=[" << gt_boxes_0.shape()[0] << "," << gt_boxes_0.shape()[1] << "]" << std::endl;
         auto iou_matrix = ops::box_iou(roi_boxes, gt_boxes_0);  // (num_sampled, num_gt)
 
         // Assign each ROI to best matching GT box
@@ -684,12 +672,6 @@ auto compute_rpn_loss(
     // targets: vector of {boxes, labels} per image
     // anchors: (num_anchors*H*W, 4)
 
-    std::cerr << "[compute_rpn_loss] START" << std::endl;
-    std::cerr << "  objectness_logits.dtype()=" << static_cast<int>(objectness_logits.dtype()) << std::endl;
-    std::cerr << "  box_regression.dtype()=" << static_cast<int>(box_regression.dtype()) << std::endl;
-    std::cerr << "  anchors.dtype()=" << static_cast<int>(anchors.dtype()) << std::endl;
-    std::cerr << "  targets.size()=" << targets.size() << std::endl;
-
     auto batch_size = objectness_logits.shape()[0];
     auto num_anchors = objectness_logits.shape()[1];
     auto device = objectness_logits.device();
@@ -706,18 +688,15 @@ auto compute_rpn_loss(
 
         auto gt_boxes = targets[b];  // (M, 4)
 
-        std::cerr << "[compute_rpn_loss] Batch " << b << " calling assign_anchors_to_targets" << std::endl;
-        std::cerr << "  anchors.dtype()=" << static_cast<int>(anchors.dtype())
-                  << " shape=[" << anchors.shape()[0] << "," << anchors.shape()[1] << "]" << std::endl;
-        std::cerr << "  gt_boxes.dtype()=" << static_cast<int>(gt_boxes.dtype())
-                  << " shape=[" << gt_boxes.shape()[0] << "," << gt_boxes.shape()[1] << "]" << std::endl;
+        // Ensure anchors match gt_boxes dtype for multi-dtype support
+        auto anchors_typed = (anchors.dtype() != gt_boxes.dtype())
+            ? anchors.to(gt_boxes.dtype())
+            : anchors;
 
         // Assign anchors to GT boxes
         auto [labels, matched_boxes] = assign_anchors_to_targets(
-            anchors, gt_boxes, 0.7f, 0.3f
+            anchors_typed, gt_boxes, 0.7f, 0.3f
         );
-
-        std::cerr << "[compute_rpn_loss] assign_anchors_to_targets completed" << std::endl;
 
         // Get objectness and bbox predictions for this image
         auto obj_logits_b = tenzor::select(objectness_logits, 0, b);  // (num_anchors, 2)
@@ -780,22 +759,14 @@ auto compute_rpn_loss(
         auto sampled_labels_full = tenzor::index_select(labels, 0, indices_tensor);
 
         // Compute classification loss: cross-entropy
-        std::cerr << "[compute_rpn_loss] About to compute CrossEntropyLoss" << std::endl;
-        std::cerr << "  sampled_logits.dtype()=" << static_cast<int>(sampled_logits.dtype())
-                  << " shape=[" << sampled_logits.shape()[0] << "," << sampled_logits.shape()[1] << "]" << std::endl;
-        std::cerr << "  sampled_labels_full.dtype()=" << static_cast<int>(sampled_labels_full.dtype())
-                  << " shape=[" << sampled_labels_full.shape()[0] << "]" << std::endl;
-
         nn::CrossEntropyLoss ce_loss;
         auto cls_loss_var = ce_loss.forward(
             Variable(sampled_logits, true),  // requires_grad=true for gradient tracking
             sampled_labels_full
         );
         cls_losses.push_back(cls_loss_var);
-        std::cerr << "[compute_rpn_loss] CrossEntropyLoss completed" << std::endl;
 
         // Regression loss: only for positive anchors
-        std::cerr << "[compute_rpn_loss] pos_count=" << pos_count << std::endl;
         if (pos_count > 0) {
             // Get positive anchor indices
             std::vector<int64_t> pos_indices;
@@ -833,8 +804,6 @@ auto compute_rpn_loss(
     }
 
     // Average losses across batch - sum Variables and divide by count for gradient tracking
-    std::cerr << "[compute_rpn_loss] cls_losses.size()=" << cls_losses.size()
-              << " bbox_losses.size()=" << bbox_losses.size() << std::endl;
     Variable cls_loss_final;
     Variable bbox_loss_final;
 
