@@ -79,6 +79,52 @@ add_executable(gradient_checkpointing cpp/training/gradient_checkpointing.cpp)
 target_link_libraries(gradient_checkpointing PRIVATE tenzor_core)
 
 # ============================================================================
+# ZeRO Optimizer and Offloading Examples
+# ============================================================================
+
+# Working examples demonstrating VRAM-aware and automatic offloading
+add_executable(vram_aware_offload_example cpp/zero/vram_aware_offload_example.cpp)
+target_link_libraries(vram_aware_offload_example PRIVATE tenzor_core)
+
+add_executable(automatic_offload_example cpp/zero/automatic_offload_example.cpp)
+target_link_libraries(automatic_offload_example PRIVATE tenzor_core)
+
+# NOTE: The following examples are disabled pending implementation of:
+# - tenzor/models/bert.hpp, tenzor/models/gpt2.hpp, tenzor/models/resnet.hpp
+# - distributed::get_default_process_group()
+# - nn/optim/adamw.hpp
+#
+# add_executable(bert_zero_stage1 cpp/zero/bert_zero_stage1.cpp)
+# target_link_libraries(bert_zero_stage1 PRIVATE tenzor_core)
+#
+# add_executable(bert_zero_stage2 cpp/zero/bert_zero_stage2.cpp)
+# target_link_libraries(bert_zero_stage2 PRIVATE tenzor_core)
+#
+# add_executable(bert_zero_stage3 cpp/zero/bert_zero_stage3.cpp)
+# target_link_libraries(bert_zero_stage3 PRIVATE tenzor_core)
+#
+# add_executable(gpt_zero_training cpp/zero/gpt_zero_training.cpp)
+# target_link_libraries(gpt_zero_training PRIVATE tenzor_core)
+#
+# add_executable(cpu_offload_example cpp/zero/cpu_offload_example.cpp)
+# target_link_libraries(cpu_offload_example PRIVATE tenzor_core)
+#
+# add_executable(custom_model_zero cpp/zero/custom_model_zero.cpp)
+# target_link_libraries(custom_model_zero PRIVATE tenzor_core)
+#
+# add_executable(distributed_training cpp/zero/distributed_training.cpp)
+# target_link_libraries(distributed_training PRIVATE tenzor_core)
+#
+# add_executable(checkpoint_example cpp/zero/checkpoint_example.cpp)
+# target_link_libraries(checkpoint_example PRIVATE tenzor_core)
+#
+# add_executable(mixed_precision_zero cpp/zero/mixed_precision_zero.cpp)
+# target_link_libraries(mixed_precision_zero PRIVATE tenzor_core)
+#
+# add_executable(performance_comparison cpp/zero/performance_comparison.cpp)
+# target_link_libraries(performance_comparison PRIVATE tenzor_core)
+
+# ============================================================================
 # Showcase Examples (Demonstrate library features at 3 abstraction levels)
 # ============================================================================
 

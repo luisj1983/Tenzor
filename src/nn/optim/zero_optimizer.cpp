@@ -55,13 +55,13 @@ ZeROStage1Optimizer::ZeROStage1Optimizer(
     // Partition parameters across ranks
     partition_parameters();
 
-    // Initialize optimizer states
-    initialize_optimizer_states();
-
-    // Initialize offload engine if needed
+    // Initialize offload engine BEFORE optimizer states (so states can be offloaded)
     if (config_.offload_to_cpu) {
         initialize_offload_engine();
     }
+
+    // Initialize optimizer states (will offload to CPU if offload_engine_ is available)
+    initialize_optimizer_states();
 }
 
 ZeROStage1Optimizer::~ZeROStage1Optimizer() {
@@ -489,13 +489,14 @@ auto ZeROStage1Optimizer::partition_parameters() -> void {
     for (int rank = 0; rank < config_.world_size; ++rank) {
         auto& partition = partitions_[rank];
         partition.rank = rank;
-        // Use the same device as the parameters (don't assume CUDA)
-        partition.device = config_.offload_to_cpu ? Device::cpu() : param_device;
-        
+        // Always use parameter device for computation
+        // States will be offloaded to CPU after initialization if offload_to_cpu is enabled
+        partition.device = param_device;
+
         // Assign parameters to this rank
         size_t start_idx = rank * params_per_rank;
         size_t end_idx = std::min(start_idx + params_per_rank, total_params);
-        
+
         for (size_t i = start_idx; i < end_idx; ++i) {
             partition.params.push_back(params[i]);
             const auto& tensor = params[i]->tensor();
@@ -507,25 +508,41 @@ auto ZeROStage1Optimizer::partition_parameters() -> void {
 auto ZeROStage1Optimizer::initialize_optimizer_states() -> void {
     // Initialize states for local partition only
     auto& partition = local_partition();
-    
+
     // Detect optimizer type and create appropriate states
     // For Adam/AdamW: need momentum and variance
     // For SGD with momentum: need momentum only
-    
+
     partition.momentum.reserve(partition.params.size());
     partition.variance.reserve(partition.params.size());
-    
+
+    // If CPU offload is enabled, create states on GPU and immediately offload each one
+    // This minimizes peak GPU memory usage during initialization
+    bool should_offload = config_.offload_to_cpu && offload_engine_;
+
     for (const auto& param : partition.params) {
-        // Momentum buffer (all optimizers)
+        // Momentum buffer - create on same device as parameters
         Tensor momentum = zeros_like(param->tensor()).to(partition.device);
-        partition.momentum.push_back(momentum);
-        
-        // Variance buffer (Adam family)
+
+        // Variance buffer (Adam family) - create on same device as parameters
         Tensor variance = zeros_like(param->tensor()).to(partition.device);
-        partition.variance.push_back(variance);
-        
+
+        // Track memory
         partition.memory_bytes += momentum.numel() * dtype_size(momentum.dtype());
         partition.memory_bytes += variance.numel() * dtype_size(variance.dtype());
+
+        // Immediately offload to CPU if enabled (minimizes peak GPU memory)
+        if (should_offload) {
+            momentum = offload_engine_->offload_to_cpu(momentum);
+            variance = offload_engine_->offload_to_cpu(variance);
+        }
+
+        partition.momentum.push_back(momentum);
+        partition.variance.push_back(variance);
+    }
+
+    if (should_offload) {
+        states_on_cpu_ = true;
     }
 }
 
@@ -807,84 +824,81 @@ auto ZeROStage1Optimizer::update_partition_sgd(
 }
 
 auto ZeROStage1Optimizer::fetch_states_to_gpu() -> void {
-    if (!offload_engine_) {
-        return;
+    if (!offload_engine_ || !states_on_cpu_) {
+        return;  // Nothing to fetch if states are already on GPU
     }
 
     auto& partition = local_partition();
 
-    // Only fetch if parameters are on GPU (CPU offload only makes sense for GPU training)
+    // Get target GPU device from parameters
     Device param_device = !parameters_.empty() ? parameters_[0]->tensor().device() : Device::cpu();
-    if (param_device.type != Device::Type::CUDA) {
-        return;  // Skip offload for CPU parameters
+    if (param_device.type == Device::Type::CPU) {
+        return;  // Skip for CPU-only training
     }
 
-    if (partition.device.type == Device::Type::CPU) {
-        // Prefetch all states to GPU
-        std::vector<Tensor*> all_states;
-        size_t total_bytes = 0;
-        for (auto& momentum : partition.momentum) {
-            all_states.push_back(&momentum);
-            if (profiling_enabled_) {
-                total_bytes += momentum.numel() * dtype_size(momentum.dtype());
-            }
-        }
-        for (auto& variance : partition.variance) {
-            all_states.push_back(&variance);
-            if (profiling_enabled_) {
-                total_bytes += variance.numel() * dtype_size(variance.dtype());
-            }
-        }
+    // Synchronously load all states to GPU and update tensor references
+    size_t total_bytes = 0;
+    for (size_t i = 0; i < partition.momentum.size(); ++i) {
+        // Load momentum to GPU
+        Tensor gpu_momentum = offload_engine_->load_to_gpu(partition.momentum[i], param_device);
+        partition.momentum[i] = gpu_momentum;
 
-        offload_engine_->prefetch_to_gpu(all_states);
-        offload_engine_->wait_for_prefetch();
+        // Load variance to GPU
+        Tensor gpu_variance = offload_engine_->load_to_gpu(partition.variance[i], param_device);
+        partition.variance[i] = gpu_variance;
 
-        // Track offloaded bytes
         if (profiling_enabled_) {
-            std::lock_guard<std::mutex> prof_lock(profiling_mutex_);
-            profiling_stats_.offloaded_bytes += total_bytes;
+            total_bytes += gpu_momentum.numel() * dtype_size(gpu_momentum.dtype());
+            total_bytes += gpu_variance.numel() * dtype_size(gpu_variance.dtype());
         }
+    }
+
+    states_on_cpu_ = false;
+
+    // Track bytes transferred
+    if (profiling_enabled_) {
+        std::lock_guard<std::mutex> prof_lock(profiling_mutex_);
+        profiling_stats_.offloaded_bytes += total_bytes;
     }
 }
 
 auto ZeROStage1Optimizer::offload_states_to_cpu() -> void {
-    if (!offload_engine_) {
-        return;
+    if (!offload_engine_ || states_on_cpu_) {
+        return;  // Nothing to offload if states are already on CPU
     }
 
     auto& partition = local_partition();
 
     // Only offload if parameters are on GPU (CPU offload only makes sense for GPU training)
     Device param_device = !parameters_.empty() ? parameters_[0]->tensor().device() : Device::cpu();
-    if (param_device.type != Device::Type::CUDA) {
-        return;  // Skip offload for CPU parameters
+    if (param_device.type == Device::Type::CPU) {
+        return;  // Skip for CPU-only training
     }
 
-    if (partition.device.type == Device::Type::CPU) {
-        // Offload all states back to CPU asynchronously
-        size_t total_bytes = 0;
-        for (auto& momentum : partition.momentum) {
-            offload_engine_->offload_to_cpu_async(momentum);
-            if (profiling_enabled_) {
-                total_bytes += momentum.numel() * dtype_size(momentum.dtype());
-            }
-        }
+    // Synchronously offload all states to CPU and update tensor references
+    size_t total_bytes = 0;
+    for (size_t i = 0; i < partition.momentum.size(); ++i) {
+        // Offload momentum to CPU
+        Tensor cpu_momentum = offload_engine_->offload_to_cpu(partition.momentum[i]);
+        partition.momentum[i] = cpu_momentum;
 
-        for (auto& variance : partition.variance) {
-            offload_engine_->offload_to_cpu_async(variance);
-            if (profiling_enabled_) {
-                total_bytes += variance.numel() * dtype_size(variance.dtype());
-            }
-        }
+        // Offload variance to CPU
+        Tensor cpu_variance = offload_engine_->offload_to_cpu(partition.variance[i]);
+        partition.variance[i] = cpu_variance;
 
-        offload_engine_->synchronize();
-
-        // Track offloaded bytes and offload operations
         if (profiling_enabled_) {
-            std::lock_guard<std::mutex> prof_lock(profiling_mutex_);
-            profiling_stats_.offloaded_bytes += total_bytes;
-            profiling_stats_.num_offloads++;
+            total_bytes += cpu_momentum.numel() * dtype_size(cpu_momentum.dtype());
+            total_bytes += cpu_variance.numel() * dtype_size(cpu_variance.dtype());
         }
+    }
+
+    states_on_cpu_ = true;
+
+    // Track offloaded bytes and offload operations
+    if (profiling_enabled_) {
+        std::lock_guard<std::mutex> prof_lock(profiling_mutex_);
+        profiling_stats_.offloaded_bytes += total_bytes;
+        profiling_stats_.num_offloads++;
     }
 }
 

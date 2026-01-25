@@ -325,6 +325,7 @@ protected:
 
     // Optimizer state
     int64_t step_count_{0};                         ///< Step counter for bias correction
+    bool states_on_cpu_{false};                     ///< Whether optimizer states are currently on CPU
 
     // Synchronization
     mutable std::mutex mutex_;                      ///< Thread safety
