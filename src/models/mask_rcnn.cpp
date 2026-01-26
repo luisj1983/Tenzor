@@ -481,11 +481,11 @@ auto MaskRCNN::forward_train(const Variable& images,
     // Simplified: assign first few ROIs to GT boxes based on IoU
     // In production, this would use proper ROI sampling with IoU matching
     auto num_gt = gt_boxes.shape()[1];
-    auto gt_labels_flat = reshape(gt_labels, {num_gt});
 
     if (num_gt > 0 && num_sampled > 0) {
-        // Extract GT boxes from first image (simplified for single-image batch)
+        // Extract GT boxes and labels from first image (simplified for single-image batch)
         auto gt_boxes_0 = tenzor::select(gt_boxes, 0, 0);  // (num_gt, 4)
+        auto gt_labels_0 = tenzor::select(gt_labels, 0, 0);  // (num_gt,)
 
         // Extract ROI boxes (remove batch index column if present)
         // sampled_rois format: (num_sampled, 5) as (batch_idx, x1, y1, x2, y2)
@@ -503,7 +503,7 @@ auto MaskRCNN::forward_train(const Variable& images,
         auto* matched_idx_data = matched_idx_cpu.data<int64_t>();
         auto max_iou_f32 = max_iou.to(Device::cpu()).to(DType::Float32);
         auto* max_iou_data = max_iou_f32.data<float>();
-        auto gt_labels_cpu = gt_labels_flat.to(Device::cpu());
+        auto gt_labels_cpu = gt_labels_0.to(Device::cpu());
         auto* gt_labels_data = gt_labels_cpu.data<int64_t>();
 
         // Convert GT boxes to Float32 on CPU for data access

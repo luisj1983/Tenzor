@@ -1,6 +1,7 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/ops/transform.hpp"
+#include "tenzor/tenzor.hpp"
 #include <iostream>
 #include <cassert>
 #include <cmath>
@@ -170,6 +171,9 @@ void test_cuda_cat_many_tensors() {
 
 int main() {
     try {
+        // Initialize tenzor library first
+        tenzor::initialize();
+
         // Check if CUDA is available - wrap in try-catch
         // Device initialization will throw if CUDA isn't available
         try {

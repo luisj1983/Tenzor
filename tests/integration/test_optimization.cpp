@@ -232,7 +232,9 @@ TEST(Optimization, ReduceLROnPlateau) {
     ReduceLROnPlateau scheduler(optimizer, "min", 0.5, 3);  // patience=3
 
     std::vector<float> learning_rates;
-    std::vector<float> val_losses = {2.0f, 1.8f, 1.7f, 1.65f, 1.64f, 1.63f, 1.62f, 1.61f};
+    // Create a loss sequence that plateaus (doesn't improve for 4+ epochs after initial drop)
+    // Epochs 0-2: improving, Epochs 3-6: plateau (no improvement), should trigger LR reduction
+    std::vector<float> val_losses = {2.0f, 1.5f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
 
     for (size_t epoch = 0; epoch < val_losses.size(); epoch++) {
         model->train();
@@ -246,11 +248,11 @@ TEST(Optimization, ReduceLROnPlateau) {
         loss.backward();
         optimizer.step();
 
-        learning_rates.push_back(scheduler.get_lr());
         scheduler.step(val_losses[epoch]);  // Pass validation loss
+        learning_rates.push_back(scheduler.get_lr());
     }
 
-    // LR should have reduced when plateau detected
+    // LR should have reduced when plateau detected (after epoch 5 with patience=3)
     EXPECT_LT(learning_rates.back(), learning_rates.front())
         << "LR should reduce on plateau";
 }

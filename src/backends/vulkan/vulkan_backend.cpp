@@ -5394,7 +5394,7 @@ auto VulkanBackend::dispatchArgmax(const Tensor& input, int64_t dim, bool keepdi
         }
     }
 
-    Tensor output(out_shape, DType::Int32, input.device());  // Use Int32 for Vulkan
+    Tensor output(out_shape, DType::Int64, input.device());  // Use Int64 for consistency with other backends
 
     // Get VkBuffer handles from tensor data pointers
     VkBuffer buffer_in = getVulkanBuffer(input.data_ptr());
@@ -5461,7 +5461,10 @@ auto VulkanBackend::dispatchArgmax(const Tensor& input, int64_t dim, bool keepdi
 
 auto VulkanBackend::dispatchArgmin(const Tensor& input, int64_t dim, bool keepdim) -> Tensor {
     int32_t device_id = input.device().index;
-    auto* pipeline = getPipeline("argmax_argmin", device_id);
+
+    // Select correct pipeline based on dtype
+    std::string shader_name = (input.dtype() == DType::Int32) ? "argmax_argmin_i32" : "argmax_argmin";
+    auto* pipeline = getPipeline(shader_name, device_id);
 
     std::vector<int64_t> out_shape;
     auto input_shape = input.shape();
@@ -5477,7 +5480,7 @@ auto VulkanBackend::dispatchArgmin(const Tensor& input, int64_t dim, bool keepdi
         }
     }
 
-    Tensor output(out_shape, DType::Int32, input.device());  // Use Int32 for Vulkan
+    Tensor output(out_shape, DType::Int64, input.device());  // Use Int64 for consistency with other backends
 
     // Get VkBuffer handles from tensor data pointers
     VkBuffer buffer_in = getVulkanBuffer(input.data_ptr());
@@ -6736,6 +6739,12 @@ auto VulkanBackend::dispatchContiguous(const Tensor& input) -> Tensor {
  * @brief Create tensor filled with zeros
  */
 auto VulkanBackend::dispatchZeros(const std::vector<int64_t>& shape, DType dtype, const Device& device) -> Tensor {
+    // For Float64, Int64, UInt8, or Bool, use full() with 0.0 since the basic fill shader only handles 32-bit values
+    // This is consistent with how dispatchOnes handles these types
+    if (dtype == DType::Float64 || dtype == DType::Int64 || dtype == DType::UInt8 || dtype == DType::Bool) {
+        return dispatchFull(shape, 0.0, dtype);
+    }
+
     // Create tensor with given shape
     Tensor output(shape, dtype, device);
 
@@ -6748,7 +6757,7 @@ auto VulkanBackend::dispatchZeros(const std::vector<int64_t>& shape, DType dtype
         return output;  // Empty tensor, nothing to fill
     }
 
-    // Fill with zeros using fill operation
+    // Fill with zeros using fill operation (for Float32, Int32, etc.)
     int32_t device_id = device.index;
     auto* pipeline = getPipeline("fill", device_id);
 

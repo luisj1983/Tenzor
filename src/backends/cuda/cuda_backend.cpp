@@ -357,6 +357,8 @@ public:
             case CopyKind::HostToDevice: cuda_kind = cudaMemcpyHostToDevice; break;
             case CopyKind::DeviceToHost: cuda_kind = cudaMemcpyDeviceToHost; break;
             case CopyKind::DeviceToDevice: cuda_kind = cudaMemcpyDeviceToDevice; break;
+            default:
+                throw std::runtime_error("Invalid CopyKind value");
         }
 
         cudaError_t err = cudaMemcpy(dst, src, bytes, cuda_kind);
@@ -1114,8 +1116,8 @@ public:
                 if (dtype == DType::Int32 || dtype == DType::Int64 || dtype == DType::Int8 ||
                     dtype == DType::Int16 || dtype == DType::UInt8 || dtype == DType::UInt16 ||
                     dtype == DType::UInt32 || dtype == DType::UInt64) {
-                    // For integer types, round to nearest integer to preserve exact values
-                    value = static_cast<float>(std::llround(value_d));
+                    // For integer types, truncate towards zero (consistent with C++ static_cast behavior)
+                    value = static_cast<float>(static_cast<long long>(value_d));
                 } else {
                     value = static_cast<float>(value_d);
                 }

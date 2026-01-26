@@ -319,11 +319,9 @@ auto repeat(const Tensor& input, std::vector<int64_t> repeats) -> Tensor {
     // CPU implementation: repeat elements along each dimension
     // Make input contiguous for easier indexing
     auto input_cont = input.is_contiguous() ? input : input.contiguous();
-    const float* input_data = input_cont.data<float>();
 
     // Create output tensor
     auto output = empty(out_shape, input.dtype(), Device::cpu());
-    float* output_data = output.data<float>();
 
     // Calculate total elements
     int64_t total_out = 1;
@@ -339,24 +337,43 @@ auto repeat(const Tensor& input, std::vector<int64_t> repeats) -> Tensor {
         in_stride *= shape[i];
     }
 
-    // Fill output by repeating each element
-    for (int64_t out_idx = 0; out_idx < total_out; ++out_idx) {
-        // Calculate output coordinates
-        int64_t temp = out_idx;
-        std::vector<int64_t> out_coords(ndim);
-        for (int64_t i = ndim - 1; i >= 0; --i) {
-            out_coords[i] = temp % out_shape[i];
-            temp /= out_shape[i];
-        }
+    // Helper lambda to perform the copy for any dtype
+    auto do_repeat = [&]<typename T>() {
+        const T* input_data = input_cont.data<T>();
+        T* output_data = output.data<T>();
 
-        // Map to input coordinates (divide by repeat factor)
-        int64_t in_idx = 0;
-        for (int64_t i = 0; i < ndim; ++i) {
-            int64_t in_coord = out_coords[i] / repeats[i];
-            in_idx += in_coord * in_strides[i];
-        }
+        for (int64_t out_idx = 0; out_idx < total_out; ++out_idx) {
+            // Calculate output coordinates
+            int64_t temp = out_idx;
+            std::vector<int64_t> out_coords(ndim);
+            for (int64_t i = ndim - 1; i >= 0; --i) {
+                out_coords[i] = temp % out_shape[i];
+                temp /= out_shape[i];
+            }
 
-        output_data[out_idx] = input_data[in_idx];
+            // Map to input coordinates (divide by repeat factor)
+            int64_t in_idx = 0;
+            for (int64_t i = 0; i < ndim; ++i) {
+                int64_t in_coord = out_coords[i] / repeats[i];
+                in_idx += in_coord * in_strides[i];
+            }
+
+            output_data[out_idx] = input_data[in_idx];
+        }
+    };
+
+    // Dispatch based on dtype
+    switch (input.dtype()) {
+        case DType::Float32: do_repeat.template operator()<float>(); break;
+        case DType::Float64: do_repeat.template operator()<double>(); break;
+        case DType::Float16: do_repeat.template operator()<Float16>(); break;
+        case DType::BFloat16: do_repeat.template operator()<BFloat16>(); break;
+        case DType::Int8: do_repeat.template operator()<int8_t>(); break;
+        case DType::Int16: do_repeat.template operator()<int16_t>(); break;
+        case DType::Int32: do_repeat.template operator()<int32_t>(); break;
+        case DType::Int64: do_repeat.template operator()<int64_t>(); break;
+        default:
+            throw std::runtime_error("Unsupported dtype for repeat operation");
     }
 
     return output;
@@ -407,11 +424,9 @@ auto tile(const Tensor& input, std::vector<int64_t> reps) -> Tensor {
     // CPU implementation: tile entire tensor along each dimension
     // Make contiguous for easier indexing
     auto input_cont = input.is_contiguous() ? input : input.contiguous();
-    const float* input_data = input_cont.data<float>();
 
     // Create output tensor
     auto output = empty(out_shape, input.dtype(), Device::cpu());
-    float* output_data = output.data<float>();
 
     // Calculate total elements
     int64_t total_out = 1;
@@ -427,24 +442,43 @@ auto tile(const Tensor& input, std::vector<int64_t> reps) -> Tensor {
         in_stride *= padded_shape[i];
     }
 
-    // Fill output by tiling the input
-    for (int64_t out_idx = 0; out_idx < total_out; ++out_idx) {
-        // Calculate output coordinates
-        int64_t temp = out_idx;
-        std::vector<int64_t> out_coords(out_ndim);
-        for (int64_t i = out_ndim - 1; i >= 0; --i) {
-            out_coords[i] = temp % out_shape[i];
-            temp /= out_shape[i];
-        }
+    // Helper lambda to perform the copy for any dtype
+    auto do_tile = [&]<typename T>() {
+        const T* input_data = input_cont.data<T>();
+        T* output_data = output.data<T>();
 
-        // Map to input coordinates (modulo by input shape)
-        int64_t in_idx = 0;
-        for (int64_t i = 0; i < out_ndim; ++i) {
-            int64_t in_coord = out_coords[i] % padded_shape[i];
-            in_idx += in_coord * in_strides[i];
-        }
+        for (int64_t out_idx = 0; out_idx < total_out; ++out_idx) {
+            // Calculate output coordinates
+            int64_t temp = out_idx;
+            std::vector<int64_t> out_coords(out_ndim);
+            for (int64_t i = out_ndim - 1; i >= 0; --i) {
+                out_coords[i] = temp % out_shape[i];
+                temp /= out_shape[i];
+            }
 
-        output_data[out_idx] = input_data[in_idx];
+            // Map to input coordinates (modulo by input shape)
+            int64_t in_idx = 0;
+            for (int64_t i = 0; i < out_ndim; ++i) {
+                int64_t in_coord = out_coords[i] % padded_shape[i];
+                in_idx += in_coord * in_strides[i];
+            }
+
+            output_data[out_idx] = input_data[in_idx];
+        }
+    };
+
+    // Dispatch based on dtype
+    switch (input.dtype()) {
+        case DType::Float32: do_tile.template operator()<float>(); break;
+        case DType::Float64: do_tile.template operator()<double>(); break;
+        case DType::Float16: do_tile.template operator()<Float16>(); break;
+        case DType::BFloat16: do_tile.template operator()<BFloat16>(); break;
+        case DType::Int8: do_tile.template operator()<int8_t>(); break;
+        case DType::Int16: do_tile.template operator()<int16_t>(); break;
+        case DType::Int32: do_tile.template operator()<int32_t>(); break;
+        case DType::Int64: do_tile.template operator()<int64_t>(); break;
+        default:
+            throw std::runtime_error("Unsupported dtype for tile operation");
     }
 
     return output;

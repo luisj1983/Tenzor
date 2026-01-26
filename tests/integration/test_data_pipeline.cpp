@@ -72,7 +72,8 @@ TEST(DataPipeline, BasicDataLoaderCreation) {
 
 TEST(DataPipeline, DataLoaderBatchIteration) {
     auto dataset = std::make_shared<SimpleDataset>(100);
-    data::DataLoader loader(dataset, 16, false);
+    // Use drop_last=true to ensure all batches have the same size
+    data::DataLoader loader(dataset, 16, false, 0, false, true);
 
     int batch_count = 0;
     for (auto batch : loader) {

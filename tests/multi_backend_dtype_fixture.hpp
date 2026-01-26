@@ -670,13 +670,13 @@ inline bool MultiDTypeTest::initialized_ = false;
  * @brief Standard backends for testing
  */
 #define STANDARD_BACKENDS \
-    ::testing::Values("cpu", "cuda", "oneapi")
+    ::testing::Values("cpu", "cuda", "vulkan", "oneapi")
 
 /**
  * @brief All backends including experimental ones
  */
 #define ALL_BACKENDS \
-    ::testing::Values("cpu", "cuda", "oneapi", "vulkan", "rocm")
+    ::testing::Values("cpu", "cuda", "vulkan", "oneapi", "rocm")
 
 /**
  * @brief Generate all combinations of backends and dtypes

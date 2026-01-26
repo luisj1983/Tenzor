@@ -40,10 +40,13 @@ static ::testing::Environment* const training_env =
 // Helper Functions
 //==============================================================================
 
-// Generate synthetic MNIST-like data
+// Generate synthetic MNIST-like data with learnable patterns
+// Each class has a distinctive pattern (a "blob" in a specific location)
 auto generate_mnist_batch(int batch_size, Device device = Device::cpu())
     -> std::pair<Variable, Variable> {
-    auto input = Variable(randn({batch_size, 1, 28, 28}, DType::Float32, device), true);
+    // Start with small random noise
+    auto input_data = randn({batch_size, 1, 28, 28}, DType::Float32, Device::cpu()) * 0.1f;
+    float* input_ptr = input_data.data<float>();
 
     // One-hot encoded targets
     auto target_data = zeros({batch_size, 10}, DType::Float32, Device::cpu());
@@ -52,10 +55,27 @@ auto generate_mnist_batch(int batch_size, Device device = Device::cpu())
     for (int i = 0; i < batch_size; i++) {
         int label = i % 10;
         target_ptr[i * 10 + label] = 1.0f;
+
+        // Create a distinctive pattern for each class:
+        // Place a bright spot at different locations based on label
+        int row_offset = (label / 4) * 8 + 4;  // rows 4, 12, 20
+        int col_offset = (label % 4) * 7 + 4;  // cols 4, 11, 18, 25
+
+        // Draw a small 5x5 bright region for this class
+        for (int dr = -2; dr <= 2; dr++) {
+            for (int dc = -2; dc <= 2; dc++) {
+                int r = row_offset + dr;
+                int c = col_offset + dc;
+                if (r >= 0 && r < 28 && c >= 0 && c < 28) {
+                    input_ptr[i * 28 * 28 + r * 28 + c] += 1.0f;
+                }
+            }
+        }
     }
 
+    auto input_device = device.type == Device::Type::CPU ? input_data : input_data.to(device);
     auto target_device = device.type == Device::Type::CPU ? target_data : target_data.to(device);
-    return {input, Variable(target_device, false)};
+    return {Variable(input_device, true), Variable(target_device, false)};
 }
 
 // Generate synthetic ImageNet-like data

@@ -459,16 +459,17 @@ TEST_F(OffloadEngineTest, BandwidthMeasurement_Load) {
 // Error Handling Tests
 // =============================================================================
 
-TEST_F(OffloadEngineTest, OffloadNonGPUTensor_ThrowsError) {
+TEST_F(OffloadEngineTest, OffloadCPUTensor_NoOp) {
     if (!cuda_available) GTEST_SKIP() << "CUDA not available";
 
     OffloadEngine engine(default_config);
 
     Tensor cpu_tensor = zeros({100}, DType::Float32, Device::cpu());
 
-    EXPECT_THROW({
-        engine.offload_to_cpu(cpu_tensor);
-    }, std::runtime_error);
+    // offload_to_cpu on CPU tensor is a no-op - returns the same tensor
+    Tensor result = engine.offload_to_cpu(cpu_tensor);
+    EXPECT_EQ(result.device().type, Device::Type::CPU);
+    EXPECT_EQ(result.numel(), cpu_tensor.numel());
 }
 
 TEST_F(OffloadEngineTest, LoadNonCPUTensor_ThrowsError) {

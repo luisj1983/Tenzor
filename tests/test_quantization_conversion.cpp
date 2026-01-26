@@ -20,6 +20,7 @@
 #include "tenzor/nn/quantization/quantize.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/autograd/variable.hpp"
+#include "tenzor/tenzor.hpp"
 #include <memory>
 #include <cmath>
 
@@ -27,6 +28,20 @@ using namespace tenzor;
 using namespace tenzor::nn;
 using namespace tenzor::nn::quantization;
 using namespace tenzor::quantization;
+
+// ===========================================================================
+// Global Test Environment for Initialization
+// ===========================================================================
+
+class QuantizationTestEnvironment : public ::testing::Environment {
+public:
+    void SetUp() override {
+        tenzor::initialize();
+    }
+};
+
+static ::testing::Environment* const quant_env =
+    ::testing::AddGlobalTestEnvironment(new QuantizationTestEnvironment);
 
 // ===========================================================================
 // Test Fixtures

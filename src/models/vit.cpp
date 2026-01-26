@@ -146,18 +146,22 @@ auto ViTEmbeddings::forward_impl(const Variable& pixel_values) -> Variable {
     auto shape = pixel_values.shape();
     int64_t batch_size = shape[0];
     DType dtype = pixel_values.tensor().dtype();
+    Device device = pixel_values.tensor().device();
 
     // Get patch embeddings: [batch, num_patches, hidden_size]
     auto embeddings = patch_embeddings_->forward(pixel_values);
+
+    // Get cls_token from parameters map (this gets the dtype-converted version)
+    auto& cls_token = *parameters_["cls_token"];
 
     // Expand [CLS] token for batch: [1, 1, hidden_size] -> [batch, 1, hidden_size]
     // We need to repeat the [CLS] token for each sample in the batch
     // Use tensor operations to support both CPU and GPU devices
 
     // First, ensure cls_token is on the same device and dtype as the input
-    Tensor cls_tensor = cls_token_.tensor();
-    if (cls_tensor.device() != pixel_values.tensor().device()) {
-        cls_tensor = cls_tensor.to(pixel_values.tensor().device());
+    Tensor cls_tensor = cls_token.tensor();
+    if (cls_tensor.device() != device) {
+        cls_tensor = cls_tensor.to(device);
     }
     if (cls_tensor.dtype() != dtype) {
         cls_tensor = cls_tensor.to(dtype);
@@ -166,9 +170,9 @@ auto ViTEmbeddings::forward_impl(const Variable& pixel_values) -> Variable {
     // Expand the [CLS] token to batch size using repeat (tensor-level op)
     // [1, 1, hidden_size] -> [batch, 1, hidden_size]
     Tensor cls_expanded = tenzor::repeat(cls_tensor, {batch_size, 1, 1});
-    Variable cls_tokens(cls_expanded, cls_token_.requires_grad());
-    if (cls_token_.grad_fn()) {
-        cls_tokens.set_grad_fn(cls_token_.grad_fn());
+    Variable cls_tokens(cls_expanded, cls_token.requires_grad());
+    if (cls_token.grad_fn()) {
+        cls_tokens.set_grad_fn(cls_token.grad_fn());
     }
 
     // Concatenate [CLS] token with patch embeddings using autograd cat
@@ -177,9 +181,23 @@ auto ViTEmbeddings::forward_impl(const Variable& pixel_values) -> Variable {
     std::vector<Variable> to_concat = {cls_tokens, embeddings};
     embeddings = cat(to_concat, 1);
 
+    // Get position_embeddings from parameters map (this gets the dtype-converted version)
+    auto& pos_embeddings = *parameters_["position_embeddings"];
+
+    // Ensure position embeddings are on the same device and dtype as input
+    Variable pos_var = pos_embeddings;
+    if (pos_var.tensor().device() != device) {
+        Tensor pos_tensor = pos_var.tensor().to(device);
+        pos_var = Variable(pos_tensor, pos_var.requires_grad());
+    }
+    if (pos_var.tensor().dtype() != dtype) {
+        Tensor pos_tensor = pos_var.tensor().to(dtype);
+        pos_var = Variable(pos_tensor, pos_var.requires_grad());
+    }
+
     // Add position embeddings
     // Position embeddings are [1, seq_len, hidden_size], broadcast to [batch, seq_len, hidden_size]
-    embeddings = embeddings + position_embeddings_;
+    embeddings = embeddings + pos_var;
 
     // Apply dropout
     embeddings = dropout_->forward(embeddings);

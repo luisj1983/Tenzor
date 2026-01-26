@@ -653,8 +653,8 @@ TEST_F(OneAPIBackendTest, SumReduction) {
 
     auto input = full({3, 4}, 2.0f, DType::Float32, device);
 
-    // Sum all elements
-    auto result = sum(input, -1, false);
+    // Sum all elements (use std::nullopt for full reduction)
+    auto result = sum(input, std::nullopt, false);
     EXPECT_EQ(result.numel(), 1);
 
     auto cpu_result = result.to(Device::cpu());
