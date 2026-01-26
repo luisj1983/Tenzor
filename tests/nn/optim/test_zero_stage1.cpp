@@ -46,19 +46,31 @@ protected:
         default_config.process_group = nullptr;  // Single-process mode
     }
 
-    // Helper: Create test parameters
-    auto create_test_params(size_t count, const std::vector<int64_t>& shape = {128, 128})
+    // Helper: Create test parameters on a specific device
+    auto create_test_params(size_t count, const std::vector<int64_t>& shape = {128, 128},
+                           Device device = Device::cpu())
         -> std::vector<std::shared_ptr<Variable>> {
         std::vector<std::shared_ptr<Variable>> params;
         params.reserve(count);
         for (size_t i = 0; i < count; ++i) {
             auto param = std::make_shared<Variable>(
-                ones(shape, DType::Float32, Device::cpu()),
+                ones(shape, DType::Float32, device),
                 true
             );
             params.push_back(param);
         }
         return params;
+    }
+
+    // Helper: Check if CUDA is available by attempting to create a tensor
+    static bool cuda_available() {
+        try {
+            // Try to create a small tensor on CUDA
+            auto test_tensor = ones({1}, DType::Float32, Device::cuda(0));
+            return true;
+        } catch (...) {
+            return false;
+        }
     }
 
     ZeROStage1Config default_config;
@@ -419,6 +431,7 @@ TEST_F(ZeROStage1Test, LoadEmptyStateDict) {
 // ============================================================================
 
 TEST_F(ZeROStage1Test, EnableCPUOffload) {
+    // Test with CPU params - tests the flag enabling
     auto params = create_test_params(10);
     auto base_optimizer = std::make_unique<Adam>(params, 0.001);
 
@@ -448,6 +461,7 @@ TEST_F(ZeROStage1Test, DisableCPUOffload) {
 }
 
 TEST_F(ZeROStage1Test, CPUOffloadStepCompletes) {
+    // Test with CPU params - verifies step works with offload flag enabled
     auto params = create_test_params(10);
 
     for (auto& param : params) {
@@ -464,6 +478,73 @@ TEST_F(ZeROStage1Test, CPUOffloadStepCompletes) {
     ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
 
     // Step should complete with offload enabled
+    EXPECT_NO_THROW(optimizer.step());
+}
+
+TEST_F(ZeROStage1Test, CPUOffloadFromGPU) {
+    // This test requires CUDA - skip if not available
+    if (!cuda_available()) {
+        GTEST_SKIP() << "CUDA not available, skipping GPU offload test";
+    }
+
+    // Create parameters on GPU
+    auto params = create_test_params(10, {128, 128}, Device::cuda(0));
+
+    // Verify params are on GPU
+    for (const auto& param : params) {
+        ASSERT_EQ(param->tensor().device().type, Device::Type::CUDA)
+            << "Parameter should be on GPU before offload";
+    }
+
+    for (auto& param : params) {
+        param->grad() = ones_like(param->tensor());
+    }
+
+    auto base_optimizer = std::make_unique<Adam>(params, 0.001);
+
+    ZeROStage1Config config = default_config;
+    config.world_size = 1;
+    config.rank = 0;
+    config.offload_to_cpu = true;
+    config.cpu_offload_threshold = 1024;  // 1KB threshold - triggers offload
+
+    ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
+
+    // Verify offload is enabled
+    EXPECT_TRUE(optimizer.is_cpu_offload_enabled());
+
+    // Step should complete with actual GPU->CPU offload
+    EXPECT_NO_THROW(optimizer.step());
+
+    // Verify local parameters are tracked
+    auto stats = optimizer.get_memory_stats();
+    EXPECT_EQ(stats.num_local_parameters, 10);
+}
+
+TEST_F(ZeROStage1Test, CPUOffloadThresholdRespected) {
+    // This test requires CUDA - skip if not available
+    if (!cuda_available()) {
+        GTEST_SKIP() << "CUDA not available, skipping GPU offload threshold test";
+    }
+
+    // Create small parameters on GPU (below threshold)
+    auto small_params = create_test_params(10, {4, 4}, Device::cuda(0));  // 64 bytes each
+
+    for (auto& param : small_params) {
+        param->grad() = ones_like(param->tensor());
+    }
+
+    auto base_optimizer = std::make_unique<Adam>(small_params, 0.001);
+
+    ZeROStage1Config config = default_config;
+    config.world_size = 1;
+    config.rank = 0;
+    config.offload_to_cpu = true;
+    config.cpu_offload_threshold = 1024 * 1024;  // 1MB - larger than params
+
+    ZeROStage1Optimizer optimizer(std::move(base_optimizer), config);
+
+    // Step should complete - small tensors may not be offloaded
     EXPECT_NO_THROW(optimizer.step());
 }
 

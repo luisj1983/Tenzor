@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <algorithm>
 #include <iostream>
+#include <type_traits>
 
 // SIMD intrinsics
 #if defined(__AVX512F__)
@@ -738,7 +739,11 @@ template<typename T>
 inline void div_scalar(const T* a, const T* b, T* c, size_t n) {
     for (size_t i = 0; i < n; ++i) {
         if (b[i] == T(0)) {
-            c[i] = std::numeric_limits<T>::infinity();
+            if constexpr (std::is_integral_v<T>) {
+                throw std::runtime_error("Integer division by zero");
+            } else {
+                c[i] = std::numeric_limits<T>::infinity();
+            }
         } else {
             c[i] = a[i] / b[i];
         }
@@ -1710,14 +1715,20 @@ auto div_kernel(const Tensor& a, const Tensor& b) -> Tensor {
             const int32_t* b_data = b.data<int32_t>();
             int32_t* c_data = result.data<int32_t>();
             detail::broadcast_op(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
-                                [](int32_t x, int32_t y) { return (y == 0) ? 0 : x / y; });
+                                [](int32_t x, int32_t y) -> int32_t {
+                                    if (y == 0) throw std::runtime_error("Integer division by zero");
+                                    return x / y;
+                                });
 
         } else if (a.dtype() == DType::Int64) {
             const int64_t* a_data = a.data<int64_t>();
             const int64_t* b_data = b.data<int64_t>();
             int64_t* c_data = result.data<int64_t>();
             detail::broadcast_op(a_data, b_data, c_data, shape_a_vec, shape_b_vec, output_shape,
-                                [](int64_t x, int64_t y) { return (y == 0) ? 0 : x / y; });
+                                [](int64_t x, int64_t y) -> int64_t {
+                                    if (y == 0) throw std::runtime_error("Integer division by zero");
+                                    return x / y;
+                                });
 
         } else if (a.dtype() == DType::Float16) {
             const Float16* a_data = a.data<Float16>();

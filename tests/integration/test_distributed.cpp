@@ -20,6 +20,17 @@
 using namespace tenzor;
 using namespace tenzor::distributed;
 
+// Global test environment for initialization (needed for standalone TEST() macros)
+class DistributedIntegrationTestEnvironment : public ::testing::Environment {
+public:
+    void SetUp() override {
+        tenzor::initialize();
+    }
+};
+
+static ::testing::Environment* const dist_int_env =
+    ::testing::AddGlobalTestEnvironment(new DistributedIntegrationTestEnvironment);
+
 // ============================================================================
 // Test Fixtures
 // ============================================================================

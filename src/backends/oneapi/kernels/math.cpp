@@ -50,6 +50,7 @@ struct DivKernelFloat32 {};
 struct DivKernelFloat64 {};
 struct DivKernelFloat16 {};
 struct DivKernelInt32 {};
+struct CheckZerosKernel {};
 struct MatMulKernelFloat32 {};
 struct MatMulKernelFloat64 {};
 struct MatMulKernelFloat16 {};
@@ -427,6 +428,29 @@ auto mul_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
     return output;
 }
 
+// Helper function to check for zeros in integer array (for division by zero check)
+template<typename T>
+inline void check_integer_divisor_for_zeros(const T* data, int64_t n, sycl::queue& queue) {
+    // Use atomic to track if any zero is found
+    int* has_zero = sycl::malloc_shared<int>(1, queue);
+    *has_zero = 0;
+
+    queue.parallel_for<CheckZerosKernel>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+        if (data[idx] == T(0)) {
+            sycl::atomic_ref<int, sycl::memory_order::relaxed, sycl::memory_scope::device,
+                            sycl::access::address_space::global_space> flag(*has_zero);
+            flag.store(1);
+        }
+    }).wait();
+
+    bool found_zero = (*has_zero != 0);
+    sycl::free(has_zero, queue);
+
+    if (found_zero) {
+        throw std::runtime_error("Integer division by zero");
+    }
+}
+
 // Element-wise division kernel
 // IMPORTANT: Must ensure contiguous inputs for direct memory access
 auto div_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
@@ -484,6 +508,9 @@ auto div_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor 
         const int32_t* a_ptr = get_data_ptr<const int32_t>(a_cont);
         const int32_t* b_ptr = get_data_ptr<const int32_t>(b_cont);
         int32_t* out_ptr = get_data_ptr<int32_t>(output);
+
+        // Check for division by zero before executing kernel
+        check_integer_divisor_for_zeros(b_ptr, numel, queue);
 
         queue.parallel_for<DivKernelInt32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = a_ptr[idx] / b_ptr[idx];

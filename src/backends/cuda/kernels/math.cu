@@ -80,6 +80,42 @@ inline void compute_launch_config_1d(int64_t n, dim3& grid, dim3& block) {
          i += blockDim.x * gridDim.x)
 
 // ============================================================================
+// Division by Zero Check (for integer types)
+// ============================================================================
+
+// Kernel to check if any element is zero (for integer division check)
+template<typename T>
+__global__ void check_for_zeros_kernel(const T* data, int64_t n, int* has_zero) {
+    CUDA_KERNEL_LOOP(idx, n) {
+        if (data[idx] == T(0)) {
+            atomicExch(has_zero, 1);
+        }
+    }
+}
+
+// Host function to check for zeros in an integer tensor
+template<typename T>
+inline void check_integer_divisor_for_zeros(const T* data, int64_t n, cudaStream_t stream) {
+    int* d_has_zero;
+    int h_has_zero = 0;
+
+    CUDA_CHECK(cudaMalloc(&d_has_zero, sizeof(int)));
+    CUDA_CHECK(cudaMemsetAsync(d_has_zero, 0, sizeof(int), stream));
+
+    dim3 grid, block;
+    compute_launch_config_1d(n, grid, block);
+    check_for_zeros_kernel<<<grid, block, 0, stream>>>(data, n, d_has_zero);
+
+    CUDA_CHECK(cudaMemcpyAsync(&h_has_zero, d_has_zero, sizeof(int), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));  // Need to sync to check the flag
+    CUDA_CHECK(cudaFree(d_has_zero));
+
+    if (h_has_zero) {
+        throw std::runtime_error("Integer division by zero");
+    }
+}
+
+// ============================================================================
 // Broadcasting Helpers (Device-side)
 // ============================================================================
 
@@ -1152,8 +1188,10 @@ auto div_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
         } else if (a.dtype() == DType::Float64) {
             div_kernel_device<<<grid, block, 0, stream>>>(a.data<double>(), b.data<double>(), result.data<double>(), n);
         } else if (a.dtype() == DType::Int32) {
+            check_integer_divisor_for_zeros(b.data<int32_t>(), n, stream);
             div_kernel_device<<<grid, block, 0, stream>>>(a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(), n);
         } else if (a.dtype() == DType::Int64) {
+            check_integer_divisor_for_zeros(b.data<int64_t>(), n, stream);
             div_kernel_device<<<grid, block, 0, stream>>>(a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(), n);
         } else if (a.dtype() == DType::Float16) {
             div_kernel_f16<<<grid, block, 0, stream>>>(
@@ -1209,10 +1247,12 @@ auto div_kernel(const Tensor& a, const Tensor& b, cudaStream_t stream) -> Tensor
             a.data<double>(), b.data<double>(), result.data<double>(),
             d_strides_a, d_strides_b, d_output_shape, ndim, n, DivOp());
     } else if (a.dtype() == DType::Int32) {
+        check_integer_divisor_for_zeros(b.data<int32_t>(), b.numel(), stream);
         broadcast_kernel<<<grid, block, 0, stream>>>(
             a.data<int32_t>(), b.data<int32_t>(), result.data<int32_t>(),
             d_strides_a, d_strides_b, d_output_shape, ndim, n, DivOp());
     } else if (a.dtype() == DType::Int64) {
+        check_integer_divisor_for_zeros(b.data<int64_t>(), b.numel(), stream);
         broadcast_kernel<<<grid, block, 0, stream>>>(
             a.data<int64_t>(), b.data<int64_t>(), result.data<int64_t>(),
             d_strides_a, d_strides_b, d_output_shape, ndim, n, DivOp());

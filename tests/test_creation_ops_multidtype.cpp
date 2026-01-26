@@ -294,7 +294,17 @@ INSTANTIATE_MULTI_BACKEND_DTYPE_TESTS(CreationOpsMultiDTypeTest);
 class CreationOpsIntegerDTypeTest : public ::testing::TestWithParam<DType> {
 protected:
     Device device = Device::cpu();
+    static bool initialized_;
+
+    void SetUp() override {
+        if (!initialized_) {
+            tenzor::initialize();
+            initialized_ = true;
+        }
+    }
 };
+
+bool CreationOpsIntegerDTypeTest::initialized_ = false;
 
 TEST_P(CreationOpsIntegerDTypeTest, ZerosInteger) {
     auto dtype = GetParam();

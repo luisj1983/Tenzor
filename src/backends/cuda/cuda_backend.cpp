@@ -1089,9 +1089,6 @@ public:
                     shape.push_back(std::stoll(shape_str));
                 }
 
-                // Use stod for better precision with very small values like denormalized floats
-                float value = static_cast<float>(std::stod(attrs.at("value")));
-
                 DType dtype = DType::Float32;
                 if (attrs.contains("dtype")) {
                     auto dtype_str = attrs.at("dtype");
@@ -1108,6 +1105,19 @@ public:
                     else if (dtype_str == "uint32") dtype = DType::UInt32;
                     else if (dtype_str == "uint64") dtype = DType::UInt64;
                     else if (dtype_str == "bool") dtype = DType::Bool;
+                }
+
+                // Parse value as double for full precision, then convert based on target dtype
+                // For integer types, parse through double and cast directly to avoid float precision loss
+                double value_d = std::stod(attrs.at("value"));
+                float value;
+                if (dtype == DType::Int32 || dtype == DType::Int64 || dtype == DType::Int8 ||
+                    dtype == DType::Int16 || dtype == DType::UInt8 || dtype == DType::UInt16 ||
+                    dtype == DType::UInt32 || dtype == DType::UInt64) {
+                    // For integer types, round to nearest integer to preserve exact values
+                    value = static_cast<float>(std::llround(value_d));
+                } else {
+                    value = static_cast<float>(value_d);
                 }
 
                 Device device = inputs.empty() ? Device::cuda(0) : inputs[0].device();

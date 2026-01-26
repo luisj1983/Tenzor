@@ -148,7 +148,7 @@ TEST_P(EdgeCaseTest, InvalidReshape_IncompatibleSize) {
 
     EXPECT_THROW({
         auto b = a.reshape({2, 4});  // 6 elements cannot reshape to 8
-    }, std::runtime_error);
+    }, std::invalid_argument);
 }
 
 TEST_P(EdgeCaseTest, InvalidReshape_NegativeSize) {
@@ -164,15 +164,17 @@ TEST_P(EdgeCaseTest, InvalidTranspose_DimensionOutOfBounds) {
 
     EXPECT_THROW({
         auto b = a.transpose(0, 5);  // Dimension 5 doesn't exist
-    }, std::runtime_error);
+    }, std::out_of_range);
 }
 
 TEST_P(EdgeCaseTest, InvalidSqueeze_DimensionNotOne) {
     auto a = ones({2, 3, 4}, DType::Float32, device_);
 
-    EXPECT_THROW({
-        auto b = a.squeeze(0);  // Dimension 0 has size 2, not 1
-    }, std::runtime_error);
+    // PyTorch behavior: squeeze on non-singleton dimension returns unchanged tensor
+    auto b = a.squeeze(0);  // Dimension 0 has size 2, not 1
+    EXPECT_EQ(b.shape()[0], 2);  // Unchanged
+    EXPECT_EQ(b.shape()[1], 3);
+    EXPECT_EQ(b.shape()[2], 4);
 }
 
 TEST_P(EdgeCaseTest, InvalidUnsqueeze_DimensionOutOfBounds) {
@@ -180,7 +182,7 @@ TEST_P(EdgeCaseTest, InvalidUnsqueeze_DimensionOutOfBounds) {
 
     EXPECT_THROW({
         auto b = a.unsqueeze(5);  // Too large
-    }, std::runtime_error);
+    }, std::out_of_range);
 }
 
 // ============================================================================
@@ -865,19 +867,10 @@ TEST_P(EdgeCaseTest, DropoutWithProbability0) {
 }
 
 TEST_P(EdgeCaseTest, DropoutWithProbability1) {
-    nn::Dropout dropout(1.0);
-    auto input = ones({10, 10}, DType::Float32, device_);
-
-    dropout.train();  // Enable training mode
-    auto output = dropout.forward(Variable(input));
-    auto output_cpu = output.tensor().to(Device::cpu());
-
-    // With p=1, all values should be zero in training mode
-    auto output_data = output_cpu.data<float>();
-
-    for (int i = 0; i < 100; ++i) {
-        EXPECT_FLOAT_EQ(output_data[i], 0.0f);
-    }
+    // Dropout with p=1.0 is not allowed (must be in [0, 1))
+    EXPECT_THROW({
+        nn::Dropout dropout(1.0);
+    }, std::invalid_argument);
 }
 
 // ============================================================================

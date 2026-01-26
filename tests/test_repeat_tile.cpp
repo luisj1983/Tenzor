@@ -2,10 +2,22 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/tenzor.hpp"
 #include <iostream>
 #include <vector>
 
 using namespace tenzor;
+
+// Global test environment for initialization
+class RepeatTileTestEnvironment : public ::testing::Environment {
+public:
+    void SetUp() override {
+        tenzor::initialize();
+    }
+};
+
+static ::testing::Environment* const repeat_tile_env =
+    ::testing::AddGlobalTestEnvironment(new RepeatTileTestEnvironment);
 
 // Helper function to print tensor values
 template<typename T>

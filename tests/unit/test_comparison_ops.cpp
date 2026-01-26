@@ -4,16 +4,22 @@
 
 using namespace tenzor;
 
+// Global test environment for initialization
+class ComparisonOpsTestEnvironment : public ::testing::Environment {
+public:
+    void SetUp() override {
+        tenzor::initialize();
+    }
+};
+
+static ::testing::Environment* const comparison_env =
+    ::testing::AddGlobalTestEnvironment(new ComparisonOpsTestEnvironment);
+
 // Test comparison operators across backends
 class ComparisonOpsTest : public ::testing::TestWithParam<std::string> {
 protected:
     void SetUp() override {
-        // Initialize library on first test
-        static bool initialized = false;
-        if (!initialized) {
-            tenzor::initialize();
-            initialized = true;
-        }
+        // Library is initialized by global test environment
 
         backend_name = GetParam();
         if (backend_name == "cpu") {

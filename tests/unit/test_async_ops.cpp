@@ -11,11 +11,23 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/autograd/ops.hpp"
+#include "tenzor/tenzor.hpp"
 #include <chrono>
 #include <thread>
 #include <vector>
 
 using namespace tenzor;
+
+// Global test environment for initialization
+class AsyncOpsTestEnvironment : public ::testing::Environment {
+public:
+    void SetUp() override {
+        tenzor::initialize();
+    }
+};
+
+static ::testing::Environment* const async_ops_env =
+    ::testing::AddGlobalTestEnvironment(new AsyncOpsTestEnvironment);
 
 // Helper function - full_like implementation
 auto full_like(const Tensor& tensor, float value) -> Tensor {

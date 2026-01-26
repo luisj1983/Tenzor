@@ -10,10 +10,22 @@
 #include "tenzor/nn/quantization/qconfig.hpp"
 #include "tenzor/nn/quantization/quantized_layers.hpp"
 #include "tenzor/core/tensor.hpp"
+#include "tenzor/tenzor.hpp"
 #include <cmath>
 
 using namespace tenzor;
 using namespace tenzor::nn::quantization;
+
+// Global test environment for initialization
+class QuantizationTestEnvironment : public ::testing::Environment {
+public:
+    void SetUp() override {
+        tenzor::initialize();
+    }
+};
+
+static ::testing::Environment* const quant_env =
+    ::testing::AddGlobalTestEnvironment(new QuantizationTestEnvironment);
 
 class QuantizationTest : public ::testing::Test {
 protected:

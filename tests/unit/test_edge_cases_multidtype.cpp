@@ -625,8 +625,14 @@ TEST_P(EdgeCaseMultiDTypeTest, IntegerOverflow_Addition) {
 
     if (dtype == DType::Int32) {
         int32_t max_val = std::numeric_limits<int32_t>::max();
-        auto a = full({10}, static_cast<float>(max_val), dtype, device_);
-        auto b = full({10}, static_cast<float>(static_cast<int32_t>(1)), dtype, device_);
+
+        // Create tensors on CPU with exact values (float can't represent INT32_MAX exactly)
+        // Then transfer to target device
+        auto a_cpu = full({10}, static_cast<double>(max_val), dtype, Device::cpu());
+        auto b_cpu = full({10}, 1.0, dtype, Device::cpu());
+
+        auto a = a_cpu.to(device_);
+        auto b = b_cpu.to(device_);
 
         auto result = add(a, b);
         auto result_cpu = result.to(Device::cpu());
@@ -647,8 +653,14 @@ TEST_P(EdgeCaseMultiDTypeTest, IntegerUnderflow_Subtraction) {
 
     if (dtype == DType::Int32) {
         int32_t min_val = std::numeric_limits<int32_t>::min();
-        auto a = full({10}, static_cast<float>(min_val), dtype, device_);
-        auto b = full({10}, static_cast<float>(static_cast<int32_t>(1)), dtype, device_);
+
+        // Create tensors on CPU with exact values (float can't represent INT32_MIN exactly)
+        // Then transfer to target device
+        auto a_cpu = full({10}, static_cast<double>(min_val), dtype, Device::cpu());
+        auto b_cpu = full({10}, 1.0, dtype, Device::cpu());
+
+        auto a = a_cpu.to(device_);
+        auto b = b_cpu.to(device_);
 
         auto result = sub(a, b);
         auto result_cpu = result.to(Device::cpu());

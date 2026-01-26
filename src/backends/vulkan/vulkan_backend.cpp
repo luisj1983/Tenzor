@@ -4212,19 +4212,84 @@ auto VulkanBackend::dispatchMaxPool2d(const Tensor& input, int64_t kernel_h, int
     int64_t out_width = (in_width + 2*padding_w - kernel_w) / stride_w + 1;
 
     int32_t device_id = input.device().index;
-    auto* pipeline = getPipeline("max_pool2d", device_id);
+    // Use pooling_forward_with_indices shader which has 3 bindings and matching push constants
+    auto* pipeline = getPipeline("pooling_forward_with_indices", device_id);
 
     std::vector<int64_t> out_shape = {batch, channels, out_height, out_width};
     Tensor output(out_shape, input.dtype(), input.device());
-    Tensor indices(out_shape, DType::Int64, input.device());
+    Tensor indices(out_shape, DType::Int32, input.device());  // Use Int32 for Vulkan
 
+    // Push constants matching pooling_forward_with_indices.comp
+    struct PushConstants {
+        uint32_t batch;
+        uint32_t channels;
+        uint32_t in_height;
+        uint32_t in_width;
+        uint32_t out_height;
+        uint32_t out_width;
+        uint32_t kernel_h;
+        uint32_t kernel_w;
+        uint32_t stride_h;
+        uint32_t stride_w;
+        uint32_t padding_h;
+        uint32_t padding_w;
+    } push_constants;
+
+    push_constants.batch = static_cast<uint32_t>(batch);
+    push_constants.channels = static_cast<uint32_t>(channels);
+    push_constants.in_height = static_cast<uint32_t>(in_height);
+    push_constants.in_width = static_cast<uint32_t>(in_width);
+    push_constants.out_height = static_cast<uint32_t>(out_height);
+    push_constants.out_width = static_cast<uint32_t>(out_width);
+    push_constants.kernel_h = static_cast<uint32_t>(kernel_h);
+    push_constants.kernel_w = static_cast<uint32_t>(kernel_w);
+    push_constants.stride_h = static_cast<uint32_t>(stride_h);
+    push_constants.stride_w = static_cast<uint32_t>(stride_w);
+    push_constants.padding_h = static_cast<uint32_t>(padding_h);
+    push_constants.padding_w = static_cast<uint32_t>(padding_w);
+
+    // Get VkBuffer handles
+    VkBuffer buffer_input = getVulkanBuffer(input.data_ptr());
+    VkBuffer buffer_output = getVulkanBuffer(output.data_ptr());
+    VkBuffer buffer_indices = getVulkanBuffer(indices.data_ptr());
+
+    // Calculate buffer sizes
+    size_t input_size = input.numel() * input.dtype_size();
+    size_t output_size = output.numel() * output.dtype_size();
+    size_t indices_size = indices.numel() * indices.dtype_size();
+
+    // Allocate and write descriptor set
+    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+        {0, buffer_input},
+        {1, buffer_output},
+        {2, buffer_indices}
+    };
+    std::vector<size_t> sizes = {input_size, output_size, indices_size};
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
+    // Execute compute shader
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
 
-    uint32_t workgroups_x = (out_width + 15) / 16;
-    uint32_t workgroups_y = (out_height + 15) / 16;
-    uint32_t workgroups_z = channels;
-    vkCmdDispatch(cmdBuffer, workgroups_x, workgroups_y, workgroups_z);
+    // Bind descriptor sets
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+
+    // Set push constants
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(PushConstants), &push_constants);
+
+    // Dispatch with (16, 16) local size shader - x = out_width, y = out_height, z = channels
+    // Process each batch separately
+    for (int64_t b = 0; b < batch; ++b) {
+        uint32_t workgroups_x = (out_width + 15) / 16;
+        uint32_t workgroups_y = (out_height + 15) / 16;
+        uint32_t workgroups_z = static_cast<uint32_t>(channels);
+        vkCmdDispatch(cmdBuffer, workgroups_x, workgroups_y, workgroups_z);
+    }
 
     // Add memory barrier
     insertComputeBarrier(cmdBuffer);
@@ -4252,13 +4317,73 @@ auto VulkanBackend::dispatchAvgPool2d(const Tensor& input, int64_t kernel_h, int
     std::vector<int64_t> out_shape = {batch, channels, out_height, out_width};
     Tensor output(out_shape, input.dtype(), input.device());
 
+    // Push constants matching avg_pool2d.comp shader
+    struct PushConstants {
+        uint32_t n_elements;
+        uint32_t batch;
+        uint32_t channels;
+        uint32_t in_height;
+        uint32_t in_width;
+        uint32_t out_height;
+        uint32_t out_width;
+        uint32_t kernel_h;
+        uint32_t kernel_w;
+        uint32_t stride_h;
+        uint32_t stride_w;
+        uint32_t padding_h;
+        uint32_t padding_w;
+        uint32_t count_include_pad;
+    } push_constants;
+
+    push_constants.n_elements = static_cast<uint32_t>(output.numel());
+    push_constants.batch = static_cast<uint32_t>(batch);
+    push_constants.channels = static_cast<uint32_t>(channels);
+    push_constants.in_height = static_cast<uint32_t>(in_height);
+    push_constants.in_width = static_cast<uint32_t>(in_width);
+    push_constants.out_height = static_cast<uint32_t>(out_height);
+    push_constants.out_width = static_cast<uint32_t>(out_width);
+    push_constants.kernel_h = static_cast<uint32_t>(kernel_h);
+    push_constants.kernel_w = static_cast<uint32_t>(kernel_w);
+    push_constants.stride_h = static_cast<uint32_t>(stride_h);
+    push_constants.stride_w = static_cast<uint32_t>(stride_w);
+    push_constants.padding_h = static_cast<uint32_t>(padding_h);
+    push_constants.padding_w = static_cast<uint32_t>(padding_w);
+    push_constants.count_include_pad = 0;  // Default: don't include padding in average
+
+    // Get VkBuffer handles
+    VkBuffer buffer_input = getVulkanBuffer(input.data_ptr());
+    VkBuffer buffer_output = getVulkanBuffer(output.data_ptr());
+
+    // Calculate buffer sizes
+    size_t input_size = input.numel() * input.dtype_size();
+    size_t output_size = output.numel() * output.dtype_size();
+
+    // Allocate and write descriptor set
+    std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+        {0, buffer_input},
+        {1, buffer_output}
+    };
+    std::vector<size_t> sizes = {input_size, output_size};
+
+    VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+        device_id, pipeline, bindings, sizes);
+
+    // Execute compute shader
     VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
     vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
 
-    uint32_t workgroups_x = (out_width + 15) / 16;
-    uint32_t workgroups_y = (out_height + 15) / 16;
-    uint32_t workgroups_z = channels;
-    vkCmdDispatch(cmdBuffer, workgroups_x, workgroups_y, workgroups_z);
+    // Bind descriptor sets
+    vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                           pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+
+    // Set push constants
+    vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                      VK_SHADER_STAGE_COMPUTE_BIT,
+                      0, sizeof(PushConstants), &push_constants);
+
+    // Shader uses local_size_x = 256, processing elements linearly
+    uint32_t workgroups = (push_constants.n_elements + 255) / 256;
+    vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
     // Add memory barrier
     insertComputeBarrier(cmdBuffer);
@@ -5269,7 +5394,7 @@ auto VulkanBackend::dispatchArgmax(const Tensor& input, int64_t dim, bool keepdi
         }
     }
 
-    Tensor output(out_shape, DType::Int64, input.device());
+    Tensor output(out_shape, DType::Int32, input.device());  // Use Int32 for Vulkan
 
     // Get VkBuffer handles from tensor data pointers
     VkBuffer buffer_in = getVulkanBuffer(input.data_ptr());
@@ -5352,7 +5477,7 @@ auto VulkanBackend::dispatchArgmin(const Tensor& input, int64_t dim, bool keepdi
         }
     }
 
-    Tensor output(out_shape, DType::Int64, input.device());
+    Tensor output(out_shape, DType::Int32, input.device());  // Use Int32 for Vulkan
 
     // Get VkBuffer handles from tensor data pointers
     VkBuffer buffer_in = getVulkanBuffer(input.data_ptr());

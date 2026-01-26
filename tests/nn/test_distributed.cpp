@@ -13,6 +13,17 @@
 using namespace tenzor;
 using namespace tenzor::nn;
 
+// Global test environment for initialization
+class DistributedTestEnvironment : public ::testing::Environment {
+public:
+    void SetUp() override {
+        tenzor::initialize();
+    }
+};
+
+static ::testing::Environment* const dist_env =
+    ::testing::AddGlobalTestEnvironment(new DistributedTestEnvironment);
+
 // Simple test model for distributed training
 class SimpleModel : public Module {
 public:

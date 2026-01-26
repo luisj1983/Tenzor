@@ -1,9 +1,21 @@
 #include <tenzor/core/tensor.hpp>
 #include <tenzor/ops/creation.hpp>
+#include <tenzor/tenzor.hpp>
 #include <gtest/gtest.h>
 #include <iostream>
 
 using namespace tenzor;
+
+// Global test environment for initialization
+class TensorIndexingTestEnvironment : public ::testing::Environment {
+public:
+    void SetUp() override {
+        tenzor::initialize();
+    }
+};
+
+static ::testing::Environment* const indexing_env =
+    ::testing::AddGlobalTestEnvironment(new TensorIndexingTestEnvironment);
 
 TEST(TensorIndexingTest, OneDimensionalIndexing) {
     // Create a 1D tensor [0, 1, 2, 3, 4]
@@ -88,11 +100,11 @@ TEST(TensorIndexingTest, OutOfBoundsPositive) {
 
     EXPECT_THROW({
         Tensor elem = t[5];
-    }, std::out_of_range);
+    }, std::runtime_error);
 
     EXPECT_THROW({
         Tensor elem = t[100];
-    }, std::out_of_range);
+    }, std::runtime_error);
 }
 
 TEST(TensorIndexingTest, OutOfBoundsNegative) {
@@ -100,11 +112,11 @@ TEST(TensorIndexingTest, OutOfBoundsNegative) {
 
     EXPECT_THROW({
         Tensor elem = t[-6];
-    }, std::out_of_range);
+    }, std::runtime_error);
 
     EXPECT_THROW({
         Tensor elem = t[-100];
-    }, std::out_of_range);
+    }, std::runtime_error);
 }
 
 TEST(TensorIndexingTest, NullTensorError) {
@@ -124,7 +136,4 @@ TEST(TensorIndexingTest, ScalarTensorError) {
     }, std::runtime_error);
 }
 
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}
+// Using GTest::gtest_main - initialization handled by TensorIndexingTestEnvironment

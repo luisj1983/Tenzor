@@ -6,10 +6,22 @@
 #include <gtest/gtest.h>
 #include <tenzor/utils/tensorboard.hpp>
 #include <tenzor/core/tensor.hpp>
+#include <tenzor/tenzor.hpp>
 #include <filesystem>
 #include <fstream>
 
 using namespace tenzor;
+
+// Global test environment for initialization
+class TensorBoardTestEnvironment : public ::testing::Environment {
+public:
+    void SetUp() override {
+        tenzor::initialize();
+    }
+};
+
+static ::testing::Environment* const tb_env =
+    ::testing::AddGlobalTestEnvironment(new TensorBoardTestEnvironment);
 
 class TensorBoardTest : public ::testing::Test {
 protected:

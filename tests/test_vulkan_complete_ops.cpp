@@ -8,10 +8,22 @@
 #include "tenzor/core/device.hpp"
 #include "tenzor/backend/backend.hpp"
 #include "tenzor/backend/loader.hpp"
+#include "tenzor/tenzor.hpp"
 #include <cmath>
 #include <algorithm>
 
 using namespace tenzor;
+
+// Global test environment for initialization
+class VulkanTestEnvironment : public ::testing::Environment {
+public:
+    void SetUp() override {
+        tenzor::initialize();
+    }
+};
+
+static ::testing::Environment* const vulkan_env =
+    ::testing::AddGlobalTestEnvironment(new VulkanTestEnvironment);
 
 class VulkanOpsTest : public ::testing::Test {
 protected:

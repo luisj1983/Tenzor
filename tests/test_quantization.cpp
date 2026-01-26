@@ -14,6 +14,7 @@
 #include <gtest/gtest.h>
 #include "tenzor/nn/quantization.hpp"
 #include "tenzor/core/tensor.hpp"
+#include "tenzor/tenzor.hpp"
 #include <cmath>
 #include <algorithm>
 
@@ -21,15 +22,15 @@ using namespace tenzor;
 using namespace tenzor::nn::quantization;
 
 // Global test environment
-class QuantizationTestEnvironment : public ::testing::Environment {
+class QuantizationTestEnvironment2 : public ::testing::Environment {
 public:
     void SetUp() override {
-        // Environment initialization if needed
+        tenzor::initialize();
     }
 };
 
-static ::testing::Environment* const quant_env =
-    ::testing::AddGlobalTestEnvironment(new QuantizationTestEnvironment);
+static ::testing::Environment* const quant_env2 =
+    ::testing::AddGlobalTestEnvironment(new QuantizationTestEnvironment2);
 
 class QuantizationTest : public ::testing::Test {
 protected:

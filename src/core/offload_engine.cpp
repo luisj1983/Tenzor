@@ -102,10 +102,15 @@ OffloadEngine::~OffloadEngine() {
 // ============================================================================
 
 auto OffloadEngine::offload_to_cpu(const Tensor& gpu_tensor) -> Tensor {
-    // Validate input
+    // If tensor is already on CPU, return it as-is (no-op)
+    if (gpu_tensor.device().type == Device::Type::CPU) {
+        return gpu_tensor;
+    }
+
+    // Validate input is a GPU device
     if (!is_gpu_device(gpu_tensor.device())) {
         throw std::runtime_error(
-            "OffloadEngine::offload_to_cpu: tensor must be on GPU, got " +
+            "OffloadEngine::offload_to_cpu: tensor must be on GPU or CPU, got " +
             gpu_tensor.device().to_string()
         );
     }
