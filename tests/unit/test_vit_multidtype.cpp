@@ -409,7 +409,7 @@ TEST_P(ViTMultiDtypeTest, ViTHugePatch14ForwardShape) {
 TEST_P(ViTMultiDtypeTest, ViTHugePatch14GradientFlow) {
     // For CUDA + Float64, use a reduced model (8 layers instead of 32)
     // to fit in 8GB GPU memory (~160M params instead of 632M)
-    bool use_reduced_model = (backend_name() == "cuda" && dtype() == DType::Float64);
+    bool use_reduced_model = (backend_name() != "cpu" && dtype() == DType::Float64);
     int img_size = use_reduced_model ? 112 : getImageSizeForMemory(224, 632'000'000, true);
 
     std::shared_ptr<ViTForImageClassification> model;

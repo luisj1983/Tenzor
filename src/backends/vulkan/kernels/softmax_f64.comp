@@ -34,23 +34,31 @@ double exp_d(double x) {
 
     // For values outside float range, use range reduction
     double ln2 = 0.6931471805599453;
-    double k = floor(x / ln2 + 0.5);
-    double r = x - k * ln2;
+    double k_dbl = floor(x / ln2 + 0.5);
+    double r = x - k_dbl * ln2;
+    int k = int(k_dbl);
 
     // exp(r) where |r| <= ln(2)/2, use float exp which is accurate
     double exp_r = double(exp(float(r)));
 
-    // Multiply by 2^k
-    if (k >= 0.0) {
-        for (int i = 0; i < int(k) && i < 1024; i++) {
-            exp_r *= 2.0;
+    // Multiply by 2^k efficiently using repeated squaring
+    // pow2 computes 2^abs(k) in O(log(k)) time
+    double pow2 = 1.0;
+    int abs_k = (k >= 0) ? k : -k;
+    double base = 2.0;
+    while (abs_k > 0) {
+        if ((abs_k & 1) != 0) {
+            pow2 *= base;
         }
-    } else {
-        for (int i = 0; i < int(-k) && i < 1024; i++) {
-            exp_r *= 0.5;
-        }
+        base *= base;
+        abs_k >>= 1;
     }
-    return exp_r;
+
+    if (k >= 0) {
+        return exp_r * pow2;
+    } else {
+        return exp_r / pow2;
+    }
 }
 
 void main() {

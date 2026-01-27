@@ -132,6 +132,7 @@ set(SHADERS
     batchnorm2d_forward
     batchnorm2d_backward
     batchnorm2d_mean_var
+    batchnorm2d_mean_var_f64
     # Pooling operations (new)
     avg_pool2d
     max_pool2d

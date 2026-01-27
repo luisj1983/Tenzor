@@ -14,20 +14,29 @@ namespace backend {
 
 /**
  * @brief Memory block representation for the Vulkan caching allocator
+ *
+ * Supports sub-allocation: multiple blocks can share the same VkDeviceMemory,
+ * each bound at a different offset. Only the block with owns_memory=true
+ * is responsible for freeing the underlying memory.
  */
 struct VulkanBlock {
     VkBuffer buffer;            // Vulkan buffer handle
-    VkDeviceMemory memory;      // Device memory handle
+    VkDeviceMemory memory;      // Device memory handle (may be shared with other blocks)
     void* mapped_ptr;           // Host-visible mapped pointer (or synthetic address)
     size_t size;                // Block size in bytes
+    size_t memory_offset;       // Offset within the VkDeviceMemory where buffer is bound
+    size_t memory_size;         // Total size of the underlying VkDeviceMemory allocation
     bool allocated;             // Whether block is currently allocated
     bool is_host_visible;       // Whether memory is host-visible (mappable)
+    bool owns_memory;           // Whether this block owns the VkDeviceMemory (should free it)
     int device;                 // Device index
     uint32_t memory_type_index; // Memory type index for this block
+    void* base_mapped_ptr;      // Base mapped pointer for the entire memory (for sub-allocation)
 
     VulkanBlock(VkBuffer buf, VkDeviceMemory mem, void* ptr, size_t s, int dev, uint32_t mem_type)
         : buffer(buf), memory(mem), mapped_ptr(ptr), size(s),
-          allocated(false), is_host_visible(true), device(dev), memory_type_index(mem_type) {}
+          memory_offset(0), memory_size(s), allocated(false), is_host_visible(true),
+          owns_memory(true), device(dev), memory_type_index(mem_type), base_mapped_ptr(ptr) {}
 
     // Comparison for ordered containers (by size, then by pointer)
     bool operator<(const VulkanBlock& other) const {
@@ -254,6 +263,11 @@ private:
     VulkanCachingAllocator& operator=(const VulkanCachingAllocator&) = delete;
 
     /**
+     * @brief Internal cache empty - assumes mutex is already held
+     */
+    void empty_cache_impl(int device);
+
+    /**
      * @brief Try to allocate from cache
      */
     VulkanBlock* try_allocate_from_cache(size_t size, int device,
@@ -308,6 +322,10 @@ private:
 
         // All blocks (free and allocated) by mapped pointer
         std::unordered_map<void*, std::unique_ptr<VulkanBlock>> all_blocks;
+
+        // Reference counts for shared VkDeviceMemory (for sub-allocation)
+        // Key: VkDeviceMemory handle, Value: number of blocks referencing it
+        std::unordered_map<VkDeviceMemory, size_t> memory_ref_counts;
 
         // Staging buffer pool for CPU<->GPU transfers
         std::vector<std::unique_ptr<StagingBuffer>> staging_pool;

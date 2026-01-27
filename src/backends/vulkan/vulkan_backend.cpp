@@ -292,10 +292,13 @@ void VulkanBackend::createLogicalDevices() {
         vkEnumerateDeviceExtensionProperties(ctx.physicalDevice, nullptr, &extensionCount, availableExtensions.data());
 
         bool hasFloatControls = false;
+        bool hasAtomicFloat = false;
         for (const auto& ext : availableExtensions) {
             if (strcmp(ext.extensionName, VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME) == 0) {
                 hasFloatControls = true;
-                break;
+            }
+            if (strcmp(ext.extensionName, VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME) == 0) {
+                hasAtomicFloat = true;
             }
         }
 
@@ -303,6 +306,9 @@ void VulkanBackend::createLogicalDevices() {
         std::vector<const char*> deviceExtensions;
         if (hasFloatControls) {
             deviceExtensions.push_back(VK_KHR_SHADER_FLOAT_CONTROLS_EXTENSION_NAME);
+        }
+        if (hasAtomicFloat) {
+            deviceExtensions.push_back(VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME);
         }
 
         // Query float controls properties to check for denorm preservation support
@@ -318,6 +324,19 @@ void VulkanBackend::createLogicalDevices() {
         // Check if denorm preserve is supported for float32
         bool canPreserveDenormsF32 = (floatControlsProps.shaderDenormPreserveFloat32 == VK_TRUE);
 
+        // Set up atomic float features if extension is available
+        VkPhysicalDeviceShaderAtomicFloatFeaturesEXT atomicFloatFeatures{};
+        atomicFloatFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT;
+        atomicFloatFeatures.pNext = nullptr;
+
+        // Query supported atomic float features
+        if (hasAtomicFloat) {
+            VkPhysicalDeviceFeatures2 features2{};
+            features2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+            features2.pNext = &atomicFloatFeatures;
+            vkGetPhysicalDeviceFeatures2(ctx.physicalDevice, &features2);
+        }
+
         // Device creation
         VkDeviceCreateInfo createInfo{};
         createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -327,6 +346,18 @@ void VulkanBackend::createLogicalDevices() {
         createInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
         createInfo.ppEnabledExtensionNames = deviceExtensions.empty() ? nullptr : deviceExtensions.data();
         createInfo.enabledLayerCount = 0;
+
+        // Chain atomic float features if supported
+        VkPhysicalDeviceFeatures2 features2Chain{};
+        if (hasAtomicFloat && (atomicFloatFeatures.shaderBufferFloat32AtomicAdd ||
+                              atomicFloatFeatures.shaderSharedFloat32AtomicAdd)) {
+            // Enable the features that are supported
+            features2Chain.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+            features2Chain.features = deviceFeatures;
+            features2Chain.pNext = &atomicFloatFeatures;
+            createInfo.pNext = &features2Chain;
+            createInfo.pEnabledFeatures = nullptr;  // Must be null when using pNext chain
+        }
 
         vulkan::checkVk(vkCreateDevice(ctx.physicalDevice, &createInfo,
                                       nullptr, &ctx.device),
@@ -746,9 +777,16 @@ void VulkanBackend::ensurePendingWorkComplete(int32_t device_id) {
         }
 
         if (!fencesToWait.empty()) {
+            // Use 30 second timeout to detect GPU hangs (often caused by memory pressure)
+            constexpr uint64_t FENCE_TIMEOUT_NS = 30'000'000'000ULL;  // 30 seconds
             VkResult result = vkWaitForFences(ctx.device,
                                               static_cast<uint32_t>(fencesToWait.size()),
-                                              fencesToWait.data(), VK_TRUE, UINT64_MAX);
+                                              fencesToWait.data(), VK_TRUE, FENCE_TIMEOUT_NS);
+            if (result == VK_TIMEOUT) {
+                throw std::runtime_error("GPU fence wait timed out after 30 seconds. "
+                    "This often indicates memory pressure or a shader hang. "
+                    "Try reducing batch size or model size, or use a smaller dtype.");
+            }
             if (result != VK_SUCCESS) {
                 std::string error_msg = "Failed to wait for fences: " + std::to_string(result);
                 if (result == VK_ERROR_DEVICE_LOST) {
@@ -782,8 +820,14 @@ void VulkanBackend::endSingleTimeCommandsAsync(VkCommandBuffer commandBuffer, in
     // We only need to wait if we've submitted MAX_FRAMES_IN_FLIGHT work already
     if (ctx.submittedFrames >= DeviceContext::MAX_FRAMES_IN_FLIGHT) {
         // Wait for the oldest frame to complete before reusing its fence
+        // Use 30 second timeout to detect GPU hangs
+        constexpr uint64_t FENCE_TIMEOUT_NS = 30'000'000'000ULL;  // 30 seconds
         VkFence fenceToWait = ctx.frameFences[targetFrame];
-        VkResult waitResult = vkWaitForFences(ctx.device, 1, &fenceToWait, VK_TRUE, UINT64_MAX);
+        VkResult waitResult = vkWaitForFences(ctx.device, 1, &fenceToWait, VK_TRUE, FENCE_TIMEOUT_NS);
+        if (waitResult == VK_TIMEOUT) {
+            throw std::runtime_error("GPU fence wait timed out after 30 seconds. "
+                "This often indicates memory pressure or a shader hang.");
+        }
         if (waitResult != VK_SUCCESS) {
             throw std::runtime_error("Failed to wait for frame fence: " + std::to_string(waitResult));
         }
@@ -838,8 +882,13 @@ auto VulkanBackend::synchronize(int32_t device_id) -> void {
             }
         }
         if (!fencesToWait.empty()) {
-            vkWaitForFences(ctx.device, static_cast<uint32_t>(fencesToWait.size()),
-                           fencesToWait.data(), VK_TRUE, UINT64_MAX);
+            constexpr uint64_t FENCE_TIMEOUT_NS = 30'000'000'000ULL;  // 30 seconds
+            VkResult result = vkWaitForFences(ctx.device, static_cast<uint32_t>(fencesToWait.size()),
+                           fencesToWait.data(), VK_TRUE, FENCE_TIMEOUT_NS);
+            if (result == VK_TIMEOUT) {
+                throw std::runtime_error("GPU sync fence wait timed out after 30 seconds. "
+                    "This often indicates memory pressure or a shader hang.");
+            }
         }
         ctx.submittedFrames = 0;
         ctx.currentFrame = 0;
@@ -964,8 +1013,13 @@ void VulkanBackend::waitForFrame(int32_t device_id, size_t frameIndex) {
     auto& ctx = devices_[device_id];
     VkFence fence = ctx.frameFences[frameIndex];
 
-    VkResult result = vkWaitForFences(ctx.device, 1, &fence, VK_TRUE, UINT64_MAX);
-    if (result != VK_SUCCESS && result != VK_TIMEOUT) {
+    constexpr uint64_t FENCE_TIMEOUT_NS = 30'000'000'000ULL;  // 30 seconds
+    VkResult result = vkWaitForFences(ctx.device, 1, &fence, VK_TRUE, FENCE_TIMEOUT_NS);
+    if (result == VK_TIMEOUT) {
+        throw std::runtime_error("GPU frame fence wait timed out after 30 seconds. "
+            "This often indicates memory pressure or a shader hang.");
+    }
+    if (result != VK_SUCCESS) {
         throw std::runtime_error("Failed to wait for frame fence: " + std::to_string(result));
     }
 }
@@ -1049,12 +1103,26 @@ vulkan::ComputePipeline* VulkanBackend::getPipeline(const std::string& shader_na
         push_range.offset = 0;
         push_range.size = 8;  // 2 uint32_t values
         pushConstants.push_back(push_range);
+    } else if (shader_name == "math_f64") {
+        // math_f64: 16 bytes (uint n, uint op, double param)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 16;  // uint + uint + double (aligned)
+        pushConstants.push_back(push_range);
     } else if (shader_name == "fill" || shader_name == "full" || shader_name == "full_f16" || shader_name == "full_i8") {
         // fill/full/full_f16/full_i8: 8 bytes (uint n, uint/float value bits)
         VkPushConstantRange push_range{};
         push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         push_range.offset = 0;
         push_range.size = 8;  // uint32_t + uint32_t (value bits)
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "full_f64") {
+        // full_f64: 16 bytes (uint n_elements, [pad], double fill_value)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 16;  // uint32_t + padding + double
         pushConstants.push_back(push_range);
     } else if (shader_name == "ones" || shader_name == "ones_f16" || shader_name == "ones_i8") {
         // ones/ones_f16/ones_i8: 8 bytes (n_elements, one_value_bits)
@@ -1091,6 +1159,50 @@ vulkan::ComputePipeline* VulkanBackend::getPipeline(const std::string& shader_na
         push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         push_range.offset = 0;
         push_range.size = 12;  // 3 uint32_t values
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "activations" || shader_name == "activations_f16" ||
+               shader_name == "activations_backward" || shader_name == "activations_backward_f16") {
+        // activations (Float32/Float16): 12 bytes (n, activation, alpha)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 12;  // 3 uint32_t values (float fits in 4 bytes)
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "activations_f64" || shader_name == "activations_backward_f64") {
+        // activations (Float64): 16 bytes (n, activation, double alpha)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 16;  // uint + uint + double (aligned)
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "batchnorm_update_stats" || shader_name == "batchnorm_update_stats_f64" ||
+               shader_name == "batchnorm_update_stats_f16") {
+        // batchnorm_update_stats: 8 bytes (n_channels, momentum)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 8;  // uint32_t + float
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "batchnorm2d_forward" || shader_name == "batchnorm2d_backward") {
+        // batchnorm2d_forward/backward: 24 bytes (n_elements, batch, channels, spatial_size, eps, has_affine/has_gamma)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 24;  // 6 uint32_t/float values
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "batchnorm2d_mean_var" || shader_name == "batchnorm2d_mean_var_f64") {
+        // batchnorm2d_mean_var: 20 bytes (n_elements, batch, channels, spatial_size, pass_id)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 20;  // 5 uint32_t values
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "random" || shader_name == "random_f64" || shader_name == "random_f16") {
+        // random: 16 bytes (n_elements, seed, offset, distribution)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 16;  // 4 uint32_t values
         pushConstants.push_back(push_range);
     } else if (shader_name == "full_uint8") {
         // full_uint8: 8 bytes (n_elements, fill_value_uint8)
@@ -1180,6 +1292,56 @@ vulkan::ComputePipeline* VulkanBackend::getPipeline(const std::string& shader_na
         push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         push_range.offset = 0;
         push_range.size = 8;  // 2 uint32_t values
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "softmax" || shader_name == "softmax_f16" || shader_name == "softmax_f64") {
+        // softmax: 16 bytes (batch_size, num_classes, dim, mode)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 16;  // 4 uint32_t values
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "softmax_backward" || shader_name == "softmax_backward_f16" || shader_name == "softmax_backward_f64") {
+        // softmax_backward: 12 bytes (outer_size, dim_size, inner_size)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 12;  // 3 uint32_t values
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "log_softmax" || shader_name == "log_softmax_f64") {
+        // log_softmax: 12 bytes (batch_size, num_classes, dim)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 12;  // 3 uint32_t values
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "log_softmax_backward" || shader_name == "log_softmax_backward_f64") {
+        // log_softmax_backward: 12 bytes (outer_size, dim_size, inner_size)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 12;  // 3 uint32_t values
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "matmul" || shader_name == "matmul_f16" || shader_name == "matmul_f64" ||
+               shader_name == "matmul_f64_optimized" || shader_name == "matmul_i32") {
+        // matmul: 12 bytes (M, N, K)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 12;  // 3 uint32_t values
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "bmm" || shader_name == "bmm_f64") {
+        // bmm: 16 bytes (batch, M, N, K)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 16;  // 4 uint32_t values
+        pushConstants.push_back(push_range);
+    } else if (shader_name == "layer_norm" || shader_name == "layer_norm_f16" || shader_name == "layer_norm_f64") {
+        // layer_norm: 16 bytes (batch_size, normalized_shape, epsilon, affine)
+        VkPushConstantRange push_range{};
+        push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        push_range.offset = 0;
+        push_range.size = 16;  // 2 uint + 1 float + 1 uint = 16 bytes
         pushConstants.push_back(push_range);
     }
 
@@ -4997,7 +5159,13 @@ auto VulkanBackend::dispatchBatchNorm2dMeanVar(const Tensor& input) -> std::pair
     int64_t normalizer = batch * spatial_size;
 
     int32_t device_id = input.device().index;
-    auto* pipeline = getPipeline("batchnorm2d_mean_var", device_id);
+
+    // Select shader based on dtype
+    std::string shader_name = "batchnorm2d_mean_var";
+    if (input.dtype() == DType::Float64) {
+        shader_name = "batchnorm2d_mean_var_f64";
+    }
+    auto* pipeline = getPipeline(shader_name, device_id);
 
     // Create output tensors
     std::vector<int64_t> stats_shape = {channels};
