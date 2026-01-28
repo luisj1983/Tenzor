@@ -1,0 +1,93 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Conv2d Backward Input - Gradient w.r.t. input (Float64 version)
+// Computes gradient using transposed convolution (col2im pattern)
+//
+// Algorithm: For each input pixel (ih, iw), accumulate gradients from all
+// output positions that used it during forward pass.
+// This reverses the im2col mapping used in forward conv2d.
+
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer GradOutput { double grad_output[]; };  // (N, C_out, H_out, W_out)
+layout(binding = 1) buffer Weight { double weight[]; };           // (C_out, C_in, K_h, K_w)
+layout(binding = 2) buffer GradInput { double grad_input[]; };    // (N, C_in, H_in, W_in)
+
+layout(push_constant) uniform PushConstants {
+    uint batch;
+    uint channels_in;
+    uint channels_out;
+    uint height_in;
+    uint width_in;
+    uint height_out;
+    uint width_out;
+    uint kernel_h;
+    uint kernel_w;
+    uint stride;
+    uint padding;
+    uint dilation;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total_elements = params.batch * params.channels_in * params.height_in * params.width_in;
+
+    if (idx >= total_elements) {
+        return;
+    }
+
+    // Decode flat index to (b, c_in, ih, iw)
+    uint temp = idx;
+    uint iw = temp % params.width_in;
+    temp /= params.width_in;
+    uint ih = temp % params.height_in;
+    temp /= params.height_in;
+    uint c_in = temp % params.channels_in;
+    uint b = temp / params.channels_in;
+
+    // Accumulate gradient from all kernel positions that used this input pixel
+    double sum = 0.0LF;
+
+    // Iterate through all kernel positions
+    for (uint kh = 0; kh < params.kernel_h; kh++) {
+        for (uint kw = 0; kw < params.kernel_w; kw++) {
+            // Reverse the forward mapping: given input (ih, iw) and kernel (kh, kw),
+            // find which output position (oh, ow) used this input
+            // Forward: ih = oh * stride - padding + kh * dilation
+            // Reverse: oh = (ih + padding - kh * dilation) / stride
+
+            int ih_shifted = int(ih) + int(params.padding) - int(kh * params.dilation);
+            int iw_shifted = int(iw) + int(params.padding) - int(kw * params.dilation);
+
+            // Check if this maps to a valid output position
+            // Must be divisible by stride
+            if (ih_shifted % int(params.stride) == 0 && iw_shifted % int(params.stride) == 0) {
+                int oh = ih_shifted / int(params.stride);
+                int ow = iw_shifted / int(params.stride);
+
+                // Check bounds
+                if (oh >= 0 && oh < int(params.height_out) &&
+                    ow >= 0 && ow < int(params.width_out)) {
+
+                    // This kernel position contributed to our gradient
+                    // Accumulate: grad_input += grad_output * weight
+
+                    // Iterate through all output channels
+                    for (uint c_out = 0; c_out < params.channels_out; c_out++) {
+                        // grad_output index: [b][c_out][oh][ow]
+                        uint grad_out_idx = ((b * params.channels_out + c_out) * params.height_out + uint(oh)) * params.width_out + uint(ow);
+
+                        // weight index: [c_out][c_in][kh][kw]
+                        uint weight_idx = ((c_out * params.channels_in + c_in) * params.kernel_h + kh) * params.kernel_w + kw;
+
+                        sum += grad_output[grad_out_idx] * weight[weight_idx];
+                    }
+                }
+            }
+        }
+    }
+
+    // Write gradient to output
+    grad_input[idx] = sum;
+}

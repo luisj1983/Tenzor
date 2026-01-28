@@ -87,10 +87,10 @@ void* VulkanCachingAllocator::allocate(size_t size, int device,
     // Proactively clear cache if memory pressure is high
     // This prevents OOM by releasing cached memory before attempting new allocation
     if (device_alloc.device_memory_size > 0 && !device_alloc.free_blocks.empty()) {
-        // Target: keep reserved memory under 40% of device VRAM
-        // Using a conservative threshold because sub-allocated blocks may not release
-        // their underlying memory until all sibling blocks are also freed
-        size_t memory_limit = (device_alloc.device_memory_size * 2) / 5;  // 40%
+        // Target: keep reserved memory under 85% of device VRAM
+        // Higher threshold to match CUDA's more aggressive memory usage while
+        // leaving headroom for Vulkan driver allocations
+        size_t memory_limit = (device_alloc.device_memory_size * 17) / 20;  // 85%
         size_t projected_usage = device_alloc.stats.reserved_bytes + size;
 
         if (projected_usage > memory_limit) {
@@ -172,7 +172,7 @@ void VulkanCachingAllocator::free(void* ptr, int device) {
     bool should_release_immediately = false;
 
     if (device_alloc.device_memory_size > 0) {
-        size_t memory_limit = (device_alloc.device_memory_size * 2) / 5;  // 40% threshold
+        size_t memory_limit = (device_alloc.device_memory_size * 17) / 20;  // 85% threshold
         if (device_alloc.stats.reserved_bytes > memory_limit && block->size >= LARGE_BLOCK_THRESHOLD) {
             should_release_immediately = true;
         }

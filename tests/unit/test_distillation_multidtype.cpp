@@ -301,9 +301,12 @@ TEST_P(DistillationMultiDTypeTest, TemperatureLogSoftmaxVsSoftmax) {
     const float* softmax_data = softmax_cpu.data<float>();
     const float* log_data = log_cpu.data<float>();
 
+    // Use Float32-appropriate tolerance since we converted to Float32 for comparison
+    // FLT_EPSILON is ~1.19e-7, so use a slightly higher tolerance
+    float comparison_tolerance = std::max(atol(), 1.5e-7f);
     for (int64_t i = 0; i < 6; ++i) {
         float expected_log = std::log(softmax_data[i]);
-        EXPECT_NEAR(log_data[i], expected_log, atol())
+        EXPECT_NEAR(log_data[i], expected_log, comparison_tolerance)
             << "Mismatch at index " << i;
     }
 }

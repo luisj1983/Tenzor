@@ -798,8 +798,9 @@ auto TransferEngine::cpu_to_gpu(const Tensor& cpu_tensor, Device gpu_device) -> 
         throw std::runtime_error("Source tensor must be on CPU");
     }
 
-    if (gpu_device.type != Device::Type::CUDA && gpu_device.type != Device::Type::ROCm) {
-        throw std::runtime_error("Target device must be CUDA or ROCm");
+    if (gpu_device.type != Device::Type::CUDA && gpu_device.type != Device::Type::ROCm &&
+        gpu_device.type != Device::Type::Vulkan) {
+        throw std::runtime_error("Target device must be CUDA, ROCm, or Vulkan");
     }
 
     auto start = std::chrono::high_resolution_clock::now();
@@ -834,6 +835,11 @@ auto TransferEngine::cpu_to_gpu(const Tensor& cpu_tensor, Device gpu_device) -> 
     }
 #endif
 
+    // Vulkan transfers via tensor .to() method
+    if (gpu_device.type == Device::Type::Vulkan) {
+        gpu_tensor = cpu_tensor.to(gpu_device);
+    }
+
     auto end = std::chrono::high_resolution_clock::now();
     double time_ms = std::chrono::duration<double, std::milli>(end - start).count();
 
@@ -843,8 +849,9 @@ auto TransferEngine::cpu_to_gpu(const Tensor& cpu_tensor, Device gpu_device) -> 
 }
 
 auto TransferEngine::gpu_to_cpu(const Tensor& gpu_tensor) -> Tensor {
-    if (gpu_tensor.device().type != Device::Type::CUDA && gpu_tensor.device().type != Device::Type::ROCm) {
-        throw std::runtime_error("Source tensor must be on CUDA or ROCm");
+    if (gpu_tensor.device().type != Device::Type::CUDA && gpu_tensor.device().type != Device::Type::ROCm &&
+        gpu_tensor.device().type != Device::Type::Vulkan) {
+        throw std::runtime_error("Source tensor must be on CUDA, ROCm, or Vulkan");
     }
 
     auto start = std::chrono::high_resolution_clock::now();
@@ -882,6 +889,11 @@ auto TransferEngine::gpu_to_cpu(const Tensor& gpu_tensor) -> Tensor {
         ));
     }
 #endif
+
+    // Vulkan transfers via tensor .to() method
+    if (gpu_tensor.device().type == Device::Type::Vulkan) {
+        cpu_tensor = gpu_tensor.to(Device::cpu());
+    }
 
     auto end = std::chrono::high_resolution_clock::now();
     double time_ms = std::chrono::duration<double, std::milli>(end - start).count();

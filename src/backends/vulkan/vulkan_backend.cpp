@@ -3520,6 +3520,13 @@ auto VulkanBackend::dispatchUnaryOp(const std::string& op_name,
     // Calculate buffer sizes
     size_t buffer_size_in = input.numel() * input.dtype_size();
     size_t buffer_size_out = output.numel() * output.dtype_size();
+    if (input.dtype() == DType::Float16) {
+        // Round up to 4-byte boundary for uint32 shader access (2 Float16 per uint32)
+        size_t in_pairs = (input.numel() + 1) / 2;
+        size_t out_pairs = (output.numel() + 1) / 2;
+        buffer_size_in = in_pairs * 4;
+        buffer_size_out = out_pairs * 4;
+    }
 
     // Allocate and write descriptor set
     // For trigonometric/hyperbolic shaders: Binding 0: input, Binding 1: output
@@ -3635,6 +3642,13 @@ auto VulkanBackend::dispatchUnaryOpWithParam(const std::string& op_name,
     // Calculate buffer sizes
     size_t buffer_size_in = input.numel() * input.dtype_size();
     size_t buffer_size_out = output.numel() * output.dtype_size();
+    if (input.dtype() == DType::Float16) {
+        // Round up to 4-byte boundary for uint32 shader access (2 Float16 per uint32)
+        size_t in_pairs = (input.numel() + 1) / 2;
+        size_t out_pairs = (output.numel() + 1) / 2;
+        buffer_size_in = in_pairs * 4;
+        buffer_size_out = out_pairs * 4;
+    }
 
     // Allocate and write descriptor set
     // Binding 0: input, Binding 1: unused (set to input), Binding 2: output
@@ -3705,6 +3719,12 @@ auto VulkanBackend::dispatchTrigonometricOp(const std::string& op_name,
     // Calculate buffer sizes
     size_t buffer_size_in = input.numel() * input.dtype_size();
     size_t buffer_size_out = output.numel() * output.dtype_size();
+    if (input.dtype() == DType::Float16) {
+        size_t in_pairs = (input.numel() + 1) / 2;
+        size_t out_pairs = (output.numel() + 1) / 2;
+        buffer_size_in = in_pairs * 4;
+        buffer_size_out = out_pairs * 4;
+    }
 
     // Allocate and write descriptor set
     std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
@@ -3771,6 +3791,12 @@ auto VulkanBackend::dispatchHyperbolicOp(const std::string& op_name,
     // Calculate buffer sizes
     size_t buffer_size_in = input.numel() * input.dtype_size();
     size_t buffer_size_out = output.numel() * output.dtype_size();
+    if (input.dtype() == DType::Float16) {
+        size_t in_pairs = (input.numel() + 1) / 2;
+        size_t out_pairs = (output.numel() + 1) / 2;
+        buffer_size_in = in_pairs * 4;
+        buffer_size_out = out_pairs * 4;
+    }
 
     // Allocate and write descriptor set
     std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
@@ -3878,6 +3904,15 @@ auto VulkanBackend::dispatchComparisonOp(const std::string& op_name,
     size_t buffer_size_a = a.numel() * a.dtype_size();
     size_t buffer_size_b = b.numel() * b.dtype_size();
     size_t buffer_size_out = output.numel() * output.dtype_size();
+    if (a.dtype() == DType::Float16) {
+        // Round up to 4-byte boundary for uint32 shader access (2 Float16 per uint32)
+        size_t a_pairs = (a.numel() + 1) / 2;
+        size_t b_pairs = (b.numel() + 1) / 2;
+        size_t out_pairs = (output.numel() + 1) / 2;
+        buffer_size_a = a_pairs * 4;
+        buffer_size_b = b_pairs * 4;
+        buffer_size_out = out_pairs * 4;
+    }
 
     // Allocate and write descriptor set
     // Binding 0: input A, Binding 1: input B, Binding 2: output
@@ -3946,9 +3981,22 @@ auto VulkanBackend::dispatchReduction(const std::string& op_name,
 
         // Create result tensor on CPU with identity value
         Tensor result_cpu(out_shape, input.dtype(), Device::cpu());
-        float* data = result_cpu.data<float>();
-        for (int64_t i = 0; i < result_cpu.numel(); i++) {
-            data[i] = identity_value;
+        // Fill with identity value based on dtype
+        if (input.dtype() == DType::Float64) {
+            double* data = result_cpu.data<double>();
+            for (int64_t i = 0; i < result_cpu.numel(); i++) {
+                data[i] = static_cast<double>(identity_value);
+            }
+        } else if (input.dtype() == DType::Float16) {
+            Float16* data = result_cpu.data<Float16>();
+            for (int64_t i = 0; i < result_cpu.numel(); i++) {
+                data[i] = Float16(identity_value);
+            }
+        } else {
+            float* data = result_cpu.data<float>();
+            for (int64_t i = 0; i < result_cpu.numel(); i++) {
+                data[i] = identity_value;
+            }
         }
         return result_cpu.to(input.device());
     }
@@ -4019,6 +4067,13 @@ auto VulkanBackend::dispatchReduction(const std::string& op_name,
     // Calculate buffer sizes
     size_t buffer_size_in = input.numel() * input.dtype_size();
     size_t buffer_size_out = output.numel() * output.dtype_size();
+    if (is_float16) {
+        // Round up to 4-byte boundary for uint32 shader access (2 Float16 per uint32)
+        size_t in_pairs = (input.numel() + 1) / 2;
+        size_t out_pairs = (output.numel() + 1) / 2;
+        buffer_size_in = in_pairs * 4;
+        buffer_size_out = out_pairs * 4;
+    }
 
     // Allocate and write descriptor set
     // Binding 0: input, Binding 1: output (matches reduction.comp shader layout)
@@ -4463,7 +4518,13 @@ auto VulkanBackend::dispatchConv2dBackwardInput(
     int64_t kernel_w = weight_shape[3];
 
     int32_t device_id = grad_output.device().index;
-    auto* pipeline = getPipeline("conv2d_backward_input", device_id);
+
+    // Select shader based on dtype
+    std::string shader_name = "conv2d_backward_input";
+    if (grad_output.dtype() == DType::Float64) {
+        shader_name = "conv2d_backward_input_f64";
+    }
+    auto* pipeline = getPipeline(shader_name, device_id);
 
     // Create gradient input tensor
     Tensor grad_input(input_shape, grad_output.dtype(), grad_output.device());
@@ -4574,7 +4635,13 @@ auto VulkanBackend::dispatchConv2dBackwardWeight(
     int64_t kernel_w = weight_shape[3];
 
     int32_t device_id = grad_output.device().index;
-    auto* pipeline = getPipeline("conv2d_backward_weight", device_id);
+
+    // Select shader based on dtype
+    std::string shader_name = "conv2d_backward_weight";
+    if (grad_output.dtype() == DType::Float64) {
+        shader_name = "conv2d_backward_weight_f64";
+    }
+    auto* pipeline = getPipeline(shader_name, device_id);
 
     // Create gradient weight tensor
     Tensor grad_weight(weight_shape, grad_output.dtype(), grad_output.device());
@@ -4670,7 +4737,13 @@ auto VulkanBackend::dispatchConv2dBackwardBias(const Tensor& grad_output) -> Ten
     int64_t width_out = grad_shape[3];
 
     int32_t device_id = grad_output.device().index;
-    auto* pipeline = getPipeline("conv2d_backward_bias", device_id);
+
+    // Select shader based on dtype
+    std::string shader_name = "conv2d_backward_bias";
+    if (grad_output.dtype() == DType::Float64) {
+        shader_name = "conv2d_backward_bias_f64";
+    }
+    auto* pipeline = getPipeline(shader_name, device_id);
 
     // Create gradient bias tensor
     std::vector<int64_t> bias_shape = {channels_out};
@@ -5590,6 +5663,11 @@ auto VulkanBackend::dispatchBatchNorm2dBackward(const Tensor& grad_out, const Te
 
     // Calculate buffer sizes
     size_t buffer_size_input = n_elements * input.dtype_size();
+    if (input.dtype() == DType::Float16) {
+        // Round up to 4-byte boundary for uint32 shader access (2 Float16 per uint32)
+        size_t input_pairs = (n_elements + 1) / 2;
+        buffer_size_input = input_pairs * 4;
+    }
     // Statistics (mean, var, gamma, grad_gamma, grad_beta) use stats_dtype
     size_t buffer_size_channel = channels * mean.dtype_size();
 
@@ -5705,6 +5783,13 @@ auto VulkanBackend::dispatchBatchNorm2dForward(const Tensor& input, const Tensor
     size_t buffer_size_mean = mean.numel() * mean.dtype_size();
     size_t buffer_size_var = var.numel() * var.dtype_size();
     size_t buffer_size_output = output.numel() * output.dtype_size();
+    if (input.dtype() == DType::Float16) {
+        // Round up input/output to 4-byte boundary for uint32 shader access (2 Float16 per uint32)
+        size_t input_pairs = (input.numel() + 1) / 2;
+        size_t output_pairs = (output.numel() + 1) / 2;
+        buffer_size_input = input_pairs * 4;
+        buffer_size_output = output_pairs * 4;
+    }
 
     // Allocate and write descriptor set
     std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
@@ -5842,6 +5927,11 @@ auto VulkanBackend::dispatchBatchNorm2dMeanVar(const Tensor& input) -> std::pair
 
     // Calculate buffer sizes
     size_t buffer_size_input = input.numel() * input.dtype_size();
+    if (input.dtype() == DType::Float16) {
+        // Round up to 4-byte boundary for uint32 shader access (2 Float16 per uint32)
+        size_t input_pairs = (input.numel() + 1) / 2;
+        buffer_size_input = input_pairs * 4;
+    }
     size_t buffer_size_stats = channels * mean.dtype_size();
 
     // First pass: compute mean
@@ -6117,6 +6207,17 @@ auto VulkanBackend::dispatchSoftmax(const Tensor& input, int64_t dim) -> Tensor 
     size_t buffer_size_out = output.numel() * output.dtype_size();
     size_t buffer_size_max = max_vals.numel() * max_vals.dtype_size();
     size_t buffer_size_sum = sum_vals.numel() * sum_vals.dtype_size();
+    if (is_float16) {
+        // Round up to 4-byte boundary for uint32 shader access (2 Float16 per uint32)
+        size_t in_pairs = (input.numel() + 1) / 2;
+        size_t out_pairs = (output.numel() + 1) / 2;
+        size_t max_pairs = (max_vals.numel() + 1) / 2;
+        size_t sum_pairs = (sum_vals.numel() + 1) / 2;
+        buffer_size_in = in_pairs * 4;
+        buffer_size_out = out_pairs * 4;
+        buffer_size_max = max_pairs * 4;
+        buffer_size_sum = sum_pairs * 4;
+    }
 
     // Bind buffers (binding 0: input, 1: output, 2: max_vals, 3: sum_vals)
     std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
@@ -6307,6 +6408,11 @@ auto VulkanBackend::dispatchArgmax(const Tensor& input, int64_t dim, bool keepdi
     // Calculate buffer sizes
     size_t buffer_size_in = input.numel() * input.dtype_size();
     size_t buffer_size_out = output.numel() * output.dtype_size();
+    if (input.dtype() == DType::Float16) {
+        // Round up input buffer to 4-byte boundary for uint32 shader access
+        size_t in_pairs = (input.numel() + 1) / 2;
+        buffer_size_in = in_pairs * 4;
+    }
 
     // Allocate and write descriptor set
     std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
@@ -6403,6 +6509,11 @@ auto VulkanBackend::dispatchArgmin(const Tensor& input, int64_t dim, bool keepdi
     // Calculate buffer sizes
     size_t buffer_size_in = input.numel() * input.dtype_size();
     size_t buffer_size_out = output.numel() * output.dtype_size();
+    if (input.dtype() == DType::Float16) {
+        // Round up input buffer to 4-byte boundary for uint32 shader access
+        size_t in_pairs = (input.numel() + 1) / 2;
+        buffer_size_in = in_pairs * 4;
+    }
 
     // Allocate and write descriptor set
     std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
@@ -8261,6 +8372,13 @@ auto VulkanBackend::dispatchActivation(const std::string& op_name,
     // Calculate buffer sizes
     size_t buffer_size_in = input.numel() * input.dtype_size();
     size_t buffer_size_out = output.numel() * output.dtype_size();
+    if (is_float16) {
+        // Round up to 4-byte boundary for uint32 shader access (2 Float16 per uint32)
+        size_t in_pairs = (input.numel() + 1) / 2;
+        size_t out_pairs = (output.numel() + 1) / 2;
+        buffer_size_in = in_pairs * 4;
+        buffer_size_out = out_pairs * 4;
+    }
 
     // Setup descriptor set
     // Binding 0: input, Binding 1: output
@@ -8352,6 +8470,15 @@ auto VulkanBackend::dispatchActivationBackward(const std::string& op_name,
     size_t buffer_size_grad_out = grad_output.numel() * grad_output.dtype_size();
     size_t buffer_size_input_or_output = input_or_output.numel() * input_or_output.dtype_size();
     size_t buffer_size_grad_in = grad_input.numel() * grad_input.dtype_size();
+    if (is_float16) {
+        // Round up to 4-byte boundary for uint32 shader access (2 Float16 per uint32)
+        size_t go_pairs = (grad_output.numel() + 1) / 2;
+        size_t io_pairs = (input_or_output.numel() + 1) / 2;
+        size_t gi_pairs = (grad_input.numel() + 1) / 2;
+        buffer_size_grad_out = go_pairs * 4;
+        buffer_size_input_or_output = io_pairs * 4;
+        buffer_size_grad_in = gi_pairs * 4;
+    }
 
     // Setup descriptor set
     // Binding 0: grad_output, Binding 1: input_or_output, Binding 2: grad_input

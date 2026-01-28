@@ -1,0 +1,79 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Conv2d Backward Weight - Gradient w.r.t. weights (Float64 version)
+// Computes gradient by correlating input patches with grad_output
+//
+// Algorithm: For each weight element, correlate corresponding input values
+// with grad_output values across all batch samples and spatial positions.
+
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer GradOutput { double grad_output[]; };  // (N, C_out, H_out, W_out)
+layout(binding = 1) buffer Input { double input_data[]; };        // (N, C_in, H_in, W_in)
+layout(binding = 2) buffer GradWeight { double grad_weight[]; };  // (C_out, C_in, K_h, K_w)
+
+layout(push_constant) uniform PushConstants {
+    uint batch;
+    uint channels_in;
+    uint channels_out;
+    uint height_in;
+    uint width_in;
+    uint height_out;
+    uint width_out;
+    uint kernel_h;
+    uint kernel_w;
+    uint stride;
+    uint padding;
+    uint dilation;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total_weight_elements = params.channels_out * params.channels_in * params.kernel_h * params.kernel_w;
+
+    if (idx >= total_weight_elements) {
+        return;
+    }
+
+    // Decode flat index to (c_out, c_in, kh, kw)
+    uint temp = idx;
+    uint kw = temp % params.kernel_w;
+    temp /= params.kernel_w;
+    uint kh = temp % params.kernel_h;
+    temp /= params.kernel_h;
+    uint c_in = temp % params.channels_in;
+    uint c_out = temp / params.channels_in;
+
+    // Accumulate gradient across batch and spatial dimensions
+    double sum = 0.0LF;
+
+    // Iterate through batch
+    for (uint b = 0; b < params.batch; b++) {
+        // Iterate through output spatial positions
+        for (uint oh = 0; oh < params.height_out; oh++) {
+            for (uint ow = 0; ow < params.width_out; ow++) {
+                // Calculate corresponding input position
+                int ih = int(oh * params.stride) - int(params.padding) + int(kh * params.dilation);
+                int iw = int(ow * params.stride) - int(params.padding) + int(kw * params.dilation);
+
+                // Check bounds (apply padding)
+                if (ih >= 0 && ih < int(params.height_in) &&
+                    iw >= 0 && iw < int(params.width_in)) {
+
+                    // grad_output index: [b][c_out][oh][ow]
+                    uint grad_out_idx = ((b * params.channels_out + c_out) * params.height_out + oh) * params.width_out + ow;
+
+                    // input index: [b][c_in][ih][iw]
+                    uint input_idx = ((b * params.channels_in + c_in) * params.height_in + uint(ih)) * params.width_in + uint(iw);
+
+                    // Accumulate: grad_weight += grad_output * input
+                    sum += grad_output[grad_out_idx] * input_data[input_idx];
+                }
+            }
+        }
+    }
+
+    // Write accumulated gradient
+    grad_weight[idx] = sum;
+}

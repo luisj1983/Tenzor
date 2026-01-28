@@ -1,0 +1,44 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Conv2d Backward Bias - Gradient w.r.t. bias (Float64 version)
+// Simple reduction: sum grad_output across batch, height, and width dimensions
+//
+// Algorithm: For each output channel, sum all gradient values from
+// that channel across all batch samples and spatial positions.
+
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer GradOutput { double grad_output[]; };  // (N, C_out, H_out, W_out)
+layout(binding = 1) buffer GradBias { double grad_bias[]; };      // (C_out)
+
+layout(push_constant) uniform PushConstants {
+    uint batch;
+    uint channels_out;
+    uint height_out;
+    uint width_out;
+} params;
+
+void main() {
+    uint c = gl_GlobalInvocationID.x;
+
+    if (c >= params.channels_out) {
+        return;
+    }
+
+    // Sum grad_output across batch, height, and width for this channel
+    double sum = 0.0LF;
+
+    for (uint b = 0; b < params.batch; b++) {
+        for (uint h = 0; h < params.height_out; h++) {
+            for (uint w = 0; w < params.width_out; w++) {
+                // grad_output index: [b][c][h][w]
+                uint idx = ((b * params.channels_out + c) * params.height_out + h) * params.width_out + w;
+                sum += grad_output[idx];
+            }
+        }
+    }
+
+    // Write result
+    grad_bias[c] = sum;
+}

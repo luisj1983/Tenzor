@@ -121,6 +121,9 @@ set(SHADERS
     conv2d_backward_input
     conv2d_backward_weight
     conv2d_backward_bias
+    conv2d_backward_input_f64
+    conv2d_backward_weight_f64
+    conv2d_backward_bias_f64
     # Tensor manipulation operations
     expand
     expand_f64
