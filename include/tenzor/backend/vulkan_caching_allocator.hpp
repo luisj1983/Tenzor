@@ -92,6 +92,17 @@ public:
     static VulkanCachingAllocator& get();
 
     /**
+     * @brief Check if the allocator singleton is still alive
+     *
+     * Returns false during static destruction when the allocator is being
+     * or has been destroyed. Use this before calling get() to avoid
+     * accessing destroyed memory.
+     *
+     * @return true if allocator is alive and safe to use
+     */
+    static bool is_alive();
+
+    /**
      * @brief Initialize the allocator with Vulkan device context
      *
      * @param device Vulkan logical device
@@ -137,6 +148,19 @@ public:
      * @param device Device ID (-1 for all devices)
      */
     void empty_cache(int device = -1);
+
+    /**
+     * @brief Shutdown the allocator for a device before VkDevice is destroyed
+     *
+     * This must be called before vkDestroyDevice() to avoid use-after-free.
+     * After shutdown:
+     * - Releases all cached blocks properly
+     * - Clears all blocks without Vulkan calls (device is about to be destroyed)
+     * - Marks device as shutdown so future free() calls are safe
+     *
+     * @param device Device ID
+     */
+    void shutdown_device(int device);
 
     /**
      * @brief Get the VkBuffer handle for a mapped pointer
@@ -316,6 +340,7 @@ private:
         VkPhysicalDeviceMemoryProperties memory_properties{};
         size_t device_memory_size = 0;  // Total device-local VRAM
         bool initialized = false;
+        bool shutdown = false;  // True after shutdown_device() called
 
         // Free blocks ordered by size (for best-fit)
         std::set<VulkanBlock*, VulkanBlockComparator> free_blocks;

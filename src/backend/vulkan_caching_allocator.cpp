@@ -4,6 +4,8 @@
 #include <stdexcept>
 #include <sstream>
 #include <cstring>
+#include <iostream>
+#include <atomic>
 
 namespace tenzor {
 namespace backend {
@@ -12,6 +14,10 @@ namespace backend {
 constexpr size_t DEFAULT_ALIGNMENT = 256;  // Vulkan-optimized alignment
 constexpr size_t DEFAULT_MIN_SPLIT_SIZE = 256;
 
+// Flag to track if the allocator singleton is being/has been destroyed
+// This prevents crashes when shutdown_device is called after the allocator is destroyed
+static std::atomic<bool> g_allocator_destroyed{false};
+
 VulkanCachingAllocator::VulkanCachingAllocator()
     : alignment_(DEFAULT_ALIGNMENT),
       max_cached_memory_(0),  // Unlimited by default
@@ -19,8 +25,16 @@ VulkanCachingAllocator::VulkanCachingAllocator()
 }
 
 VulkanCachingAllocator::~VulkanCachingAllocator() {
+    // Mark as destroyed FIRST to prevent any calls during destruction
+    g_allocator_destroyed.store(true, std::memory_order_release);
+
     // Release all cached memory
     empty_cache(-1);
+}
+
+// Check if the allocator singleton is still alive
+bool VulkanCachingAllocator::is_alive() {
+    return !g_allocator_destroyed.load(std::memory_order_acquire);
 }
 
 VulkanCachingAllocator& VulkanCachingAllocator::get() {
@@ -84,28 +98,9 @@ void* VulkanCachingAllocator::allocate(size_t size, int device,
     auto& device_alloc = device_allocators_[device];
     device_alloc.stats.num_allocations++;
 
-    // Proactively clear cache if memory pressure is high
-    // This prevents OOM by releasing cached memory before attempting new allocation
-    if (device_alloc.device_memory_size > 0 && !device_alloc.free_blocks.empty()) {
-        // Target: keep reserved memory under 85% of device VRAM
-        // Higher threshold to match CUDA's more aggressive memory usage while
-        // leaving headroom for Vulkan driver allocations
-        size_t memory_limit = (device_alloc.device_memory_size * 17) / 20;  // 85%
-        size_t projected_usage = device_alloc.stats.reserved_bytes + size;
-
-        if (projected_usage > memory_limit) {
-            // Release cached blocks until we're under the limit or cache is empty
-            while (!device_alloc.free_blocks.empty() &&
-                   device_alloc.stats.reserved_bytes + size > memory_limit) {
-                // Release largest block first for maximum impact
-                auto it = device_alloc.free_blocks.rbegin();
-                VulkanBlock* block_to_release = *it;
-                auto forward_it = std::next(it).base();
-                device_alloc.free_blocks.erase(forward_it);
-                release_block(block_to_release);
-            }
-        }
-    }
+    // NOTE: Proactive cache clearing disabled to match CUDA behavior.
+    // CUDA uses all available memory and relies on OOM retry to clear cache.
+    // The OOM retry mechanism at line 456 handles memory pressure.
 
     // Try to find a suitable block in cache
     VulkanBlock* block = try_allocate_from_cache(size, device, usage, properties);
@@ -143,13 +138,26 @@ void VulkanCachingAllocator::free(void* ptr, int device) {
 
     std::lock_guard<std::mutex> lock(mutex_);
 
-    auto& device_alloc = device_allocators_[device];
+    auto dev_it = device_allocators_.find(device);
+    if (dev_it == device_allocators_.end()) {
+        // Device not found - might have been shutdown already
+        return;
+    }
+
+    auto& device_alloc = dev_it->second;
+
+    // If device is shutdown, the block was already cleaned up
+    if (device_alloc.shutdown) {
+        return;
+    }
+
     device_alloc.stats.num_frees++;
 
     // Find the block
     auto it = device_alloc.all_blocks.find(ptr);
     if (it == device_alloc.all_blocks.end()) {
-        throw std::runtime_error("VulkanCachingAllocator: Attempted to free pointer not allocated by this allocator");
+        // Block not found - might have been cleaned up during shutdown
+        return;
     }
 
     VulkanBlock* block = it->second.get();
@@ -165,31 +173,14 @@ void VulkanCachingAllocator::free(void* ptr, int device) {
         device_alloc.stats.allocated_bytes -= block->size;
     }
 
-    // Check if we should release immediately instead of caching
-    // Release large blocks (>16MB) immediately when memory pressure is high
-    // This helps prevent OOM on memory-constrained systems
-    constexpr size_t LARGE_BLOCK_THRESHOLD = 16 * 1024 * 1024;  // 16MB
-    bool should_release_immediately = false;
+    // Always cache the block for reuse (like CUDA allocator)
+    // OOM retry mechanism will clear cache when needed
+    device_alloc.stats.cached_bytes += block->size;
+    device_alloc.free_blocks.insert(block);
 
-    if (device_alloc.device_memory_size > 0) {
-        size_t memory_limit = (device_alloc.device_memory_size * 17) / 20;  // 85% threshold
-        if (device_alloc.stats.reserved_bytes > memory_limit && block->size >= LARGE_BLOCK_THRESHOLD) {
-            should_release_immediately = true;
-        }
-    }
-
-    if (should_release_immediately) {
-        // Release block directly instead of caching
-        release_block(block);
-    } else {
-        // Cache the block for reuse
-        device_alloc.stats.cached_bytes += block->size;
-        device_alloc.free_blocks.insert(block);
-
-        // Enforce cache limit if set
-        if (max_cached_memory_ > 0) {
-            enforce_cache_limit(device);
-        }
+    // Enforce cache limit if set
+    if (max_cached_memory_ > 0) {
+        enforce_cache_limit(device);
     }
 }
 
@@ -238,6 +229,47 @@ void VulkanCachingAllocator::empty_cache(int device)
     empty_cache_impl(device);
 }
 
+void VulkanCachingAllocator::shutdown_device(int device)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    auto it = device_allocators_.find(device);
+    if (it == device_allocators_.end() || !it->second.initialized) {
+        return;  // Device doesn't exist or not initialized
+    }
+
+    auto& device_alloc = it->second;
+
+    // First, release all free blocks properly (device is still valid at this point)
+    std::vector<VulkanBlock*> blocks_to_release;
+    for (VulkanBlock* block : device_alloc.free_blocks) {
+        blocks_to_release.push_back(block);
+    }
+    for (VulkanBlock* block : blocks_to_release) {
+        release_block(block);
+    }
+
+    // Now mark device as shutdown - any remaining allocated blocks will be
+    // cleaned up without Vulkan calls when their tensors are destroyed
+    device_alloc.shutdown = true;
+
+    // Also mark as uninitialized to prevent any future operations
+    device_alloc.initialized = false;
+
+    // Clear any remaining blocks without Vulkan calls (device about to be destroyed)
+    // Just clear the containers - the VkBuffer/VkDeviceMemory handles will be
+    // invalidated when vkDestroyDevice is called anyway
+    device_alloc.free_blocks.clear();
+    device_alloc.all_blocks.clear();
+    device_alloc.memory_ref_counts.clear();
+
+    // Set device handle to null to catch any accidental use
+    device_alloc.device = VK_NULL_HANDLE;
+
+    // Clear staging buffers (also without Vulkan calls - they'll be invalidated)
+    device_alloc.staging_pool.clear();
+}
+
 
 VkBuffer VulkanCachingAllocator::get_buffer(void* ptr, int device) const {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -245,6 +277,11 @@ VkBuffer VulkanCachingAllocator::get_buffer(void* ptr, int device) const {
     auto dev_it = device_allocators_.find(device);
     if (dev_it == device_allocators_.end()) {
         throw std::runtime_error("VulkanCachingAllocator: Device not found");
+    }
+
+    // If device is shutdown, return null handle
+    if (dev_it->second.shutdown) {
+        return VK_NULL_HANDLE;
     }
 
     auto it = dev_it->second.all_blocks.find(ptr);
@@ -385,11 +422,12 @@ VulkanBlock* VulkanCachingAllocator::try_allocate_from_cache(size_t size, int de
         // Remove from free blocks
         device_alloc.free_blocks.erase(it);
 
-        // Try to split if block is significantly larger than needed
-        // This sub-allocates from the same VkDeviceMemory without new allocations
-        if (block->size >= size + min_split_size_) {
-            split_block(block, size);
-        }
+        // NOTE: Sub-allocation disabled to allow independent block freeing (like CUDA)
+        // Sub-allocation causes memory to be stuck when allocated blocks share
+        // VkDeviceMemory with free blocks - the memory can't be freed until ALL
+        // blocks using that memory are freed. This prevents effective cache clearing.
+        //
+        // Trade-off: More vkAllocateMemory calls, but each block can be freed independently.
 
         return block;
     }
@@ -636,31 +674,20 @@ void VulkanCachingAllocator::release_block(VulkanBlock* block) {
     // Remove from free blocks if present
     device_alloc.free_blocks.erase(block);
 
-    // Always destroy the buffer (each sub-block has its own buffer)
+    // Destroy the buffer
     if (block->buffer != VK_NULL_HANDLE) {
         vkDestroyBuffer(device_alloc.device, block->buffer, nullptr);
     }
 
-    // Decrement reference count for the shared memory
+    // With sub-allocation disabled, each block owns its own memory
+    // We can free it directly without reference counting
     VkDeviceMemory memory = block->memory;
-    bool should_free_memory = false;
 
-    auto ref_it = device_alloc.memory_ref_counts.find(memory);
-    if (ref_it != device_alloc.memory_ref_counts.end()) {
-        ref_it->second--;
-        if (ref_it->second == 0) {
-            // Last reference - can free the memory
-            should_free_memory = true;
-            device_alloc.memory_ref_counts.erase(ref_it);
-        }
-    } else {
-        // No ref count entry (shouldn't happen, but handle gracefully)
-        // Only free if this block owns the memory
-        should_free_memory = block->owns_memory;
-    }
+    // Clean up reference count entry if it exists (for backward compatibility)
+    device_alloc.memory_ref_counts.erase(memory);
 
-    // Free memory only when all references are gone
-    if (should_free_memory && memory != VK_NULL_HANDLE) {
+    // Free the memory
+    if (memory != VK_NULL_HANDLE) {
         // Unmap memory only if it's actually host-visible (mapped)
         if (block->is_host_visible && block->base_mapped_ptr) {
             vkUnmapMemory(device_alloc.device, memory);
@@ -669,13 +696,13 @@ void VulkanCachingAllocator::release_block(VulkanBlock* block) {
         // Free the underlying device memory
         vkFreeMemory(device_alloc.device, memory, nullptr);
 
-        // Subtract from reserved_bytes when memory is actually freed
-        if (device_alloc.stats.reserved_bytes >= block->memory_size) {
-            device_alloc.stats.reserved_bytes -= block->memory_size;
+        // Subtract from reserved_bytes
+        if (device_alloc.stats.reserved_bytes >= block->size) {
+            device_alloc.stats.reserved_bytes -= block->size;
         }
     }
 
-    // Always update cached_bytes (every block contributes to cache)
+    // Update cached_bytes
     if (device_alloc.stats.cached_bytes >= block->size) {
         device_alloc.stats.cached_bytes -= block->size;
     }
@@ -721,7 +748,7 @@ bool VulkanCachingAllocator::is_memory_host_visible(void* ptr, int device) const
     std::lock_guard<std::mutex> lock(mutex_);
 
     auto dev_it = device_allocators_.find(device);
-    if (dev_it == device_allocators_.end()) {
+    if (dev_it == device_allocators_.end() || dev_it->second.shutdown) {
         return false;
     }
 
@@ -737,7 +764,7 @@ void* VulkanCachingAllocator::get_mapped_ptr(void* ptr, int device) const {
     std::lock_guard<std::mutex> lock(mutex_);
 
     auto dev_it = device_allocators_.find(device);
-    if (dev_it == device_allocators_.end()) {
+    if (dev_it == device_allocators_.end() || dev_it->second.shutdown) {
         return nullptr;
     }
 

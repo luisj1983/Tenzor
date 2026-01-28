@@ -113,6 +113,21 @@ VulkanBackend::~VulkanBackend() {
         }
     }
 
+    // IMPORTANT: Shutdown the caching allocator BEFORE destroying the Vulkan device
+    // The allocator is a singleton that may outlive this backend instance.
+    // shutdown_device() releases free blocks, clears all blocks without Vulkan calls,
+    // and marks the device as shutdown so future free() calls are safe.
+    //
+    // NOTE: During static destruction, the allocator singleton may already be destroyed
+    // (due to LIFO destruction order). Check is_alive() first to avoid crash.
+    if (backend::VulkanCachingAllocator::is_alive()) {
+        for (size_t i = 0; i < devices_.size(); ++i) {
+            if (devices_[i].device != VK_NULL_HANDLE) {
+                backend::VulkanCachingAllocator::get().shutdown_device(static_cast<int>(i));
+            }
+        }
+    }
+
     // Cleanup staging buffers
     stagingBuffers_.clear();
 
@@ -6192,41 +6207,30 @@ auto VulkanBackend::dispatchSoftmax(const Tensor& input, int64_t dim) -> Tensor 
     }
     uint32_t num_classes = static_cast<uint32_t>(input_shape[dim]);
 
-    // Create temporary buffers for max and sum values (one per batch)
-    Tensor max_vals({static_cast<int64_t>(batch_size)}, input.dtype(), input.device());
-    Tensor sum_vals({static_cast<int64_t>(batch_size)}, input.dtype(), input.device());
+    // NOTE: max_vals and sum_vals are computed using shared memory within the shader.
+    // No separate device allocations needed - the backward pass computes from output only.
 
     // Get VkBuffer handles
     VkBuffer buffer_in = getVulkanBuffer(input.data_ptr());
     VkBuffer buffer_out = getVulkanBuffer(output.data_ptr());
-    VkBuffer buffer_max = getVulkanBuffer(max_vals.data_ptr());
-    VkBuffer buffer_sum = getVulkanBuffer(sum_vals.data_ptr());
 
     // Calculate buffer sizes
     size_t buffer_size_in = input.numel() * input.dtype_size();
     size_t buffer_size_out = output.numel() * output.dtype_size();
-    size_t buffer_size_max = max_vals.numel() * max_vals.dtype_size();
-    size_t buffer_size_sum = sum_vals.numel() * sum_vals.dtype_size();
     if (is_float16) {
         // Round up to 4-byte boundary for uint32 shader access (2 Float16 per uint32)
         size_t in_pairs = (input.numel() + 1) / 2;
         size_t out_pairs = (output.numel() + 1) / 2;
-        size_t max_pairs = (max_vals.numel() + 1) / 2;
-        size_t sum_pairs = (sum_vals.numel() + 1) / 2;
         buffer_size_in = in_pairs * 4;
         buffer_size_out = out_pairs * 4;
-        buffer_size_max = max_pairs * 4;
-        buffer_size_sum = sum_pairs * 4;
     }
 
-    // Bind buffers (binding 0: input, 1: output, 2: max_vals, 3: sum_vals)
+    // Bind buffers (binding 0: input, 1: output)
     std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
         {0, buffer_in},
-        {1, buffer_out},
-        {2, buffer_max},
-        {3, buffer_sum}
+        {1, buffer_out}
     };
-    std::vector<size_t> sizes = {buffer_size_in, buffer_size_out, buffer_size_max, buffer_size_sum};
+    std::vector<size_t> sizes = {buffer_size_in, buffer_size_out};
 
     VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
         device_id, pipeline, bindings, sizes);

@@ -58,19 +58,10 @@ OffloadContext::~OffloadContext() {
         transfer_engine_->synchronize();
     }
 
-    // Restore all offloaded tensors to GPU
-    std::lock_guard<std::mutex> lock(tensor_map_mutex_);
-    for (auto& [tensor_ptr, info] : tensor_map_) {
-        if (info.is_offloaded && info.tensor) {
-            // Transfer back to GPU
-            try {
-                auto gpu_tensor = transfer_engine_->cpu_to_gpu(info.cpu_copy, Device::cuda(0));
-                *info.tensor = gpu_tensor;
-            } catch (const std::exception& e) {
-                std::cerr << "Warning: Failed to restore tensor during cleanup: " << e.what() << "\n";
-            }
-        }
-    }
+    // Restore all offloaded tensors to their original device
+    // NOTE: During cleanup, we don't strictly need to restore - the tensors will be
+    // destroyed anyway. Skip restoration to avoid potential allocation failures.
+    // The CPU copies will be cleaned up when tensor_map_ is destroyed.
 }
 
 auto OffloadContext::enable() -> void {

@@ -4,12 +4,11 @@
 // Softmax with numerical stability for Float16
 // Float16 elements are packed 2 per 32-bit word
 // Uses single-threaded writes per word to avoid race conditions
+// Uses shared memory for max and sum - no external buffers needed
 layout(local_size_x = 256) in;
 
 layout(binding = 0) buffer Input { uint input_data[]; };
 layout(binding = 1) buffer Output { uint output_data[]; };
-layout(binding = 2) buffer MaxVals { uint max_vals[]; };    // Pre-computed max per row (packed)
-layout(binding = 3) buffer SumVals { uint sum_vals[]; };    // Pre-computed sum per row (packed)
 
 layout(push_constant) uniform PushConstants {
     uint batch_size;
@@ -128,14 +127,6 @@ void main() {
 
             // Write packed pair - no race condition since each thread owns its word
             output_data[(base_idx / 2) + word_idx] = packF16Pair(val0, val1);
-        }
-
-        // Store max and sum for backward pass (as Float16 packed)
-        if (tid == 0) {
-            // Just store as float converted to f16 - simple approach
-            uint max_word_idx = batch_idx / 2;
-            uint sum_word_idx = batch_idx / 2;
-            // Note: This is simplified - proper implementation would need atomic for batches
         }
     }
 }

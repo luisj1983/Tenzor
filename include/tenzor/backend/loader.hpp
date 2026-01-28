@@ -211,4 +211,17 @@ private:
  */
 auto backend_registry() -> BackendLoader&;
 
+/**
+ * @brief Check if the backend registry is still alive.
+ *
+ * Returns false during static destruction when the BackendLoader is being
+ * or has been destroyed. Use this before calling backend_registry() from
+ * destructors to avoid accessing destroyed memory.
+ *
+ * @return true if registry is alive and safe to use, false during destruction
+ *
+ * @note Thread-safe using atomic operations.
+ */
+auto is_backend_registry_alive() -> bool;
+
 } // namespace tenzor

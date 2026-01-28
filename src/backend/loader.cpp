@@ -1,6 +1,7 @@
 #include "tenzor/backend/loader.hpp"
 #include <mutex>
 #include <cstdlib>
+#include <atomic>
 
 #ifndef _WIN32
 #include <dlfcn.h>
@@ -8,10 +9,17 @@
 
 namespace tenzor {
 
-// Forward declaration
+// Forward declarations
 auto backend_registry() -> BackendLoader&;
 
+// Global registry destruction flag - defined at the end of this file
+extern std::atomic<bool> g_registry_destroying;
+
 BackendLoader::~BackendLoader() {
+    // Mark that we're destroying the registry - this prevents DeviceStorage
+    // from trying to access backends during static destruction
+    g_registry_destroying.store(true, std::memory_order_release);
+
     // Destroy backends in reverse dependency order to avoid cleanup issues.
 
     // Clear device type mapping first
@@ -178,10 +186,19 @@ auto BackendLoader::get_symbol(LibHandle handle, const char* name) -> void* {
     #endif
 }
 
+// Global registry destruction flag - set when BackendLoader destructor starts
+std::atomic<bool> g_registry_destroying{false};
+
 // Global registry
 auto backend_registry() -> BackendLoader& {
     static BackendLoader registry;
     return registry;
+}
+
+// Check if the backend registry is still alive and not being destroyed
+// Safe to call from any thread during static destruction
+auto is_backend_registry_alive() -> bool {
+    return !g_registry_destroying.load(std::memory_order_acquire);
 }
 
 } // namespace tenzor

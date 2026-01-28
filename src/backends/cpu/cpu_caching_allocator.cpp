@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <algorithm>
 #include <vector>
+#include <unordered_set>
 
 #ifdef _WIN32
 #include <malloc.h>
@@ -595,28 +596,47 @@ void CPUCachingAllocator::check_memory_pressure() {
     // If any blocks are in thread-local pools, we cannot free the root here
     // because other threads might still reference those blocks.
     //
-    // To determine this, we check if the blocks in global_free_blocks_ for a root
-    // account for its entire freed_size. If so, all fragments are in global pool.
+    // IMPORTANT: We also verify that no blocks are currently allocated from the root.
+    // A root can only be freed if freed_size == root.size (all blocks returned to pools).
 
-    std::vector<void*> roots_to_free;
     std::lock_guard<std::mutex> lock(global_mutex_);
 
-    // First, compute how much of each root's freed_size is in global pool
+    // First, compute how much of each root's size is in global FREE pool
     std::unordered_map<void*, size_t> global_freed_per_root;
     for (auto& [size, block] : global_free_blocks_) {
         global_freed_per_root[block.root_ptr] += block.size;
     }
 
-    // Find roots that are fully coalesced AND have all fragments in global pool
+    // Also check if any blocks from each root are currently ALLOCATED
+    std::unordered_set<void*> roots_with_allocated_blocks;
+    for (auto& [ptr, block] : global_allocated_blocks_) {
+        roots_with_allocated_blocks.insert(block.root_ptr);
+    }
+
+    // Find roots that:
+    // 1. Are fully coalesced (freed_size == root.size)
+    // 2. Have ALL freed blocks in global pool (global_freed == freed_size)
+    // 3. Have NO currently allocated blocks
+    std::vector<void*> roots_to_free;
     for (auto& [root_ptr, root] : global_root_allocations_) {
-        if (is_fully_coalesced(root)) {
-            // Check if all freed blocks are in global pool
-            auto git = global_freed_per_root.find(root_ptr);
-            size_t global_freed = (git != global_freed_per_root.end()) ? git->second : 0;
-            if (global_freed == root.freed_size) {
-                // All blocks are in global pool, safe to free
-                roots_to_free.push_back(root_ptr);
-            }
+        // Skip if any blocks are currently allocated
+        if (roots_with_allocated_blocks.count(root_ptr) > 0) {
+            continue;
+        }
+
+        // Check if fully coalesced
+        if (!is_fully_coalesced(root)) {
+            continue;
+        }
+
+        // Check if all freed blocks are in global pool
+        auto git = global_freed_per_root.find(root_ptr);
+        size_t global_freed = (git != global_freed_per_root.end()) ? git->second : 0;
+
+        // CRITICAL: Only free if global_freed == root.size (not just freed_size)
+        // This ensures we account for the full allocation, not just tracked freed bytes
+        if (global_freed == root.size) {
+            roots_to_free.push_back(root_ptr);
         }
     }
 
@@ -626,6 +646,24 @@ void CPUCachingAllocator::check_memory_pressure() {
 
     // Free roots and remove their blocks from global free pool
     for (void* root_ptr : roots_to_free) {
+        // Recheck: ensure root still exists and has no allocated blocks
+        auto root_it = global_root_allocations_.find(root_ptr);
+        if (root_it == global_root_allocations_.end()) {
+            continue;  // Root was removed by another thread
+        }
+
+        // Double-check no allocated blocks reference this root
+        bool has_allocated = false;
+        for (auto& [ptr, block] : global_allocated_blocks_) {
+            if (block.root_ptr == root_ptr) {
+                has_allocated = true;
+                break;
+            }
+        }
+        if (has_allocated) {
+            continue;  // Safety: skip if any blocks are now allocated
+        }
+
         size_t freed_bytes = 0;
 
         // Remove blocks from global free pool
@@ -636,6 +674,15 @@ void CPUCachingAllocator::check_memory_pressure() {
             } else {
                 ++it;
             }
+        }
+
+        // CRITICAL: Verify freed_bytes matches root size before freeing
+        // If they don't match, there's a tracking bug - skip this root
+        if (freed_bytes != root_it->second.size) {
+            // Tracking inconsistency detected - don't free, just continue
+            // The blocks have been removed from free pool but we won't free the root
+            // This leaks memory but avoids corruption
+            continue;
         }
 
         // Free the root allocation

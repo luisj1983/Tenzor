@@ -2,12 +2,11 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
 
 // Softmax with numerical stability for Float64
+// Uses shared memory for max and sum - no external buffers needed
 layout(local_size_x = 256) in;
 
 layout(binding = 0) buffer Input { double input_data[]; };
 layout(binding = 1) buffer Output { double output_data[]; };
-layout(binding = 2) buffer MaxVals { double max_vals[]; };    // Pre-computed max per row
-layout(binding = 3) buffer SumVals { double sum_vals[]; };    // Pre-computed sum per row
 
 layout(push_constant) uniform PushConstants {
     uint batch_size;
@@ -121,12 +120,6 @@ void main() {
         double safe_sum = (row_sum > 0.0) ? row_sum : 1.0;
         for (uint i = tid; i < params.num_classes; i += 256) {
             output_data[base_idx + i] /= safe_sum;
-        }
-
-        // Store max and sum for backward pass
-        if (tid == 0) {
-            max_vals[batch_idx] = row_max;
-            sum_vals[batch_idx] = row_sum;
         }
     }
 }

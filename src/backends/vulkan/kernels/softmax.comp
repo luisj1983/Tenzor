@@ -1,12 +1,11 @@
 #version 450
 
 // Softmax with numerical stability
+// Uses shared memory for max and sum - no external buffers needed
 layout(local_size_x = 256) in;
 
 layout(binding = 0) buffer Input { float input_data[]; };
 layout(binding = 1) buffer Output { float output_data[]; };
-layout(binding = 2) buffer MaxVals { float max_vals[]; };    // Pre-computed max per row
-layout(binding = 3) buffer SumVals { float sum_vals[]; };    // Pre-computed sum per row
 
 layout(push_constant) uniform PushConstants {
     uint batch_size;
@@ -74,12 +73,6 @@ void main() {
         // Step 3: Divide by sum
         for (uint i = tid; i < params.num_classes; i += 256) {
             output_data[base_idx + i] /= row_sum;
-        }
-
-        // Store max and sum for backward pass
-        if (tid == 0) {
-            max_vals[batch_idx] = row_max;
-            sum_vals[batch_idx] = row_sum;
         }
     }
 }
