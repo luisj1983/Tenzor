@@ -1,0 +1,84 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// Argmax and Argmin for Float64 inputs
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Input { double input_data[]; };
+layout(binding = 1) buffer Output { int64_t output_indices[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;              // Total number of elements
+    uint reduce_size;    // Size of dimension to reduce
+    uint outer_size;     // Number of output elements
+    uint inner_size;     // Product of dimensions after reduction dim
+    uint op;             // 0=argmax, 1=argmin
+} params;
+
+shared double shared_vals[256];
+shared int64_t shared_indices[256];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint output_idx = gl_WorkGroupID.x;
+
+    if (output_idx >= params.outer_size) return;
+
+    double best_value;
+    int64_t best_index = -1L;
+
+    if (params.op == 0) {
+        best_value = -1.0lf / 0.0lf;
+    } else {
+        best_value = 1.0lf / 0.0lf;
+    }
+
+    uint outer_idx = output_idx / params.inner_size;
+    uint inner_idx = output_idx % params.inner_size;
+    uint base_idx = outer_idx * params.reduce_size * params.inner_size + inner_idx;
+
+    for (uint i = tid; i < params.reduce_size; i += 256) {
+        uint idx = base_idx + i * params.inner_size;
+        if (idx < params.n) {
+            double val = input_data[idx];
+
+            if (params.op == 0) {
+                if (val > best_value) {
+                    best_value = val;
+                    best_index = int64_t(i);
+                }
+            } else {
+                if (val < best_value) {
+                    best_value = val;
+                    best_index = int64_t(i);
+                }
+            }
+        }
+    }
+
+    shared_vals[tid] = best_value;
+    shared_indices[tid] = best_index;
+    barrier();
+
+    for (uint s = 128; s > 0; s >>= 1) {
+        if (tid < s) {
+            if (params.op == 0) {
+                if (shared_vals[tid + s] > shared_vals[tid]) {
+                    shared_vals[tid] = shared_vals[tid + s];
+                    shared_indices[tid] = shared_indices[tid + s];
+                }
+            } else {
+                if (shared_vals[tid + s] < shared_vals[tid]) {
+                    shared_vals[tid] = shared_vals[tid + s];
+                    shared_indices[tid] = shared_indices[tid + s];
+                }
+            }
+        }
+        barrier();
+    }
+
+    if (tid == 0) {
+        output_indices[output_idx] = shared_indices[0];
+    }
+}

@@ -8,6 +8,7 @@
 
 #include "tenzor/backend/dispatch_table.hpp"
 #include "tenzor/backend/kernel_registry.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
 #include "tenzor/ops/op_id.hpp"
 #include "vulkan_backend.hpp"
 #include <cstdlib>
@@ -581,6 +582,66 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
     });
 
     // Note: GatherRelativePositionBias not in OpId enum - registered via string dispatch only
+
+    // ========================================================================
+    // In-place Activation Operations
+    // ========================================================================
+    table.register_kernel(OpId::ReLUInplace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return get_vulkan_backend()->dispatch("relu_inplace", inputs, attrs);
+    });
+
+    table.register_kernel(OpId::SigmoidInplace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return get_vulkan_backend()->dispatch("sigmoid_inplace", inputs, attrs);
+    });
+
+    table.register_kernel(OpId::TanhInplace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return get_vulkan_backend()->dispatch("tanh_inplace", inputs, attrs);
+    });
+
+    table.register_kernel(OpId::LeakyReLUInplace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return get_vulkan_backend()->dispatch("leaky_relu_inplace", inputs, attrs);
+    });
+
+    table.register_kernel(OpId::GeluInplace, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return get_vulkan_backend()->dispatch("gelu_inplace", inputs, attrs);
+    });
+
+    // ========================================================================
+    // Fused Operations
+    // ========================================================================
+    table.register_kernel(OpId::FusedLinearReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return get_vulkan_backend()->dispatch("fused_linear_relu", inputs, attrs);
+    });
+
+    table.register_kernel(OpId::FusedBatchNormReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return get_vulkan_backend()->dispatch("fused_batchnorm_relu", inputs, attrs);
+    });
+
+    table.register_kernel(OpId::FusedAddReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return get_vulkan_backend()->dispatch("fused_add_relu", inputs, attrs);
+    });
+
+    table.register_kernel(OpId::FusedGelu, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return get_vulkan_backend()->dispatch("fused_gelu", inputs, attrs);
+    });
+
+    table.register_kernel(OpId::FusedLayerNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return get_vulkan_backend()->dispatch("fused_layer_norm", inputs, attrs);
+    });
+
+    // ========================================================================
+    // Interpolation Operations
+    // ========================================================================
+    table.register_kernel(OpId::Interpolate, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return get_vulkan_backend()->dispatch("interpolate", inputs, attrs);
+    });
+
+    // ========================================================================
+    // ArgSort (GPU bitonic sort for Float32 last-dim, CPU fallback otherwise)
+    // ========================================================================
+    table.register_kernel(OpId::ArgSort, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return get_vulkan_backend()->dispatch("argsort", inputs, attrs);
+    });
 
     std::cout << "Vulkan dispatch table initialized with O(1) lookup" << std::endl;
 }

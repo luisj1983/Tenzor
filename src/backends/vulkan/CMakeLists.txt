@@ -192,6 +192,42 @@ set(SHADERS
     masked_select_count
     masked_select_gather
     prefix_sum
+    # Float64 pooling operations
+    max_pool2d_f64
+    avg_pool2d_f64
+    avg_pool2d_backward_f64
+    # Float64 batchnorm operations
+    batchnorm2d_forward_f64
+    batchnorm2d_backward_f64
+    # Interpolation operations
+    bilinear_interpolate
+    bilinear_interpolate_f64
+    nearest_interpolate
+    nearest_interpolate_f64
+    # F16 math function shaders
+    trigonometric_f16
+    hyperbolic_f16
+    comparison_f16
+    # F16 pooling shaders
+    max_pool2d_f16
+    avg_pool2d_f16
+    avg_pool2d_backward_f16
+    # F16 batchnorm shaders
+    batchnorm2d_forward_f16
+    batchnorm2d_backward_f16
+    batchnorm2d_mean_var_f16
+    # Multi-dtype argmax/argmin
+    argmax_argmin_f16
+    argmax_argmin_f64
+    # Multi-dtype index_select
+    index_select_f16
+    index_select_f64
+    index_select_i64
+    # Multi-dtype conv_transpose2d
+    conv_transpose2d_forward_f64
+    conv_transpose2d_forward_f16
+    # GPU sorting
+    bitonic_sort
 )
 
 # Compile each shader

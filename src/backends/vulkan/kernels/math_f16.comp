@@ -93,6 +93,26 @@ void main() {
             res0 = float16_t(sign(float(val_a0)));
             res1 = float16_t(sign(float(val_a1)));
             break;
+        case 11: // floor
+            res0 = float16_t(floor(float(val_a0)));
+            res1 = float16_t(floor(float(val_a1)));
+            break;
+        case 12: // ceil
+            res0 = float16_t(ceil(float(val_a0)));
+            res1 = float16_t(ceil(float(val_a1)));
+            break;
+        case 13: // round
+            res0 = float16_t(round(float(val_a0)));
+            res1 = float16_t(round(float(val_a1)));
+            break;
+        case 14: // trunc
+            res0 = float16_t(trunc(float(val_a0)));
+            res1 = float16_t(trunc(float(val_a1)));
+            break;
+        case 15: // reciprocal
+            res0 = float16_t(1.0 / float(val_a0));
+            res1 = float16_t(1.0 / float(val_a1));
+            break;
         default:
             res0 = float16_t(0.0);
             res1 = float16_t(0.0);

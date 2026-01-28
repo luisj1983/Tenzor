@@ -1,0 +1,94 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_atomic_float : enable
+
+// Batch Normalization 2D Backward Pass for Float16
+// Input/grad tensors are packed F16; statistics and parameter gradients are Float32
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer GradOutput { uint grad_output[]; };   // Packed F16 (N, C, H, W)
+layout(binding = 1) buffer Input { uint input_data[]; };          // Packed F16 (N, C, H, W)
+layout(binding = 2) buffer Mean { float mean_data[]; };           // (C) Float32
+layout(binding = 3) buffer Variance { float var_data[]; };        // (C) Float32
+layout(binding = 4) buffer Gamma { float gamma_data[]; };         // (C) Float32
+layout(binding = 5) buffer GradInput { uint grad_input[]; };      // Packed F16 (N, C, H, W)
+layout(binding = 6) buffer GradGamma { float grad_gamma[]; };     // (C) Float32 - accumulated atomically
+layout(binding = 7) buffer GradBeta { float grad_beta[]; };       // (C) Float32 - accumulated atomically
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    uint batch;
+    uint channels;
+    uint spatial_size;
+    float eps;
+    uint has_gamma;
+} params;
+
+float16_t readF16Element(uint flat_idx, bool is_grad) {
+    uint word_idx = flat_idx / 2;
+    uint half_idx = flat_idx % 2;
+    uint packed = is_grad ? grad_output[word_idx] : input_data[word_idx];
+    uint bits = (packed >> (half_idx * 16)) & 0xFFFFu;
+    return float16_t(unpackHalf2x16(bits | (bits << 16)).x);
+}
+
+void writeF16Element(uint flat_idx, float16_t val) {
+    uint word_idx = flat_idx / 2;
+    uint half_idx = flat_idx % 2;
+    uint bits = packHalf2x16(vec2(float(val), 0.0)).x & 0xFFFFu;
+    uint shift = half_idx * 16;
+    atomicAnd(grad_input[word_idx], ~(0xFFFFu << shift));
+    atomicOr(grad_input[word_idx], bits << shift);
+}
+
+shared float s_grad_gamma[256];
+shared float s_grad_beta[256];
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint local_id = gl_LocalInvocationID.x;
+
+    if (local_id < params.channels && local_id < 256) {
+        s_grad_gamma[local_id] = 0.0;
+        s_grad_beta[local_id] = 0.0;
+    }
+    barrier();
+
+    if (idx >= params.n_elements) return;
+
+    uint temp = idx;
+    uint w = temp % params.spatial_size;
+    temp /= params.spatial_size;
+    uint c = temp % params.channels;
+
+    float x = float(readF16Element(idx, false));
+    float grad_out = float(readF16Element(idx, true));
+    float mean = mean_data[c];
+    float variance = var_data[c];
+    float inv_std = 1.0 / sqrt(variance + params.eps);
+
+    float x_normalized = (x - mean) * inv_std;
+    float grad_x_normalized = grad_out;
+    if (params.has_gamma != 0) {
+        grad_x_normalized = grad_out * gamma_data[c];
+    }
+
+    atomicAdd(s_grad_gamma[c % 256], grad_out * x_normalized);
+    atomicAdd(s_grad_beta[c % 256], grad_out);
+
+    float grad_in = grad_x_normalized * inv_std;
+    writeF16Element(idx, float16_t(grad_in));
+
+    barrier();
+
+    if (local_id == 0) {
+        for (uint i = 0; i < params.channels && i < 256; i++) {
+            if (s_grad_gamma[i] != 0.0) {
+                atomicAdd(grad_gamma[i], s_grad_gamma[i]);
+            }
+            if (s_grad_beta[i] != 0.0) {
+                atomicAdd(grad_beta[i], s_grad_beta[i]);
+            }
+        }
+    }
+}

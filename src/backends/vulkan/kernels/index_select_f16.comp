@@ -1,0 +1,63 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// Index select for Float16: select specific indices along a dimension
+// Reads/writes packed F16 pairs using element-level indexing
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Input { uint input_data[]; };    // Packed F16
+layout(binding = 1) buffer Indices { int indices[]; };
+layout(binding = 2) buffer Output { uint output_data[]; };  // Packed F16
+
+layout(push_constant) uniform PushConstants {
+    uint num_indices;
+    uint dim;
+    uint dim_size;
+    uint inner_size;
+    uint outer_size;
+} params;
+
+float16_t readF16(uint flat_idx) {
+    uint word_idx = flat_idx / 2;
+    uint half_idx = flat_idx % 2;
+    uint packed = input_data[word_idx];
+    uint bits = (packed >> (half_idx * 16)) & 0xFFFFu;
+    return float16_t(unpackHalf2x16(bits | (bits << 16)).x);
+}
+
+void writeF16(uint flat_idx, float16_t val) {
+    uint word_idx = flat_idx / 2;
+    uint half_idx = flat_idx % 2;
+    uint bits = packHalf2x16(vec2(float(val), 0.0)).x & 0xFFFFu;
+    uint shift = half_idx * 16;
+    // Atomic OR to avoid race conditions on packed pairs
+    // First clear the target half-word, then set it
+    uint clear_mask = ~(0xFFFFu << shift);
+    atomicAnd(output_data[word_idx], clear_mask);
+    atomicOr(output_data[word_idx], bits << shift);
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint total_output = params.outer_size * params.num_indices * params.inner_size;
+
+    if (idx >= total_output) return;
+
+    uint outer_idx = idx / (params.num_indices * params.inner_size);
+    uint remainder = idx % (params.num_indices * params.inner_size);
+    uint index_pos = remainder / params.inner_size;
+    uint inner_idx = remainder % params.inner_size;
+
+    int select_idx = indices[index_pos];
+
+    if (select_idx < 0 || select_idx >= int(params.dim_size)) {
+        writeF16(idx, float16_t(0.0));
+        return;
+    }
+
+    uint in_idx = outer_idx * (params.dim_size * params.inner_size) +
+                  uint(select_idx) * params.inner_size +
+                  inner_idx;
+
+    writeF16(idx, readF16(in_idx));
+}

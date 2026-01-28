@@ -1,0 +1,80 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+
+// 2D Transposed Convolution Forward Pass for Float64
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Input { double input_data[]; };
+layout(binding = 1) buffer Weight { double weight_data[]; };
+layout(binding = 2) buffer Bias { double bias_data[]; };
+layout(binding = 3) buffer Output { double output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    uint batch;
+    uint in_channels;
+    uint out_channels;
+    uint in_height;
+    uint in_width;
+    uint kernel_h;
+    uint kernel_w;
+    uint stride;
+    uint padding;
+    uint output_padding;
+    uint dilation;
+    uint groups;
+    uint out_h;
+    uint out_w;
+    uint has_bias;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= params.n_elements) return;
+
+    uint ow = idx % params.out_w;
+    uint temp = idx / params.out_w;
+    uint oh = temp % params.out_h;
+    temp /= params.out_h;
+    uint oc = temp % params.out_channels;
+    uint n = temp / params.out_channels;
+
+    double sum = 0.0lf;
+
+    uint in_channels_per_group = params.in_channels / params.groups;
+    uint out_channels_per_group = params.out_channels / params.groups;
+    uint group_id = oc / out_channels_per_group;
+    uint oc_local = oc % out_channels_per_group;
+    uint ic_start = group_id * in_channels_per_group;
+
+    for (uint ic = 0; ic < in_channels_per_group; ic++) {
+        for (uint kh = 0; kh < params.kernel_h; kh++) {
+            for (uint kw = 0; kw < params.kernel_w; kw++) {
+                int h_shifted = int(oh) + int(params.padding) - int(kh * params.dilation);
+                int w_shifted = int(ow) + int(params.padding) - int(kw * params.dilation);
+
+                if (h_shifted >= 0 && h_shifted % int(params.stride) == 0 &&
+                    w_shifted >= 0 && w_shifted % int(params.stride) == 0) {
+                    int ih = h_shifted / int(params.stride);
+                    int iw = w_shifted / int(params.stride);
+
+                    if (ih >= 0 && ih < int(params.in_height) && iw >= 0 && iw < int(params.in_width)) {
+                        uint input_idx = n * (params.in_channels * params.in_height * params.in_width) +
+                                        (ic_start + ic) * (params.in_height * params.in_width) +
+                                        uint(ih) * params.in_width + uint(iw);
+                        uint weight_idx = (ic_start + ic) * (out_channels_per_group * params.kernel_h * params.kernel_w) +
+                                         oc_local * (params.kernel_h * params.kernel_w) +
+                                         kh * params.kernel_w + kw;
+                        sum += input_data[input_idx] * weight_data[weight_idx];
+                    }
+                }
+            }
+        }
+    }
+
+    if (params.has_bias == 1) {
+        sum += bias_data[oc];
+    }
+
+    output_data[idx] = sum;
+}

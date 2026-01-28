@@ -1,5 +1,6 @@
 #include "tenzor/nn/layers/conv.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/indexing.hpp"
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/transform.hpp"
@@ -772,10 +773,13 @@ public:
         auto* backend = Dispatcher::get_backend(tensors_for_dispatch);
 
         // grad_input: Use regular conv2d forward with grad_output as input
-        // The relationship: ConvTranspose(x, w) backward w.r.t. x = Conv(grad, w)
+        // The backward of ConvTranspose2d w.r.t. input is a regular Conv2d:
+        //   grad_input = Conv2d(grad_output, weight, stride=stride, padding=padding)
+        // The weight layout [in_ch, out_ch, kH, kW] matches Conv2d weight [C_out, C_in, kH, kW]
+        // where C_out=in_ch (channels of grad_input) and C_in=out_ch (channels of grad_output).
         OpAttributes conv_attrs = {
             {"stride", std::to_string(stride_)},
-            {"padding", std::to_string(kernel_h - 1 - padding_)},  // Adjusted for transposed conv
+            {"padding", std::to_string(padding_)},
             {"dilation", std::to_string(dilation_)},
             {"groups", std::to_string(groups_)}
         };
@@ -784,15 +788,23 @@ public:
         auto conv_result = backend->dispatch("conv2d_forward", conv_inputs, conv_attrs);
         Tensor grad_input = conv_result[0];
 
-        // Ensure grad_input matches input shape
+        // Handle potential shape mismatch due to output_padding in the forward pass.
+        // Slice grad_input to match the original input shape if dimensions differ.
         if (!std::equal(grad_input.shape().begin(), grad_input.shape().end(),
                         input_shape.begin(), input_shape.end())) {
-            // May need to slice or pad - for now just ensure dtype/device match
-            grad_input = grad_input.to(input.dtype());
+            // Slice spatial dimensions to match input_shape
+            auto gi_shape = grad_input.shape();
+            if (gi_shape.size() == 4 && input_shape.size() == 4 &&
+                gi_shape[0] == input_shape[0] && gi_shape[1] == input_shape[1]) {
+                // Spatial dimensions may differ by output_padding amount - slice to match
+                grad_input = tenzor::slice(grad_input, 2, 0, input_shape[2]);
+                grad_input = tenzor::slice(grad_input, 3, 0, input_shape[3]);
+            }
         }
 
-        // grad_weight: Compute using conv2d_backward's grad_weight computation
-        // Use dispatch to conv2d_backward to get grad_weight
+        // grad_weight: For ConvTranspose2d, the weight gradient involves correlating
+        // the input with grad_output. We dispatch to conv2d_backward with swapped roles:
+        // input (to ConvTranspose2d) acts as grad_output, and grad_output acts as input.
         OpAttributes backward_attrs = {
             {"stride", std::to_string(stride_)},
             {"padding", std::to_string(padding_)},
@@ -800,15 +812,15 @@ public:
             {"groups", std::to_string(groups_)},
             {"compute_grad_input", "0"},
             {"compute_grad_weight", "1"},
-            {"compute_grad_bias", has_bias ? "1" : "0"}
+            {"compute_grad_bias", "0"}
         };
 
-        // For grad_weight of transposed conv: we use input as "weight" and grad_output as "input"
-        // This is a simplified approach - swap roles for weight gradient
+        // Swap roles: input as grad_output, grad_output as input for weight gradient
         std::vector<Tensor> weight_grad_inputs = {input, grad_output, weight};
         auto weight_grad_result = backend->dispatch("conv2d_backward", weight_grad_inputs, backward_attrs);
 
-        Tensor grad_weight = weight_grad_result[1];
+        // With compute_grad_input=0, the result vector has grad_weight at index 0
+        Tensor grad_weight = weight_grad_result[0];
 
         if (has_bias) {
             // grad_bias = sum(grad_output, dims=[0,2,3])

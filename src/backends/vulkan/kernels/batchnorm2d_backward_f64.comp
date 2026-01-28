@@ -1,0 +1,96 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : enable
+#extension GL_EXT_shader_atomic_float : enable
+
+// Batch Normalization 2D Backward Pass - Float64 variant
+// Computes gradients w.r.t. input, scale (gamma), and bias (beta)
+
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer GradOutput { double grad_output[]; };  // (N, C, H, W)
+layout(binding = 1) buffer Input { double input_data[]; };         // (N, C, H, W)
+layout(binding = 2) buffer Mean { double mean_data[]; };           // (C)
+layout(binding = 3) buffer Variance { double var_data[]; };        // (C)
+layout(binding = 4) buffer Gamma { double gamma_data[]; };         // (C)
+layout(binding = 5) buffer GradInput { double grad_input[]; };     // (N, C, H, W)
+layout(binding = 6) buffer GradGamma { double grad_gamma[]; };     // (C) - accumulated atomically
+layout(binding = 7) buffer GradBeta { double grad_beta[]; };       // (C) - accumulated atomically
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;     // Total elements (N * C * H * W)
+    uint batch;          // N
+    uint channels;       // C
+    uint spatial_size;   // H * W
+    float eps;           // Epsilon for numerical stability
+    uint has_gamma;      // 1 if gamma is provided, 0 otherwise
+} params;
+
+// Shared memory for channel-wise accumulation
+shared double s_grad_gamma[256];
+shared double s_grad_beta[256];
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    uint local_id = gl_LocalInvocationID.x;
+
+    // Initialize shared memory
+    if (local_id < params.channels && local_id < 256) {
+        s_grad_gamma[local_id] = 0.0lf;
+        s_grad_beta[local_id] = 0.0lf;
+    }
+    barrier();
+
+    // Bounds check
+    if (idx >= params.n_elements) {
+        return;
+    }
+
+    // Decode flat index to (b, c, hw)
+    uint temp = idx;
+    uint w = temp % params.spatial_size;
+    temp /= params.spatial_size;
+    uint c = temp % params.channels;
+    uint b = temp / params.channels;
+
+    // Get values
+    double x = input_data[idx];
+    double grad_out = grad_output[idx];
+    double mean = mean_data[c];
+    double variance = var_data[c];
+    double inv_std = 1.0lf / sqrt(variance + double(params.eps));
+
+    // Compute normalized input
+    double x_normalized = (x - mean) * inv_std;
+
+    // Compute gradient w.r.t. normalized input
+    double grad_x_normalized = grad_out;
+    if (params.has_gamma != 0) {
+        double gamma = gamma_data[c];
+        grad_x_normalized = grad_out * gamma;
+    }
+
+    // Accumulate gradients for gamma and beta
+    atomicAdd(s_grad_gamma[c % 256], grad_out * x_normalized);
+    atomicAdd(s_grad_beta[c % 256], grad_out);
+
+    // Compute grad_input
+    double grad_in = grad_x_normalized * inv_std;
+
+    // Write gradient w.r.t. input
+    grad_input[idx] = grad_in;
+
+    // Wait for all threads in workgroup
+    barrier();
+
+    // First thread writes accumulated gradients to global memory
+    if (local_id == 0) {
+        for (uint i = 0; i < params.channels && i < 256; i++) {
+            if (s_grad_gamma[i] != 0.0lf) {
+                atomicAdd(grad_gamma[i], s_grad_gamma[i]);
+            }
+            if (s_grad_beta[i] != 0.0lf) {
+                atomicAdd(grad_beta[i], s_grad_beta[i]);
+            }
+        }
+    }
+}

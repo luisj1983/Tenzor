@@ -1,0 +1,57 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// Trigonometric functions for Float16: sin, cos, tan, asin, acos, atan
+// Float16 elements are packed 2 per 32-bit word
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Input { uint input_data[]; };
+layout(binding = 1) buffer Output { uint output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n;          // Number of elements
+    uint op;         // Operation: 0=sin, 1=cos, 2=tan, 3=asin, 4=acos, 5=atan
+} params;
+
+float16_t readF16(uint packed, uint offset) {
+    uint bits = (packed >> (offset * 16)) & 0xFFFFu;
+    return float16_t(unpackHalf2x16(bits | (bits << 16)).x);
+}
+
+uint packF16Pair(float16_t v0, float16_t v1) {
+    uint bits0 = packHalf2x16(vec2(float(v0), 0.0)).x & 0xFFFFu;
+    uint bits1 = packHalf2x16(vec2(float(v1), 0.0)).x & 0xFFFFu;
+    return bits0 | (bits1 << 16);
+}
+
+float compute_trig(float val) {
+    switch (params.op) {
+        case 0: return sin(val);
+        case 1: return cos(val);
+        case 2: return tan(val);
+        case 3: return asin(val);
+        case 4: return acos(val);
+        case 5: return atan(val);
+        default: return 0.0;
+    }
+}
+
+void main() {
+    uint pair_idx = gl_GlobalInvocationID.x;
+    uint idx0 = pair_idx * 2;
+
+    if (idx0 >= params.n) return;
+
+    uint packed = input_data[pair_idx];
+    float16_t v0 = readF16(packed, 0);
+    float16_t v1 = readF16(packed, 1);
+
+    float16_t res0 = float16_t(compute_trig(float(v0)));
+    float16_t res1 = float16_t(0.0);
+
+    if (idx0 + 1 < params.n) {
+        res1 = float16_t(compute_trig(float(v1)));
+    }
+
+    output_data[pair_idx] = packF16Pair(res0, res1);
+}

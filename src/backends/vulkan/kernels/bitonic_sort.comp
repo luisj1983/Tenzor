@@ -1,0 +1,61 @@
+#version 450
+
+// Bitonic sort - one compare-and-swap pass per dispatch
+// Operates on (value, index) pairs: sorts by value, produces sorted indices
+// Multiple dispatches required: log2(N) * (log2(N)+1) / 2 passes total
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Values { float values[]; };      // Values to sort by
+layout(binding = 1) buffer Indices { int indices[]; };       // Corresponding indices (output)
+
+layout(push_constant) uniform PushConstants {
+    uint n;               // Original (unpadded) number of elements
+    uint padded_n;        // Padded to power-of-2
+    uint stage;           // Current stage (0, 1, 2, ...)
+    uint substage;        // Current substage within stage
+    uint descending;      // 0 = ascending, 1 = descending
+} params;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+
+    // Each thread handles one compare-and-swap
+    if (gid >= params.padded_n / 2) return;
+
+    // Compute the pair of elements to compare
+    uint block_size = 1u << (params.stage + 1);
+    uint half_block = 1u << params.substage;
+
+    // Determine position within the block structure
+    uint block_id = gid / half_block;
+    uint offset = gid % half_block;
+
+    uint i = block_id * (half_block * 2) + offset;
+    uint j = i + half_block;
+
+    if (j >= params.padded_n) return;
+
+    // Determine sort direction for this block
+    // In bitonic sort, the direction alternates every (1 << (stage+1)) elements
+    uint sort_block = i / block_size;
+    bool ascending_block = ((sort_block % 2) == 0);
+    if (params.descending != 0) ascending_block = !ascending_block;
+
+    float val_i = values[i];
+    float val_j = values[j];
+
+    bool should_swap;
+    if (ascending_block) {
+        should_swap = (val_i > val_j);
+    } else {
+        should_swap = (val_i < val_j);
+    }
+
+    if (should_swap) {
+        values[i] = val_j;
+        values[j] = val_i;
+        int tmp = indices[i];
+        indices[i] = indices[j];
+        indices[j] = tmp;
+    }
+}

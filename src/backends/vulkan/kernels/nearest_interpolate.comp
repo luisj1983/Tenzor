@@ -1,0 +1,63 @@
+#version 450
+
+// Nearest Neighbor Interpolation Forward Pass
+// Resizes input tensor to target size using nearest neighbor sampling
+// Input shape: (N, C, H_in, W_in)
+// Output shape: (N, C, H_out, W_out)
+
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Input { float input_data[]; };
+layout(binding = 1) buffer Output { float output_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;     // Total output elements
+    uint batch;          // N
+    uint channels;       // C
+    uint in_height;      // H_in
+    uint in_width;       // W_in
+    uint out_height;     // H_out
+    uint out_width;      // W_out
+    uint align_corners;  // 1 if align_corners, 0 otherwise
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.n_elements) {
+        return;
+    }
+
+    // Decode flat index to (n, c, h_out, w_out)
+    uint temp = idx;
+    uint w_out = temp % params.out_width;
+    temp /= params.out_width;
+    uint h_out = temp % params.out_height;
+    temp /= params.out_height;
+    uint c = temp % params.channels;
+    uint n = temp / params.channels;
+
+    // Compute nearest source coordinates
+    uint h_in, w_in;
+    if (params.align_corners != 0 && params.out_height > 1) {
+        h_in = uint(round(float(h_out) * float(params.in_height - 1) / float(params.out_height - 1)));
+    } else {
+        h_in = min(uint(floor(float(h_out) * float(params.in_height) / float(params.out_height))),
+                   params.in_height - 1);
+    }
+
+    if (params.align_corners != 0 && params.out_width > 1) {
+        w_in = uint(round(float(w_out) * float(params.in_width - 1) / float(params.out_width - 1)));
+    } else {
+        w_in = min(uint(floor(float(w_out) * float(params.in_width) / float(params.out_width))),
+                   params.in_width - 1);
+    }
+
+    // Compute input index: (n, c, h_in, w_in)
+    uint input_idx = n * params.channels * params.in_height * params.in_width +
+                     c * params.in_height * params.in_width +
+                     h_in * params.in_width +
+                     w_in;
+
+    output_data[idx] = input_data[input_idx];
+}

@@ -20,6 +20,7 @@
 #include <vector>
 #include <span>
 #include <unordered_map>
+#include <mutex>
 
 namespace tenzor {
 
@@ -223,6 +224,7 @@ private:
     // Advanced reduction operations
     auto dispatchArgmax(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
     auto dispatchArgmin(const Tensor& input, int64_t dim, bool keepdim) -> Tensor;
+    auto dispatchArgSort(const Tensor& input, int64_t dim, bool descending) -> Tensor;
     auto dispatchVariance(const Tensor& input, int64_t dim, bool unbiased, bool keepdim) -> Tensor;
     auto dispatchStd(const Tensor& input, int64_t dim, bool unbiased, bool keepdim) -> Tensor;
     auto dispatchNorm(const Tensor& input, float p, int64_t dim, bool keepdim) -> Tensor;
@@ -270,6 +272,9 @@ private:
     auto dispatchCat(const std::vector<Tensor>& inputs, int64_t dim) -> Tensor;
     auto dispatchClamp(const Tensor& input, float min_value, float max_value) -> Tensor;
 
+    // Interpolation operation
+    auto dispatchInterpolate(const Tensor& input, const OpAttributes& attrs) -> Tensor;
+
     // Forward activation operations
     auto dispatchActivation(const std::string& op_name,
                            const Tensor& input,
@@ -311,6 +316,10 @@ private:
 
     // Shader paths
     std::string shaderPath_;
+
+    // Thread safety: mutex for serializing Vulkan queue submissions and device access.
+    // Vulkan requires external synchronization for host access to queues.
+    mutable std::recursive_mutex dispatch_mutex_;
 };
 
 } // namespace tenzor
