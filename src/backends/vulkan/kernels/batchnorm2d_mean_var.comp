@@ -39,29 +39,25 @@ void main() {
     }
     barrier();
 
-    // Bounds check
-    if (idx >= params.n_elements) {
-        return;
-    }
+    // Accumulate if within bounds (no early return to avoid barrier divergence)
+    if (idx < params.n_elements) {
+        // Decode flat index to (b, c, h, w)
+        uint temp = idx;
+        uint w = temp % params.spatial_size;
+        temp /= params.spatial_size;
+        uint c = temp % params.channels;
 
-    // Decode flat index to (b, c, h, w)
-    uint temp = idx;
-    uint w = temp % params.spatial_size;
-    temp /= params.spatial_size;
-    uint c = temp % params.channels;
-    uint b = temp / params.channels;
+        float value = input_data[idx];
 
-    float value = input_data[idx];
-
-    if (params.pass_id == 0) {
-        // First pass: compute sum for mean
-        // Accumulate in shared memory per channel
-        atomicAdd(s_channel_sums[c % 256], value);
-    } else {
-        // Second pass: compute sum of squared differences for variance
-        float mean = mean_data[c];
-        float diff = value - mean;
-        atomicAdd(s_channel_sums[c % 256], diff * diff);
+        if (params.pass_id == 0) {
+            // First pass: compute sum for mean
+            atomicAdd(s_channel_sums[c % 256], value);
+        } else {
+            // Second pass: compute sum of squared differences for variance
+            float mean = mean_data[c];
+            float diff = value - mean;
+            atomicAdd(s_channel_sums[c % 256], diff * diff);
+        }
     }
 
     // Wait for all threads in workgroup

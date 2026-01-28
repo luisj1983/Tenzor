@@ -22,6 +22,9 @@ shared double shared_sum[256];
 // Helper: exp for double using range reduction
 // exp(x) = exp(k*ln(2) + r) = 2^k * exp(r) where |r| < ln(2)/2
 double exp_d(double x) {
+    // Handle NaN
+    if (x != x) return x;  // NaN propagation
+
     // Clamp to avoid overflow/underflow
     if (x > 709.0) return 1.0e308;  // near max double
     if (x < -745.0) return 0.0;
@@ -36,7 +39,7 @@ double exp_d(double x) {
     double ln2 = 0.6931471805599453;
     double k_dbl = floor(x / ln2 + 0.5);
     double r = x - k_dbl * ln2;
-    int k = int(k_dbl);
+    int k = int(clamp(k_dbl, -1100.0, 1100.0));
 
     // exp(r) where |r| <= ln(2)/2, use float exp which is accurate
     double exp_r = double(exp(float(r)));

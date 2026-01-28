@@ -9,7 +9,7 @@ layout(local_size_x = 256) in;
 layout(binding = 0) buffer GradOutput { uint grad_output[]; };   // Packed F16 (N, C, H, W)
 layout(binding = 1) buffer Input { uint input_data[]; };          // Packed F16 (N, C, H, W)
 layout(binding = 2) buffer Mean { float mean_data[]; };           // (C) Float32
-layout(binding = 3) buffer Variance { float var_data[]; };        // (C) Float32
+layout(binding = 3) buffer InvStd { float invstd_data[]; };        // (C) Float32 - pre-computed 1/sqrt(var+eps)
 layout(binding = 4) buffer Gamma { float gamma_data[]; };         // (C) Float32
 layout(binding = 5) buffer GradInput { uint grad_input[]; };      // Packed F16 (N, C, H, W)
 layout(binding = 6) buffer GradGamma { float grad_gamma[]; };     // (C) Float32 - accumulated atomically
@@ -54,30 +54,30 @@ void main() {
     }
     barrier();
 
-    if (idx >= params.n_elements) return;
+    // Accumulate if within bounds (no early return to avoid barrier divergence)
+    if (idx < params.n_elements) {
+        uint temp = idx;
+        uint w = temp % params.spatial_size;
+        temp /= params.spatial_size;
+        uint c = temp % params.channels;
 
-    uint temp = idx;
-    uint w = temp % params.spatial_size;
-    temp /= params.spatial_size;
-    uint c = temp % params.channels;
+        float x = float(readF16Element(idx, false));
+        float grad_out = float(readF16Element(idx, true));
+        float mean = mean_data[c];
+        float inv_std = invstd_data[c];
 
-    float x = float(readF16Element(idx, false));
-    float grad_out = float(readF16Element(idx, true));
-    float mean = mean_data[c];
-    float variance = var_data[c];
-    float inv_std = 1.0 / sqrt(variance + params.eps);
+        float x_normalized = (x - mean) * inv_std;
+        float grad_x_normalized = grad_out;
+        if (params.has_gamma != 0) {
+            grad_x_normalized = grad_out * gamma_data[c];
+        }
 
-    float x_normalized = (x - mean) * inv_std;
-    float grad_x_normalized = grad_out;
-    if (params.has_gamma != 0) {
-        grad_x_normalized = grad_out * gamma_data[c];
+        atomicAdd(s_grad_gamma[c % 256], grad_out * x_normalized);
+        atomicAdd(s_grad_beta[c % 256], grad_out);
+
+        float grad_in = grad_x_normalized * inv_std;
+        writeF16Element(idx, float16_t(grad_in));
     }
-
-    atomicAdd(s_grad_gamma[c % 256], grad_out * x_normalized);
-    atomicAdd(s_grad_beta[c % 256], grad_out);
-
-    float grad_in = grad_x_normalized * inv_std;
-    writeF16Element(idx, float16_t(grad_in));
 
     barrier();
 

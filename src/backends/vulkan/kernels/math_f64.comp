@@ -15,56 +15,70 @@ layout(push_constant) uniform PushConstants {
     double param;    // Parameter for operations like pow (exponent) - now double
 } params;
 
-// Double-precision exp approximation using the identity: exp(x) = exp(x/2)^2
-// This provides better precision than casting to float
+// Double-precision exp approximation using range reduction with O(log(k)) exponentiation
 double exp_double(double x) {
-    // For large |x|, clamp to avoid overflow/underflow
-    if (x > 709.0) return 1.0e308;  // near max double
+    // Handle NaN
+    if (x != x) return x;
+
+    // Clamp to avoid overflow/underflow
+    if (x > 709.0) return 1.0e308;
     if (x < -745.0) return 0.0;
 
-    // Use range reduction: exp(x) = 2^k * exp(r) where x = k*ln(2) + r
-    // For values in reasonable range, use float exp with correction
-    double ln2 = 0.6931471805599453;
-    double k = floor(x / ln2);
-    double r = x - k * ln2;
+    // For moderate values that fit in float range, use float exp
+    if (x >= -87.0 && x <= 88.0) {
+        return double(exp(float(x)));
+    }
 
-    // exp(r) where |r| < ln(2) ~ 0.693, use float exp which is accurate enough
+    // Range reduction: exp(x) = 2^k * exp(r)
+    double ln2 = 0.6931471805599453;
+    double k_dbl = floor(x / ln2 + 0.5);
+    double r = x - k_dbl * ln2;
+    int k = int(clamp(k_dbl, -1100.0, 1100.0));
+
+    // exp(r) where |r| <= ln(2)/2
     double exp_r = double(exp(float(r)));
 
-    // Multiply by 2^k using ldexp-like operation
-    // 2^k = exp(k * ln(2))
-    if (k >= 0.0) {
-        for (int i = 0; i < int(k); i++) {
-            exp_r *= 2.0;
+    // Compute 2^|k| using O(log(k)) binary exponentiation
+    double pow2 = 1.0;
+    int abs_k = (k >= 0) ? k : -k;
+    double base = 2.0;
+    while (abs_k > 0) {
+        if ((abs_k & 1) != 0) {
+            pow2 *= base;
         }
-    } else {
-        for (int i = 0; i < int(-k); i++) {
-            exp_r *= 0.5;
-        }
+        base *= base;
+        abs_k >>= 1;
     }
-    return exp_r;
+
+    if (k >= 0) {
+        return exp_r * pow2;
+    } else {
+        return exp_r / pow2;
+    }
 }
 
 // Double-precision log approximation
 // log(x) = log(m * 2^e) = log(m) + e * log(2)
 double log_double(double x) {
+    // Handle NaN
+    if (x != x) return x;
+
     if (x <= 0.0) return -1.0 / 0.0;  // -inf for x <= 0
     if (x == 1.0) return 0.0;
 
     // For values that fit in float range with good precision, use float log
-    // Float has ~7 decimal digits precision, sufficient for values 1e-38 to 1e38
     if (x >= 1.0e-30 && x <= 1.0e30) {
         return double(log(float(x)));
     }
 
-    // For extreme values, use range reduction
+    // For extreme values, use range reduction with bounded loop
     double ln2 = 0.6931471805599453;
     int e = 0;
     double m = x;
 
-    // Normalize to range [1, 2)
-    while (m >= 2.0) { m *= 0.5; e++; }
-    while (m < 1.0) { m *= 2.0; e--; }
+    // Normalize to range [1, 2) with bounded iterations
+    for (int i = 0; i < 1100 && m >= 2.0; i++) { m *= 0.5; e++; }
+    for (int i = 0; i < 1100 && m < 1.0; i++) { m *= 2.0; e--; }
 
     // Now m is in [1, 2), compute log(m) using float
     double log_m = double(log(float(m)));

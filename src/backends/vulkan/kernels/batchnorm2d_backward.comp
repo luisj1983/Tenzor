@@ -16,7 +16,7 @@ layout(local_size_x = 256) in;
 layout(binding = 0) buffer GradOutput { float grad_output[]; };  // (N, C, H, W)
 layout(binding = 1) buffer Input { float input_data[]; };         // (N, C, H, W)
 layout(binding = 2) buffer Mean { float mean_data[]; };           // (C)
-layout(binding = 3) buffer Variance { float var_data[]; };        // (C)
+layout(binding = 3) buffer InvStd { float invstd_data[]; };        // (C) - pre-computed 1/sqrt(var+eps)
 layout(binding = 4) buffer Gamma { float gamma_data[]; };         // (C)
 layout(binding = 5) buffer GradInput { float grad_input[]; };     // (N, C, H, W)
 layout(binding = 6) buffer GradGamma { float grad_gamma[]; };     // (C) - accumulated atomically
@@ -46,52 +46,38 @@ void main() {
     }
     barrier();
 
-    // Bounds check
-    if (idx >= params.n_elements) {
-        return;
+    // Accumulate if within bounds (no early return to avoid barrier divergence)
+    if (idx < params.n_elements) {
+        // Decode flat index to (b, c, h, w)
+        uint temp = idx;
+        uint w = temp % params.spatial_size;
+        temp /= params.spatial_size;
+        uint c = temp % params.channels;
+
+        // Get values
+        float x = input_data[idx];
+        float grad_out = grad_output[idx];
+        float mean = mean_data[c];
+        float inv_std = invstd_data[c];
+
+        // Compute normalized input
+        float x_normalized = (x - mean) * inv_std;
+
+        // Compute gradient w.r.t. normalized input
+        float grad_x_normalized = grad_out;
+        if (params.has_gamma != 0) {
+            float gamma = gamma_data[c];
+            grad_x_normalized = grad_out * gamma;
+        }
+
+        // Accumulate gradients for gamma and beta
+        atomicAdd(s_grad_gamma[c % 256], grad_out * x_normalized);
+        atomicAdd(s_grad_beta[c % 256], grad_out);
+
+        // Compute and write gradient w.r.t. input
+        float grad_in = grad_x_normalized * inv_std;
+        grad_input[idx] = grad_in;
     }
-
-    // Decode flat index to (b, c, h, w)
-    uint temp = idx;
-    uint w = temp % params.spatial_size;
-    temp /= params.spatial_size;
-    uint c = temp % params.channels;
-    uint b = temp / params.channels;
-
-    // Get values
-    float x = input_data[idx];
-    float grad_out = grad_output[idx];
-    float mean = mean_data[c];
-    float variance = var_data[c];
-    float inv_std = 1.0 / sqrt(variance + params.eps);
-
-    // Compute normalized input
-    float x_normalized = (x - mean) * inv_std;
-
-    // Compute gradient w.r.t. normalized input
-    float grad_x_normalized = grad_out;
-    if (params.has_gamma != 0) {
-        float gamma = gamma_data[c];
-        grad_x_normalized = grad_out * gamma;
-    }
-
-    // Accumulate gradients for gamma and beta
-    // grad_gamma = sum(grad_out * x_normalized)
-    // grad_beta = sum(grad_out)
-    atomicAdd(s_grad_gamma[c % 256], grad_out * x_normalized);
-    atomicAdd(s_grad_beta[c % 256], grad_out);
-
-    // For grad_input, we need to compute:
-    // grad_input = grad_x_normalized * inv_std
-    // But this is simplified - the full formula involves:
-    // 1. Gradient of normalization operation
-    // 2. Contribution from mean and variance gradients
-    //
-    // Simplified version for element-wise computation:
-    float grad_in = grad_x_normalized * inv_std;
-
-    // Write gradient w.r.t. input
-    grad_input[idx] = grad_in;
 
     // Wait for all threads in workgroup to finish accumulation
     barrier();

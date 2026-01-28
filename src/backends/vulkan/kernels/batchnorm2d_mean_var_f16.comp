@@ -38,21 +38,22 @@ void main() {
     }
     barrier();
 
-    if (idx >= params.n_elements) return;
+    // Accumulate if within bounds (no early return to avoid barrier divergence)
+    if (idx < params.n_elements) {
+        uint temp = idx;
+        uint w = temp % params.spatial_size;
+        temp /= params.spatial_size;
+        uint c = temp % params.channels;
 
-    uint temp = idx;
-    uint w = temp % params.spatial_size;
-    temp /= params.spatial_size;
-    uint c = temp % params.channels;
+        float value = float(readF16Element(idx));
 
-    float value = float(readF16Element(idx));
-
-    if (params.pass_id == 0) {
-        atomicAdd(s_channel_sums[c % 256], value);
-    } else {
-        float mean = mean_data[c];
-        float diff = value - mean;
-        atomicAdd(s_channel_sums[c % 256], diff * diff);
+        if (params.pass_id == 0) {
+            atomicAdd(s_channel_sums[c % 256], value);
+        } else {
+            float mean = mean_data[c];
+            float diff = value - mean;
+            atomicAdd(s_channel_sums[c % 256], diff * diff);
+        }
     }
 
     barrier();

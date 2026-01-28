@@ -1625,11 +1625,19 @@ auto VulkanBackend::dispatch(const std::string& op_name,
                 "sinh", "cosh",
                 // Comparison (comparison_f16 shader)
                 "eq", "ne", "lt", "le", "gt", "ge",
+                // Matrix ops (matmul_f16 shader with float32 accumulation)
+                "matmul", "bmm", "dot",
+                // Fused operations (composed from native F16 sub-operations)
+                "fused_linear_relu", "fused_batchnorm_relu", "fused_add_relu",
+                "fused_conv2d_relu", "fused_gelu", "fused_layer_norm",
+                "fused_softmax_cross_entropy",
                 // Operations with native F16 GPU shaders in their dispatch functions
                 "argmax", "argmin", "argsort",
                 "batchnorm2d_forward", "batchnorm2d_backward",
                 "batchnorm2d_mean_var", "batchnorm2d_update_running_stats",
                 "index_select",
+                // Reduction (reduction_f16 shader handles sum/mean/max/min/prod)
+                "sum", "mean", "max", "min", "prod",
                 // Type-agnostic operations (work on raw bytes or metadata only)
                 "reshape", "view", "contiguous", "to", "to_dtype",
                 "zeros", "ones", "full", "empty",
@@ -2509,13 +2517,15 @@ auto VulkanBackend::dispatch(const std::string& op_name,
     }
 
     if (op_name == "batchnorm2d_backward") {
-        if (inputs.size() < 4) {
-            throw std::invalid_argument("batchnorm2d_backward requires at least 4 inputs (grad_output, input, mean, var)");
+        // Autograd passes: [grad_output, input, weight(gamma), mean, invstd]
+        if (inputs.size() < 5) {
+            throw std::invalid_argument("batchnorm2d_backward requires 5 inputs (grad_output, input, weight, mean, invstd)");
         }
-        const Tensor* gamma = (inputs.size() > 4) ? &inputs[4] : nullptr;
+        const Tensor* gamma = &inputs[2];  // weight = gamma
         float epsilon = attrs.contains("eps") ? std::stof(attrs.at("eps")) : 1e-5f;
+        // Pass mean=inputs[3], invstd=inputs[4] (shader uses invstd directly)
         auto [grad_input, grad_gamma, grad_beta] = dispatchBatchNorm2dBackward(
-            inputs[0], inputs[1], inputs[2], inputs[3], gamma, epsilon);
+            inputs[0], inputs[1], inputs[3], inputs[4], gamma, epsilon);
         return {grad_input, grad_gamma, grad_beta};
     }
 
@@ -5553,10 +5563,21 @@ auto VulkanBackend::dispatchBatchNorm2dBackward(const Tensor& grad_out, const Te
     std::vector<int64_t> grad_in_shape(input_shape.begin(), input_shape.end());
     Tensor grad_input(grad_in_shape, input.dtype(), input.device());
 
+    // For Float16, the backward shader accumulates grad_gamma/grad_beta in Float32
+    // (mean/var are also Float32 for F16 input)
+    DType stats_dtype = (input.dtype() == DType::Float16) ? DType::Float32 : input.dtype();
     std::vector<int64_t> param_shape = {channels};
     // Initialize grad_gamma and grad_beta to zeros since shader uses atomicAdd
-    Tensor grad_gamma = dispatchZeros(param_shape, input.dtype(), input.device());
-    Tensor grad_beta = dispatchZeros(param_shape, input.dtype(), input.device());
+    Tensor grad_gamma = dispatchZeros(param_shape, stats_dtype, input.device());
+    Tensor grad_beta = dispatchZeros(param_shape, stats_dtype, input.device());
+
+    // For Float16 input, cast gamma to Float32 if needed (shader expects Float32 stats)
+    Tensor gamma_f32;
+    const Tensor* gamma_effective = gamma;
+    if (gamma && input.dtype() == DType::Float16 && gamma->dtype() == DType::Float16) {
+        gamma_f32 = gamma->to(DType::Float32);
+        gamma_effective = &gamma_f32;
+    }
 
     // Get VkBuffer handles
     VkBuffer buffer_grad_out = getVulkanBuffer(grad_out.data_ptr());
@@ -5569,7 +5590,8 @@ auto VulkanBackend::dispatchBatchNorm2dBackward(const Tensor& grad_out, const Te
 
     // Calculate buffer sizes
     size_t buffer_size_input = n_elements * input.dtype_size();
-    size_t buffer_size_channel = channels * input.dtype_size();
+    // Statistics (mean, var, gamma, grad_gamma, grad_beta) use stats_dtype
+    size_t buffer_size_channel = channels * mean.dtype_size();
 
     // Set up descriptor bindings
     std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
@@ -5586,10 +5608,10 @@ auto VulkanBackend::dispatchBatchNorm2dBackward(const Tensor& grad_out, const Te
     };
 
     // Handle optional gamma
-    if (gamma) {
-        VkBuffer buffer_gamma = getVulkanBuffer(gamma->data_ptr());
+    if (gamma_effective) {
+        VkBuffer buffer_gamma = getVulkanBuffer(gamma_effective->data_ptr());
         bindings.push_back({4, buffer_gamma});
-        sizes.push_back(buffer_size_channel);
+        sizes.push_back(gamma_effective->numel() * gamma_effective->dtype_size());
     } else {
         // Use dummy buffer for gamma binding
         bindings.push_back({4, buffer_mean});
@@ -5693,11 +5715,24 @@ auto VulkanBackend::dispatchBatchNorm2dForward(const Tensor& input, const Tensor
     std::vector<size_t> sizes = {buffer_size_input, buffer_size_mean, buffer_size_var};
 
     // Add optional gamma and beta buffers
+    // Keep cast tensors alive in this scope so their buffers remain valid
+    Tensor gamma_f32, beta_f32;
     if (gamma && beta) {
-        VkBuffer buffer_gamma = getVulkanBuffer(gamma->data_ptr());
-        VkBuffer buffer_beta = getVulkanBuffer(beta->data_ptr());
-        size_t buffer_size_gamma = gamma->numel() * gamma->dtype_size();
-        size_t buffer_size_beta = beta->numel() * beta->dtype_size();
+        const Tensor* gamma_ptr = gamma;
+        const Tensor* beta_ptr = beta;
+
+        // For Float16 input, the shader expects gamma/beta as Float32 for numerical stability
+        if (input.dtype() == DType::Float16 && gamma->dtype() == DType::Float16) {
+            gamma_f32 = gamma->to(DType::Float32);
+            beta_f32 = beta->to(DType::Float32);
+            gamma_ptr = &gamma_f32;
+            beta_ptr = &beta_f32;
+        }
+
+        VkBuffer buffer_gamma = getVulkanBuffer(gamma_ptr->data_ptr());
+        VkBuffer buffer_beta = getVulkanBuffer(beta_ptr->data_ptr());
+        size_t buffer_size_gamma = gamma_ptr->numel() * gamma_ptr->dtype_size();
+        size_t buffer_size_beta = beta_ptr->numel() * beta_ptr->dtype_size();
 
         bindings.push_back({3, buffer_gamma});
         bindings.push_back({4, buffer_beta});
@@ -5856,7 +5891,7 @@ auto VulkanBackend::dispatchBatchNorm2dMeanVar(const Tensor& input) -> std::pair
 
     // Normalize mean: temp_sum / normalizer -> mean
     {
-        Tensor normalizer_tensor(stats_shape, input.dtype(), input.device());
+        Tensor normalizer_tensor(stats_shape, stats_dtype, input.device());
         normalizer_tensor = dispatchFill(normalizer_tensor, static_cast<float>(normalizer));
         mean = dispatchBinaryOp("div", temp_sum, normalizer_tensor);
     }
@@ -5912,7 +5947,7 @@ auto VulkanBackend::dispatchBatchNorm2dMeanVar(const Tensor& input) -> std::pair
 
     // Normalize variance: var_data / normalizer -> variance
     {
-        Tensor normalizer_tensor(stats_shape, input.dtype(), input.device());
+        Tensor normalizer_tensor(stats_shape, stats_dtype, input.device());
         normalizer_tensor = dispatchFill(normalizer_tensor, static_cast<float>(normalizer));
         variance = dispatchBinaryOp("div", variance, normalizer_tensor);
     }
@@ -7715,13 +7750,54 @@ auto VulkanBackend::dispatchZeros(const std::vector<int64_t>& shape, DType dtype
 auto VulkanBackend::dispatchFill(const Tensor& input, float value) -> Tensor {
     auto input_shape = input.shape();
     int32_t device_id = input.device().index;
-    auto* pipeline = getPipeline("fill", device_id);
 
     std::vector<int64_t> out_shape(input_shape.begin(), input_shape.end());
     Tensor output(out_shape, input.dtype(), input.device());
 
     VkBuffer buffer_out = getVulkanBuffer(output.data_ptr());
     size_t buffer_size_out = output.numel() * output.dtype_size();
+
+    // Float64 requires special handling: the generic fill shader is 32-bit only,
+    // so use the full_f64 pipeline which properly writes double-precision values
+    if (input.dtype() == DType::Float64) {
+        auto* pipeline = getPipeline("full_f64", device_id);
+
+        std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
+            {0, buffer_out}
+        };
+        std::vector<size_t> sizes = {buffer_size_out};
+
+        VkDescriptorSet descriptorSet = allocateAndWriteDescriptorSet(
+            device_id, pipeline, bindings, sizes);
+
+        struct PushConstantsF64 {
+            uint32_t n_elements;
+            uint32_t padding;
+            double fill_value;
+        } push_constants;
+
+        push_constants.n_elements = static_cast<uint32_t>(output.numel());
+        push_constants.padding = 0;
+        push_constants.fill_value = static_cast<double>(value);
+
+        VkCommandBuffer cmdBuffer = beginSingleTimeCommands(device_id);
+        vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline->pipeline());
+        vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
+                               pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
+        vkCmdPushConstants(cmdBuffer, pipeline->layout(),
+                          VK_SHADER_STAGE_COMPUTE_BIT,
+                          0, sizeof(PushConstantsF64), &push_constants);
+
+        uint32_t workgroups = (output.numel() + 255) / 256;
+        vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
+
+        insertComputeBarrier(cmdBuffer);
+        endSingleTimeCommands(cmdBuffer, device_id);
+
+        return output;
+    }
+
+    auto* pipeline = getPipeline("fill", device_id);
 
     std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
         {0, buffer_out}

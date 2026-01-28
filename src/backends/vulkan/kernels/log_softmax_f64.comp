@@ -17,34 +17,52 @@ shared double shared_max[256];
 shared double shared_sum[256];
 
 // Double-precision exp approximation with range reduction
+// Uses O(log(k)) binary exponentiation to avoid slow linear loops
 double exp_d(double x) {
-    // For large |x|, clamp to avoid overflow/underflow
-    if (x > 709.0) return 1.0e308;  // near max double
+    // Handle NaN
+    if (x != x) return x;  // NaN propagation
+
+    // Clamp to avoid overflow/underflow
+    if (x > 709.0) return 1.0e308;
     if (x < -745.0) return 0.0;
 
-    // Use range reduction: exp(x) = 2^k * exp(r) where x = k*ln(2) + r
-    double ln2 = 0.6931471805599453;
-    double k = floor(x / ln2);
-    double r = x - k * ln2;
+    // For moderate values that fit in float range, use float exp
+    if (x >= -87.0 && x <= 88.0) {
+        return double(exp(float(x)));
+    }
 
-    // exp(r) where |r| < ln(2) ~ 0.693, use float exp which is accurate enough for small values
+    // Range reduction: exp(x) = 2^k * exp(r) where x = k*ln(2) + r
+    double ln2 = 0.6931471805599453;
+    double k_dbl = floor(x / ln2 + 0.5);
+    double r = x - k_dbl * ln2;
+    int k = int(clamp(k_dbl, -1100.0, 1100.0));
+
+    // exp(r) where |r| <= ln(2)/2, use float exp
     double exp_r = double(exp(float(r)));
 
-    // Multiply by 2^k
-    if (k >= 0.0) {
-        for (int i = 0; i < int(k); i++) {
-            exp_r *= 2.0;
+    // Compute 2^|k| using O(log(k)) binary exponentiation
+    double pow2 = 1.0;
+    int abs_k = (k >= 0) ? k : -k;
+    double base = 2.0;
+    while (abs_k > 0) {
+        if ((abs_k & 1) != 0) {
+            pow2 *= base;
         }
-    } else {
-        for (int i = 0; i < int(-k); i++) {
-            exp_r *= 0.5;
-        }
+        base *= base;
+        abs_k >>= 1;
     }
-    return exp_r;
+
+    if (k >= 0) {
+        return exp_r * pow2;
+    } else {
+        return exp_r / pow2;
+    }
 }
 
 // Double-precision log approximation
 double log_d(double x) {
+    // Handle special cases
+    if (x != x) return x;  // NaN propagation
     if (x <= 0.0) return -1.0 / 0.0;  // -inf for x <= 0
     if (x == 1.0) return 0.0;
 
@@ -53,14 +71,15 @@ double log_d(double x) {
         return double(log(float(x)));
     }
 
-    // For extreme values, use range reduction
+    // For extreme values, use range reduction with bounded loop
     double ln2 = 0.6931471805599453;
     int e = 0;
     double m = x;
 
-    // Normalize to range [1, 2)
-    while (m >= 2.0) { m *= 0.5; e++; }
-    while (m < 1.0) { m *= 2.0; e--; }
+    // Normalize to range [1, 2) with bounded iterations
+    // Double precision exponent range is about [-1022, 1023]
+    for (int i = 0; i < 1100 && m >= 2.0; i++) { m *= 0.5; e++; }
+    for (int i = 0; i < 1100 && m < 1.0; i++) { m *= 2.0; e--; }
 
     // Now m is in [1, 2), compute log(m) using float
     double log_m = double(log(float(m)));
