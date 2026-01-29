@@ -77,14 +77,20 @@ uint computeInputIdxB(uint out_idx) {
     return idx;
 }
 
+// Compute in float32 to avoid overflow in float16 range (±65504).
+// This matches the CPU backend which upcasts F16→F32 before computing.
 float16_t compute_op(float16_t val_a, float16_t val_b) {
+    float fa = float(val_a);
+    float fb = float(val_b);
+    float res;
     switch (params.op) {
-        case 0: return val_a + val_b;
-        case 1: return val_a - val_b;
-        case 2: return val_a * val_b;
-        case 3: return val_a / val_b;
-        default: return float16_t(0.0);
+        case 0: res = fa + fb; break;
+        case 1: res = fa - fb; break;
+        case 2: res = fa * fb; break;
+        case 3: res = fa / fb; break;
+        default: res = 0.0; break;
     }
+    return float16_t(res);
 }
 
 void main() {

@@ -38,22 +38,23 @@ float16_t readF16Element(uint flat_idx) {
 void atomicAddF16(uint flat_idx, float add_val) {
     uint word_idx = flat_idx / 2;
     uint half_idx = flat_idx % 2;
+    uint mask = 0xFFFFu << (half_idx * 16);
 
     // CAS loop on the packed uint32
     uint old_val = grad_input[word_idx];
-    uint new_val;
+    uint new_val, expected;
     do {
-        uint bits = (old_val >> (half_idx * 16)) & 0xFFFFu;
+        expected = old_val;
+        uint bits = (expected >> (half_idx * 16)) & 0xFFFFu;
         float current = unpackHalf2x16(bits | (bits << 16)).x;
         float updated = current + add_val;
         uint new_bits = packHalf2x16(vec2(updated, 0.0)).x & 0xFFFFu;
 
         // Build the new word with only the target half changed
-        uint mask = 0xFFFFu << (half_idx * 16);
-        new_val = (old_val & ~mask) | (new_bits << (half_idx * 16));
+        new_val = (expected & ~mask) | (new_bits << (half_idx * 16));
 
-        old_val = atomicCompSwap(grad_input[word_idx], old_val, new_val);
-    } while (old_val != new_val && old_val != atomicCompSwap(grad_input[word_idx], old_val, new_val));
+        old_val = atomicCompSwap(grad_input[word_idx], expected, new_val);
+    } while (old_val != expected);
 }
 
 void main() {

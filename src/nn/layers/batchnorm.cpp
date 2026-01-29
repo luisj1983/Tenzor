@@ -93,8 +93,20 @@ public:
         }
 
         // ================================================================
-        // CPU FALLBACK: Use tensor operations
+        // FALLBACK: Use tensor operations (CPU, Vulkan, etc.)
         // ================================================================
+
+        // For Float16, upcast to Float32 to avoid overflow/precision loss
+        // (matches CUDA/cuDNN which uses FP32 internally for batchnorm backward)
+        DType orig_dtype = input.dtype();
+        bool needs_upcast = (orig_dtype == DType::Float16);
+        if (needs_upcast) {
+            grad_output = grad_output.to(DType::Float32);
+            input = input.to(DType::Float32);
+            mean = mean.to(DType::Float32);
+            invstd = invstd.to(DType::Float32);
+            weight = weight.to(DType::Float32);
+        }
 
         // Compute normalized input for gradient computation
         auto mean_broadcast = mean.unsqueeze(0).unsqueeze(2).unsqueeze(3).contiguous();
@@ -132,6 +144,13 @@ public:
         auto grad_input = ((grad_input_normalized - term1 - term2) * invstd_expanded).contiguous();
 
         grad_input = grad_input.reshape({N, C, H, W}).contiguous();
+
+        // Downcast back to original dtype if we upcasted
+        if (needs_upcast) {
+            grad_input = grad_input.to(orig_dtype);
+            grad_weight = grad_weight.to(orig_dtype);
+            grad_bias = grad_bias.to(orig_dtype);
+        }
 
         // Return gradients in the order of input_vars: [input, weight, bias]
         return {grad_input, grad_weight, grad_bias};

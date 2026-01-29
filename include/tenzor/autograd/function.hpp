@@ -10,10 +10,17 @@
 
 #include <memory>
 #include <vector>
+#include <atomic>
 #include "../core/tensor.hpp"
 #include "variable.hpp"
 
 namespace tenzor {
+
+/// Enable/disable activation offloading to CPU for GPU-resident saved tensors.
+/// When enabled, save_for_backward() moves GPU tensors to CPU RAM to reduce
+/// GPU memory pressure, and saved_tensors() loads them back on access.
+void set_activation_offload(bool enabled);
+bool activation_offload_enabled();
 
 // Forward declaration
 class Variable;
@@ -117,6 +124,21 @@ public:
     auto input_variables() const -> const std::vector<Variable>&;
 
     /**
+     * @brief Reload offloaded saved tensors back to GPU.
+     *
+     * If activation offloading moved saved tensors to CPU during forward,
+     * this reloads them to the original GPU device before backward.
+     */
+    void reload_saved_tensors() const;
+
+    /**
+     * @brief Release saved tensors to free memory.
+     *
+     * Called after backward() to release GPU memory held by saved tensors.
+     */
+    void release_saved_tensors() { saved_tensors_.clear(); }
+
+    /**
      * @brief Get number of saved tensors.
      *
      * @return Count of tensors saved for backward pass
@@ -143,7 +165,9 @@ public:
     auto saved_tensors() const -> const std::vector<Tensor>&;
 
 protected:
-    std::vector<Tensor> saved_tensors_;                             ///< Tensors saved for backward
+    mutable std::vector<Tensor> saved_tensors_;                     ///< Tensors saved for backward
+    mutable Device offloaded_device_{Device::cpu()};                ///< Original device when offloaded
+    mutable bool tensors_offloaded_{false};                         ///< Whether saved tensors are on CPU due to offloading
     std::vector<std::shared_ptr<Function>> next_functions_;         ///< Chained gradient functions
     std::vector<Variable> input_variables_;                          ///< Input variables for gradient accumulation (stored by value)
 };

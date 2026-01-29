@@ -10,6 +10,17 @@
 
 namespace tenzor {
 
+// Global activation offload flag
+static std::atomic<bool> g_activation_offload_enabled{false};
+
+void set_activation_offload(bool enabled) {
+    g_activation_offload_enabled.store(enabled, std::memory_order_release);
+}
+
+bool activation_offload_enabled() {
+    return g_activation_offload_enabled.load(std::memory_order_acquire);
+}
+
 auto Function::set_next_functions(std::vector<std::shared_ptr<Function>> funcs) -> void {
     next_functions_ = std::move(funcs);
 }
@@ -27,11 +38,33 @@ auto Function::input_variables() const -> const std::vector<Variable>& {
 }
 
 auto Function::save_for_backward(std::vector<Tensor> tensors) -> void {
+    if (activation_offload_enabled() && !tensors.empty()) {
+        // Check if any tensor is on a GPU device
+        auto dev = tensors[0].device();
+        if (dev.type != Device::Type::CPU) {
+            offloaded_device_ = dev;
+            tensors_offloaded_ = true;
+            for (auto& t : tensors) {
+                t = t.to(Device::cpu());
+            }
+        }
+    }
     saved_tensors_ = std::move(tensors);
 }
 
 auto Function::saved_tensors() const -> const std::vector<Tensor>& {
+    if (tensors_offloaded_) {
+        reload_saved_tensors();
+    }
     return saved_tensors_;
+}
+
+void Function::reload_saved_tensors() const {
+    if (!tensors_offloaded_) return;
+    for (auto& t : saved_tensors_) {
+        t = t.to(offloaded_device_);
+    }
+    tensors_offloaded_ = false;
 }
 
 // Helper function to reduce gradient along broadcasted dimensions

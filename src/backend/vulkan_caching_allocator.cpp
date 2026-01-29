@@ -408,28 +408,37 @@ void VulkanCachingAllocator::set_min_split_size(size_t min_size) {
 
 VulkanBlock* VulkanCachingAllocator::try_allocate_from_cache(size_t size, int device,
                                                               VkBufferUsageFlags /*usage*/,
-                                                              VkMemoryPropertyFlags /*properties*/) {
+                                                              VkMemoryPropertyFlags properties) {
     auto& device_alloc = device_allocators_[device];
+    bool need_host_visible = (properties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0;
 
-    // Find smallest free block that fits (best-fit)
+    // Find smallest free block that fits (best-fit) with compatible memory type
     // Create a temporary block for comparison
     VulkanBlock search_block(VK_NULL_HANDLE, VK_NULL_HANDLE, nullptr, size, device, 0);
     auto it = device_alloc.free_blocks.lower_bound(&search_block);
 
-    if (it != device_alloc.free_blocks.end()) {
+    // Iterate through candidates to find one with compatible memory type
+    while (it != device_alloc.free_blocks.end()) {
         VulkanBlock* block = *it;
 
-        // Remove from free blocks
-        device_alloc.free_blocks.erase(it);
+        // Check memory type compatibility:
+        // - If HOST_VISIBLE is requested, block must be host-visible
+        // - If HOST_VISIBLE is not requested, any block is acceptable
+        //   (DEVICE_LOCAL is always suitable for non-HOST_VISIBLE requests)
+        if (!need_host_visible || block->is_host_visible) {
+            // Found compatible block, remove from free blocks
+            device_alloc.free_blocks.erase(it);
 
-        // NOTE: Sub-allocation disabled to allow independent block freeing (like CUDA)
-        // Sub-allocation causes memory to be stuck when allocated blocks share
-        // VkDeviceMemory with free blocks - the memory can't be freed until ALL
-        // blocks using that memory are freed. This prevents effective cache clearing.
-        //
-        // Trade-off: More vkAllocateMemory calls, but each block can be freed independently.
+            // Try to split if block is too large (reclaim unused portion)
+            if (block->size >= size + min_split_size_) {
+                split_block(block, size);
+            }
 
-        return block;
+            return block;
+        }
+
+        // Try next larger block
+        ++it;
     }
 
     return nullptr;
@@ -440,10 +449,34 @@ VulkanBlock* VulkanCachingAllocator::allocate_new_block(size_t size, int device,
                                                          VkMemoryPropertyFlags properties) {
     auto& device_alloc = device_allocators_[device];
 
-    // Create buffer
+    // Slab allocation: round up to reduce the number of vkAllocateMemory calls.
+    // Each VkDeviceMemory has ~256KB driver overhead on NVIDIA, so fewer is better.
+    // Note: No block coalescing is implemented, so partially-used slabs can't be
+    // freed during OOM retry. Use moderate slab sizes to balance overhead vs fragmentation.
+    constexpr size_t kSmallSlab  = 2 * 1024 * 1024;    // 2 MB for small allocs
+    constexpr size_t kMediumSlab = 32 * 1024 * 1024;   // 32 MB
+    constexpr size_t kLargeSlab  = 256 * 1024 * 1024;  // 256 MB
+
+    // When memory pressure is high (>60% of device memory reserved), skip slab
+    // allocation to avoid fragmentation that wastes the remaining budget.
+    bool memory_pressure_high = (device_alloc.stats.reserved_bytes >
+                                  device_alloc.device_memory_size * 3 / 5);
+
+    size_t slab_size = size;
+    if (!memory_pressure_high) {
+        if (size < kSmallSlab) {
+            slab_size = kSmallSlab;
+        } else if (size < kMediumSlab) {
+            slab_size = kMediumSlab;
+        } else if (size < kLargeSlab) {
+            slab_size = kLargeSlab;
+        }
+    }
+
+    // Create buffer with slab size
     VkBufferCreateInfo buffer_info{};
     buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    buffer_info.size = size;
+    buffer_info.size = slab_size;
     buffer_info.usage = usage;
     buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
@@ -490,12 +523,52 @@ VulkanBlock* VulkanCachingAllocator::allocate_new_block(size_t size, int device,
         }
     }
 
+    // If slab allocation fails, fall back to exact size before giving up
+    if (result != VK_SUCCESS && slab_size > size) {
+        vkDestroyBuffer(device_alloc.device, buffer, nullptr);
+
+        // Recreate buffer with exact requested size
+        slab_size = size;
+        buffer_info.size = slab_size;
+        result = vkCreateBuffer(device_alloc.device, &buffer_info, nullptr, &buffer);
+        if (result == VK_SUCCESS) {
+            vkGetBufferMemoryRequirements(device_alloc.device, buffer, &mem_requirements);
+            alloc_info.allocationSize = mem_requirements.size;
+            alloc_info.memoryTypeIndex = find_memory_type(device_alloc.physical_device,
+                                                           mem_requirements.memoryTypeBits,
+                                                           properties);
+            result = vkAllocateMemory(device_alloc.device, &alloc_info, nullptr, &memory);
+
+            if (result != VK_SUCCESS && (properties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) {
+                alloc_info.memoryTypeIndex = find_memory_type(device_alloc.physical_device,
+                                                               mem_requirements.memoryTypeBits,
+                                                               relaxed_props);
+                result = vkAllocateMemory(device_alloc.device, &alloc_info, nullptr, &memory);
+                if (result == VK_SUCCESS) {
+                    using_relaxed_props = true;
+                    properties = relaxed_props;
+                } else {
+                    using_relaxed_props = true;
+                }
+            }
+        }
+    }
+
     // If allocation still fails (OOM), try emptying the cache and retrying
     if (result == VK_ERROR_OUT_OF_DEVICE_MEMORY || result == VK_ERROR_OUT_OF_HOST_MEMORY) {
         // Use internal version since we already hold the mutex
         empty_cache_impl(device);
 
-        // Retry allocation
+        // Retry allocation with exact size
+        if (slab_size != size) {
+            vkDestroyBuffer(device_alloc.device, buffer, nullptr);
+            slab_size = size;
+            buffer_info.size = slab_size;
+            vkCreateBuffer(device_alloc.device, &buffer_info, nullptr, &buffer);
+            vkGetBufferMemoryRequirements(device_alloc.device, buffer, &mem_requirements);
+            alloc_info.allocationSize = mem_requirements.size;
+        }
+
         result = vkAllocateMemory(device_alloc.device, &alloc_info, nullptr, &memory);
 
         // If OOM retry succeeded with relaxed props, update properties
@@ -506,8 +579,26 @@ VulkanBlock* VulkanCachingAllocator::allocate_new_block(size_t size, int device,
 
     if (result != VK_SUCCESS) {
         vkDestroyBuffer(device_alloc.device, buffer, nullptr);
-        throw std::runtime_error("VulkanCachingAllocator: Failed to allocate memory, VkResult: " +
-                                 std::to_string(result));
+
+        // Debug: report memory state on OOM
+        size_t total_allocated = 0, total_cached = 0, num_blocks = 0;
+        for (auto& [ptr, blk] : device_alloc.all_blocks) {
+            num_blocks++;
+            if (blk->allocated) total_allocated += blk->size;
+            else total_cached += blk->size;
+        }
+        std::ostringstream oss;
+        size_t num_allocs = device_alloc.memory_ref_counts.size();
+        oss << "VulkanCachingAllocator: Failed to allocate memory, VkResult: "
+            << std::to_string(result)
+            << " (requested=" << size << " bytes"
+            << ", allocated=" << total_allocated
+            << ", cached=" << total_cached
+            << ", blocks=" << num_blocks
+            << ", vkAllocs=" << num_allocs
+            << ", reserved=" << device_alloc.stats.reserved_bytes
+            << ", device_mem=" << device_alloc.device_memory_size << ")";
+        throw std::runtime_error(oss.str());
     }
 
     // Bind buffer to memory
@@ -523,7 +614,7 @@ VulkanBlock* VulkanCachingAllocator::allocate_new_block(size_t size, int device,
     void* mapped_ptr = nullptr;
     bool is_host_visible = (properties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0;
     if (is_host_visible) {
-        result = vkMapMemory(device_alloc.device, memory, 0, size, 0, &mapped_ptr);
+        result = vkMapMemory(device_alloc.device, memory, 0, slab_size, 0, &mapped_ptr);
         if (result != VK_SUCCESS) {
             vkFreeMemory(device_alloc.device, memory, nullptr);
             vkDestroyBuffer(device_alloc.device, buffer, nullptr);
@@ -536,13 +627,13 @@ VulkanBlock* VulkanCachingAllocator::allocate_new_block(size_t size, int device,
         mapped_ptr = reinterpret_cast<void*>(buffer);
     }
 
-    // Create block
-    auto block = std::make_unique<VulkanBlock>(buffer, memory, mapped_ptr, size, device,
+    // Create block with full slab size
+    auto block = std::make_unique<VulkanBlock>(buffer, memory, mapped_ptr, slab_size, device,
                                                 alloc_info.memoryTypeIndex);
     block->is_host_visible = is_host_visible;
     block->owns_memory = true;
     block->memory_offset = 0;
-    block->memory_size = size;
+    block->memory_size = slab_size;
     block->base_mapped_ptr = mapped_ptr;
     VulkanBlock* block_ptr = block.get();
 
@@ -553,7 +644,12 @@ VulkanBlock* VulkanCachingAllocator::allocate_new_block(size_t size, int device,
     device_alloc.memory_ref_counts[memory] = 1;
 
     // Update statistics
-    device_alloc.stats.reserved_bytes += size;
+    device_alloc.stats.reserved_bytes += slab_size;
+
+    // Split the slab: return only the requested size, cache the remainder
+    if (slab_size > size + min_split_size_) {
+        split_block(block_ptr, size);
+    }
 
     return block_ptr;
 }
@@ -647,6 +743,8 @@ bool VulkanCachingAllocator::split_block(VulkanBlock* block, size_t size) {
 }
 
 size_t VulkanCachingAllocator::round_size(size_t size) const {
+    // Just apply base alignment (256 bytes) - no aggressive bucketing.
+    // Bucketing was causing too much memory overhead for large models.
     return ((size + alignment_ - 1) / alignment_) * alignment_;
 }
 
@@ -674,20 +772,29 @@ void VulkanCachingAllocator::release_block(VulkanBlock* block) {
     // Remove from free blocks if present
     device_alloc.free_blocks.erase(block);
 
-    // Destroy the buffer
+    // Destroy the buffer (each block has its own VkBuffer even if sharing memory)
     if (block->buffer != VK_NULL_HANDLE) {
         vkDestroyBuffer(device_alloc.device, block->buffer, nullptr);
     }
 
-    // With sub-allocation disabled, each block owns its own memory
-    // We can free it directly without reference counting
     VkDeviceMemory memory = block->memory;
 
-    // Clean up reference count entry if it exists (for backward compatibility)
-    device_alloc.memory_ref_counts.erase(memory);
+    // Use reference counting to manage shared memory from split blocks
+    bool should_free_memory = false;
+    auto ref_it = device_alloc.memory_ref_counts.find(memory);
+    if (ref_it != device_alloc.memory_ref_counts.end()) {
+        ref_it->second--;
+        if (ref_it->second == 0) {
+            should_free_memory = true;
+            device_alloc.memory_ref_counts.erase(ref_it);
+        }
+    } else {
+        // No ref count entry means this block solely owns its memory
+        should_free_memory = true;
+    }
 
-    // Free the memory
-    if (memory != VK_NULL_HANDLE) {
+    // Free the underlying memory only when the last reference is released
+    if (should_free_memory && memory != VK_NULL_HANDLE) {
         // Unmap memory only if it's actually host-visible (mapped)
         if (block->is_host_visible && block->base_mapped_ptr) {
             vkUnmapMemory(device_alloc.device, memory);
@@ -695,11 +802,11 @@ void VulkanCachingAllocator::release_block(VulkanBlock* block) {
 
         // Free the underlying device memory
         vkFreeMemory(device_alloc.device, memory, nullptr);
+    }
 
-        // Subtract from reserved_bytes
-        if (device_alloc.stats.reserved_bytes >= block->size) {
-            device_alloc.stats.reserved_bytes -= block->size;
-        }
+    // Subtract from reserved_bytes only for the block's portion
+    if (device_alloc.stats.reserved_bytes >= block->size) {
+        device_alloc.stats.reserved_bytes -= block->size;
     }
 
     // Update cached_bytes

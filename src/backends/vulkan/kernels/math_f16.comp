@@ -48,22 +48,27 @@ void main() {
 
     float16_t res0, res1;
 
+    // Binary ops: compute in float32 to avoid overflow in float16 range (±65504).
+    // This matches the CPU backend which upcasts F16→F32 before computing.
+    float fa0 = float(val_a0), fb0 = float(val_b0);
+    float fa1 = float(val_a1), fb1 = float(val_b1);
+
     switch (params.op) {
         case 0: // add
-            res0 = val_a0 + val_b0;
-            res1 = val_a1 + val_b1;
+            res0 = float16_t(fa0 + fb0);
+            res1 = float16_t(fa1 + fb1);
             break;
         case 1: // sub
-            res0 = val_a0 - val_b0;
-            res1 = val_a1 - val_b1;
+            res0 = float16_t(fa0 - fb0);
+            res1 = float16_t(fa1 - fb1);
             break;
         case 2: // mul
-            res0 = val_a0 * val_b0;
-            res1 = val_a1 * val_b1;
+            res0 = float16_t(fa0 * fb0);
+            res1 = float16_t(fa1 * fb1);
             break;
         case 3: // div
-            res0 = val_a0 / val_b0;
-            res1 = val_a1 / val_b1;
+            res0 = float16_t(fa0 / fb0);
+            res1 = float16_t(fa1 / fb1);
             break;
         case 4: // sqrt (unary)
             res0 = float16_t(sqrt(float(val_a0)));

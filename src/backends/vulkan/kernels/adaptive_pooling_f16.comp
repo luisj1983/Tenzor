@@ -28,19 +28,24 @@ float readF16(uint element_idx) {
     return unpackHalf2x16(bits | (bits << 16)).x;
 }
 
-// Helper to write float16 at element index
+// Helper to write float16 at element index using atomic compare-exchange
+// Two threads writing adjacent elements share the same uint32 word,
+// so we must use atomicCompSwap to avoid clobbering each other's data.
 void writeF16(uint element_idx, float value) {
     uint word_idx = element_idx / 2;
     uint word_offset = element_idx % 2;
 
-    // Convert value to float16 bits
     uint new_bits = packHalf2x16(vec2(value, 0.0)) & 0xFFFFu;
+    uint shift = word_offset * 16;
+    uint mask = 0xFFFFu << shift;
 
-    // Read current word, modify our half, write back
-    uint current = output_data[word_idx];
-    uint mask = 0xFFFFu << (word_offset * 16);
-    uint new_word = (current & ~mask) | (new_bits << (word_offset * 16));
-    output_data[word_idx] = new_word;
+    uint old_val = output_data[word_idx];
+    uint new_val, expected;
+    do {
+        expected = old_val;
+        new_val = (expected & ~mask) | (new_bits << shift);
+        old_val = atomicCompSwap(output_data[word_idx], expected, new_val);
+    } while (old_val != expected);
 }
 
 // Helper to compute start index for adaptive pooling

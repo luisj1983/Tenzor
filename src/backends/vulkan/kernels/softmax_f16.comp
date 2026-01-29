@@ -3,8 +3,10 @@
 
 // Softmax with numerical stability for Float16
 // Float16 elements are packed 2 per 32-bit word
-// Uses single-threaded writes per word to avoid race conditions
 // Uses shared memory for max and sum - no external buffers needed
+//
+// IMPORTANT: Output writes use atomicCompSwap to handle cases where
+// batch boundaries don't align to word boundaries (odd num_classes).
 layout(local_size_x = 256) in;
 
 layout(binding = 0) buffer Input { uint input_data[]; };
@@ -22,7 +24,7 @@ shared float shared_sum[256];
 // Temporary storage for computed values
 shared float shared_exp[512];  // Up to 512 elements per batch
 
-// Helper to read float16 at element index
+// Helper to read float16 at element index (global index into packed buffer)
 float readF16(uint element_idx) {
     uint word_idx = element_idx / 2;
     uint word_offset = element_idx % 2;
@@ -31,11 +33,22 @@ float readF16(uint element_idx) {
     return unpackHalf2x16(bits | (bits << 16)).x;
 }
 
-// Helper to pack two float16 values
-uint packF16Pair(float v0, float v1) {
-    uint bits0 = packHalf2x16(vec2(v0, 0.0)).x & 0xFFFFu;
-    uint bits1 = packHalf2x16(vec2(v1, 0.0)).x & 0xFFFFu;
-    return bits0 | (bits1 << 16);
+// Write a single F16 element at a global element index using atomic CAS
+// This is safe when two threads write to different halves of the same word
+void writeF16(uint element_idx, float val) {
+    uint word_idx = element_idx / 2;
+    uint half_idx = element_idx % 2;
+    uint bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
+    uint shift = half_idx * 16;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = output_data[word_idx];
+    uint new_val, expected;
+    do {
+        expected = old_val;
+        new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(output_data[word_idx], expected, new_val);
+    } while (old_val != expected);
 }
 
 void main() {
@@ -97,36 +110,18 @@ void main() {
         float inv_sum = 1.0 / row_sum;
         barrier();
 
-        // Step 3: Write output as packed pairs (each thread writes one word = 2 elements)
-        // Thread tid writes word tid, which contains elements tid*2 and tid*2+1
-        uint num_words = (params.num_classes + 1) / 2;
-        for (uint word_idx = tid; word_idx < num_words; word_idx += 256) {
-            uint elem0 = word_idx * 2;
-            uint elem1 = word_idx * 2 + 1;
-
-            float val0, val1;
-
-            // Read exp values (recompute if not in shared memory)
-            if (elem0 < 512 && elem0 < params.num_classes) {
-                val0 = shared_exp[elem0] * inv_sum;
-            } else if (elem0 < params.num_classes) {
-                float input_val = readF16(base_idx + elem0);
-                val0 = exp(input_val - row_max) * inv_sum;
+        // Step 3: Write output elements
+        // Use per-element writes with atomicCompSwap to handle non-word-aligned
+        // batch boundaries (when num_classes is odd)
+        for (uint i = tid; i < params.num_classes; i += 256) {
+            float val;
+            if (i < 512) {
+                val = shared_exp[i] * inv_sum;
             } else {
-                val0 = 0.0;
+                float input_val = readF16(base_idx + i);
+                val = exp(input_val - row_max) * inv_sum;
             }
-
-            if (elem1 < 512 && elem1 < params.num_classes) {
-                val1 = shared_exp[elem1] * inv_sum;
-            } else if (elem1 < params.num_classes) {
-                float input_val = readF16(base_idx + elem1);
-                val1 = exp(input_val - row_max) * inv_sum;
-            } else {
-                val1 = 0.0;
-            }
-
-            // Write packed pair - no race condition since each thread owns its word
-            output_data[(base_idx / 2) + word_idx] = packF16Pair(val0, val1);
+            writeF16(base_idx + i, val);
         }
     }
 }

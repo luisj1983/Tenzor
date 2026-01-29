@@ -108,6 +108,20 @@ TEST_P(SwinMultiDTypeTest, SwinTinyGradientFlow) {
     Variable loss = tenzor::sum(output);
     loss.backward();
 
+    if (input.grad().has_value()) {
+        auto grad = input.grad().value().to(Device::cpu()).to(DType::Float32);
+        auto grad_data = grad.data<float>();
+        int64_t total = grad.numel();
+        int non_finite_count = 0;
+        float max_abs = 0;
+        for (int64_t i = 0; i < total; ++i) {
+            if (!std::isfinite(grad_data[i])) non_finite_count++;
+            else max_abs = std::max(max_abs, std::abs(grad_data[i]));
+        }
+        std::cerr << "SWIN_TINY GRAD STATS: total=" << total << " non_finite=" << non_finite_count
+                  << " max_abs_finite=" << max_abs << std::endl;
+    }
+
     EXPECT_TRUE(input.grad().has_value());
     auto params = model->parameters();
     EXPECT_GT(params.size(), 0);
@@ -185,6 +199,20 @@ TEST_P(SwinMultiDTypeTest, SwinSmallGradientFlow) {
     Variable output = model->forward(input);
     Variable loss = tenzor::sum(output);
     loss.backward();
+
+    if (input.grad().has_value()) {
+        auto grad = input.grad().value().to(Device::cpu()).to(DType::Float32);
+        auto grad_data = grad.data<float>();
+        int64_t total = grad.numel();
+        int non_finite_count = 0;
+        float max_abs = 0;
+        for (int64_t i = 0; i < total; ++i) {
+            if (!std::isfinite(grad_data[i])) non_finite_count++;
+            else max_abs = std::max(max_abs, std::abs(grad_data[i]));
+        }
+        std::cerr << "SWIN_SMALL GRAD STATS: total=" << total << " non_finite=" << non_finite_count
+                  << " max_abs_finite=" << max_abs << std::endl;
+    }
 
     EXPECT_TRUE(input.grad().has_value());
     EXPECT_EQ(input.grad()->dtype(), dtype());
@@ -622,11 +650,39 @@ TEST_P(SwinMultiDTypeTest, SwinBaseNumericalStability) {
     loss.backward();
 
     // Check for numerical stability (no NaN or Inf)
+    {
+        auto out_cpu = output.tensor().to(Device::cpu()).to(DType::Float32);
+        auto* out_data = out_cpu.data<float>();
+        int64_t n = out_cpu.numel();
+        float max_out = 0;
+        int non_fin = 0;
+        for (int64_t i = 0; i < n; i++) {
+            if (!std::isfinite(out_data[i])) non_fin++;
+            else max_out = std::max(max_out, std::abs(out_data[i]));
+        }
+        std::cerr << "OUTPUT STATS: numel=" << n << " non_finite=" << non_fin
+                  << " max_abs=" << max_out << std::endl;
+    }
     EXPECT_TRUE(checkFiniteValues(output));
 
     if (input.grad().has_value()) {
         auto grad = input.grad().value().to(Device::cpu()).to(DType::Float32);
         auto grad_data = grad.data<float>();
+        int64_t total = grad.numel();
+        int non_finite_count = 0;
+        float max_abs = 0;
+        for (int64_t i = 0; i < total; ++i) {
+            if (!std::isfinite(grad_data[i])) {
+                non_finite_count++;
+                if (non_finite_count <= 10) {
+                    std::cerr << "  NON-FINITE at index " << i << ": " << grad_data[i] << std::endl;
+                }
+            } else {
+                max_abs = std::max(max_abs, std::abs(grad_data[i]));
+            }
+        }
+        std::cerr << "GRAD STATS: total=" << total << " non_finite=" << non_finite_count
+                  << " max_abs_finite=" << max_abs << std::endl;
         for (size_t i = 0; i < std::min(size_t(100), static_cast<size_t>(grad.numel())); ++i) {
             EXPECT_TRUE(std::isfinite(grad_data[i]));
         }

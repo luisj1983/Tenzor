@@ -59,16 +59,19 @@ void main() {
     uint src_packed = input_data[src_word_idx];
     uint src_val = (src_half_idx == 0) ? (src_packed & 0xFFFF) : (src_packed >> 16);
 
-    // Write to destination packed uint32
+    // Write to destination packed uint32 using atomic CAS to avoid race conditions.
+    // Two threads writing to different halves of the same word must not corrupt
+    // each other's data.
     uint dst_word_idx = idx / 2;
     uint dst_half_idx = idx % 2;
+    uint shift = dst_half_idx * 16;
+    uint mask = 0xFFFFu << shift;
 
-    // Atomic operation to safely update the packed value
-    if (dst_half_idx == 0) {
-        uint old_val = output_data[dst_word_idx];
-        output_data[dst_word_idx] = (old_val & 0xFFFF0000) | src_val;
-    } else {
-        uint old_val = output_data[dst_word_idx];
-        output_data[dst_word_idx] = (old_val & 0x0000FFFF) | (src_val << 16);
-    }
+    uint old_val = output_data[dst_word_idx];
+    uint new_val, expected;
+    do {
+        expected = old_val;
+        new_val = (expected & ~mask) | (src_val << shift);
+        old_val = atomicCompSwap(output_data[dst_word_idx], expected, new_val);
+    } while (old_val != expected);
 }

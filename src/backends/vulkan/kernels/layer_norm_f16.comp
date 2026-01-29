@@ -95,42 +95,32 @@ void main() {
     float inv_std = 1.0 / sqrt(variance + params.epsilon);
     barrier();
 
-    // Step 3: Normalize and write output as packed pairs
-    // Each thread writes complete words (2 elements) to avoid race conditions
-    uint num_words = (params.normalized_shape + 1) / 2;
-    for (uint word_idx = tid; word_idx < num_words; word_idx += 256) {
-        uint elem0 = word_idx * 2;
-        uint elem1 = word_idx * 2 + 1;
-
-        float val0, val1;
-
-        // Process element 0
-        if (elem0 < params.normalized_shape) {
-            float input_val = readF16(0, base_idx + elem0);
-            val0 = (input_val - mean) * inv_std;
-            if (params.affine > 0) {
-                float gamma = readF16(2, elem0);
-                float beta = readF16(3, elem0);
-                val0 = val0 * gamma + beta;
-            }
-        } else {
-            val0 = 0.0;
+    // Step 3: Normalize and write output per-element
+    // Use atomicCompSwap to handle non-word-aligned batch boundaries
+    // (when normalized_shape is odd, base_idx can be odd for some batches)
+    for (uint i = tid; i < params.normalized_shape; i += 256) {
+        float input_val = readF16(0, base_idx + i);
+        float val = (input_val - mean) * inv_std;
+        if (params.affine > 0) {
+            float gamma = readF16(2, i);
+            float beta = readF16(3, i);
+            val = val * gamma + beta;
         }
 
-        // Process element 1
-        if (elem1 < params.normalized_shape) {
-            float input_val = readF16(0, base_idx + elem1);
-            val1 = (input_val - mean) * inv_std;
-            if (params.affine > 0) {
-                float gamma = readF16(2, elem1);
-                float beta = readF16(3, elem1);
-                val1 = val1 * gamma + beta;
-            }
-        } else {
-            val1 = 0.0;
-        }
+        // Write using atomic CAS to safely handle packed F16 words
+        uint global_idx = base_idx + i;
+        uint word_idx = global_idx / 2;
+        uint half_idx = global_idx % 2;
+        uint bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
+        uint shift = half_idx * 16;
+        uint mask = 0xFFFFu << shift;
 
-        // Write packed pair - no race condition since each thread owns its word
-        output_data[(base_idx / 2) + word_idx] = packF16Pair(val0, val1);
+        uint old_val = output_data[word_idx];
+        uint new_val, expected;
+        do {
+            expected = old_val;
+            new_val = (expected & ~mask) | (bits << shift);
+            old_val = atomicCompSwap(output_data[word_idx], expected, new_val);
+        } while (old_val != expected);
     }
 }

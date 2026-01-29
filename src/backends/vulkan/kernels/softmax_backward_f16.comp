@@ -30,21 +30,24 @@ float readF16(uint buffer_type, uint element_idx) {
     return unpackHalf2x16(bits | (bits << 16)).x;
 }
 
-// Helper to write float16 at element index
+// Helper to write float16 at element index using atomic compare-exchange
+// Two threads writing adjacent elements share the same uint32 word,
+// so we must use atomicCompSwap to avoid clobbering each other's data.
 void writeF16(uint element_idx, float value) {
     uint word_idx = element_idx / 2;
     uint word_offset = element_idx % 2;
 
-    // Read-modify-write (not atomic, but we process pairs)
-    uint packed = grad_input[word_idx];
     uint bits = packHalf2x16(vec2(value, 0.0)) & 0xFFFFu;
+    uint shift = word_offset * 16;
+    uint mask = 0xFFFFu << shift;
 
-    if (word_offset == 0) {
-        packed = (packed & 0xFFFF0000u) | bits;
-    } else {
-        packed = (packed & 0x0000FFFFu) | (bits << 16);
-    }
-    grad_input[word_idx] = packed;
+    uint old_val = grad_input[word_idx];
+    uint new_val, expected;
+    do {
+        expected = old_val;
+        new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(grad_input[word_idx], expected, new_val);
+    } while (old_val != expected);
 }
 
 // Helper to pack two float16 values

@@ -1,8 +1,9 @@
 #version 450
 #extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
 
-// Batched matrix multiplication with tiling for Float64
+// Strided batched matrix multiplication with tiling for Float64
 // C[b, :, :] = A[b, :, :] @ B[b, :, :]
+// Supports non-contiguous (strided) inputs to avoid contiguous copies.
 // A: (batch, M, K), B: (batch, K, N), C: (batch, M, N)
 layout(local_size_x = 16, local_size_y = 16) in;
 
@@ -15,6 +16,14 @@ layout(push_constant) uniform PushConstants {
     uint M;      // rows of A
     uint N;      // cols of B
     uint K;      // cols of A / rows of B
+    // A strides (in elements)
+    uint a_stride0;  // batch stride
+    uint a_stride1;  // row stride
+    uint a_stride2;  // col stride
+    // B strides (in elements)
+    uint b_stride0;  // batch stride
+    uint b_stride1;  // row stride
+    uint b_stride2;  // col stride
 } params;
 
 shared double tileA[16][16];
@@ -30,14 +39,12 @@ void main() {
 
     bool in_bounds = (batch_idx < params.batch && row < params.M && col < params.N);
 
-    // Batch strides
-    uint a_batch_stride = params.M * params.K;
-    uint b_batch_stride = params.K * params.N;
-    uint c_batch_stride = params.M * params.N;
+    // Base offsets for this batch (using strides)
+    uint a_base = batch_idx * params.a_stride0;
+    uint b_base = batch_idx * params.b_stride0;
 
-    // Base offsets for this batch
-    uint a_base = batch_idx * a_batch_stride;
-    uint b_base = batch_idx * b_batch_stride;
+    // Output is always contiguous
+    uint c_batch_stride = params.M * params.N;
     uint c_base = batch_idx * c_batch_stride;
 
     double sum = 0.0;
@@ -46,18 +53,18 @@ void main() {
     uint num_tiles = (params.K + 15) / 16;
 
     for (uint t = 0; t < num_tiles; t++) {
-        // Load tile from A
+        // Load tile from A using strides
         uint a_col = t * 16 + local_col;
         if (batch_idx < params.batch && row < params.M && a_col < params.K) {
-            tileA[local_row][local_col] = a[a_base + row * params.K + a_col];
+            tileA[local_row][local_col] = a[a_base + row * params.a_stride1 + a_col * params.a_stride2];
         } else {
             tileA[local_row][local_col] = 0.0;
         }
 
-        // Load tile from B
+        // Load tile from B using strides
         uint b_row = t * 16 + local_row;
         if (batch_idx < params.batch && b_row < params.K && col < params.N) {
-            tileB[local_row][local_col] = b[b_base + b_row * params.N + col];
+            tileB[local_row][local_col] = b[b_base + b_row * params.b_stride1 + col * params.b_stride2];
         } else {
             tileB[local_row][local_col] = 0.0;
         }
@@ -72,7 +79,7 @@ void main() {
         barrier();
     }
 
-    // Write result
+    // Write result (output is always contiguous)
     if (in_bounds) {
         c[c_base + row * params.N + col] = sum;
     }

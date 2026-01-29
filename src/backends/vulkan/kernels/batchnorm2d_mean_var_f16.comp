@@ -4,6 +4,9 @@
 
 // Batch Normalization 2D - Compute Mean and Variance for Float16 input
 // Input is packed F16; accumulation and output (mean/var) are Float32
+//
+// Each thread processes one input element and atomically accumulates
+// into per-channel global buffers. This handles any number of channels.
 layout(local_size_x = 256) in;
 
 layout(binding = 0) buffer Input { uint input_data[]; };       // Packed F16 (N, C, H, W)
@@ -19,54 +22,36 @@ layout(push_constant) uniform PushConstants {
     uint pass_id;        // 0 = compute mean, 1 = compute variance
 } params;
 
-float16_t readF16Element(uint flat_idx) {
+float readF16AsFloat(uint flat_idx) {
     uint word_idx = flat_idx / 2;
     uint half_idx = flat_idx % 2;
     uint packed = input_data[word_idx];
     uint bits = (packed >> (half_idx * 16)) & 0xFFFFu;
-    return float16_t(unpackHalf2x16(bits | (bits << 16)).x);
+    return unpackHalf2x16(bits | (bits << 16)).x;
 }
-
-shared float s_channel_sums[256];
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
-    uint local_id = gl_LocalInvocationID.x;
 
-    if (local_id < params.channels && local_id < 256) {
-        s_channel_sums[local_id] = 0.0;
-    }
-    barrier();
-
-    // Accumulate if within bounds (no early return to avoid barrier divergence)
-    if (idx < params.n_elements) {
-        uint temp = idx;
-        uint w = temp % params.spatial_size;
-        temp /= params.spatial_size;
-        uint c = temp % params.channels;
-
-        float value = float(readF16Element(idx));
-
-        if (params.pass_id == 0) {
-            atomicAdd(s_channel_sums[c % 256], value);
-        } else {
-            float mean = mean_data[c];
-            float diff = value - mean;
-            atomicAdd(s_channel_sums[c % 256], diff * diff);
-        }
+    if (idx >= params.n_elements) {
+        return;
     }
 
-    barrier();
+    // Compute channel index from flat index
+    uint temp = idx;
+    uint w = temp % params.spatial_size;
+    temp /= params.spatial_size;
+    uint c = temp % params.channels;
 
-    if (local_id == 0) {
-        for (uint i = 0; i < params.channels && i < 256; i++) {
-            if (s_channel_sums[i] != 0.0) {
-                if (params.pass_id == 0) {
-                    atomicAdd(temp_sum[i], s_channel_sums[i]);
-                } else {
-                    atomicAdd(var_data[i], s_channel_sums[i]);
-                }
-            }
-        }
+    float value = readF16AsFloat(idx);
+
+    if (params.pass_id == 0) {
+        // Pass 0: accumulate sum for mean computation
+        atomicAdd(temp_sum[c], value);
+    } else {
+        // Pass 1: accumulate squared differences for variance
+        float mean = mean_data[c];
+        float diff = value - mean;
+        atomicAdd(var_data[c], diff * diff);
     }
 }

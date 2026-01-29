@@ -52,8 +52,17 @@ auto BackwardEngine::execute(Variable& root, std::optional<Tensor> gradient, boo
             grad_outputs.push_back(total_grad);
         }
 
+        // Reload offloaded saved tensors back to GPU before backward
+        function->reload_saved_tensors();
+
         // Compute gradients for inputs
         auto input_grads = function->backward(grad_outputs);
+
+        // Release saved tensors immediately to free GPU memory for subsequent layers.
+        // This is safe because saved tensors are only needed during this backward() call.
+        if (!retain_graph) {
+            function->release_saved_tensors();
+        }
 
         // Accumulate gradients to input variables
         const auto& input_vars = function->input_variables();

@@ -2,8 +2,12 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 
 // Batch Normalization 2D Forward Pass for Float16
-// Input/output are packed F16, but mean/var/gamma/beta are Float32 (channel-level statistics)
+// Input/output are packed F16 (2 elements per 32-bit word)
+// Mean/var/gamma/beta are Float32 (channel-level statistics)
 // Computation done in float32 for numerical stability
+//
+// Each thread processes a pair of F16 elements (one 32-bit word) to avoid
+// race conditions when writing packed data.
 layout(local_size_x = 256) in;
 
 layout(binding = 0) buffer Input { uint input_data[]; };       // Packed F16 (N, C, H, W)
@@ -22,43 +26,71 @@ layout(push_constant) uniform PushConstants {
     uint has_affine;
 } params;
 
-float16_t readF16Element(uint flat_idx) {
-    uint word_idx = flat_idx / 2;
-    uint half_idx = flat_idx % 2;
-    uint packed = input_data[word_idx];
-    uint bits = (packed >> (half_idx * 16)) & 0xFFFFu;
-    return float16_t(unpackHalf2x16(bits | (bits << 16)).x);
+// Unpack a 32-bit word containing two F16 values
+vec2 unpackF16Pair(uint packed) {
+    float lo = unpackHalf2x16(packed).x;
+    float hi = unpackHalf2x16(packed >> 16).x;
+    return vec2(lo, hi);
 }
 
-void writeF16Element(uint flat_idx, float16_t val) {
-    uint word_idx = flat_idx / 2;
-    uint half_idx = flat_idx % 2;
-    uint bits = packHalf2x16(vec2(float(val), 0.0)).x & 0xFFFFu;
-    uint shift = half_idx * 16;
-    atomicAnd(output_data[word_idx], ~(0xFFFFu << shift));
-    atomicOr(output_data[word_idx], bits << shift);
+// Pack two float values into a 32-bit word as F16
+uint packF16Pair(float v0, float v1) {
+    uint bits0 = packHalf2x16(vec2(v0, 0.0)) & 0xFFFFu;
+    uint bits1 = packHalf2x16(vec2(v1, 0.0)) & 0xFFFFu;
+    return bits0 | (bits1 << 16);
 }
 
-void main() {
-    uint idx = gl_GlobalInvocationID.x;
-    if (idx >= params.n_elements) return;
-
+// Process a single element and return the result
+float processElement(uint flat_idx) {
     // Decode to get channel
-    uint temp = idx;
+    uint temp = flat_idx;
     uint w = temp % params.spatial_size;
     temp /= params.spatial_size;
     uint c = temp % params.channels;
 
-    float x = float(readF16Element(idx));
+    // Read the element
+    uint word_idx = flat_idx / 2;
+    uint half_idx = flat_idx % 2;
+    uint packed = input_data[word_idx];
+    float x = (half_idx == 0) ? unpackHalf2x16(packed).x : unpackHalf2x16(packed >> 16).x;
+
+    // Normalize
     float mean = mean_data[c];
     float variance = var_data[c];
-
     float normalized = (x - mean) / sqrt(variance + params.eps);
 
+    // Apply affine if needed
     float result = normalized;
     if (params.has_affine != 0) {
         result = normalized * gamma_data[c] + beta_data[c];
     }
 
-    writeF16Element(idx, float16_t(result));
+    return result;
+}
+
+void main() {
+    // Each thread processes one 32-bit word (2 F16 elements)
+    uint word_idx = gl_GlobalInvocationID.x;
+    uint num_words = (params.n_elements + 1) / 2;
+
+    if (word_idx >= num_words) return;
+
+    uint elem0 = word_idx * 2;
+    uint elem1 = word_idx * 2 + 1;
+
+    float result0 = 0.0;
+    float result1 = 0.0;
+
+    // Process first element (always valid if word is valid)
+    if (elem0 < params.n_elements) {
+        result0 = processElement(elem0);
+    }
+
+    // Process second element (may be padding if n_elements is odd)
+    if (elem1 < params.n_elements) {
+        result1 = processElement(elem1);
+    }
+
+    // Write both elements as a single word - no race condition
+    output_data[word_idx] = packF16Pair(result0, result1);
 }

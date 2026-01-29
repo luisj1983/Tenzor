@@ -16,6 +16,7 @@
 #include "../../include/tenzor/models/vit.hpp"
 #include "../../include/tenzor/core/tensor.hpp"
 #include "../../include/tenzor/autograd/variable.hpp"
+#include "../../include/tenzor/autograd/function.hpp"
 #include "../multi_backend_dtype_fixture.hpp"
 #include <tuple>
 #include <vector>
@@ -36,9 +37,14 @@ protected:
      * Sizes are chosen to be divisible by common patch sizes (14, 16)
      */
     int getImageSizeForMemory(int default_size, size_t param_count, bool needs_gradients, int patch_size = 16) const {
-        if (backend_name() != "cuda") return default_size;
+        if (backend_name() != "cuda" && backend_name() != "vulkan") return default_size;
 
         bool is_float64 = (dtype() == DType::Float64);
+        // Vulkan uses unfused attention (separate BMM ops) while CUDA uses cuDNN SDPA,
+        // so Vulkan needs more memory for attention intermediates in the autograd graph.
+        bool is_vulkan = (backend_name() == "vulkan");
+        // Vulkan F16 uses F32 upcasts for key ops, so memory usage is similar to F32
+        bool is_vulkan_f16 = (is_vulkan && dtype() == DType::Float16);
 
         // ViT-Huge (~632M params) with Float64 + gradients needs very small images
         if (param_count > 500'000'000 && needs_gradients && is_float64) {
@@ -53,8 +59,9 @@ protected:
             return 112;  // Divisible by 14 and 16
         }
         // ViT-Large with gradients and Float64
+        // Vulkan needs smaller images due to unfused attention intermediates
         if (param_count > 200'000'000 && needs_gradients && is_float64) {
-            return 160;  // Divisible by 16
+            return is_vulkan ? 112 : 160;  // Both divisible by 16
         }
         // Large image sizes (512+) need reduction with Float64
         if (default_size >= 512 && is_float64) {
@@ -407,9 +414,13 @@ TEST_P(ViTMultiDtypeTest, ViTHugePatch14ForwardShape) {
 }
 
 TEST_P(ViTMultiDtypeTest, ViTHugePatch14GradientFlow) {
-    // For CUDA + Float64, use a reduced model (8 layers instead of 32)
-    // to fit in 8GB GPU memory (~160M params instead of 632M)
-    bool use_reduced_model = (backend_name() != "cpu" && dtype() == DType::Float64);
+    // Use a reduced model (8 layers instead of 32) to fit in 8GB GPU memory
+    // (~160M params instead of 632M) for memory-constrained configurations:
+    // - Float64 on any GPU backend (doubles memory vs Float32)
+    // - Vulkan backend (unfused attention stores more intermediates than CUDA's cuDNN SDPA)
+    bool use_reduced_model = (backend_name() != "cpu" &&
+        (dtype() == DType::Float64 ||
+         backend_name() == "vulkan"));
     int img_size = use_reduced_model ? 112 : getImageSizeForMemory(224, 632'000'000, true);
 
     std::shared_ptr<ViTForImageClassification> model;
