@@ -62,20 +62,35 @@ auto put(const Tensor& input, const Tensor& index, const Tensor& source) -> Tens
 }
 
 auto nonzero(const Tensor& input) -> Tensor {
-    // Simple CPU implementation - find all non-zero elements
-    auto input_cpu = input.to(Device::cpu());
-    const float* data = static_cast<const float*>(input_cpu.data_ptr());
-
     auto shape = input.shape();
     int64_t ndim = shape.size();
+
+    // Use backend dispatch for non-CPU devices (avoids GPU→CPU→GPU round-trip)
+    if (input.device().type != Device::Type::CPU) {
+        OpAttributes attrs;
+        // Pass shape info so the backend can compute multi-dimensional indices
+        std::string shape_str;
+        for (size_t i = 0; i < shape.size(); ++i) {
+            if (i > 0) shape_str += ",";
+            shape_str += std::to_string(shape[i]);
+        }
+        attrs["shape"] = shape_str;
+        attrs["ndim"] = std::to_string(ndim);
+
+        std::vector<Tensor> inputs = {input};
+        auto results = dispatch(OpId::Nonzero, inputs, attrs);
+        return results[0];
+    }
+
+    // CPU fallback
+    auto input_cpu = input.to(Device::cpu());
+    const float* data = static_cast<const float*>(input_cpu.data_ptr());
     int64_t numel = input.numel();
 
-    // First pass: count non-zero elements
     std::vector<std::vector<int64_t>> indices;
 
     for (int64_t flat_idx = 0; flat_idx < numel; ++flat_idx) {
         if (std::abs(data[flat_idx]) > 1e-10f) {
-            // Convert flat index to multi-dimensional indices
             std::vector<int64_t> multi_idx(ndim);
             int64_t remaining = flat_idx;
             for (int64_t d = ndim - 1; d >= 0; --d) {
@@ -91,7 +106,6 @@ auto nonzero(const Tensor& input) -> Tensor {
         return tenzor::empty({0, ndim}, DType::Int64, input.device());
     }
 
-    // Create result tensor
     std::vector<int64_t> result_data(num_nonzero * ndim);
     for (int64_t i = 0; i < num_nonzero; ++i) {
         for (int64_t d = 0; d < ndim; ++d) {
@@ -100,7 +114,7 @@ auto nonzero(const Tensor& input) -> Tensor {
     }
 
     auto result = tenzor::from_data(result_data.data(), {num_nonzero, ndim}, Device::cpu());
-    return result.to(input.device());
+    return result;
 }
 
 auto select(const Tensor& input, int64_t dim, int64_t index) -> Tensor {

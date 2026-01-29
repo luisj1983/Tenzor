@@ -6,6 +6,8 @@
 #include "tenzor/nn/optim/rmsprop.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/ops/op_id.hpp"
 #include <cmath>
 #include <stdexcept>
 
@@ -77,6 +79,30 @@ auto RMSprop::step() -> void {
         const auto& grad_orig = param->grad().value();
         const auto& param_data_orig = param->tensor();
         auto original_device = param_data_orig.device();
+
+        // Vulkan fast path: fused kernel avoids GPU→CPU→GPU round-trip
+        if (original_device.type == Device::Type::Vulkan &&
+            grad_orig.device().type == Device::Type::Vulkan) {
+
+            std::vector<Tensor> inputs = {grad_orig, param->tensor(), square_avg_[i]};
+            if (momentum_ > 0.0 && i < momentum_buffer_.size()) {
+                inputs.push_back(momentum_buffer_[i]);
+            }
+            if (centered_ && i < grad_avg_.size()) {
+                inputs.push_back(grad_avg_[i]);
+            }
+
+            OpAttributes attrs;
+            attrs["lr"] = std::to_string(static_cast<float>(lr_));
+            attrs["alpha"] = std::to_string(static_cast<float>(alpha_));
+            attrs["eps"] = std::to_string(static_cast<float>(eps_));
+            attrs["weight_decay"] = std::to_string(static_cast<float>(weight_decay_));
+            attrs["momentum"] = std::to_string(static_cast<float>(momentum_));
+            attrs["centered"] = centered_ ? "1" : "0";
+
+            dispatch(OpId::FusedRMSPropStep, inputs, attrs);
+            continue;
+        }
 
         // Move all tensors to CPU for data access
         Tensor grad = grad_orig.to(Device::cpu());

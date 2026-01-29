@@ -1,0 +1,40 @@
+#version 450
+#extension GL_EXT_shader_atomic_float : require
+
+// Embedding Backward Pass (Float32)
+// Scatter-add: accumulates gradients from grad_output into grad_weight rows indexed by indices
+// Input: grad_output (num_indices, embedding_dim), indices (num_indices)
+// Output: grad_weight (num_embeddings, embedding_dim)
+
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer GradOutput { float grad_output_data[]; };
+layout(binding = 1) buffer Indices { int indices_data[]; };
+layout(binding = 2) buffer GradWeight { float grad_weight_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint num_indices;
+    uint embedding_dim;
+    uint num_embeddings;
+} params;
+
+void main() {
+    uint global_id = gl_GlobalInvocationID.x;
+
+    uint index_pos = global_id / params.embedding_dim;
+    uint dim = global_id % params.embedding_dim;
+
+    if (index_pos >= params.num_indices) {
+        return;
+    }
+
+    uint target_row = uint(indices_data[index_pos]);
+
+    // Bounds check on target row
+    if (target_row >= params.num_embeddings) {
+        return;
+    }
+
+    atomicAdd(grad_weight_data[target_row * params.embedding_dim + dim],
+              grad_output_data[index_pos * params.embedding_dim + dim]);
+}

@@ -2395,21 +2395,6 @@ target_link_libraries(debug_vulkan_hang PRIVATE
     tenzor_core
 )
 
-add_executable(debug_gpt_f16
-    debug_gpt_f16.cpp
-)
-
-target_link_libraries(debug_gpt_f16 PRIVATE
-    tenzor_core
-)
-
-add_executable(debug_swin_f16
-    debug_swin_f16.cpp
-)
-
-target_link_libraries(debug_swin_f16 PRIVATE
-    tenzor_core
-)
 
 # Inplace operations multi-dtype tests
 add_executable(test_inplace_operations_multidtype

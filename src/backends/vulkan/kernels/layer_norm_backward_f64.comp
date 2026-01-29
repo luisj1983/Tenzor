@@ -1,0 +1,92 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
+#extension GL_EXT_shader_atomic_float : enable
+
+// Layer Normalization Backward Pass for Float64
+// Computes gradients w.r.t. input, weight (gamma), and bias (beta)
+//
+// One workgroup per batch element. Each workgroup computes:
+// 1. Shared memory reductions for sum_dy_w and sum_dy_w_xhat
+// 2. Per-element grad_input
+// 3. Atomic accumulation of grad_weight and grad_bias across batch elements
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer GradOutput { double grad_output[]; };    // (batch_size, normalized_shape)
+layout(binding = 1) buffer Input { double input_data[]; };           // (batch_size, normalized_shape)
+layout(binding = 2) buffer Mean { double mean_data[]; };             // (batch_size)
+layout(binding = 3) buffer Rstd { double rstd_data[]; };             // (batch_size)
+layout(binding = 4) buffer Weight { double weight_data[]; };         // (normalized_shape)
+layout(binding = 5) buffer GradInput { double grad_input[]; };       // (batch_size, normalized_shape)
+layout(binding = 6) buffer GradWeight { double grad_weight[]; };     // (normalized_shape) - accumulated atomically
+layout(binding = 7) buffer GradBias { double grad_bias[]; };         // (normalized_shape) - accumulated atomically
+
+layout(push_constant) uniform PushConstants {
+    uint batch_size;
+    uint normalized_shape;
+    uint affine;           // 0=no affine, 1=with affine
+    uint padding;
+} params;
+
+shared double shared_sum_dy_w[256];
+shared double shared_sum_dy_w_xhat[256];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint batch_idx = gl_WorkGroupID.x;
+
+    if (batch_idx >= params.batch_size) {
+        return;
+    }
+
+    uint base_idx = batch_idx * params.normalized_shape;
+
+    // Read mean and rstd for this batch element
+    double mean = mean_data[batch_idx];
+    double rstd = rstd_data[batch_idx];
+
+    // Step 1: Compute sum_dy_w and sum_dy_w_xhat via shared memory reduction
+    double local_sum_dy_w = 0.0;
+    double local_sum_dy_w_xhat = 0.0;
+    for (uint i = tid; i < params.normalized_shape; i += 256) {
+        double dy = grad_output[base_idx + i];
+        double w = (params.affine > 0) ? weight_data[i] : 1.0;
+        double xhat = (input_data[base_idx + i] - mean) * rstd;
+
+        local_sum_dy_w += dy * w;
+        local_sum_dy_w_xhat += dy * w * xhat;
+    }
+    shared_sum_dy_w[tid] = local_sum_dy_w;
+    shared_sum_dy_w_xhat[tid] = local_sum_dy_w_xhat;
+    barrier();
+
+    // Parallel reduction for sum_dy_w and sum_dy_w_xhat
+    for (uint s = 128; s > 0; s >>= 1) {
+        if (tid < s) {
+            shared_sum_dy_w[tid] += shared_sum_dy_w[tid + s];
+            shared_sum_dy_w_xhat[tid] += shared_sum_dy_w_xhat[tid + s];
+        }
+        barrier();
+    }
+
+    double sum_dy_w = shared_sum_dy_w[0];
+    double sum_dy_w_xhat = shared_sum_dy_w_xhat[0];
+    double inv_n = 1.0 / double(params.normalized_shape);
+    barrier();
+
+    // Step 2: Compute grad_input and accumulate grad_weight, grad_bias
+    for (uint i = tid; i < params.normalized_shape; i += 256) {
+        double dy = grad_output[base_idx + i];
+        double w = (params.affine > 0) ? weight_data[i] : 1.0;
+        double xhat = (input_data[base_idx + i] - mean) * rstd;
+
+        // grad_input = rstd * (dy * w - sum_dy_w / N - xhat * sum_dy_w_xhat / N)
+        double grad_in = rstd * (dy * w - sum_dy_w * inv_n - xhat * sum_dy_w_xhat * inv_n);
+        grad_input[base_idx + i] = grad_in;
+
+        // Accumulate grad_weight and grad_bias atomically across batch elements
+        if (params.affine > 0) {
+            atomicAdd(grad_weight[i], dy * xhat);
+            atomicAdd(grad_bias[i], dy);
+        }
+    }
+}

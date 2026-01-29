@@ -7,6 +7,8 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/ops/creation.hpp"
 #include "tenzor/autograd/function.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/ops/op_id.hpp"
 #include <stdexcept>
 #include <cmath>
 #include <iostream>
@@ -112,6 +114,19 @@ public:
         }
 
         const auto& grad_output = grad_outputs[0];
+
+        // Vulkan GPU fast path: dispatch to GPU embedding backward shader
+        if (grad_output.device().type == Device::Type::Vulkan) {
+            // Ensure indices are on the same device
+            Tensor indices_vk = (indices_.device() == grad_output.device())
+                               ? indices_ : indices_.to(grad_output.device());
+
+            OpAttributes attrs;
+            attrs["num_embeddings"] = std::to_string(num_embeddings_);
+            std::vector<Tensor> inputs_vec = {grad_output, indices_vk};
+            auto results = dispatch<OpId::EmbeddingBackward>(inputs_vec, attrs);
+            return results;
+        }
 
         // Save original device and transfer to CPU for computation
         Device original_device = grad_output.device();

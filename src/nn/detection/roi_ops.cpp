@@ -1,10 +1,12 @@
 /**
  * @file roi_ops.cpp
- * @brief ROI operations implementation (CPU reference)
+ * @brief ROI operations implementation (CPU reference + GPU dispatch)
  */
 
 #include "tenzor/nn/detection/roi_ops.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/ops/op_id.hpp"
 #include <cmath>
 #include <algorithm>
 
@@ -51,7 +53,7 @@ static inline float bilinear_interpolate(const float* data, int64_t height,
     return w1 * v1 + w2 * v2 + w3 * v3 + w4 * v4;
 }
 
-// CPU forward implementation
+// Forward implementation (GPU dispatch for non-CPU, CPU fallback)
 auto ROIAlignOp::apply(const Tensor& features, const Tensor& rois,
                        int64_t output_h, int64_t output_w,
                        double spatial_scale, int64_t sampling_ratio,
@@ -63,6 +65,21 @@ auto ROIAlignOp::apply(const Tensor& features, const Tensor& rois,
         throw std::invalid_argument("ROIs must be (num_rois, 5) tensor");
     }
 
+    // Dispatch to GPU backend if not on CPU
+    if (features.device().type != Device::Type::CPU) {
+        OpAttributes attrs;
+        attrs["output_h"] = std::to_string(output_h);
+        attrs["output_w"] = std::to_string(output_w);
+        attrs["spatial_scale"] = std::to_string(static_cast<float>(spatial_scale));
+        attrs["sampling_ratio"] = std::to_string(sampling_ratio);
+        attrs["aligned"] = aligned ? "1" : "0";
+
+        std::array<Tensor, 2> inputs = {features, rois};
+        auto results = dispatch<OpId::ROIAlignForward>(inputs, attrs);
+        return results[0];
+    }
+
+    // CPU path below
     const int64_t num_rois = rois.shape()[0];
     const int64_t channels = features.shape()[1];
     const int64_t feat_height = features.shape()[2];
@@ -167,10 +184,26 @@ auto ROIAlignOp::apply(const Tensor& features, const Tensor& rois,
     return output.to(original_dtype).to(original_device);
 }
 
-// CPU backward implementation
+// Backward implementation (GPU dispatch for non-CPU, CPU fallback)
 auto ROIAlignOp::apply_backward(const Tensor& grad_output, const Tensor& features,
                                 const Tensor& rois, double spatial_scale,
                                 int64_t sampling_ratio, bool aligned) -> Tensor {
+    // Dispatch to GPU backend if not on CPU
+    if (grad_output.device().type != Device::Type::CPU) {
+        OpAttributes attrs;
+        attrs["batch_size"] = std::to_string(features.shape()[0]);
+        attrs["feat_height"] = std::to_string(features.shape()[2]);
+        attrs["feat_width"] = std::to_string(features.shape()[3]);
+        attrs["spatial_scale"] = std::to_string(static_cast<float>(spatial_scale));
+        attrs["sampling_ratio"] = std::to_string(sampling_ratio);
+        attrs["aligned"] = aligned ? "1" : "0";
+
+        std::array<Tensor, 2> inputs = {grad_output, rois};
+        auto results = dispatch<OpId::ROIAlignBackward>(inputs, attrs);
+        return results[0];
+    }
+
+    // CPU path below
     const int64_t num_rois = rois.shape()[0];
     const int64_t channels = features.shape()[1];
     const int64_t feat_height = features.shape()[2];

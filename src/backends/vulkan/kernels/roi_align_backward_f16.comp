@@ -1,0 +1,112 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_atomic_float : require
+
+// ROI Align Backward Pass (Float16)
+// Computation in float32, input/output in float16
+
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer GradOutput { float16_t grad_output_data[]; };
+layout(binding = 1) buffer ROIs { float16_t rois_data[]; };
+layout(binding = 2) buffer GradFeatures { float grad_features_f32[]; };  // Accumulate in f32
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    uint num_rois;
+    uint channels;
+    uint feat_height;
+    uint feat_width;
+    uint output_h;
+    uint output_w;
+    uint spatial_scale_bits;
+    uint sampling_ratio;
+    uint aligned;
+    uint batch_size;
+} params;
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.n_elements) {
+        return;
+    }
+
+    uint temp = idx;
+    uint pw = temp % params.output_w;
+    temp /= params.output_w;
+    uint ph = temp % params.output_h;
+    temp /= params.output_h;
+    uint c = temp % params.channels;
+    uint roi_idx = temp / params.channels;
+
+    uint roi_base = roi_idx * 5;
+    uint batch_idx = uint(rois_data[roi_base]);
+    float spatial_scale = uintBitsToFloat(params.spatial_scale_bits);
+
+    float roi_x1 = float(rois_data[roi_base + 1]) * spatial_scale;
+    float roi_y1 = float(rois_data[roi_base + 2]) * spatial_scale;
+    float roi_x2 = float(rois_data[roi_base + 3]) * spatial_scale;
+    float roi_y2 = float(rois_data[roi_base + 4]) * spatial_scale;
+
+    if (params.aligned != 0) {
+        roi_x1 -= 0.5;
+        roi_y1 -= 0.5;
+        roi_x2 -= 0.5;
+        roi_y2 -= 0.5;
+    }
+
+    float roi_width = roi_x2 - roi_x1;
+    float roi_height = roi_y2 - roi_y1;
+
+    float bin_size_h = roi_height / float(params.output_h);
+    float bin_size_w = roi_width / float(params.output_w);
+
+    uint roi_bin_grid_h = (params.sampling_ratio > 0)
+        ? params.sampling_ratio
+        : uint(ceil(bin_size_h));
+    uint roi_bin_grid_w = (params.sampling_ratio > 0)
+        ? params.sampling_ratio
+        : uint(ceil(bin_size_w));
+
+    uint count = roi_bin_grid_h * roi_bin_grid_w;
+    float grad_val = float(grad_output_data[idx]) / float(count);
+
+    uint base_offset = batch_idx * params.channels * params.feat_height * params.feat_width
+                     + c * params.feat_height * params.feat_width;
+
+    int height = int(params.feat_height);
+    int width = int(params.feat_width);
+
+    for (uint iy = 0; iy < roi_bin_grid_h; iy++) {
+        for (uint ix = 0; ix < roi_bin_grid_w; ix++) {
+            float y = roi_y1 + float(ph) * bin_size_h
+                    + (float(iy) + 0.5) * bin_size_h / float(roi_bin_grid_h);
+            float x = roi_x1 + float(pw) * bin_size_w
+                    + (float(ix) + 0.5) * bin_size_w / float(roi_bin_grid_w);
+
+            if (y < -1.0 || y > float(height) || x < -1.0 || x > float(width)) {
+                continue;
+            }
+
+            y = max(0.0, min(y, float(height - 1)));
+            x = max(0.0, min(x, float(width - 1)));
+
+            int y_low = int(floor(y));
+            int x_low = int(floor(x));
+            int y_high = min(y_low + 1, height - 1);
+            int x_high = min(x_low + 1, width - 1);
+
+            float ly = y - float(y_low);
+            float lx = x - float(x_low);
+            float hy = 1.0 - ly;
+            float hx = 1.0 - lx;
+
+            // Accumulate in f32 buffer using atomicAdd
+            atomicAdd(grad_features_f32[base_offset + y_low * width + x_low], grad_val * hy * hx);
+            atomicAdd(grad_features_f32[base_offset + y_low * width + x_high], grad_val * hy * lx);
+            atomicAdd(grad_features_f32[base_offset + y_high * width + x_low], grad_val * ly * hx);
+            atomicAdd(grad_features_f32[base_offset + y_high * width + x_high], grad_val * ly * lx);
+        }
+    }
+}

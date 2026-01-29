@@ -1,0 +1,69 @@
+#version 450
+#extension GL_EXT_shader_atomic_float : require
+
+// RMS Normalization Backward Pass (Float32)
+// One workgroup per batch element
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer GradOutput { float grad_output_data[]; };
+layout(binding = 1) buffer Input { float input_data[]; };
+layout(binding = 2) buffer Rrms { float rrms_data[]; };
+layout(binding = 3) buffer Weight { float weight_data[]; };
+layout(binding = 4) buffer GradInput { float grad_input_data[]; };
+layout(binding = 5) buffer GradWeight { float grad_weight_data[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint batch_size;
+    uint normalized_shape;
+    uint padding0;
+    uint padding1;
+} params;
+
+shared float shared_sum[256];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint batch_idx = gl_WorkGroupID.x;
+
+    if (batch_idx >= params.batch_size) {
+        return;
+    }
+
+    uint base_idx = batch_idx * params.normalized_shape;
+
+    // Read rrms for this batch element
+    float rrms = rrms_data[batch_idx];
+    float rrms_sq = rrms * rrms;
+
+    // Step 1: Compute c = sum(grad_output[i] * input[i] * weight[i]) * rrms^2 / normalized_shape
+    float local_sum = 0.0;
+    for (uint i = tid; i < params.normalized_shape; i += 256) {
+        local_sum += grad_output_data[base_idx + i] * input_data[base_idx + i] * weight_data[i];
+    }
+    shared_sum[tid] = local_sum;
+    barrier();
+
+    // Parallel reduction
+    for (uint s = 128; s > 0; s >>= 1) {
+        if (tid < s) {
+            shared_sum[tid] += shared_sum[tid + s];
+        }
+        barrier();
+    }
+
+    float c = shared_sum[0] * rrms_sq / float(params.normalized_shape);
+    barrier();
+
+    // Step 2: Compute grad_input and accumulate grad_weight
+    for (uint i = tid; i < params.normalized_shape; i += 256) {
+        float go = grad_output_data[base_idx + i];
+        float inp = input_data[base_idx + i];
+        float w = weight_data[i];
+
+        // grad_input = rrms * (grad_output * weight - input * c)
+        grad_input_data[base_idx + i] = rrms * (go * w - inp * c);
+
+        // grad_weight += grad_output * input * rrms (accumulated across batch)
+        atomicAdd(grad_weight_data[i], go * inp * rrms);
+    }
+}

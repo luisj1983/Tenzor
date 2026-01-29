@@ -1,0 +1,70 @@
+#version 450
+
+// Nonzero - Pass 1: Count nonzero elements and write per-element flags
+// Reuses prefix_sum.comp for exclusive scan, then nonzero_gather.comp for output
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Input { float input_data[]; };
+layout(binding = 1) buffer Flags { uint flags[]; };         // Per-element: 1 if nonzero, 0 if zero
+layout(binding = 2) buffer Count { uint count[]; };         // Workgroup counts, then total
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    uint pass;            // 0 = per-element flag + workgroup count, 1 = reduce workgroup counts
+} params;
+
+shared uint shared_count[256];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint gid = gl_GlobalInvocationID.x;
+    uint wid = gl_WorkGroupID.x;
+
+    if (params.pass == 0) {
+        // Pass 0: Write per-element flags and compute workgroup count
+        uint is_nonzero = 0;
+
+        if (gid < params.n_elements) {
+            float val = input_data[gid];
+            is_nonzero = (val != 0.0) ? 1u : 0u;
+            flags[gid] = is_nonzero;
+        }
+
+        shared_count[tid] = is_nonzero;
+        barrier();
+
+        // Parallel reduction for workgroup count
+        for (uint s = 128; s > 0; s >>= 1) {
+            if (tid < s) {
+                shared_count[tid] += shared_count[tid + s];
+            }
+            barrier();
+        }
+
+        if (tid == 0) {
+            count[wid] = shared_count[0];
+        }
+    } else {
+        // Pass 1: Sum workgroup counts to get total
+        uint n_workgroups = (params.n_elements + 255) / 256;
+
+        uint local_sum = 0;
+        for (uint i = tid; i < n_workgroups; i += 256) {
+            local_sum += count[i];
+        }
+
+        shared_count[tid] = local_sum;
+        barrier();
+
+        for (uint s = 128; s > 0; s >>= 1) {
+            if (tid < s) {
+                shared_count[tid] += shared_count[tid + s];
+            }
+            barrier();
+        }
+
+        if (tid == 0) {
+            count[0] = shared_count[0];
+        }
+    }
+}

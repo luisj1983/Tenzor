@@ -9,6 +9,8 @@
 #include "tenzor/ops/reduction.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/indexing.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/ops/op_id.hpp"
 #include <algorithm>
 #include <numeric>
 #include <cmath>
@@ -89,8 +91,16 @@ auto box_iou(const Tensor& boxes1, const Tensor& boxes2, IoUType iou_type) -> Te
         return result_f32.to(boxes1.dtype());
     }
 
-    // For all devices, use CPU path for reliability (GPU tensor ops can be slow/unstable)
-    // Move to CPU, compute, and move result back to original device
+    // For Vulkan device, dispatch to GPU box_iou shader
+    if (boxes1.device().type == Device::Type::Vulkan) {
+        OpAttributes attrs;
+        attrs["iou_type"] = std::to_string(static_cast<int>(iou_type));
+        std::vector<Tensor> inputs_vec = {boxes1, boxes2};
+        auto results = dispatch<OpId::BoxIoU>(inputs_vec, attrs);
+        return results[0];
+    }
+
+    // For other non-CPU devices, move to CPU, compute, and move back
     Device original_device = boxes1.device();
     if (original_device != Device::cpu()) {
         auto boxes1_cpu = boxes1.to(Device::cpu());

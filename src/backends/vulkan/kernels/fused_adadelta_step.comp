@@ -1,0 +1,48 @@
+#version 450
+
+// Fused Adadelta optimizer step (Float32)
+// Per-element: updates square_avg, acc_delta, and param in one kernel
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Grad { float grad_data[]; };
+layout(binding = 1) buffer Param { float param_data[]; };
+layout(binding = 2) buffer SquareAvg { float square_avg[]; };
+layout(binding = 3) buffer AccDelta { float acc_delta[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint numel;
+    float lr;
+    float rho;
+    float eps;
+    float weight_decay;
+    uint padding0;
+    uint padding1;
+    uint padding2;
+} params;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= params.numel) return;
+
+    float g = grad_data[gid];
+
+    // Weight decay
+    if (params.weight_decay > 0.0) {
+        g += params.weight_decay * param_data[gid];
+    }
+
+    // Accumulate squared gradient
+    float sq = params.rho * square_avg[gid] + (1.0 - params.rho) * g * g;
+    square_avg[gid] = sq;
+
+    // Compute update delta
+    float std_delta = sqrt(acc_delta[gid] + params.eps);
+    float std_grad = sqrt(sq + params.eps);
+    float delta = std_delta / std_grad * g;
+
+    // Accumulate squared update
+    acc_delta[gid] = params.rho * acc_delta[gid] + (1.0 - params.rho) * delta * delta;
+
+    // Update parameter
+    param_data[gid] -= params.lr * delta;
+}

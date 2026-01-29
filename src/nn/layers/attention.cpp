@@ -8,6 +8,7 @@
 #include "tenzor/ops/math.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/ops/indexing.hpp"
 #include "tenzor/autograd/ops.hpp"
 #include <cmath>
 #include <stdexcept>
@@ -382,24 +383,16 @@ auto MultiheadAttention::forward(const Variable& query,
         std::vector<int64_t> mask_shape = {batch_size, 1, 1, seq_len_k};
         Tensor padding_mask = reshape(key_padding_mask, mask_shape);
 
-        // Save original device and move to CPU for pointer-based computation
-        Device original_device = padding_mask.device();
-        Tensor padding_mask_cpu = (original_device == Device::cpu()) ? padding_mask : padding_mask.to(Device::cpu());
+        // Create -inf tensor for masked positions using device-agnostic tensor ops
+        auto pm_shape = std::vector<int64_t>(padding_mask.shape().begin(), padding_mask.shape().end());
+        Tensor neg_inf_tensor = full(pm_shape, -std::numeric_limits<float>::infinity(),
+                                     padding_mask.dtype(), padding_mask.device());
+        Tensor zero_tensor = zeros(pm_shape, padding_mask.dtype(), padding_mask.device());
+        Tensor threshold = full(pm_shape, 0.5f, padding_mask.dtype(), padding_mask.device());
 
-        // Create -inf tensor for masked positions on CPU
-        Tensor neg_inf_tensor = zeros(std::vector<int64_t>(padding_mask_cpu.shape().begin(), padding_mask_cpu.shape().end()),
-                                      padding_mask_cpu.dtype(), Device::cpu());
-        auto* mask_data = padding_mask_cpu.data<float>();
-        auto* neg_inf_data = neg_inf_tensor.data<float>();
-
-        for (int64_t i = 0; i < padding_mask_cpu.numel(); ++i) {
-            neg_inf_data[i] = mask_data[i] > 0.5f ? -std::numeric_limits<float>::infinity() : 0.0f;
-        }
-
-        // Move result back to original device if needed
-        if (original_device != Device::cpu()) {
-            neg_inf_tensor = neg_inf_tensor.to(original_device);
-        }
+        // where(mask > 0.5, -inf, 0.0) — runs on GPU if tensors are on GPU
+        Tensor mask_gt = Tensor(gt(padding_mask, threshold));
+        neg_inf_tensor = Tensor(where(mask_gt, neg_inf_tensor, zero_tensor));
 
         // Broadcast to full attention shape
         std::vector<int64_t> full_mask_shape = {batch_size, num_heads_, seq_len_q, seq_len_k};

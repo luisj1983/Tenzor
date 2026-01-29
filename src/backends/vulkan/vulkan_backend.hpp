@@ -214,6 +214,22 @@ private:
                           const Tensor* gamma, const Tensor* beta, float epsilon) -> Tensor;
     auto dispatchGroupNorm(const Tensor& input, int64_t num_groups,
                           const Tensor* gamma, const Tensor* beta, float epsilon) -> Tensor;
+    auto dispatchLayerNormBackward(const Tensor& grad_output, const Tensor& input,
+                                   const Tensor& mean, const Tensor& rstd,
+                                   const Tensor* weight, int64_t normalized_shape)
+                                   -> std::tuple<Tensor, Tensor, Tensor>;
+    auto dispatchGroupNormBackward(const Tensor& grad_output, const Tensor& input,
+                                   const Tensor& mean, const Tensor& rstd,
+                                   const Tensor* weight, int64_t num_groups)
+                                   -> std::tuple<Tensor, Tensor, Tensor>;
+    auto dispatchEmbeddingBackward(const Tensor& grad_output, const Tensor& indices,
+                                    int64_t num_embeddings, int64_t embedding_dim) -> Tensor;
+    auto dispatchRMSNorm(const Tensor& input, const Tensor& weight,
+                         int64_t normalized_shape, float epsilon) -> std::pair<Tensor, Tensor>;
+    auto dispatchRMSNormBackward(const Tensor& grad_output, const Tensor& input,
+                                  const Tensor& rrms, const Tensor& weight,
+                                  int64_t normalized_shape)
+                                  -> std::pair<Tensor, Tensor>;
 
     // Softmax and loss operations
     auto dispatchSoftmax(const Tensor& input, int64_t dim) -> Tensor;
@@ -274,6 +290,15 @@ private:
 
     // Interpolation operation
     auto dispatchInterpolate(const Tensor& input, const OpAttributes& attrs) -> Tensor;
+
+    // ROI Align operations
+    auto dispatchROIAlignForward(const Tensor& features, const Tensor& rois, const OpAttributes& attrs) -> Tensor;
+    auto dispatchROIAlignBackward(const Tensor& grad_output, const Tensor& rois, const OpAttributes& attrs) -> Tensor;
+
+    // Phase 3 operations
+    auto dispatchNonzero(const Tensor& input) -> Tensor;
+    auto dispatchOneHot(const Tensor& indices, int64_t num_classes) -> Tensor;
+    auto dispatchBoxIoU(const Tensor& boxes1, const Tensor& boxes2, int64_t iou_type) -> Tensor;
 
     // Forward activation operations
     auto dispatchActivation(const std::string& op_name,

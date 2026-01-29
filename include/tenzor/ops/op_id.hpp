@@ -154,6 +154,8 @@ enum class OpId : uint16_t {
     Cat,
     Take,
     Put,
+    Nonzero,
+    OneHot,
 
     // =========================================================================
     // Comparison Operations (140-149)
@@ -180,6 +182,7 @@ enum class OpId : uint16_t {
     GroupNormBackward,
     InstanceNorm,
     InstanceNormBackward,
+    RMSNormBackward,
 
     // =========================================================================
     // Convolution Operations (170-189)
@@ -209,6 +212,9 @@ enum class OpId : uint16_t {
     Unfold = 200,
     Fold,
     Interpolate,
+    ROIAlignForward,
+    ROIAlignBackward,
+    BoxIoU,
 
     // =========================================================================
     // Fused Operations (210-229)
@@ -224,6 +230,9 @@ enum class OpId : uint16_t {
     FusedAttention,
     FusedSGDStep,
     FusedAdamStep,
+    FusedRMSPropStep,
+    FusedAdadeltaStep,
+    FusedAdagradStep,
 
     // =========================================================================
     // Creation Operations (230-249)

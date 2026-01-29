@@ -233,8 +233,48 @@ set(SHADERS
     # Multi-dtype conv_transpose2d
     conv_transpose2d_forward_f64
     conv_transpose2d_forward_f16
+    # ROI Align operations
+    roi_align
+    roi_align_f64
+    roi_align_f16
+    roi_align_backward
+    roi_align_backward_f64
+    roi_align_backward_f16
     # GPU sorting
     bitonic_sort
+    # LayerNorm backward
+    layer_norm_backward
+    layer_norm_backward_f64
+    layer_norm_backward_f16
+    # GroupNorm backward
+    group_norm_backward
+    group_norm_backward_f64
+    group_norm_backward_f16
+    # Embedding backward
+    embedding_backward
+    embedding_backward_f64
+    embedding_backward_f16
+    # RMSNorm forward and backward
+    rms_norm
+    rms_norm_f64
+    rms_norm_f16
+    rms_norm_backward
+    rms_norm_backward_f64
+    rms_norm_backward_f16
+    # Phase 3: Nonzero, OneHot, BoxIoU, dtype variants
+    nonzero_count
+    nonzero_gather
+    one_hot
+    box_iou
+    masked_select_gather_f64
+    masked_select_gather_f16
+    bitonic_sort_f64
+    bitonic_sort_i32
+    cast_int64_to_int32
+    # Phase 4: Fused optimizer kernels
+    fused_rmsprop_step
+    fused_adadelta_step
+    fused_adagrad_step
 )
 
 # Compile each shader

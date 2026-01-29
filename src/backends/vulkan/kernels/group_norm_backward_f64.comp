@@ -1,0 +1,126 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float64 : enable
+#extension GL_EXT_shader_atomic_float : enable
+
+// Group Normalization Backward Pass - Float64 variant
+// Computes gradients w.r.t. input, weight (gamma), and bias (beta)
+//
+// One workgroup per (batch, group) pair.
+// Note: Uses buffer atomicAdd (shaderBufferFloat64AtomicAdd) instead of
+// shared memory atomicAdd, since shaderSharedFloat64AtomicAdd is not
+// available in standard Vulkan extensions.
+
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer GradOutput { double grad_output[]; };  // (N, C, H, W)
+layout(binding = 1) buffer Input { double input_data[]; };         // (N, C, H, W)
+layout(binding = 2) buffer Mean { double mean_data[]; };           // (N * num_groups)
+layout(binding = 3) buffer Rstd { double rstd_data[]; };           // (N * num_groups)
+layout(binding = 4) buffer Weight { double weight_data[]; };       // (C)
+layout(binding = 5) buffer GradInput { double grad_input[]; };     // (N, C, H, W)
+layout(binding = 6) buffer GradWeight { double grad_weight[]; };   // (C) - accumulated atomically
+layout(binding = 7) buffer GradBias { double grad_bias[]; };       // (C) - accumulated atomically
+
+layout(push_constant) uniform PushConstants {
+    uint batch_size;
+    uint num_channels;
+    uint height;
+    uint width;
+    uint num_groups;
+    float epsilon;
+    uint affine;
+    uint padding;
+} params;
+
+shared double shared_sum_dy[256];
+shared double shared_sum_dy_xhat[256];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint batch_idx = gl_WorkGroupID.x / params.num_groups;
+    uint group_idx = gl_WorkGroupID.x % params.num_groups;
+
+    if (batch_idx >= params.batch_size) {
+        return;
+    }
+
+    uint channels_per_group = params.num_channels / params.num_groups;
+    uint spatial_size = params.height * params.width;
+    uint group_size = channels_per_group * spatial_size;
+
+    uint group_start = batch_idx * params.num_channels * spatial_size +
+                       group_idx * channels_per_group * spatial_size;
+
+    // Read mean and rstd for this (batch, group) pair
+    uint stats_idx = batch_idx * params.num_groups + group_idx;
+    double mean = mean_data[stats_idx];
+    double rstd = rstd_data[stats_idx];
+
+    // Step 1: Compute sum_dy and sum_dy_xhat over group elements
+    double local_sum_dy = 0.0lf;
+    double local_sum_dy_xhat = 0.0lf;
+
+    for (uint i = tid; i < group_size; i += 256) {
+        uint idx = group_start + i;
+        uint local_channel = i / spatial_size;
+        uint global_channel = group_idx * channels_per_group + local_channel;
+
+        double grad_out = grad_output[idx];
+        double x = input_data[idx];
+        double xhat = (x - mean) * rstd;
+
+        double w = 1.0lf;
+        if (params.affine > 0) {
+            w = weight_data[global_channel];
+        }
+
+        local_sum_dy += grad_out * w;
+        local_sum_dy_xhat += grad_out * w * xhat;
+    }
+
+    shared_sum_dy[tid] = local_sum_dy;
+    shared_sum_dy_xhat[tid] = local_sum_dy_xhat;
+    barrier();
+
+    // Parallel reduction for sum_dy and sum_dy_xhat
+    for (uint s = 128; s > 0; s >>= 1) {
+        if (tid < s) {
+            shared_sum_dy[tid] += shared_sum_dy[tid + s];
+            shared_sum_dy_xhat[tid] += shared_sum_dy_xhat[tid + s];
+        }
+        barrier();
+    }
+
+    double sum_dy = shared_sum_dy[0];
+    double sum_dy_xhat = shared_sum_dy_xhat[0];
+    barrier();
+
+    // Step 2: Compute grad_input and accumulate grad_weight, grad_bias
+    double fgroup_size = double(group_size);
+
+    for (uint i = tid; i < group_size; i += 256) {
+        uint idx = group_start + i;
+        uint local_channel = i / spatial_size;
+        uint global_channel = group_idx * channels_per_group + local_channel;
+
+        double grad_out = grad_output[idx];
+        double x = input_data[idx];
+        double xhat = (x - mean) * rstd;
+
+        double w = 1.0lf;
+        if (params.affine > 0) {
+            w = weight_data[global_channel];
+        }
+
+        // Compute grad_input
+        double grad_in = rstd * (grad_out * w - sum_dy / fgroup_size - xhat * sum_dy_xhat / fgroup_size);
+        grad_input[idx] = grad_in;
+
+        // Accumulate grad_weight and grad_bias using buffer atomicAdd
+        // (supported by VK_EXT_shader_atomic_float shaderBufferFloat64AtomicAdd)
+        if (params.affine > 0) {
+            atomicAdd(grad_weight[global_channel], grad_out * xhat);
+            atomicAdd(grad_bias[global_channel], grad_out);
+        }
+    }
+}

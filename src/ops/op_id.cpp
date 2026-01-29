@@ -134,6 +134,8 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::Cat)] = "cat";
     names[static_cast<size_t>(OpId::Take)] = "take";
     names[static_cast<size_t>(OpId::Put)] = "put";
+    names[static_cast<size_t>(OpId::Nonzero)] = "nonzero";
+    names[static_cast<size_t>(OpId::OneHot)] = "one_hot";
 
     // Comparison
     names[static_cast<size_t>(OpId::Eq)] = "eq";
@@ -155,6 +157,7 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::GroupNormBackward)] = "group_norm_backward";
     names[static_cast<size_t>(OpId::InstanceNorm)] = "instance_norm";
     names[static_cast<size_t>(OpId::InstanceNormBackward)] = "instance_norm_backward";
+    names[static_cast<size_t>(OpId::RMSNormBackward)] = "rms_norm_backward";
 
     // Convolution
     names[static_cast<size_t>(OpId::Conv2dForward)] = "conv2d_forward";
@@ -178,6 +181,9 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::Unfold)] = "unfold";
     names[static_cast<size_t>(OpId::Fold)] = "fold";
     names[static_cast<size_t>(OpId::Interpolate)] = "interpolate";
+    names[static_cast<size_t>(OpId::ROIAlignForward)] = "roi_align_forward";
+    names[static_cast<size_t>(OpId::ROIAlignBackward)] = "roi_align_backward";
+    names[static_cast<size_t>(OpId::BoxIoU)] = "box_iou";
 
     // Fused operations
     names[static_cast<size_t>(OpId::FusedLinearReLU)] = "fused_linear_relu";
@@ -191,6 +197,9 @@ constexpr std::array<std::string_view, OP_COUNT> op_names = []() {
     names[static_cast<size_t>(OpId::FusedAttention)] = "fused_attention";
     names[static_cast<size_t>(OpId::FusedSGDStep)] = "fused_sgd_step";
     names[static_cast<size_t>(OpId::FusedAdamStep)] = "fused_adam_step";
+    names[static_cast<size_t>(OpId::FusedRMSPropStep)] = "fused_rmsprop_step";
+    names[static_cast<size_t>(OpId::FusedAdadeltaStep)] = "fused_adadelta_step";
+    names[static_cast<size_t>(OpId::FusedAdagradStep)] = "fused_adagrad_step";
 
     // Creation
     names[static_cast<size_t>(OpId::Zeros)] = "zeros";

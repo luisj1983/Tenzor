@@ -581,7 +581,79 @@ void register_vulkan_kernels(BackendDispatchTable& table) {
         return get_vulkan_backend()->dispatch("fold", inputs, attrs);
     });
 
+    table.register_kernel(OpId::ROIAlignForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return get_vulkan_backend()->dispatch("roi_align_forward", inputs, attrs);
+    });
+
+    table.register_kernel(OpId::ROIAlignBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return get_vulkan_backend()->dispatch("roi_align_backward", inputs, attrs);
+    });
+
     // Note: GatherRelativePositionBias not in OpId enum - registered via string dispatch only
+
+    // ========================================================================
+    // Normalization Backward Operations
+    // ========================================================================
+    table.register_kernel(OpId::LayerNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return get_vulkan_backend()->dispatch("layer_norm_backward", inputs, attrs);
+    });
+
+    table.register_kernel(OpId::GroupNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return get_vulkan_backend()->dispatch("group_norm_backward", inputs, attrs);
+    });
+
+    table.register_kernel(OpId::LayerNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return get_vulkan_backend()->dispatch("layer_norm", inputs, attrs);
+    });
+
+    table.register_kernel(OpId::GroupNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return get_vulkan_backend()->dispatch("group_norm", inputs, attrs);
+    });
+
+    table.register_kernel(OpId::FusedRMSNorm, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return get_vulkan_backend()->dispatch("fused_rms_norm", inputs, attrs);
+    });
+
+    table.register_kernel(OpId::RMSNormBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return get_vulkan_backend()->dispatch("rms_norm_backward", inputs, attrs);
+    });
+
+    // ========================================================================
+    // Embedding Backward
+    // ========================================================================
+    table.register_kernel(OpId::EmbeddingBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return get_vulkan_backend()->dispatch("embedding_backward", inputs, attrs);
+    });
+
+    // ========================================================================
+    // Phase 4: Fused Optimizer Steps
+    // ========================================================================
+    table.register_kernel(OpId::FusedRMSPropStep, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return get_vulkan_backend()->dispatch("fused_rmsprop_step", inputs, attrs);
+    });
+
+    table.register_kernel(OpId::FusedAdadeltaStep, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return get_vulkan_backend()->dispatch("fused_adadelta_step", inputs, attrs);
+    });
+
+    table.register_kernel(OpId::FusedAdagradStep, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return get_vulkan_backend()->dispatch("fused_adagrad_step", inputs, attrs);
+    });
+
+    // ========================================================================
+    // Phase 3: Nonzero, OneHot, BoxIoU
+    // ========================================================================
+    table.register_kernel(OpId::Nonzero, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return get_vulkan_backend()->dispatch("nonzero", inputs, attrs);
+    });
+
+    table.register_kernel(OpId::OneHot, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return get_vulkan_backend()->dispatch("one_hot", inputs, attrs);
+    });
+
+    table.register_kernel(OpId::BoxIoU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        return get_vulkan_backend()->dispatch("box_iou", inputs, attrs);
+    });
 
     // ========================================================================
     // In-place Activation Operations

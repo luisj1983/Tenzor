@@ -1,0 +1,109 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_atomic_float : require
+
+// RMS Normalization Backward Pass (Float16)
+// Float16 elements are packed 2 per 32-bit word
+// Computation in float32, grad_weight accumulated in float32 buffer
+// One workgroup per batch element
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer GradOutput { uint grad_output_data[]; };    // packed f16
+layout(binding = 1) buffer Input { uint input_data[]; };               // packed f16
+layout(binding = 2) buffer Rrms { float rrms_data[]; };                // float32
+layout(binding = 3) buffer Weight { uint weight_data[]; };             // packed f16
+layout(binding = 4) buffer GradInput { uint grad_input_data[]; };      // packed f16
+layout(binding = 5) buffer GradWeight { float grad_weight_data[]; };   // float32 for atomicAdd
+
+layout(push_constant) uniform PushConstants {
+    uint batch_size;
+    uint normalized_shape;
+    uint padding0;
+    uint padding1;
+} params;
+
+shared float shared_sum[256];
+
+// Helper to read float16 from packed uint buffer at element index
+float readF16(uint buffer_idx, uint element_idx) {
+    uint word_idx = element_idx / 2;
+    uint word_offset = element_idx % 2;
+    uint packed;
+    if (buffer_idx == 0) {
+        packed = grad_output_data[word_idx];
+    } else if (buffer_idx == 1) {
+        packed = input_data[word_idx];
+    } else {
+        packed = weight_data[word_idx];
+    }
+    uint bits = (packed >> (word_offset * 16)) & 0xFFFFu;
+    return unpackHalf2x16(bits | (bits << 16)).x;
+}
+
+// Helper to write float16 to packed uint buffer using atomicCompSwap
+void writeF16(uint element_idx, float val) {
+    uint word_idx = element_idx / 2;
+    uint half_idx = element_idx % 2;
+    uint bits = packHalf2x16(vec2(val, 0.0)) & 0xFFFFu;
+    uint shift = half_idx * 16;
+    uint mask = 0xFFFFu << shift;
+
+    uint old_val = grad_input_data[word_idx];
+    uint new_val, expected;
+    do {
+        expected = old_val;
+        new_val = (expected & ~mask) | (bits << shift);
+        old_val = atomicCompSwap(grad_input_data[word_idx], expected, new_val);
+    } while (old_val != expected);
+}
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint batch_idx = gl_WorkGroupID.x;
+
+    if (batch_idx >= params.batch_size) {
+        return;
+    }
+
+    uint base_idx = batch_idx * params.normalized_shape;
+
+    // Read rrms for this batch element (stored as float32)
+    float rrms = rrms_data[batch_idx];
+    float rrms_sq = rrms * rrms;
+
+    // Step 1: Compute c = sum(grad_output[i] * input[i] * weight[i]) * rrms^2 / normalized_shape
+    float local_sum = 0.0;
+    for (uint i = tid; i < params.normalized_shape; i += 256) {
+        float go = readF16(0, base_idx + i);
+        float inp = readF16(1, base_idx + i);
+        float w = readF16(3, i);
+        local_sum += go * inp * w;
+    }
+    shared_sum[tid] = local_sum;
+    barrier();
+
+    // Parallel reduction
+    for (uint s = 128; s > 0; s >>= 1) {
+        if (tid < s) {
+            shared_sum[tid] += shared_sum[tid + s];
+        }
+        barrier();
+    }
+
+    float c = shared_sum[0] * rrms_sq / float(params.normalized_shape);
+    barrier();
+
+    // Step 2: Compute grad_input and accumulate grad_weight
+    for (uint i = tid; i < params.normalized_shape; i += 256) {
+        float go = readF16(0, base_idx + i);
+        float inp = readF16(1, base_idx + i);
+        float w = readF16(3, i);
+
+        // grad_input = rrms * (grad_output * weight - input * c)
+        float gi = rrms * (go * w - inp * c);
+        writeF16(base_idx + i, gi);
+
+        // grad_weight += grad_output * input * rrms (accumulated in float32)
+        atomicAdd(grad_weight_data[i], go * inp * rrms);
+    }
+}

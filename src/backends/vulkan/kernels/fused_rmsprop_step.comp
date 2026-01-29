@@ -1,0 +1,58 @@
+#version 450
+
+// Fused RMSprop optimizer step (Float32)
+// Per-element: updates square_avg, momentum_buffer, and param in one kernel
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Grad { float grad_data[]; };
+layout(binding = 1) buffer Param { float param_data[]; };
+layout(binding = 2) buffer SquareAvg { float square_avg[]; };
+layout(binding = 3) buffer MomentumBuf { float momentum_buf[]; };
+layout(binding = 4) buffer GradAvg { float grad_avg[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint numel;
+    float lr;
+    float alpha;          // decay rate for square_avg
+    float eps;
+    float weight_decay;
+    float momentum;
+    uint centered;        // 0 = not centered, 1 = centered
+    uint has_momentum;    // 0 = no momentum buffer, 1 = has momentum
+} params;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= params.numel) return;
+
+    float g = grad_data[gid];
+
+    // Weight decay
+    if (params.weight_decay > 0.0) {
+        g += params.weight_decay * param_data[gid];
+    }
+
+    // Update square average: sq_avg = alpha * sq_avg + (1 - alpha) * g^2
+    float sq = params.alpha * square_avg[gid] + (1.0 - params.alpha) * g * g;
+    square_avg[gid] = sq;
+
+    float denom;
+    if (params.centered != 0) {
+        // Centered RMSprop: subtract squared mean gradient
+        float ga = params.alpha * grad_avg[gid] + (1.0 - params.alpha) * g;
+        grad_avg[gid] = ga;
+        denom = sqrt(sq - ga * ga + params.eps);
+    } else {
+        denom = sqrt(sq + params.eps);
+    }
+
+    if (params.has_momentum != 0) {
+        // With momentum
+        float buf = params.momentum * momentum_buf[gid] + g / denom;
+        momentum_buf[gid] = buf;
+        param_data[gid] -= params.lr * buf;
+    } else {
+        // Without momentum
+        param_data[gid] -= params.lr * g / denom;
+    }
+}

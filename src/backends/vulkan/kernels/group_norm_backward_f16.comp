@@ -1,0 +1,168 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_atomic_float : enable
+
+// Group Normalization Backward Pass for Float16
+// Input/grad tensors are packed F16 (2 elements per 32-bit word)
+// Statistics (mean, rstd) and parameter gradients (grad_weight, grad_bias) are Float32
+//
+// One workgroup per (batch, group) pair.
+// All intermediate computations are performed in Float32 for numerical stability.
+
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer GradOutput { uint grad_output[]; };   // Packed F16 (N, C, H, W)
+layout(binding = 1) buffer Input { uint input_data[]; };          // Packed F16 (N, C, H, W)
+layout(binding = 2) buffer Mean { float mean_data[]; };           // (N * num_groups) Float32
+layout(binding = 3) buffer Rstd { float rstd_data[]; };           // (N * num_groups) Float32
+layout(binding = 4) buffer Weight { float weight_data[]; };       // (C) Float32
+layout(binding = 5) buffer GradInput { uint grad_input[]; };      // Packed F16 (N, C, H, W)
+layout(binding = 6) buffer GradWeight { float grad_weight[]; };   // (C) Float32 - accumulated atomically
+layout(binding = 7) buffer GradBias { float grad_bias[]; };       // (C) Float32 - accumulated atomically
+
+layout(push_constant) uniform PushConstants {
+    uint batch_size;
+    uint num_channels;
+    uint height;
+    uint width;
+    uint num_groups;
+    float epsilon;
+    uint affine;
+    uint padding;
+} params;
+
+// Read a single F16 element from packed storage
+float readF16(uint flat_idx) {
+    uint word_idx = flat_idx / 2;
+    uint half_idx = flat_idx % 2;
+    uint packed = (half_idx == 0) ? input_data[word_idx] : input_data[word_idx];
+    if (half_idx == 0) {
+        return unpackHalf2x16(packed).x;
+    } else {
+        return unpackHalf2x16(packed >> 16).x;
+    }
+}
+
+// Read a single F16 element from grad_output packed storage
+float readF16GradOutput(uint flat_idx) {
+    uint word_idx = flat_idx / 2;
+    uint half_idx = flat_idx % 2;
+    uint packed = grad_output[word_idx];
+    if (half_idx == 0) {
+        return unpackHalf2x16(packed).x;
+    } else {
+        return unpackHalf2x16(packed >> 16).x;
+    }
+}
+
+// Write a single F16 element to packed storage using atomicCompSwap
+void writeF16(uint flat_idx, float value) {
+    uint word_idx = flat_idx / 2;
+    uint half_idx = flat_idx % 2;
+    uint f16_bits = packHalf2x16(vec2(value, 0.0)) & 0xFFFFu;
+
+    uint old_val = grad_input[word_idx];
+    uint new_val;
+    uint result;
+    do {
+        old_val = grad_input[word_idx];
+        if (half_idx == 0) {
+            new_val = (old_val & 0xFFFF0000u) | f16_bits;
+        } else {
+            new_val = (old_val & 0x0000FFFFu) | (f16_bits << 16);
+        }
+        result = atomicCompSwap(grad_input[word_idx], old_val, new_val);
+    } while (result != old_val);
+}
+
+shared float shared_sum_dy[256];
+shared float shared_sum_dy_xhat[256];
+
+void main() {
+    uint tid = gl_LocalInvocationID.x;
+    uint batch_idx = gl_WorkGroupID.x / params.num_groups;
+    uint group_idx = gl_WorkGroupID.x % params.num_groups;
+
+    if (batch_idx >= params.batch_size) {
+        return;
+    }
+
+    uint channels_per_group = params.num_channels / params.num_groups;
+    uint spatial_size = params.height * params.width;
+    uint group_size = channels_per_group * spatial_size;
+
+    uint group_start = batch_idx * params.num_channels * spatial_size +
+                       group_idx * channels_per_group * spatial_size;
+
+    // Read mean and rstd for this (batch, group) pair
+    uint stats_idx = batch_idx * params.num_groups + group_idx;
+    float mean = mean_data[stats_idx];
+    float rstd = rstd_data[stats_idx];
+
+    // Step 1: Compute sum_dy and sum_dy_xhat over group elements (accumulate in Float32)
+    float local_sum_dy = 0.0;
+    float local_sum_dy_xhat = 0.0;
+
+    for (uint i = tid; i < group_size; i += 256) {
+        uint flat_idx = group_start + i;
+        uint local_channel = i / spatial_size;
+        uint global_channel = group_idx * channels_per_group + local_channel;
+
+        float grad_out = readF16GradOutput(flat_idx);
+        float x = readF16(flat_idx);
+        float xhat = (x - mean) * rstd;
+
+        float w = 1.0;
+        if (params.affine > 0) {
+            w = weight_data[global_channel];
+        }
+
+        local_sum_dy += grad_out * w;
+        local_sum_dy_xhat += grad_out * w * xhat;
+    }
+
+    shared_sum_dy[tid] = local_sum_dy;
+    shared_sum_dy_xhat[tid] = local_sum_dy_xhat;
+    barrier();
+
+    // Parallel reduction for sum_dy and sum_dy_xhat
+    for (uint s = 128; s > 0; s >>= 1) {
+        if (tid < s) {
+            shared_sum_dy[tid] += shared_sum_dy[tid + s];
+            shared_sum_dy_xhat[tid] += shared_sum_dy_xhat[tid + s];
+        }
+        barrier();
+    }
+
+    float sum_dy = shared_sum_dy[0];
+    float sum_dy_xhat = shared_sum_dy_xhat[0];
+    barrier();
+
+    // Step 2: Compute grad_input and accumulate grad_weight, grad_bias
+    float fgroup_size = float(group_size);
+
+    for (uint i = tid; i < group_size; i += 256) {
+        uint flat_idx = group_start + i;
+        uint local_channel = i / spatial_size;
+        uint global_channel = group_idx * channels_per_group + local_channel;
+
+        float grad_out = readF16GradOutput(flat_idx);
+        float x = readF16(flat_idx);
+        float xhat = (x - mean) * rstd;
+
+        float w = 1.0;
+        if (params.affine > 0) {
+            w = weight_data[global_channel];
+        }
+
+        // Compute grad_input in Float32, write back as F16
+        float grad_in = rstd * (grad_out * w - sum_dy / fgroup_size - xhat * sum_dy_xhat / fgroup_size);
+        writeF16(flat_idx, grad_in);
+
+        // Accumulate grad_weight and grad_bias atomically (Float32 buffers)
+        if (params.affine > 0) {
+            atomicAdd(grad_weight[global_channel], grad_out * xhat);
+            atomicAdd(grad_bias[global_channel], grad_out);
+        }
+    }
+}

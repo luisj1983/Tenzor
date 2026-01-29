@@ -1,0 +1,37 @@
+#version 450
+
+// Nonzero - Pass 3: Gather N-dimensional indices of nonzero elements
+// Each nonzero element writes its multi-dimensional index to the output
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Flags { uint flags[]; };           // Per-element nonzero flags
+layout(binding = 1) buffer PrefixSums { uint prefix_sums[]; }; // Exclusive prefix sums of flags
+layout(binding = 2) buffer Output { int output_data[]; };      // (num_nonzero, ndim) output indices
+layout(binding = 3) buffer Shape { uint shape_data[]; };       // Input tensor shape
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;
+    uint ndim;
+    uint output_size;     // num_nonzero (for bounds checking)
+} params;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+
+    if (gid >= params.n_elements) return;
+
+    // Only process nonzero elements
+    if (flags[gid] == 0) return;
+
+    // Get output row from prefix sum
+    uint out_row = prefix_sums[gid];
+    if (out_row >= params.output_size) return;
+
+    // Convert flat index to multi-dimensional index
+    uint remaining = gid;
+    for (int d = int(params.ndim) - 1; d >= 0; d--) {
+        uint dim_size = shape_data[d];
+        output_data[out_row * params.ndim + uint(d)] = int(remaining % dim_size);
+        remaining /= dim_size;
+    }
+}

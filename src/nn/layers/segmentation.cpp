@@ -9,6 +9,8 @@
 #include "tenzor/autograd/ops.hpp"
 #include "tenzor/ops/transform.hpp"
 #include "tenzor/ops/math.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/ops/op_id.hpp"
 #include <cmath>
 #include <stdexcept>
 #include <iostream>
@@ -193,79 +195,15 @@ auto upsample_bilinear(const Variable& input, int64_t target_h, int64_t target_w
     int64_t H_in = shape[2];
     int64_t W_in = shape[3];
 
-    // Implement true bilinear interpolation
-    // scale = input_size / output_size (coordinate mapping)
-    float scale_h = static_cast<float>(H_in) / target_h;
-    float scale_w = static_cast<float>(W_in) / target_w;
+    // Use backend dispatch for bilinear interpolation (avoids GPU→CPU→GPU round-trip)
+    OpAttributes interp_attrs;
+    interp_attrs["mode"] = "bilinear";
+    interp_attrs["size"] = std::to_string(target_h) + "," + std::to_string(target_w);
+    interp_attrs["align_corners"] = "0";
 
-    // Remember original dtype for output conversion
-    DType original_dtype = input.tensor().dtype();
-
-    // Convert to Float32 for computation (on CPU for direct memory access)
-    Tensor in_data = input.tensor().to(Device::cpu());
-    if (in_data.dtype() != DType::Float32) {
-        in_data = in_data.to(DType::Float32);
-    }
-
-    // Create output tensor in Float32 for computation
-    Tensor output(std::vector<int64_t>{N, C, target_h, target_w}, DType::Float32, Device::cpu());
-
-    // Bilinear interpolation implementation
-    auto* out_ptr = output.data<float>();
-    const auto* in_ptr = in_data.data<float>();
-
-    for (int64_t n = 0; n < N; ++n) {
-        for (int64_t c = 0; c < C; ++c) {
-            for (int64_t h = 0; h < target_h; ++h) {
-                for (int64_t w = 0; w < target_w; ++w) {
-                    // Map output coordinates to input space (center-aligned)
-                    float src_h = (h + 0.5f) * scale_h - 0.5f;
-                    float src_w = (w + 0.5f) * scale_w - 0.5f;
-
-                    // Clamp to valid range
-                    src_h = std::max(0.0f, std::min(src_h, static_cast<float>(H_in - 1)));
-                    src_w = std::max(0.0f, std::min(src_w, static_cast<float>(W_in - 1)));
-
-                    // Get integer parts and fractional parts
-                    int64_t h0 = static_cast<int64_t>(std::floor(src_h));
-                    int64_t w0 = static_cast<int64_t>(std::floor(src_w));
-                    int64_t h1 = std::min(h0 + 1, H_in - 1);
-                    int64_t w1 = std::min(w0 + 1, W_in - 1);
-
-                    float fh = src_h - h0;
-                    float fw = src_w - w0;
-
-                    // Get four neighboring pixels
-                    int64_t idx00 = ((n * C + c) * H_in + h0) * W_in + w0;
-                    int64_t idx01 = ((n * C + c) * H_in + h0) * W_in + w1;
-                    int64_t idx10 = ((n * C + c) * H_in + h1) * W_in + w0;
-                    int64_t idx11 = ((n * C + c) * H_in + h1) * W_in + w1;
-
-                    float v00 = in_ptr[idx00];
-                    float v01 = in_ptr[idx01];
-                    float v10 = in_ptr[idx10];
-                    float v11 = in_ptr[idx11];
-
-                    // Bilinear interpolation formula
-                    float v0 = v00 * (1.0f - fw) + v01 * fw;
-                    float v1 = v10 * (1.0f - fw) + v11 * fw;
-                    float interpolated = v0 * (1.0f - fh) + v1 * fh;
-
-                    // Write result
-                    int64_t out_idx = ((n * C + c) * target_h + h) * target_w + w;
-                    out_ptr[out_idx] = interpolated;
-                }
-            }
-        }
-    }
-
-    // Convert output back to original dtype and device
-    if (output.dtype() != original_dtype) {
-        output = output.to(original_dtype);
-    }
-    if (output.device() != input.tensor().device()) {
-        output = output.to(input.tensor().device());
-    }
+    std::vector<Tensor> interp_inputs = {input.tensor()};
+    auto interp_results = dispatch(OpId::Interpolate, interp_inputs, interp_attrs);
+    Tensor output = interp_results[0];
 
     // Create Variable with gradient tracking if needed
     Variable result(output, input.requires_grad());

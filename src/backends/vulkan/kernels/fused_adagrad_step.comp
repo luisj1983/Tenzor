@@ -1,0 +1,34 @@
+#version 450
+
+// Fused Adagrad optimizer step (Float32)
+// Per-element: updates sum_sq and param in one kernel
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Grad { float grad_data[]; };
+layout(binding = 1) buffer Param { float param_data[]; };
+layout(binding = 2) buffer SumSq { float sum_sq[]; };
+
+layout(push_constant) uniform PushConstants {
+    uint numel;
+    float lr;
+    float eps;
+    float weight_decay;
+} params;
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    if (gid >= params.numel) return;
+
+    float g = grad_data[gid];
+
+    // Weight decay
+    if (params.weight_decay > 0.0) {
+        g += params.weight_decay * param_data[gid];
+    }
+
+    // Accumulate squared gradient
+    sum_sq[gid] += g * g;
+
+    // Update parameter
+    param_data[gid] -= params.lr * g / (sqrt(sum_sq[gid]) + params.eps);
+}

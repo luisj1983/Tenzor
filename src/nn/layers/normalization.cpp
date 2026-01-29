@@ -397,10 +397,25 @@ public:
         // Save original device before transferring to CPU
         Device original_device = input_orig.device();
 
-        // Make all tensors contiguous AND transfer to CPU for pointer-based access
         // Save original dtype for conversion back
         DType original_dtype = grad_output_orig.dtype();
 
+        // Vulkan GPU fast path: dispatch to GPU backward shader
+        if (original_device.type == Device::Type::Vulkan) {
+            auto go = grad_output_orig.contiguous();
+            auto inp = input_orig.contiguous();
+            auto mn = mean_orig.contiguous();
+            auto rs = rstd_orig.contiguous();
+            auto wt = weight_orig.contiguous();
+
+            OpAttributes attrs;
+            attrs["normalized_shape"] = std::to_string(normalized_size_);
+            std::vector<Tensor> inputs_vec = {go, inp, mn, rs, wt};
+            auto results = dispatch<OpId::LayerNormBackward>(inputs_vec, attrs);
+            return results;
+        }
+
+        // CPU path: transfer to CPU for pointer-based access
         // Move to CPU and convert to Float32 for computation
         auto grad_output = (grad_output_orig.device() == Device::cpu())
                           ? grad_output_orig.contiguous().to(DType::Float32)
@@ -1115,8 +1130,22 @@ public:
         auto original_device = grad_output_orig.device();
         auto original_dtype = grad_output_orig.dtype();
 
-        // Move tensors to CPU and convert to Float32 for backward computation
-        // TODO: Implement CUDA kernel for GroupNorm backward for better performance
+        // Vulkan GPU fast path: dispatch to GPU backward shader
+        if (original_device.type == Device::Type::Vulkan) {
+            auto go = grad_output_orig.contiguous();
+            auto inp = input_orig.contiguous();
+            auto mn = mean_orig.contiguous();
+            auto rs = rstd_orig.contiguous();
+            auto wt = weight_orig.contiguous();
+
+            OpAttributes attrs;
+            attrs["num_groups"] = std::to_string(num_groups_);
+            std::vector<Tensor> inputs_vec = {go, inp, mn, rs, wt};
+            auto results = dispatch<OpId::GroupNormBackward>(inputs_vec, attrs);
+            return results;
+        }
+
+        // CPU path: transfer to CPU for pointer-based access
         auto grad_output = grad_output_orig.to(Device::cpu()).to(DType::Float32).contiguous();
         auto input = input_orig.to(Device::cpu()).to(DType::Float32).contiguous();
         auto mean = mean_orig.to(Device::cpu()).to(DType::Float32).contiguous();
@@ -1480,7 +1509,21 @@ public:
         Device original_device = input_orig.device();
         DType original_dtype = grad_output_orig.dtype();
 
-        // Move to CPU and convert to Float32 for computation
+        // Vulkan GPU fast path: dispatch to GPU backward shader
+        if (original_device.type == Device::Type::Vulkan) {
+            auto go = grad_output_orig.contiguous();
+            auto inp = input_orig.contiguous();
+            auto rm = rrms_orig.contiguous();
+            auto wt = weight_orig.contiguous();
+
+            OpAttributes attrs;
+            attrs["normalized_shape"] = std::to_string(normalized_size_);
+            std::vector<Tensor> inputs_vec = {go, inp, rm, wt};
+            auto results = dispatch<OpId::RMSNormBackward>(inputs_vec, attrs);
+            return results;
+        }
+
+        // CPU path: transfer to CPU for pointer-based access
         auto grad_output = (grad_output_orig.device() == Device::cpu())
                           ? grad_output_orig.contiguous().to(DType::Float32)
                           : grad_output_orig.contiguous().to(Device::cpu()).to(DType::Float32);
@@ -1621,6 +1664,23 @@ auto RMSNorm::forward_impl(const Variable& input) -> Variable {
         std::vector<Tensor> inputs_vec = {x, weight_cuda};
         auto results = dispatch<OpId::FusedRMSNorm>(inputs_vec, attrs);
         return Variable(results[0], false);  // results[0] is output, [1] is rrms
+    }
+
+    // Vulkan fast path: dispatch to GPU RMSNorm shader (inference only)
+    if (!needs_input_grad && input.tensor().device().type == Device::Type::Vulkan) {
+        const Tensor& x = input.tensor();
+
+        Tensor weight_vk = cached_weight_ ? cached_weight_->tensor() : weight_.tensor();
+        if (weight_vk.device().type != Device::Type::Vulkan) {
+            weight_vk = weight_vk.to(input.tensor().device());
+        }
+
+        OpAttributes attrs;
+        attrs["eps"] = std::to_string(eps_);
+
+        std::vector<Tensor> inputs_vec = {x, weight_vk};
+        auto results = dispatch<OpId::FusedRMSNorm>(inputs_vec, attrs);
+        return Variable(results[0], false);
     }
 
     if (!needs_input_grad && input.tensor().device().type == Device::Type::CPU && input.tensor().dtype() == DType::Float32) {

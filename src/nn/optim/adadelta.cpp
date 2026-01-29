@@ -6,6 +6,8 @@
 #include "tenzor/nn/optim/adadelta.hpp"
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/ops/creation.hpp"
+#include "tenzor/backend/fast_dispatch.hpp"
+#include "tenzor/ops/op_id.hpp"
 #include <cmath>
 #include <stdexcept>
 
@@ -63,6 +65,24 @@ auto Adadelta::step() -> void {
         const auto& grad_orig = param->grad().value();
         const auto& param_data_orig = param->tensor();
         auto original_device = param_data_orig.device();
+
+        // Vulkan fast path: fused kernel avoids GPU→CPU→GPU round-trip
+        if (original_device.type == Device::Type::Vulkan &&
+            grad_orig.device().type == Device::Type::Vulkan) {
+
+            std::vector<Tensor> inputs = {
+                grad_orig, param->tensor(), square_avg_[i], acc_delta_[i]
+            };
+
+            OpAttributes attrs;
+            attrs["lr"] = std::to_string(static_cast<float>(lr_));
+            attrs["rho"] = std::to_string(static_cast<float>(rho_));
+            attrs["eps"] = std::to_string(static_cast<float>(eps_));
+            attrs["weight_decay"] = std::to_string(static_cast<float>(weight_decay_));
+
+            dispatch(OpId::FusedAdadeltaStep, inputs, attrs);
+            continue;
+        }
 
         // Move all tensors to CPU for data access
         Tensor grad = grad_orig.to(Device::cpu());
