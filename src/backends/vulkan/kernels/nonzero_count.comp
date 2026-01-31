@@ -26,7 +26,7 @@ void main() {
 
         if (gid < params.n_elements) {
             float val = input_data[gid];
-            is_nonzero = (val != 0.0) ? 1u : 0u;
+            is_nonzero = (abs(val) > 1e-10) ? 1u : 0u;
             flags[gid] = is_nonzero;
         }
 

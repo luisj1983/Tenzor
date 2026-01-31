@@ -3,9 +3,11 @@
 
 // Bitonic sort (Float64 variant)
 // One compare-and-swap pass per dispatch
+// Operates on (value, index) pairs: sorts by value, produces sorted indices
+// Multiple dispatches required: log2(N) * (log2(N)+1) / 2 passes total
 layout(local_size_x = 256) in;
 
-layout(binding = 0) buffer Values { float64_t values[]; };
+layout(binding = 0) buffer Values { double values[]; };
 layout(binding = 1) buffer Indices { int indices[]; };
 
 layout(push_constant) uniform PushConstants {
@@ -36,8 +38,8 @@ void main() {
     bool ascending_block = ((sort_block % 2) == 0);
     if (params.descending != 0) ascending_block = !ascending_block;
 
-    float64_t val_i = values[i];
-    float64_t val_j = values[j];
+    double val_i = values[i];
+    double val_j = values[j];
 
     bool should_swap;
     if (ascending_block) {

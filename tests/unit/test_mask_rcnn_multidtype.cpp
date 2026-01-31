@@ -171,10 +171,10 @@ TEST_P(MaskRCNNMultiDTypeTest, RPNGradientFlow) {
     Tensor gt_boxes({1, 3, 4}, dtype(), device());
     initialize_boxes(gt_boxes, 3, img_size);
 
-    Tensor gt_labels({1, 3}, DType::Int64, device());
-    auto labels_data = gt_labels.to(Device::cpu()).data<int64_t>();
+    Tensor gt_labels_cpu({1, 3}, DType::Int64, Device::cpu());
+    auto labels_data = gt_labels_cpu.data<int64_t>();
     labels_data[0] = 1; labels_data[1] = 2; labels_data[2] = 3;
-    gt_labels = Tensor({1, 3}, DType::Int64, device());
+    auto gt_labels = gt_labels_cpu.to(device());
 
     Tensor gt_masks({1, 3, img_size, img_size}, dtype(), device());
     initialize_masks(gt_masks);

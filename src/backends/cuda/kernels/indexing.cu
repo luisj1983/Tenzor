@@ -855,5 +855,186 @@ auto embedding_backward_kernel(const Tensor& grad_output, const Tensor& indices,
     return grad_weight;
 }
 
+// ============================================================================
+// one_hot kernel
+// ============================================================================
+
+template<typename IndexT>
+__global__ void one_hot_kernel_impl(
+    const IndexT* indices,
+    float* output,
+    int64_t batch_size,
+    int64_t num_classes) {
+
+    int64_t total = batch_size * num_classes;
+    CUDA_GRID_STRIDE_LOOP(idx, total) {
+        int64_t batch = idx / num_classes;
+        int64_t cls = idx % num_classes;
+        output[idx] = (static_cast<int64_t>(indices[batch]) == cls) ? 1.0f : 0.0f;
+    }
+}
+
+auto one_hot_kernel(const Tensor& indices, int64_t num_classes,
+                    cudaStream_t stream) -> Tensor {
+    int64_t batch_size = indices.numel();
+
+    Tensor output({batch_size, num_classes}, DType::Float32, indices.device());
+
+    if (batch_size == 0) return output;
+
+    int64_t total = batch_size * num_classes;
+    int num_blocks = get_num_blocks(total);
+
+    switch (indices.dtype()) {
+        case DType::Int32:
+            one_hot_kernel_impl<int32_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                indices.data<int32_t>(), output.data<float>(), batch_size, num_classes);
+            break;
+        case DType::Int64:
+            one_hot_kernel_impl<int64_t><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                indices.data<int64_t>(), output.data<float>(), batch_size, num_classes);
+            break;
+        default:
+            throw std::runtime_error("one_hot: unsupported index dtype (expected Int32 or Int64)");
+    }
+
+    CUDA_CHECK(cudaGetLastError());
+    return output;
+}
+
+// ============================================================================
+// nonzero kernel
+// ============================================================================
+
+template<typename T>
+__global__ void nonzero_flag_kernel(
+    const T* input,
+    int64_t* flags,
+    int64_t n) {
+
+    CUDA_GRID_STRIDE_LOOP(i, n) {
+        flags[i] = (input[i] != static_cast<T>(0)) ? 1 : 0;
+    }
+}
+
+// Specialization for __half
+template<>
+__global__ void nonzero_flag_kernel<__half>(
+    const __half* input,
+    int64_t* flags,
+    int64_t n) {
+
+    CUDA_GRID_STRIDE_LOOP(i, n) {
+        flags[i] = (__hne(input[i], __float2half(0.0f))) ? 1 : 0;
+    }
+}
+
+__global__ void nonzero_gather_kernel(
+    const int64_t* flags,
+    const int64_t* prefix_sum,
+    int64_t* output,
+    const int64_t* shape,
+    int64_t n,
+    int64_t ndim) {
+
+    CUDA_GRID_STRIDE_LOOP(i, n) {
+        if (flags[i]) {
+            int64_t out_row = (i == 0) ? 0 : prefix_sum[i - 1];
+            // Convert flat index to multi-dimensional indices
+            int64_t flat = i;
+            for (int64_t d = ndim - 1; d >= 0; --d) {
+                output[out_row * ndim + d] = flat % shape[d];
+                flat /= shape[d];
+            }
+        }
+    }
+}
+
+auto nonzero_kernel(const Tensor& input, cudaStream_t stream) -> Tensor {
+    int64_t n = input.numel();
+    int64_t ndim = input.ndim();
+
+    if (n == 0) {
+        return Tensor({0, ndim}, DType::Int64, input.device());
+    }
+
+    // Allocate flags array
+    int64_t* d_flags;
+    CUDA_CHECK(cudaMalloc(&d_flags, n * sizeof(int64_t)));
+
+    int num_blocks = get_num_blocks(n);
+
+    // Launch flag kernel based on dtype
+    #define LAUNCH_NONZERO_FLAG(T) \
+        nonzero_flag_kernel<T><<<num_blocks, BLOCK_SIZE, 0, stream>>>( \
+            input.data<T>(), d_flags, n)
+
+    switch (input.dtype()) {
+        case DType::Float32: LAUNCH_NONZERO_FLAG(float); break;
+        case DType::Float64: LAUNCH_NONZERO_FLAG(double); break;
+        case DType::Int32:   LAUNCH_NONZERO_FLAG(int32_t); break;
+        case DType::Int64:   LAUNCH_NONZERO_FLAG(int64_t); break;
+        case DType::Int8:    LAUNCH_NONZERO_FLAG(int8_t); break;
+        case DType::UInt8:   LAUNCH_NONZERO_FLAG(uint8_t); break;
+        case DType::Bool:    LAUNCH_NONZERO_FLAG(bool); break;
+        case DType::Float16:
+            nonzero_flag_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+                reinterpret_cast<const __half*>(input.data_ptr()), d_flags, n);
+            break;
+        default:
+            CUDA_CHECK(cudaFree(d_flags));
+            throw std::runtime_error("nonzero: unsupported dtype");
+    }
+
+    #undef LAUNCH_NONZERO_FLAG
+
+    // Compute prefix sum using CUB
+    int64_t* d_prefix_sum;
+    CUDA_CHECK(cudaMalloc(&d_prefix_sum, n * sizeof(int64_t)));
+
+    void* d_temp_storage = nullptr;
+    size_t temp_storage_bytes = 0;
+    cub::DeviceScan::InclusiveSum(d_temp_storage, temp_storage_bytes,
+                                   d_flags, d_prefix_sum, n, stream);
+    CUDA_CHECK(cudaMalloc(&d_temp_storage, temp_storage_bytes));
+    cub::DeviceScan::InclusiveSum(d_temp_storage, temp_storage_bytes,
+                                   d_flags, d_prefix_sum, n, stream);
+    CUDA_CHECK(cudaFree(d_temp_storage));
+
+    // Read total count from last element of prefix sum
+    int64_t total_nonzero;
+    CUDA_CHECK(cudaMemcpyAsync(&total_nonzero, d_prefix_sum + n - 1,
+                                sizeof(int64_t), cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+
+    if (total_nonzero == 0) {
+        CUDA_CHECK(cudaFree(d_flags));
+        CUDA_CHECK(cudaFree(d_prefix_sum));
+        return Tensor({0, ndim}, DType::Int64, input.device());
+    }
+
+    // Allocate output tensor
+    Tensor output({total_nonzero, ndim}, DType::Int64, input.device());
+
+    // Copy shape to device
+    int64_t* d_shape;
+    CUDA_CHECK(cudaMalloc(&d_shape, ndim * sizeof(int64_t)));
+    CUDA_CHECK(cudaMemcpyAsync(d_shape, input.shape().data(),
+                                ndim * sizeof(int64_t), cudaMemcpyHostToDevice, stream));
+
+    // Gather nonzero indices
+    nonzero_gather_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+        d_flags, d_prefix_sum, output.data<int64_t>(), d_shape, n, ndim);
+
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaStreamSynchronize(stream));
+
+    CUDA_CHECK(cudaFree(d_flags));
+    CUDA_CHECK(cudaFree(d_prefix_sum));
+    CUDA_CHECK(cudaFree(d_shape));
+
+    return output;
+}
+
 } // namespace cuda
 } // namespace tenzor

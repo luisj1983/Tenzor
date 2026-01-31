@@ -155,6 +155,8 @@ namespace cuda {
     auto masked_select_kernel(const Tensor& input, const Tensor& mask, cudaStream_t stream) -> Tensor;
     auto masked_fill_kernel(const Tensor& input, const Tensor& mask, double value, cudaStream_t stream) -> Tensor;
     auto where_kernel(const Tensor& condition, const Tensor& x, const Tensor& y, cudaStream_t stream) -> Tensor;
+    auto nonzero_kernel(const Tensor& input, cudaStream_t stream) -> Tensor;
+    auto one_hot_kernel(const Tensor& indices, int64_t num_classes, cudaStream_t stream) -> Tensor;
 
     // Embedding operations
     auto embedding_kernel(const Tensor& weight, const Tensor& indices, cudaStream_t stream) -> Tensor;
@@ -168,6 +170,16 @@ namespace cuda {
 
     // Vision/Interpolation operations
     auto interpolate_cuda(const Tensor& input, const std::vector<int64_t>& size, const std::string& mode, bool align_corners) -> Tensor;
+
+    // ROI Align operations
+    auto roi_align_forward(const Tensor& features, const Tensor& rois,
+                           int64_t output_h, int64_t output_w,
+                           float spatial_scale, int64_t sampling_ratio,
+                           bool aligned) -> Tensor;
+    auto roi_align_backward(const Tensor& grad_output, const Tensor& rois,
+                            int64_t batch_size, int64_t feat_height, int64_t feat_width,
+                            float spatial_scale, int64_t sampling_ratio,
+                            bool aligned) -> Tensor;
 
     // BatchNorm2d operations
     auto batchnorm2d_mean_var(const Tensor& input, Tensor& mean, Tensor& variance, cudaStream_t stream) -> void;
@@ -677,6 +689,13 @@ void register_cuda_kernels(BackendDispatchTable& table) {
     table.register_single_output_kernel(OpId::Where, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
         return cuda::where_kernel(inputs[0], inputs[1], inputs[2], get_cuda_stream(attrs));
     });
+    table.register_single_output_kernel(OpId::Nonzero, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        return cuda::nonzero_kernel(inputs[0], get_cuda_stream(attrs));
+    });
+    table.register_single_output_kernel(OpId::OneHot, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        int64_t num_classes = parse_attr<int64_t>(attrs, "num_classes", 0);
+        return cuda::one_hot_kernel(inputs[0], num_classes, get_cuda_stream(attrs));
+    });
 
     // =========================================================================
     // Pooling Operations (use cuDNN when available for better performance)
@@ -990,6 +1009,38 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         std::string mode = parse_attr<std::string>(attrs, "mode", "bilinear");
         bool align_corners = parse_attr<bool>(attrs, "align_corners", false);
         return cuda::interpolate_cuda(inputs[0], size, mode, align_corners);
+    });
+
+    // =========================================================================
+    // ROI Align Operations
+    // =========================================================================
+    table.register_kernel(OpId::ROIAlignForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        // inputs: [features, rois]
+        // attrs: output_h, output_w, spatial_scale, sampling_ratio, aligned
+        int64_t output_h = parse_attr<int64_t>(attrs, "output_h", 7);
+        int64_t output_w = parse_attr<int64_t>(attrs, "output_w", 7);
+        float spatial_scale = parse_attr<float>(attrs, "spatial_scale", 1.0f / 16.0f);
+        int64_t sampling_ratio = parse_attr<int64_t>(attrs, "sampling_ratio", 0);
+        bool aligned = parse_attr<bool>(attrs, "aligned", true);
+
+        return {cuda::roi_align_forward(inputs[0], inputs[1],
+                                        output_h, output_w, spatial_scale,
+                                        sampling_ratio, aligned)};
+    });
+
+    table.register_kernel(OpId::ROIAlignBackward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+        // inputs: [grad_output, rois]
+        // attrs: batch_size, feat_height, feat_width, spatial_scale, sampling_ratio, aligned
+        int64_t batch_size = parse_attr<int64_t>(attrs, "batch_size", 1);
+        int64_t feat_height = parse_attr<int64_t>(attrs, "feat_height", 0);
+        int64_t feat_width = parse_attr<int64_t>(attrs, "feat_width", 0);
+        float spatial_scale = parse_attr<float>(attrs, "spatial_scale", 1.0f / 16.0f);
+        int64_t sampling_ratio = parse_attr<int64_t>(attrs, "sampling_ratio", 0);
+        bool aligned = parse_attr<bool>(attrs, "aligned", true);
+
+        return {cuda::roi_align_backward(inputs[0], inputs[1],
+                                         batch_size, feat_height, feat_width,
+                                         spatial_scale, sampling_ratio, aligned)};
     });
 }
 

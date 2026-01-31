@@ -4,12 +4,38 @@
 #include "tenzor/core/tensor.hpp"
 #include "tenzor/core/shape.hpp"
 #include <cuda_runtime.h>
+#include <cuda_fp16.h>
 #include <algorithm>
 #include <limits>
 #include <vector>
 
 namespace tenzor {
 namespace cuda {
+
+// ============================================================================
+// FP16 Saturating Clamp Kernel
+// ============================================================================
+
+// Clamps FP16 values to max finite range, replacing ±Inf with ±65504.
+// This provides saturating Float16 behavior for cuDNN outputs, matching CPU
+// Float16 operator overloads which naturally clamp per-element.
+__global__ void fp16_saturate_kernel(__half* data, int64_t n) {
+    constexpr float kHalfMax = 65504.0f;
+    for (int64_t idx = blockIdx.x * blockDim.x + threadIdx.x; idx < n; idx += blockDim.x * gridDim.x) {
+        float val = __half2float(data[idx]);
+        if (val > kHalfMax || val < -kHalfMax) {
+            data[idx] = __float2half(fminf(fmaxf(val, -kHalfMax), kHalfMax));
+        }
+    }
+}
+
+// Launch FP16 saturation on a tensor
+static void fp16_saturate(Float16* data, int64_t n, cudaStream_t stream) {
+    if (n <= 0) return;
+    const int block = 256;
+    const int grid = std::min((int)((n + block - 1) / block), 65535);
+    fp16_saturate_kernel<<<grid, block, 0, stream>>>(reinterpret_cast<__half*>(data), n);
+}
 
 // ============================================================================
 // NCHW <-> NHWC Format Conversion Kernels
@@ -636,6 +662,13 @@ auto cudnn_conv2d_forward(
     }
 
     // No cleanup needed - workspace is persistent
+
+    // Saturate FP16 output: clamp any ±Inf to ±65504 (max finite Float16 value).
+    // cuDNN with FP32 compute type can produce values exceeding Float16 range,
+    // which IEEE 754 converts to Inf. Saturating conversion matches CPU behavior.
+    if (input.dtype() == DType::Float16) {
+        fp16_saturate(output.data<Float16>(), output.numel(), stream);
+    }
 
     return output;
 }

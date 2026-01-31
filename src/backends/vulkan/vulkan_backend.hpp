@@ -167,10 +167,12 @@ private:
     // Conv2d backward operations
     auto dispatchConv2dBackwardInput(const Tensor& grad_output, const Tensor& weight,
                                      int64_t stride, int64_t padding, int64_t dilation,
-                                     const std::vector<int64_t>& input_shape) -> Tensor;
+                                     const std::vector<int64_t>& input_shape,
+                                     int64_t groups = 1) -> Tensor;
     auto dispatchConv2dBackwardWeight(const Tensor& grad_output, const Tensor& input,
                                       int64_t stride, int64_t padding, int64_t dilation,
-                                      const std::vector<int64_t>& weight_shape) -> Tensor;
+                                      const std::vector<int64_t>& weight_shape,
+                                      int64_t groups = 1) -> Tensor;
     auto dispatchConv2dBackwardBias(const Tensor& grad_output) -> Tensor;
 
     // Vision operations

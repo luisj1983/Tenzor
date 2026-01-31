@@ -744,12 +744,31 @@ __global__ void leaky_relu_forward_kernel(const T* input, T* output,
     }
 }
 
+// Float16 forward kernel: compute in Float32 for numerical stability
+__global__ void leaky_relu_forward_fp16_kernel(const __half* input, __half* output,
+                                                int64_t n, float alpha) {
+    CUDA_GRID_STRIDE_LOOP(idx, n) {
+        float val = __half2float(input[idx]);
+        output[idx] = __float2half(val > 0.0f ? val : alpha * val);
+    }
+}
+
 // Backward: grad_out * (1 if x > 0 else alpha)
 template<typename T>
 __global__ void leaky_relu_backward_kernel(const T* grad_output, const T* input,
                                           T* grad_input, int64_t n, T alpha) {
     CUDA_GRID_STRIDE_LOOP(idx, n) {
         grad_input[idx] = grad_output[idx] * (input[idx] > T(0) ? T(1) : alpha);
+    }
+}
+
+// Float16 backward kernel: compute in Float32 for numerical stability
+__global__ void leaky_relu_backward_fp16_kernel(const __half* grad_output, const __half* input,
+                                                 __half* grad_input, int64_t n, float alpha) {
+    CUDA_GRID_STRIDE_LOOP(idx, n) {
+        float grad = __half2float(grad_output[idx]);
+        float val = __half2float(input[idx]);
+        grad_input[idx] = __float2half(grad * (val > 0.0f ? 1.0f : alpha));
     }
 }
 
@@ -1456,6 +1475,14 @@ __global__ void leaky_relu_inplace_cuda_kernel(T* data, T alpha, int64_t n) {
     }
 }
 
+// Float16 inplace kernel: compute in Float32 for numerical stability
+__global__ void leaky_relu_inplace_fp16_kernel(__half* data, float alpha, int64_t n) {
+    CUDA_GRID_STRIDE_LOOP(idx, n) {
+        float val = __half2float(data[idx]);
+        data[idx] = __float2half(val > 0.0f ? val : alpha * val);
+    }
+}
+
 // In-place GELU: x = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
 template<typename T>
 __global__ void gelu_inplace_cuda_kernel(T* data, int64_t n) {
@@ -1600,8 +1627,8 @@ auto leaky_relu_inplace_kernel(Tensor& input, float alpha, cudaStream_t stream) 
         leaky_relu_inplace_cuda_kernel<double><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             input.data<double>(), static_cast<double>(alpha), n);
     } else if (input.dtype() == DType::Float16) {
-        leaky_relu_inplace_cuda_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
-            reinterpret_cast<__half*>(input.data_ptr()), __float2half(alpha), n);
+        leaky_relu_inplace_fp16_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<__half*>(input.data_ptr()), alpha, n);
     } else {
         throw std::runtime_error("LeakyReLU inplace only supports Float32, Float64, and Float16 dtypes");
     }
@@ -2303,9 +2330,9 @@ auto leaky_relu_kernel(const Tensor& input, float alpha, cudaStream_t stream) ->
             input.data<double>(), result.data<double>(), n, static_cast<double>(alpha));
     } else if (input.dtype() == DType::Float16) {
         int num_blocks = get_num_blocks(n);
-        leaky_relu_forward_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+        leaky_relu_forward_fp16_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __half*>(input.data_ptr()),
-            reinterpret_cast<__half*>(result.data_ptr()), n, __float2half(alpha));
+            reinterpret_cast<__half*>(result.data_ptr()), n, alpha);
     } else {
         throw std::runtime_error("Leaky ReLU only supports Float32, Float64, and Float16 dtypes");
     }
@@ -2339,10 +2366,10 @@ auto leaky_relu_backward_kernel(const Tensor& grad_output, const Tensor& input, 
             grad_output.data<double>(), input.data<double>(), result.data<double>(), n, static_cast<double>(alpha));
     } else if (input.dtype() == DType::Float16) {
         int num_blocks = get_num_blocks(n);
-        leaky_relu_backward_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+        leaky_relu_backward_fp16_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __half*>(grad_output.data_ptr()),
             reinterpret_cast<const __half*>(input.data_ptr()),
-            reinterpret_cast<__half*>(result.data_ptr()), n, __float2half(alpha));
+            reinterpret_cast<__half*>(result.data_ptr()), n, alpha);
     } else {
         throw std::runtime_error("Leaky ReLU backward only supports Float32, Float64, and Float16 dtypes");
     }

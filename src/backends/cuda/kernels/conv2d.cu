@@ -58,6 +58,16 @@ inline void compute_launch_config_2d(int64_t rows, int64_t cols, dim3& grid, dim
          i += blockDim.x * gridDim.x)
 
 // ============================================================================
+// FP16 Saturating Conversion
+// ============================================================================
+
+__device__ __forceinline__ __half __float2half_sat(float x) {
+    constexpr float kHalfMax = 65504.0f;
+    x = fminf(fmaxf(x, -kHalfMax), kHalfMax);
+    return __float2half(x);
+}
+
+// ============================================================================
 // Helper Functions
 // ============================================================================
 
@@ -540,7 +550,7 @@ __global__ void col2im_kernel_f16(
         }
 
         // Direct write - NO ATOMIC NEEDED!
-        output[output_idx] = __float2half(sum);
+        output[output_idx] = __float2half_sat(sum);
     }
 }
 
@@ -620,7 +630,7 @@ __global__ void sum_bias_grad_kernel_f16(
                 sum += __half2float(grad_output[idx]);
             }
         }
-        grad_bias[c] = __float2half(sum);
+        grad_bias[c] = __float2half_sat(sum);
     }
 }
 
@@ -817,8 +827,20 @@ auto conv2d_forward_kernel(
 
     // Check dtype and dispatch to appropriate implementation
     if (input.dtype() == DType::Float16) {
-        // FP16 path with Tensor Cores
-        return conv2d_forward_f16(input, weight, bias, stride, padding, dilation, groups, stream);
+        // FP16 path: promote to Float32 for numerical stability, then convert back.
+        // This prevents overflow in deep networks where accumulated convolution
+        // outputs exceed Float16 range (~65504). Matches cuDNN's mixed-precision approach.
+        Tensor input_f32 = input.to(DType::Float32);
+        Tensor weight_f32 = weight.to(DType::Float32);
+        const Tensor* bias_f32_ptr = nullptr;
+        Tensor bias_f32;
+        if (bias != nullptr) {
+            bias_f32 = bias->to(DType::Float32);
+            bias_f32_ptr = &bias_f32;
+        }
+        Tensor output_f32 = conv2d_forward_kernel(input_f32, weight_f32, bias_f32_ptr,
+                                                   stride, padding, dilation, groups, stream);
+        return output_f32.to(DType::Float16);
     }
 
     // Initialize output to zeros (Float32 path)
@@ -1571,7 +1593,7 @@ __global__ void conv_transpose2d_forward_kernel_f16(
             sum += __half2float(bias[c]);
         }
 
-        output[idx] = __float2half(sum);
+        output[idx] = __float2half_sat(sum);
     }
 }
 

@@ -454,24 +454,32 @@ public:
 
     void set(int pad_h, int pad_w, int stride_h, int stride_w,
              int dilation_h, int dilation_w, cudnnDataType_t dtype) {
+        // For FP16 inputs, use FP32 compute type to prevent intermediate product
+        // overflow (FP16 × FP16 can exceed 65504 and produce Inf in tensor cores).
+        // This matches CPU behavior where Float32 products are used in GEMM.
+        cudnnDataType_t compute_type = dtype;
+        if (dtype == CUDNN_DATA_HALF) {
+            compute_type = CUDNN_DATA_FLOAT;
+        }
+
         CUDNN_CHECK(cudnnSetConvolution2dDescriptor(
             desc_,
             pad_h, pad_w,
             stride_h, stride_w,
             dilation_h, dilation_w,
             CUDNN_CROSS_CORRELATION,
-            dtype
+            compute_type
         ));
 
-        // Enable tensor core acceleration (TF32 for FP32, FP16 tensor cores for FP16)
-        // CUDNN_DEFAULT_MATH automatically uses TF32 on Ampere+ GPUs (like PyTorch)
-        // For FP16, explicitly request tensor core math
+        // Enable tensor core acceleration
+        // For FP16 with FP32 compute: TENSOR_OP_MATH_ALLOW_CONVERSION allows
+        // cuDNN to use tensor cores (FP16 I/O with FP32 accumulate) while
+        // maintaining FP32 compute precision for intermediate operations.
+        // For FP32: default math enables TF32 on compatible GPUs.
         #ifdef TENZOR_HAS_TENSOR_CORES
         if (dtype == CUDNN_DATA_HALF) {
-            CUDNN_CHECK(cudnnSetConvolutionMathType(desc_, CUDNN_TENSOR_OP_MATH));
+            CUDNN_CHECK(cudnnSetConvolutionMathType(desc_, CUDNN_TENSOR_OP_MATH_ALLOW_CONVERSION));
         }
-        // For FP32, use default math which enables TF32 on compatible GPUs
-        // No need to set explicitly as CUDNN_DEFAULT_MATH is the default
         #endif
     }
 

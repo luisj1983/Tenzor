@@ -32,6 +32,13 @@ namespace cuda {
          i < (n); \
          i += blockDim.x * gridDim.x)
 
+// FP16 saturating conversion
+__device__ __forceinline__ __half __float2half_sat(float x) {
+    constexpr float kHalfMax = 65504.0f;
+    x = fminf(fmaxf(x, -kHalfMax), kHalfMax);
+    return __float2half(x);
+}
+
 // Optimal block size
 constexpr int BLOCK_SIZE = 256;
 constexpr int BATCHNORM_BLOCK_SIZE = 512;
@@ -248,6 +255,31 @@ __global__ void batchnorm_normalize_kernel(const T* input,
     }
 }
 
+// Float16 specialization: compute normalization in Float32 to prevent overflow
+__global__ void batchnorm_normalize_fp16_kernel(const __half* input,
+                                                 __half* output,
+                                                 const __half* mean,
+                                                 const __half* variance,
+                                                 float epsilon,
+                                                 int64_t N,
+                                                 int64_t C,
+                                                 int64_t H,
+                                                 int64_t W) {
+    int64_t spatial_size = H * W;
+    int64_t total_size = N * C * spatial_size;
+
+    CUDA_GRID_STRIDE_LOOP(idx, total_size) {
+        int64_t c = (idx / (W * H)) % C;
+
+        float channel_mean = __half2float(mean[c]);
+        float channel_var = __half2float(variance[c]);
+        float invstd = rsqrtf(channel_var + epsilon);
+
+        float result = (__half2float(input[idx]) - channel_mean) * invstd;
+        output[idx] = __float2half_sat(result);
+    }
+}
+
 // ============================================================================
 // BatchNorm2d Affine Transform Kernel
 // ============================================================================
@@ -299,6 +331,34 @@ __global__ void batchnorm_forward_affine_kernel(const T* input,
 
         T normalized = (input[idx] - channel_mean) * invstd;
         output[idx] = gamma[c] * normalized + beta[c];
+    }
+}
+
+// Float16 specialization: compute in Float32 internally to prevent overflow
+__global__ void batchnorm_forward_affine_fp16_kernel(const __half* input,
+                                                      __half* output,
+                                                      const __half* mean,
+                                                      const __half* variance,
+                                                      const __half* gamma,
+                                                      const __half* beta,
+                                                      float epsilon,
+                                                      int64_t N,
+                                                      int64_t C,
+                                                      int64_t H,
+                                                      int64_t W) {
+    int64_t spatial_size = H * W;
+    int64_t total_size = N * C * spatial_size;
+
+    CUDA_GRID_STRIDE_LOOP(idx, total_size) {
+        int64_t c = (idx / (H * W)) % C;
+
+        float channel_mean = __half2float(mean[c]);
+        float channel_var = __half2float(variance[c]);
+        float invstd = rsqrtf(channel_var + epsilon);
+
+        float normalized = (__half2float(input[idx]) - channel_mean) * invstd;
+        float result = __half2float(gamma[c]) * normalized + __half2float(beta[c]);
+        output[idx] = __float2half_sat(result);
     }
 }
 
@@ -665,12 +725,12 @@ auto batchnorm2d_forward(const Tensor& input,
         CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         int num_blocks = get_num_blocks(total_size);
-        batchnorm_normalize_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+        batchnorm_normalize_fp16_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(output.data<Float16>()),
             reinterpret_cast<const __half*>(mean.data<Float16>()),
             reinterpret_cast<const __half*>(variance.data<Float16>()),
-            __float2half(epsilon), N, C, H, W);
+            epsilon, N, C, H, W);
         CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("BatchNorm2D only supports Float32, Float64, and Float16 dtypes");
@@ -715,14 +775,14 @@ auto batchnorm2d_forward_affine(const Tensor& input,
         CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
         int num_blocks = get_num_blocks(total_size);
-        batchnorm_forward_affine_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+        batchnorm_forward_affine_fp16_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(output.data<Float16>()),
             reinterpret_cast<const __half*>(mean.data<Float16>()),
             reinterpret_cast<const __half*>(variance.data<Float16>()),
             reinterpret_cast<const __half*>(gamma.data<Float16>()),
             reinterpret_cast<const __half*>(beta.data<Float16>()),
-            __float2half(epsilon), N, C, H, W);
+            epsilon, N, C, H, W);
         CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("BatchNorm2D only supports Float32, Float64, and Float16 dtypes");
@@ -788,16 +848,16 @@ auto batchnorm2d_forward_affine_optimized(const Tensor& input,
             epsilon, N, C, H, W);
         CUDA_CHECK(cudaGetLastError());
     } else if (input.dtype() == DType::Float16) {
-        // For Float16, use the standard kernel
+        // For Float16, use FP16 kernel that computes in Float32 for numerical stability
         int num_blocks = get_num_blocks(total_size);
-        batchnorm_forward_affine_kernel<__half><<<num_blocks, BLOCK_SIZE, 0, stream>>>(
+        batchnorm_forward_affine_fp16_kernel<<<num_blocks, BLOCK_SIZE, 0, stream>>>(
             reinterpret_cast<const __half*>(input.data<Float16>()),
             reinterpret_cast<__half*>(output.data<Float16>()),
             reinterpret_cast<const __half*>(mean.data<Float16>()),
             reinterpret_cast<const __half*>(variance.data<Float16>()),
             reinterpret_cast<const __half*>(gamma.data<Float16>()),
             reinterpret_cast<const __half*>(beta.data<Float16>()),
-            __float2half(epsilon), N, C, H, W);
+            epsilon, N, C, H, W);
         CUDA_CHECK(cudaGetLastError());
     } else {
         throw std::runtime_error("BatchNorm2D only supports Float32, Float64, and Float16 dtypes");

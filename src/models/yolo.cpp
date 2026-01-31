@@ -12,12 +12,12 @@
 #include <cmath>
 #include <stdexcept>
 #include <algorithm>
-#include <iostream>
 
 namespace tenzor {
 namespace models {
 
 using namespace nn;
+
 using namespace ops;
 
 // ============================================================================
@@ -284,8 +284,8 @@ auto YOLOv3::forward_impl(const Variable& input) -> Variable {
     // Predictions format: [tx, ty, tw, th, objectness, class_probs...]
     std::vector<Tensor> all_scores;
 
-    for (const auto& pred_var : predictions) {
-        auto pred = pred_var.tensor();
+    for (size_t si = 0; si < predictions.size(); ++si) {
+        auto pred = predictions[si].tensor();
         auto shape = pred.shape();
         int64_t N = shape[0];
         int64_t num_anchors = shape[1];
@@ -338,21 +338,6 @@ auto YOLOv3::forward_impl(const Variable& input) -> Variable {
     return Variable(std::get<0>(detections[0]));
 }
 
-// Temporary debug helper
-static bool debug_check_finite(const Tensor& t, const char* name) {
-    auto data = t.to(DType::Float32).to(Device::cpu()).data<float>();
-    int64_t count = 0;
-    for (int64_t i = 0; i < t.numel(); ++i) {
-        if (!std::isfinite(data[i])) count++;
-    }
-    if (count > 0) {
-        std::cerr << "[YOLO_DEBUG] FAIL " << name << ": " << count << "/" << t.numel() << " non-finite" << std::endl;
-        return false;
-    }
-    std::cerr << "[YOLO_DEBUG] OK   " << name << " (" << t.numel() << " elems)" << std::endl;
-    return true;
-}
-
 auto YOLOv3::forward_raw(const Variable& input) -> std::vector<Variable> {
     // Extract multi-scale features from backbone
     auto features = backbone_->forward_multiscale(input);
@@ -360,14 +345,9 @@ auto YOLOv3::forward_raw(const Variable& input) -> std::vector<Variable> {
     auto feat_medium = features[1];  // 512 channels, 1/16 scale (26x26)
     auto feat_large = features[2];   // 1024 channels, 1/32 scale (13x13)
 
-    debug_check_finite(feat_small.tensor(), "backbone feat_small");
-    debug_check_finite(feat_medium.tensor(), "backbone feat_medium");
-    debug_check_finite(feat_large.tensor(), "backbone feat_large");
-
     // Top-down FPN pathway
     // P5 -> P4: Upsample large features to match medium features
     auto p5_up = fpn_upsample1_->forward(feat_large);
-    debug_check_finite(p5_up.tensor(), "fpn_upsample1 output");
 
     // Upsample by 2x using bilinear interpolation
     auto p5_shape = feat_medium.tensor().shape();
@@ -375,11 +355,9 @@ auto YOLOv3::forward_raw(const Variable& input) -> std::vector<Variable> {
     int64_t target_w = p5_shape[3];
     auto p5_up_tensor = ops::interpolate(p5_up.tensor(), {target_h, target_w}, "bilinear", false);
     p5_up = Variable(p5_up_tensor, p5_up.requires_grad());
-    debug_check_finite(p5_up.tensor(), "p5_up after interpolate");
 
     auto p4_lateral = fpn_lateral1_->forward(feat_medium);
     auto p4 = p5_up + p4_lateral;
-    debug_check_finite(p4.tensor(), "p4 after lateral fusion");
 
     // P4 -> P3: Upsample medium features to match small features
     auto p4_up = fpn_upsample2_->forward(p4);
@@ -395,7 +373,6 @@ auto YOLOv3::forward_raw(const Variable& input) -> std::vector<Variable> {
 
     // Apply detection heads
     auto pred_large = head_large_->forward(feat_large);   // 13x13
-    debug_check_finite(pred_large.tensor(), "pred_large (head output)");
     auto pred_medium = head_medium_->forward(p4);         // 26x26
     auto pred_small = head_small_->forward(p3);           // 52x52
 

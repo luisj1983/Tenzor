@@ -361,34 +361,47 @@ __global__ void div_kernel_device(const T* a, const T* b, T* c, int64_t n) {
 }
 
 // ============================================================================
+// FP16 Saturating Conversion
+// ============================================================================
+
+// Saturating Float32 → Float16 conversion: clamps to max finite Float16 value
+// instead of producing Inf. This matches CPU Float16 operator behavior where
+// per-element clamping naturally limits value growth through deep networks.
+__device__ __forceinline__ __half __float2half_sat(float x) {
+    constexpr float kHalfMax = 65504.0f;
+    x = fminf(fmaxf(x, -kHalfMax), kHalfMax);
+    return __float2half(x);
+}
+
+// ============================================================================
 // FP16 Binary Operations
 // ============================================================================
 
-// FP16 addition kernel
+// FP16 addition kernel (compute in Float32, saturating conversion)
 __global__ void add_kernel_f16(const __half* a, const __half* b, __half* c, int64_t n) {
     CUDA_KERNEL_LOOP(idx, n) {
-        c[idx] = __hadd(a[idx], b[idx]);
+        c[idx] = __float2half_sat(__half2float(a[idx]) + __half2float(b[idx]));
     }
 }
 
-// FP16 subtraction kernel
+// FP16 subtraction kernel (compute in Float32, saturating conversion)
 __global__ void sub_kernel_f16(const __half* a, const __half* b, __half* c, int64_t n) {
     CUDA_KERNEL_LOOP(idx, n) {
-        c[idx] = __hsub(a[idx], b[idx]);
+        c[idx] = __float2half_sat(__half2float(a[idx]) - __half2float(b[idx]));
     }
 }
 
-// FP16 multiplication kernel
+// FP16 multiplication kernel (compute in Float32, saturating conversion)
 __global__ void mul_kernel_f16(const __half* a, const __half* b, __half* c, int64_t n) {
     CUDA_KERNEL_LOOP(idx, n) {
-        c[idx] = __hmul(a[idx], b[idx]);
+        c[idx] = __float2half_sat(__half2float(a[idx]) * __half2float(b[idx]));
     }
 }
 
-// FP16 division kernel
+// FP16 division kernel (compute in Float32, saturating conversion)
 __global__ void div_kernel_f16(const __half* a, const __half* b, __half* c, int64_t n) {
     CUDA_KERNEL_LOOP(idx, n) {
-        c[idx] = __hdiv(a[idx], b[idx]);
+        c[idx] = __float2half_sat(__half2float(a[idx]) / __half2float(b[idx]));
     }
 }
 

@@ -209,8 +209,10 @@ set(SHADERS
     # Interpolation operations
     bilinear_interpolate
     bilinear_interpolate_f64
+    bilinear_interpolate_f16
     nearest_interpolate
     nearest_interpolate_f64
+    nearest_interpolate_f16
     # F16 math function shaders
     trigonometric_f16
     hyperbolic_f16

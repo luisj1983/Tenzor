@@ -1,16 +1,16 @@
 #version 450
 
 // Conv2d Backward Input - Gradient w.r.t. input
-// Computes gradient using transposed convolution (col2im pattern)
+// Supports grouped convolutions (including depthwise where groups == channels)
 //
 // Algorithm: For each input pixel (ih, iw), accumulate gradients from all
 // output positions that used it during forward pass.
-// This reverses the im2col mapping used in forward conv2d.
+// With groups: each input channel only connects to output channels in same group.
 
 layout(local_size_x = 256) in;
 
 layout(binding = 0) buffer GradOutput { float grad_output[]; };  // (N, C_out, H_out, W_out)
-layout(binding = 1) buffer Weight { float weight[]; };           // (C_out, C_in, K_h, K_w)
+layout(binding = 1) buffer Weight { float weight[]; };           // (C_out, C_in/groups, K_h, K_w)
 layout(binding = 2) buffer GradInput { float grad_input[]; };    // (N, C_in, H_in, W_in)
 
 layout(push_constant) uniform PushConstants {
@@ -26,6 +26,7 @@ layout(push_constant) uniform PushConstants {
     uint stride;
     uint padding;
     uint dilation;
+    uint groups;
 } params;
 
 void main() {
@@ -45,6 +46,16 @@ void main() {
     uint c_in = temp % params.channels_in;
     uint b = temp / params.channels_in;
 
+    // Grouped convolution parameters
+    uint in_channels_per_group = params.channels_in / params.groups;
+    uint out_channels_per_group = params.channels_out / params.groups;
+    uint group = c_in / in_channels_per_group;
+    uint c_in_local = c_in % in_channels_per_group;  // channel index within group
+
+    // Output channels for this group
+    uint c_out_start = group * out_channels_per_group;
+    uint c_out_end = c_out_start + out_channels_per_group;
+
     // Accumulate gradient from all kernel positions that used this input pixel
     float sum = 0.0;
 
@@ -53,14 +64,10 @@ void main() {
         for (uint kw = 0; kw < params.kernel_w; kw++) {
             // Reverse the forward mapping: given input (ih, iw) and kernel (kh, kw),
             // find which output position (oh, ow) used this input
-            // Forward: ih = oh * stride - padding + kh * dilation
-            // Reverse: oh = (ih + padding - kh * dilation) / stride
-
             int ih_shifted = int(ih) + int(params.padding) - int(kh * params.dilation);
             int iw_shifted = int(iw) + int(params.padding) - int(kw * params.dilation);
 
-            // Check if this maps to a valid output position
-            // Must be divisible by stride
+            // Check if this maps to a valid output position (must be divisible by stride)
             if (ih_shifted % int(params.stride) == 0 && iw_shifted % int(params.stride) == 0) {
                 int oh = ih_shifted / int(params.stride);
                 int ow = iw_shifted / int(params.stride);
@@ -69,16 +76,14 @@ void main() {
                 if (oh >= 0 && oh < int(params.height_out) &&
                     ow >= 0 && ow < int(params.width_out)) {
 
-                    // This kernel position contributed to our gradient
-                    // Accumulate: grad_input += grad_output * weight
-
-                    // Iterate through all output channels
-                    for (uint c_out = 0; c_out < params.channels_out; c_out++) {
+                    // Only iterate over output channels in the same group
+                    for (uint c_out = c_out_start; c_out < c_out_end; c_out++) {
                         // grad_output index: [b][c_out][oh][ow]
                         uint grad_out_idx = ((b * params.channels_out + c_out) * params.height_out + uint(oh)) * params.width_out + uint(ow);
 
-                        // weight index: [c_out][c_in][kh][kw]
-                        uint weight_idx = ((c_out * params.channels_in + c_in) * params.kernel_h + kh) * params.kernel_w + kw;
+                        // weight index: [c_out][c_in_local][kh][kw]
+                        // Weight shape is (C_out, C_in/groups, K_h, K_w)
+                        uint weight_idx = ((c_out * in_channels_per_group + c_in_local) * params.kernel_h + kh) * params.kernel_w + kw;
 
                         sum += grad_output[grad_out_idx] * weight[weight_idx];
                     }

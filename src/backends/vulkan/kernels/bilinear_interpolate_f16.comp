@@ -1,0 +1,101 @@
+#version 450
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+
+// Bilinear Interpolation Forward Pass for Float16
+// Reads packed F16 pairs, computes in float32 for stability
+// Input shape: (N, C, H_in, W_in)
+// Output shape: (N, C, H_out, W_out)
+
+layout(local_size_x = 256) in;
+
+layout(binding = 0) buffer Input { uint input_data[]; };    // Packed F16
+layout(binding = 1) buffer Output { uint output_data[]; };  // Packed F16
+
+layout(push_constant) uniform PushConstants {
+    uint n_elements;     // Total output elements
+    uint batch;          // N
+    uint channels;       // C
+    uint in_height;      // H_in
+    uint in_width;       // W_in
+    uint out_height;     // H_out
+    uint out_width;      // W_out
+    uint align_corners;  // 1 if align_corners, 0 otherwise
+} params;
+
+float readF16Element(uint flat_idx) {
+    uint word_idx = flat_idx / 2;
+    uint half_idx = flat_idx % 2;
+    uint packed = input_data[word_idx];
+    uint bits = (packed >> (half_idx * 16)) & 0xFFFFu;
+    return float(float16_t(unpackHalf2x16(bits | (bits << 16)).x));
+}
+
+void writeF16Element(uint flat_idx, float val) {
+    uint word_idx = flat_idx / 2;
+    uint half_idx = flat_idx % 2;
+    uint bits = packHalf2x16(vec2(val, 0.0)).x & 0xFFFFu;
+    uint shift = half_idx * 16;
+    atomicAnd(output_data[word_idx], ~(0xFFFFu << shift));
+    atomicOr(output_data[word_idx], bits << shift);
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+
+    if (idx >= params.n_elements) {
+        return;
+    }
+
+    // Decode flat index to (n, c, h_out, w_out)
+    uint temp = idx;
+    uint w_out = temp % params.out_width;
+    temp /= params.out_width;
+    uint h_out = temp % params.out_height;
+    temp /= params.out_height;
+    uint c = temp % params.channels;
+    uint n = temp / params.channels;
+
+    // Compute source coordinates
+    float h_real, w_real;
+    if (params.align_corners != 0 && params.out_height > 1) {
+        h_real = float(h_out) * float(params.in_height - 1) / float(params.out_height - 1);
+    } else {
+        h_real = (float(h_out) + 0.5) * float(params.in_height) / float(params.out_height) - 0.5;
+    }
+
+    if (params.align_corners != 0 && params.out_width > 1) {
+        w_real = float(w_out) * float(params.in_width - 1) / float(params.out_width - 1);
+    } else {
+        w_real = (float(w_out) + 0.5) * float(params.in_width) / float(params.out_width) - 0.5;
+    }
+
+    // Clamp to valid range
+    h_real = max(0.0, min(h_real, float(params.in_height - 1)));
+    w_real = max(0.0, min(w_real, float(params.in_width - 1)));
+
+    // Compute integer coordinates and fractional parts
+    uint h0 = uint(floor(h_real));
+    uint w0 = uint(floor(w_real));
+    uint h1 = min(h0 + 1, params.in_height - 1);
+    uint w1 = min(w0 + 1, params.in_width - 1);
+
+    float h_frac = h_real - float(h0);
+    float w_frac = w_real - float(w0);
+
+    // Compute input base offset for (n, c)
+    uint base = n * params.channels * params.in_height * params.in_width +
+                c * params.in_height * params.in_width;
+
+    // Bilinear interpolation (compute in float32 for stability)
+    float v00 = readF16Element(base + h0 * params.in_width + w0);
+    float v01 = readF16Element(base + h0 * params.in_width + w1);
+    float v10 = readF16Element(base + h1 * params.in_width + w0);
+    float v11 = readF16Element(base + h1 * params.in_width + w1);
+
+    float result = v00 * (1.0 - h_frac) * (1.0 - w_frac) +
+                   v01 * (1.0 - h_frac) * w_frac +
+                   v10 * h_frac * (1.0 - w_frac) +
+                   v11 * h_frac * w_frac;
+
+    writeF16Element(idx, result);
+}

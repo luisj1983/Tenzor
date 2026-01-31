@@ -1400,7 +1400,9 @@ vulkan::ComputePipeline* VulkanBackend::getPipeline(const std::string& shader_na
         push_range.size = 60;  // 15 uint32_t values
         pushConstants.push_back(push_range);
     } else if (shader_name == "bilinear_interpolate" || shader_name == "bilinear_interpolate_f64" ||
-               shader_name == "nearest_interpolate" || shader_name == "nearest_interpolate_f64") {
+               shader_name == "bilinear_interpolate_f16" ||
+               shader_name == "nearest_interpolate" || shader_name == "nearest_interpolate_f64" ||
+               shader_name == "nearest_interpolate_f16") {
         // interpolation: 32 bytes (n_elements, batch, channels, in_height, in_width, out_height, out_width, align_corners)
         VkPushConstantRange push_range{};
         push_range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
@@ -2020,12 +2022,13 @@ auto VulkanBackend::dispatch(const std::string& op_name,
         const Tensor& input = inputs[1];
         const Tensor& weight = inputs[2];
 
-        int64_t stride = 1, padding = 0, dilation = 1;
+        int64_t stride = 1, padding = 0, dilation = 1, groups = 1;
         bool compute_grad_input = true, compute_grad_weight = true, compute_grad_bias = false;
 
         if (attrs.contains("stride")) stride = std::stoll(attrs.at("stride"));
         if (attrs.contains("padding")) padding = std::stoll(attrs.at("padding"));
         if (attrs.contains("dilation")) dilation = std::stoll(attrs.at("dilation"));
+        if (attrs.contains("groups")) groups = std::stoll(attrs.at("groups"));
         if (attrs.contains("compute_grad_input")) compute_grad_input = (attrs.at("compute_grad_input") == "1");
         if (attrs.contains("compute_grad_weight")) compute_grad_weight = (attrs.at("compute_grad_weight") == "1");
         if (attrs.contains("compute_grad_bias")) compute_grad_bias = (attrs.at("compute_grad_bias") == "1");
@@ -2037,12 +2040,12 @@ auto VulkanBackend::dispatch(const std::string& op_name,
 
         // Compute grad_input
         if (compute_grad_input) {
-            results.push_back(dispatchConv2dBackwardInput(grad_output, weight, stride, padding, dilation, input_shape));
+            results.push_back(dispatchConv2dBackwardInput(grad_output, weight, stride, padding, dilation, input_shape, groups));
         }
 
         // Compute grad_weight
         if (compute_grad_weight) {
-            results.push_back(dispatchConv2dBackwardWeight(grad_output, input, stride, padding, dilation, weight_shape));
+            results.push_back(dispatchConv2dBackwardWeight(grad_output, input, stride, padding, dilation, weight_shape, groups));
         }
 
         // Compute grad_bias
@@ -4247,10 +4250,10 @@ auto VulkanBackend::dispatchComparisonOp(const std::string& op_name,
         // Round up to 4-byte boundary for uint32 shader access (2 Float16 per uint32)
         size_t a_pairs = (a.numel() + 1) / 2;
         size_t b_pairs = (b.numel() + 1) / 2;
-        size_t out_pairs = (output.numel() + 1) / 2;
         buffer_size_a = a_pairs * 4;
         buffer_size_b = b_pairs * 4;
-        buffer_size_out = out_pairs * 4;
+        // Output is Bool (uint8_t per element), NOT packed Float16
+        // Keep buffer_size_out as output.numel() * output.dtype_size()
     }
 
     // Allocate and write descriptor set
@@ -4957,13 +4960,14 @@ auto VulkanBackend::dispatchConv2dBackwardInput(
     int64_t stride,
     int64_t padding,
     int64_t dilation,
-    const std::vector<int64_t>& input_shape) -> Tensor {
+    const std::vector<int64_t>& input_shape,
+    int64_t groups) -> Tensor {
 
     // Float16: upcast to Float32, compute, downcast back
     if (grad_output.dtype() == DType::Float16) {
         auto grad_f32 = grad_output.to(DType::Float32);
         auto weight_f32 = weight.to(DType::Float32);
-        auto result = dispatchConv2dBackwardInput(grad_f32, weight_f32, stride, padding, dilation, input_shape);
+        auto result = dispatchConv2dBackwardInput(grad_f32, weight_f32, stride, padding, dilation, input_shape, groups);
         return result.to(DType::Float16);
     }
 
@@ -5024,7 +5028,7 @@ auto VulkanBackend::dispatchConv2dBackwardInput(
     vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                            pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
 
-    // Set push constants
+    // Set push constants (groups support for depthwise/grouped convolutions)
     struct PushConstants {
         uint32_t batch;
         uint32_t channels_in;
@@ -5038,6 +5042,7 @@ auto VulkanBackend::dispatchConv2dBackwardInput(
         uint32_t stride;
         uint32_t padding;
         uint32_t dilation;
+        uint32_t groups;
     } push_constants;
 
     push_constants.batch = static_cast<uint32_t>(batch);
@@ -5052,6 +5057,7 @@ auto VulkanBackend::dispatchConv2dBackwardInput(
     push_constants.stride = static_cast<uint32_t>(stride);
     push_constants.padding = static_cast<uint32_t>(padding);
     push_constants.dilation = static_cast<uint32_t>(dilation);
+    push_constants.groups = static_cast<uint32_t>(groups);
 
     vkCmdPushConstants(cmdBuffer, pipeline->layout(),
                       VK_SHADER_STAGE_COMPUTE_BIT,
@@ -5082,13 +5088,14 @@ auto VulkanBackend::dispatchConv2dBackwardWeight(
     int64_t stride,
     int64_t padding,
     int64_t dilation,
-    const std::vector<int64_t>& weight_shape) -> Tensor {
+    const std::vector<int64_t>& weight_shape,
+    int64_t groups) -> Tensor {
 
     // Float16: upcast to Float32, compute, downcast back
     if (grad_output.dtype() == DType::Float16) {
         auto grad_f32 = grad_output.to(DType::Float32);
         auto input_f32 = input.to(DType::Float32);
-        auto result = dispatchConv2dBackwardWeight(grad_f32, input_f32, stride, padding, dilation, weight_shape);
+        auto result = dispatchConv2dBackwardWeight(grad_f32, input_f32, stride, padding, dilation, weight_shape, groups);
         return result.to(DType::Float16);
     }
 
@@ -5149,7 +5156,7 @@ auto VulkanBackend::dispatchConv2dBackwardWeight(
     vkCmdBindDescriptorSets(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE,
                            pipeline->layout(), 0, 1, &descriptorSet, 0, nullptr);
 
-    // Set push constants
+    // Set push constants (groups support for depthwise/grouped convolutions)
     struct PushConstants {
         uint32_t batch;
         uint32_t channels_in;
@@ -5163,6 +5170,7 @@ auto VulkanBackend::dispatchConv2dBackwardWeight(
         uint32_t stride;
         uint32_t padding;
         uint32_t dilation;
+        uint32_t groups;
     } push_constants;
 
     push_constants.batch = static_cast<uint32_t>(batch);
@@ -5177,13 +5185,16 @@ auto VulkanBackend::dispatchConv2dBackwardWeight(
     push_constants.stride = static_cast<uint32_t>(stride);
     push_constants.padding = static_cast<uint32_t>(padding);
     push_constants.dilation = static_cast<uint32_t>(dilation);
+    push_constants.groups = static_cast<uint32_t>(groups);
 
     vkCmdPushConstants(cmdBuffer, pipeline->layout(),
                       VK_SHADER_STAGE_COMPUTE_BIT,
                       0, sizeof(PushConstants), &push_constants);
 
     // Dispatch workgroups (256 threads per workgroup as defined in shader)
-    int64_t total_weight_elements = channels_out * channels_in * kernel_h * kernel_w;
+    // Weight shape: (C_out, C_in/groups, K_h, K_w) - total elements is the product of these
+    int64_t in_channels_per_group = channels_in / groups;
+    int64_t total_weight_elements = channels_out * in_channels_per_group * kernel_h * kernel_w;
     uint32_t workgroups = static_cast<uint32_t>((total_weight_elements + 255) / 256);
     vkCmdDispatch(cmdBuffer, workgroups, 1, 1);
 
@@ -6261,16 +6272,28 @@ auto VulkanBackend::dispatchBatchNorm2dForward(const Tensor& input, const Tensor
     std::vector<int64_t> output_shape(input_shape.begin(), input_shape.end());
     Tensor output(output_shape, input.dtype(), input.device());
 
+    // For Float16 input, the shader expects mean/var as Float32 for numerical stability
+    // Keep converted tensors alive in this scope so their buffers remain valid
+    Tensor mean_f32, var_f32;
+    const Tensor* mean_ptr = &mean;
+    const Tensor* var_ptr = &var;
+    if (input.dtype() == DType::Float16 && mean.dtype() == DType::Float16) {
+        mean_f32 = mean.to(DType::Float32);
+        var_f32 = var.to(DType::Float32);
+        mean_ptr = &mean_f32;
+        var_ptr = &var_f32;
+    }
+
     // Get VkBuffer handles
     VkBuffer buffer_input = getVulkanBuffer(input.data_ptr());
-    VkBuffer buffer_mean = getVulkanBuffer(mean.data_ptr());
-    VkBuffer buffer_var = getVulkanBuffer(var.data_ptr());
+    VkBuffer buffer_mean = getVulkanBuffer(mean_ptr->data_ptr());
+    VkBuffer buffer_var = getVulkanBuffer(var_ptr->data_ptr());
     VkBuffer buffer_output = getVulkanBuffer(output.data_ptr());
 
     // Calculate buffer sizes
     size_t buffer_size_input = input.numel() * input.dtype_size();
-    size_t buffer_size_mean = mean.numel() * mean.dtype_size();
-    size_t buffer_size_var = var.numel() * var.dtype_size();
+    size_t buffer_size_mean = mean_ptr->numel() * mean_ptr->dtype_size();
+    size_t buffer_size_var = var_ptr->numel() * var_ptr->dtype_size();
     size_t buffer_size_output = output.numel() * output.dtype_size();
     if (input.dtype() == DType::Float16) {
         // Round up input/output to 4-byte boundary for uint32 shader access (2 Float16 per uint32)
@@ -7143,11 +7166,18 @@ auto VulkanBackend::dispatchBoxIoU(const Tensor& boxes1, const Tensor& boxes2, i
     int64_t N = boxes1.shape()[0];
     int64_t M = boxes2.shape()[0];
 
-    Tensor result({N, M}, boxes1.dtype(), boxes1.device());
+    // The box_iou shader operates on float (32-bit), so convert Float64→Float32
+    // Also ensure inputs are contiguous (views/slices may have offsets into parent buffers)
+    Tensor b1 = boxes1.contiguous();
+    Tensor b2 = boxes2.contiguous();
+    if (b1.dtype() != DType::Float32) b1 = b1.to(DType::Float32);
+    if (b2.dtype() != DType::Float32) b2 = b2.to(DType::Float32);
 
-    size_t elem_size = boxes1.dtype_size();
-    VkBuffer buf_boxes1 = getVulkanBuffer(boxes1.data_ptr());
-    VkBuffer buf_boxes2 = getVulkanBuffer(boxes2.data_ptr());
+    Tensor result({N, M}, DType::Float32, boxes1.device());
+
+    size_t elem_size = sizeof(float);
+    VkBuffer buf_boxes1 = getVulkanBuffer(b1.data_ptr());
+    VkBuffer buf_boxes2 = getVulkanBuffer(b2.data_ptr());
     VkBuffer buf_result = getVulkanBuffer(result.data_ptr());
 
     std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
@@ -7192,6 +7222,11 @@ auto VulkanBackend::dispatchBoxIoU(const Tensor& boxes1, const Tensor& boxes2, i
     insertComputeBarrier(cmdBuffer);
     endSingleTimeCommands(cmdBuffer, device_id);
 
+    // Convert back to original dtype if needed
+    if (boxes1.dtype() != DType::Float32) {
+        result = result.to(boxes1.dtype());
+    }
+
     return result;
 }
 
@@ -7200,10 +7235,13 @@ auto VulkanBackend::dispatchOneHot(const Tensor& indices, int64_t num_classes) -
     int32_t device_id = indices.device().index;
     auto* pipeline = getPipeline("one_hot", device_id);
 
-    int64_t batch_size = indices.numel();
+    // The one_hot shader reads int indices_data[] (32-bit), so convert Int64→Int32
+    Tensor indices_i32 = (indices.dtype() == DType::Int32) ? indices : indices.to(DType::Int32);
+
+    int64_t batch_size = indices_i32.numel();
     Tensor output({batch_size, num_classes}, DType::Float32, indices.device());
 
-    VkBuffer buf_indices = getVulkanBuffer(indices.data_ptr());
+    VkBuffer buf_indices = getVulkanBuffer(indices_i32.data_ptr());
     VkBuffer buf_output = getVulkanBuffer(output.data_ptr());
 
     std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
@@ -7211,7 +7249,7 @@ auto VulkanBackend::dispatchOneHot(const Tensor& indices, int64_t num_classes) -
         {1, buf_output},
     };
     std::vector<size_t> sizes = {
-        static_cast<size_t>(batch_size) * indices.dtype_size(),
+        static_cast<size_t>(batch_size) * indices_i32.dtype_size(),
         static_cast<size_t>(batch_size * num_classes) * sizeof(float),
     };
 
@@ -10626,6 +10664,9 @@ auto VulkanBackend::dispatchConv2dForward(const Tensor& input, const Tensor& wei
         // Pass through bias handling - attrs may reference a bias tensor
         // that also needs conversion, handled by the F32 path
         auto result_f32 = dispatchConv2dForward(input_f32, weight_f32, attrs);
+        // Saturating conversion: clamp to Float16 representable range to prevent
+        // Inf/NaN from overflow when converting back to Float16
+        result_f32 = dispatchClamp(result_f32, -65504.0f, 65504.0f);
         return result_f32.to(DType::Float16);
     }
 
@@ -11768,13 +11809,16 @@ auto VulkanBackend::dispatchInterpolate(const Tensor& input, const OpAttributes&
 
     int32_t device_id = input.device().index;
     bool is_float64 = (input.dtype() == DType::Float64);
+    bool is_float16 = (input.dtype() == DType::Float16);
 
     // Select shader based on mode and dtype
     std::string shader_name;
     if (mode == "bilinear" || mode == "bicubic") {
-        shader_name = is_float64 ? "bilinear_interpolate_f64" : "bilinear_interpolate";
+        shader_name = is_float64 ? "bilinear_interpolate_f64" :
+                      is_float16 ? "bilinear_interpolate_f16" : "bilinear_interpolate";
     } else {
-        shader_name = is_float64 ? "nearest_interpolate_f64" : "nearest_interpolate";
+        shader_name = is_float64 ? "nearest_interpolate_f64" :
+                      is_float16 ? "nearest_interpolate_f16" : "nearest_interpolate";
     }
 
     auto* pipeline = getPipeline(shader_name, device_id);
@@ -12146,8 +12190,6 @@ auto VulkanBackend::dispatchArgSort(const Tensor& input, int64_t dim, bool desce
                                : static_cast<float>(std::numeric_limits<int32_t>::max());
     }
 
-    VkBuffer buffer_values = getVulkanBuffer(work_values.data_ptr());
-    VkBuffer buffer_indices = getVulkanBuffer(work_indices.data_ptr());
     size_t values_bytes = padded_n * elem_size;
     size_t indices_bytes = padded_n * sizeof(int32_t);
 
@@ -12179,7 +12221,10 @@ auto VulkanBackend::dispatchArgSort(const Tensor& input, int64_t dim, bool desce
         synchronize(device_id);
 
         // Step 2: Run all bitonic sort passes in a single command buffer
+        // Get VkBuffer handles after fill/copy since dispatchFill may reallocate
         {
+            VkBuffer buffer_values = getVulkanBuffer(work_values.data_ptr());
+            VkBuffer buffer_indices = getVulkanBuffer(work_indices.data_ptr());
             std::vector<std::pair<uint32_t, VkBuffer>> bindings = {
                 {0, buffer_values}, {1, buffer_indices}
             };

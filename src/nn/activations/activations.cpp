@@ -81,38 +81,16 @@ public:
     auto backward(std::vector<Tensor> grad_outputs) -> std::vector<Tensor> override {
         auto& grad_output = grad_outputs[0];
         const auto& input = saved_tensors()[0];
-        const auto& output = saved_tensors()[1];  // gelu(x)
 
-        // GELU derivative: d(GELU)/dx
-        // GELU(x) ≈ 0.5 * x * (1 + tanh(sqrt(2/π) * (x + 0.044715 * x³)))
-        // We compute the derivative using the formula
-
-        const double sqrt_2_over_pi = 0.7978845608;  // sqrt(2/π)
-        const double coeff = 0.044715;
-
-        auto shape_vec = std::vector<int64_t>(input.shape().begin(), input.shape().end());
-
-        // Compute intermediate values
-        auto x_cubed = input * input * input;
-        auto inner = input + x_cubed * coeff;
-
-        // Create constant tensors
-        std::vector<Tensor> inner_vec = {inner * sqrt_2_over_pi};
-        auto tanh_inner = dispatch(OpId::Tanh, inner_vec)[0];
-
-        auto one_tensor = ones(shape_vec, input.dtype(), input.device());
-        auto half_tensor = ones(shape_vec, input.dtype(), input.device()) * 0.5;
-
-        // First term: 0.5 * (1 + tanh(...))
-        auto term1 = half_tensor * (one_tensor + tanh_inner);
-
-        // Second term: 0.5 * x * sech²(...) * d/dx[sqrt(2/π) * (x + 0.044715 * x³)]
-        auto one_minus_tanh_sq = one_tensor - (tanh_inner * tanh_inner);  // sech²(y) = 1 - tanh²(y)
-        auto d_inner = one_tensor + input * input * (3.0 * coeff);  // d/dx[x + 0.044715*x³]
-        auto term2 = half_tensor * input * one_minus_tanh_sq * d_inner * sqrt_2_over_pi;
+        // Use the fused gelu_backward kernel which computes the entire derivative
+        // in Float32 internally. This avoids Float16 intermediate overflow that occurs
+        // when computing the derivative with individual tensor operations (e.g., x*x
+        // overflows Float16 for |x| > 256, leading to inf and then 0*inf = NaN).
+        std::vector<Tensor> backward_inputs = {grad_output, input};
+        auto result_tensor = dispatch(OpId::GeluBackward, backward_inputs)[0];
 
         std::vector<Tensor> result;
-        result.push_back(grad_output * (term1 + term2));
+        result.push_back(result_tensor);
         return result;
     }
 };

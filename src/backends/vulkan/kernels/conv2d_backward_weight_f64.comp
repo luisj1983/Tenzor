@@ -2,16 +2,17 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_float64 : require
 
 // Conv2d Backward Weight - Gradient w.r.t. weights (Float64 version)
-// Computes gradient by correlating input patches with grad_output
+// Supports grouped convolutions (including depthwise where groups == channels)
 //
 // Algorithm: For each weight element, correlate corresponding input values
 // with grad_output values across all batch samples and spatial positions.
+// With groups: weight shape is (C_out, C_in/groups, K_h, K_w)
 
 layout(local_size_x = 256) in;
 
 layout(binding = 0) buffer GradOutput { double grad_output[]; };  // (N, C_out, H_out, W_out)
 layout(binding = 1) buffer Input { double input_data[]; };        // (N, C_in, H_in, W_in)
-layout(binding = 2) buffer GradWeight { double grad_weight[]; };  // (C_out, C_in, K_h, K_w)
+layout(binding = 2) buffer GradWeight { double grad_weight[]; };  // (C_out, C_in/groups, K_h, K_w)
 
 layout(push_constant) uniform PushConstants {
     uint batch;
@@ -26,24 +27,35 @@ layout(push_constant) uniform PushConstants {
     uint stride;
     uint padding;
     uint dilation;
+    uint groups;
 } params;
 
 void main() {
     uint idx = gl_GlobalInvocationID.x;
-    uint total_weight_elements = params.channels_out * params.channels_in * params.kernel_h * params.kernel_w;
+
+    // Grouped convolution parameters
+    uint in_channels_per_group = params.channels_in / params.groups;
+    uint out_channels_per_group = params.channels_out / params.groups;
+
+    // Weight shape: (C_out, C_in/groups, K_h, K_w)
+    uint total_weight_elements = params.channels_out * in_channels_per_group * params.kernel_h * params.kernel_w;
 
     if (idx >= total_weight_elements) {
         return;
     }
 
-    // Decode flat index to (c_out, c_in, kh, kw)
+    // Decode flat index to (c_out, c_in_local, kh, kw)
     uint temp = idx;
     uint kw = temp % params.kernel_w;
     temp /= params.kernel_w;
     uint kh = temp % params.kernel_h;
     temp /= params.kernel_h;
-    uint c_in = temp % params.channels_in;
-    uint c_out = temp / params.channels_in;
+    uint c_in_local = temp % in_channels_per_group;
+    uint c_out = temp / in_channels_per_group;
+
+    // Determine the group and actual input channel
+    uint group = c_out / out_channels_per_group;
+    uint c_in = group * in_channels_per_group + c_in_local;
 
     // Accumulate gradient across batch and spatial dimensions
     double sum = 0.0LF;

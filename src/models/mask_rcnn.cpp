@@ -581,7 +581,7 @@ auto MaskRCNN::forward_train(const Variable& images,
                         "bilinear",
                         false
                     );
-                    resized_mask = resized_mask.squeeze(0).squeeze(0).to(Device::cpu());
+                    resized_mask = resized_mask.squeeze(0).squeeze(0).to(DType::Float32).to(Device::cpu());
 
                     // Copy to sampled_masks_cpu
                     auto target_mask_cpu = tenzor::select(sampled_masks_cpu, 0, i);

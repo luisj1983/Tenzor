@@ -795,10 +795,14 @@ auto LayerNorm::forward_impl(const Variable& input) -> Variable {
             auto result = Variable(output, true);
 
             // Prepare tensors to save for backward
+            // Move statistics to original device so backward dispatch finds all tensors on same device
+            Tensor saved_mean = (original_device == Device::cpu()) ? batch_mean : batch_mean.to(original_device);
+            Tensor saved_rstd = (original_device == Device::cpu()) ? rstd : rstd.to(original_device);
+
             std::vector<Tensor> tensors_to_save = {
                 input.tensor(),
-                batch_mean,
-                rstd,
+                saved_mean,
+                saved_rstd,
                 (elementwise_affine_ && cached_weight_) ? cached_weight_->tensor() : ones({N}, input.tensor().dtype(), input.tensor().device())
             };
 
@@ -912,10 +916,14 @@ auto LayerNorm::forward_impl(const Variable& input) -> Variable {
             auto result = Variable(output, true);
 
             // Prepare tensors to save for backward
+            // Move statistics to original device so backward dispatch finds all tensors on same device
+            Tensor saved_mean = (original_device == Device::cpu()) ? batch_mean : batch_mean.to(original_device);
+            Tensor saved_rstd = (original_device == Device::cpu()) ? rstd : rstd.to(original_device);
+
             std::vector<Tensor> tensors_to_save = {
                 input.tensor(),
-                batch_mean,
-                rstd,
+                saved_mean,
+                saved_rstd,
                 (elementwise_affine_ && cached_weight_) ? cached_weight_->tensor() : ones({N}, input.tensor().dtype(), input.tensor().device())
             };
 
@@ -1025,22 +1033,41 @@ auto LayerNorm::forward_impl(const Variable& input) -> Variable {
         if (is_grad_enabled() && (input.requires_grad() || (elementwise_affine_ && cached_weight_->requires_grad()))) {
             auto result = Variable(output, true);
 
-            // Convert mean and rstd to Float32 for backward compatibility
-            auto batch_mean_f32 = zeros({batch_size}, DType::Float32, Device::cpu());
-            auto rstd_f32 = zeros({batch_size}, DType::Float32, Device::cpu());
-            auto* mean_f32_data = batch_mean_f32.data<float>();
-            auto* rstd_f32_data = rstd_f32.data<float>();
-
-            for (int64_t b = 0; b < batch_size; b++) {
-                mean_f32_data[b] = static_cast<float>(mean_data_f64[b]);
-                rstd_f32_data[b] = static_cast<float>(rstd_data_f64[b]);
+            // Save mean and rstd for backward pass
+            // For Vulkan backward, stats must match input dtype (Float64) since the
+            // f64 shader reads them as double[]. CPU backward converts to Float32 itself.
+            Tensor batch_mean_save, rstd_save;
+            if (original_device.type == Device::Type::Vulkan) {
+                // Save as Float64 to match the f64 backward shader's buffer declarations
+                batch_mean_save = zeros({batch_size}, DType::Float64, Device::cpu());
+                rstd_save = zeros({batch_size}, DType::Float64, Device::cpu());
+                auto* mean_save_data = batch_mean_save.data<double>();
+                auto* rstd_save_data = rstd_save.data<double>();
+                for (int64_t b = 0; b < batch_size; b++) {
+                    mean_save_data[b] = mean_data_f64[b];
+                    rstd_save_data[b] = rstd_data_f64[b];
+                }
+            } else {
+                // CPU backward converts to Float32 anyway, save as Float32
+                batch_mean_save = zeros({batch_size}, DType::Float32, Device::cpu());
+                rstd_save = zeros({batch_size}, DType::Float32, Device::cpu());
+                auto* mean_save_data = batch_mean_save.data<float>();
+                auto* rstd_save_data = rstd_save.data<float>();
+                for (int64_t b = 0; b < batch_size; b++) {
+                    mean_save_data[b] = static_cast<float>(mean_data_f64[b]);
+                    rstd_save_data[b] = static_cast<float>(rstd_data_f64[b]);
+                }
             }
 
             // Prepare tensors to save for backward
+            // Move statistics to original device so backward dispatch finds all tensors on same device
+            Tensor saved_mean = (original_device == Device::cpu()) ? batch_mean_save : batch_mean_save.to(original_device);
+            Tensor saved_rstd = (original_device == Device::cpu()) ? rstd_save : rstd_save.to(original_device);
+
             std::vector<Tensor> tensors_to_save = {
                 input.tensor(),
-                batch_mean_f32,
-                rstd_f32,
+                saved_mean,
+                saved_rstd,
                 elementwise_affine_ ? cached_weight_->tensor() : ones({N}, input.tensor().dtype(), input.tensor().device())
             };
 
@@ -1419,10 +1446,22 @@ auto GroupNorm::forward_impl(const Variable& input) -> Variable {
     if (input.requires_grad() || (affine_ && parameters_["weight"]->requires_grad())) {
         auto result = Variable(output_final, true);
 
+        // Move statistics to original device so backward dispatch finds all tensors on same device
+        // For Float64 on Vulkan, stats must match input dtype since the f64 backward shader
+        // declares double[] buffers. Convert Float32 stats to Float64 before uploading.
+        Tensor stats_mean = group_mean;
+        Tensor stats_rstd = rstd;
+        if (original_dtype == DType::Float64 && original_device.type == Device::Type::Vulkan) {
+            stats_mean = stats_mean.to(DType::Float64);
+            stats_rstd = stats_rstd.to(DType::Float64);
+        }
+        Tensor saved_mean = (original_device.type == Device::Type::CPU) ? stats_mean : stats_mean.to(original_device);
+        Tensor saved_rstd = (original_device.type == Device::Type::CPU) ? stats_rstd : stats_rstd.to(original_device);
+
         std::vector<Tensor> tensors_to_save = {
             input.tensor(),
-            group_mean,
-            rstd,
+            saved_mean,
+            saved_rstd,
             affine_ ? parameters_["weight"]->tensor() : ones({C}, input.tensor().dtype(), input.tensor().device())
         };
 
@@ -1796,9 +1835,12 @@ auto RMSNorm::forward_impl(const Variable& input) -> Variable {
         if (is_grad_enabled() && (input.requires_grad() || (cached_weight_ && cached_weight_->requires_grad()))) {
             auto result = Variable(output, true);
 
+            // Move statistics to original device so backward dispatch finds all tensors on same device
+            Tensor saved_rrms = (original_device == Device::cpu()) ? rrms : rrms.to(original_device);
+
             std::vector<Tensor> tensors_to_save = {
                 input.tensor(),
-                rrms,
+                saved_rrms,
                 cached_weight_ ? cached_weight_->tensor() : weight_.tensor()
             };
 
@@ -1872,16 +1914,28 @@ auto RMSNorm::forward_impl(const Variable& input) -> Variable {
         if (is_grad_enabled() && (input.requires_grad() || (cached_weight_ && cached_weight_->requires_grad()))) {
             auto result = Variable(output, true);
 
-            // Convert rrms to Float32 for backward compatibility
-            auto rrms_f32 = zeros({batch_size}, DType::Float32, Device::cpu());
-            auto* rrms_f32_data = rrms_f32.data<float>();
-            for (int64_t b = 0; b < batch_size; b++) {
-                rrms_f32_data[b] = static_cast<float>(rrms_data[b]);
+            // Save rrms for backward pass
+            // For Vulkan backward, stats must match input dtype (Float64) since the
+            // f64 shader reads them as double[]. CPU backward converts to Float32 itself.
+            Tensor rrms_save;
+            if (original_device.type == Device::Type::Vulkan) {
+                // Keep as Float64 to match the f64 backward shader's buffer declarations
+                rrms_save = rrms;
+            } else {
+                // CPU backward converts to Float32 anyway
+                rrms_save = zeros({batch_size}, DType::Float32, Device::cpu());
+                auto* rrms_save_data = rrms_save.data<float>();
+                for (int64_t b = 0; b < batch_size; b++) {
+                    rrms_save_data[b] = static_cast<float>(rrms_data[b]);
+                }
             }
+
+            // Move statistics to original device so backward dispatch finds all tensors on same device
+            Tensor saved_rrms = (original_device == Device::cpu()) ? rrms_save : rrms_save.to(original_device);
 
             std::vector<Tensor> tensors_to_save = {
                 input.tensor(),
-                rrms_f32,
+                saved_rrms,
                 cached_weight_ ? cached_weight_->tensor() : weight_.tensor()
             };
 
@@ -1955,9 +2009,12 @@ auto RMSNorm::forward_impl(const Variable& input) -> Variable {
         if (is_grad_enabled() && (input.requires_grad() || (cached_weight_ && cached_weight_->requires_grad()))) {
             auto result = Variable(output, true);
 
+            // Move statistics to original device so backward dispatch finds all tensors on same device
+            Tensor saved_rrms = (original_device == Device::cpu()) ? rrms : rrms.to(original_device);
+
             std::vector<Tensor> tensors_to_save = {
                 input.tensor(),
-                rrms,
+                saved_rrms,
                 cached_weight_ ? cached_weight_->tensor() : weight_.tensor()
             };
 
