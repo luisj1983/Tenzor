@@ -447,6 +447,7 @@ TEST_P(YOLOMultiDTypeTest, YOLOv5BatchProcessing) {
 // ============================================================================
 
 TEST_P(YOLOMultiDTypeTest, YOLOv3EvalMode) {
+    tenzor::manual_seed(42);
     auto model = yolov3(80, false);
     convert_model(model);
     model->eval();

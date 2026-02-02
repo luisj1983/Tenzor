@@ -8,12 +8,15 @@
 #include <algorithm>
 #include <sstream>
 #include <iostream>  // DEBUG
+#include <chrono>
 
 namespace tenzor {
 
 // Global random number generator for reproducible randomness
 static std::random_device rd;
 static std::mt19937 global_rng(rd());
+static bool manual_seed_set = false;
+static uint64_t manual_seed_value = 0;
 
 // Function to access the global RNG
 static std::mt19937& get_rng() {
@@ -23,6 +26,18 @@ static std::mt19937& get_rng() {
 // Public function to set the random seed
 void manual_seed(unsigned int seed) {
     global_rng.seed(seed);
+    manual_seed_set = true;
+    manual_seed_value = seed;
+}
+
+// Get a seed for backend RNG: returns the manual seed if set, otherwise a time-based seed
+uint64_t get_global_seed() {
+    if (manual_seed_set) {
+        // Increment so successive calls get different but deterministic seeds
+        return manual_seed_value++;
+    }
+    auto now = std::chrono::high_resolution_clock::now();
+    return static_cast<uint64_t>(now.time_since_epoch().count());
 }
 
 // Helper function to convert shape vector to comma-separated string

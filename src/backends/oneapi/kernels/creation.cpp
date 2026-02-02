@@ -1,4 +1,5 @@
 #include "tenzor/core/tensor.hpp"
+#include "tenzor/ops/creation.hpp"
 #include <sycl/sycl.hpp>
 #include <cmath>
 #include <stdexcept>
@@ -43,9 +44,8 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
 #ifdef TENZOR_HAS_ONEMKL
     // Use Intel oneMKL VSL for high-performance random number generation
 
-    // Generate seed based on current time for thread-safety
-    auto now = std::chrono::high_resolution_clock::now();
-    auto seed = static_cast<uint64_t>(now.time_since_epoch().count());
+    // Use global seed (respects manual_seed) or fall back to time-based
+    auto seed = tenzor::get_global_seed();
 
     try {
         if (dtype == DType::Float32) {
@@ -111,11 +111,9 @@ auto randn_kernel(const std::vector<int64_t>& shape, DType dtype, Device device,
     }
 #else
     // Fallback: Generate on host using std::normal_distribution and copy to device
-    // This is slower but works without oneMKL
 
-    // Use time-based seed for different results on each call
-    auto now = std::chrono::high_resolution_clock::now();
-    auto seed = static_cast<unsigned int>(now.time_since_epoch().count());
+    // Use global seed (respects manual_seed) or fall back to time-based
+    auto seed = static_cast<unsigned int>(tenzor::get_global_seed());
 
     std::mt19937 gen(seed);
     std::normal_distribution<double> dist(0.0, 1.0);
@@ -185,8 +183,8 @@ auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
 #ifdef TENZOR_HAS_ONEMKL
     // Use Intel oneMKL VSL for high-performance random number generation
 
-    auto now = std::chrono::high_resolution_clock::now();
-    auto seed = static_cast<uint64_t>(now.time_since_epoch().count());
+    // Use global seed (respects manual_seed) or fall back to time-based
+    auto seed = tenzor::get_global_seed();
 
     try {
         if (dtype == DType::Float32) {
@@ -224,10 +222,10 @@ auto rand_kernel(const std::vector<int64_t>& shape, DType dtype, Device device, 
 #else
     // Fallback: Generate on host using std::uniform_real_distribution
 
-    auto now = std::chrono::high_resolution_clock::now();
-    auto seed = static_cast<unsigned int>(now.time_since_epoch().count());
+    // Use global seed (respects manual_seed) or fall back to time-based
+    auto seed_val = static_cast<unsigned int>(tenzor::get_global_seed());
 
-    std::mt19937 gen(seed);
+    std::mt19937 gen(seed_val);
     std::uniform_real_distribution<double> dist(0.0, 1.0);
 
     if (dtype == DType::Float32) {

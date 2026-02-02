@@ -313,6 +313,15 @@ auto randn_like(const Tensor& tensor) -> Tensor;
  */
 void manual_seed(unsigned int seed);
 
+/**
+ * @brief Check if a manual seed has been set and retrieve it
+ *
+ * Returns the seed value set by manual_seed(), or generates a time-based
+ * seed if manual_seed() has not been called. Backend implementations
+ * should use this to respect the global seed setting.
+ */
+uint64_t get_global_seed();
+
 /** @} */ // end of tensor_creation group
 
 } // namespace tenzor

@@ -15,6 +15,13 @@
 namespace tenzor {
 namespace oneapi {
 
+// Saturating float-to-half conversion: clamps to Float16 representable range
+// instead of producing Infinity on overflow (matches Vulkan/GPU hardware behavior)
+constexpr float HALF_MAX = 65504.0f;
+inline sycl::half saturate_to_half(float val) {
+    return sycl::half(sycl::fmin(sycl::fmax(val, -HALF_MAX), HALF_MAX));
+}
+
 // Helper function to get typed pointer from tensor
 template<typename T>
 inline auto get_data_ptr(const Tensor& t) -> T* {
@@ -718,7 +725,8 @@ auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
                         sum += static_cast<float>(weight_group_ptr[oc_local * K + k]) *
                                static_cast<float>(col_ptr[k * N_gemm + hw]);
                     }
-                    output_group_ptr[oc_local * N_gemm + hw] = sycl::half(sum);
+                    // Saturate to Float16 range to prevent Inf/NaN propagation
+                    output_group_ptr[oc_local * N_gemm + hw] = saturate_to_half(sum);
                 }).wait();
             }
 
@@ -728,8 +736,8 @@ auto conv2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bia
                     const int64_t oc = idx[0];
                     const int64_t hw = idx[1];
                     const int64_t out_idx = n * C_out * H_out * W_out + oc * H_out * W_out + hw;
-                    output_ptr[out_idx] = sycl::half(static_cast<float>(output_ptr[out_idx]) +
-                                                     static_cast<float>(bias_ptr[oc]));
+                    output_ptr[out_idx] = saturate_to_half(static_cast<float>(output_ptr[out_idx]) +
+                                                           static_cast<float>(bias_ptr[oc]));
                 }).wait();
             }
         }
@@ -1090,7 +1098,7 @@ auto conv2d_backward_input(const Tensor& grad_output, const Tensor& weight,
                         sum += static_cast<float>(weight_group[oc * M_group + k]) *
                                static_cast<float>(grad_out_group[oc * N_gemm + hw]);
                     }
-                    col_ptr[k * N_gemm + hw] = sycl::half(sum);
+                    col_ptr[k * N_gemm + hw] = saturate_to_half(sum);
                 }).wait();
 
                 col2im_grouped_kernel(
@@ -1357,7 +1365,7 @@ auto conv2d_backward_bias(const Tensor& grad_output, sycl::queue& queue) -> Tens
                     }
                 }
             }
-            grad_bias_ptr[c] = sycl::half(sum);
+            grad_bias_ptr[c] = saturate_to_half(sum);
         }).wait();
     }
     else {
@@ -1595,7 +1603,7 @@ auto conv_transpose2d_forward(
                     }
                 }
 
-                output_data[idx] = sycl::half(sum);
+                output_data[idx] = saturate_to_half(sum);
             }
         ).wait();
 
@@ -1605,7 +1613,7 @@ auto conv_transpose2d_forward(
                 sycl::range<1>(total_output),
                 [=](sycl::id<1> idx) {
                     int64_t c = (idx / (out_w * out_h)) % out_channels;
-                    output_data[idx] = sycl::half(float(output_data[idx]) + float(bias_data[c]));
+                    output_data[idx] = saturate_to_half(float(output_data[idx]) + float(bias_data[c]));
                 }
             ).wait();
         }
