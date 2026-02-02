@@ -537,6 +537,32 @@ private:
     cudnnPoolingDescriptor_t desc_ = nullptr;
 };
 
+class ActivationDescriptor {
+public:
+    ActivationDescriptor() {
+        CUDNN_CHECK(cudnnCreateActivationDescriptor(&desc_));
+    }
+
+    ~ActivationDescriptor() {
+        if (desc_) {
+            cudnnDestroyActivationDescriptor(desc_);
+        }
+    }
+
+    ActivationDescriptor(const ActivationDescriptor&) = delete;
+    ActivationDescriptor& operator=(const ActivationDescriptor&) = delete;
+
+    cudnnActivationDescriptor_t get() const { return desc_; }
+
+    void set_relu() {
+        CUDNN_CHECK(cudnnSetActivationDescriptor(
+            desc_, CUDNN_ACTIVATION_RELU, CUDNN_NOT_PROPAGATE_NAN, 0.0));
+    }
+
+private:
+    cudnnActivationDescriptor_t desc_ = nullptr;
+};
+
 class RNNDescriptor {
 public:
     RNNDescriptor() {
@@ -671,6 +697,22 @@ auto cudnn_conv2d_forward_nhwc(
     int64_t dilation,
     int64_t groups,
     void* stream
+) -> Tensor;
+
+/**
+ * @brief Fused Conv2D + Bias + ReLU using cudnnConvolutionBiasActivationForward
+ *
+ * Single cuDNN call that fuses convolution, bias addition, and ReLU activation.
+ */
+auto cudnn_fused_conv2d_relu_forward(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias,
+    int64_t stride,
+    int64_t padding,
+    int64_t dilation,
+    int64_t groups,
+    cudaStream_t stream
 ) -> Tensor;
 
 auto cudnn_conv2d_backward(

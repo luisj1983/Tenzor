@@ -94,8 +94,10 @@ __global__ void check_for_zeros_kernel(const T* data, int64_t n, int* has_zero) 
 }
 
 // Host function to check for zeros in an integer tensor
+// Only enabled in debug builds to avoid the stream sync penalty in release
 template<typename T>
 inline void check_integer_divisor_for_zeros(const T* data, int64_t n, cudaStream_t stream) {
+#ifndef NDEBUG
     int* d_has_zero;
     int h_has_zero = 0;
 
@@ -107,12 +109,15 @@ inline void check_integer_divisor_for_zeros(const T* data, int64_t n, cudaStream
     check_for_zeros_kernel<<<grid, block, 0, stream>>>(data, n, d_has_zero);
 
     CUDA_CHECK(cudaMemcpyAsync(&h_has_zero, d_has_zero, sizeof(int), cudaMemcpyDeviceToHost, stream));
-    CUDA_CHECK(cudaStreamSynchronize(stream));  // Need to sync to check the flag
+    CUDA_CHECK(cudaStreamSynchronize(stream));
     CUDA_CHECK(cudaFree(d_has_zero));
 
     if (h_has_zero) {
         throw std::runtime_error("Integer division by zero");
     }
+#else
+    (void)data; (void)n; (void)stream;
+#endif
 }
 
 // ============================================================================

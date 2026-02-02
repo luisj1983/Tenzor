@@ -34,6 +34,9 @@ namespace fe = cudnn_frontend;
 namespace tenzor {
 namespace cuda {
 
+// Forward declaration: FP32 flash attention kernel (defined in fused_ops.cu)
+auto fused_attention_cuda(const Tensor& Q, const Tensor& K, const Tensor& V, float scale) -> Tensor;
+
 namespace {
 
 // ============================================================================
@@ -304,6 +307,12 @@ auto cudnn_sdpa_forward(
     const Tensor& V,
     float scale
 ) -> Tensor {
+    // FP32 bypass: route to custom flash attention kernel instead of
+    // expensive FP32→FP16→cuDNN→FP16→FP32 conversion chain
+    if (Q.dtype() == DType::Float32) {
+        return fused_attention_cuda(Q, K, V, scale);
+    }
+
     // Get singleton cuDNN handle (avoids create/destroy overhead)
     cudnnHandle_t handle = SDPACuDNNHandle::get();
 

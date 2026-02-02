@@ -274,7 +274,6 @@ auto roi_align_forward(const Tensor& features, const Tensor& rois,
     }
 
     ROI_CUDA_CHECK(cudaGetLastError());
-    ROI_CUDA_CHECK(cudaDeviceSynchronize());
 
     return (compute_dtype != original_dtype) ? output.to(original_dtype) : output;
 }
@@ -332,7 +331,6 @@ auto roi_align_backward(const Tensor& grad_output, const Tensor& rois,
     }
 
     ROI_CUDA_CHECK(cudaGetLastError());
-    ROI_CUDA_CHECK(cudaDeviceSynchronize());
 
     return (compute_dtype != original_dtype) ? grad_features.to(original_dtype) : grad_features;
 }

@@ -865,8 +865,6 @@ static void launch_full_reduction_sum(const T* d_input, T* d_output, int64_t n, 
         if (err != cudaSuccess) {
             throw std::runtime_error(std::string("CUDA kernel launch failed in sum_reduce_kernel: ") + cudaGetErrorString(err));
         }
-        // Synchronize to ensure kernel completes
-        cudaStreamSynchronize(stream);
     } else {
         // Phase 1: Reduce to num_blocks intermediate results
         T* d_temp;
@@ -885,9 +883,12 @@ static void launch_full_reduction_sum(const T* d_input, T* d_output, int64_t n, 
             throw std::runtime_error(std::string("CUDA kernel launch failed in sum_reduce_kernel phase 2: ") + cudaGetErrorString(err));
         }
 
-        // Synchronize before freeing temp buffer
+#if CUDART_VERSION >= 11020
+        cudaFreeAsync(d_temp, stream);
+#else
         cudaStreamSynchronize(stream);
         cudaFree(d_temp);
+#endif
     }
     // Check for any errors during synchronization
     cudaError_t err = cudaGetLastError();
@@ -911,16 +912,18 @@ static void launch_full_reduction_max(const T* d_input, T* d_output, int64_t n, 
 
     if (num_blocks == 1) {
         max_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
-        // Synchronize to ensure kernel completes
-        cudaStreamSynchronize(stream);
     } else {
         T* d_temp;
         cudaMalloc(&d_temp, num_blocks * sizeof(T));
         max_reduce_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
         max_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, d_output, num_blocks);
 
+#if CUDART_VERSION >= 11020
+        cudaFreeAsync(d_temp, stream);
+#else
         cudaStreamSynchronize(stream);
         cudaFree(d_temp);
+#endif
     }
 }
 
@@ -939,15 +942,18 @@ static void launch_full_reduction_min(const T* d_input, T* d_output, int64_t n, 
 
     if (num_blocks == 1) {
         min_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
-        cudaStreamSynchronize(stream);
     } else {
         T* d_temp;
         cudaMalloc(&d_temp, num_blocks * sizeof(T));
         min_reduce_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
         min_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, d_output, num_blocks);
 
+#if CUDART_VERSION >= 11020
+        cudaFreeAsync(d_temp, stream);
+#else
         cudaStreamSynchronize(stream);
         cudaFree(d_temp);
+#endif
     }
 }
 
@@ -988,11 +994,14 @@ static void launch_dim_reduction_sum(
         d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size
     );
 
-    // Wait for kernel to complete before freeing memory
+#if CUDART_VERSION >= 11020
+    cudaFreeAsync(d_shape, nullptr);
+    cudaFreeAsync(d_strides, nullptr);
+#else
     cudaDeviceSynchronize();
-
     cudaFree(d_shape);
     cudaFree(d_strides);
+#endif
 }
 
 template<typename T>
@@ -1029,11 +1038,14 @@ static void launch_dim_reduction_max(
         d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size
     );
 
-    // Wait for kernel to complete before freeing memory
+#if CUDART_VERSION >= 11020
+    cudaFreeAsync(d_shape, nullptr);
+    cudaFreeAsync(d_strides, nullptr);
+#else
     cudaDeviceSynchronize();
-
     cudaFree(d_shape);
     cudaFree(d_strides);
+#endif
 }
 
 template<typename T>
@@ -1070,11 +1082,14 @@ static void launch_dim_reduction_min(
         d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size
     );
 
-    // Wait for kernel to complete before freeing memory
+#if CUDART_VERSION >= 11020
+    cudaFreeAsync(d_shape, nullptr);
+    cudaFreeAsync(d_strides, nullptr);
+#else
     cudaDeviceSynchronize();
-
     cudaFree(d_shape);
     cudaFree(d_strides);
+#endif
 }
 
 // ============================================================================
@@ -1095,15 +1110,18 @@ static void launch_full_reduction_max_half(const __half* d_input, __half* d_outp
 
     if (num_blocks == 1) {
         max_reduce_kernel_half<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
-        cudaStreamSynchronize(stream);
     } else {
         __half* d_temp;
         cudaMalloc(&d_temp, num_blocks * sizeof(__half));
         max_reduce_kernel_half<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
         max_reduce_kernel_half<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, d_output, num_blocks);
 
+#if CUDART_VERSION >= 11020
+        cudaFreeAsync(d_temp, stream);
+#else
         cudaStreamSynchronize(stream);
         cudaFree(d_temp);
+#endif
     }
 }
 
@@ -1121,15 +1139,18 @@ static void launch_full_reduction_min_half(const __half* d_input, __half* d_outp
 
     if (num_blocks == 1) {
         min_reduce_kernel_half<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
-        cudaStreamSynchronize(stream);
     } else {
         __half* d_temp;
         cudaMalloc(&d_temp, num_blocks * sizeof(__half));
         min_reduce_kernel_half<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_temp, n);
         min_reduce_kernel_half<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, d_output, num_blocks);
 
+#if CUDART_VERSION >= 11020
+        cudaFreeAsync(d_temp, stream);
+#else
         cudaStreamSynchronize(stream);
         cudaFree(d_temp);
+#endif
     }
 }
 
@@ -1166,10 +1187,14 @@ static void launch_dim_reduction_max_half(
         d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size
     );
 
+#if CUDART_VERSION >= 11020
+    cudaFreeAsync(d_shape, nullptr);
+    cudaFreeAsync(d_strides, nullptr);
+#else
     cudaDeviceSynchronize();
-
     cudaFree(d_shape);
     cudaFree(d_strides);
+#endif
 }
 
 static void launch_dim_reduction_min_half(
@@ -1205,10 +1230,14 @@ static void launch_dim_reduction_min_half(
         d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size
     );
 
+#if CUDART_VERSION >= 11020
+    cudaFreeAsync(d_shape, nullptr);
+    cudaFreeAsync(d_strides, nullptr);
+#else
     cudaDeviceSynchronize();
-
     cudaFree(d_shape);
     cudaFree(d_strides);
+#endif
 }
 
 // ============================================================================
@@ -1404,9 +1433,6 @@ auto mean_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t st
     if (err != cudaSuccess) {
         throw std::runtime_error(std::string("CUDA error in mean_kernel: ") + cudaGetErrorString(err));
     }
-
-    // Additional device-wide synchronization to ensure all operations complete
-    cudaDeviceSynchronize();
 
     return sum_result;
 }
@@ -2177,10 +2203,14 @@ static void launch_dim_argmax(
         d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size
     );
 
+#if CUDART_VERSION >= 11020
+    cudaFreeAsync(d_shape, nullptr);
+    cudaFreeAsync(d_strides, nullptr);
+#else
     cudaDeviceSynchronize();
-
     cudaFree(d_shape);
     cudaFree(d_strides);
+#endif
 }
 
 // Helper function for dimensional argmin
@@ -2219,10 +2249,14 @@ static void launch_dim_argmin(
         d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size
     );
 
+#if CUDART_VERSION >= 11020
+    cudaFreeAsync(d_shape, nullptr);
+    cudaFreeAsync(d_strides, nullptr);
+#else
     cudaDeviceSynchronize();
-
     cudaFree(d_shape);
     cudaFree(d_strides);
+#endif
 }
 
 // ============================================================================
@@ -2318,10 +2352,14 @@ static void launch_dim_argmax_half(
         d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size
     );
 
+#if CUDART_VERSION >= 11020
+    cudaFreeAsync(d_shape, nullptr);
+    cudaFreeAsync(d_strides, nullptr);
+#else
     cudaDeviceSynchronize();
-
     cudaFree(d_shape);
     cudaFree(d_strides);
+#endif
 }
 
 static void launch_dim_argmin_half(
@@ -2358,10 +2396,14 @@ static void launch_dim_argmin_half(
         d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size
     );
 
+#if CUDART_VERSION >= 11020
+    cudaFreeAsync(d_shape, nullptr);
+    cudaFreeAsync(d_strides, nullptr);
+#else
     cudaDeviceSynchronize();
-
     cudaFree(d_shape);
     cudaFree(d_strides);
+#endif
 }
 
 // Public API for argmax
@@ -2713,7 +2755,6 @@ static void launch_full_reduction_prod(const T* d_input, T* d_output, int64_t n,
 
     if (num_blocks == 1) {
         prod_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, d_output, n);
-        cudaStreamSynchronize(stream);
     } else {
         // Phase 1: Reduce to num_blocks intermediate results
         T* d_temp;
@@ -2723,8 +2764,12 @@ static void launch_full_reduction_prod(const T* d_input, T* d_output, int64_t n,
         // Phase 2: Final reduction
         prod_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, d_output, num_blocks);
 
+#if CUDART_VERSION >= 11020
+        cudaFreeAsync(d_temp, stream);
+#else
         cudaStreamSynchronize(stream);
         cudaFree(d_temp);
+#endif
     }
 }
 
@@ -2764,10 +2809,14 @@ static void launch_dim_reduction_prod(
         d_input, d_output, d_shape, d_strides, ndim, dim, output_size, dim_size
     );
 
+#if CUDART_VERSION >= 11020
+    cudaFreeAsync(d_shape, nullptr);
+    cudaFreeAsync(d_strides, nullptr);
+#else
     cudaDeviceSynchronize();
-
     cudaFree(d_shape);
     cudaFree(d_strides);
+#endif
 }
 
 // Public API for prod (product reduction)
@@ -2874,51 +2923,99 @@ auto prod_kernel(const Tensor& input, int64_t dim, bool keepdim, cudaStream_t st
 }
 
 // ============================================================================
-// Variance and Standard Deviation operations
+// Variance and Standard Deviation operations (Welford single-pass)
 // ============================================================================
 
-// Variance kernel (two-pass algorithm for numerical stability)
+// Device helper: combine two Welford accumulators
 template<typename T>
-__global__ void variance_kernel(const T* input, T mean, T* output, int64_t n, int64_t correction) {
-    __shared__ T shared[REDUCTION_BLOCK_SIZE];
+__device__ __forceinline__ void welford_combine(
+    T& mean_a, T& m2_a, int64_t& count_a,
+    T mean_b, T m2_b, int64_t count_b
+) {
+    if (count_b == 0) return;
+    int64_t count_ab = count_a + count_b;
+    T delta = mean_b - mean_a;
+    T new_mean = mean_a + delta * static_cast<T>(count_b) / static_cast<T>(count_ab);
+    m2_a += m2_b + delta * delta * static_cast<T>(count_a) * static_cast<T>(count_b) / static_cast<T>(count_ab);
+    mean_a = new_mean;
+    count_a = count_ab;
+}
+
+// Welford single-pass variance kernel — per-block (mean, M2, count) output
+template<typename T>
+__global__ void welford_variance_kernel(
+    const T* input,
+    T* block_means,
+    T* block_m2s,
+    int64_t* block_counts,
+    int64_t n
+) {
+    __shared__ T s_mean[REDUCTION_BLOCK_SIZE];
+    __shared__ T s_m2[REDUCTION_BLOCK_SIZE];
+    __shared__ int64_t s_count[REDUCTION_BLOCK_SIZE];
 
     int tid = threadIdx.x;
     int64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     int64_t grid_size = blockDim.x * gridDim.x;
 
-    // Compute sum of squared differences
-    T thread_sum = 0;
+    // Per-thread Welford accumulation
+    T t_mean = 0;
+    T t_m2 = 0;
+    int64_t t_count = 0;
+
     for (int64_t i = idx; i < n; i += grid_size) {
-        T diff = input[i] - mean;
-        thread_sum += diff * diff;
+        t_count++;
+        T delta = input[i] - t_mean;
+        t_mean += delta / static_cast<T>(t_count);
+        T delta2 = input[i] - t_mean;
+        t_m2 += delta * delta2;
     }
 
-    shared[tid] = thread_sum;
+    s_mean[tid] = t_mean;
+    s_m2[tid] = t_m2;
+    s_count[tid] = t_count;
     __syncthreads();
 
-    // Block-level reduction
-    for (int stride = blockDim.x / 2; stride >= WARP_SIZE; stride >>= 1) {
+    // Block-level tree reduction using Welford combine
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
         if (tid < stride) {
-            shared[tid] += shared[tid + stride];
+            welford_combine(s_mean[tid], s_m2[tid], s_count[tid],
+                            s_mean[tid + stride], s_m2[tid + stride], s_count[tid + stride]);
         }
         __syncthreads();
     }
 
-    // Warp-level reduction
-    if (tid < WARP_SIZE) {
-        T val = shared[tid];
-        #pragma unroll
-        for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
-            val += __shfl_down_sync(0xffffffff, val, offset);
-        }
-
-        if (tid == 0) {
-            output[blockIdx.x] = val;
-        }
+    if (tid == 0) {
+        block_means[blockIdx.x] = s_mean[0];
+        block_m2s[blockIdx.x] = s_m2[0];
+        block_counts[blockIdx.x] = s_count[0];
     }
 }
 
-// Helper function to compute variance
+// Final merge kernel: combines per-block Welford results into a single variance
+template<typename T>
+__global__ void welford_finalize_kernel(
+    const T* block_means,
+    const T* block_m2s,
+    const int64_t* block_counts,
+    T* output,
+    int num_blocks,
+    int64_t correction
+) {
+    T mean = block_means[0];
+    T m2 = block_m2s[0];
+    int64_t count = block_counts[0];
+
+    for (int i = 1; i < num_blocks; ++i) {
+        welford_combine(mean, m2, count, block_means[i], block_m2s[i], block_counts[i]);
+    }
+
+    int64_t divisor = count - correction;
+    if (divisor <= 0) divisor = 1;
+    output[0] = m2 / static_cast<T>(divisor);
+}
+
+// Helper function to compute variance — single-pass Welford, zero D2H transfers
 template<typename T>
 static void launch_variance_computation(const T* d_input, T* d_output, int64_t n, int64_t correction, cudaStream_t stream = nullptr) {
     if (n == 0) {
@@ -2933,44 +3030,34 @@ static void launch_variance_computation(const T* d_input, T* d_output, int64_t n
         return;
     }
 
-    // Step 1: Compute mean
-    T* d_mean_temp;
-    cudaMalloc(&d_mean_temp, sizeof(T));
-    launch_full_reduction_sum(d_input, d_mean_temp, n, stream);
-
-    T mean;
-    cudaMemcpyAsync(&mean, d_mean_temp, sizeof(T), cudaMemcpyDeviceToHost, stream);
-    cudaStreamSynchronize(stream);
-    mean /= static_cast<T>(n);
-
-    // Step 2: Compute sum of squared differences
     int num_blocks = std::min<int>((n + REDUCTION_BLOCK_SIZE - 1) / REDUCTION_BLOCK_SIZE, 1024);
 
-    if (num_blocks == 1) {
-        variance_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, mean, d_output, n, correction);
+    // Allocate per-block Welford accumulators
+    T* d_block_means;
+    T* d_block_m2s;
+    int64_t* d_block_counts;
+    cudaMalloc(&d_block_means, num_blocks * sizeof(T));
+    cudaMalloc(&d_block_m2s, num_blocks * sizeof(T));
+    cudaMalloc(&d_block_counts, num_blocks * sizeof(int64_t));
 
-        // Divide by (n - correction) on GPU
-        int64_t divisor = n - correction;
-        if (divisor <= 0) divisor = 1;
-        divide_scalar_kernel<<<1, 1, 0, stream>>>(d_output, static_cast<T>(divisor));
-    } else {
-        // Two-phase reduction
-        T* d_temp;
-        cudaMalloc(&d_temp, num_blocks * sizeof(T));
+    // Phase 1: Per-block Welford reduction
+    welford_variance_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(
+        d_input, d_block_means, d_block_m2s, d_block_counts, n);
 
-        variance_kernel<<<num_blocks, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_input, mean, d_temp, n, correction);
+    // Phase 2: Merge block results and compute final variance (single thread)
+    welford_finalize_kernel<<<1, 1, 0, stream>>>(
+        d_block_means, d_block_m2s, d_block_counts, d_output, num_blocks, correction);
 
-        // Second phase: sum the partial results
-        sum_reduce_kernel<<<1, REDUCTION_BLOCK_SIZE, 0, stream>>>(d_temp, d_output, num_blocks);
-
-        // Divide by (n - correction) on GPU
-        int64_t divisor = n - correction;
-        if (divisor <= 0) divisor = 1;
-        divide_scalar_kernel<<<1, 1, 0, stream>>>(d_output, static_cast<T>(divisor));
-        cudaFree(d_temp);
-    }
-
-    cudaFree(d_mean_temp);
+#if CUDART_VERSION >= 11020
+    cudaFreeAsync(d_block_means, stream);
+    cudaFreeAsync(d_block_m2s, stream);
+    cudaFreeAsync(d_block_counts, stream);
+#else
+    cudaStreamSynchronize(stream);
+    cudaFree(d_block_means);
+    cudaFree(d_block_m2s);
+    cudaFree(d_block_counts);
+#endif
 }
 
 // Public API for variance

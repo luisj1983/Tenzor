@@ -674,6 +674,140 @@ auto cudnn_conv2d_forward(
 }
 
 // ============================================================================
+// Fused Conv2d + Bias + ReLU using cudnnConvolutionBiasActivationForward
+// ============================================================================
+
+auto cudnn_fused_conv2d_relu_forward(
+    const Tensor& input,
+    const Tensor& weight,
+    const Tensor* bias,
+    int64_t stride,
+    int64_t padding,
+    int64_t dilation,
+    int64_t groups,
+    cudaStream_t stream
+) -> Tensor {
+    auto input_shape = input.shape();
+    auto weight_shape = weight.shape();
+
+    int64_t batch = input_shape[0];
+    int64_t in_channels = input_shape[1];
+    int64_t height = input_shape[2];
+    int64_t width = input_shape[3];
+
+    int64_t out_channels = weight_shape[0];
+    int64_t kernel_h = weight_shape[2];
+    int64_t kernel_w = weight_shape[3];
+
+    int64_t out_h = (height + 2 * padding - dilation * (kernel_h - 1) - 1) / stride + 1;
+    int64_t out_w = (width + 2 * padding - dilation * (kernel_w - 1) - 1) / stride + 1;
+
+    std::vector<int64_t> output_shape = {batch, out_channels, out_h, out_w};
+    Tensor output(output_shape, input.dtype(), input.device());
+
+    cudnnHandle_t handle = CuDNNHandle::get();
+    CuDNNHandle::set_stream(stream);
+
+    cudnnDataType_t cudnn_dtype;
+    switch (input.dtype()) {
+        case DType::Float32: cudnn_dtype = CUDNN_DATA_FLOAT; break;
+        case DType::Float64: cudnn_dtype = CUDNN_DATA_DOUBLE; break;
+        case DType::Float16: cudnn_dtype = CUDNN_DATA_HALF; break;
+        default:
+            throw std::runtime_error("cuDNN FusedConv2dReLU: unsupported dtype");
+    }
+
+    TensorDescriptor input_desc, output_desc;
+    FilterDescriptor filter_desc;
+    ConvolutionDescriptor conv_desc;
+    ActivationDescriptor act_desc;
+
+    input_desc.set(cudnn_dtype, batch, in_channels, height, width);
+    output_desc.set(cudnn_dtype, batch, out_channels, out_h, out_w);
+    filter_desc.set(cudnn_dtype, out_channels, in_channels / groups, kernel_h, kernel_w);
+    conv_desc.set(padding, padding, stride, stride, dilation, dilation, cudnn_dtype);
+    act_desc.set_relu();
+
+    if (groups > 1) {
+        conv_desc.set_group_count(groups);
+    }
+
+    // Create bias descriptor (1 x C x 1 x 1)
+    TensorDescriptor bias_desc;
+    bias_desc.set(cudnn_dtype, 1, out_channels, 1, 1);
+
+    // Allocate a zero bias if none provided (cudnnConvolutionBiasActivationForward requires bias)
+    Tensor zero_bias;
+    const void* bias_ptr;
+    if (bias != nullptr) {
+        bias_ptr = bias->data_ptr();
+    } else {
+        zero_bias = Tensor({out_channels}, input.dtype(), input.device());
+        cudaMemset(zero_bias.data_ptr(), 0, out_channels * dtype_size(input.dtype()));
+        bias_ptr = zero_bias.data_ptr();
+    }
+
+    // Find algorithm (using heuristic for simplicity since this is a fused path)
+    cudnnConvolutionFwdAlgo_t algo;
+    size_t workspace_size;
+
+    cudnnConvolutionFwdAlgoPerf_t heuristic_result;
+    int heuristic_count = 0;
+    CUDNN_CHECK(cudnnGetConvolutionForwardAlgorithm_v7(
+        handle, input_desc.get(), filter_desc.get(), conv_desc.get(),
+        output_desc.get(), 1, &heuristic_count, &heuristic_result
+    ));
+    algo = heuristic_result.algo;
+    CUDNN_CHECK(cudnnGetConvolutionForwardWorkspaceSize(
+        handle, input_desc.get(), filter_desc.get(), conv_desc.get(),
+        output_desc.get(), algo, &workspace_size
+    ));
+
+    void* workspace = CuDNNWorkspace::get(workspace_size);
+
+    const float alpha1 = 1.0f;
+    const float alpha2 = 0.0f;
+
+    if (input.dtype() == DType::Float32 || input.dtype() == DType::Float16) {
+        CUDNN_CHECK(cudnnConvolutionBiasActivationForward(
+            handle,
+            &alpha1,
+            input_desc.get(), input.data_ptr(),
+            filter_desc.get(), weight.data_ptr(),
+            conv_desc.get(), algo,
+            workspace, workspace_size,
+            &alpha2,
+            output_desc.get(), output.data_ptr(),
+            bias_desc.get(), bias_ptr,
+            act_desc.get(),
+            output_desc.get(), output.data_ptr()
+        ));
+    } else if (input.dtype() == DType::Float64) {
+        const double alpha1_d = 1.0;
+        const double alpha2_d = 0.0;
+        CUDNN_CHECK(cudnnConvolutionBiasActivationForward(
+            handle,
+            &alpha1_d,
+            input_desc.get(), input.data_ptr(),
+            filter_desc.get(), weight.data_ptr(),
+            conv_desc.get(), algo,
+            workspace, workspace_size,
+            &alpha2_d,
+            output_desc.get(), output.data_ptr(),
+            bias_desc.get(), bias_ptr,
+            act_desc.get(),
+            output_desc.get(), output.data_ptr()
+        ));
+    }
+
+    if (input.dtype() == DType::Float16) {
+        fp16_saturate(output.data<Float16>(), output.numel(), stream);
+    }
+
+    return output;
+}
+
+// ============================================================================
 // cuDNN Conv2d Backward Implementation
 // ============================================================================
 
@@ -2801,6 +2935,287 @@ __global__ void optimized_layer_norm_backward_kernel(
 }
 
 /**
+ * @brief Mixed-precision LayerNorm forward kernel
+ *
+ * Reads InputT, accumulates in float, writes OutputT.
+ * Eliminates full-tensor dtype conversion passes for FP16 inputs.
+ */
+template<int BLOCK_SIZE, typename InputT, typename OutputT>
+__global__ void layer_norm_mixed_kernel(
+    const InputT* __restrict__ input,
+    const InputT* __restrict__ weight,
+    const InputT* __restrict__ bias,
+    OutputT* __restrict__ output,
+    OutputT* __restrict__ mean_out,
+    OutputT* __restrict__ inv_std_out,
+    int64_t batch_size,
+    int64_t norm_size,
+    float eps
+) {
+    const int64_t b = blockIdx.x;
+    if (b >= batch_size) return;
+
+    const InputT* batch_in = input + b * norm_size;
+    OutputT* batch_out = output + b * norm_size;
+
+    __shared__ float shared[BLOCK_SIZE / 32];
+
+    // First pass: compute sum and sum_sq in float
+    float sum = 0.0f;
+    float sum_sq = 0.0f;
+
+    for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
+        float val = static_cast<float>(batch_in[i]);
+        sum += val;
+        sum_sq += val * val;
+    }
+
+    sum = blockReduceSum<BLOCK_SIZE>(sum, shared);
+    __syncthreads();
+    sum_sq = blockReduceSum<BLOCK_SIZE>(sum_sq, shared);
+
+    float mean, inv_std;
+    if (threadIdx.x == 0) {
+        mean = sum / static_cast<float>(norm_size);
+        float variance = (sum_sq / static_cast<float>(norm_size)) - (mean * mean);
+        inv_std = rsqrtf(variance + eps);
+        mean_out[b] = static_cast<OutputT>(mean);
+        inv_std_out[b] = static_cast<OutputT>(inv_std);
+    }
+
+    if (threadIdx.x == 0) {
+        shared[0] = mean;
+        shared[1] = inv_std;
+    }
+    __syncthreads();
+    mean = shared[0];
+    inv_std = shared[1];
+
+    // Second pass: normalize and apply affine transform
+    for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
+        float val = static_cast<float>(batch_in[i]);
+        float normalized = (val - mean) * inv_std;
+        float w = static_cast<float>(weight[i]);
+        float bb = static_cast<float>(bias[i]);
+        batch_out[i] = static_cast<OutputT>(normalized * w + bb);
+    }
+}
+
+/**
+ * @brief Mixed-precision LayerNorm backward kernel
+ */
+template<int BLOCK_SIZE, typename InputT, typename OutputT>
+__global__ void layer_norm_backward_mixed_kernel(
+    const InputT* __restrict__ grad_output,
+    const InputT* __restrict__ input,
+    const InputT* __restrict__ weight,
+    const InputT* __restrict__ mean,
+    const InputT* __restrict__ inv_std,
+    OutputT* __restrict__ grad_input,
+    float* __restrict__ grad_weight,
+    float* __restrict__ grad_bias,
+    int64_t batch_size,
+    int64_t norm_size
+) {
+    const int64_t b = blockIdx.x;
+    if (b >= batch_size) return;
+
+    const InputT* batch_grad_out = grad_output + b * norm_size;
+    const InputT* batch_in = input + b * norm_size;
+    OutputT* batch_grad_in = grad_input + b * norm_size;
+
+    const float batch_mean = static_cast<float>(mean[b]);
+    const float batch_inv_std = static_cast<float>(inv_std[b]);
+
+    __shared__ float shared[BLOCK_SIZE / 32];
+
+    float sum1 = 0.0f;
+    float sum2 = 0.0f;
+
+    for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
+        float grad_w = static_cast<float>(batch_grad_out[i]) * static_cast<float>(weight[i]);
+        float normalized = (static_cast<float>(batch_in[i]) - batch_mean) * batch_inv_std;
+        sum1 += grad_w;
+        sum2 += grad_w * normalized;
+    }
+
+    sum1 = blockReduceSum<BLOCK_SIZE>(sum1, shared);
+    __syncthreads();
+    sum2 = blockReduceSum<BLOCK_SIZE>(sum2, shared);
+
+    if (threadIdx.x == 0) {
+        shared[0] = sum1 / static_cast<float>(norm_size);
+        shared[1] = sum2 / static_cast<float>(norm_size);
+    }
+    __syncthreads();
+    const float mean_grad_w = shared[0];
+    const float mean_grad_w_norm = shared[1];
+
+    for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
+        float normalized = (static_cast<float>(batch_in[i]) - batch_mean) * batch_inv_std;
+        float grad_w = static_cast<float>(batch_grad_out[i]) * static_cast<float>(weight[i]);
+
+        batch_grad_in[i] = static_cast<OutputT>(
+            batch_inv_std * (grad_w - mean_grad_w - normalized * mean_grad_w_norm));
+
+        atomicAdd(&grad_weight[i], static_cast<float>(batch_grad_out[i]) * normalized);
+        atomicAdd(&grad_bias[i], static_cast<float>(batch_grad_out[i]));
+    }
+}
+
+/**
+ * @brief Double-precision warp reduce sum
+ */
+__device__ __forceinline__ double warpReduceSumDouble(double val) {
+    #pragma unroll
+    for (int offset = 16; offset > 0; offset >>= 1) {
+        val += __shfl_xor_sync(0xffffffff, val, offset);
+    }
+    return val;
+}
+
+template<int BLOCK_SIZE>
+__device__ __forceinline__ double blockReduceSumDouble(double val, double* shared) {
+    int lane = threadIdx.x % 32;
+    int wid = threadIdx.x / 32;
+
+    val = warpReduceSumDouble(val);
+
+    if (lane == 0) {
+        shared[wid] = val;
+    }
+    __syncthreads();
+
+    constexpr int numWarps = BLOCK_SIZE / 32;
+    val = (threadIdx.x < numWarps) ? shared[lane] : 0.0;
+    if (wid == 0) {
+        val = warpReduceSumDouble(val);
+    }
+
+    return val;
+}
+
+/**
+ * @brief Double-precision LayerNorm forward kernel
+ */
+template<int BLOCK_SIZE>
+__global__ void layer_norm_fp64_kernel(
+    const double* __restrict__ input,
+    const double* __restrict__ weight,
+    const double* __restrict__ bias,
+    double* __restrict__ output,
+    double* __restrict__ mean_out,
+    double* __restrict__ inv_std_out,
+    int64_t batch_size,
+    int64_t norm_size,
+    double eps
+) {
+    const int64_t b = blockIdx.x;
+    if (b >= batch_size) return;
+
+    const double* batch_in = input + b * norm_size;
+    double* batch_out = output + b * norm_size;
+
+    __shared__ double shared[BLOCK_SIZE / 32];
+
+    double sum = 0.0;
+    double sum_sq = 0.0;
+
+    for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
+        double val = batch_in[i];
+        sum += val;
+        sum_sq += val * val;
+    }
+
+    sum = blockReduceSumDouble<BLOCK_SIZE>(sum, shared);
+    __syncthreads();
+    sum_sq = blockReduceSumDouble<BLOCK_SIZE>(sum_sq, shared);
+
+    double mean, inv_std;
+    if (threadIdx.x == 0) {
+        mean = sum / static_cast<double>(norm_size);
+        double variance = (sum_sq / static_cast<double>(norm_size)) - (mean * mean);
+        inv_std = rsqrt(variance + eps);
+        mean_out[b] = mean;
+        inv_std_out[b] = inv_std;
+    }
+
+    if (threadIdx.x == 0) {
+        shared[0] = mean;
+        shared[1] = inv_std;
+    }
+    __syncthreads();
+    mean = shared[0];
+    inv_std = shared[1];
+
+    for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
+        double normalized = (batch_in[i] - mean) * inv_std;
+        batch_out[i] = normalized * weight[i] + bias[i];
+    }
+}
+
+/**
+ * @brief Double-precision LayerNorm backward kernel
+ */
+template<int BLOCK_SIZE>
+__global__ void layer_norm_backward_fp64_kernel(
+    const double* __restrict__ grad_output,
+    const double* __restrict__ input,
+    const double* __restrict__ weight,
+    const double* __restrict__ mean,
+    const double* __restrict__ inv_std,
+    double* __restrict__ grad_input,
+    double* __restrict__ grad_weight,
+    double* __restrict__ grad_bias,
+    int64_t batch_size,
+    int64_t norm_size
+) {
+    const int64_t b = blockIdx.x;
+    if (b >= batch_size) return;
+
+    const double* batch_grad_out = grad_output + b * norm_size;
+    const double* batch_in = input + b * norm_size;
+    double* batch_grad_in = grad_input + b * norm_size;
+
+    const double batch_mean = mean[b];
+    const double batch_inv_std = inv_std[b];
+
+    __shared__ double shared[BLOCK_SIZE / 32];
+
+    double sum1 = 0.0;
+    double sum2 = 0.0;
+
+    for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
+        double grad_w = batch_grad_out[i] * weight[i];
+        double normalized = (batch_in[i] - batch_mean) * batch_inv_std;
+        sum1 += grad_w;
+        sum2 += grad_w * normalized;
+    }
+
+    sum1 = blockReduceSumDouble<BLOCK_SIZE>(sum1, shared);
+    __syncthreads();
+    sum2 = blockReduceSumDouble<BLOCK_SIZE>(sum2, shared);
+
+    if (threadIdx.x == 0) {
+        shared[0] = sum1 / static_cast<double>(norm_size);
+        shared[1] = sum2 / static_cast<double>(norm_size);
+    }
+    __syncthreads();
+    const double mean_grad_w = shared[0];
+    const double mean_grad_w_norm = shared[1];
+
+    for (int64_t i = threadIdx.x; i < norm_size; i += blockDim.x) {
+        double normalized = (batch_in[i] - batch_mean) * batch_inv_std;
+        double grad_w = batch_grad_out[i] * weight[i];
+
+        batch_grad_in[i] = batch_inv_std * (grad_w - mean_grad_w - normalized * mean_grad_w_norm);
+
+        atomicAdd(&grad_weight[i], batch_grad_out[i] * normalized);
+        atomicAdd(&grad_bias[i], batch_grad_out[i]);
+    }
+}
+
+/**
  * @brief Host wrapper for optimized LayerNorm forward
  *
  * Uses warp shuffle reductions and vectorized memory access for
@@ -2855,62 +3270,37 @@ auto cudnn_layer_norm_forward(
             eps
         );
     } else if (input_c.dtype() == DType::Float64) {
-        // Float64: convert to Float32, compute, convert back
-        // LayerNorm typically has sufficient precision with Float32
+        // Float64: compute directly in double precision — no conversion needed
         constexpr int BLOCK_SIZE = 256;
         int blocks = static_cast<int>(batch_size);
 
-        Tensor input_f32 = input_c.to(DType::Float32);
-        Tensor weight_f32 = weight_c.to(DType::Float32);
-        Tensor bias_f32 = bias_c.to(DType::Float32);
-        Tensor output_f32(std::vector<int64_t>(shape.begin(), shape.end()), DType::Float32, input.device());
-        Tensor mean_f32({batch_size}, DType::Float32, input.device());
-        Tensor inv_std_f32({batch_size}, DType::Float32, input.device());
-
-        optimized_layer_norm_kernel<BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
-            input_f32.data<float>(),
-            weight_f32.data<float>(),
-            bias_f32.data<float>(),
-            output_f32.data<float>(),
-            mean_f32.data<float>(),
-            inv_std_f32.data<float>(),
+        layer_norm_fp64_kernel<BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
+            input_c.data<double>(),
+            weight_c.data<double>(),
+            bias_c.data<double>(),
+            output.data<double>(),
+            mean_tensor.data<double>(),
+            inv_std_tensor.data<double>(),
             batch_size,
             norm_size,
-            eps
+            static_cast<double>(eps)
         );
-
-        // Convert outputs back to Float64
-        output = output_f32.to(DType::Float64);
-        mean_tensor = mean_f32.to(DType::Float64);
-        inv_std_tensor = inv_std_f32.to(DType::Float64);
     } else if (input_c.dtype() == DType::Float16) {
-        // Float16: convert to Float32, compute, convert back for numerical stability
+        // Float16: read __half, accumulate in float, write __half — no full-tensor conversion
         constexpr int BLOCK_SIZE = 256;
         int blocks = static_cast<int>(batch_size);
 
-        Tensor input_f32 = input_c.to(DType::Float32);
-        Tensor weight_f32 = weight_c.to(DType::Float32);
-        Tensor bias_f32 = bias_c.to(DType::Float32);
-        Tensor output_f32(std::vector<int64_t>(shape.begin(), shape.end()), DType::Float32, input.device());
-        Tensor mean_f32({batch_size}, DType::Float32, input.device());
-        Tensor inv_std_f32({batch_size}, DType::Float32, input.device());
-
-        optimized_layer_norm_kernel<BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
-            input_f32.data<float>(),
-            weight_f32.data<float>(),
-            bias_f32.data<float>(),
-            output_f32.data<float>(),
-            mean_f32.data<float>(),
-            inv_std_f32.data<float>(),
+        layer_norm_mixed_kernel<BLOCK_SIZE, __half, __half><<<blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<const __half*>(input_c.data_ptr()),
+            reinterpret_cast<const __half*>(weight_c.data_ptr()),
+            reinterpret_cast<const __half*>(bias_c.data_ptr()),
+            reinterpret_cast<__half*>(output.data_ptr()),
+            reinterpret_cast<__half*>(mean_tensor.data_ptr()),
+            reinterpret_cast<__half*>(inv_std_tensor.data_ptr()),
             batch_size,
             norm_size,
             eps
         );
-
-        // Convert outputs back to Float16
-        output = output_f32.to(DType::Float16);
-        mean_tensor = mean_f32.to(DType::Float16);
-        inv_std_tensor = inv_std_f32.to(DType::Float16);
     } else {
         throw std::runtime_error("cudnn_layer_norm_forward: unsupported dtype");
     }
@@ -2944,8 +3334,9 @@ auto cudnn_layer_norm_backward(
     Tensor grad_bias({norm_size}, weight.dtype(), weight.device());
 
     // Zero initialize gradient accumulation tensors
-    cudaMemsetAsync(grad_weight.data_ptr(), 0, grad_weight.numel() * sizeof(float), stream);
-    cudaMemsetAsync(grad_bias.data_ptr(), 0, grad_bias.numel() * sizeof(float), stream);
+    size_t elem_size = dtype_size(weight.dtype());
+    cudaMemsetAsync(grad_weight.data_ptr(), 0, grad_weight.numel() * elem_size, stream);
+    cudaMemsetAsync(grad_bias.data_ptr(), 0, grad_bias.numel() * elem_size, stream);
 
     // Ensure tensors are contiguous
     Tensor grad_out_c = grad_output.is_contiguous() ? grad_output : grad_output.contiguous();
@@ -2971,73 +3362,54 @@ auto cudnn_layer_norm_backward(
             norm_size
         );
     } else if (input_c.dtype() == DType::Float64) {
-        // Float64: convert to Float32, compute, convert back
+        // Float64: compute directly in double precision
         constexpr int BLOCK_SIZE = 256;
         int blocks = static_cast<int>(batch_size);
 
-        Tensor grad_out_f32 = grad_out_c.to(DType::Float32);
-        Tensor input_f32 = input_c.to(DType::Float32);
-        Tensor weight_f32 = weight_c.to(DType::Float32);
-        Tensor mean_f32 = mean_c.to(DType::Float32);
-        Tensor inv_std_f32 = inv_std_c.to(DType::Float32);
-        Tensor grad_input_f32(std::vector<int64_t>(shape.begin(), shape.end()), DType::Float32, input.device());
-        Tensor grad_weight_f32({norm_size}, DType::Float32, weight.device());
-        Tensor grad_bias_f32({norm_size}, DType::Float32, weight.device());
+        Tensor grad_weight_f64({norm_size}, DType::Float64, weight.device());
+        Tensor grad_bias_f64({norm_size}, DType::Float64, weight.device());
+        cudaMemsetAsync(grad_weight_f64.data_ptr(), 0, grad_weight_f64.numel() * sizeof(double), stream);
+        cudaMemsetAsync(grad_bias_f64.data_ptr(), 0, grad_bias_f64.numel() * sizeof(double), stream);
 
-        // Zero initialize gradient accumulation tensors
-        cudaMemsetAsync(grad_weight_f32.data_ptr(), 0, grad_weight_f32.numel() * sizeof(float), stream);
-        cudaMemsetAsync(grad_bias_f32.data_ptr(), 0, grad_bias_f32.numel() * sizeof(float), stream);
-
-        optimized_layer_norm_backward_kernel<BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
-            grad_out_f32.data<float>(),
-            input_f32.data<float>(),
-            weight_f32.data<float>(),
-            mean_f32.data<float>(),
-            inv_std_f32.data<float>(),
-            grad_input_f32.data<float>(),
-            grad_weight_f32.data<float>(),
-            grad_bias_f32.data<float>(),
+        layer_norm_backward_fp64_kernel<BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
+            grad_out_c.data<double>(),
+            input_c.data<double>(),
+            weight_c.data<double>(),
+            mean_c.data<double>(),
+            inv_std_c.data<double>(),
+            grad_input.data<double>(),
+            grad_weight_f64.data<double>(),
+            grad_bias_f64.data<double>(),
             batch_size,
             norm_size
         );
 
-        // Convert outputs back to Float64
-        grad_input = grad_input_f32.to(DType::Float64);
-        grad_weight = grad_weight_f32.to(DType::Float64);
-        grad_bias = grad_bias_f32.to(DType::Float64);
+        grad_weight = grad_weight_f64;
+        grad_bias = grad_bias_f64;
     } else if (input_c.dtype() == DType::Float16) {
-        // Float16: convert to Float32, compute, convert back for numerical stability
+        // Float16: read __half, accumulate grad_weight/grad_bias in float, write __half grad_input
         constexpr int BLOCK_SIZE = 256;
         int blocks = static_cast<int>(batch_size);
 
-        Tensor grad_out_f32 = grad_out_c.to(DType::Float32);
-        Tensor input_f32 = input_c.to(DType::Float32);
-        Tensor weight_f32 = weight_c.to(DType::Float32);
-        Tensor mean_f32 = mean_c.to(DType::Float32);
-        Tensor inv_std_f32 = inv_std_c.to(DType::Float32);
-        Tensor grad_input_f32(std::vector<int64_t>(shape.begin(), shape.end()), DType::Float32, input.device());
+        // grad_weight and grad_bias accumulate atomically in float for precision
         Tensor grad_weight_f32({norm_size}, DType::Float32, weight.device());
         Tensor grad_bias_f32({norm_size}, DType::Float32, weight.device());
-
-        // Zero initialize gradient accumulation tensors
         cudaMemsetAsync(grad_weight_f32.data_ptr(), 0, grad_weight_f32.numel() * sizeof(float), stream);
         cudaMemsetAsync(grad_bias_f32.data_ptr(), 0, grad_bias_f32.numel() * sizeof(float), stream);
 
-        optimized_layer_norm_backward_kernel<BLOCK_SIZE><<<blocks, BLOCK_SIZE, 0, stream>>>(
-            grad_out_f32.data<float>(),
-            input_f32.data<float>(),
-            weight_f32.data<float>(),
-            mean_f32.data<float>(),
-            inv_std_f32.data<float>(),
-            grad_input_f32.data<float>(),
+        layer_norm_backward_mixed_kernel<BLOCK_SIZE, __half, __half><<<blocks, BLOCK_SIZE, 0, stream>>>(
+            reinterpret_cast<const __half*>(grad_out_c.data_ptr()),
+            reinterpret_cast<const __half*>(input_c.data_ptr()),
+            reinterpret_cast<const __half*>(weight_c.data_ptr()),
+            reinterpret_cast<const __half*>(mean_c.data_ptr()),
+            reinterpret_cast<const __half*>(inv_std_c.data_ptr()),
+            reinterpret_cast<__half*>(grad_input.data_ptr()),
             grad_weight_f32.data<float>(),
             grad_bias_f32.data<float>(),
             batch_size,
             norm_size
         );
 
-        // Convert outputs back to Float16
-        grad_input = grad_input_f32.to(DType::Float16);
         grad_weight = grad_weight_f32.to(DType::Float16);
         grad_bias = grad_bias_f32.to(DType::Float16);
     } else {

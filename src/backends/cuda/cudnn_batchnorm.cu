@@ -135,7 +135,10 @@ auto cudnn_batchnorm2d_forward_inference(
             epsilon
         ));
     } else if (input.dtype() == DType::Float16) {
-        // For FP16 input, cuDNN requires FP32 for bnScale, bnBias, mean, variance
+        // cuDNN mandates FP32 for bnScale, bnBias, estimatedMean, estimatedVariance
+        // when the input tensor is FP16 (see cudnnBatchNormalizationForwardInference docs).
+        // The conversion cost is negligible since these are small per-channel tensors
+        // (C elements), not full activation tensors.
         const float alpha = 1.0f;
         const float zero = 0.0f;
 

@@ -34,16 +34,18 @@ inline std::vector<int64_t> to_vector(const std::span<const int64_t>& s) {
     return std::vector<int64_t>(s.begin(), s.end());
 }
 
-// Helper for computing sum of a 1D tensor on GPU (for reduction)
-inline float cuda_sum_float(const Tensor& t) {
+// Helper for computing sum of a 1D tensor on GPU — returns a scalar device Tensor
+// No D2H synchronization needed
+inline Tensor cuda_sum_device(const Tensor& t) {
     int64_t n = t.numel();
     const float* data = t.data<float>();
+
+    Tensor result({1}, DType::Float32, t.device());
+    float* d_out = result.data<float>();
 
     // Allocate temp storage for CUB reduction
     void* d_temp_storage = nullptr;
     size_t temp_storage_bytes = 0;
-    float* d_out;
-    cudaMalloc(&d_out, sizeof(float));
 
     // Determine temp storage requirements
     cub::DeviceReduce::Sum(d_temp_storage, temp_storage_bytes, data, d_out, n);
@@ -52,12 +54,7 @@ inline float cuda_sum_float(const Tensor& t) {
     // Run sum
     cub::DeviceReduce::Sum(d_temp_storage, temp_storage_bytes, data, d_out, n);
 
-    // Copy result back
-    float result;
-    cudaMemcpy(&result, d_out, sizeof(float), cudaMemcpyDeviceToHost);
-
     cudaFree(d_temp_storage);
-    cudaFree(d_out);
 
     return result;
 }
@@ -67,6 +64,11 @@ inline Tensor create_scalar_tensor(float value, DType dtype, Device device) {
     Tensor t({1}, dtype, device);
     cudaMemcpy(t.data_ptr(), &value, sizeof(float), cudaMemcpyHostToDevice);
     return t;
+}
+
+// Device kernel to scale a single float in-place
+__global__ void scale_scalar_kernel(float* data, float scale) {
+    data[0] *= scale;
 }
 
 // Error checking macro
@@ -193,10 +195,6 @@ auto fused_linear_relu_cuda(
     }
 
     CUDA_CHECK(cudaGetLastError());
-
-    // Synchronize to ensure kernel completes before returning result
-    // This is necessary for correctness when results are immediately used
-    CUDA_CHECK(cudaDeviceSynchronize());
 
     return output;
 }
@@ -417,13 +415,13 @@ auto fused_softmax_cross_entropy_cuda(
 
     CUDA_CHECK(cudaGetLastError());
 
-    // Apply reduction
+    // Apply reduction — stays on device, no D2H transfer
     if (reduction == "mean") {
-        float sum_val = cuda_sum_float(losses);
-        return create_scalar_tensor(sum_val / batch_size, logits.dtype(), logits.device());
+        Tensor sum_tensor = cuda_sum_device(losses);
+        scale_scalar_kernel<<<1, 1>>>(sum_tensor.data<float>(), 1.0f / batch_size);
+        return sum_tensor;
     } else if (reduction == "sum") {
-        float sum_val = cuda_sum_float(losses);
-        return create_scalar_tensor(sum_val, logits.dtype(), logits.device());
+        return cuda_sum_device(losses);
     } else {
         return losses;
     }

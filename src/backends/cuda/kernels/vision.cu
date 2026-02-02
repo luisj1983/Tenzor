@@ -400,7 +400,6 @@ auto unfold_cuda(const Tensor& input,
     }
 
     CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
 
     return output;
 }
@@ -462,7 +461,6 @@ auto fold_cuda(const Tensor& input,
     }
 
     CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
 
     return output;
 }
@@ -566,7 +564,6 @@ auto interpolate_cuda(const Tensor& input,
     }
 
     CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
 
     return output;
 }

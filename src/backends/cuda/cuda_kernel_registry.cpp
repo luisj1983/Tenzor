@@ -166,7 +166,31 @@ namespace cuda {
     auto fused_linear_relu_cuda(const Tensor& input, const Tensor& weight, const Tensor* bias) -> Tensor;
     auto fused_batchnorm_relu_cuda(const Tensor& input, const Tensor& running_mean, const Tensor& running_var, const Tensor& weight, const Tensor& bias, float eps) -> Tensor;
     auto fused_add_relu_cuda(const Tensor& a, const Tensor& b) -> Tensor;
+    auto cudnn_fused_conv2d_relu_forward(const Tensor& input, const Tensor& weight, const Tensor* bias, int64_t stride, int64_t padding, int64_t dilation, int64_t groups, cudaStream_t stream) -> Tensor;
     auto fused_gelu_cuda(const Tensor& input) -> Tensor;
+
+    // Full-sequence RNN operations
+    auto lstm_forward_cuda(const Tensor& input, const Tensor& W_ih, const Tensor& W_hh,
+                           const Tensor& bias_ih, const Tensor& bias_hh,
+                           const Tensor& h0, const Tensor& c0) -> std::vector<Tensor>;
+    auto gru_forward_cuda(const Tensor& input, const Tensor& W_ih, const Tensor& W_hh,
+                          const Tensor& bias, const Tensor& h0) -> std::vector<Tensor>;
+    auto lstm_multi_layer_forward_cuda(const Tensor& input,
+                                       const std::vector<Tensor>& W_ih_list,
+                                       const std::vector<Tensor>& W_hh_list,
+                                       const std::vector<Tensor>& bias_list,
+                                       const Tensor& h0, const Tensor& c0) -> std::vector<Tensor>;
+    auto gru_multi_layer_forward_cuda(const Tensor& input,
+                                      const std::vector<Tensor>& W_ih_list,
+                                      const std::vector<Tensor>& W_hh_list,
+                                      const std::vector<Tensor>& bias_list,
+                                      const Tensor& h0) -> std::vector<Tensor>;
+    auto bilstm_forward_cuda(const Tensor& input,
+                             const Tensor& W_ih_fwd, const Tensor& W_hh_fwd,
+                             const Tensor& bias_ih_fwd, const Tensor& bias_hh_fwd,
+                             const Tensor& W_ih_bwd, const Tensor& W_hh_bwd,
+                             const Tensor& bias_ih_bwd, const Tensor& bias_hh_bwd,
+                             const Tensor& h0, const Tensor& c0) -> std::vector<Tensor>;
 
     // Vision/Interpolation operations
     auto interpolate_cuda(const Tensor& input, const std::vector<int64_t>& size, const std::string& mode, bool align_corners) -> Tensor;
@@ -1062,6 +1086,18 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         return cuda::fused_gelu_cuda(inputs[0]);
     });
 
+#ifdef TENZOR_HAS_CUDNN
+    table.register_single_output_kernel(OpId::FusedConv2dReLU, [](std::span<const Tensor> inputs, const OpAttributes& attrs) -> Tensor {
+        // inputs: [input, weight] or [input, weight, bias]
+        int64_t stride = parse_attr<int64_t>(attrs, "stride", 1);
+        int64_t padding = parse_attr<int64_t>(attrs, "padding", 0);
+        int64_t dilation = parse_attr<int64_t>(attrs, "dilation", 1);
+        int64_t groups = parse_attr<int64_t>(attrs, "groups", 1);
+        const Tensor* bias = inputs.size() > 2 ? &inputs[2] : nullptr;
+        return cuda::cudnn_fused_conv2d_relu_forward(inputs[0], inputs[1], bias, stride, padding, dilation, groups, get_cuda_stream(attrs));
+    });
+#endif
+
     // =========================================================================
     // Vision/Interpolation Operations
     // =========================================================================
@@ -1542,6 +1578,70 @@ void register_cuda_kernels(BackendDispatchTable& table) {
         cuda::fused_adagrad_step_cuda(param, inputs[1], sum_sq,
             lr, lr_decay, eps, weight_decay, step, get_cuda_stream(attrs));
         return std::vector<Tensor>{param};
+    });
+
+    // =========================================================================
+    // Full-Sequence RNN Operations
+    // =========================================================================
+
+    // inputs: [input, W_ih, W_hh, bias_ih, bias_hh, h0, c0]
+    table.register_kernel(OpId::LSTMForward, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return cuda::lstm_forward_cuda(inputs[0], inputs[1], inputs[2],
+                                       inputs[3], inputs[4], inputs[5], inputs[6]);
+    });
+
+    // inputs: [input, W_ih, W_hh, bias, h0]
+    table.register_kernel(OpId::GRUForward, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return cuda::gru_forward_cuda(inputs[0], inputs[1], inputs[2],
+                                      inputs[3], inputs[4]);
+    });
+
+    // inputs: [input, h0, c0, W_ih_0, W_hh_0, bias_0, W_ih_1, W_hh_1, bias_1, ...]
+    table.register_kernel(OpId::LSTMMultiLayerForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t num_layers = parse_attr<int64_t>(attrs, "num_layers", 1);
+
+        const Tensor& input = inputs[0];
+        const Tensor& h0 = inputs[1];
+        const Tensor& c0 = inputs[2];
+
+        std::vector<Tensor> W_ih_list, W_hh_list, bias_list;
+        for (int64_t l = 0; l < num_layers; ++l) {
+            size_t base_idx = 3 + l * 3;
+            W_ih_list.push_back(inputs[base_idx]);
+            W_hh_list.push_back(inputs[base_idx + 1]);
+            bias_list.push_back(inputs[base_idx + 2]);
+        }
+
+        return cuda::lstm_multi_layer_forward_cuda(input, W_ih_list, W_hh_list, bias_list, h0, c0);
+    });
+
+    // inputs: [input, h0, W_ih_0, W_hh_0, bias_0, W_ih_1, W_hh_1, bias_1, ...]
+    table.register_kernel(OpId::GRUMultiLayerForward, [](std::span<const Tensor> inputs, const OpAttributes& attrs) {
+        int64_t num_layers = parse_attr<int64_t>(attrs, "num_layers", 1);
+
+        const Tensor& input = inputs[0];
+        const Tensor& h0 = inputs[1];
+
+        std::vector<Tensor> W_ih_list, W_hh_list, bias_list;
+        for (int64_t l = 0; l < num_layers; ++l) {
+            size_t base_idx = 2 + l * 3;
+            W_ih_list.push_back(inputs[base_idx]);
+            W_hh_list.push_back(inputs[base_idx + 1]);
+            bias_list.push_back(inputs[base_idx + 2]);
+        }
+
+        return cuda::gru_multi_layer_forward_cuda(input, W_ih_list, W_hh_list, bias_list, h0);
+    });
+
+    // inputs: [input, h0, c0, W_ih_fwd, W_hh_fwd, bias_ih_fwd, bias_hh_fwd,
+    //          W_ih_bwd, W_hh_bwd, bias_ih_bwd, bias_hh_bwd]
+    table.register_kernel(OpId::BiLSTMForward, [](std::span<const Tensor> inputs, const OpAttributes&) {
+        return cuda::bilstm_forward_cuda(
+            inputs[0],
+            inputs[3], inputs[4], inputs[5], inputs[6],
+            inputs[7], inputs[8], inputs[9], inputs[10],
+            inputs[1], inputs[2]
+        );
     });
 }
 

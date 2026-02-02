@@ -98,6 +98,47 @@ __global__ void nms_kernel(const float* boxes, const int64_t* sorted_indices,
     }
 }
 
+// Device kernel for greedy suppression — runs in a single thread
+// Eliminates D2H copies of sorted_indices and suppression_mask
+__global__ void nms_greedy_suppression_kernel(
+    const uint64_t* suppression_mask,
+    const int64_t* sorted_indices,
+    int64_t* keep_indices,
+    int64_t* num_keep,
+    int64_t num_boxes,
+    int64_t num_chunks
+) {
+    // Single-thread kernel: sequential greedy suppression
+    int64_t keep_count = 0;
+    uint64_t* remv = nullptr;
+
+    // Use dynamic shared memory as scratch for "removed" bitmask
+    extern __shared__ uint64_t s_remv[];
+    for (int64_t i = 0; i < num_chunks; ++i) {
+        s_remv[i] = 0;
+    }
+
+    for (int64_t i = 0; i < num_boxes; ++i) {
+        // Check if box i (in sorted order) is already suppressed
+        int64_t chunk_i = i / 64;
+        int64_t bit_i = i % 64;
+        if (s_remv[chunk_i] & (1ULL << bit_i)) {
+            continue;
+        }
+
+        // Keep this box
+        keep_indices[keep_count++] = sorted_indices[i];
+
+        // OR this box's suppression row into the removed set
+        const uint64_t* row = suppression_mask + i * num_chunks;
+        for (int64_t c = 0; c < num_chunks; ++c) {
+            s_remv[c] |= row[c];
+        }
+    }
+
+    *num_keep = keep_count;
+}
+
 // Host function to perform NMS on GPU
 extern "C" void nms_cuda(const float* boxes, const float* scores,
                          int64_t num_boxes, float iou_threshold,
@@ -142,61 +183,32 @@ extern "C" void nms_cuda(const float* boxes, const float* scores,
     cudaFree(d_indices_in);
     cudaFree(d_scores_sorted);
 
-    // Copy sorted indices to host for sequential suppression mask processing
-    std::vector<int64_t> sorted_indices(num_boxes);
-    cudaMemcpy(sorted_indices.data(), d_sorted_indices,
-               num_boxes * sizeof(int64_t), cudaMemcpyDeviceToHost);
-
     // Allocate suppression mask
     const int64_t num_chunks = (num_boxes + 63) / 64;
     uint64_t* d_suppression_mask;
     cudaMalloc(&d_suppression_mask, num_boxes * num_chunks * sizeof(uint64_t));
     cudaMemset(d_suppression_mask, 0, num_boxes * num_chunks * sizeof(uint64_t));
 
-    // Launch NMS kernel
+    // Launch NMS IoU kernel — one block per reference box
     const int threads_per_block = 256;
     nms_kernel<<<num_boxes, threads_per_block>>>(
         boxes, d_sorted_indices, d_suppression_mask, num_boxes, iou_threshold);
 
-    // Copy suppression mask to host
-    std::vector<uint64_t> suppression_mask(num_boxes * num_chunks);
-    cudaMemcpy(suppression_mask.data(), d_suppression_mask,
-               num_boxes * num_chunks * sizeof(uint64_t),
-               cudaMemcpyDeviceToHost);
+    // Allocate device-side num_keep scalar
+    int64_t* d_num_keep;
+    cudaMalloc(&d_num_keep, sizeof(int64_t));
 
-    // Process suppression mask to get keep indices
-    std::vector<bool> suppressed(num_boxes, false);
-    std::vector<int64_t> keep;
-    keep.reserve(num_boxes);
+    // Launch greedy suppression on device (single thread, shared memory for bitmask)
+    size_t shared_bytes = num_chunks * sizeof(uint64_t);
+    nms_greedy_suppression_kernel<<<1, 1, shared_bytes>>>(
+        d_suppression_mask, d_sorted_indices, keep_indices, d_num_keep,
+        num_boxes, num_chunks);
 
-    for (int64_t i = 0; i < num_boxes; ++i) {
-        const int64_t idx = sorted_indices[i];
-        if (suppressed[idx]) continue;
-
-        keep.push_back(idx);
-
-        // Mark suppressed boxes
-        for (int64_t chunk = 0; chunk < num_chunks; ++chunk) {
-            uint64_t mask = suppression_mask[i * num_chunks + chunk];
-            const int64_t start_idx = chunk * 64;
-
-            for (int bit = 0; bit < 64; ++bit) {
-                if (mask & (1ULL << bit)) {
-                    const int64_t box_idx = start_idx + bit;
-                    if (box_idx < num_boxes) {
-                        suppressed[sorted_indices[box_idx]] = true;
-                    }
-                }
-            }
-        }
-    }
-
-    // Copy results
-    *num_keep = static_cast<int64_t>(keep.size());
-    cudaMemcpy(keep_indices, keep.data(), keep.size() * sizeof(int64_t),
-               cudaMemcpyHostToDevice);
+    // Only D2H transfer: the scalar num_keep
+    cudaMemcpy(num_keep, d_num_keep, sizeof(int64_t), cudaMemcpyDeviceToHost);
 
     // Cleanup
+    cudaFree(d_num_keep);
     cudaFree(d_sorted_indices);
     cudaFree(d_suppression_mask);
 }
