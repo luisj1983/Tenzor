@@ -13,10 +13,22 @@ struct NMSKernelFloat32 {};
 struct NMSKernelFloat64 {};
 struct ROIAlignKernelFloat32 {};
 struct ROIAlignKernelFloat64 {};
+struct ROIAlignKernelFloat16 {};
 struct ROIAlignBackwardKernelFloat32 {};
+struct ROIAlignBackwardKernelFloat64 {};
+struct ROIAlignBackwardKernelFloat16 {};
 struct GatherRelativePositionBiasKernelFloat32 {};
 struct GatherRelativePositionBiasKernelFloat64 {};
 struct GatherRelativePositionBiasKernelFloat16 {};
+struct InterpolateNearestKernelFloat32 {};
+struct InterpolateNearestKernelFloat64 {};
+struct InterpolateNearestKernelFloat16 {};
+struct InterpolateBilinearKernelFloat32 {};
+struct InterpolateBilinearKernelFloat64 {};
+struct InterpolateBilinearKernelFloat16 {};
+struct InterpolateBicubicKernelFloat32 {};
+struct InterpolateBicubicKernelFloat64 {};
+struct InterpolateBicubicKernelFloat16 {};
 
 // Helper function to get typed pointer from tensor
 template<typename T>
@@ -53,11 +65,31 @@ auto nms_kernel(
     std::vector<float> host_boxes(num_boxes * 4);
     std::vector<float> host_scores(num_boxes);
 
-    const float* boxes_ptr = get_data_ptr<const float>(boxes);
-    const float* scores_ptr = get_data_ptr<const float>(scores);
-
-    queue.memcpy(host_boxes.data(), boxes_ptr, num_boxes * 4 * sizeof(float)).wait();
-    queue.memcpy(host_scores.data(), scores_ptr, num_boxes * sizeof(float)).wait();
+    if (boxes.dtype() == DType::Float16) {
+        // Float16: copy as half, then convert to float on host
+        std::vector<sycl::half> host_boxes_h(num_boxes * 4);
+        std::vector<sycl::half> host_scores_h(num_boxes);
+        const sycl::half* boxes_ptr_h = get_data_ptr<const sycl::half>(boxes);
+        const sycl::half* scores_ptr_h = get_data_ptr<const sycl::half>(scores);
+        queue.memcpy(host_boxes_h.data(), boxes_ptr_h, num_boxes * 4 * sizeof(sycl::half)).wait();
+        queue.memcpy(host_scores_h.data(), scores_ptr_h, num_boxes * sizeof(sycl::half)).wait();
+        for (int64_t i = 0; i < num_boxes * 4; ++i) host_boxes[i] = static_cast<float>(host_boxes_h[i]);
+        for (int64_t i = 0; i < num_boxes; ++i) host_scores[i] = static_cast<float>(host_scores_h[i]);
+    } else if (boxes.dtype() == DType::Float64) {
+        std::vector<double> host_boxes_d(num_boxes * 4);
+        std::vector<double> host_scores_d(num_boxes);
+        const double* boxes_ptr_d = get_data_ptr<const double>(boxes);
+        const double* scores_ptr_d = get_data_ptr<const double>(scores);
+        queue.memcpy(host_boxes_d.data(), boxes_ptr_d, num_boxes * 4 * sizeof(double)).wait();
+        queue.memcpy(host_scores_d.data(), scores_ptr_d, num_boxes * sizeof(double)).wait();
+        for (int64_t i = 0; i < num_boxes * 4; ++i) host_boxes[i] = static_cast<float>(host_boxes_d[i]);
+        for (int64_t i = 0; i < num_boxes; ++i) host_scores[i] = static_cast<float>(host_scores_d[i]);
+    } else {
+        const float* boxes_ptr = get_data_ptr<const float>(boxes);
+        const float* scores_ptr = get_data_ptr<const float>(scores);
+        queue.memcpy(host_boxes.data(), boxes_ptr, num_boxes * 4 * sizeof(float)).wait();
+        queue.memcpy(host_scores.data(), scores_ptr, num_boxes * sizeof(float)).wait();
+    }
 
     // Sort boxes by score (descending)
     std::vector<int64_t> order(num_boxes);
@@ -363,11 +395,429 @@ auto roi_align_kernel(
             }
         ).wait();
     }
+    else if (features.dtype() == DType::Float16) {
+        const sycl::half* features_ptr = get_data_ptr<const sycl::half>(features);
+        const sycl::half* rois_ptr = get_data_ptr<const sycl::half>(rois);
+        sycl::half* output_ptr = get_data_ptr<sycl::half>(output);
+
+        const float offset = aligned ? 0.5f : 0.0f;
+
+        queue.parallel_for<ROIAlignKernelFloat16>(
+            sycl::range<1>(total_elements),
+            [=](sycl::id<1> idx) {
+                int64_t pw = idx % output_width;
+                int64_t ph = (idx / output_width) % output_height;
+                int64_t c = (idx / output_width / output_height) % channels;
+                int64_t n = idx / output_width / output_height / channels;
+
+                const sycl::half* roi = rois_ptr + n * 5;
+                int64_t batch_idx = static_cast<int64_t>(float(roi[0]));
+                float roi_x1 = float(roi[1]) * spatial_scale - offset;
+                float roi_y1 = float(roi[2]) * spatial_scale - offset;
+                float roi_x2 = float(roi[3]) * spatial_scale - offset;
+                float roi_y2 = float(roi[4]) * spatial_scale - offset;
+
+                float roi_width = roi_x2 - roi_x1;
+                float roi_height = roi_y2 - roi_y1;
+                if (!aligned) {
+                    roi_width = sycl::fmax(roi_width, 1.0f);
+                    roi_height = sycl::fmax(roi_height, 1.0f);
+                }
+
+                float bin_size_h = roi_height / static_cast<float>(output_height);
+                float bin_size_w = roi_width / static_cast<float>(output_width);
+
+                int64_t roi_bin_grid_h = sampling_ratio > 0 ? sampling_ratio
+                    : static_cast<int64_t>(sycl::ceil(roi_height / output_height));
+                int64_t roi_bin_grid_w = sampling_ratio > 0 ? sampling_ratio
+                    : static_cast<int64_t>(sycl::ceil(roi_width / output_width));
+
+                const float count = roi_bin_grid_h * roi_bin_grid_w;
+
+                float output_val = 0.0f;
+
+                for (int64_t iy = 0; iy < roi_bin_grid_h; ++iy) {
+                    float y = roi_y1 + ph * bin_size_h + (iy + 0.5f) * bin_size_h / roi_bin_grid_h;
+
+                    for (int64_t ix = 0; ix < roi_bin_grid_w; ++ix) {
+                        float x = roi_x1 + pw * bin_size_w + (ix + 0.5f) * bin_size_w / roi_bin_grid_w;
+
+                        if (y < -1.0f || y > height || x < -1.0f || x > width) {
+                            continue;
+                        }
+
+                        y = sycl::fmax(y, 0.0f);
+                        x = sycl::fmax(x, 0.0f);
+
+                        int64_t y_low = static_cast<int64_t>(y);
+                        int64_t x_low = static_cast<int64_t>(x);
+                        int64_t y_high = y_low + 1;
+                        int64_t x_high = x_low + 1;
+
+                        if (y_low >= height - 1) {
+                            y_high = y_low = height - 1;
+                            y = static_cast<float>(y_low);
+                        }
+                        if (x_low >= width - 1) {
+                            x_high = x_low = width - 1;
+                            x = static_cast<float>(x_low);
+                        }
+
+                        float ly = y - y_low;
+                        float lx = x - x_low;
+                        float hy = 1.0f - ly;
+                        float hx = 1.0f - lx;
+
+                        int64_t base = batch_idx * channels * height * width + c * height * width;
+
+                        float v1 = float(features_ptr[base + y_low * width + x_low]);
+                        float v2 = float(features_ptr[base + y_low * width + x_high]);
+                        float v3 = float(features_ptr[base + y_high * width + x_low]);
+                        float v4 = float(features_ptr[base + y_high * width + x_high]);
+
+                        float w1 = hy * hx;
+                        float w2 = hy * lx;
+                        float w3 = ly * hx;
+                        float w4 = ly * lx;
+
+                        output_val += w1 * v1 + w2 * v2 + w3 * v3 + w4 * v4;
+                    }
+                }
+                output_val /= count;
+
+                output_ptr[idx] = sycl::half(output_val);
+            }
+        ).wait();
+    }
     else {
         throw std::runtime_error("roi_align: unsupported dtype");
     }
 
     return output;
+}
+
+// ============================================================================
+// ROI Align Backward
+// ============================================================================
+/**
+ * @brief ROI Align backward for gradient computation
+ *
+ * Distributes gradients back to feature map positions using bilinear weights.
+ *
+ * @param grad_output Gradient from next layer: (K, C, output_height, output_width)
+ * @param rois Regions of interest: (K, 5) format [batch_idx, x1, y1, x2, y2]
+ * @param batch_size Number of batches in original feature map
+ * @param channels Number of channels
+ * @param feat_height Feature map height
+ * @param feat_width Feature map width
+ * @param spatial_scale Scale factor from input to feature map
+ * @param sampling_ratio Number of sampling points (0 for adaptive)
+ * @param aligned Whether to use aligned mode
+ * @param queue SYCL queue for execution
+ * @return Gradient w.r.t. features: (batch_size, channels, feat_height, feat_width)
+ */
+auto roi_align_backward_kernel(
+    const Tensor& grad_output,
+    const Tensor& rois,
+    int64_t batch_size,
+    int64_t channels,
+    int64_t feat_height,
+    int64_t feat_width,
+    float spatial_scale,
+    int64_t sampling_ratio,
+    bool aligned,
+    sycl::queue& queue
+) -> Tensor {
+    auto grad_shape = grad_output.shape();
+    int64_t num_rois = grad_shape[0];
+    int64_t output_height = grad_shape[2];
+    int64_t output_width = grad_shape[3];
+
+    Tensor grad_features({batch_size, channels, feat_height, feat_width},
+                         grad_output.dtype(), grad_output.device());
+
+    int64_t feat_size = batch_size * channels * feat_height * feat_width;
+    int64_t total_elements = num_rois * channels * output_height * output_width;
+
+    if (num_rois == 0 || total_elements == 0) {
+        // Zero out and return
+        if (grad_output.dtype() == DType::Float32) {
+            queue.fill(get_data_ptr<float>(grad_features), 0.0f, feat_size).wait();
+        } else {
+            queue.fill(get_data_ptr<double>(grad_features), 0.0, feat_size).wait();
+        }
+        return grad_features;
+    }
+
+    if (grad_output.dtype() == DType::Float32) {
+        const float* grad_out_ptr = get_data_ptr<const float>(grad_output);
+        const float* rois_ptr = get_data_ptr<const float>(rois);
+        float* grad_feat_ptr = get_data_ptr<float>(grad_features);
+
+        queue.fill(grad_feat_ptr, 0.0f, feat_size).wait();
+
+        const float offset = aligned ? 0.5f : 0.0f;
+
+        queue.parallel_for<ROIAlignBackwardKernelFloat32>(
+            sycl::range<1>(total_elements),
+            [=](sycl::id<1> idx) {
+                int64_t pw = idx % output_width;
+                int64_t ph = (idx / output_width) % output_height;
+                int64_t c = (idx / output_width / output_height) % channels;
+                int64_t n = idx / output_width / output_height / channels;
+
+                const float* roi = rois_ptr + n * 5;
+                int64_t batch_idx = static_cast<int64_t>(roi[0]);
+                float roi_x1 = roi[1] * spatial_scale - offset;
+                float roi_y1 = roi[2] * spatial_scale - offset;
+                float roi_x2 = roi[3] * spatial_scale - offset;
+                float roi_y2 = roi[4] * spatial_scale - offset;
+
+                float roi_width = roi_x2 - roi_x1;
+                float roi_height = roi_y2 - roi_y1;
+                if (!aligned) {
+                    roi_width = sycl::fmax(roi_width, 1.0f);
+                    roi_height = sycl::fmax(roi_height, 1.0f);
+                }
+
+                float bin_size_h = roi_height / static_cast<float>(output_height);
+                float bin_size_w = roi_width / static_cast<float>(output_width);
+
+                int64_t roi_bin_grid_h = sampling_ratio > 0 ? sampling_ratio
+                    : static_cast<int64_t>(sycl::ceil(roi_height / output_height));
+                int64_t roi_bin_grid_w = sampling_ratio > 0 ? sampling_ratio
+                    : static_cast<int64_t>(sycl::ceil(roi_width / output_width));
+
+                const float count = roi_bin_grid_h * roi_bin_grid_w;
+                const float grad_val = grad_out_ptr[idx] / count;
+
+                for (int64_t iy = 0; iy < roi_bin_grid_h; ++iy) {
+                    float y = roi_y1 + ph * bin_size_h + (iy + 0.5f) * bin_size_h / roi_bin_grid_h;
+                    for (int64_t ix = 0; ix < roi_bin_grid_w; ++ix) {
+                        float x = roi_x1 + pw * bin_size_w + (ix + 0.5f) * bin_size_w / roi_bin_grid_w;
+
+                        if (y < -1.0f || y > feat_height || x < -1.0f || x > feat_width) continue;
+
+                        y = sycl::fmax(y, 0.0f);
+                        x = sycl::fmax(x, 0.0f);
+
+                        int64_t y_low = static_cast<int64_t>(y);
+                        int64_t x_low = static_cast<int64_t>(x);
+                        int64_t y_high = y_low + 1;
+                        int64_t x_high = x_low + 1;
+
+                        if (y_low >= feat_height - 1) { y_high = y_low = feat_height - 1; y = static_cast<float>(y_low); }
+                        if (x_low >= feat_width - 1) { x_high = x_low = feat_width - 1; x = static_cast<float>(x_low); }
+
+                        float ly = y - y_low;
+                        float lx = x - x_low;
+                        float hy = 1.0f - ly;
+                        float hx = 1.0f - lx;
+
+                        int64_t base = batch_idx * channels * feat_height * feat_width + c * feat_height * feat_width;
+
+                        sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device>
+                            a1(grad_feat_ptr[base + y_low * feat_width + x_low]);
+                        a1 += hy * hx * grad_val;
+
+                        sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device>
+                            a2(grad_feat_ptr[base + y_low * feat_width + x_high]);
+                        a2 += hy * lx * grad_val;
+
+                        sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device>
+                            a3(grad_feat_ptr[base + y_high * feat_width + x_low]);
+                        a3 += ly * hx * grad_val;
+
+                        sycl::atomic_ref<float, sycl::memory_order::relaxed, sycl::memory_scope::device>
+                            a4(grad_feat_ptr[base + y_high * feat_width + x_high]);
+                        a4 += ly * lx * grad_val;
+                    }
+                }
+            }
+        ).wait();
+    }
+    else if (grad_output.dtype() == DType::Float64) {
+        const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
+        const double* rois_ptr = get_data_ptr<const double>(rois);
+        double* grad_feat_ptr = get_data_ptr<double>(grad_features);
+
+        queue.fill(grad_feat_ptr, 0.0, feat_size).wait();
+
+        const double offset = aligned ? 0.5 : 0.0;
+
+        queue.parallel_for<ROIAlignBackwardKernelFloat64>(
+            sycl::range<1>(total_elements),
+            [=](sycl::id<1> idx) {
+                int64_t pw = idx % output_width;
+                int64_t ph = (idx / output_width) % output_height;
+                int64_t c = (idx / output_width / output_height) % channels;
+                int64_t n = idx / output_width / output_height / channels;
+
+                const double* roi = rois_ptr + n * 5;
+                int64_t batch_idx = static_cast<int64_t>(roi[0]);
+                double roi_x1 = roi[1] * spatial_scale - offset;
+                double roi_y1 = roi[2] * spatial_scale - offset;
+                double roi_x2 = roi[3] * spatial_scale - offset;
+                double roi_y2 = roi[4] * spatial_scale - offset;
+
+                double roi_width = roi_x2 - roi_x1;
+                double roi_height = roi_y2 - roi_y1;
+                if (!aligned) {
+                    roi_width = sycl::fmax(roi_width, 1.0);
+                    roi_height = sycl::fmax(roi_height, 1.0);
+                }
+
+                double bin_size_h = roi_height / static_cast<double>(output_height);
+                double bin_size_w = roi_width / static_cast<double>(output_width);
+
+                int64_t roi_bin_grid_h = sampling_ratio > 0 ? sampling_ratio
+                    : static_cast<int64_t>(sycl::ceil(roi_height / output_height));
+                int64_t roi_bin_grid_w = sampling_ratio > 0 ? sampling_ratio
+                    : static_cast<int64_t>(sycl::ceil(roi_width / output_width));
+
+                const double count = roi_bin_grid_h * roi_bin_grid_w;
+                const double grad_val = grad_out_ptr[idx] / count;
+
+                for (int64_t iy = 0; iy < roi_bin_grid_h; ++iy) {
+                    double y = roi_y1 + ph * bin_size_h + (iy + 0.5) * bin_size_h / roi_bin_grid_h;
+                    for (int64_t ix = 0; ix < roi_bin_grid_w; ++ix) {
+                        double x = roi_x1 + pw * bin_size_w + (ix + 0.5) * bin_size_w / roi_bin_grid_w;
+
+                        if (y < -1.0 || y > feat_height || x < -1.0 || x > feat_width) continue;
+
+                        y = sycl::fmax(y, 0.0);
+                        x = sycl::fmax(x, 0.0);
+
+                        int64_t y_low = static_cast<int64_t>(y);
+                        int64_t x_low = static_cast<int64_t>(x);
+                        int64_t y_high = y_low + 1;
+                        int64_t x_high = x_low + 1;
+
+                        if (y_low >= feat_height - 1) { y_high = y_low = feat_height - 1; y = static_cast<double>(y_low); }
+                        if (x_low >= feat_width - 1) { x_high = x_low = feat_width - 1; x = static_cast<double>(x_low); }
+
+                        double ly = y - y_low;
+                        double lx = x - x_low;
+                        double hy = 1.0 - ly;
+                        double hx = 1.0 - lx;
+
+                        int64_t base = batch_idx * channels * feat_height * feat_width + c * feat_height * feat_width;
+
+                        sycl::atomic_ref<double, sycl::memory_order::relaxed, sycl::memory_scope::device>
+                            a1(grad_feat_ptr[base + y_low * feat_width + x_low]);
+                        a1 += hy * hx * grad_val;
+
+                        sycl::atomic_ref<double, sycl::memory_order::relaxed, sycl::memory_scope::device>
+                            a2(grad_feat_ptr[base + y_low * feat_width + x_high]);
+                        a2 += hy * lx * grad_val;
+
+                        sycl::atomic_ref<double, sycl::memory_order::relaxed, sycl::memory_scope::device>
+                            a3(grad_feat_ptr[base + y_high * feat_width + x_low]);
+                        a3 += ly * hx * grad_val;
+
+                        sycl::atomic_ref<double, sycl::memory_order::relaxed, sycl::memory_scope::device>
+                            a4(grad_feat_ptr[base + y_high * feat_width + x_high]);
+                        a4 += ly * lx * grad_val;
+                    }
+                }
+            }
+        ).wait();
+    }
+    else if (grad_output.dtype() == DType::Float16) {
+        const sycl::half* grad_out_ptr = get_data_ptr<const sycl::half>(grad_output);
+        const sycl::half* rois_ptr = get_data_ptr<const sycl::half>(rois);
+        sycl::half* grad_feat_ptr = get_data_ptr<sycl::half>(grad_features);
+
+        queue.fill(grad_feat_ptr, sycl::half(0.0f), feat_size).wait();
+
+        const float offset = aligned ? 0.5f : 0.0f;
+
+        queue.parallel_for<ROIAlignBackwardKernelFloat16>(
+            sycl::range<1>(total_elements),
+            [=](sycl::id<1> idx) {
+                int64_t pw = idx % output_width;
+                int64_t ph = (idx / output_width) % output_height;
+                int64_t c = (idx / output_width / output_height) % channels;
+                int64_t n = idx / output_width / output_height / channels;
+
+                const sycl::half* roi = rois_ptr + n * 5;
+                int64_t batch_idx = static_cast<int64_t>(float(roi[0]));
+                float roi_x1 = float(roi[1]) * spatial_scale - offset;
+                float roi_y1 = float(roi[2]) * spatial_scale - offset;
+                float roi_x2 = float(roi[3]) * spatial_scale - offset;
+                float roi_y2 = float(roi[4]) * spatial_scale - offset;
+
+                float roi_width = roi_x2 - roi_x1;
+                float roi_height = roi_y2 - roi_y1;
+                if (!aligned) {
+                    roi_width = sycl::fmax(roi_width, 1.0f);
+                    roi_height = sycl::fmax(roi_height, 1.0f);
+                }
+
+                float bin_size_h = roi_height / static_cast<float>(output_height);
+                float bin_size_w = roi_width / static_cast<float>(output_width);
+
+                int64_t roi_bin_grid_h = sampling_ratio > 0 ? sampling_ratio
+                    : static_cast<int64_t>(sycl::ceil(roi_height / output_height));
+                int64_t roi_bin_grid_w = sampling_ratio > 0 ? sampling_ratio
+                    : static_cast<int64_t>(sycl::ceil(roi_width / output_width));
+
+                const float count = roi_bin_grid_h * roi_bin_grid_w;
+                const float grad_val = float(grad_out_ptr[idx]) / count;
+
+                for (int64_t iy = 0; iy < roi_bin_grid_h; ++iy) {
+                    float y = roi_y1 + ph * bin_size_h + (iy + 0.5f) * bin_size_h / roi_bin_grid_h;
+                    for (int64_t ix = 0; ix < roi_bin_grid_w; ++ix) {
+                        float x = roi_x1 + pw * bin_size_w + (ix + 0.5f) * bin_size_w / roi_bin_grid_w;
+
+                        if (y < -1.0f || y > feat_height || x < -1.0f || x > feat_width) continue;
+
+                        y = sycl::fmax(y, 0.0f);
+                        x = sycl::fmax(x, 0.0f);
+
+                        int64_t y_low = static_cast<int64_t>(y);
+                        int64_t x_low = static_cast<int64_t>(x);
+                        int64_t y_high = y_low + 1;
+                        int64_t x_high = x_low + 1;
+
+                        if (y_low >= feat_height - 1) { y_high = y_low = feat_height - 1; y = static_cast<float>(y_low); }
+                        if (x_low >= feat_width - 1) { x_high = x_low = feat_width - 1; x = static_cast<float>(x_low); }
+
+                        float ly = y - y_low;
+                        float lx = x - x_low;
+                        float hy = 1.0f - ly;
+                        float hx = 1.0f - lx;
+
+                        int64_t base = batch_idx * channels * feat_height * feat_width + c * feat_height * feat_width;
+
+                        // Use atomic_ref on sycl::half - accumulate in half precision
+                        // Note: atomic operations on half may not be supported on all devices
+                        // For safety, we use a float-based approach via atomic_ref
+                        sycl::atomic_ref<sycl::half, sycl::memory_order::relaxed, sycl::memory_scope::device>
+                            a1(grad_feat_ptr[base + y_low * feat_width + x_low]);
+                        a1 += sycl::half(hy * hx * grad_val);
+
+                        sycl::atomic_ref<sycl::half, sycl::memory_order::relaxed, sycl::memory_scope::device>
+                            a2(grad_feat_ptr[base + y_low * feat_width + x_high]);
+                        a2 += sycl::half(hy * lx * grad_val);
+
+                        sycl::atomic_ref<sycl::half, sycl::memory_order::relaxed, sycl::memory_scope::device>
+                            a3(grad_feat_ptr[base + y_high * feat_width + x_low]);
+                        a3 += sycl::half(ly * hx * grad_val);
+
+                        sycl::atomic_ref<sycl::half, sycl::memory_order::relaxed, sycl::memory_scope::device>
+                            a4(grad_feat_ptr[base + y_high * feat_width + x_high]);
+                        a4 += sycl::half(ly * lx * grad_val);
+                    }
+                }
+            }
+        ).wait();
+    }
+    else {
+        throw std::runtime_error("roi_align_backward: unsupported dtype");
+    }
+
+    return grad_features;
 }
 
 // ============================================================================
@@ -457,6 +907,441 @@ auto gather_relative_position_bias_kernel(
     }
     else {
         throw std::runtime_error("gather_relative_position_bias: unsupported dtype");
+    }
+
+    return output;
+}
+
+// ============================================================================
+// Interpolate (resize) operation
+// ============================================================================
+
+/**
+ * @brief Cubic interpolation weight using Catmull-Rom spline
+ */
+inline float cubic_weight(float x) {
+    x = std::abs(x);
+    if (x < 1.0f) {
+        return ((1.5f * x - 2.5f) * x) * x + 1.0f;
+    } else if (x < 2.0f) {
+        return ((-0.5f * x + 2.5f) * x - 4.0f) * x + 2.0f;
+    }
+    return 0.0f;
+}
+
+/**
+ * @brief Interpolate (resize) operation supporting nearest, bilinear, and bicubic modes
+ *
+ * Resizes 4D tensor (N, C, H, W) to target spatial dimensions.
+ *
+ * @param input Input tensor: (N, C, H_in, W_in)
+ * @param size Target spatial dimensions {H_out, W_out}
+ * @param mode Interpolation mode: "nearest", "bilinear", or "bicubic"
+ * @param align_corners Whether to align corner pixels
+ * @param queue SYCL queue for execution
+ * @return Resized tensor: (N, C, H_out, W_out)
+ */
+auto interpolate_kernel(
+    const Tensor& input,
+    const std::vector<int64_t>& size,
+    const std::string& mode,
+    bool align_corners,
+    sycl::queue& queue
+) -> Tensor {
+    auto input_shape = input.shape();
+    if (input_shape.size() != 4) {
+        throw std::invalid_argument("interpolate requires 4D input (N, C, H, W)");
+    }
+    if (size.size() != 2) {
+        throw std::invalid_argument("interpolate size must have 2 elements (H_out, W_out)");
+    }
+
+    const int64_t N = input_shape[0];
+    const int64_t C = input_shape[1];
+    const int64_t H_in = input_shape[2];
+    const int64_t W_in = input_shape[3];
+    const int64_t H_out = size[0];
+    const int64_t W_out = size[1];
+
+    Tensor output({N, C, H_out, W_out}, input.dtype(), input.device());
+    const int64_t total = N * C * H_out * W_out;
+
+    if (total == 0) return output;
+
+    if (mode == "nearest") {
+        if (input.dtype() == DType::Float32) {
+            const float* in_ptr = get_data_ptr<const float>(input);
+            float* out_ptr = get_data_ptr<float>(output);
+            queue.parallel_for<InterpolateNearestKernelFloat32>(sycl::range<1>(total),
+                [=](sycl::id<1> idx) {
+                    int64_t temp = idx;
+                    const int64_t w = temp % W_out; temp /= W_out;
+                    const int64_t h = temp % H_out; temp /= H_out;
+                    const int64_t c = temp % C;
+                    const int64_t n = temp / C;
+
+                    int64_t h_in = static_cast<int64_t>(static_cast<float>(h) * H_in / H_out);
+                    int64_t w_in = static_cast<int64_t>(static_cast<float>(w) * W_in / W_out);
+                    h_in = sycl::min(h_in, H_in - 1);
+                    w_in = sycl::min(w_in, W_in - 1);
+
+                    out_ptr[idx] = in_ptr[((n * C + c) * H_in + h_in) * W_in + w_in];
+                }).wait();
+        }
+        else if (input.dtype() == DType::Float64) {
+            const double* in_ptr = get_data_ptr<const double>(input);
+            double* out_ptr = get_data_ptr<double>(output);
+            queue.parallel_for<InterpolateNearestKernelFloat64>(sycl::range<1>(total),
+                [=](sycl::id<1> idx) {
+                    int64_t temp = idx;
+                    const int64_t w = temp % W_out; temp /= W_out;
+                    const int64_t h = temp % H_out; temp /= H_out;
+                    const int64_t c = temp % C;
+                    const int64_t n = temp / C;
+
+                    int64_t h_in = static_cast<int64_t>(static_cast<double>(h) * H_in / H_out);
+                    int64_t w_in = static_cast<int64_t>(static_cast<double>(w) * W_in / W_out);
+                    h_in = sycl::min(h_in, H_in - 1);
+                    w_in = sycl::min(w_in, W_in - 1);
+
+                    out_ptr[idx] = in_ptr[((n * C + c) * H_in + h_in) * W_in + w_in];
+                }).wait();
+        }
+        else if (input.dtype() == DType::Float16) {
+            const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+            sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+            queue.parallel_for<InterpolateNearestKernelFloat16>(sycl::range<1>(total),
+                [=](sycl::id<1> idx) {
+                    int64_t temp = idx;
+                    const int64_t w = temp % W_out; temp /= W_out;
+                    const int64_t h = temp % H_out; temp /= H_out;
+                    const int64_t c = temp % C;
+                    const int64_t n = temp / C;
+
+                    int64_t h_in = static_cast<int64_t>(static_cast<float>(h) * H_in / H_out);
+                    int64_t w_in = static_cast<int64_t>(static_cast<float>(w) * W_in / W_out);
+                    h_in = sycl::min(h_in, H_in - 1);
+                    w_in = sycl::min(w_in, W_in - 1);
+
+                    out_ptr[idx] = in_ptr[((n * C + c) * H_in + h_in) * W_in + w_in];
+                }).wait();
+        }
+        else {
+            throw std::runtime_error("interpolate nearest: unsupported dtype");
+        }
+    }
+    else if (mode == "bilinear") {
+        if (input.dtype() == DType::Float32) {
+            const float* in_ptr = get_data_ptr<const float>(input);
+            float* out_ptr = get_data_ptr<float>(output);
+            queue.parallel_for<InterpolateBilinearKernelFloat32>(sycl::range<1>(total),
+                [=](sycl::id<1> idx) {
+                    int64_t temp = idx;
+                    const int64_t w = temp % W_out; temp /= W_out;
+                    const int64_t h = temp % H_out; temp /= H_out;
+                    const int64_t c = temp % C;
+                    const int64_t n = temp / C;
+
+                    float h_scale = align_corners && H_out > 1
+                        ? static_cast<float>(H_in - 1) / (H_out - 1)
+                        : static_cast<float>(H_in) / H_out;
+                    float w_scale = align_corners && W_out > 1
+                        ? static_cast<float>(W_in - 1) / (W_out - 1)
+                        : static_cast<float>(W_in) / W_out;
+
+                    float h_real = align_corners ? h * h_scale : (h + 0.5f) * h_scale - 0.5f;
+                    float w_real = align_corners ? w * w_scale : (w + 0.5f) * w_scale - 0.5f;
+
+                    h_real = sycl::fmax(h_real, 0.0f);
+                    w_real = sycl::fmax(w_real, 0.0f);
+
+                    int64_t h0 = static_cast<int64_t>(h_real);
+                    int64_t w0 = static_cast<int64_t>(w_real);
+                    int64_t h1 = sycl::min(h0 + 1, H_in - 1);
+                    int64_t w1 = sycl::min(w0 + 1, W_in - 1);
+                    h0 = sycl::min(h0, H_in - 1);
+                    w0 = sycl::min(w0, W_in - 1);
+
+                    float h_lambda = h_real - h0;
+                    float w_lambda = w_real - w0;
+
+                    int64_t base = (n * C + c) * H_in;
+                    float v00 = in_ptr[(base + h0) * W_in + w0];
+                    float v01 = in_ptr[(base + h0) * W_in + w1];
+                    float v10 = in_ptr[(base + h1) * W_in + w0];
+                    float v11 = in_ptr[(base + h1) * W_in + w1];
+
+                    float val = (1.0f - h_lambda) * ((1.0f - w_lambda) * v00 + w_lambda * v01)
+                              + h_lambda * ((1.0f - w_lambda) * v10 + w_lambda * v11);
+                    out_ptr[idx] = val;
+                }).wait();
+        }
+        else if (input.dtype() == DType::Float64) {
+            const double* in_ptr = get_data_ptr<const double>(input);
+            double* out_ptr = get_data_ptr<double>(output);
+            queue.parallel_for<InterpolateBilinearKernelFloat64>(sycl::range<1>(total),
+                [=](sycl::id<1> idx) {
+                    int64_t temp = idx;
+                    const int64_t w = temp % W_out; temp /= W_out;
+                    const int64_t h = temp % H_out; temp /= H_out;
+                    const int64_t c = temp % C;
+                    const int64_t n = temp / C;
+
+                    double h_scale = align_corners && H_out > 1
+                        ? static_cast<double>(H_in - 1) / (H_out - 1)
+                        : static_cast<double>(H_in) / H_out;
+                    double w_scale = align_corners && W_out > 1
+                        ? static_cast<double>(W_in - 1) / (W_out - 1)
+                        : static_cast<double>(W_in) / W_out;
+
+                    double h_real = align_corners ? h * h_scale : (h + 0.5) * h_scale - 0.5;
+                    double w_real = align_corners ? w * w_scale : (w + 0.5) * w_scale - 0.5;
+
+                    h_real = sycl::fmax(h_real, 0.0);
+                    w_real = sycl::fmax(w_real, 0.0);
+
+                    int64_t h0 = static_cast<int64_t>(h_real);
+                    int64_t w0 = static_cast<int64_t>(w_real);
+                    int64_t h1 = sycl::min(h0 + 1, H_in - 1);
+                    int64_t w1 = sycl::min(w0 + 1, W_in - 1);
+                    h0 = sycl::min(h0, H_in - 1);
+                    w0 = sycl::min(w0, W_in - 1);
+
+                    double h_lambda = h_real - h0;
+                    double w_lambda = w_real - w0;
+
+                    int64_t base = (n * C + c) * H_in;
+                    double v00 = in_ptr[(base + h0) * W_in + w0];
+                    double v01 = in_ptr[(base + h0) * W_in + w1];
+                    double v10 = in_ptr[(base + h1) * W_in + w0];
+                    double v11 = in_ptr[(base + h1) * W_in + w1];
+
+                    double val = (1.0 - h_lambda) * ((1.0 - w_lambda) * v00 + w_lambda * v01)
+                               + h_lambda * ((1.0 - w_lambda) * v10 + w_lambda * v11);
+                    out_ptr[idx] = val;
+                }).wait();
+        }
+        else if (input.dtype() == DType::Float16) {
+            const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+            sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+            queue.parallel_for<InterpolateBilinearKernelFloat16>(sycl::range<1>(total),
+                [=](sycl::id<1> idx) {
+                    int64_t temp = idx;
+                    const int64_t w = temp % W_out; temp /= W_out;
+                    const int64_t h = temp % H_out; temp /= H_out;
+                    const int64_t c = temp % C;
+                    const int64_t n = temp / C;
+
+                    float h_scale = align_corners && H_out > 1
+                        ? static_cast<float>(H_in - 1) / (H_out - 1)
+                        : static_cast<float>(H_in) / H_out;
+                    float w_scale = align_corners && W_out > 1
+                        ? static_cast<float>(W_in - 1) / (W_out - 1)
+                        : static_cast<float>(W_in) / W_out;
+
+                    float h_real = align_corners ? h * h_scale : (h + 0.5f) * h_scale - 0.5f;
+                    float w_real = align_corners ? w * w_scale : (w + 0.5f) * w_scale - 0.5f;
+
+                    h_real = sycl::fmax(h_real, 0.0f);
+                    w_real = sycl::fmax(w_real, 0.0f);
+
+                    int64_t h0 = static_cast<int64_t>(h_real);
+                    int64_t w0 = static_cast<int64_t>(w_real);
+                    int64_t h1 = sycl::min(h0 + 1, H_in - 1);
+                    int64_t w1 = sycl::min(w0 + 1, W_in - 1);
+                    h0 = sycl::min(h0, H_in - 1);
+                    w0 = sycl::min(w0, W_in - 1);
+
+                    float h_lambda = h_real - h0;
+                    float w_lambda = w_real - w0;
+
+                    int64_t base = (n * C + c) * H_in;
+                    float v00 = static_cast<float>(in_ptr[(base + h0) * W_in + w0]);
+                    float v01 = static_cast<float>(in_ptr[(base + h0) * W_in + w1]);
+                    float v10 = static_cast<float>(in_ptr[(base + h1) * W_in + w0]);
+                    float v11 = static_cast<float>(in_ptr[(base + h1) * W_in + w1]);
+
+                    float val = (1.0f - h_lambda) * ((1.0f - w_lambda) * v00 + w_lambda * v01)
+                              + h_lambda * ((1.0f - w_lambda) * v10 + w_lambda * v11);
+                    out_ptr[idx] = sycl::half(val);
+                }).wait();
+        }
+        else {
+            throw std::runtime_error("interpolate bilinear: unsupported dtype");
+        }
+    }
+    else if (mode == "bicubic") {
+        if (input.dtype() == DType::Float32) {
+            const float* in_ptr = get_data_ptr<const float>(input);
+            float* out_ptr = get_data_ptr<float>(output);
+            queue.parallel_for<InterpolateBicubicKernelFloat32>(sycl::range<1>(total),
+                [=](sycl::id<1> idx) {
+                    int64_t temp = idx;
+                    const int64_t w = temp % W_out; temp /= W_out;
+                    const int64_t h = temp % H_out; temp /= H_out;
+                    const int64_t c = temp % C;
+                    const int64_t n = temp / C;
+
+                    float h_scale = align_corners && H_out > 1
+                        ? static_cast<float>(H_in - 1) / (H_out - 1)
+                        : static_cast<float>(H_in) / H_out;
+                    float w_scale = align_corners && W_out > 1
+                        ? static_cast<float>(W_in - 1) / (W_out - 1)
+                        : static_cast<float>(W_in) / W_out;
+
+                    float h_real = align_corners ? h * h_scale : (h + 0.5f) * h_scale - 0.5f;
+                    float w_real = align_corners ? w * w_scale : (w + 0.5f) * w_scale - 0.5f;
+
+                    int64_t h_floor = static_cast<int64_t>(sycl::floor(h_real));
+                    int64_t w_floor = static_cast<int64_t>(sycl::floor(w_real));
+
+                    float val = 0.0f;
+                    for (int64_t dh = -1; dh <= 2; ++dh) {
+                        int64_t hi = sycl::clamp(h_floor + dh, int64_t(0), H_in - 1);
+                        float h_w = 1.5f * sycl::fabs(h_real - (h_floor + dh));
+                        float hw;
+                        if (h_w < 1.0f) {
+                            hw = ((1.5f * h_w - 2.5f) * h_w) * h_w + 1.0f;
+                        } else if (h_w < 2.0f) {
+                            hw = ((-0.5f * h_w + 2.5f) * h_w - 4.0f) * h_w + 2.0f;
+                        } else {
+                            hw = 0.0f;
+                        }
+
+                        for (int64_t dw = -1; dw <= 2; ++dw) {
+                            int64_t wi = sycl::clamp(w_floor + dw, int64_t(0), W_in - 1);
+                            float w_w = sycl::fabs(w_real - (w_floor + dw));
+                            float ww;
+                            if (w_w < 1.0f) {
+                                ww = ((1.5f * w_w - 2.5f) * w_w) * w_w + 1.0f;
+                            } else if (w_w < 2.0f) {
+                                ww = ((-0.5f * w_w + 2.5f) * w_w - 4.0f) * w_w + 2.0f;
+                            } else {
+                                ww = 0.0f;
+                            }
+
+                            val += hw * ww * in_ptr[((n * C + c) * H_in + hi) * W_in + wi];
+                        }
+                    }
+                    out_ptr[idx] = val;
+                }).wait();
+        }
+        else if (input.dtype() == DType::Float64) {
+            const double* in_ptr = get_data_ptr<const double>(input);
+            double* out_ptr = get_data_ptr<double>(output);
+            queue.parallel_for<InterpolateBicubicKernelFloat64>(sycl::range<1>(total),
+                [=](sycl::id<1> idx) {
+                    int64_t temp = idx;
+                    const int64_t w = temp % W_out; temp /= W_out;
+                    const int64_t h = temp % H_out; temp /= H_out;
+                    const int64_t c = temp % C;
+                    const int64_t n = temp / C;
+
+                    double h_scale = align_corners && H_out > 1
+                        ? static_cast<double>(H_in - 1) / (H_out - 1)
+                        : static_cast<double>(H_in) / H_out;
+                    double w_scale = align_corners && W_out > 1
+                        ? static_cast<double>(W_in - 1) / (W_out - 1)
+                        : static_cast<double>(W_in) / W_out;
+
+                    double h_real = align_corners ? h * h_scale : (h + 0.5) * h_scale - 0.5;
+                    double w_real = align_corners ? w * w_scale : (w + 0.5) * w_scale - 0.5;
+
+                    int64_t h_floor = static_cast<int64_t>(sycl::floor(h_real));
+                    int64_t w_floor = static_cast<int64_t>(sycl::floor(w_real));
+
+                    double val = 0.0;
+                    for (int64_t dh = -1; dh <= 2; ++dh) {
+                        int64_t hi = sycl::clamp(h_floor + dh, int64_t(0), H_in - 1);
+                        double h_w = sycl::fabs(h_real - (h_floor + dh));
+                        double hw;
+                        if (h_w < 1.0) {
+                            hw = ((1.5 * h_w - 2.5) * h_w) * h_w + 1.0;
+                        } else if (h_w < 2.0) {
+                            hw = ((-0.5 * h_w + 2.5) * h_w - 4.0) * h_w + 2.0;
+                        } else {
+                            hw = 0.0;
+                        }
+
+                        for (int64_t dw = -1; dw <= 2; ++dw) {
+                            int64_t wi = sycl::clamp(w_floor + dw, int64_t(0), W_in - 1);
+                            double w_w = sycl::fabs(w_real - (w_floor + dw));
+                            double ww;
+                            if (w_w < 1.0) {
+                                ww = ((1.5 * w_w - 2.5) * w_w) * w_w + 1.0;
+                            } else if (w_w < 2.0) {
+                                ww = ((-0.5 * w_w + 2.5) * w_w - 4.0) * w_w + 2.0;
+                            } else {
+                                ww = 0.0;
+                            }
+
+                            val += hw * ww * in_ptr[((n * C + c) * H_in + hi) * W_in + wi];
+                        }
+                    }
+                    out_ptr[idx] = val;
+                }).wait();
+        }
+        else if (input.dtype() == DType::Float16) {
+            const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+            sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+            queue.parallel_for<InterpolateBicubicKernelFloat16>(sycl::range<1>(total),
+                [=](sycl::id<1> idx) {
+                    int64_t temp = idx;
+                    const int64_t w = temp % W_out; temp /= W_out;
+                    const int64_t h = temp % H_out; temp /= H_out;
+                    const int64_t c = temp % C;
+                    const int64_t n = temp / C;
+
+                    float h_scale = align_corners && H_out > 1
+                        ? static_cast<float>(H_in - 1) / (H_out - 1)
+                        : static_cast<float>(H_in) / H_out;
+                    float w_scale = align_corners && W_out > 1
+                        ? static_cast<float>(W_in - 1) / (W_out - 1)
+                        : static_cast<float>(W_in) / W_out;
+
+                    float h_real = align_corners ? h * h_scale : (h + 0.5f) * h_scale - 0.5f;
+                    float w_real = align_corners ? w * w_scale : (w + 0.5f) * w_scale - 0.5f;
+
+                    int64_t h_floor = static_cast<int64_t>(sycl::floor(h_real));
+                    int64_t w_floor = static_cast<int64_t>(sycl::floor(w_real));
+
+                    float val = 0.0f;
+                    for (int64_t dh = -1; dh <= 2; ++dh) {
+                        int64_t hi = sycl::clamp(h_floor + dh, int64_t(0), H_in - 1);
+                        float h_w = sycl::fabs(h_real - (h_floor + dh));
+                        float hw;
+                        if (h_w < 1.0f) {
+                            hw = ((1.5f * h_w - 2.5f) * h_w) * h_w + 1.0f;
+                        } else if (h_w < 2.0f) {
+                            hw = ((-0.5f * h_w + 2.5f) * h_w - 4.0f) * h_w + 2.0f;
+                        } else {
+                            hw = 0.0f;
+                        }
+
+                        for (int64_t dw = -1; dw <= 2; ++dw) {
+                            int64_t wi = sycl::clamp(w_floor + dw, int64_t(0), W_in - 1);
+                            float w_w = sycl::fabs(w_real - (w_floor + dw));
+                            float ww;
+                            if (w_w < 1.0f) {
+                                ww = ((1.5f * w_w - 2.5f) * w_w) * w_w + 1.0f;
+                            } else if (w_w < 2.0f) {
+                                ww = ((-0.5f * w_w + 2.5f) * w_w - 4.0f) * w_w + 2.0f;
+                            } else {
+                                ww = 0.0f;
+                            }
+
+                            val += hw * ww * static_cast<float>(in_ptr[((n * C + c) * H_in + hi) * W_in + wi]);
+                        }
+                    }
+                    out_ptr[idx] = sycl::half(val);
+                }).wait();
+        }
+        else {
+            throw std::runtime_error("interpolate bicubic: unsupported dtype");
+        }
+    }
+    else {
+        throw std::runtime_error("interpolate: unsupported mode '" + mode + "' (use nearest, bilinear, or bicubic)");
     }
 
     return output;

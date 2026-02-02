@@ -1786,9 +1786,30 @@ auto initialize() -> void {
                 ONEAPI_REGISTER(FusedAddReLU, "fused_add_relu");
                 ONEAPI_REGISTER(FusedGelu, "fused_gelu");
                 ONEAPI_REGISTER(FusedLayerNorm, "fused_layer_norm");
+                ONEAPI_REGISTER(LayerNormBackward, "fused_layer_norm_backward");
                 ONEAPI_REGISTER(FusedLinearReLU, "fused_linear_relu");
                 ONEAPI_REGISTER(FusedBatchNormReLU, "fused_batchnorm_relu");
                 ONEAPI_REGISTER(FusedSoftmaxCrossEntropy, "fused_softmax_cross_entropy");
+
+                // Vision operations
+                ONEAPI_REGISTER(ROIAlignForward, "roi_align");
+                ONEAPI_REGISTER(ROIAlignBackward, "roi_align_backward");
+                ONEAPI_REGISTER(Interpolate, "interpolate");
+
+                // In-place activation operations
+                ONEAPI_REGISTER(ReLUInplace, "relu_inplace");
+                ONEAPI_REGISTER(SigmoidInplace, "sigmoid_inplace");
+                ONEAPI_REGISTER(TanhInplace, "tanh_inplace");
+                ONEAPI_REGISTER(LeakyReLUInplace, "leaky_relu_inplace");
+                ONEAPI_REGISTER(GeluInplace, "gelu_inplace");
+
+                // Indexing operations
+                ONEAPI_REGISTER(Nonzero, "nonzero");
+                ONEAPI_REGISTER(OneHot, "one_hot");
+                ONEAPI_REGISTER(ArgSort, "argsort");
+
+                // Transposed convolution
+                ONEAPI_REGISTER(ConvTranspose2dForward, "conv_transpose2d_forward");
 
                 #undef ONEAPI_REGISTER
 
@@ -2344,7 +2365,19 @@ auto initialize() -> void {
                         return oneapi_backend->dispatch("gather_relative_position_bias", inputs, attrs);
                     });
 
-                std::cout << "OneAPI operations registered successfully (92 operations)" << std::endl;
+                // Transposed convolution
+                registry.register_kernel("conv_transpose2d_forward", Device::Type::OneAPI,
+                    [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return oneapi_backend->dispatch("conv_transpose2d_forward", inputs, attrs);
+                    });
+
+                // Argsort
+                registry.register_kernel("argsort", Device::Type::OneAPI,
+                    [oneapi_backend](std::span<const Tensor> inputs, const OpAttributes& attrs) -> std::vector<Tensor> {
+                        return oneapi_backend->dispatch("argsort", inputs, attrs);
+                    });
+
+                std::cout << "OneAPI operations registered successfully (94 operations)" << std::endl;
             } else {
                 std::cout << "OneAPI backend loaded but no OneAPI devices available" << std::endl;
             }

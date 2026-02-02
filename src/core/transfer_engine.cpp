@@ -799,8 +799,8 @@ auto TransferEngine::cpu_to_gpu(const Tensor& cpu_tensor, Device gpu_device) -> 
     }
 
     if (gpu_device.type != Device::Type::CUDA && gpu_device.type != Device::Type::ROCm &&
-        gpu_device.type != Device::Type::Vulkan) {
-        throw std::runtime_error("Target device must be CUDA, ROCm, or Vulkan");
+        gpu_device.type != Device::Type::Vulkan && gpu_device.type != Device::Type::OneAPI) {
+        throw std::runtime_error("Target device must be CUDA, ROCm, Vulkan, or OneAPI");
     }
 
     auto start = std::chrono::high_resolution_clock::now();
@@ -840,6 +840,11 @@ auto TransferEngine::cpu_to_gpu(const Tensor& cpu_tensor, Device gpu_device) -> 
         gpu_tensor = cpu_tensor.to(gpu_device);
     }
 
+    // OneAPI uses USM shared memory - direct memcpy works via backend copy
+    if (gpu_device.type == Device::Type::OneAPI) {
+        gpu_tensor = cpu_tensor.to(gpu_device);
+    }
+
     auto end = std::chrono::high_resolution_clock::now();
     double time_ms = std::chrono::duration<double, std::milli>(end - start).count();
 
@@ -850,8 +855,8 @@ auto TransferEngine::cpu_to_gpu(const Tensor& cpu_tensor, Device gpu_device) -> 
 
 auto TransferEngine::gpu_to_cpu(const Tensor& gpu_tensor) -> Tensor {
     if (gpu_tensor.device().type != Device::Type::CUDA && gpu_tensor.device().type != Device::Type::ROCm &&
-        gpu_tensor.device().type != Device::Type::Vulkan) {
-        throw std::runtime_error("Source tensor must be on CUDA, ROCm, or Vulkan");
+        gpu_tensor.device().type != Device::Type::Vulkan && gpu_tensor.device().type != Device::Type::OneAPI) {
+        throw std::runtime_error("Source tensor must be on CUDA, ROCm, Vulkan, or OneAPI");
     }
 
     auto start = std::chrono::high_resolution_clock::now();
@@ -892,6 +897,11 @@ auto TransferEngine::gpu_to_cpu(const Tensor& gpu_tensor) -> Tensor {
 
     // Vulkan transfers via tensor .to() method
     if (gpu_tensor.device().type == Device::Type::Vulkan) {
+        cpu_tensor = gpu_tensor.to(Device::cpu());
+    }
+
+    // OneAPI uses USM shared memory - transfer via .to() method
+    if (gpu_tensor.device().type == Device::Type::OneAPI) {
         cpu_tensor = gpu_tensor.to(Device::cpu());
     }
 

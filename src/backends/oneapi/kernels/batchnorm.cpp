@@ -387,8 +387,12 @@ auto batchnorm2d_forward(const Tensor& input, const Tensor& mean, const Tensor& 
     }
     else if (input.dtype() == DType::Float16) {
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
-        const sycl::half* mean_ptr = get_data_ptr<const sycl::half>(mean);
-        const sycl::half* var_ptr = get_data_ptr<const sycl::half>(variance);
+        // Mean/variance may be Float32 (from mean_var) or Float16 (running stats)
+        const bool stats_f32 = (mean.dtype() == DType::Float32);
+        const float* mean_f32 = stats_f32 ? get_data_ptr<const float>(mean) : nullptr;
+        const float* var_f32 = stats_f32 ? get_data_ptr<const float>(variance) : nullptr;
+        const sycl::half* mean_f16 = !stats_f32 ? get_data_ptr<const sycl::half>(mean) : nullptr;
+        const sycl::half* var_f16 = !stats_f32 ? get_data_ptr<const sycl::half>(variance) : nullptr;
         sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
 
         queue.parallel_for<BatchNorm2dForwardKernelFloat16>(sycl::range<3>(N, C, H * W), [=](sycl::id<3> idx) {
@@ -397,8 +401,8 @@ auto batchnorm2d_forward(const Tensor& input, const Tensor& mean, const Tensor& 
             const int64_t hw = idx[2];
 
             // Use float for intermediate calculations for numerical stability
-            const float m = static_cast<float>(mean_ptr[c]);
-            const float v = static_cast<float>(var_ptr[c]);
+            const float m = stats_f32 ? mean_f32[c] : static_cast<float>(mean_f16[c]);
+            const float v = stats_f32 ? var_f32[c] : static_cast<float>(var_f16[c]);
             const float std_inv = 1.0f / sycl::sqrt(v + epsilon);
 
             const int64_t input_idx = ((n * C + c) * H * W) + hw;
@@ -475,8 +479,12 @@ auto batchnorm2d_forward_affine(const Tensor& input, const Tensor& mean, const T
     }
     else if (input.dtype() == DType::Float16) {
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
-        const sycl::half* mean_ptr = get_data_ptr<const sycl::half>(mean);
-        const sycl::half* var_ptr = get_data_ptr<const sycl::half>(variance);
+        // Mean/variance may be Float32 (from mean_var) or Float16 (running stats)
+        const bool stats_f32 = (mean.dtype() == DType::Float32);
+        const float* mean_f32 = stats_f32 ? get_data_ptr<const float>(mean) : nullptr;
+        const float* var_f32 = stats_f32 ? get_data_ptr<const float>(variance) : nullptr;
+        const sycl::half* mean_f16 = !stats_f32 ? get_data_ptr<const sycl::half>(mean) : nullptr;
+        const sycl::half* var_f16 = !stats_f32 ? get_data_ptr<const sycl::half>(variance) : nullptr;
         const sycl::half* gamma_ptr = get_data_ptr<const sycl::half>(gamma);
         const sycl::half* beta_ptr = get_data_ptr<const sycl::half>(beta);
         sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
@@ -487,8 +495,8 @@ auto batchnorm2d_forward_affine(const Tensor& input, const Tensor& mean, const T
             const int64_t hw = idx[2];
 
             // Use float for intermediate calculations for numerical stability
-            const float m = static_cast<float>(mean_ptr[c]);
-            const float v = static_cast<float>(var_ptr[c]);
+            const float m = stats_f32 ? mean_f32[c] : static_cast<float>(mean_f16[c]);
+            const float v = stats_f32 ? var_f32[c] : static_cast<float>(var_f16[c]);
             const float g = static_cast<float>(gamma_ptr[c]);
             const float b = static_cast<float>(beta_ptr[c]);
             const float std_inv = 1.0f / sycl::sqrt(v + epsilon);
@@ -622,8 +630,12 @@ auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const 
     else if (input.dtype() == DType::Float16) {
         const sycl::half* grad_out_ptr = get_data_ptr<const sycl::half>(grad_output);
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
-        const sycl::half* mean_ptr = get_data_ptr<const sycl::half>(mean);
-        const sycl::half* var_ptr = get_data_ptr<const sycl::half>(variance);
+        // Mean/variance may be Float32 (from mean_var) or Float16 (running stats)
+        const bool stats_f32 = (mean.dtype() == DType::Float32);
+        const float* mean_f32 = stats_f32 ? get_data_ptr<const float>(mean) : nullptr;
+        const float* var_f32 = stats_f32 ? get_data_ptr<const float>(variance) : nullptr;
+        const sycl::half* mean_f16 = !stats_f32 ? get_data_ptr<const sycl::half>(mean) : nullptr;
+        const sycl::half* var_f16 = !stats_f32 ? get_data_ptr<const sycl::half>(variance) : nullptr;
         const sycl::half* gamma_ptr = get_data_ptr<const sycl::half>(gamma);
         sycl::half* grad_in_ptr = get_data_ptr<sycl::half>(grad_input);
         sycl::half* grad_gamma_ptr = get_data_ptr<sycl::half>(grad_gamma);
@@ -633,8 +645,8 @@ auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const 
         queue.parallel_for<BatchNorm2dBackwardGammaKernelFloat16>(sycl::range<1>(C), [=](sycl::id<1> c) {
             float sum_grad_out = 0.0f;
             float sum_grad_out_norm = 0.0f;
-            const float m = static_cast<float>(mean_ptr[c]);
-            const float v = static_cast<float>(var_ptr[c]);
+            const float m = stats_f32 ? mean_f32[c] : static_cast<float>(mean_f16[c]);
+            const float v = stats_f32 ? var_f32[c] : static_cast<float>(var_f16[c]);
             const float std_inv = 1.0f / sycl::sqrt(v + epsilon);
 
             for (int64_t n = 0; n < N; ++n) {
@@ -658,8 +670,8 @@ auto batchnorm2d_backward(const Tensor& grad_output, const Tensor& input, const 
             const int64_t c = idx[1];
             const int64_t hw = idx[2];
 
-            const float m = static_cast<float>(mean_ptr[c]);
-            const float v = static_cast<float>(var_ptr[c]);
+            const float m = stats_f32 ? mean_f32[c] : static_cast<float>(mean_f16[c]);
+            const float v = stats_f32 ? var_f32[c] : static_cast<float>(var_f16[c]);
             const float g = static_cast<float>(gamma_ptr[c]);
             const float std_inv = 1.0f / sycl::sqrt(v + epsilon);
 
@@ -756,8 +768,10 @@ auto batchnorm2d_mean_var(const Tensor& input, sycl::queue& queue) -> std::vecto
         throw std::runtime_error("BatchNorm2d: Cannot compute mean/variance for empty tensor");
     }
 
-    Tensor mean({C}, input.dtype(), input.device());
-    Tensor variance({C}, input.dtype(), input.device());
+    // For Float16 inputs, store mean/variance in Float32 to avoid overflow
+    DType stats_dtype = (input.dtype() == DType::Float16) ? DType::Float32 : input.dtype();
+    Tensor mean({C}, stats_dtype, input.device());
+    Tensor variance({C}, stats_dtype, input.device());
 
     if (input.dtype() == DType::Float32) {
         const float* in_ptr = get_data_ptr<const float>(input);
@@ -843,8 +857,9 @@ auto batchnorm2d_mean_var(const Tensor& input, sycl::queue& queue) -> std::vecto
     }
     else if (input.dtype() == DType::Float16) {
         const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
-        sycl::half* mean_ptr = get_data_ptr<sycl::half>(mean);
-        sycl::half* var_ptr = get_data_ptr<sycl::half>(variance);
+        // Mean/variance stored as Float32 to avoid Float16 overflow
+        float* mean_ptr = get_data_ptr<float>(mean);
+        float* var_ptr = get_data_ptr<float>(variance);
 
         // Compute mean for each channel using float accumulation
         queue.parallel_for<BatchNorm2dMeanKernelFloat16>(sycl::range<1>(C), [=](sycl::id<1> c_id) {
@@ -860,13 +875,13 @@ auto batchnorm2d_mean_var(const Tensor& input, sycl::queue& queue) -> std::vecto
                 }
             }
 
-            mean_ptr[c] = sycl::half(sum / static_cast<float>(total_elements));
+            mean_ptr[c] = sum / static_cast<float>(total_elements);
         }).wait();
 
         // Compute variance for each channel using float accumulation
         queue.parallel_for<BatchNorm2dVarianceKernelFloat16>(sycl::range<1>(C), [=](sycl::id<1> c_id) {
             const int64_t c = c_id[0];
-            const float channel_mean = static_cast<float>(mean_ptr[c]);
+            const float channel_mean = mean_ptr[c];
             float sum_sq_diff = 0.0f;
 
             for (int64_t n = 0; n < N; ++n) {
@@ -879,7 +894,7 @@ auto batchnorm2d_mean_var(const Tensor& input, sycl::queue& queue) -> std::vecto
                 }
             }
 
-            var_ptr[c] = sycl::half(sum_sq_diff / static_cast<float>(total_elements));
+            var_ptr[c] = sum_sq_diff / static_cast<float>(total_elements);
         }).wait();
     }
     else {

@@ -33,6 +33,7 @@ class AdaptiveAvgPool2dBackwardKernelFloat64;
 class AdaptiveAvgPool2dBackwardKernelFloat16;
 class AvgPool2dBackwardKernelFloat32;
 class AvgPool2dBackwardKernelFloat64;
+class AvgPool2dBackwardKernelFloat16;
 class MaxPool2dBackwardKernelFloat32;
 class MaxPool2dBackwardKernelFloat64;
 class MaxPool2dBackwardWithIndicesKernelFloat32;
@@ -1175,6 +1176,66 @@ auto avg_pool2d_backward_kernel(const Tensor& grad_output, const Tensor& input,
                     }
                 }
         }).wait();
+    }
+    else if (input.dtype() == DType::Float16) {
+        const sycl::half* grad_out_ptr = get_data_ptr<const sycl::half>(grad_output);
+        sycl::half* grad_in_ptr = get_data_ptr<sycl::half>(grad_input);
+
+        // Use float32 intermediate buffer since atomic_ref<sycl::half> is not widely supported
+        const int64_t input_size = N * C * H_in * W_in;
+        float* acc_ptr = sycl::malloc_device<float>(input_size, queue);
+        queue.fill(acc_ptr, 0.0f, input_size).wait();
+
+        const int64_t total_output_size = N * C * H_out * W_out;
+        queue.parallel_for<AvgPool2dBackwardKernelFloat16>(sycl::range<1>(total_output_size),
+            [=](sycl::id<1> flat_idx) {
+                int64_t temp = flat_idx;
+                const int64_t w_out = temp % W_out;
+                temp /= W_out;
+                const int64_t h_out = temp % H_out;
+                temp /= H_out;
+                const int64_t c = temp % C;
+                const int64_t n = temp / C;
+
+                const float grad_val = static_cast<float>(grad_out_ptr[((n * C + c) * H_out + h_out) * W_out + w_out]);
+
+                int64_t count = 0;
+                for (int64_t kh = 0; kh < kernel_size; ++kh) {
+                    for (int64_t kw = 0; kw < kernel_size; ++kw) {
+                        int64_t h_in = h_out * stride - padding + kh;
+                        int64_t w_in = w_out * stride - padding + kw;
+
+                        if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
+                            count++;
+                        } else if (count_include_pad) {
+                            count++;
+                        }
+                    }
+                }
+
+                const float grad_per_input = count > 0 ? grad_val / static_cast<float>(count) : 0.0f;
+
+                for (int64_t kh = 0; kh < kernel_size; ++kh) {
+                    for (int64_t kw = 0; kw < kernel_size; ++kw) {
+                        int64_t h_in = h_out * stride - padding + kh;
+                        int64_t w_in = w_out * stride - padding + kw;
+
+                        if (h_in >= 0 && h_in < H_in && w_in >= 0 && w_in < W_in) {
+                            int64_t input_idx = ((n * C + c) * H_in + h_in) * W_in + w_in;
+                            sycl::atomic_ref<float, sycl::memory_order::relaxed,
+                                           sycl::memory_scope::device> atomic_grad(acc_ptr[input_idx]);
+                            atomic_grad += grad_per_input;
+                        }
+                    }
+                }
+        }).wait();
+
+        // Convert float32 accumulator back to Float16
+        queue.parallel_for(sycl::range<1>(input_size), [=](sycl::id<1> idx) {
+            grad_in_ptr[idx] = sycl::half(acc_ptr[idx]);
+        }).wait();
+
+        sycl::free(acc_ptr, queue);
     }
     else {
         throw std::runtime_error("Unsupported dtype for avg_pool2d_backward");

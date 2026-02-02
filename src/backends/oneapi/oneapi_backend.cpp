@@ -119,6 +119,14 @@ namespace oneapi {
                                 sycl::queue& queue) -> Tensor;
     auto conv2d_backward_bias(const Tensor& grad_output, sycl::queue& queue) -> Tensor;
 
+    // ConvTranspose2d operations
+    auto conv_transpose2d_forward(const Tensor& input, const Tensor& weight, const Tensor* bias,
+                                   int64_t stride, int64_t padding, int64_t output_padding,
+                                   int64_t dilation, int64_t groups, sycl::queue& queue) -> Tensor;
+
+    // Argsort operation
+    auto argsort_kernel(const Tensor& input, int64_t dim, bool descending, sycl::queue& queue) -> Tensor;
+
     // Embedding operations
     auto embedding_lookup_kernel(const Tensor& indices, const Tensor& weights,
                                 int64_t padding_idx, sycl::queue& queue) -> Tensor;
@@ -255,6 +263,26 @@ namespace oneapi {
     auto gather_relative_position_bias_kernel(const Tensor& table, const Tensor& indices,
                                               int64_t num_positions, int64_t num_heads,
                                               sycl::queue& queue) -> Tensor;
+    auto roi_align_backward_kernel(const Tensor& grad_output, const Tensor& rois,
+                                   int64_t batch_size, int64_t channels,
+                                   int64_t feat_height, int64_t feat_width,
+                                   float spatial_scale, int64_t sampling_ratio, bool aligned,
+                                   sycl::queue& queue) -> Tensor;
+    auto interpolate_kernel(const Tensor& input, const std::vector<int64_t>& size,
+                            const std::string& mode, bool align_corners,
+                            sycl::queue& queue) -> Tensor;
+
+    // In-place activation operations
+    auto relu_inplace_kernel(Tensor& input, sycl::queue& queue) -> void;
+    auto sigmoid_inplace_kernel(Tensor& input, sycl::queue& queue) -> void;
+    auto tanh_inplace_kernel(Tensor& input, sycl::queue& queue) -> void;
+    auto leaky_relu_inplace_kernel(Tensor& input, float alpha, sycl::queue& queue) -> void;
+    auto gelu_inplace_kernel(Tensor& input, sycl::queue& queue) -> void;
+
+    // Indexing operations
+    auto nonzero_kernel(const Tensor& input, sycl::queue& queue) -> Tensor;
+    auto one_hot_kernel(const Tensor& indices, int64_t num_classes, DType output_dtype,
+                        sycl::queue& queue) -> Tensor;
 
     // Quantization operations
     auto quantize_kernel(const Tensor& input, float scale, int32_t zero_point,
@@ -1012,6 +1040,29 @@ public:
                 return {oneapi::conv2d_backward_bias(inputs[0], queue)};
             }
 
+            // ConvTranspose2d operations
+            else if (op_name == "conv_transpose2d_forward") {
+                if (inputs.size() < 2 || inputs.size() > 3) {
+                    throw std::invalid_argument("conv_transpose2d_forward requires 2 or 3 inputs");
+                }
+                const Tensor* bias = inputs.size() == 3 ? &inputs[2] : nullptr;
+                int64_t stride = attrs.contains("stride") ? std::stoll(attrs.at("stride")) : 1;
+                int64_t padding = attrs.contains("padding") ? std::stoll(attrs.at("padding")) : 0;
+                int64_t output_padding = attrs.contains("output_padding") ? std::stoll(attrs.at("output_padding")) : 0;
+                int64_t dilation = attrs.contains("dilation") ? std::stoll(attrs.at("dilation")) : 1;
+                int64_t groups = attrs.contains("groups") ? std::stoll(attrs.at("groups")) : 1;
+                return {oneapi::conv_transpose2d_forward(inputs[0], inputs[1], bias, stride, padding,
+                                                         output_padding, dilation, groups, queue)};
+            }
+
+            // Argsort operation
+            else if (op_name == "argsort") {
+                if (inputs.size() != 1) throw std::invalid_argument("argsort requires 1 input");
+                int64_t dim = attrs.contains("dim") ? std::stoll(attrs.at("dim")) : -1;
+                bool descending = attrs.contains("descending") && attrs.at("descending") == "1";
+                return {oneapi::argsort_kernel(inputs[0], dim, descending, queue)};
+            }
+
             // Embedding operations
             else if (op_name == "embedding_lookup") {
                 if (inputs.size() != 2) throw std::invalid_argument("embedding_lookup requires 2 inputs");
@@ -1112,8 +1163,16 @@ public:
                 return {oneapi::adaptive_max_pool2d_kernel(inputs[0], attrs, queue)};
             }
             else if (op_name == "avg_pool2d_backward") {
-                if (inputs.size() != 2) throw std::invalid_argument("avg_pool2d_backward requires 2 inputs: grad_output, input");
-                return {oneapi::avg_pool2d_backward_kernel(inputs[0], inputs[1], attrs, queue)};
+                if (inputs.size() == 2) {
+                    return {oneapi::avg_pool2d_backward_kernel(inputs[0], inputs[1], attrs, queue)};
+                } else if (inputs.size() == 1 && attrs.contains("input_shape")) {
+                    // Autograd path: input shape passed via attributes, create placeholder tensor
+                    auto input_shape = parse_shape(attrs.at("input_shape"));
+                    Tensor dummy_input(input_shape, inputs[0].dtype(), inputs[0].device());
+                    return {oneapi::avg_pool2d_backward_kernel(inputs[0], dummy_input, attrs, queue)};
+                } else {
+                    throw std::invalid_argument("avg_pool2d_backward requires 2 inputs or 1 input with input_shape attribute");
+                }
             }
             else if (op_name == "max_pool2d_backward") {
                 if (inputs.size() != 2) throw std::invalid_argument("max_pool2d_backward requires 2 inputs: grad_output, indices");
@@ -1357,19 +1416,103 @@ public:
             }
             else if (op_name == "roi_align") {
                 if (inputs.size() != 2) throw std::invalid_argument("roi_align requires 2 inputs");
-                int64_t output_height = std::stoll(attrs.at("output_height"));
-                int64_t output_width = std::stoll(attrs.at("output_width"));
+                int64_t output_height = attrs.contains("output_height") ? std::stoll(attrs.at("output_height"))
+                    : std::stoll(attrs.at("output_h"));
+                int64_t output_width = attrs.contains("output_width") ? std::stoll(attrs.at("output_width"))
+                    : std::stoll(attrs.at("output_w"));
                 float spatial_scale = attrs.contains("spatial_scale") ? std::stof(attrs.at("spatial_scale")) : 1.0f;
                 int64_t sampling_ratio = attrs.contains("sampling_ratio") ? std::stoll(attrs.at("sampling_ratio")) : 0;
                 bool aligned = attrs.contains("aligned") && attrs.at("aligned") == "1";
                 return {oneapi::roi_align_kernel(inputs[0], inputs[1], output_height, output_width,
                                                  spatial_scale, sampling_ratio, aligned, queue)};
             }
+            else if (op_name == "roi_align_backward") {
+                if (inputs.size() != 2) throw std::invalid_argument("roi_align_backward requires 2 inputs (grad_output, rois)");
+                int64_t batch_size = std::stoll(attrs.at("batch_size"));
+                int64_t channels = inputs[0].shape()[1]; // channels from grad_output shape
+                int64_t feat_height = std::stoll(attrs.at("feat_height"));
+                int64_t feat_width = std::stoll(attrs.at("feat_width"));
+                float spatial_scale = attrs.contains("spatial_scale") ? std::stof(attrs.at("spatial_scale")) : 1.0f;
+                int64_t sampling_ratio = attrs.contains("sampling_ratio") ? std::stoll(attrs.at("sampling_ratio")) : 0;
+                bool aligned = attrs.contains("aligned") && attrs.at("aligned") == "1";
+                return {oneapi::roi_align_backward_kernel(inputs[0], inputs[1], batch_size, channels,
+                                                          feat_height, feat_width, spatial_scale,
+                                                          sampling_ratio, aligned, queue)};
+            }
             else if (op_name == "gather_relative_position_bias") {
                 if (inputs.size() != 2) throw std::invalid_argument("gather_relative_position_bias requires 2 inputs (table, indices)");
                 int64_t num_positions = std::stoll(attrs.at("num_positions"));
                 int64_t num_heads = std::stoll(attrs.at("num_heads"));
                 return {oneapi::gather_relative_position_bias_kernel(inputs[0], inputs[1], num_positions, num_heads, queue)};
+            }
+            else if (op_name == "interpolate") {
+                if (inputs.size() != 1) throw std::invalid_argument("interpolate requires 1 input");
+                auto size_str = attrs.at("size");
+                std::vector<int64_t> size;
+                std::string s = size_str;
+                size_t pos = 0;
+                while ((pos = s.find(',')) != std::string::npos) {
+                    size.push_back(std::stoll(s.substr(0, pos)));
+                    s.erase(0, pos + 1);
+                }
+                if (!s.empty()) size.push_back(std::stoll(s));
+                std::string mode = attrs.contains("mode") ? attrs.at("mode") : "bilinear";
+                bool align_corners = attrs.contains("align_corners") && attrs.at("align_corners") == "1";
+                return {oneapi::interpolate_kernel(inputs[0], size, mode, align_corners, queue)};
+            }
+
+            // ================================================================
+            // In-place activation operations
+            // ================================================================
+            else if (op_name == "relu_inplace") {
+                if (inputs.size() != 1) throw std::invalid_argument("relu_inplace requires 1 input");
+                Tensor result = inputs[0];
+                oneapi::relu_inplace_kernel(result, queue);
+                return {result};
+            }
+            else if (op_name == "sigmoid_inplace") {
+                if (inputs.size() != 1) throw std::invalid_argument("sigmoid_inplace requires 1 input");
+                Tensor result = inputs[0];
+                oneapi::sigmoid_inplace_kernel(result, queue);
+                return {result};
+            }
+            else if (op_name == "tanh_inplace") {
+                if (inputs.size() != 1) throw std::invalid_argument("tanh_inplace requires 1 input");
+                Tensor result = inputs[0];
+                oneapi::tanh_inplace_kernel(result, queue);
+                return {result};
+            }
+            else if (op_name == "leaky_relu_inplace") {
+                if (inputs.size() != 1) throw std::invalid_argument("leaky_relu_inplace requires 1 input");
+                float alpha = attrs.contains("alpha") ? std::stof(attrs.at("alpha")) : 0.01f;
+                Tensor result = inputs[0];
+                oneapi::leaky_relu_inplace_kernel(result, alpha, queue);
+                return {result};
+            }
+            else if (op_name == "gelu_inplace") {
+                if (inputs.size() != 1) throw std::invalid_argument("gelu_inplace requires 1 input");
+                Tensor result = inputs[0];
+                oneapi::gelu_inplace_kernel(result, queue);
+                return {result};
+            }
+
+            // ================================================================
+            // Indexing operations (nonzero, one_hot)
+            // ================================================================
+            else if (op_name == "nonzero") {
+                if (inputs.size() != 1) throw std::invalid_argument("nonzero requires 1 input");
+                return {oneapi::nonzero_kernel(inputs[0], queue)};
+            }
+            else if (op_name == "one_hot") {
+                if (inputs.size() != 1) throw std::invalid_argument("one_hot requires 1 input");
+                int64_t num_classes = std::stoll(attrs.at("num_classes"));
+                DType output_dtype = DType::Float32;
+                if (attrs.contains("dtype")) {
+                    auto dt = attrs.at("dtype");
+                    if (dt == "float64") output_dtype = DType::Float64;
+                    else if (dt == "float16") output_dtype = DType::Float16;
+                }
+                return {oneapi::one_hot_kernel(inputs[0], num_classes, output_dtype, queue)};
             }
 
             // ================================================================

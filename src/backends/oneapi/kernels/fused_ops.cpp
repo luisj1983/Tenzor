@@ -24,6 +24,12 @@ struct FusedMatmulAddKernelFloat32 {};
 struct FusedMatmulAddKernelFloat64 {};
 struct FusedSoftmaxCrossEntropyKernelFloat32 {};
 struct FusedSoftmaxCrossEntropyKernelFloat64 {};
+struct FusedAddReluKernelFloat16 {};
+struct FusedGeluKernelFloat16 {};
+struct FusedLayerNormKernelFloat16 {};
+struct FusedLinearReluKernelFloat16 {};
+struct FusedBatchNormReluKernelFloat16 {};
+struct FusedMatmulAddKernelFloat16 {};
 
 // Helper function to get typed pointer from tensor
 template<typename T>
@@ -63,6 +69,16 @@ auto fused_add_relu_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue)
         queue.parallel_for<FusedAddReluKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             double sum = a_ptr[idx] + b_ptr[idx];
             out_ptr[idx] = sum > 0.0 ? sum : 0.0;
+        }).wait();
+    }
+    else if (a.dtype() == DType::Float16) {
+        const sycl::half* a_ptr = get_data_ptr<const sycl::half>(a);
+        const sycl::half* b_ptr = get_data_ptr<const sycl::half>(b);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+
+        queue.parallel_for<FusedAddReluKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float sum = static_cast<float>(a_ptr[idx]) + static_cast<float>(b_ptr[idx]);
+            out_ptr[idx] = sycl::half(sum > 0.0f ? sum : 0.0f);
         }).wait();
     }
     else {
@@ -111,6 +127,21 @@ auto fused_gelu_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             double inner = sqrt_2_over_pi * (x + coeff * x_cubed);
             double tanh_val = sycl::tanh(inner);
             out_ptr[idx] = 0.5 * x * (1.0 + tanh_val);
+        }).wait();
+    }
+    else if (input.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+
+        constexpr float sqrt_2_over_pi_f = 0.7978845608f;
+        constexpr float coeff_f = 0.044715f;
+
+        queue.parallel_for<FusedGeluKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = static_cast<float>(in_ptr[idx]);
+            float x_cubed = x * x * x;
+            float inner = sqrt_2_over_pi_f * (x + coeff_f * x_cubed);
+            float tanh_val = sycl::tanh(inner);
+            out_ptr[idx] = sycl::half(0.5f * x * (1.0f + tanh_val));
         }).wait();
     }
     else {
@@ -230,6 +261,50 @@ auto fused_layer_norm_kernel(
             }).wait();
         }
     }
+    else if (input.dtype() == DType::Float16) {
+        // Float16: use float32 accumulation for numerical stability
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        const sycl::half* weight_ptr = get_data_ptr<const sycl::half>(weight);
+        const sycl::half* bias_ptr = get_data_ptr<const sycl::half>(bias);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+        sycl::half* mean_ptr = get_data_ptr<sycl::half>(mean);
+        sycl::half* inv_std_ptr = get_data_ptr<sycl::half>(inv_std);
+
+        for (int64_t b = 0; b < batch_size; ++b) {
+            const sycl::half* batch_in = in_ptr + b * norm_size;
+            sycl::half* batch_out = out_ptr + b * norm_size;
+
+            std::vector<sycl::half> host_in(norm_size);
+            queue.memcpy(host_in.data(), batch_in, norm_size * sizeof(sycl::half)).wait();
+
+            float sum = 0.0f;
+            for (int64_t i = 0; i < norm_size; ++i) {
+                sum += static_cast<float>(host_in[i]);
+            }
+            float batch_mean = sum / static_cast<float>(norm_size);
+
+            float var_sum = 0.0f;
+            for (int64_t i = 0; i < norm_size; ++i) {
+                float diff = static_cast<float>(host_in[i]) - batch_mean;
+                var_sum += diff * diff;
+            }
+            float variance = var_sum / static_cast<float>(norm_size);
+            float batch_inv_std = 1.0f / sycl::sqrt(variance + epsilon);
+
+            sycl::half h_mean = sycl::half(batch_mean);
+            sycl::half h_inv_std = sycl::half(batch_inv_std);
+            queue.fill(mean_ptr + b, h_mean, 1).wait();
+            queue.fill(inv_std_ptr + b, h_inv_std, 1).wait();
+
+            queue.parallel_for<FusedLayerNormKernelFloat16>(sycl::range<1>(norm_size), [=](sycl::id<1> idx) {
+                int64_t i = idx[0];
+                float val = static_cast<float>(batch_in[i]);
+                float normalized = (val - batch_mean) * batch_inv_std;
+                float result = normalized * static_cast<float>(weight_ptr[i]) + static_cast<float>(bias_ptr[i]);
+                batch_out[i] = sycl::half(result);
+            }).wait();
+        }
+    }
     else {
         throw std::runtime_error("fused_layer_norm: unsupported dtype");
     }
@@ -331,8 +406,62 @@ auto fused_layer_norm_backward_kernel(
             }).wait();
         }
     }
+    else if (input.dtype() == DType::Float64) {
+        const double* grad_out_ptr = get_data_ptr<const double>(grad_output);
+        const double* in_ptr = get_data_ptr<const double>(input);
+        const double* mean_ptr = get_data_ptr<const double>(mean);
+        const double* inv_std_ptr = get_data_ptr<const double>(inv_std);
+        const double* weight_ptr = get_data_ptr<const double>(weight);
+        double* grad_in_ptr = get_data_ptr<double>(grad_input);
+        double* grad_weight_ptr = get_data_ptr<double>(grad_weight);
+        double* grad_bias_ptr = get_data_ptr<double>(grad_bias);
+
+        queue.fill(grad_weight_ptr, 0.0, norm_size).wait();
+        queue.fill(grad_bias_ptr, 0.0, norm_size).wait();
+
+        for (int64_t b = 0; b < batch_size; ++b) {
+            const double* batch_grad = grad_out_ptr + b * norm_size;
+            const double* batch_in = in_ptr + b * norm_size;
+
+            std::vector<double> host_grad(norm_size);
+            std::vector<double> host_in(norm_size);
+            queue.memcpy(host_grad.data(), batch_grad, norm_size * sizeof(double)).wait();
+            queue.memcpy(host_in.data(), batch_in, norm_size * sizeof(double)).wait();
+
+            double batch_mean, batch_inv_std;
+            queue.memcpy(&batch_mean, mean_ptr + b, sizeof(double)).wait();
+            queue.memcpy(&batch_inv_std, inv_std_ptr + b, sizeof(double)).wait();
+
+            std::vector<double> curr_gw(norm_size), curr_gb(norm_size);
+            queue.memcpy(curr_gw.data(), grad_weight_ptr, norm_size * sizeof(double)).wait();
+            queue.memcpy(curr_gb.data(), grad_bias_ptr, norm_size * sizeof(double)).wait();
+
+            for (int64_t i = 0; i < norm_size; ++i) {
+                double normalized = (host_in[i] - batch_mean) * batch_inv_std;
+                curr_gw[i] += host_grad[i] * normalized;
+                curr_gb[i] += host_grad[i];
+            }
+
+            queue.memcpy(grad_weight_ptr, curr_gw.data(), norm_size * sizeof(double)).wait();
+            queue.memcpy(grad_bias_ptr, curr_gb.data(), norm_size * sizeof(double)).wait();
+        }
+
+        for (int64_t b = 0; b < batch_size; ++b) {
+            const double* batch_grad = grad_out_ptr + b * norm_size;
+            double* batch_grad_in = grad_in_ptr + b * norm_size;
+
+            double batch_mean, batch_inv_std;
+            queue.memcpy(&batch_mean, mean_ptr + b, sizeof(double)).wait();
+            queue.memcpy(&batch_inv_std, inv_std_ptr + b, sizeof(double)).wait();
+
+            queue.parallel_for<FusedLayerNormBackwardKernelFloat64>(sycl::range<1>(norm_size), [=](sycl::id<1> idx) {
+                int64_t i = idx[0];
+                batch_grad_in[i] = batch_grad[i] * weight_ptr[i] * batch_inv_std;
+            }).wait();
+        }
+    }
     else {
-        throw std::runtime_error("fused_layer_norm_backward: only Float32 supported");
+        throw std::runtime_error("fused_layer_norm_backward: unsupported dtype");
     }
 
     return {grad_input, grad_weight, grad_bias};
@@ -420,6 +549,34 @@ auto fused_linear_relu_kernel(
             }
         ).wait();
     }
+    else if (input.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        const sycl::half* weight_ptr = get_data_ptr<const sycl::half>(weight);
+        const sycl::half* bias_ptr = bias ? get_data_ptr<const sycl::half>(*bias) : nullptr;
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+
+        const bool has_bias = (bias != nullptr);
+
+        queue.parallel_for<FusedLinearReluKernelFloat16>(
+            sycl::range<1>(total_elements),
+            [=](sycl::id<1> idx) {
+                int64_t b = idx / out_features;
+                int64_t o = idx % out_features;
+
+                float sum = 0.0f;
+                for (int64_t i = 0; i < in_features; ++i) {
+                    sum += static_cast<float>(in_ptr[b * in_features + i]) *
+                           static_cast<float>(weight_ptr[o * in_features + i]);
+                }
+
+                if (has_bias) {
+                    sum += static_cast<float>(bias_ptr[o]);
+                }
+
+                out_ptr[idx] = sycl::half(sum > 0.0f ? sum : 0.0f);
+            }
+        ).wait();
+    }
     else {
         throw std::runtime_error("fused_linear_relu: unsupported dtype");
     }
@@ -503,6 +660,32 @@ auto fused_batchnorm_relu_kernel(
             }
         ).wait();
     }
+    else if (input.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        const sycl::half* mean_ptr = get_data_ptr<const sycl::half>(running_mean);
+        const sycl::half* var_ptr = get_data_ptr<const sycl::half>(running_var);
+        const sycl::half* weight_ptr = get_data_ptr<const sycl::half>(weight);
+        const sycl::half* bias_ptr = get_data_ptr<const sycl::half>(bias);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+
+        queue.parallel_for<FusedBatchNormReluKernelFloat16>(
+            sycl::range<1>(total_elements),
+            [=](sycl::id<1> idx) {
+                int64_t i = idx;
+                int64_t c = (i / spatial_size) % num_features;
+
+                float val = static_cast<float>(in_ptr[i]);
+                float m = static_cast<float>(mean_ptr[c]);
+                float v = static_cast<float>(var_ptr[c]);
+                float w = static_cast<float>(weight_ptr[c]);
+                float b = static_cast<float>(bias_ptr[c]);
+
+                float normalized = (val - m) * sycl::rsqrt(v + epsilon);
+                float scaled = normalized * w + b;
+                out_ptr[i] = sycl::half(scaled > 0.0f ? scaled : 0.0f);
+            }
+        ).wait();
+    }
     else {
         throw std::runtime_error("fused_batchnorm_relu: unsupported dtype");
     }
@@ -576,6 +759,27 @@ auto fused_matmul_add_kernel(
                 }
 
                 out_ptr[i * n + j] = sum + bias_ptr[j];
+            }
+        ).wait();
+    }
+    else if (a.dtype() == DType::Float16) {
+        const sycl::half* a_ptr = get_data_ptr<const sycl::half>(a);
+        const sycl::half* b_ptr = get_data_ptr<const sycl::half>(b);
+        const sycl::half* bias_ptr = get_data_ptr<const sycl::half>(bias);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+
+        queue.parallel_for<FusedMatmulAddKernelFloat16>(
+            sycl::range<2>(m, n),
+            [=](sycl::id<2> idx) {
+                int64_t i = idx[0];
+                int64_t j = idx[1];
+
+                float sum = 0.0f;
+                for (int64_t p = 0; p < k; ++p) {
+                    sum += static_cast<float>(a_ptr[i * k + p]) *
+                           static_cast<float>(b_ptr[p * n + j]);
+                }
+                out_ptr[i * n + j] = sycl::half(sum + static_cast<float>(bias_ptr[j]));
             }
         ).wait();
     }
@@ -662,8 +866,123 @@ auto fused_softmax_cross_entropy_kernel(
             return result;
         }
     }
+    else if (logits.dtype() == DType::Float64) {
+        const double* logits_ptr = get_data_ptr<const double>(logits);
+        const int64_t* targets_ptr = get_data_ptr<const int64_t>(targets);
+        double* losses_ptr = get_data_ptr<double>(losses);
+
+        for (int64_t b = 0; b < batch_size; ++b) {
+            const double* row = logits_ptr + b * num_classes;
+            int64_t target = targets_ptr[b];
+
+            std::vector<double> host_row(num_classes);
+            queue.memcpy(host_row.data(), row, num_classes * sizeof(double)).wait();
+
+            double max_val = host_row[0];
+            for (int64_t i = 1; i < num_classes; ++i) {
+                if (host_row[i] > max_val) max_val = host_row[i];
+            }
+
+            double sum_exp = 0.0;
+            for (int64_t i = 0; i < num_classes; ++i) {
+                sum_exp += std::exp(host_row[i] - max_val);
+            }
+
+            double log_sum_exp = std::log(sum_exp) + max_val;
+            double loss = log_sum_exp - host_row[target];
+            queue.fill(losses_ptr + b, loss, 1).wait();
+        }
+
+        if (reduction == "mean") {
+            std::vector<double> host_losses(batch_size);
+            queue.memcpy(host_losses.data(), losses_ptr, batch_size * sizeof(double)).wait();
+
+            double mean_loss = 0.0;
+            for (int64_t i = 0; i < batch_size; ++i) {
+                mean_loss += host_losses[i];
+            }
+            mean_loss /= static_cast<double>(batch_size);
+
+            Tensor result({1}, logits.dtype(), logits.device());
+            queue.fill(get_data_ptr<double>(result), mean_loss, 1).wait();
+            return result;
+        }
+        else if (reduction == "sum") {
+            std::vector<double> host_losses(batch_size);
+            queue.memcpy(host_losses.data(), losses_ptr, batch_size * sizeof(double)).wait();
+
+            double sum_loss = 0.0;
+            for (int64_t i = 0; i < batch_size; ++i) {
+                sum_loss += host_losses[i];
+            }
+
+            Tensor result({1}, logits.dtype(), logits.device());
+            queue.fill(get_data_ptr<double>(result), sum_loss, 1).wait();
+            return result;
+        }
+    }
+    else if (logits.dtype() == DType::Float16) {
+        // Float16: compute in float32 for numerical stability
+        const sycl::half* logits_ptr = get_data_ptr<const sycl::half>(logits);
+        const int64_t* targets_ptr = get_data_ptr<const int64_t>(targets);
+        sycl::half* losses_ptr = get_data_ptr<sycl::half>(losses);
+
+        for (int64_t b = 0; b < batch_size; ++b) {
+            const sycl::half* row = logits_ptr + b * num_classes;
+            int64_t target = targets_ptr[b];
+
+            std::vector<sycl::half> host_row(num_classes);
+            queue.memcpy(host_row.data(), row, num_classes * sizeof(sycl::half)).wait();
+
+            float max_val = static_cast<float>(host_row[0]);
+            for (int64_t i = 1; i < num_classes; ++i) {
+                float v = static_cast<float>(host_row[i]);
+                if (v > max_val) max_val = v;
+            }
+
+            float sum_exp = 0.0f;
+            for (int64_t i = 0; i < num_classes; ++i) {
+                sum_exp += std::exp(static_cast<float>(host_row[i]) - max_val);
+            }
+
+            float log_sum_exp = std::log(sum_exp) + max_val;
+            float loss = log_sum_exp - static_cast<float>(host_row[target]);
+            sycl::half h_loss = sycl::half(loss);
+            queue.fill(losses_ptr + b, h_loss, 1).wait();
+        }
+
+        if (reduction == "mean") {
+            std::vector<sycl::half> host_losses(batch_size);
+            queue.memcpy(host_losses.data(), losses_ptr, batch_size * sizeof(sycl::half)).wait();
+
+            float mean_loss = 0.0f;
+            for (int64_t i = 0; i < batch_size; ++i) {
+                mean_loss += static_cast<float>(host_losses[i]);
+            }
+            mean_loss /= static_cast<float>(batch_size);
+
+            Tensor result({1}, logits.dtype(), logits.device());
+            sycl::half h_mean = sycl::half(mean_loss);
+            queue.fill(get_data_ptr<sycl::half>(result), h_mean, 1).wait();
+            return result;
+        }
+        else if (reduction == "sum") {
+            std::vector<sycl::half> host_losses(batch_size);
+            queue.memcpy(host_losses.data(), losses_ptr, batch_size * sizeof(sycl::half)).wait();
+
+            float sum_loss = 0.0f;
+            for (int64_t i = 0; i < batch_size; ++i) {
+                sum_loss += static_cast<float>(host_losses[i]);
+            }
+
+            Tensor result({1}, logits.dtype(), logits.device());
+            sycl::half h_sum = sycl::half(sum_loss);
+            queue.fill(get_data_ptr<sycl::half>(result), h_sum, 1).wait();
+            return result;
+        }
+    }
     else {
-        throw std::runtime_error("fused_softmax_cross_entropy: only Float32 supported");
+        throw std::runtime_error("fused_softmax_cross_entropy: unsupported dtype");
     }
 
     return losses;

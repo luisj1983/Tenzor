@@ -20,31 +20,37 @@ struct EqKernelFloat32 {};
 struct EqKernelFloat64 {};
 struct EqKernelInt32 {};
 struct EqKernelInt64 {};
+struct EqKernelFloat16 {};
 struct EqKernelBool {};
 struct NeKernelFloat32 {};
 struct NeKernelFloat64 {};
 struct NeKernelInt32 {};
 struct NeKernelInt64 {};
+struct NeKernelFloat16 {};
 struct NeKernelBool {};
 struct LtKernelFloat32 {};
 struct LtKernelFloat64 {};
 struct LtKernelInt32 {};
 struct LtKernelInt64 {};
+struct LtKernelFloat16 {};
 struct LtKernelBool {};
 struct LeKernelFloat32 {};
 struct LeKernelFloat64 {};
 struct LeKernelInt32 {};
 struct LeKernelInt64 {};
+struct LeKernelFloat16 {};
 struct LeKernelBool {};
 struct GtKernelFloat32 {};
 struct GtKernelFloat64 {};
 struct GtKernelInt32 {};
 struct GtKernelInt64 {};
+struct GtKernelFloat16 {};
 struct GtKernelBool {};
 struct GeKernelFloat32 {};
 struct GeKernelFloat64 {};
 struct GeKernelInt32 {};
 struct GeKernelInt64 {};
+struct GeKernelFloat16 {};
 struct GeKernelBool {};
 
 // Helper function to get typed pointer from tensor
@@ -122,6 +128,15 @@ auto eq_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
         bool* out_ptr = get_data_ptr<bool>(output);
 
         queue.parallel_for<EqKernelInt64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = (a_ptr[idx] == b_ptr[idx]);
+        }).wait();
+    }
+    else if (a.dtype() == DType::Float16) {
+        const sycl::half* a_ptr = get_data_ptr<const sycl::half>(a);
+        const sycl::half* b_ptr = get_data_ptr<const sycl::half>(b);
+        bool* out_ptr = get_data_ptr<bool>(output);
+
+        queue.parallel_for<EqKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = (a_ptr[idx] == b_ptr[idx]);
         }).wait();
     }
@@ -203,6 +218,15 @@ auto ne_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
             out_ptr[idx] = (a_ptr[idx] != b_ptr[idx]);
         }).wait();
     }
+    else if (a.dtype() == DType::Float16) {
+        const sycl::half* a_ptr = get_data_ptr<const sycl::half>(a);
+        const sycl::half* b_ptr = get_data_ptr<const sycl::half>(b);
+        bool* out_ptr = get_data_ptr<bool>(output);
+
+        queue.parallel_for<NeKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = (a_ptr[idx] != b_ptr[idx]);
+        }).wait();
+    }
     else if (a.dtype() == DType::Bool) {
         const bool* a_ptr = get_data_ptr<const bool>(a);
         const bool* b_ptr = get_data_ptr<const bool>(b);
@@ -278,6 +302,15 @@ auto lt_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
         bool* out_ptr = get_data_ptr<bool>(output);
 
         queue.parallel_for<LtKernelInt64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = (a_ptr[idx] < b_ptr[idx]);
+        }).wait();
+    }
+    else if (a.dtype() == DType::Float16) {
+        const sycl::half* a_ptr = get_data_ptr<const sycl::half>(a);
+        const sycl::half* b_ptr = get_data_ptr<const sycl::half>(b);
+        bool* out_ptr = get_data_ptr<bool>(output);
+
+        queue.parallel_for<LtKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = (a_ptr[idx] < b_ptr[idx]);
         }).wait();
     }
@@ -360,6 +393,15 @@ auto le_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
             out_ptr[idx] = (a_ptr[idx] <= b_ptr[idx]);
         }).wait();
     }
+    else if (a.dtype() == DType::Float16) {
+        const sycl::half* a_ptr = get_data_ptr<const sycl::half>(a);
+        const sycl::half* b_ptr = get_data_ptr<const sycl::half>(b);
+        bool* out_ptr = get_data_ptr<bool>(output);
+
+        queue.parallel_for<LeKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = (a_ptr[idx] <= b_ptr[idx]);
+        }).wait();
+    }
     else if (a.dtype() == DType::Bool) {
         const bool* a_ptr = get_data_ptr<const bool>(a);
         const bool* b_ptr = get_data_ptr<const bool>(b);
@@ -439,6 +481,15 @@ auto gt_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
             out_ptr[idx] = (a_ptr[idx] > b_ptr[idx]);
         }).wait();
     }
+    else if (a.dtype() == DType::Float16) {
+        const sycl::half* a_ptr = get_data_ptr<const sycl::half>(a);
+        const sycl::half* b_ptr = get_data_ptr<const sycl::half>(b);
+        bool* out_ptr = get_data_ptr<bool>(output);
+
+        queue.parallel_for<GtKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = (a_ptr[idx] > b_ptr[idx]);
+        }).wait();
+    }
     else if (a.dtype() == DType::Bool) {
         const bool* a_ptr = get_data_ptr<const bool>(a);
         const bool* b_ptr = get_data_ptr<const bool>(b);
@@ -515,6 +566,15 @@ auto ge_kernel(const Tensor& a, const Tensor& b, sycl::queue& queue) -> Tensor {
         bool* out_ptr = get_data_ptr<bool>(output);
 
         queue.parallel_for<GeKernelInt64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = (a_ptr[idx] >= b_ptr[idx]);
+        }).wait();
+    }
+    else if (a.dtype() == DType::Float16) {
+        const sycl::half* a_ptr = get_data_ptr<const sycl::half>(a);
+        const sycl::half* b_ptr = get_data_ptr<const sycl::half>(b);
+        bool* out_ptr = get_data_ptr<bool>(output);
+
+        queue.parallel_for<GeKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
             out_ptr[idx] = (a_ptr[idx] >= b_ptr[idx]);
         }).wait();
     }

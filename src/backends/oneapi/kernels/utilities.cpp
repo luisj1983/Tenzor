@@ -12,6 +12,8 @@ struct CatKernelFloat32 {};
 struct CatKernelFloat64 {};
 struct CatKernelFloat16 {};
 struct CatKernelInt32 {};
+struct CatKernelInt64 {};
+struct CatKernelBool {};
 struct ClampKernelFloat32 {};
 struct ClampKernelFloat64 {};
 struct ClampKernelFloat16 {};
@@ -240,6 +242,56 @@ auto cat_kernel(std::span<const Tensor> tensors, int64_t dim, sycl::queue& queue
             const int64_t dst_offset = offset_in_concat_dim * elements_per_slice;
 
             queue.parallel_for<CatKernelInt32>(
+                sycl::range<1>(num_slices * tensor_size_in_dim * elements_per_slice),
+                [=](sycl::id<1> idx) {
+                    const int64_t flat_idx = idx[0];
+                    const int64_t slice_idx = flat_idx / src_slice_stride;
+                    const int64_t remainder = flat_idx % src_slice_stride;
+                    const int64_t concat_idx = remainder / elements_per_slice;
+                    const int64_t elem_idx = remainder % elements_per_slice;
+
+                    const int64_t src_idx = slice_idx * src_slice_stride + concat_idx * elements_per_slice + elem_idx;
+                    const int64_t dst_idx = slice_idx * dst_slice_stride +
+                                           (offset_in_concat_dim + concat_idx) * elements_per_slice +
+                                           elem_idx;
+
+                    dst_ptr[dst_idx] = src_ptr[src_idx];
+                }
+            ).wait();
+        }
+        else if (dtype == DType::Int64) {
+            const int64_t* src_ptr = get_data_ptr<const int64_t>(tensor);
+            int64_t* dst_ptr = get_data_ptr<int64_t>(output);
+
+            const int64_t src_slice_stride = elements_per_slice * tensor_size_in_dim;
+            const int64_t dst_slice_stride = elements_per_slice * out_shape[dim];
+
+            queue.parallel_for<CatKernelInt64>(
+                sycl::range<1>(num_slices * tensor_size_in_dim * elements_per_slice),
+                [=](sycl::id<1> idx) {
+                    const int64_t flat_idx = idx[0];
+                    const int64_t slice_idx = flat_idx / src_slice_stride;
+                    const int64_t remainder = flat_idx % src_slice_stride;
+                    const int64_t concat_idx = remainder / elements_per_slice;
+                    const int64_t elem_idx = remainder % elements_per_slice;
+
+                    const int64_t src_idx = slice_idx * src_slice_stride + concat_idx * elements_per_slice + elem_idx;
+                    const int64_t dst_idx = slice_idx * dst_slice_stride +
+                                           (offset_in_concat_dim + concat_idx) * elements_per_slice +
+                                           elem_idx;
+
+                    dst_ptr[dst_idx] = src_ptr[src_idx];
+                }
+            ).wait();
+        }
+        else if (dtype == DType::Bool) {
+            const bool* src_ptr = get_data_ptr<const bool>(tensor);
+            bool* dst_ptr = get_data_ptr<bool>(output);
+
+            const int64_t src_slice_stride = elements_per_slice * tensor_size_in_dim;
+            const int64_t dst_slice_stride = elements_per_slice * out_shape[dim];
+
+            queue.parallel_for<CatKernelBool>(
                 sycl::range<1>(num_slices * tensor_size_in_dim * elements_per_slice),
                 [=](sycl::id<1> idx) {
                     const int64_t flat_idx = idx[0];

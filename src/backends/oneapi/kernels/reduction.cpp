@@ -20,6 +20,8 @@ class SumKernelFloat32;
 class SumKernelFloat64;
 class SumKernelFloat16;
 class SumKernelInt32;
+class SumKernelInt64;
+class SumKernelBool;
 class MeanKernelFloat32;
 class MeanKernelFloat64;
 class MeanKernelFloat16;
@@ -193,6 +195,40 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
             queue.wait();
             sycl::free(sum_buf, queue);
         }
+        else if (in_cont.dtype() == DType::Int64) {
+            const int64_t* in_ptr = get_data_ptr<const int64_t>(in_cont);
+            int64_t* out_ptr = get_data_ptr<int64_t>(output);
+
+            // Host-side summation for Int64 (avoids SYCL reduction issues with int64)
+            std::vector<int64_t> host_data(total_size);
+            queue.memcpy(host_data.data(), in_ptr, total_size * sizeof(int64_t)).wait();
+
+            int64_t sum = 0;
+            for (int64_t i = 0; i < total_size; ++i) {
+                sum += host_data[i];
+            }
+
+            queue.memcpy(out_ptr, &sum, sizeof(int64_t)).wait();
+        }
+        else if (in_cont.dtype() == DType::Bool) {
+            const bool* in_ptr = get_data_ptr<const bool>(in_cont);
+            // Sum of bools returns Int64
+            Tensor bool_output({}, DType::Int64, output.device());
+            int64_t* out_ptr = get_data_ptr<int64_t>(bool_output);
+
+            std::vector<bool> host_data(total_size);
+            // Copy bool data to host
+            std::vector<uint8_t> host_raw(total_size);
+            queue.memcpy(host_raw.data(), in_ptr, total_size * sizeof(bool)).wait();
+
+            int64_t sum = 0;
+            for (int64_t i = 0; i < total_size; ++i) {
+                sum += host_raw[i] ? 1 : 0;
+            }
+
+            queue.memcpy(out_ptr, &sum, sizeof(int64_t)).wait();
+            return bool_output;
+        }
         else {
             throw std::runtime_error("Unsupported dtype for sum reduction");
         }
@@ -271,6 +307,44 @@ auto sum_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
 
                 out_ptr[outer_idx * inner_size + inner_idx] = static_cast<int32_t>(sum);
             }).wait();
+        }
+        else if (in_cont.dtype() == DType::Int64) {
+            const int64_t* in_ptr = get_data_ptr<const int64_t>(in_cont);
+            int64_t* out_ptr = get_data_ptr<int64_t>(output);
+
+            queue.parallel_for<SumKernelInt64>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+                const int64_t outer_idx = idx[0];
+                const int64_t inner_idx = idx[1];
+                const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+
+                int64_t sum = 0;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    sum += in_ptr[base_offset + d * inner_size];
+                }
+
+                out_ptr[outer_idx * inner_size + inner_idx] = sum;
+            }).wait();
+        }
+        else if (in_cont.dtype() == DType::Bool) {
+            const bool* in_ptr = get_data_ptr<const bool>(in_cont);
+            // Sum of bools along dim returns Int64
+            std::vector<int64_t> bool_out_shape(out_shape.begin(), out_shape.end());
+            Tensor bool_output(bool_out_shape, DType::Int64, output.device());
+            int64_t* out_ptr = get_data_ptr<int64_t>(bool_output);
+
+            queue.parallel_for<SumKernelBool>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+                const int64_t outer_idx = idx[0];
+                const int64_t inner_idx = idx[1];
+                const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+
+                int64_t sum = 0;
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    sum += in_ptr[base_offset + d * inner_size] ? 1 : 0;
+                }
+
+                out_ptr[outer_idx * inner_size + inner_idx] = sum;
+            }).wait();
+            return bool_output;
         }
         else {
             throw std::runtime_error("Unsupported dtype for sum reduction");
@@ -484,6 +558,18 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                 out_ptr[0] = max_val;
             }).wait();
         }
+        else if (input.dtype() == DType::Float16) {
+            const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+            sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+
+            queue.single_task([=]() {
+                float max_val = -std::numeric_limits<float>::infinity();
+                for (int64_t i = 0; i < total_size; ++i) {
+                    max_val = sycl::fmax(max_val, static_cast<float>(in_ptr[i]));
+                }
+                out_ptr[0] = sycl::half(max_val);
+            }).wait();
+        }
         else if (input.dtype() == DType::Int32) {
             const int32_t* in_ptr = get_data_ptr<const int32_t>(input);
             int32_t* out_ptr = get_data_ptr<int32_t>(output);
@@ -539,6 +625,24 @@ auto max_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                 }
 
                 out_ptr[outer_idx * inner_size + inner_idx] = max_val;
+            }).wait();
+        }
+        else if (input.dtype() == DType::Float16) {
+            const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+            sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+
+            queue.parallel_for<MaxKernelFloat16>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+                const int64_t outer_idx = idx[0];
+                const int64_t inner_idx = idx[1];
+                const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+
+                float max_val = -std::numeric_limits<float>::infinity();
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    float val = static_cast<float>(in_ptr[base_offset + d * inner_size]);
+                    max_val = sycl::fmax(max_val, val);
+                }
+
+                out_ptr[outer_idx * inner_size + inner_idx] = sycl::half(max_val);
             }).wait();
         }
         else if (input.dtype() == DType::Int32) {
@@ -618,6 +722,18 @@ auto min_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                 out_ptr[0] = min_val;
             }).wait();
         }
+        else if (input.dtype() == DType::Float16) {
+            const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+            sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+
+            queue.single_task([=]() {
+                float min_val = std::numeric_limits<float>::infinity();
+                for (int64_t i = 0; i < total_size; ++i) {
+                    min_val = sycl::fmin(min_val, static_cast<float>(in_ptr[i]));
+                }
+                out_ptr[0] = sycl::half(min_val);
+            }).wait();
+        }
         else if (input.dtype() == DType::Int32) {
             const int32_t* in_ptr = get_data_ptr<const int32_t>(input);
             int32_t* out_ptr = get_data_ptr<int32_t>(output);
@@ -673,6 +789,24 @@ auto min_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& que
                 }
 
                 out_ptr[outer_idx * inner_size + inner_idx] = min_val;
+            }).wait();
+        }
+        else if (input.dtype() == DType::Float16) {
+            const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+            sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+
+            queue.parallel_for<MinKernelFloat16>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+                const int64_t outer_idx = idx[0];
+                const int64_t inner_idx = idx[1];
+                const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+
+                float min_val = std::numeric_limits<float>::infinity();
+                for (int64_t d = 0; d < dim_size; ++d) {
+                    float val = static_cast<float>(in_ptr[base_offset + d * inner_size]);
+                    min_val = sycl::fmin(min_val, val);
+                }
+
+                out_ptr[outer_idx * inner_size + inner_idx] = sycl::half(min_val);
             }).wait();
         }
         else if (input.dtype() == DType::Int32) {
@@ -763,6 +897,25 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& 
 
             queue.memcpy(out_ptr, &max_idx, sizeof(int64_t)).wait();
         }
+        else if (input.dtype() == DType::Float16) {
+            const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+
+            // Copy data to host and find argmax
+            std::vector<sycl::half> host_data(total_size);
+            queue.memcpy(host_data.data(), in_ptr, total_size * sizeof(sycl::half)).wait();
+
+            int64_t max_idx = 0;
+            float max_val = static_cast<float>(host_data[0]);
+            for (int64_t i = 1; i < total_size; ++i) {
+                float val = static_cast<float>(host_data[i]);
+                if (val > max_val) {
+                    max_val = val;
+                    max_idx = i;
+                }
+            }
+
+            queue.memcpy(out_ptr, &max_idx, sizeof(int64_t)).wait();
+        }
         else if (input.dtype() == DType::Int32) {
             const int32_t* in_ptr = get_data_ptr<const int32_t>(input);
 
@@ -842,6 +995,27 @@ auto argmax_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& 
             int64_t max_idx = 0;
             for (int64_t d = 0; d < dim_size; ++d) {
                 double val = in_ptr[base_offset + d * inner_size];
+                if (val > max_val) {
+                    max_val = val;
+                    max_idx = d;
+                }
+            }
+
+            out_ptr[outer_idx * inner_size + inner_idx] = max_idx;
+        }).wait();
+    }
+    else if (input.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+
+        queue.parallel_for<ArgmaxKernelFloat16>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+            const int64_t outer_idx = idx[0];
+            const int64_t inner_idx = idx[1];
+            const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+
+            float max_val = -std::numeric_limits<float>::infinity();
+            int64_t max_idx = 0;
+            for (int64_t d = 0; d < dim_size; ++d) {
+                float val = static_cast<float>(in_ptr[base_offset + d * inner_size]);
                 if (val > max_val) {
                     max_val = val;
                     max_idx = d;
@@ -941,6 +1115,25 @@ auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& 
 
             queue.memcpy(out_ptr, &min_idx, sizeof(int64_t)).wait();
         }
+        else if (input.dtype() == DType::Float16) {
+            const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+
+            // Copy data to host and find argmin
+            std::vector<sycl::half> host_data(total_size);
+            queue.memcpy(host_data.data(), in_ptr, total_size * sizeof(sycl::half)).wait();
+
+            int64_t min_idx = 0;
+            float min_val = static_cast<float>(host_data[0]);
+            for (int64_t i = 1; i < total_size; ++i) {
+                float val = static_cast<float>(host_data[i]);
+                if (val < min_val) {
+                    min_val = val;
+                    min_idx = i;
+                }
+            }
+
+            queue.memcpy(out_ptr, &min_idx, sizeof(int64_t)).wait();
+        }
         else if (input.dtype() == DType::Int32) {
             const int32_t* in_ptr = get_data_ptr<const int32_t>(input);
 
@@ -1020,6 +1213,27 @@ auto argmin_kernel(const Tensor& input, int64_t dim, bool keepdim, sycl::queue& 
             int64_t min_idx = 0;
             for (int64_t d = 0; d < dim_size; ++d) {
                 double val = in_ptr[base_offset + d * inner_size];
+                if (val < min_val) {
+                    min_val = val;
+                    min_idx = d;
+                }
+            }
+
+            out_ptr[outer_idx * inner_size + inner_idx] = min_idx;
+        }).wait();
+    }
+    else if (input.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+
+        queue.parallel_for<ArgminKernelFloat16>(sycl::range<2>(outer_size, inner_size), [=](sycl::id<2> idx) {
+            const int64_t outer_idx = idx[0];
+            const int64_t inner_idx = idx[1];
+            const int64_t base_offset = outer_idx * dim_size * inner_size + inner_idx;
+
+            float min_val = std::numeric_limits<float>::infinity();
+            int64_t min_idx = 0;
+            for (int64_t d = 0; d < dim_size; ++d) {
+                float val = static_cast<float>(in_ptr[base_offset + d * inner_size]);
                 if (val < min_val) {
                     min_val = val;
                     min_idx = d;

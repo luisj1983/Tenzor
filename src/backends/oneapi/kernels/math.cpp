@@ -70,6 +70,7 @@ struct AbsKernelFloat16 {};
 struct AbsKernelInt32 {};
 struct LogKernelFloat32 {};
 struct LogKernelFloat64 {};
+struct LogKernelFloat16 {};
 struct ExpKernelFloat32 {};
 struct ExpKernelFloat64 {};
 struct ExpKernelFloat16 {};
@@ -118,6 +119,7 @@ struct WhereKernelFloat32 {};
 struct WhereKernelFloat64 {};
 struct RepeatKernelFloat32 {};
 struct RepeatKernelFloat64 {};
+struct RepeatKernelFloat16 {};
 
 // Helper function to get typed pointer from tensor
 template<typename T>
@@ -1063,6 +1065,14 @@ auto log_kernel(const Tensor& input, sycl::queue& queue) -> Tensor {
             out_ptr[idx] = sycl::log(in_ptr[idx]);
         }).wait();
     }
+    else if (input.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+
+        queue.parallel_for<LogKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            out_ptr[idx] = sycl::half(sycl::log(static_cast<float>(in_ptr[idx])));
+        }).wait();
+    }
     else {
         throw std::runtime_error("Unsupported dtype for log");
     }
@@ -1849,6 +1859,35 @@ auto repeat_kernel(const Tensor& input, const std::vector<int64_t>& repeats, syc
             });
         }).wait();
     }
+    else if (input.dtype() == DType::Float16) {
+        const sycl::half* in_ptr = get_data_ptr<const sycl::half>(input);
+        sycl::half* out_ptr = get_data_ptr<sycl::half>(output);
+
+        auto shape_buf = sycl::buffer<int64_t, 1>(shape.data(), sycl::range<1>(ndim));
+        auto out_shape_buf = sycl::buffer<int64_t, 1>(out_shape.data(), sycl::range<1>(ndim));
+        auto in_strides_buf = sycl::buffer<int64_t, 1>(in_strides.data(), sycl::range<1>(ndim));
+        auto out_strides_buf = sycl::buffer<int64_t, 1>(out_strides.data(), sycl::range<1>(ndim));
+
+        queue.submit([&](sycl::handler& h) {
+            auto shape_acc = shape_buf.get_access<sycl::access::mode::read>(h);
+            auto out_shape_acc = out_shape_buf.get_access<sycl::access::mode::read>(h);
+            auto in_strides_acc = in_strides_buf.get_access<sycl::access::mode::read>(h);
+            auto out_strides_acc = out_strides_buf.get_access<sycl::access::mode::read>(h);
+
+            h.parallel_for<RepeatKernelFloat16>(sycl::range<1>(out_numel), [=](sycl::id<1> idx) {
+                int64_t out_idx = idx[0];
+                int64_t in_idx = 0;
+
+                for (int64_t d = 0; d < ndim; ++d) {
+                    int64_t coord = (out_idx / out_strides_acc[d]) % out_shape_acc[d];
+                    int64_t in_coord = coord % shape_acc[d];
+                    in_idx += in_coord * in_strides_acc[d];
+                }
+
+                out_ptr[out_idx] = in_ptr[in_idx];
+            });
+        }).wait();
+    }
     else {
         throw std::runtime_error("repeat: unsupported dtype");
     }
@@ -1859,115 +1898,390 @@ auto repeat_kernel(const Tensor& input, const std::vector<int64_t>& repeats, syc
 // In-place operation kernel name classes
 struct AddInplaceKernelFloat32 {};
 struct AddInplaceKernelFloat64 {};
+struct AddInplaceKernelFloat16 {};
 struct SubInplaceKernelFloat32 {};
 struct SubInplaceKernelFloat64 {};
+struct SubInplaceKernelFloat16 {};
 struct MulInplaceKernelFloat32 {};
 struct MulInplaceKernelFloat64 {};
+struct MulInplaceKernelFloat16 {};
 struct DivInplaceKernelFloat32 {};
 struct DivInplaceKernelFloat64 {};
+struct DivInplaceKernelFloat16 {};
+struct AddInplaceBcastKernelFloat32 {};
+struct AddInplaceBcastKernelFloat64 {};
+struct AddInplaceBcastKernelFloat16 {};
+struct SubInplaceBcastKernelFloat32 {};
+struct SubInplaceBcastKernelFloat64 {};
+struct SubInplaceBcastKernelFloat16 {};
+struct MulInplaceBcastKernelFloat32 {};
+struct MulInplaceBcastKernelFloat64 {};
+struct MulInplaceBcastKernelFloat16 {};
+struct DivInplaceBcastKernelFloat32 {};
+struct DivInplaceBcastKernelFloat64 {};
+struct DivInplaceBcastKernelFloat16 {};
 
-// In-place add kernel
+// Maximum number of dimensions supported for broadcasting strides in SYCL kernels
+constexpr int MAX_BROADCAST_DIMS = 8;
+
+// Structure to hold broadcast strides for SYCL kernel capture
+struct BroadcastStrides {
+    int64_t self_strides[MAX_BROADCAST_DIMS];
+    int64_t other_strides[MAX_BROADCAST_DIMS];
+    int64_t shape[MAX_BROADCAST_DIMS];
+    int64_t ndim;
+};
+
+/**
+ * @brief Check if shapes are broadcastable for in-place operation.
+ *
+ * For in-place ops, the result shape must match self's shape.
+ * Other's shape must be broadcastable to self's shape.
+ */
+inline auto validate_inplace_broadcast(
+    std::span<const int64_t> self_shape,
+    std::span<const int64_t> other_shape
+) -> bool {
+    int64_t self_ndim = self_shape.size();
+    int64_t other_ndim = other_shape.size();
+
+    // other cannot have more dims than self (would expand self's shape)
+    if (other_ndim > self_ndim) return false;
+
+    // Check each dimension from the right
+    for (int64_t i = 0; i < other_ndim; ++i) {
+        int64_t self_dim = self_shape[self_ndim - 1 - i];
+        int64_t other_dim = other_shape[other_ndim - 1 - i];
+
+        if (other_dim != 1 && other_dim != self_dim) {
+            return false;  // Not broadcastable
+        }
+    }
+    return true;
+}
+
+/**
+ * @brief Compute broadcast strides for mapping self linear index to other linear index.
+ */
+inline auto compute_broadcast_strides(
+    std::span<const int64_t> self_shape,
+    std::span<const int64_t> other_shape
+) -> BroadcastStrides {
+    BroadcastStrides bs{};
+    int64_t self_ndim = self_shape.size();
+    int64_t other_ndim = other_shape.size();
+    bs.ndim = self_ndim;
+
+    // Compute self strides (row-major)
+    int64_t stride = 1;
+    for (int64_t i = self_ndim - 1; i >= 0; --i) {
+        bs.self_strides[i] = stride;
+        bs.shape[i] = self_shape[i];
+        stride *= self_shape[i];
+    }
+
+    // Compute other strides with broadcasting (stride=0 for broadcast dims)
+    stride = 1;
+    for (int64_t i = self_ndim - 1; i >= 0; --i) {
+        int64_t other_idx = i - (self_ndim - other_ndim);
+        if (other_idx < 0) {
+            // other doesn't have this dim - broadcast
+            bs.other_strides[i] = 0;
+        } else {
+            int64_t other_dim = other_shape[other_idx];
+            if (other_dim == 1) {
+                bs.other_strides[i] = 0;  // broadcast
+            } else {
+                bs.other_strides[i] = stride;
+            }
+            stride *= other_dim;
+        }
+    }
+
+    return bs;
+}
+
+/**
+ * @brief Compute linear index into other tensor given linear index into self.
+ * Uses broadcast strides: stride=0 means that dimension is broadcast.
+ */
+inline int64_t broadcast_other_idx(int64_t self_idx, const BroadcastStrides& bs) {
+    int64_t other_idx = 0;
+    int64_t remaining = self_idx;
+    for (int64_t d = 0; d < bs.ndim; ++d) {
+        int64_t coord = remaining / bs.self_strides[d];
+        remaining %= bs.self_strides[d];
+        other_idx += coord * bs.other_strides[d];
+    }
+    return other_idx;
+}
+
+// In-place add kernel with broadcasting support
 auto add_inplace_kernel(Tensor& inout, const Tensor& other, sycl::queue& queue) -> Tensor {
+    auto self_shape = inout.shape();
+    auto other_shape = other.shape();
+    bool same_shape = std::equal(self_shape.begin(), self_shape.end(), other_shape.begin(), other_shape.end());
+
+    if (!same_shape) {
+        if (!validate_inplace_broadcast(self_shape, other_shape)) {
+            throw std::runtime_error("In-place add: shapes are not broadcastable");
+        }
+
+        BroadcastStrides bs = compute_broadcast_strides(self_shape, other_shape);
+        const int64_t n = inout.numel();
+
+        if (inout.dtype() == DType::Float32) {
+            float* data = get_data_ptr<float>(inout);
+            const float* other_ptr = get_data_ptr<const float>(other);
+            queue.parallel_for<AddInplaceBcastKernelFloat32>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+                int64_t oidx = broadcast_other_idx(idx, bs);
+                data[idx] += other_ptr[oidx];
+            }).wait();
+        } else if (inout.dtype() == DType::Float64) {
+            double* data = get_data_ptr<double>(inout);
+            const double* other_ptr = get_data_ptr<const double>(other);
+            queue.parallel_for<AddInplaceBcastKernelFloat64>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+                int64_t oidx = broadcast_other_idx(idx, bs);
+                data[idx] += other_ptr[oidx];
+            }).wait();
+        } else if (inout.dtype() == DType::Float16) {
+            sycl::half* data = get_data_ptr<sycl::half>(inout);
+            const sycl::half* other_ptr = get_data_ptr<const sycl::half>(other);
+            queue.parallel_for<AddInplaceBcastKernelFloat16>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+                int64_t oidx = broadcast_other_idx(idx, bs);
+                data[idx] = sycl::half(float(data[idx]) + float(other_ptr[oidx]));
+            }).wait();
+        } else {
+            throw std::runtime_error("add_inplace: unsupported dtype");
+        }
+        return inout;
+    }
+
     const int64_t n = inout.numel();
 
     if (inout.dtype() == DType::Float32) {
         float* data = get_data_ptr<float>(inout);
         const float* other_ptr = get_data_ptr<const float>(other);
-
         queue.parallel_for<AddInplaceKernelFloat32>(sycl::range<1>(n), [=](sycl::id<1> idx) {
             data[idx] += other_ptr[idx];
         }).wait();
-    }
-    else if (inout.dtype() == DType::Float64) {
+    } else if (inout.dtype() == DType::Float64) {
         double* data = get_data_ptr<double>(inout);
         const double* other_ptr = get_data_ptr<const double>(other);
-
         queue.parallel_for<AddInplaceKernelFloat64>(sycl::range<1>(n), [=](sycl::id<1> idx) {
             data[idx] += other_ptr[idx];
         }).wait();
-    }
-    else {
+    } else if (inout.dtype() == DType::Float16) {
+        sycl::half* data = get_data_ptr<sycl::half>(inout);
+        const sycl::half* other_ptr = get_data_ptr<const sycl::half>(other);
+        queue.parallel_for<AddInplaceKernelFloat16>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+            data[idx] = sycl::half(float(data[idx]) + float(other_ptr[idx]));
+        }).wait();
+    } else {
         throw std::runtime_error("add_inplace: unsupported dtype");
     }
 
     return inout;
 }
 
-// In-place sub kernel
+// In-place sub kernel with broadcasting support
 auto sub_inplace_kernel(Tensor& inout, const Tensor& other, sycl::queue& queue) -> Tensor {
+    auto self_shape = inout.shape();
+    auto other_shape = other.shape();
+    bool same_shape = std::equal(self_shape.begin(), self_shape.end(), other_shape.begin(), other_shape.end());
+
+    if (!same_shape) {
+        if (!validate_inplace_broadcast(self_shape, other_shape)) {
+            throw std::runtime_error("In-place sub: shapes are not broadcastable");
+        }
+
+        BroadcastStrides bs = compute_broadcast_strides(self_shape, other_shape);
+        const int64_t n = inout.numel();
+
+        if (inout.dtype() == DType::Float32) {
+            float* data = get_data_ptr<float>(inout);
+            const float* other_ptr = get_data_ptr<const float>(other);
+            queue.parallel_for<SubInplaceBcastKernelFloat32>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+                int64_t oidx = broadcast_other_idx(idx, bs);
+                data[idx] -= other_ptr[oidx];
+            }).wait();
+        } else if (inout.dtype() == DType::Float64) {
+            double* data = get_data_ptr<double>(inout);
+            const double* other_ptr = get_data_ptr<const double>(other);
+            queue.parallel_for<SubInplaceBcastKernelFloat64>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+                int64_t oidx = broadcast_other_idx(idx, bs);
+                data[idx] -= other_ptr[oidx];
+            }).wait();
+        } else if (inout.dtype() == DType::Float16) {
+            sycl::half* data = get_data_ptr<sycl::half>(inout);
+            const sycl::half* other_ptr = get_data_ptr<const sycl::half>(other);
+            queue.parallel_for<SubInplaceBcastKernelFloat16>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+                int64_t oidx = broadcast_other_idx(idx, bs);
+                data[idx] = sycl::half(float(data[idx]) - float(other_ptr[oidx]));
+            }).wait();
+        } else {
+            throw std::runtime_error("sub_inplace: unsupported dtype");
+        }
+        return inout;
+    }
+
     const int64_t n = inout.numel();
 
     if (inout.dtype() == DType::Float32) {
         float* data = get_data_ptr<float>(inout);
         const float* other_ptr = get_data_ptr<const float>(other);
-
         queue.parallel_for<SubInplaceKernelFloat32>(sycl::range<1>(n), [=](sycl::id<1> idx) {
             data[idx] -= other_ptr[idx];
         }).wait();
-    }
-    else if (inout.dtype() == DType::Float64) {
+    } else if (inout.dtype() == DType::Float64) {
         double* data = get_data_ptr<double>(inout);
         const double* other_ptr = get_data_ptr<const double>(other);
-
         queue.parallel_for<SubInplaceKernelFloat64>(sycl::range<1>(n), [=](sycl::id<1> idx) {
             data[idx] -= other_ptr[idx];
         }).wait();
-    }
-    else {
+    } else if (inout.dtype() == DType::Float16) {
+        sycl::half* data = get_data_ptr<sycl::half>(inout);
+        const sycl::half* other_ptr = get_data_ptr<const sycl::half>(other);
+        queue.parallel_for<SubInplaceKernelFloat16>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+            data[idx] = sycl::half(float(data[idx]) - float(other_ptr[idx]));
+        }).wait();
+    } else {
         throw std::runtime_error("sub_inplace: unsupported dtype");
     }
 
     return inout;
 }
 
-// In-place mul kernel
+// In-place mul kernel with broadcasting support
 auto mul_inplace_kernel(Tensor& inout, const Tensor& other, sycl::queue& queue) -> Tensor {
+    auto self_shape = inout.shape();
+    auto other_shape = other.shape();
+    bool same_shape = std::equal(self_shape.begin(), self_shape.end(), other_shape.begin(), other_shape.end());
+
+    if (!same_shape) {
+        if (!validate_inplace_broadcast(self_shape, other_shape)) {
+            throw std::runtime_error("In-place mul: shapes are not broadcastable");
+        }
+
+        BroadcastStrides bs = compute_broadcast_strides(self_shape, other_shape);
+        const int64_t n = inout.numel();
+
+        if (inout.dtype() == DType::Float32) {
+            float* data = get_data_ptr<float>(inout);
+            const float* other_ptr = get_data_ptr<const float>(other);
+            queue.parallel_for<MulInplaceBcastKernelFloat32>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+                int64_t oidx = broadcast_other_idx(idx, bs);
+                data[idx] *= other_ptr[oidx];
+            }).wait();
+        } else if (inout.dtype() == DType::Float64) {
+            double* data = get_data_ptr<double>(inout);
+            const double* other_ptr = get_data_ptr<const double>(other);
+            queue.parallel_for<MulInplaceBcastKernelFloat64>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+                int64_t oidx = broadcast_other_idx(idx, bs);
+                data[idx] *= other_ptr[oidx];
+            }).wait();
+        } else if (inout.dtype() == DType::Float16) {
+            sycl::half* data = get_data_ptr<sycl::half>(inout);
+            const sycl::half* other_ptr = get_data_ptr<const sycl::half>(other);
+            queue.parallel_for<MulInplaceBcastKernelFloat16>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+                int64_t oidx = broadcast_other_idx(idx, bs);
+                data[idx] = sycl::half(float(data[idx]) * float(other_ptr[oidx]));
+            }).wait();
+        } else {
+            throw std::runtime_error("mul_inplace: unsupported dtype");
+        }
+        return inout;
+    }
+
     const int64_t n = inout.numel();
 
     if (inout.dtype() == DType::Float32) {
         float* data = get_data_ptr<float>(inout);
         const float* other_ptr = get_data_ptr<const float>(other);
-
         queue.parallel_for<MulInplaceKernelFloat32>(sycl::range<1>(n), [=](sycl::id<1> idx) {
             data[idx] *= other_ptr[idx];
         }).wait();
-    }
-    else if (inout.dtype() == DType::Float64) {
+    } else if (inout.dtype() == DType::Float64) {
         double* data = get_data_ptr<double>(inout);
         const double* other_ptr = get_data_ptr<const double>(other);
-
         queue.parallel_for<MulInplaceKernelFloat64>(sycl::range<1>(n), [=](sycl::id<1> idx) {
             data[idx] *= other_ptr[idx];
         }).wait();
-    }
-    else {
+    } else if (inout.dtype() == DType::Float16) {
+        sycl::half* data = get_data_ptr<sycl::half>(inout);
+        const sycl::half* other_ptr = get_data_ptr<const sycl::half>(other);
+        queue.parallel_for<MulInplaceKernelFloat16>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+            data[idx] = sycl::half(float(data[idx]) * float(other_ptr[idx]));
+        }).wait();
+    } else {
         throw std::runtime_error("mul_inplace: unsupported dtype");
     }
 
     return inout;
 }
 
-// In-place div kernel
+// In-place div kernel with broadcasting support
 auto div_inplace_kernel(Tensor& inout, const Tensor& other, sycl::queue& queue) -> Tensor {
+    auto self_shape = inout.shape();
+    auto other_shape = other.shape();
+    bool same_shape = std::equal(self_shape.begin(), self_shape.end(), other_shape.begin(), other_shape.end());
+
+    if (!same_shape) {
+        if (!validate_inplace_broadcast(self_shape, other_shape)) {
+            throw std::runtime_error("In-place div: shapes are not broadcastable");
+        }
+
+        BroadcastStrides bs = compute_broadcast_strides(self_shape, other_shape);
+        const int64_t n = inout.numel();
+
+        if (inout.dtype() == DType::Float32) {
+            float* data = get_data_ptr<float>(inout);
+            const float* other_ptr = get_data_ptr<const float>(other);
+            queue.parallel_for<DivInplaceBcastKernelFloat32>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+                int64_t oidx = broadcast_other_idx(idx, bs);
+                data[idx] /= other_ptr[oidx];
+            }).wait();
+        } else if (inout.dtype() == DType::Float64) {
+            double* data = get_data_ptr<double>(inout);
+            const double* other_ptr = get_data_ptr<const double>(other);
+            queue.parallel_for<DivInplaceBcastKernelFloat64>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+                int64_t oidx = broadcast_other_idx(idx, bs);
+                data[idx] /= other_ptr[oidx];
+            }).wait();
+        } else if (inout.dtype() == DType::Float16) {
+            sycl::half* data = get_data_ptr<sycl::half>(inout);
+            const sycl::half* other_ptr = get_data_ptr<const sycl::half>(other);
+            queue.parallel_for<DivInplaceBcastKernelFloat16>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+                int64_t oidx = broadcast_other_idx(idx, bs);
+                data[idx] = sycl::half(float(data[idx]) / float(other_ptr[oidx]));
+            }).wait();
+        } else {
+            throw std::runtime_error("div_inplace: unsupported dtype");
+        }
+        return inout;
+    }
+
     const int64_t n = inout.numel();
 
     if (inout.dtype() == DType::Float32) {
         float* data = get_data_ptr<float>(inout);
         const float* other_ptr = get_data_ptr<const float>(other);
-
         queue.parallel_for<DivInplaceKernelFloat32>(sycl::range<1>(n), [=](sycl::id<1> idx) {
             data[idx] /= other_ptr[idx];
         }).wait();
-    }
-    else if (inout.dtype() == DType::Float64) {
+    } else if (inout.dtype() == DType::Float64) {
         double* data = get_data_ptr<double>(inout);
         const double* other_ptr = get_data_ptr<const double>(other);
-
         queue.parallel_for<DivInplaceKernelFloat64>(sycl::range<1>(n), [=](sycl::id<1> idx) {
             data[idx] /= other_ptr[idx];
         }).wait();
-    }
-    else {
+    } else if (inout.dtype() == DType::Float16) {
+        sycl::half* data = get_data_ptr<sycl::half>(inout);
+        const sycl::half* other_ptr = get_data_ptr<const sycl::half>(other);
+        queue.parallel_for<DivInplaceKernelFloat16>(sycl::range<1>(n), [=](sycl::id<1> idx) {
+            data[idx] = sycl::half(float(data[idx]) / float(other_ptr[idx]));
+        }).wait();
+    } else {
         throw std::runtime_error("div_inplace: unsupported dtype");
     }
 

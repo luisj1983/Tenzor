@@ -1367,6 +1367,256 @@ auto conv2d_backward_bias(const Tensor& grad_output, sycl::queue& queue) -> Tens
     return grad_bias;
 }
 
+// ============================================================================
+// Transposed Convolution (ConvTranspose2d) Forward
+// ============================================================================
+
+// SYCL Kernel name classes for conv_transpose2d
+struct ConvTranspose2dForwardKernelFloat32 {};
+struct ConvTranspose2dForwardKernelFloat64 {};
+struct ConvTranspose2dForwardKernelFloat16 {};
+struct ConvTranspose2dBiasKernelFloat32 {};
+struct ConvTranspose2dBiasKernelFloat64 {};
+struct ConvTranspose2dBiasKernelFloat16 {};
+
+/**
+ * @brief Transposed 2D convolution (deconvolution) forward pass
+ *
+ * Uses gather approach: each output position independently gathers contributions
+ * from input positions through the transposed kernel relationship.
+ *
+ * Output size: (in_size - 1) * stride - 2 * padding + dilation * (kernel_size - 1) + output_padding + 1
+ *
+ * @param input Input tensor (N, C_in, H_in, W_in)
+ * @param weight Weight tensor (C_in, C_out/groups, kH, kW)
+ * @param bias Optional bias tensor (C_out) or nullptr
+ * @param stride Stride of transposed convolution
+ * @param padding Padding applied to input
+ * @param output_padding Additional size added to output
+ * @param dilation Spacing between kernel elements
+ * @param groups Number of groups for grouped convolution
+ * @param queue SYCL queue for execution
+ * @return Output tensor (N, C_out, H_out, W_out)
+ */
+auto conv_transpose2d_forward(
+    const Tensor& input, const Tensor& weight, const Tensor* bias,
+    int64_t stride, int64_t padding, int64_t output_padding,
+    int64_t dilation, int64_t groups,
+    sycl::queue& queue
+) -> Tensor {
+    auto input_shape = input.shape();
+    auto weight_shape = weight.shape();
+
+    int64_t batch = input_shape[0];
+    int64_t in_channels = input_shape[1];
+    int64_t in_h = input_shape[2];
+    int64_t in_w = input_shape[3];
+
+    int64_t in_channels_per_group = weight_shape[0] / groups;
+    int64_t out_channels_per_group = weight_shape[1];
+    int64_t out_channels = out_channels_per_group * groups;
+    int64_t kernel_h = weight_shape[2];
+    int64_t kernel_w = weight_shape[3];
+
+    // Calculate output dimensions
+    int64_t out_h = (in_h - 1) * stride - 2 * padding + dilation * (kernel_h - 1) + output_padding + 1;
+    int64_t out_w = (in_w - 1) * stride - 2 * padding + dilation * (kernel_w - 1) + output_padding + 1;
+
+    if (out_h <= 0 || out_w <= 0) {
+        throw std::invalid_argument(
+            "Invalid ConvTranspose2d configuration: output dimensions are non-positive (out_h=" +
+            std::to_string(out_h) + ", out_w=" + std::to_string(out_w) + ")");
+    }
+
+    Tensor output({batch, out_channels, out_h, out_w}, input.dtype(), input.device());
+
+    int64_t total_output = batch * out_channels * out_h * out_w;
+
+    if (input.dtype() == DType::Float32) {
+        const float* input_data = get_data_ptr<const float>(input);
+        const float* weight_data = get_data_ptr<const float>(weight);
+        float* output_data = get_data_ptr<float>(output);
+
+        queue.parallel_for<ConvTranspose2dForwardKernelFloat32>(
+            sycl::range<1>(total_output),
+            [=](sycl::id<1> idx) {
+                int64_t w = idx % out_w;
+                int64_t h = (idx / out_w) % out_h;
+                int64_t c = (idx / (out_w * out_h)) % out_channels;
+                int64_t b = idx / (out_w * out_h * out_channels);
+
+                int64_t g = c / out_channels_per_group;
+                int64_t oc = c % out_channels_per_group;
+                int64_t in_start = g * in_channels_per_group;
+
+                float sum = 0.0f;
+
+                for (int64_t ic = 0; ic < in_channels_per_group; ++ic) {
+                    for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                        for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                            int64_t h_shifted = h + padding - kh * dilation;
+                            int64_t w_shifted = w + padding - kw * dilation;
+
+                            if (h_shifted >= 0 && h_shifted % stride == 0 &&
+                                w_shifted >= 0 && w_shifted % stride == 0) {
+                                int64_t ih = h_shifted / stride;
+                                int64_t iw = w_shifted / stride;
+
+                                if (ih >= 0 && ih < in_h && iw >= 0 && iw < in_w) {
+                                    int64_t input_idx = b * (in_channels * in_h * in_w) +
+                                                       (in_start + ic) * (in_h * in_w) +
+                                                       ih * in_w + iw;
+                                    int64_t weight_idx = (in_start + ic) * (out_channels_per_group * kernel_h * kernel_w) +
+                                                        oc * (kernel_h * kernel_w) +
+                                                        kh * kernel_w + kw;
+                                    sum += input_data[input_idx] * weight_data[weight_idx];
+                                }
+                            }
+                        }
+                    }
+                }
+
+                output_data[idx] = sum;
+            }
+        ).wait();
+
+        // Add bias if present
+        if (bias != nullptr) {
+            const float* bias_data = get_data_ptr<const float>(*bias);
+            queue.parallel_for<ConvTranspose2dBiasKernelFloat32>(
+                sycl::range<1>(total_output),
+                [=](sycl::id<1> idx) {
+                    int64_t c = (idx / (out_w * out_h)) % out_channels;
+                    output_data[idx] += bias_data[c];
+                }
+            ).wait();
+        }
+    }
+    else if (input.dtype() == DType::Float64) {
+        const double* input_data = get_data_ptr<const double>(input);
+        const double* weight_data = get_data_ptr<const double>(weight);
+        double* output_data = get_data_ptr<double>(output);
+
+        queue.parallel_for<ConvTranspose2dForwardKernelFloat64>(
+            sycl::range<1>(total_output),
+            [=](sycl::id<1> idx) {
+                int64_t w = idx % out_w;
+                int64_t h = (idx / out_w) % out_h;
+                int64_t c = (idx / (out_w * out_h)) % out_channels;
+                int64_t b = idx / (out_w * out_h * out_channels);
+
+                int64_t g = c / out_channels_per_group;
+                int64_t oc = c % out_channels_per_group;
+                int64_t in_start = g * in_channels_per_group;
+
+                double sum = 0.0;
+
+                for (int64_t ic = 0; ic < in_channels_per_group; ++ic) {
+                    for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                        for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                            int64_t h_shifted = h + padding - kh * dilation;
+                            int64_t w_shifted = w + padding - kw * dilation;
+
+                            if (h_shifted >= 0 && h_shifted % stride == 0 &&
+                                w_shifted >= 0 && w_shifted % stride == 0) {
+                                int64_t ih = h_shifted / stride;
+                                int64_t iw = w_shifted / stride;
+
+                                if (ih >= 0 && ih < in_h && iw >= 0 && iw < in_w) {
+                                    int64_t input_idx = b * (in_channels * in_h * in_w) +
+                                                       (in_start + ic) * (in_h * in_w) +
+                                                       ih * in_w + iw;
+                                    int64_t weight_idx = (in_start + ic) * (out_channels_per_group * kernel_h * kernel_w) +
+                                                        oc * (kernel_h * kernel_w) +
+                                                        kh * kernel_w + kw;
+                                    sum += input_data[input_idx] * weight_data[weight_idx];
+                                }
+                            }
+                        }
+                    }
+                }
+
+                output_data[idx] = sum;
+            }
+        ).wait();
+
+        if (bias != nullptr) {
+            const double* bias_data = get_data_ptr<const double>(*bias);
+            queue.parallel_for<ConvTranspose2dBiasKernelFloat64>(
+                sycl::range<1>(total_output),
+                [=](sycl::id<1> idx) {
+                    int64_t c = (idx / (out_w * out_h)) % out_channels;
+                    output_data[idx] += bias_data[c];
+                }
+            ).wait();
+        }
+    }
+    else if (input.dtype() == DType::Float16) {
+        const sycl::half* input_data = get_data_ptr<const sycl::half>(input);
+        const sycl::half* weight_data = get_data_ptr<const sycl::half>(weight);
+        sycl::half* output_data = get_data_ptr<sycl::half>(output);
+
+        queue.parallel_for<ConvTranspose2dForwardKernelFloat16>(
+            sycl::range<1>(total_output),
+            [=](sycl::id<1> idx) {
+                int64_t w = idx % out_w;
+                int64_t h = (idx / out_w) % out_h;
+                int64_t c = (idx / (out_w * out_h)) % out_channels;
+                int64_t b = idx / (out_w * out_h * out_channels);
+
+                int64_t g = c / out_channels_per_group;
+                int64_t oc = c % out_channels_per_group;
+                int64_t in_start = g * in_channels_per_group;
+
+                float sum = 0.0f;
+
+                for (int64_t ic = 0; ic < in_channels_per_group; ++ic) {
+                    for (int64_t kh = 0; kh < kernel_h; ++kh) {
+                        for (int64_t kw = 0; kw < kernel_w; ++kw) {
+                            int64_t h_shifted = h + padding - kh * dilation;
+                            int64_t w_shifted = w + padding - kw * dilation;
+
+                            if (h_shifted >= 0 && h_shifted % stride == 0 &&
+                                w_shifted >= 0 && w_shifted % stride == 0) {
+                                int64_t ih = h_shifted / stride;
+                                int64_t iw = w_shifted / stride;
+
+                                if (ih >= 0 && ih < in_h && iw >= 0 && iw < in_w) {
+                                    int64_t input_idx = b * (in_channels * in_h * in_w) +
+                                                       (in_start + ic) * (in_h * in_w) +
+                                                       ih * in_w + iw;
+                                    int64_t weight_idx = (in_start + ic) * (out_channels_per_group * kernel_h * kernel_w) +
+                                                        oc * (kernel_h * kernel_w) +
+                                                        kh * kernel_w + kw;
+                                    sum += float(input_data[input_idx]) * float(weight_data[weight_idx]);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                output_data[idx] = sycl::half(sum);
+            }
+        ).wait();
+
+        if (bias != nullptr) {
+            const sycl::half* bias_data = get_data_ptr<const sycl::half>(*bias);
+            queue.parallel_for<ConvTranspose2dBiasKernelFloat16>(
+                sycl::range<1>(total_output),
+                [=](sycl::id<1> idx) {
+                    int64_t c = (idx / (out_w * out_h)) % out_channels;
+                    output_data[idx] = sycl::half(float(output_data[idx]) + float(bias_data[c]));
+                }
+            ).wait();
+        }
+    }
+    else {
+        throw std::runtime_error("Unsupported dtype for conv_transpose2d_forward");
+    }
+
+    return output;
+}
+
 #endif // TENZOR_HAS_ONEDNN
 
 } // namespace oneapi

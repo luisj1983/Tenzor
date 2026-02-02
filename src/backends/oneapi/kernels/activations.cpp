@@ -1149,5 +1149,169 @@ auto swish_backward_kernel(const Tensor& grad_output, const Tensor& input, sycl:
     return grad_input;
 }
 
+// ============================================================================
+// In-place Activation Operations
+// ============================================================================
+
+// Kernel name classes for in-place activations
+class ReLUInplaceKernelFloat32 {};
+class ReLUInplaceKernelFloat64 {};
+class ReLUInplaceKernelFloat16 {};
+class SigmoidInplaceKernelFloat32 {};
+class SigmoidInplaceKernelFloat64 {};
+class SigmoidInplaceKernelFloat16 {};
+class TanhInplaceKernelFloat32 {};
+class TanhInplaceKernelFloat64 {};
+class TanhInplaceKernelFloat16 {};
+class LeakyReLUInplaceKernelFloat32 {};
+class LeakyReLUInplaceKernelFloat64 {};
+class LeakyReLUInplaceKernelFloat16 {};
+class GeLUInplaceKernelFloat32 {};
+class GeLUInplaceKernelFloat64 {};
+class GeLUInplaceKernelFloat16 {};
+
+auto relu_inplace_kernel(Tensor& input, sycl::queue& queue) -> void {
+    const int64_t numel = input.numel();
+    if (input.dtype() == DType::Float32) {
+        float* ptr = get_data_ptr<float>(input);
+        queue.parallel_for<ReLUInplaceKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            if (ptr[idx] < 0.0f) ptr[idx] = 0.0f;
+        }).wait();
+    }
+    else if (input.dtype() == DType::Float64) {
+        double* ptr = get_data_ptr<double>(input);
+        queue.parallel_for<ReLUInplaceKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            if (ptr[idx] < 0.0) ptr[idx] = 0.0;
+        }).wait();
+    }
+    else if (input.dtype() == DType::Float16) {
+        sycl::half* ptr = get_data_ptr<sycl::half>(input);
+        queue.parallel_for<ReLUInplaceKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            if (float(ptr[idx]) < 0.0f) ptr[idx] = sycl::half(0.0f);
+        }).wait();
+    }
+    else {
+        throw std::runtime_error("relu_inplace: unsupported dtype");
+    }
+}
+
+auto sigmoid_inplace_kernel(Tensor& input, sycl::queue& queue) -> void {
+    const int64_t numel = input.numel();
+    if (input.dtype() == DType::Float32) {
+        float* ptr = get_data_ptr<float>(input);
+        queue.parallel_for<SigmoidInplaceKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            ptr[idx] = 1.0f / (1.0f + sycl::exp(-ptr[idx]));
+        }).wait();
+    }
+    else if (input.dtype() == DType::Float64) {
+        double* ptr = get_data_ptr<double>(input);
+        queue.parallel_for<SigmoidInplaceKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            ptr[idx] = 1.0 / (1.0 + sycl::exp(-ptr[idx]));
+        }).wait();
+    }
+    else if (input.dtype() == DType::Float16) {
+        sycl::half* ptr = get_data_ptr<sycl::half>(input);
+        queue.parallel_for<SigmoidInplaceKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = static_cast<float>(ptr[idx]);
+            ptr[idx] = sycl::half(1.0f / (1.0f + sycl::exp(-x)));
+        }).wait();
+    }
+    else {
+        throw std::runtime_error("sigmoid_inplace: unsupported dtype");
+    }
+}
+
+auto tanh_inplace_kernel(Tensor& input, sycl::queue& queue) -> void {
+    const int64_t numel = input.numel();
+    if (input.dtype() == DType::Float32) {
+        float* ptr = get_data_ptr<float>(input);
+        queue.parallel_for<TanhInplaceKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            ptr[idx] = sycl::tanh(ptr[idx]);
+        }).wait();
+    }
+    else if (input.dtype() == DType::Float64) {
+        double* ptr = get_data_ptr<double>(input);
+        queue.parallel_for<TanhInplaceKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            ptr[idx] = sycl::tanh(ptr[idx]);
+        }).wait();
+    }
+    else if (input.dtype() == DType::Float16) {
+        sycl::half* ptr = get_data_ptr<sycl::half>(input);
+        queue.parallel_for<TanhInplaceKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = static_cast<float>(ptr[idx]);
+            ptr[idx] = sycl::half(sycl::tanh(x));
+        }).wait();
+    }
+    else {
+        throw std::runtime_error("tanh_inplace: unsupported dtype");
+    }
+}
+
+auto leaky_relu_inplace_kernel(Tensor& input, float alpha, sycl::queue& queue) -> void {
+    const int64_t numel = input.numel();
+    if (input.dtype() == DType::Float32) {
+        float* ptr = get_data_ptr<float>(input);
+        queue.parallel_for<LeakyReLUInplaceKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            if (ptr[idx] < 0.0f) ptr[idx] *= alpha;
+        }).wait();
+    }
+    else if (input.dtype() == DType::Float64) {
+        double* ptr = get_data_ptr<double>(input);
+        const double alpha_d = static_cast<double>(alpha);
+        queue.parallel_for<LeakyReLUInplaceKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            if (ptr[idx] < 0.0) ptr[idx] *= alpha_d;
+        }).wait();
+    }
+    else if (input.dtype() == DType::Float16) {
+        sycl::half* ptr = get_data_ptr<sycl::half>(input);
+        queue.parallel_for<LeakyReLUInplaceKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = static_cast<float>(ptr[idx]);
+            if (x < 0.0f) ptr[idx] = sycl::half(x * alpha);
+        }).wait();
+    }
+    else {
+        throw std::runtime_error("leaky_relu_inplace: unsupported dtype");
+    }
+}
+
+auto gelu_inplace_kernel(Tensor& input, sycl::queue& queue) -> void {
+    const int64_t numel = input.numel();
+    constexpr float sqrt_2_over_pi = 0.7978845608f;
+    constexpr float coeff = 0.044715f;
+
+    if (input.dtype() == DType::Float32) {
+        float* ptr = get_data_ptr<float>(input);
+        queue.parallel_for<GeLUInplaceKernelFloat32>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = ptr[idx];
+            float x_cubed = x * x * x;
+            float inner = sqrt_2_over_pi * (x + coeff * x_cubed);
+            ptr[idx] = 0.5f * x * (1.0f + sycl::tanh(inner));
+        }).wait();
+    }
+    else if (input.dtype() == DType::Float64) {
+        double* ptr = get_data_ptr<double>(input);
+        constexpr double sqrt_2_over_pi_d = 0.7978845608028654;
+        constexpr double coeff_d = 0.044715;
+        queue.parallel_for<GeLUInplaceKernelFloat64>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            double x = ptr[idx];
+            double x_cubed = x * x * x;
+            double inner = sqrt_2_over_pi_d * (x + coeff_d * x_cubed);
+            ptr[idx] = 0.5 * x * (1.0 + sycl::tanh(inner));
+        }).wait();
+    }
+    else if (input.dtype() == DType::Float16) {
+        sycl::half* ptr = get_data_ptr<sycl::half>(input);
+        queue.parallel_for<GeLUInplaceKernelFloat16>(sycl::range<1>(numel), [=](sycl::id<1> idx) {
+            float x = static_cast<float>(ptr[idx]);
+            float x_cubed = x * x * x;
+            float inner = sqrt_2_over_pi * (x + coeff * x_cubed);
+            ptr[idx] = sycl::half(0.5f * x * (1.0f + sycl::tanh(inner)));
+        }).wait();
+    }
+    else {
+        throw std::runtime_error("gelu_inplace: unsupported dtype");
+    }
+}
+
 } // namespace oneapi
 } // namespace tenzor
